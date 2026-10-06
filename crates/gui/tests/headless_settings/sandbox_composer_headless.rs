@@ -18,7 +18,7 @@ fn workbench(
         .expect("state")
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(root.to_path_buf()),
-            user_config_dir: Some(root.join("user")),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })
@@ -121,7 +121,7 @@ fn sandbox_button_label_tracks_saved_mode() {
         .expect("state")
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(dir.path().to_path_buf()),
-            user_config_dir: Some(dir.path().join("user")),
+            user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

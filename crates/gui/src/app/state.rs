@@ -108,6 +108,8 @@ pub struct WorkbenchState<S> {
     pub(super) settings_load_options: config::LoadOptions,
     pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
     pub(super) provider_save_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Recomposition after the active project switched role profile.
+    pub(super) project_profile_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) production_model: Option<(
         crate::model::production::ProductionModel,
         Arc<runtime::compose::SwitchableModel>,
@@ -213,6 +215,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             settings_load_options: config::LoadOptions::default(),
             credential_store: None,
             provider_save_rx: None,
+            project_profile_rx: None,
             production_model: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {

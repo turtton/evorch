@@ -39,10 +39,9 @@ absolute executable path.
 `enabled = true` enables checking; the default timeout is 15,000 milliseconds.
 The prompt override is optional.
 
-Executable settings are accepted only from user/global configuration. Project
-configuration cannot select the binary, timeout, or prompt: only
-`enabled = false` is effective there, allowing a project to disable checking.
-This prevents project-controlled configuration from selecting executable code.
+Comment checker settings are accepted only from user/global configuration.
+Project configuration (`.evorch/config.toml`) may only select a role profile, so
+it can neither select executable code nor disable checking.
 
 Empty or relative PATH entries are not used. Executables inside the original
 project or actual worktree are rejected, including symlinks pointing there.

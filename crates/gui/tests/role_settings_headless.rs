@@ -15,7 +15,7 @@ fn logical_model_options_come_from_routing_routes() {
     let (mut harness, _) = fixture(temp.path());
     let mut config = config::Config::load(&config::LoadOptions {
         project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
+        user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

@@ -887,11 +887,12 @@ fn run() -> Result<(), GuiError> {
             guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
         };
     }
+    // The demo keeps its settings in an isolated user layer: projects may only select a role profile.
     let provider_settings_path = match demo_directory.as_ref() {
-        Some(directory) => config::project_main_config_path(directory.path()),
+        Some(directory) => directory.path().join("config.toml"),
         None => config::user_main_config_path().unwrap_or_else(|| {
             tracing::warn!(
-                "user config directory unavailable; saving settings in the project config"
+                "user config directory unavailable; settings saved to the project config are ignored on load (projects may only select a role profile)"
             );
             config::project_main_config_path(&effective_project_root)
         }),
@@ -905,6 +906,9 @@ fn run() -> Result<(), GuiError> {
             || effective_project_root.clone(),
             |directory| directory.path().to_path_buf(),
         )),
+        user_config_dir: demo_directory
+            .as_ref()
+            .map(|directory| directory.path().to_path_buf()),
         read_env: false,
         ..Default::default()
     };
@@ -1482,8 +1486,8 @@ mod effective_project_tests {
     }
 
     #[tokio::test]
-    async fn primary_project_opt_out_controls_composed_write_not_startup_cwd() {
-        for disabled in [true, false] {
+    async fn primary_project_controls_composed_write_and_cannot_disable_trusted_checker() {
+        {
             let cwd = tempfile::tempdir().unwrap();
             let primary = tempfile::tempdir().unwrap();
             let repo_a = init_demo_repo(cwd.path()).unwrap();
@@ -1501,10 +1505,11 @@ mod effective_project_tests {
                 binary.to_str().unwrap(),
             )).unwrap();
             std::fs::create_dir_all(repo_b.join(".evorch")).unwrap();
-            std::fs::write(config::project_main_config_path(&repo_b), format!(
-                "[comment_checker]\nenabled = {}\nbinary = '/untrusted/checker'\ntimeout_ms = 1\nprompt = 'untrusted prompt'\n",
-                !disabled,
-            )).unwrap();
+            std::fs::write(
+                config::project_main_config_path(&repo_b),
+                "[comment_checker]\nenabled = false\nbinary = '/untrusted/checker'\ntimeout_ms = 1\nprompt = 'untrusted prompt'\n",
+            )
+            .unwrap();
             let mut sidebar = SidebarState::default();
             for (id, root) in [("a", &repo_a), ("b", &repo_b)] {
                 sidebar.add_project(ProjectId::new(id), id, root).unwrap();
@@ -1518,7 +1523,10 @@ mod effective_project_tests {
             load_options.user_config_dir = Some(trusted.path().to_path_buf());
             load_options.read_env = false;
             let config = config::Config::load(&load_options).unwrap();
-            assert_eq!(config.comment_checker.enabled, !disabled);
+            assert!(
+                config.comment_checker.enabled,
+                "projects cannot disable the trusted checker"
+            );
             assert_eq!(config.comment_checker.binary, binary.to_str().unwrap());
             assert_eq!(config.comment_checker.timeout_ms, 2500);
             assert_eq!(
@@ -1559,7 +1567,7 @@ mod effective_project_tests {
                 runtime.wait(run).await.unwrap(),
                 event_bus::AgentRunPhase::Done
             );
-            assert_eq!(sandbox.0.load(Ordering::SeqCst), usize::from(!disabled));
+            assert_eq!(sandbox.0.load(Ordering::SeqCst), 1);
             assert_eq!(
                 std::fs::read_to_string(repo_b.join("source.rs")).unwrap(),
                 "// comment\nfn main() {}"
@@ -1575,7 +1583,7 @@ mod effective_project_tests {
                 {
                     assert_eq!(tool_name, "write");
                     assert!(!is_error);
-                    assert_eq!(detail.is_none(), disabled);
+                    assert!(detail.is_some());
                     break;
                 }
             }

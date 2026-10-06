@@ -23,8 +23,7 @@ fn web_tools_default_to_enabled_and_round_trip_disabled() {
     )
     .expect("save");
     let loaded = Config::load(&LoadOptions {
-        project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join("user")),
+        user_config_dir: Some(dir.path().join(".evorch")),
         read_env: false,
         ..Default::default()
     })
@@ -47,8 +46,7 @@ fn removed_network_settings_are_rejected_at_the_strict_boundary() {
         )
         .expect("write");
         let error = Config::load_strict(&LoadOptions {
-            project_dir: Some(dir.path().into()),
-            user_config_dir: Some(dir.path().join("user")),
+            user_config_dir: Some(dir.path().join(".evorch")),
             read_env: false,
             ..Default::default()
         })
@@ -149,8 +147,7 @@ fn save_sandbox_persists_escalation_fields_and_keeps_other_sections() {
     // When: saving only the sandbox section and reloading the document.
     save_sandbox(&path, sandbox).expect("save sandbox");
     let config = Config::load(&LoadOptions {
-        project_dir: Some(tmp.path().to_path_buf()),
-        user_config_dir: Some(tmp.path().join("empty")),
+        user_config_dir: Some(tmp.path().join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

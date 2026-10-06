@@ -233,7 +233,7 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     assert_eq!(harness.state().routing_settings().validation_error, None);
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
+        user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

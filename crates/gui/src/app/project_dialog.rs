@@ -19,11 +19,28 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(record) = self.sidebar.projects.iter().find(|p| p.id == project) else {
             return;
         };
+        let root = record.repo_root.clone();
+        let name = record.name.clone();
+        let mut error = None;
+        let role_profile = config::project_role_profile(&root)
+            .unwrap_or_else(|failure| {
+                error = Some(failure.to_string());
+                None
+            })
+            .unwrap_or_else(|| config::DEFAULT_ROLE_PROFILE.to_owned());
+        let role_profiles = config::Config::load_unresolved(&self.user_settings_options())
+            .map(|config| config.role_profile_names())
+            .unwrap_or_else(|failure| {
+                error.get_or_insert(failure.to_string());
+                vec![config::DEFAULT_ROLE_PROFILE.to_owned()]
+            });
         self.project_dialog = ProjectDialog::Settings {
-            name: record.name.clone(),
+            name,
             project,
             directory: String::new(),
-            error: None,
+            role_profile,
+            role_profiles,
+            error,
         };
     }
 
@@ -87,6 +104,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ProjectDialogAction::SetPrimary(project) => {
                 self.set_primary_project(project).map_err(error_text)
             }
+            ProjectDialogAction::SetRoleProfile { project, profile } => {
+                self.set_project_role_profile(&project, &profile)
+            }
             ProjectDialogAction::SetTrust {
                 project,
                 path,
@@ -100,6 +120,58 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         };
         self.project_dialog.set_error(result.err());
+    }
+}
+
+impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Writes the selection to the project's config and recomposes when it is the active one.
+    pub fn set_project_role_profile(
+        &mut self,
+        project: &ProjectId,
+        profile: &str,
+    ) -> Result<(), String> {
+        let root = self
+            .sidebar
+            .projects
+            .iter()
+            .find(|record| &record.id == project)
+            .map(|record| record.repo_root.clone())
+            .ok_or_else(|| "Project no longer exists".to_owned())?;
+        config::save_project_role_profile(&root, Some(profile))
+            .map_err(|error| error.to_string())?;
+        if let ProjectDialog::Settings { role_profile, .. } = &mut self.project_dialog {
+            profile.clone_into(role_profile);
+        }
+        if self.config_project_dir().as_deref() == Some(root.as_path())
+            && let Some((context, model)) = self.production_model.clone()
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.project_profile_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(context.reload().map(|routed| model.replace(routed)));
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn poll_project_role_profile(&mut self) {
+        let Some(rx) = self.project_profile_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => self.push_notice("Project role profile applied"),
+            Ok(Err(error)) => {
+                tracing::error!(%error, "project role profile recomposition failed");
+                self.push_notice(format!("Project role profile not applied: {error}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => self.project_profile_rx = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
+    /// Whether the active project's profile recomposition is still running.
+    pub fn project_role_profile_pending(&self) -> bool {
+        self.project_profile_rx.is_some()
     }
 }
 

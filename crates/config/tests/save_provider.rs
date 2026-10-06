@@ -91,8 +91,7 @@ fn validation_rejects_empty_keyring_account() {
 
 fn load(dir: &Path) -> Config {
     Config::load(&LoadOptions {
-        project_dir: Some(dir.to_path_buf()),
-        user_config_dir: Some(dir.join("user-empty")),
+        user_config_dir: Some(dir.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

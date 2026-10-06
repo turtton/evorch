@@ -33,7 +33,7 @@ pub(super) fn keyring_editor(
         .unwrap()
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(root.to_path_buf()),
-            user_config_dir: Some(root.join("isolated-user-config")),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

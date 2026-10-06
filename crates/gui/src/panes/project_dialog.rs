@@ -15,6 +15,7 @@ pub const PATH_LABEL: &str = "Project path (~ allowed)";
 pub const NAME_LABEL: &str = "Project name";
 pub const DIRECTORY_LABEL: &str = "Directory path (~ allowed)";
 pub const PRIMARY_LABEL: &str = "Primary project";
+pub const ROLE_PROFILE_LABEL: &str = "Role profile";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectDialogAction {
@@ -29,6 +30,10 @@ pub enum ProjectDialogAction {
         path: PathBuf,
     },
     SetPrimary(Option<ProjectId>),
+    SetRoleProfile {
+        project: ProjectId,
+        profile: String,
+    },
     SetTrust {
         project: ProjectId,
         path: PathBuf,
@@ -61,6 +66,8 @@ pub fn project_dialog_modal(
                     project,
                     name,
                     directory,
+                    role_profile,
+                    role_profiles,
                     error,
                 } => match sidebar.projects.iter().find(|record| &record.id == project) {
                     Some(project) => {
@@ -68,6 +75,8 @@ pub fn project_dialog_modal(
                         let form = SettingsForm {
                             name,
                             directory,
+                            role_profile,
+                            role_profiles,
                             primary,
                             picker_busy,
                         };
@@ -147,6 +156,8 @@ fn path_input(
 struct SettingsForm<'a> {
     name: &'a mut String,
     directory: &'a mut String,
+    role_profile: &'a str,
+    role_profiles: &'a [String],
     primary: bool,
     picker_busy: bool,
 }
@@ -161,6 +172,8 @@ fn project_settings(
     let SettingsForm {
         name,
         directory: new_directory,
+        role_profile,
+        role_profiles,
         primary,
         picker_busy,
     } = form;
@@ -202,6 +215,36 @@ fn project_settings(
     {
         *action = Some(ProjectDialogAction::SetPrimary(
             checked.then(|| project.id.clone()),
+        ));
+    }
+
+    let label = ui.label(section(ROLE_PROFILE_LABEL));
+    let mut selected = role_profile.to_owned();
+    egui::ComboBox::from_id_salt("project-role-profile")
+        .selected_text(&selected)
+        .show_ui(ui, |ui| {
+            for name in role_profiles {
+                ui.selectable_value(&mut selected, name.clone(), name);
+            }
+        })
+        .response
+        .labelled_by(label.id);
+    if selected != role_profile {
+        *action = Some(ProjectDialogAction::SetRoleProfile {
+            project: project.id.clone(),
+            profile: selected,
+        });
+    }
+    if role_profiles.iter().all(|name| name != role_profile) {
+        ui.colored_label(
+            palette().WARNING_FG,
+            format!(
+                "Role profile '{role_profile}' is not in your user config; runs use 'default'."
+            ),
+        );
+    } else {
+        ui.label(muted(
+            "Agent roles and routes come from this user-config profile.",
         ));
     }
 

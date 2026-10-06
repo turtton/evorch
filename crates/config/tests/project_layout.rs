@@ -55,25 +55,21 @@ fn new_main_and_dropins_load_in_lexicographic_order() {
     let temp = tempfile::tempdir().expect("temp");
     let options = options(temp.path());
     let dir = temp.path().join("project/.evorch");
-    write_file(
-        &dir.join("config.toml"),
-        "[metrics]\nenabled = false\nretention_days = 7\n",
-    );
+    write_file(&dir.join("config.toml"), "role_profile = 'main'\n");
     // Deliberately create the later-sorting drop-in first.
     write_file(
         &dir.join("config.d/90-last.toml"),
-        "[metrics]\nretention_days = 19\n",
+        "role_profile = 'last'\n",
     );
     write_file(
         &dir.join("config.d/10-first.toml"),
-        "[metrics]\nretention_days = 11\n",
+        "role_profile = 'first'\n",
     );
     write_file(&dir.join("config.d/99-ignored.txt"), "[invalid TOML");
     std::fs::create_dir_all(dir.join("config.d/99-directory.toml")).expect("directory");
 
     for loaded in load_both(&options) {
-        assert!(!loaded.metrics.enabled, "main-only values survive");
-        assert_eq!(loaded.metrics.retention_days, 19);
+        assert_eq!(loaded.role_profile.as_deref(), Some("last"));
     }
 }
 
@@ -119,11 +115,11 @@ fn new_dropins_load_even_without_main() {
     write_file(&project.join("config.d/10-legacy.toml"), "[invalid TOML");
     write_file(
         &project.join(".evorch/config.d/10-new.toml"),
-        "[metrics]\nretention_days = 9\n",
+        "role_profile = 'dropin'\n",
     );
 
     for loaded in load_both(&options) {
-        assert_eq!(loaded.metrics.retention_days, 9);
+        assert_eq!(loaded.role_profile.as_deref(), Some("dropin"));
     }
     assert!(!project_main_config_path(&project).exists());
 }
@@ -135,25 +131,20 @@ fn new_layout_does_not_merge_any_legacy_files() {
     let project = temp.path().join("project");
     write_file(
         &project.join(".evorch/config.toml"),
-        "[metrics]\nretention_days = 7\n",
+        "role_profile = 'main'\n",
     );
     write_file(
         &project.join(".evorch/config.d/10-new.toml"),
-        "[metrics]\nretention_days = 11\n",
+        "role_profile = 'new'\n",
     );
-    write_file(
-        &project.join("evorch.toml"),
-        "[metrics]\nenabled = false\nretention_days = 99\n",
-    );
+    write_file(&project.join("evorch.toml"), "role_profile = 'legacy'\n");
     write_file(
         &project.join("config.d/90-legacy.toml"),
-        "[panel]\nlayout = 'compact'\n",
+        "role_profile = 'legacy-dropin'\n",
     );
 
     for loaded in load_both(&options) {
-        assert_eq!(loaded.metrics.retention_days, 11);
-        assert_eq!(loaded.metrics.enabled, Config::default().metrics.enabled);
-        assert_eq!(loaded.panel, Config::default().panel);
+        assert_eq!(loaded.role_profile.as_deref(), Some("new"));
     }
 }
 

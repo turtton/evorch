@@ -42,7 +42,7 @@ pub fn sized_fixture(
     let context = gui::model::production::ProductionModel {
         load_options: config::LoadOptions {
             project_dir: Some(root.into()),
-            user_config_dir: Some(root.join("user")),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         },

@@ -143,7 +143,7 @@ summarizer = "structural"
     .unwrap();
     let config = Config::load(&LoadOptions {
         project_dir: Some(directory.path().into()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
+        user_config_dir: Some(directory.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -658,7 +658,7 @@ async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_pr
     let root = harness._directory.path();
     let config = Config::load(&LoadOptions {
         project_dir: Some(root.into()),
-        user_config_dir: Some(root.join("empty-user-config")),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

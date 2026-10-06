@@ -1,5 +1,10 @@
 use super::WorkbenchState;
-use crate::model::{routing_settings::RoutingSettingsModel, tasks::AgentRunSource};
+use super::role_profiles::SettingsWrite;
+use crate::model::{
+    role_profiles::{RoleProfileAction, RoleProfileJob, profile_view},
+    routing_settings::RoutingSettingsModel,
+    tasks::AgentRunSource,
+};
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn routing_settings(&self) -> &RoutingSettingsModel {
@@ -29,10 +34,35 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         self.routing_settings.origin_role_settings = false;
-        match config::Config::load(&self.routing_load_options()) {
-            Ok(config) => self.routing_settings = RoutingSettingsModel::seed_from_config(&config),
-            Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
+        match self.load_profile_settings(None) {
+            Ok((config, picker)) => {
+                self.routing_settings = RoutingSettingsModel::seed_from_config(&config);
+                self.routing_settings.profiles = picker;
+            }
+            Err(error) => self.routing_settings.validation_error = Some(error),
         }
+        self.show_routing_settings();
+    }
+
+    /// Opens routing on the profile being edited in role settings, with `logical` added.
+    pub fn open_routing_settings_prefill(&mut self, logical: &str) {
+        if self.settings_save_in_progress() {
+            return;
+        }
+        self.routing_settings.origin_role_settings = true;
+        let profile = self.role_settings.profiles.selected.clone();
+        match self.load_profile_settings(Some(&profile)) {
+            Ok((config, picker)) => {
+                self.routing_settings =
+                    RoutingSettingsModel::seed_from_config_prefill(&config, logical);
+                self.routing_settings.profiles = picker;
+            }
+            Err(error) => self.routing_settings.validation_error = Some(error),
+        }
+        self.show_routing_settings();
+    }
+
+    fn show_routing_settings(&mut self) {
         self.provider_settings.open = false;
         self.sandbox_settings.open = false;
         self.self_improvement_settings.open = false;
@@ -41,24 +71,71 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.open = true;
     }
 
-    pub fn open_routing_settings_prefill(&mut self, logical: &str) {
+    /// Re-seeds the open modal from `config`, keeping where it was opened from.
+    fn reseed_routing(&mut self, config: &config::Config, preferred: Option<&str>) {
+        let origin = self.routing_settings.origin_role_settings;
+        let (view, picker) = self.profile_settings_from(config, preferred);
+        self.routing_settings = RoutingSettingsModel::seed_from_config(&view);
+        self.routing_settings.profiles = picker;
+        self.routing_settings.origin_role_settings = origin;
+    }
+
+    pub fn apply_routing_profile_action(&mut self, action: RoleProfileAction) {
         if self.settings_save_in_progress() {
             return;
         }
-        self.routing_settings.origin_role_settings = true;
-        match config::Config::load(&self.routing_load_options()) {
-            Ok(config) => {
-                self.routing_settings =
-                    RoutingSettingsModel::seed_from_config_prefill(&config, logical);
+        let (job, write): (RoleProfileJob, Box<SettingsWrite>) = match action {
+            RoleProfileAction::Select(name) => {
+                match config::Config::load_unresolved(&self.user_settings_options()) {
+                    Ok(config) => self.reseed_routing(&config, Some(&name)),
+                    Err(error) => {
+                        self.routing_settings.validation_error = Some(error.to_string());
+                    }
+                }
+                self.routing_settings.open = true;
+                return;
             }
-            Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
+            RoleProfileAction::Create(name) => {
+                let name = match self.routing_settings.profiles.validate_new_name(&name) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        self.routing_settings.validation_error = Some(error);
+                        return;
+                    }
+                };
+                let source = self.routing_settings.profiles.selected.clone();
+                let target = name.clone();
+                (
+                    RoleProfileJob::Created(name),
+                    Box::new(move |path, current| {
+                        super::role_profiles::create_profile(path, current, &source, &target)
+                    }),
+                )
+            }
+            RoleProfileAction::Delete(name) => {
+                let target = name.clone();
+                (
+                    RoleProfileJob::Deleted(name),
+                    Box::new(move |path, _| super::role_profiles::delete_profile(path, &target)),
+                )
+            }
+        };
+        self.start_routing_job(job, write);
+    }
+
+    fn start_routing_job(&mut self, job: RoleProfileJob, write: Box<SettingsWrite>) {
+        let closes = job == RoleProfileJob::Save;
+        match self.spawn_settings_job(write) {
+            Ok(rx) => {
+                self.routing_settings.validation_error = None;
+                self.routing_settings.job = job;
+                self.routing_settings.save_rx = Some(rx);
+                if closes {
+                    self.routing_settings.open = false;
+                }
+            }
+            Err(error) => self.routing_settings.validation_error = Some(error),
         }
-        self.provider_settings.open = false;
-        self.sandbox_settings.open = false;
-        self.self_improvement_settings.open = false;
-        self.close_theme_settings();
-        self.role_settings.open = false;
-        self.routing_settings.open = true;
     }
 
     pub fn submit_routing_settings(&mut self) {
@@ -72,119 +149,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 return;
             }
         };
-        let Some(path) = self.provider_settings_path.clone() else {
-            self.routing_settings.validation_error =
-                Some("No project config path is configured".into());
-            return;
-        };
         let renames = self.routing_settings.route_renames();
-        let options = self.routing_load_options();
-        let production = self.production_model.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.routing_settings.validation_error = None;
-        self.routing_settings.save_rx = Some(rx);
-        self.routing_settings.open = false;
-        std::thread::spawn(move || {
-            let saved = if renames.is_empty() {
-                path.parent()
-                    .map_or(Ok(()), std::fs::create_dir_all)
-                    .map_err(|error| error.to_string())
-                    .and_then(|()| {
-                        config::save_routing(&path, &routing).map_err(|error| error.to_string())
-                    })
-            } else {
-                config::Config::load(&options)
-                    .map_err(|error| error.to_string())
-                    .and_then(|loaded| {
-                        let mut renamed_agents = loaded.agents.clone();
-                        config::types::agents::rename_logical_model_refs(
-                            &mut renamed_agents,
-                            &renames,
-                        );
-
-                        // 保存先だけを仮置換し、上位レイヤー適用後も参照更新が有効か確認する。
-                        let mut candidate = match std::fs::read_to_string(&path) {
-                            Ok(content) => toml::from_str::<toml::Table>(&content)
-                                .map_err(|error| error.to_string())?,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                toml::Table::new()
-                            }
-                            Err(error) => return Err(error.to_string()),
-                        };
-                        // Values local to the save target are the baseline. Copying the
-                        // merged agents would persist unrelated overrides from other layers.
-                        let mut project_agents: config::AgentsConfig = candidate
-                            .get("agents")
-                            .cloned()
-                            .map(toml::Value::try_into)
-                            .transpose()
-                            .map_err(|error| error.to_string())?
-                            .unwrap_or_default();
-                        config::types::agents::rename_logical_model_refs(
-                            &mut project_agents,
-                            &renames,
-                        );
-                        for (address, old_name) in config::types::agents::explicit_refs(&loaded.agents) {
-                            if let Some(new_name) = renames.get(&old_name) {
-                                set_project_agent_ref(&mut project_agents, &address, new_name)?;
-                            }
-                        }
-                        candidate.insert(
-                            "routing".into(),
-                            toml::Value::try_from(&routing).map_err(|error| error.to_string())?,
-                        );
-                        candidate.insert(
-                            "agents".into(),
-                            toml::Value::try_from(&project_agents)
-                                .map_err(|error| error.to_string())?,
-                        );
-                        let mut candidate_options = options.clone();
-                        candidate_options.file_overrides = std::collections::BTreeMap::from([
-                            (path.clone(), toml::Value::Table(candidate)),
-                        ]);
-                        let effective = config::Config::load(&candidate_options)
-                            .map_err(|error| error.to_string())?;
-                        let before: std::collections::BTreeMap<_, _> =
-                            config::types::agents::explicit_refs(&loaded.agents)
-                                .into_iter()
-                                .collect();
-                        let candidate_refs: std::collections::BTreeMap<_, _> =
-                            config::types::agents::explicit_refs(&effective.agents)
-                                .into_iter()
-                                .collect();
-                        let blocked: Vec<_> =
-                            config::types::agents::explicit_refs(&renamed_agents)
-                                .into_iter()
-                                .filter(|(address, new_name)| {
-                                    before.get(address) != Some(new_name)
-                                        && candidate_refs.get(address) != Some(new_name)
-                                })
-                                .map(|(address, new_name)| format!("{address} -> {new_name}"))
-                                .collect();
-                        if !blocked.is_empty() {
-                            return Err(format!(
-                                "Route rename blocked: higher-priority config (config.d drop-in, EVORCH_* env, or CLI override) still pins agents binding(s) {} to the old route name. Remove that override or edit that layer directly. No changes were saved.",
-                                blocked.join(", ")
-                            ));
-                        }
-                        if let Some(parent) = path.parent() {
-                            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                        }
-                        config::save_routing_and_agents(&path, &routing, &project_agents)
-                            .map_err(|error| error.to_string())
-                    })
-            };
-            let result = saved.and_then(|()| {
-                if let Some((context, model)) = production {
-                    model.replace(context.reload()?);
+        let profile = self.routing_settings.profiles.selected.clone();
+        let options = self.user_settings_options();
+        self.start_routing_job(
+            RoleProfileJob::Save,
+            Box::new(move |path, current| {
+                if renames.is_empty() {
+                    return config::save_role_profile_bindings(
+                        path,
+                        Some(&profile),
+                        Some(&routing),
+                        None,
+                    )
+                    .map_err(|error| error.to_string());
                 }
-                config::Config::load(&options).map_err(|error| error.to_string())
-            });
-            if let Err(error) = &result {
-                tracing::error!(%error, "routing settings update or recomposition failed");
-            }
-            let _ = tx.send(result);
-        });
+                save_renamed_routes(path, current, &options, &profile, &routing, &renames)
+            }),
+        );
     }
 
     pub fn poll_routing_save(&mut self) {
@@ -193,25 +175,42 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         match rx.try_recv() {
             Ok(Ok(config)) => {
-                let return_to_roles = self.routing_settings.origin_role_settings;
-                let expanded = self
-                    .routing_settings
-                    .expanded
-                    .iter()
-                    .map(|name| {
-                        self.routing_settings
-                            .route_name_edits
-                            .get(name)
-                            .unwrap_or(name)
-                            .clone()
-                    })
-                    .collect();
-                self.routing_settings = RoutingSettingsModel::seed_from_config(&config);
-                self.routing_settings.expanded = expanded;
-                if return_to_roles {
-                    self.open_role_settings();
+                let job = std::mem::take(&mut self.routing_settings.job);
+                match job {
+                    RoleProfileJob::Save => {
+                        let return_to_roles = self.routing_settings.origin_role_settings;
+                        let profile = self.routing_settings.profiles.selected.clone();
+                        let expanded = self
+                            .routing_settings
+                            .expanded
+                            .iter()
+                            .map(|name| {
+                                self.routing_settings
+                                    .route_name_edits
+                                    .get(name)
+                                    .unwrap_or(name)
+                                    .clone()
+                            })
+                            .collect();
+                        self.reseed_routing(&config, Some(&profile));
+                        self.routing_settings.origin_role_settings = false;
+                        self.routing_settings.expanded = expanded;
+                        if return_to_roles {
+                            self.open_role_settings_profile(Some(&profile));
+                        }
+                        self.push_notice("Routing settings updated");
+                    }
+                    RoleProfileJob::Created(name) => {
+                        self.reseed_routing(&config, Some(&name));
+                        self.routing_settings.open = true;
+                        self.push_notice(format!("Role profile '{name}' created"));
+                    }
+                    RoleProfileJob::Deleted(name) => {
+                        self.reseed_routing(&config, None);
+                        self.routing_settings.open = true;
+                        self.push_notice(format!("Role profile '{name}' deleted"));
+                    }
                 }
-                self.push_notice("Routing settings updated");
             }
             Ok(Err(error)) => {
                 self.routing_settings.validation_error = Some(error);
@@ -225,6 +224,101 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
     }
+}
+
+/// Saves `routing` into `profile` and moves the profile's agent bindings to renamed routes.
+fn save_renamed_routes(
+    path: &std::path::Path,
+    current: &config::Config,
+    options: &config::LoadOptions,
+    profile: &str,
+    routing: &config::RoutingConfig,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let loaded = profile_view(current, profile);
+    let mut renamed_agents = loaded.agents.clone();
+    config::types::agents::rename_logical_model_refs(&mut renamed_agents, renames);
+
+    // 保存先だけを仮置換し、上位レイヤー適用後も参照更新が有効か確認する。
+    let mut candidate = match std::fs::read_to_string(path) {
+        Ok(content) => {
+            toml::from_str::<toml::Table>(&content).map_err(|error| error.to_string())?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let target = profile_table(&mut candidate, profile)?;
+    // Values local to the save target are the baseline. Copying the
+    // merged agents would persist unrelated overrides from other layers.
+    let mut file_agents: config::AgentsConfig = target
+        .get("agents")
+        .cloned()
+        .map(toml::Value::try_into)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    config::types::agents::rename_logical_model_refs(&mut file_agents, renames);
+    for (address, old_name) in config::types::agents::explicit_refs(&loaded.agents) {
+        if let Some(new_name) = renames.get(&old_name) {
+            set_project_agent_ref(&mut file_agents, &address, new_name)?;
+        }
+    }
+    target.insert(
+        "routing".into(),
+        toml::Value::try_from(routing).map_err(|error| error.to_string())?,
+    );
+    target.insert(
+        "agents".into(),
+        toml::Value::try_from(&file_agents).map_err(|error| error.to_string())?,
+    );
+    let mut candidate_options = options.clone();
+    candidate_options.file_overrides =
+        std::collections::BTreeMap::from([(path.to_path_buf(), toml::Value::Table(candidate))]);
+    let effective = profile_view(
+        &config::Config::load_unresolved(&candidate_options).map_err(|error| error.to_string())?,
+        profile,
+    );
+    let before: std::collections::BTreeMap<_, _> =
+        config::types::agents::explicit_refs(&loaded.agents)
+            .into_iter()
+            .collect();
+    let candidate_refs: std::collections::BTreeMap<_, _> =
+        config::types::agents::explicit_refs(&effective.agents)
+            .into_iter()
+            .collect();
+    let blocked: Vec<_> = config::types::agents::explicit_refs(&renamed_agents)
+        .into_iter()
+        .filter(|(address, new_name)| {
+            before.get(address) != Some(new_name) && candidate_refs.get(address) != Some(new_name)
+        })
+        .map(|(address, new_name)| format!("{address} -> {new_name}"))
+        .collect();
+    if !blocked.is_empty() {
+        return Err(format!(
+            "Route rename blocked: higher-priority config (config.d drop-in, EVORCH_* env, or CLI override) still pins agents binding(s) {} to the old route name. Remove that override or edit that layer directly. No changes were saved.",
+            blocked.join(", ")
+        ));
+    }
+    config::save_role_profile_bindings(path, Some(profile), Some(routing), Some(&file_agents))
+        .map_err(|error| error.to_string())
+}
+
+/// The table holding `profile`'s agents and routing inside a raw config table.
+fn profile_table<'a>(
+    root: &'a mut toml::Table,
+    profile: &str,
+) -> Result<&'a mut toml::Table, String> {
+    if profile == config::DEFAULT_ROLE_PROFILE {
+        return Ok(root);
+    }
+    root.entry("role_profiles")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "role_profiles must be a table".to_owned())?
+        .entry(profile)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("role_profiles.{profile} must be a table"))
 }
 
 fn set_project_agent_ref(

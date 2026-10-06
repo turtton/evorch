@@ -106,7 +106,7 @@ fn delete_removes_profile_and_refreshes_list() {
     config::delete_provider(&path, "work").unwrap();
     let config = Config::load(&config::LoadOptions {
         project_dir: Some(tmp.path().into()),
-        user_config_dir: Some(tmp.path().join("empty")),
+        user_config_dir: Some(tmp.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

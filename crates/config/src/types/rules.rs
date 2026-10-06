@@ -27,7 +27,7 @@ impl Default for RulesConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Config, LoadOptions};
+    use crate::Config;
 
     // Given: 既定のルール設定 / When: TOML に直列化して再度パースする / Then: 既定値が保存される
     #[test]
@@ -61,36 +61,5 @@ mod tests {
         let result = toml::from_str::<Config>("[rules]\nunknown = 1\n");
 
         assert!(result.is_err(), "rules の未知フィールドは拒否される");
-    }
-
-    // Given: ユーザ層とプロジェクト層に異なる rules 値 / When: レイヤーを読み込む / Then: プロジェクト値が優先される
-    #[test]
-    fn project_layer_overrides_user_rules_value() {
-        let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
-        let user = tmp.path().join("user");
-        let project = tmp.path().join("project");
-        std::fs::create_dir_all(&user).expect("ユーザ設定ディレクトリを作成できる");
-        std::fs::create_dir_all(project.join(".evorch"))
-            .expect("プロジェクト設定ディレクトリを作成できる");
-        std::fs::write(
-            user.join("config.toml"),
-            "[rules]\nmax_injection_bytes = 1000\n",
-        )
-        .expect("ユーザ設定を書き込める");
-        std::fs::write(
-            project.join(".evorch/config.toml"),
-            "[rules]\nmax_injection_bytes = 2000\n",
-        )
-        .expect("プロジェクト設定を書き込める");
-
-        let config = Config::load(&LoadOptions {
-            project_dir: Some(project),
-            user_config_dir: Some(user),
-            read_env: false,
-            ..LoadOptions::default()
-        })
-        .expect("レイヤー設定を読み込める");
-
-        assert_eq!(config.rules.max_injection_bytes, 2_000);
     }
 }

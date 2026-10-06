@@ -11,6 +11,8 @@ const ROOT_KEYS: &[&str] = &[
     "providers",
     "model_presets",
     "routing",
+    "role_profile",
+    "role_profiles",
     "panel",
     "diagnostics",
     "permissions",
@@ -59,6 +61,7 @@ const MODEL_PRESET_KEYS: &[&str] = &[
 ];
 const ENV_KEYS: &[&str] = &["type", "var"];
 const ROUTING_KEYS: &[&str] = &["routes"];
+const ROLE_PROFILE_KEYS: &[&str] = &["agents", "routing"];
 const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "reasoning_effort"];
 const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir", "persistence"];
@@ -175,8 +178,13 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         }
     }
 
-    validate_routing(root)?;
-    validate_agents(root)?;
+    if let Some(routing) = root.get("routing").and_then(toml::Value::as_table) {
+        validate_routing(routing, "routing")?;
+    }
+    if let Some(agents) = root.get("agents").and_then(toml::Value::as_table) {
+        validate_agents(agents, "agents")?;
+    }
+    validate_role_profiles(root)?;
     validate_section(root, "panel", PANEL_KEYS)?;
     validate_section(root, "diagnostics", DIAGNOSTICS_KEYS)?;
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
@@ -262,45 +270,32 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
     }
 
     if let Some(routing) = root.get_mut("routing").and_then(toml::Value::as_table_mut) {
-        retain_known(routing, "routing", ROUTING_KEYS, &mut ignored);
-        if let Some(routes) = routing
-            .get_mut("routes")
-            .and_then(toml::Value::as_table_mut)
-        {
-            for (name, candidates) in routes {
-                if let Some(candidates) = candidates.as_array_mut() {
-                    for (index, candidate) in candidates.iter_mut().enumerate() {
-                        if let Some(table) = candidate.as_table_mut() {
-                            retain_known(
-                                table,
-                                &format!("routing.routes.{name}[{index}]"),
-                                ROUTE_CANDIDATE_KEYS,
-                                &mut ignored,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        strip_routing(routing, "routing", &mut ignored);
     }
-
     if let Some(agents) = root.get_mut("agents").and_then(toml::Value::as_table_mut) {
-        retain_known(agents, "agents", AGENTS_KEYS, &mut ignored);
-        for (role, value) in agents {
-            if role == "roles" {
-                if let Some(roles) = value.as_table_mut() {
-                    retain_known(roles, "agents.roles", ADDITIONAL_ROLE_KEYS, &mut ignored);
-                    for (name, binding) in roles {
-                        strip_role_binding(
-                            binding,
-                            &format!("agents.roles.{name}"),
-                            name,
-                            &mut ignored,
-                        );
-                    }
-                }
-            } else {
-                strip_role_binding(value, &format!("agents.{role}"), role, &mut ignored);
+        strip_agents(agents, "agents", &mut ignored);
+    }
+    if let Some(profiles) = root
+        .get_mut("role_profiles")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (name, value) in profiles {
+            let Some(profile) = value.as_table_mut() else {
+                continue;
+            };
+            let path = format!("role_profiles.{name}");
+            retain_known(profile, &path, ROLE_PROFILE_KEYS, &mut ignored);
+            if let Some(routing) = profile
+                .get_mut("routing")
+                .and_then(toml::Value::as_table_mut)
+            {
+                strip_routing(routing, &format!("{path}.routing"), &mut ignored);
+            }
+            if let Some(agents) = profile
+                .get_mut("agents")
+                .and_then(toml::Value::as_table_mut)
+            {
+                strip_agents(agents, &format!("{path}.agents"), &mut ignored);
             }
         }
     }
@@ -326,6 +321,47 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         }
     }
     Ok(ignored)
+}
+
+fn strip_routing(routing: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {
+    retain_known(routing, path, ROUTING_KEYS, ignored);
+    let Some(routes) = routing
+        .get_mut("routes")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+    for (name, candidates) in routes {
+        if let Some(candidates) = candidates.as_array_mut() {
+            for (index, candidate) in candidates.iter_mut().enumerate() {
+                if let Some(table) = candidate.as_table_mut() {
+                    retain_known(
+                        table,
+                        &format!("{path}.routes.{name}[{index}]"),
+                        ROUTE_CANDIDATE_KEYS,
+                        ignored,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn strip_agents(agents: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {
+    retain_known(agents, path, AGENTS_KEYS, ignored);
+    for (role, value) in agents {
+        if role == "roles" {
+            if let Some(roles) = value.as_table_mut() {
+                let roles_path = format!("{path}.roles");
+                retain_known(roles, &roles_path, ADDITIONAL_ROLE_KEYS, ignored);
+                for (name, binding) in roles {
+                    strip_role_binding(binding, &format!("{roles_path}.{name}"), name, ignored);
+                }
+            }
+        } else {
+            strip_role_binding(value, &format!("{path}.{role}"), role, ignored);
+        }
+    }
 }
 
 fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: &mut Vec<String>) {
@@ -506,11 +542,40 @@ fn validate_credential(
     }
 }
 
-fn validate_routing(root: &toml::value::Table) -> Result<(), ConfigError> {
-    let Some(routing) = root.get("routing").and_then(toml::Value::as_table) else {
+fn validate_role_profiles(root: &toml::value::Table) -> Result<(), ConfigError> {
+    let Some(profiles) = root.get("role_profiles").and_then(toml::Value::as_table) else {
         return Ok(());
     };
-    check_keys(routing, "routing", ROUTING_KEYS)?;
+    for (name, value) in profiles {
+        let path = format!("role_profiles.{name}");
+        if name == crate::DEFAULT_ROLE_PROFILE {
+            return Err(ConfigError::InvalidField {
+                path,
+                message: "\"default\" is reserved for the top-level [agents] and [routing]".into(),
+            });
+        }
+        if !crate::is_valid_role_profile_name(name) {
+            return Err(ConfigError::InvalidField {
+                path,
+                message: "role profile names must match [a-z0-9_-]{1,64}".into(),
+            });
+        }
+        let Some(profile) = value.as_table() else {
+            continue;
+        };
+        check_keys(profile, &path, ROLE_PROFILE_KEYS)?;
+        if let Some(routing) = profile.get("routing").and_then(toml::Value::as_table) {
+            validate_routing(routing, &format!("{path}.routing"))?;
+        }
+        if let Some(agents) = profile.get("agents").and_then(toml::Value::as_table) {
+            validate_agents(agents, &format!("{path}.agents"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_routing(routing: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
+    check_keys(routing, path, ROUTING_KEYS)?;
     let Some(routes) = routing.get("routes").and_then(toml::Value::as_table) else {
         return Ok(());
     };
@@ -524,7 +589,7 @@ fn validate_routing(root: &toml::value::Table) -> Result<(), ConfigError> {
             };
             check_keys(
                 candidate,
-                &format!("routing.routes.{route}[{index}]"),
+                &format!("{path}.routes.{route}[{index}]"),
                 ROUTE_CANDIDATE_KEYS,
             )?;
         }
@@ -532,23 +597,24 @@ fn validate_routing(root: &toml::value::Table) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_agents(root: &toml::value::Table) -> Result<(), ConfigError> {
-    let Some(agents) = root.get("agents").and_then(toml::Value::as_table) else {
-        return Ok(());
-    };
-    check_keys(agents, "agents", AGENTS_KEYS)?;
-    validate_role_bindings(agents, "agents")
+fn validate_agents(agents: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
+    check_keys(agents, path, AGENTS_KEYS)?;
+    validate_role_bindings(agents, path, path)
 }
 
-fn validate_role_bindings(agents: &toml::value::Table, prefix: &str) -> Result<(), ConfigError> {
+fn validate_role_bindings(
+    agents: &toml::value::Table,
+    prefix: &str,
+    agents_path: &str,
+) -> Result<(), ConfigError> {
     for (role, value) in agents {
         let Some(binding) = value.as_table() else {
             continue;
         };
         let role_path = format!("{prefix}.{role}");
-        if prefix == "agents" && role == "roles" {
+        if prefix == agents_path && role == "roles" {
             check_keys(binding, &role_path, ADDITIONAL_ROLE_KEYS)?;
-            validate_role_bindings(binding, &role_path)?;
+            validate_role_bindings(binding, &role_path, agents_path)?;
             continue;
         }
         check_keys(binding, &role_path, ROLE_BINDING_KEYS)?;
@@ -559,7 +625,8 @@ fn validate_role_bindings(agents: &toml::value::Table, prefix: &str) -> Result<(
                 GENERATION_KEYS,
             )?;
         }
-        validate_role_categories(binding, &role_path)?;
+        let categorized = prefix == agents_path && matches!(role.as_str(), "worker" | "reviewer");
+        validate_role_categories(binding, &role_path, categorized.then_some(role.as_str()))?;
     }
     Ok(())
 }
@@ -567,19 +634,20 @@ fn validate_role_bindings(agents: &toml::value::Table, prefix: &str) -> Result<(
 fn validate_role_categories(
     binding: &toml::value::Table,
     role_path: &str,
+    categorized_role: Option<&str>,
 ) -> Result<(), ConfigError> {
-    if !matches!(role_path, "agents.worker" | "agents.reviewer")
-        && binding.contains_key("categories")
-    {
+    let Some(role) = categorized_role else {
+        if !binding.contains_key("categories") {
+            return Ok(());
+        }
         return Err(ConfigError::InvalidField {
             path: format!("{role_path}.categories"),
             message: "categories are only allowed on worker and reviewer".into(),
         });
-    }
+    };
     let Some(categories) = binding.get("categories").and_then(toml::Value::as_table) else {
         return Ok(());
     };
-    let role = role_path.rsplit('.').next().unwrap_or(role_path);
     for (category, value) in categories {
         let category_path = format!("{role_path}.categories.{category}");
         if category_for_role(role, category).is_none() {

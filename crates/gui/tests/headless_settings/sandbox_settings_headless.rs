@@ -21,7 +21,7 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
         .expect("state")
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(dir.path().to_path_buf()),
-            user_config_dir: Some(dir.path().join("user")),
+            user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })
@@ -40,7 +40,7 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     // Then: the typed setting is persisted without changing other sections.
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join("user")),
+        user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -69,7 +69,7 @@ fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
             .expect("state")
             .with_settings_load_options(config::LoadOptions {
                 project_dir: Some(dir.path().to_path_buf()),
-                user_config_dir: Some(dir.path().join("user")),
+                user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
                 read_env: false,
                 ..Default::default()
             })
@@ -89,7 +89,7 @@ fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
     harness.run();
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join("user")),
+        user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -123,7 +123,7 @@ fn escalation_fixture(
             .expect("state")
             .with_settings_load_options(config::LoadOptions {
                 project_dir: Some(dir.to_path_buf()),
-                user_config_dir: Some(dir.join("user")),
+                user_config_dir: Some(dir.join(config::PROJECT_CONFIG_DIR)),
                 read_env: false,
                 ..Default::default()
             })
@@ -138,7 +138,7 @@ fn escalation_fixture(
 fn reload_sandbox(dir: &std::path::Path) -> config::SandboxConfig {
     config::Config::load(&config::LoadOptions {
         project_dir: Some(dir.into()),
-        user_config_dir: Some(dir.join("user")),
+        user_config_dir: Some(dir.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -245,7 +245,7 @@ fn capture_sandbox_settings() {
             .expect("state")
             .with_settings_load_options(config::LoadOptions {
                 project_dir: Some(dir.path().to_path_buf()),
-                user_config_dir: Some(dir.path().join("user")),
+                user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
                 read_env: false,
                 ..Default::default()
             })

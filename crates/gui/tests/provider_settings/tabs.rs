@@ -86,7 +86,7 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
         .unwrap()
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(temp.path().to_path_buf()),
-            user_config_dir: Some(temp.path().join("isolated-user-config")),
+            user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

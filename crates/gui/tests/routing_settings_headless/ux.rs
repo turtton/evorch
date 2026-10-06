@@ -155,7 +155,7 @@ fn routing_expanded_route_can_edit_save_and_close() {
     assert_eq!(
         config::Config::load(&config::LoadOptions {
             project_dir: Some(temp.path().into()),
-            user_config_dir: Some(temp.path().join("user")),
+            user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

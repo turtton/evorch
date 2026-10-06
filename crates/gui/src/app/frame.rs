@@ -44,6 +44,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.drain_pty(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
+        self.poll_project_role_profile();
         self.poll_self_improvement_save();
         self.poll_storage_settings();
         if self.provider_settings.catalog.poll() {

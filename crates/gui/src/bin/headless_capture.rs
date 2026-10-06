@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         state = state
             .with_settings_load_options(config::LoadOptions {
                 project_dir: Some(dir.path().to_path_buf()),
-                user_config_dir: Some(dir.path().join("user")),
+                user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
                 read_env: false,
                 ..Default::default()
             })

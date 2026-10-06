@@ -67,40 +67,6 @@ fn checker_execution_settings_are_user_only_in_both_load_paths() {
 }
 
 #[test]
-fn project_opt_out_is_monotonic_and_cannot_reenable_user_opt_out() {
-    for user_enabled in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let mut opts = options(root.path());
-        put(
-            &root.path().join("user/config.toml"),
-            &format!("[comment_checker]\nenabled={user_enabled}\nbinary='/trusted'\n"),
-        );
-        put(
-            &root.path().join("project/.evorch/config.toml"),
-            "[comment_checker]\nenabled=false\n",
-        );
-        put(
-            &root.path().join("project/.evorch/config.d/99-checker.toml"),
-            "[comment_checker]\nenabled=true\n",
-        );
-        opts.cli_overrides = Some(toml::from_str("[comment_checker]\nenabled=true\n").unwrap());
-        for load in [Config::load, Config::load_strict] {
-            let effective = load(&opts).unwrap();
-            assert!(!effective.comment_checker.enabled);
-            assert_eq!(effective.comment_checker.binary, "/trusted");
-        }
-        // Without a project opt-out, a disabled user checker still cannot be re-enabled.
-        if !user_enabled {
-            put(
-                &root.path().join("project/.evorch/config.toml"),
-                "[comment_checker]\nenabled=true\n",
-            );
-            assert!(!Config::load_strict(&opts).unwrap().comment_checker.enabled);
-        }
-    }
-}
-
-#[test]
 fn unknown_stripping_strict_validation_and_save_simulation_keep_trusted_section() {
     let root = tempfile::tempdir().unwrap();
     let mut opts = options(root.path());

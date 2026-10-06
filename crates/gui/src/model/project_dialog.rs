@@ -16,6 +16,10 @@ pub enum ProjectDialog {
         name: String,
         /// Draft path for a new allowed directory.
         directory: String,
+        /// The project's role profile selection; `default` when it selects none.
+        role_profile: String,
+        /// User-config profiles it can select, `default` first.
+        role_profiles: Vec<String>,
         error: Option<String>,
     },
 }

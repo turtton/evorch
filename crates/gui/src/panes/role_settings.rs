@@ -11,6 +11,7 @@ pub enum RoleSettingsAction {
     Save,
     Cancel,
     CreateRoute(String),
+    Profile(crate::model::role_profiles::RoleProfileAction),
 }
 
 pub fn role_settings_modal(
@@ -31,6 +32,13 @@ pub fn role_settings_modal(
             ui.label(muted(
                 "Worker and reviewer categories take precedence over their role defaults; other roles use their role model.",
             ));
+            ui.add_enabled_ui(!busy, |ui| {
+                if let Some(profile) =
+                    crate::panes::role_profiles::role_profile_bar(ui, "role", &mut model.profiles)
+                {
+                    action = Some(RoleSettingsAction::Profile(profile));
+                }
+            });
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("role-bindings")

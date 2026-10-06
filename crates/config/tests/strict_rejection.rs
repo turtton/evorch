@@ -29,8 +29,7 @@ fn load_project(tmp: &tempfile::TempDir, content: &str) -> Result<Config, Config
     let project = tmp.path().join("project");
     write_file(&project.join(".evorch/config.toml"), content);
     Config::load_strict(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -389,15 +388,14 @@ fn valid_env_profile_loads() {
 #[test]
 fn dropin_source_secret_rejected() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
-    let project = tmp.path().join("project");
+    let user = tmp.path().join("user");
     write_file(
-        &project.join(".evorch/config.d/50-secret.toml"),
+        &user.join("config.d/50-secret.toml"),
         "[providers.foo]\napi_key = \"x\"\n",
     );
     assert_error_contains(
         Config::load(&LoadOptions {
-            project_dir: Some(project),
-            user_config_dir: Some(empty_user_dir(&tmp)),
+            user_config_dir: Some(user),
             read_env: false,
             ..LoadOptions::default()
         }),

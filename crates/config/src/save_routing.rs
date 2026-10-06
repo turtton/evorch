@@ -32,7 +32,7 @@ pub fn save_routing_and_agents(
     super::save::write_document(path, &doc)
 }
 
-fn routing_document_table(routing: &RoutingConfig) -> Table {
+pub(crate) fn routing_document_table(routing: &RoutingConfig) -> Table {
     let mut routes = Table::new();
     for (name, candidates) in &routing.routes {
         let mut tables = ArrayOfTables::new();

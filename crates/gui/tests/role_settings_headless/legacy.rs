@@ -23,7 +23,7 @@ fn role_binding_edit_saves_toml_and_reloads_runtime() {
     assert_eq!(harness.state().role_settings().error, None);
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
+        user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -187,7 +187,7 @@ fn role_settings_geometry_matrix() {
                     .expect("state")
                     .with_settings_load_options(config::LoadOptions {
                         project_dir: Some(temp.path().to_path_buf()),
-                        user_config_dir: Some(temp.path().join("user")),
+                        user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
                         read_env: false,
                         ..Default::default()
                     })

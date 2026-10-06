@@ -195,6 +195,7 @@ fn config_roundtrip_with_preset_keeps_fields() {
     config::save_openai_compatible_provider(&path, &editor.to_input()).unwrap();
     let loaded = config::Config::load(&config::LoadOptions {
         project_dir: Some(dir.path().into()),
+        user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

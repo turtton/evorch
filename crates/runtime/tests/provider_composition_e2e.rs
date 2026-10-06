@@ -109,7 +109,7 @@ profile = "local"
     .expect("write config");
     Config::load(&LoadOptions {
         project_dir: Some(root.to_path_buf()),
-        user_config_dir: Some(root.join("empty-user-config")),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..LoadOptions::default()
     })

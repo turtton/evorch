@@ -57,8 +57,7 @@ fn strict_load_accepts_exclusions_when_present_in_project_config() {
     .unwrap();
     // When: マージと strict validation を含むロードを実行する
     let config = Config::load(&LoadOptions {
-        project_dir: Some(tmp.path().to_path_buf()),
-        user_config_dir: Some(tmp.path().join("empty-user")),
+        user_config_dir: Some(tmp.path().join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -105,8 +104,7 @@ fn save_round_trips_exclusions_when_input_needs_normalization() {
     save_openai_compatible_provider(&path, &input).unwrap();
     // Then: 実ロード経路でも正規化された除外 ID が維持される
     let config = Config::load(&LoadOptions {
-        project_dir: Some(tmp.path().to_path_buf()),
-        user_config_dir: Some(tmp.path().join("empty-user")),
+        user_config_dir: Some(tmp.path().join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

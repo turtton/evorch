@@ -25,8 +25,7 @@ preset = "deep-preset"
 
 fn load(root: &Path) -> Config {
     Config::load(&LoadOptions {
-        project_dir: Some(root.into()),
-        user_config_dir: Some(root.join("user-empty")),
+        user_config_dir: Some(root.join(".evorch")),
         read_env: false,
         ..Default::default()
     })

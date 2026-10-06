@@ -12,8 +12,7 @@ fn codex(name: &str) -> CodexProviderInput {
 
 fn load(dir: &std::path::Path) -> Config {
     Config::load(&LoadOptions {
-        project_dir: Some(dir.into()),
-        user_config_dir: Some(dir.join("empty")),
+        user_config_dir: Some(dir.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

@@ -10,6 +10,7 @@ pub mod orchestration;
 pub mod ownership;
 pub mod panel;
 pub mod provider;
+pub mod role_profile;
 pub mod routing;
 pub mod rules;
 pub mod sandbox;
@@ -39,6 +40,7 @@ pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig,
     ProviderProfileConfig, ProviderTypeConfig,
 };
+pub use role_profile::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
 pub use routing::{RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
@@ -66,6 +68,13 @@ pub struct Config {
     pub agents: AgentsConfig,
     /// ルーティング設定。
     pub routing: RoutingConfig,
+    /// 選択中のロール構成プロファイル名。`None` と `"default"` はトップレベルの
+    /// `agents` / `routing` を使う。プロジェクト層が設定できる唯一のキー。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_profile: Option<String>,
+    /// 名前付きのロール構成プロファイル (マップキーがプロファイル名)。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_profiles: BTreeMap<String, RoleProfileConfig>,
     /// パネル UI 設定。
     pub panel: PanelConfig,
     /// 診断 (ログ) 設定。
@@ -99,6 +108,8 @@ impl Default for Config {
             model_presets: BTreeMap::new(),
             agents: AgentsConfig::default(),
             routing: RoutingConfig::default(),
+            role_profile: None,
+            role_profiles: BTreeMap::new(),
             panel: PanelConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             permissions: PermissionConfig::default(),

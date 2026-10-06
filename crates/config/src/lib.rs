@@ -16,6 +16,7 @@ pub mod prompt_sources;
 pub mod save;
 mod save_agents;
 mod save_codex;
+mod save_role_profiles;
 mod save_routing;
 mod save_sandbox;
 mod save_self_improvement;
@@ -25,8 +26,8 @@ pub mod types;
 
 pub use error::ConfigError;
 pub use load::{
-    LoadOptions, PROJECT_CONFIG_DIR, project_main_config_path, user_config_dir,
-    user_main_config_path,
+    LoadOptions, PROJECT_CONFIG_DIR, project_main_config_path, project_role_profile,
+    user_config_dir, user_main_config_path,
 };
 pub use presets::{PresetOrigin, PresetStore};
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
@@ -37,6 +38,9 @@ pub use save::{
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
     CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
+};
+pub use save_role_profiles::{
+    delete_role_profile, save_project_role_profile, save_role_profile, save_role_profile_bindings,
 };
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;
@@ -53,3 +57,4 @@ pub use types::{
     RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
     SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
 };
+pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};

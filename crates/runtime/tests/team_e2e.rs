@@ -43,7 +43,7 @@ enabled = true
     .unwrap();
     let config = Config::load(&config::LoadOptions {
         project_dir: Some(root.path().to_path_buf()),
-        user_config_dir: Some(root.path().join("empty-user")),
+        user_config_dir: Some(root.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

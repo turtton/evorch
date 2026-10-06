@@ -292,8 +292,7 @@ default_model = "{MODEL}"
     )
     .expect("設定を書き込める");
     let loaded = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(temporary.path().join("empty-user")),
+        user_config_dir: Some(project.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..LoadOptions::default()
     })

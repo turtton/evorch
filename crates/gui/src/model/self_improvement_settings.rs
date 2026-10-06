@@ -154,7 +154,7 @@ mod tests {
         assert!(wait_for_save(&mut model));
         let loaded = config::Config::load(&config::LoadOptions {
             project_dir: Some(dir.path().into()),
-            user_config_dir: Some(dir.path().join("user")),
+            user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })
