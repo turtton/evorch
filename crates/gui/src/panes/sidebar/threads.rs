@@ -8,11 +8,9 @@ use workspace_ui::{
 
 use crate::model::telemetry::{TelemetryOverlay, WorkspaceWaitEntry};
 use crate::theme::icons;
-use crate::theme::text::section;
-use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, SP_3, palette};
+use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{
-    compact_row, empty_state, ghost, ghost_icon_button, icon_button, icon_text, labeled,
-    primary_button, row_title,
+    compact_row, ghost, ghost_icon_button, icon_button, icon_text, labeled, row_title,
 };
 
 use super::SidebarAction;
@@ -75,44 +73,25 @@ pub fn render(
     let (project_threads, archived) =
         ThreadRecord::partition_for_project(&sidebar.threads, &project.id);
 
-    ui.add_space(SP_3);
-    ui.horizontal(|ui| {
-        ui.set_min_height(ROW_DENSE);
-        ui.add_space(SP_2);
-        ui.label(section("Threads"));
-        let has_threads = !project_threads.is_empty();
-        let new_thread_clicked = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if has_threads {
-                    icon_button(ui, icons::PLUS, "New thread").clicked()
-                } else {
-                    primary_button(ui, "New thread").clicked()
-                }
-            })
-            .inner;
-        if new_thread_clicked {
-            let title = format!("thread-{}", sidebar.threads.len() + 1);
-            *action = Some(SidebarAction::CreateThread(title));
-        }
-    });
-
     if project_threads.is_empty() {
-        empty_state(
-            ui,
-            "No threads yet",
-            "Start a thread to begin a conversation.",
-            None,
-        );
+        ui.horizontal(|ui| {
+            ui.add_space(SP_2 + 16.0);
+            ui.label(crate::theme::text::muted("No threads yet"));
+        });
     }
 
     render_tree(ui, sidebar, &project_threads, &indicators, false, action);
 
-    egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
-        .id_salt(("archived-threads", &project.id))
-        .show(ui, |ui| {
-            render_tree(ui, sidebar, &archived, &indicators, true, action);
+    if !archived.is_empty() {
+        // Nested under the project row, level with its thread titles.
+        ui.indent(("archived-threads-indent", &project.id), |ui| {
+            egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
+                .id_salt(("archived-threads", &project.id))
+                .show(ui, |ui| {
+                    render_tree(ui, sidebar, &archived, &indicators, true, action);
+                });
         });
-    ui.add_space(SP_2);
+    }
 }
 
 struct ThreadIndicators<'a> {

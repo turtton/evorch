@@ -43,12 +43,11 @@ pub fn verify_with_theme(state: State, theme: ThemePreset) {
                 State::Demo | State::ErrorThread => {
                     for label in [
                         "Projects",
-                        "Threads",
                         "evorch",
                         "Refine GUI design system",
                         "Provider composition root",
                         "Fix flaky offscreen test",
-                        "New thread",
+                        "New thread in evorch",
                     ] {
                         geometry.sidebar(label);
                     }

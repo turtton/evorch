@@ -218,6 +218,9 @@ fn request_row_opens_its_conversation() {
     harness.click_label("Request log");
     harness.run();
     assert!(harness.has_label("Showing 3 of 3 requests"));
+    // The sidebar lists the same title; collapse it so the row link is unique.
+    harness.click_label("Collapse threads of demo");
+    harness.run();
     harness.click_label("Fix login flow");
     harness.run();
 

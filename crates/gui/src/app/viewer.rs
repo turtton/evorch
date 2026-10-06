@@ -286,6 +286,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.set_primary_project(project_id)
                 }
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
+                SidebarAction::CreateThreadIn(project_id) => self
+                    .select_project(project_id)
+                    .and_then(|()| {
+                        self.create_thread(format!("thread-{}", self.sidebar.threads.len() + 1))
+                    })
+                    .map(|_| ()),
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
                 SidebarAction::ForkAtTurn { thread, entry_id } => {
                     self.fork_at_turn(thread, entry_id).map(|_| ())

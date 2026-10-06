@@ -18,7 +18,7 @@ use gui::theme::tokens::ROW_DENSE;
 use runtime::{
     AgentInspection, AgentSummary, MergeMode, RunId, WorkspaceInspection, WorkspaceMode,
 };
-use workspace_ui::{Membership, ProjectId, SidebarState, TrustState, UiSettings};
+use workspace_ui::{Membership, ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 #[derive(Clone, Default)]
 struct MockSource {
@@ -188,7 +188,7 @@ fn create_switch_pin_thread_via_ui_clicks() {
     harness.run();
 
     // When: a thread is created, selected by title, and pinned through the UI
-    harness.click_label("New thread");
+    harness.click_label("New thread in demo");
     harness.run();
     let pin = harness.label_rects("☆")[0];
     let archive = harness.label_rects("Archive")[0];
@@ -209,6 +209,52 @@ fn create_switch_pin_thread_via_ui_clicks() {
     );
     assert_eq!(sidebar.threads.len(), 1);
     assert!(sidebar.threads[0].pinned);
+}
+
+#[test]
+fn every_project_lists_its_threads_and_starts_new_ones_in_place() {
+    // Given: two projects, the first selected, with one thread under the second
+    let first = tempfile::tempdir().expect("temp dir");
+    let second = tempfile::tempdir().expect("temp dir");
+    let mut sidebar = sidebar_with_project(first.path());
+    let other = ProjectId::new("other");
+    sidebar
+        .add_project(other.clone(), "other", second.path())
+        .expect("project can be added");
+    sidebar
+        .create_thread(ThreadId::new("other-thread"), other.clone(), "Other work")
+        .expect("thread can be created");
+    let mut harness = HeadlessWorkbench::new(state(MockSource::default(), sidebar), [800.0, 600.0]);
+    harness.run();
+
+    // Then: both projects are shown, each with its own threads or placeholder
+    assert!(harness.has_label("Other work"));
+    assert!(harness.has_label("No threads yet"));
+    assert!(harness.has_label("New thread in other"));
+
+    // When: the operator opens the other project's thread
+    harness.click_label("Other work");
+    harness.run();
+
+    // Then: its project becomes the selected one
+    assert_eq!(harness.state().sidebar().selected_project, Some(other));
+
+    // When: the other project is collapsed and a thread is started from the first row
+    harness.click_label("Collapse threads of other");
+    harness.run();
+    assert!(!harness.has_label("Other work"));
+    harness.click_label("New thread in demo");
+    harness.run();
+
+    // Then: it belongs to the first project, which becomes selected
+    let sidebar = harness.state().sidebar();
+    let created = sidebar
+        .threads
+        .iter()
+        .find(|thread| Some(&thread.id) == sidebar.active_thread.as_ref())
+        .expect("new thread is active");
+    assert_eq!(created.project_id, ProjectId::new("demo"));
+    assert_eq!(sidebar.selected_project, Some(ProjectId::new("demo")));
 }
 
 #[test]
@@ -342,10 +388,10 @@ fn sidebar_with_project_but_no_threads_shows_thread_placeholder() {
 
     // Then: the thread placeholder is shown with a single "New thread" CTA
     assert!(harness.has_label("No threads yet"));
-    assert_eq!(harness.count_labels("New thread"), 1);
+    assert_eq!(harness.count_labels("New thread in demo"), 1);
 
     // When: the operator clicks the CTA
-    harness.click_label("New thread");
+    harness.click_label("New thread in demo");
     harness.run();
 
     // Then: the placeholder disappears and the new thread title is rendered
