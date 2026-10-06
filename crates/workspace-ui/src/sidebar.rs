@@ -147,10 +147,16 @@ impl SidebarState {
         Ok(())
     }
 
+    /// Activating a thread also selects the project it belongs to.
     pub fn switch_thread(&mut self, id: &ThreadId) -> Result<(), ThreadError> {
-        if !self.threads.iter().any(|thread| &thread.id == id) {
-            return Err(ThreadError::UnknownThread);
-        }
+        let project = self
+            .threads
+            .iter()
+            .find(|thread| &thread.id == id)
+            .ok_or(ThreadError::UnknownThread)?
+            .project_id
+            .clone();
+        self.selected_project = Some(project);
         self.active_thread = Some(id.clone());
         Ok(())
     }

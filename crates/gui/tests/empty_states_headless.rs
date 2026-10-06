@@ -57,8 +57,7 @@ fn conversation_with_project_but_no_thread_offers_start_thread() {
 
     assert!(harness.has_label("No thread selected"));
     assert!(harness.has_label("Start a thread to open a conversation."));
-    assert!(harness.has_label("Start a thread to begin a conversation."));
-    assert!(harness.has_label("New thread"));
+    assert!(harness.has_label("New thread in demo"));
     harness.click_label("Start a thread");
     harness.run();
     assert!(harness.state().sidebar().active_thread.is_some());

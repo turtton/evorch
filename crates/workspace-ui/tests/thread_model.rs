@@ -38,6 +38,30 @@ fn create_switch_pin_unpin_threads_under_project() {
 }
 
 #[test]
+fn switching_to_another_projects_thread_selects_that_project() {
+    let first_dir = tempdir().expect("temporary directory must be created");
+    let second_dir = tempdir().expect("temporary directory must be created");
+    let mut sidebar = SidebarState::default();
+    let (first, second) = (ProjectId::new("p1"), ProjectId::new("p2"));
+    sidebar
+        .add_project(first.clone(), "One", first_dir.path())
+        .expect("first project must be added");
+    sidebar
+        .add_project(second.clone(), "Two", second_dir.path())
+        .expect("second project must be added");
+    sidebar.select_project(&first).expect("project must select");
+    let thread = ThreadId::new("t2");
+    sidebar
+        .create_thread(thread.clone(), second.clone(), "Second")
+        .expect("thread must be created");
+
+    sidebar.switch_thread(&thread).expect("thread must switch");
+
+    assert_eq!(sidebar.selected_project, Some(second));
+    assert_eq!(sidebar.active_thread, Some(thread));
+}
+
+#[test]
 fn thread_state_precedence_stopped_error_running_waiting_done_active() {
     // Given: a thread with two run IDs and each possible runtime phase combination.
     let mut thread =

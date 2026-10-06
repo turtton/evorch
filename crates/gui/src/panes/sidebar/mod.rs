@@ -21,6 +21,8 @@ pub enum SidebarAction {
     OpenAddProject,
     OpenProjectSettings(ProjectId),
     CreateThread(String),
+    /// Start a thread in the given project and make it the active one.
+    CreateThreadIn(ProjectId),
     ForkThread(ThreadId),
     /// Fork a child thread from a completed turn (transcript entry id).
     ForkAtTurn {
@@ -64,18 +66,24 @@ pub fn sidebar_pane(
             .show(ui, |ui| {
                 // The pane itself is the surface; nesting another frame only adds borders.
                 let selected = selected_project(sidebar);
-                projects::render(ui, sidebar, selected, &pane_state, &mut action);
-                if let Some(project) = selected {
-                    threads::render(
-                        ui,
-                        sidebar,
-                        project,
-                        phases,
-                        telemetry,
-                        question_threads,
-                        &mut action,
-                    );
-                }
+                projects::render(
+                    ui,
+                    sidebar,
+                    selected,
+                    &pane_state,
+                    &mut action,
+                    |ui, project, action| {
+                        threads::render(
+                            ui,
+                            sidebar,
+                            project,
+                            phases,
+                            telemetry,
+                            question_threads,
+                            action,
+                        );
+                    },
+                );
             });
     });
 

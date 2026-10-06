@@ -1,6 +1,6 @@
 use egui::{FontFamily, FontId, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
-use gui::theme::tokens::{FONT_H3, FONT_SMALL};
+use gui::theme::tokens::FONT_H3;
 
 fn assert_header(harness: &Harness<'_, ()>, label: &str, size: f32) {
     harness.get_by_label(label);
@@ -20,29 +20,6 @@ fn assert_header(harness: &Harness<'_, ()>, label: &str, size: f32) {
             FontId::new(size, FontFamily::Proportional)
         );
     }
-}
-
-#[test]
-fn sidebar_header_uses_section_label_when_project_is_selected() {
-    // Given: a real sidebar with its selected demo project.
-    let dir = tempfile::tempdir().unwrap();
-    let sidebar = gui::fixture::demo_sidebar(dir.path()).unwrap();
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(800.0, 600.0))
-        .build_ui(|ui| {
-            gui::theme::install(ui.ctx());
-            gui::panes::sidebar::sidebar_pane(
-                ui,
-                &sidebar,
-                &Default::default(),
-                &gui::model::telemetry::TelemetryOverlay::new(),
-                &Default::default(),
-            );
-        });
-    // When: the sidebar renders.
-    harness.run_steps(2);
-    // Then: its section heading uses the small proportional section role.
-    assert_header(&harness, "Threads", FONT_SMALL);
 }
 
 #[test]
