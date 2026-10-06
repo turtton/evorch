@@ -11,6 +11,7 @@ mod frontmatter;
 mod registry;
 mod resource;
 
+pub(crate) use discovery::repo_skill_dirs;
 pub use discovery::{
     build_standard_registry, default_skill_dirs, discover_skills, discover_with_builtin,
 };

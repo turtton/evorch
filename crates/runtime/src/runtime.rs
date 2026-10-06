@@ -85,7 +85,7 @@ pub(crate) struct Shared {
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) skill_source: OnceLock<Arc<SkillCatalogSource>>,
-    pub(crate) rules: OnceLock<Arc<RulesSource>>,
+    pub(crate) rules: Mutex<Option<Arc<RulesSource>>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
@@ -107,6 +107,15 @@ pub(crate) struct Shared {
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
+}
+
+impl Shared {
+    pub(crate) fn rules(&self) -> Option<Arc<RulesSource>> {
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// isolated sandbox を構築するための mount policy 入力。
@@ -134,8 +143,30 @@ pub trait SandboxFactory: Send + Sync {
 }
 
 pub(crate) struct WorkspaceContext {
+    /// Follows the active project; `None` while that project is not a git repository root.
+    manager: Mutex<Option<WorktreeManager>>,
+    pub(crate) factory: Arc<dyn SandboxFactory>,
+}
+
+/// One run's view of [`WorkspaceContext`], resolved once per setup so a
+/// concurrent project switch cannot split a run across two repositories.
+pub(crate) struct IsolatedWorkspace {
     pub(crate) manager: WorktreeManager,
     pub(crate) factory: Arc<dyn SandboxFactory>,
+}
+
+impl WorkspaceContext {
+    pub(crate) fn isolated(&self) -> Option<IsolatedWorkspace> {
+        let manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        Some(IsolatedWorkspace {
+            manager,
+            factory: Arc::clone(&self.factory),
+        })
+    }
 }
 
 struct RunEntry {
@@ -187,6 +218,45 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Rebind every project-scoped input to `root` for runs started afterwards:
+    /// the shell sandbox and cwd, project rules, repository skills and the
+    /// isolated worktree manager. Running runs keep the root they started with.
+    ///
+    /// # Errors
+    /// Propagates [`AgentRuntime::set_default_cwd`] failures.
+    pub fn set_project_root(&self, root: PathBuf) -> Result<(), RuntimeError> {
+        self.set_default_cwd(root.clone())?;
+        {
+            let mut rules = self
+                .shared
+                .rules
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(current) = rules.as_ref() {
+                *rules = Some(Arc::new(current.with_project_root(Some(root.clone()))));
+            }
+        }
+        if let Some(source) = self.shared.skill_source.get() {
+            source.set_repo_root(&root);
+        }
+        if let Some(workspace) = &self.shared.workspace {
+            let manager = match crate::workspace::Project::new(root) {
+                Ok(project) => Some(WorktreeManager::new(project)),
+                Err(error) => {
+                    // Fail closed: isolated runs report a missing workspace
+                    // instead of creating worktrees in the previous project.
+                    tracing::warn!(%error, "isolated workspaces are unavailable for this project");
+                    None
+                }
+            };
+            *workspace
+                .manager
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = manager;
+        }
+        Ok(())
+    }
+
     pub fn team_tasks(&self) -> Vec<(RunId, Vec<crate::team::TeamTask>)> {
         lock_runs(&self.shared.runs)
             .iter()
@@ -234,7 +304,7 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&run_id)
-            .and_then(|workspace| workspace.worktree_path.clone());
+            .and_then(WorkspaceInspection::snapshot_root);
         let mut workspace = service
             .lock(root.as_deref())
             .await
@@ -278,7 +348,7 @@ impl AgentRuntime {
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
-                rules: OnceLock::new(),
+                rules: Mutex::new(None),
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
@@ -388,7 +458,11 @@ impl AgentRuntime {
     /// 設定済みの場合は 2 回目以降の呼び出しを無視する先勝ち契約で、実際のルール
     /// 注入は agent loop 統合を行う後続 Wave が担う。
     pub fn with_project_rules(self, rules: Arc<RulesSource>) -> Self {
-        let _ = self.shared.rules.set(rules);
+        self.shared
+            .rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(rules);
         self
     }
 
@@ -531,7 +605,7 @@ impl AgentRuntime {
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
-                rules: OnceLock::new(),
+                rules: Mutex::new(None),
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
@@ -547,7 +621,10 @@ impl AgentRuntime {
                 goals: OnceLock::new(),
                 reviewer_results: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
-                workspace: Some(WorkspaceContext { manager, factory }),
+                workspace: Some(WorkspaceContext {
+                    manager: Mutex::new(Some(manager)),
+                    factory,
+                }),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
@@ -2053,7 +2130,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
             model: Arc::clone(&shared.model),
             system_prompts,
             skills,
-            rules: shared.rules.get().cloned(),
+            rules: shared.rules(),
             compaction: shared.compaction.get().cloned().unwrap_or_default(),
             compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
             escalation: shared
@@ -2446,6 +2523,10 @@ mod stop_cancel_tests {
 #[cfg(test)]
 #[path = "runtime/comment_checker_tests.rs"]
 mod comment_checker_tests;
+
+#[cfg(test)]
+#[path = "runtime/project_switch_tests.rs"]
+mod project_switch_tests;
 
 #[cfg(test)]
 use crate::escalation_review::support as comment_checker_support;

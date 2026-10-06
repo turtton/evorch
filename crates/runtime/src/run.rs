@@ -143,6 +143,15 @@ pub struct WorkspaceInspection {
     pub merge_mode: MergeMode,
 }
 
+impl WorkspaceInspection {
+    /// file snapshot を取る root。shared run も起動時ではなく自身の作業 root を使う。
+    pub(crate) fn snapshot_root(&self) -> Option<PathBuf> {
+        self.worktree_path
+            .clone()
+            .or_else(|| self.active_root.clone())
+    }
+}
+
 /// AgentRun の要約 (一覧表示用 DTO)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentSummary {

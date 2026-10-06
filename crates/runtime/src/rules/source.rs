@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use super::types::{ProjectTrust, RulesSettings};
 
 /// 複数 run で共有する不変のルール読み込み設定。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RulesSource {
     pub(crate) trust: ProjectTrust,
     pub(crate) settings: RulesSettings,
@@ -45,6 +45,15 @@ impl RulesSource {
     /// 構成時に指定されたプロジェクトルートを返す。
     pub fn project_root(&self) -> Option<&std::path::Path> {
         self.project_root.as_deref()
+    }
+
+    /// 他の設定を保ったままプロジェクトルートだけを差し替えた読み込み元を返す。
+    #[must_use]
+    pub fn with_project_root(&self, project_root: Option<PathBuf>) -> Self {
+        Self {
+            project_root,
+            ..self.clone()
+        }
     }
 }
 

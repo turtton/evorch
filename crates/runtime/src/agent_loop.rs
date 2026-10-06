@@ -37,7 +37,7 @@ use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
-use crate::runtime::{Shared, WorkspaceContext, loop_shared};
+use crate::runtime::{IsolatedWorkspace, Shared, WorkspaceContext, loop_shared};
 use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
@@ -383,7 +383,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 let Some(runtime_shared) = shared.upgrade() else {
                     return;
                 };
-                let Some(workspace) = runtime_shared.workspace.as_ref() else {
+                let Some(workspace) = runtime_shared
+                    .workspace
+                    .as_ref()
+                    .and_then(WorkspaceContext::isolated)
+                else {
                     state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
                     return;
                 };
@@ -394,9 +398,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     .and_then(|handoff| handoff.worktree.take());
                 let setup = match adopted {
                     Some(owned) => {
-                        attach_adopted_workspace(workspace, &runtime_shared, &state, owned).await
+                        attach_adopted_workspace(&workspace, &runtime_shared, &state, owned).await
                     }
-                    None => setup_isolated_workspace(workspace, &runtime_shared, &state).await,
+                    None => setup_isolated_workspace(&workspace, &runtime_shared, &state).await,
                 };
                 match setup {
                     Ok((owned, executor)) => {
@@ -532,17 +536,20 @@ fn update_workspace_system_message(context: &mut AgentContext, root: &std::path:
     }
 }
 
+/// Workspace advertised to a shared run. The sandbox root wins because it is
+/// the only project the shell sandbox mounts; advertising another root makes
+/// the model pass a `cwd` that does not exist inside the sandbox.
 pub(crate) fn shared_active_root(
     rules: Option<&RulesSource>,
     sandbox_root: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    rules
-        .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
-        .or(sandbox_root)
+    sandbox_root.or_else(|| {
+        rules.and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
+    })
 }
 
 async fn setup_isolated_workspace(
-    workspace: &WorkspaceContext,
+    workspace: &IsolatedWorkspace,
     runtime_shared: &Arc<Shared>,
     state: &LoopState,
 ) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
@@ -557,7 +564,7 @@ async fn setup_isolated_workspace(
 }
 
 async fn create_worktree(
-    workspace: &WorkspaceContext,
+    workspace: &IsolatedWorkspace,
     runtime_shared: &Arc<Shared>,
     state: &LoopState,
 ) -> Result<OwnedWorktree, String> {
@@ -637,7 +644,7 @@ async fn create_worktree(
 }
 
 async fn attach_adopted_workspace(
-    workspace: &WorkspaceContext,
+    workspace: &IsolatedWorkspace,
     runtime_shared: &Arc<Shared>,
     state: &LoopState,
     owned: OwnedWorktree,
@@ -676,7 +683,7 @@ async fn attach_adopted_workspace(
 }
 
 async fn attach_worktree_executor(
-    workspace: &WorkspaceContext,
+    workspace: &IsolatedWorkspace,
     runtime_shared: &Arc<Shared>,
     state: &LoopState,
     owned: &OwnedWorktree,
@@ -1590,7 +1597,7 @@ mod workspace_tests {
     }
 
     #[test]
-    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
+    fn shared_active_root_prefers_mounted_sandbox_root_over_rules_root() {
         let rules_root = PathBuf::from("/rules-project");
         let sandbox_root = PathBuf::from("/sandbox-project");
         let rules = RulesSource::new(
@@ -1601,9 +1608,10 @@ mod workspace_tests {
             None,
         );
         assert_eq!(
-            shared_active_root(Some(&rules), Some(sandbox_root)),
-            Some(rules_root),
+            shared_active_root(Some(&rules), Some(sandbox_root.clone())),
+            Some(sandbox_root),
         );
+        assert_eq!(shared_active_root(Some(&rules), None), Some(rules_root));
     }
 
     #[test]

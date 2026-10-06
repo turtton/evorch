@@ -63,6 +63,17 @@ pub fn default_skill_dirs(repo_root: Option<&Path>) -> Vec<(SkillScope, PathBuf)
     default_skill_dirs_from(repo_root, user_config.as_deref(), home.as_deref())
 }
 
+/// リポジトリスコープの探索ディレクトリ。[`default_skill_dirs`] の先頭に並ぶ。
+pub(crate) fn repo_skill_dirs(repo_root: &Path) -> [(SkillScope, PathBuf); 2] {
+    [
+        (SkillScope::Repo, repo_root.join(".evorch").join("skills")),
+        (
+            SkillScope::RepoAgents,
+            repo_root.join(".agents").join("skills"),
+        ),
+    ]
+}
+
 fn default_skill_dirs_from(
     repo_root: Option<&Path>,
     user_config: Option<&Path>,
@@ -70,11 +81,7 @@ fn default_skill_dirs_from(
 ) -> Vec<(SkillScope, PathBuf)> {
     let mut dirs = Vec::new();
     if let Some(repo_root) = repo_root {
-        dirs.push((SkillScope::Repo, repo_root.join(".evorch").join("skills")));
-        dirs.push((
-            SkillScope::RepoAgents,
-            repo_root.join(".agents").join("skills"),
-        ));
+        dirs.extend(repo_skill_dirs(repo_root));
     }
     if let Some(user_dir) = user_config {
         dirs.push((SkillScope::User, user_dir.join("skills")));

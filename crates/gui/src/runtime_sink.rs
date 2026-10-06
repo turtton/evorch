@@ -277,7 +277,7 @@ impl CommandSink for RuntimeCommandSink {
             return Ok(());
         }
         self.runtime
-            .set_default_cwd(root.clone())
+            .set_project_root(root.clone())
             .map_err(|error| error.to_string())?;
         self.shell_cwd = Some(root);
         Ok(())

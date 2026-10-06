@@ -40,7 +40,11 @@ impl AgentRuntime {
     }
 
     pub(crate) fn workspace_configuration_failed(&self, run: RunId) -> bool {
-        self.shared.workspace.is_none()
+        self.shared
+            .workspace
+            .as_ref()
+            .and_then(crate::runtime::WorkspaceContext::isolated)
+            .is_none()
             && lock_runs(&self.shared.runs)
                 .get(&run)
                 .is_some_and(|entry| entry.config.workspace_mode == WorkspaceMode::Isolated)
