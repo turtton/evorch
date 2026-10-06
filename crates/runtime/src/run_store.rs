@@ -11,7 +11,8 @@ use crate::RunId;
 pub struct RunStore {
     pub(crate) handle: StorageHandle,
     database: Mutex<Database>,
-    pub(crate) next_run_id: u64,
+    /// Largest run ID already reserved in storage, so new IDs never reuse it.
+    pub(crate) latest_run_id: Option<RunId>,
     pub(crate) restore_gate: Mutex<()>,
 }
 
@@ -68,14 +69,17 @@ impl RunStore {
     /// DB を開けない場合に storage のエラーを返す。
     pub fn open(config: &StorageConfig, handle: StorageHandle) -> Result<Self, StorageError> {
         let database = Database::open(config)?;
-        let next_run_id = database
-            .max_persisted_run_id()?
-            .checked_add(1)
-            .ok_or_else(|| StorageError::Serialization("run ID overflow".into()))?;
+        let mut latest_run_id = None;
+        for id in database.persisted_run_ids()? {
+            let id = id
+                .parse::<RunId>()
+                .map_err(|error| StorageError::Serialization(error.to_string()))?;
+            latest_run_id = latest_run_id.max(Some(id));
+        }
         Ok(Self {
             handle,
             database: Mutex::new(database),
-            next_run_id,
+            latest_run_id,
             restore_gate: Mutex::new(()),
         })
     }

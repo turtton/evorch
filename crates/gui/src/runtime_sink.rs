@@ -202,19 +202,14 @@ impl CommandSink for RuntimeCommandSink {
     fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
         self.goal_projects
             .insert(snapshot.thread_id.clone(), project.into());
-        if let Some(id) = snapshot
-            .root_run_id
-            .strip_prefix("run-")
-            .and_then(|id| id.parse::<u64>().ok())
-        {
-            self.chat_runs
-                .insert(snapshot.thread_id.clone(), RunId::new(id));
+        if let Ok(id) = snapshot.root_run_id.parse::<RunId>() {
+            self.chat_runs.insert(snapshot.thread_id.clone(), id);
         }
     }
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
-        if let Some(id) = run.strip_prefix("run-").and_then(|s| s.parse::<u64>().ok()) {
-            self.goal_runs.insert(thread.into(), RunId::new(id));
+        if let Ok(id) = run.parse::<RunId>() {
+            self.goal_runs.insert(thread.into(), id);
             self.goal_projects.insert(thread.into(), project.into());
         }
     }
@@ -222,12 +217,9 @@ impl CommandSink for RuntimeCommandSink {
         &self,
         run: &str,
     ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
-        let id = run
-            .strip_prefix("run-")
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or("invalid run ID")?;
+        let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
         self.runtime
-            .restore_diagnostics(RunId::new(id))
+            .restore_diagnostics(id)
             .map_err(|e| e.to_string())
     }
 
@@ -258,13 +250,8 @@ impl CommandSink for RuntimeCommandSink {
         &self,
         run: &str,
     ) -> Result<Option<runtime::base_context::RunContextView>, String> {
-        let id = run
-            .strip_prefix("run-")
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or("invalid run ID")?;
-        self.runtime
-            .run_context_view(RunId::new(id))
-            .map_err(|e| e.to_string())
+        let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
+        self.runtime.run_context_view(id).map_err(|e| e.to_string())
     }
 
     fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
@@ -542,10 +529,7 @@ impl RuntimeCommandSink {
                         }];
                     }
                 };
-                let target = run_id
-                    .strip_prefix("run-")
-                    .and_then(|id| id.parse::<u64>().ok())
-                    .map(RunId::new);
+                let target = run_id.parse::<RunId>().ok();
                 let root = self
                     .chat_runs
                     .get(&thread_id)

@@ -51,7 +51,8 @@ impl Fixture {
             model.add_keyed(marker, [response]).await;
         }
         let runtime =
-            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
+            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+                .with_sequential_run_ids();
         Self {
             runtime,
             model,

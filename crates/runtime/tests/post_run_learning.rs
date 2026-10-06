@@ -253,6 +253,7 @@ impl Fixture {
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
         ));
         let runtime = AgentRuntime::new(bus, executor, model.clone())
+            .with_sequential_run_ids()
             .with_run_store(RunStore::open(&config, store.handle()).unwrap())
             .with_learning(runtime::memory_queue::LearningSettings {
                 writer: store.handle(),

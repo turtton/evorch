@@ -82,12 +82,9 @@ impl AgentRuntime {
             let parent = parent_id
                 .as_deref()
                 .map(|id| {
-                    id.strip_prefix("run-")
-                        .and_then(|id| id.parse::<u64>().ok())
-                        .map(RunId::new)
-                        .ok_or_else(|| {
-                            fail(RunRestoreFailure::CorruptContext("parent run ID".into()))
-                        })
+                    id.parse::<RunId>().map_err(|_| {
+                        fail(RunRestoreFailure::CorruptContext("parent run ID".into()))
+                    })
                 })
                 .transpose()?;
             if previous.is_none() {
@@ -119,11 +116,6 @@ impl AgentRuntime {
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
             let mut restored = RestoredState::from_record(&record)?;
-            let next_id = recipient.get().checked_add(1).ok_or_else(|| {
-                fail(RunRestoreFailure::UnsupportedConfig(
-                    "run ID overflow".into(),
-                ))
-            })?;
             descriptor.restorable = false;
             descriptor.non_restorable_reason = Some("snapshot_consumed".into());
             record.restorable = false;
@@ -170,9 +162,7 @@ impl AgentRuntime {
             store.handle.upsert_run_context(&record).map_err(|error| {
                 fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
             })?;
-            self.shared
-                .next_run_id
-                .fetch_max(next_id, Ordering::Relaxed);
+            self.shared.run_ids.observe(recipient);
             message.message_id = format!(
                 "msg-{}",
                 self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)

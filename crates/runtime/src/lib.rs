@@ -40,6 +40,7 @@ pub mod prompt;
 pub mod restore;
 pub mod rules;
 pub mod run;
+mod run_ids;
 pub mod run_store;
 pub mod runtime;
 mod sandbox_settings;
@@ -91,8 +92,8 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, RunPurpose,
-    WorkspaceInspection, WorkspaceMode,
+    AgentInspection, AgentSummary, DelegateImage, MergeMode, ParseRunIdError, RunConfig, RunId,
+    RunPurpose, WorkspaceInspection, WorkspaceMode,
 };
 pub use run_store::RunStore;
 pub use runtime::{

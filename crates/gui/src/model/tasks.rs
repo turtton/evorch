@@ -121,6 +121,40 @@ mod tests {
     }
 
     #[test]
+    fn rows_list_the_most_recently_updated_run_first() {
+        // Given: two child runs whose latest activity times differ from their creation order
+        let mut model = TasksModel::new(Source(vec![
+            summary(2, AgentRunPhase::Running),
+            summary(3, AgentRunPhase::Running),
+        ]));
+        let turn_at = |run_id: &str, seconds| {
+            let mut event = Event::new(LifecycleEvent::TurnCompleted {
+                run_id: run_id.into(),
+                context_len: 1,
+            });
+            event.meta.wall_clock = UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+            event
+        };
+        let order = |model: &TasksModel<Source>| {
+            model
+                .rows()
+                .iter()
+                .map(|row| row.run_id)
+                .collect::<Vec<_>>()
+        };
+        model.apply_event(&turn_at("run-3", 10));
+        model.apply_event(&turn_at("run-2", 20));
+        model.refresh();
+        assert_eq!(order(&model), [RunId::new(2), RunId::new(3)]);
+
+        // When: the older run completes another turn
+        model.apply_event(&turn_at("run-3", 30));
+
+        // Then: it moves to the top
+        assert_eq!(order(&model), [RunId::new(3), RunId::new(2)]);
+    }
+
+    #[test]
     fn state_change_updates_known_row_and_unknown_refreshes() {
         // Given: a refreshed row built from a summary with distinct identity values
         let source = Source(vec![summary(2, AgentRunPhase::Running)]);
@@ -141,6 +175,8 @@ mod tests {
 }
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::{AgentInspection, AgentRuntime, AgentSummary, RunId};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait AgentRunSource: Send {
     fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
@@ -180,6 +216,8 @@ pub struct TasksModel<S> {
     source: S,
     rows: Vec<TaskRow>,
     history_rows: Vec<TaskRow>,
+    /// Latest lifecycle event time per run; rows are listed most recently updated first.
+    updated_at: HashMap<RunId, SystemTime>,
 }
 
 pub fn role_for_run<'a>(rows: &'a [TaskRow], run_id: &str) -> Option<&'a str> {
@@ -197,6 +235,7 @@ impl<S: AgentRunSource> TasksModel<S> {
             source,
             rows: Vec::new(),
             history_rows: Vec::new(),
+            updated_at: HashMap::new(),
         }
     }
 
@@ -233,13 +272,36 @@ impl<S: AgentRunSource> TasksModel<S> {
                 self.rows.push(live);
             }
         }
-        self.rows.sort_by_key(|row| row.run_id.get());
+        self.sort_rows();
+    }
+
+    fn sort_rows(&mut self) {
+        let updated_at = &self.updated_at;
+        self.rows.sort_by_key(|row| {
+            std::cmp::Reverse((updated_at.get(&row.run_id).copied(), row.run_id))
+        });
+    }
+
+    fn touch(&mut self, event: &Event) {
+        let run_id = match &event.kind {
+            EventKind::Lifecycle(
+                LifecycleEvent::AgentRunStarted { run_id, .. }
+                | LifecycleEvent::AgentRunStateChanged { run_id, .. }
+                | LifecycleEvent::TurnCompleted { run_id, .. },
+            ) => run_id,
+            _ => return,
+        };
+        if let Ok(run_id) = run_id.parse() {
+            let updated = self.updated_at.entry(run_id).or_insert(UNIX_EPOCH);
+            *updated = (*updated).max(event.meta.wall_clock);
+        }
     }
 
     /// Rebuild the delegated-run index from durable events on startup.
     pub fn restore_events<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) {
-        let mut restored = std::collections::BTreeMap::<u64, TaskRow>::new();
+        let mut restored = std::collections::BTreeMap::<RunId, TaskRow>::new();
         for event in events {
+            self.touch(event);
             match &event.kind {
                 EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                     run_id,
@@ -250,7 +312,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                     let Some(id) = parse_run_id(run_id) else {
                         continue;
                     };
-                    restored.entry(id.get()).or_insert_with(|| TaskRow {
+                    restored.entry(id).or_insert_with(|| TaskRow {
                         run_id: id,
                         name: agent_name.clone(),
                         role: role.clone(),
@@ -262,9 +324,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                 EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                     run_id, to, ..
                 }) => {
-                    if let Some(row) =
-                        parse_run_id(run_id).and_then(|id| restored.get_mut(&id.get()))
-                    {
+                    if let Some(row) = parse_run_id(run_id).and_then(|id| restored.get_mut(&id)) {
                         row.status = *to;
                     }
                 }
@@ -276,6 +336,7 @@ impl<S: AgentRunSource> TasksModel<S> {
     }
 
     pub fn apply_event(&mut self, event: &Event) {
+        self.touch(event);
         match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { .. }) => self.refresh(),
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
@@ -292,15 +353,17 @@ impl<S: AgentRunSource> TasksModel<S> {
                     .find(|row| row.run_id.to_string() == *run_id)
                 {
                     row.status = *to;
+                    self.sort_rows();
                 } else {
                     self.refresh();
                 }
             }
+            EventKind::Lifecycle(LifecycleEvent::TurnCompleted { .. }) => self.sort_rows(),
             _ => {}
         }
     }
 }
 
 fn parse_run_id(value: &str) -> Option<RunId> {
-    value.strip_prefix("run-")?.parse().ok().map(RunId::new)
+    value.parse().ok()
 }

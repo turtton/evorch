@@ -374,5 +374,5 @@ pub(super) fn phase(phase: AgentRunPhase) -> ThreadRunPhase {
 }
 
 fn parse_run_id(run_id: &str) -> Option<RunId> {
-    run_id.strip_prefix("run-")?.parse().ok().map(RunId::new)
+    run_id.parse().ok()
 }

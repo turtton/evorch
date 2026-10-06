@@ -18,7 +18,7 @@ fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    AgentRuntime::new(bus, executor, model)
+    AgentRuntime::new(bus, executor, model).with_sequential_run_ids()
 }
 
 #[tokio::test]
@@ -83,5 +83,5 @@ fn agent_summary_serializes_identity_fields() {
     assert_eq!(json["role_name"], json!("Reviewer"));
     assert_eq!(json["model"], json!("model-z"));
     assert_eq!(json["phase"], json!("Done"));
-    assert!(json["run_id"].is_number());
+    assert_eq!(json["run_id"], json!("run-9"));
 }

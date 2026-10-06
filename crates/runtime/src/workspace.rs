@@ -145,7 +145,7 @@ impl WorktreeManager {
 
     /// 指定 branch の checkout 用に、run 名から worktree path を作成前に導出する。
     ///
-    /// path は branch 名から導出せず run 名 (`run-N`) から決める。既存 branch を
+    /// path は branch 名から導出せず run 名 (`run-<id>`) から決める。既存 branch を
     /// 別 run が再 checkout しても path が衝突しないためである (issue #73 D2)。
     pub(crate) fn planned_on_branch(&self, run_id: RunId, branch: &str) -> (String, PathBuf) {
         let run_name = run_id.to_string();
@@ -338,7 +338,7 @@ pub struct OwnedWorktree {
     pub path: PathBuf,
     /// merge deliverable として cleanup 後も保持する branch 名。
     pub branch: String,
-    /// worktree path の導出元 run 名 (`run-N`)。cleanup の所有判定は
+    /// worktree path の導出元 run 名 (`run-<id>`)。cleanup の所有判定は
     /// branch 名からではなくこの値で行う (issue #73 D2)。
     pub run_name: String,
     repo_root: PathBuf,

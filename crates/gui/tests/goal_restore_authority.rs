@@ -89,6 +89,7 @@ impl Fixture {
             Arc::new(tools::ToolExecutor::new(bus.clone())),
             Arc::new(CaptureModel(self.messages.clone())),
         )
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&self.config, self.storage.handle()).unwrap());
         let supervisor = self.rt.block_on(async {
             GoalSupervisor::spawn(
@@ -186,7 +187,7 @@ impl Fixture {
     }
 }
 fn parse(id: &str) -> RunId {
-    RunId::new(id.strip_prefix("run-").unwrap().parse().unwrap())
+    id.parse::<RunId>().unwrap()
 }
 fn send(world: &mut World, text: &str) -> Vec<LoopEvent> {
     world

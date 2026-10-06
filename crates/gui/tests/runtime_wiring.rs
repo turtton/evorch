@@ -187,7 +187,7 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
     let bus = Arc::new(event_bus::EventBus::new(16));
     let executor = Arc::new(ToolExecutor::new(bus.clone()));
     let model = Arc::new(ScriptedModel::new(&bus));
-    let runtime = AgentRuntime::new(bus.clone(), executor, model);
+    let runtime = AgentRuntime::new(bus.clone(), executor, model).with_sequential_run_ids();
     let (repaint_tx, repaint_rx) = mpsc::channel();
     let pump = EventPump::spawn(
         rt.handle(),

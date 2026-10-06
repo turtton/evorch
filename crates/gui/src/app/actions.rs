@@ -270,9 +270,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .iter()
                 .filter(|row| row.role.eq_ignore_ascii_case(role));
             let row = if latest {
-                rows.max_by_key(|row| row.run_id.get())
+                rows.max_by_key(|row| row.run_id)
             } else {
-                rows.min_by_key(|row| row.run_id.get())
+                rows.min_by_key(|row| row.run_id)
             };
             if let Some(row) = row {
                 selected.insert(row.run_id.to_string());

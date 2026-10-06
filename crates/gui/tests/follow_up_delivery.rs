@@ -85,7 +85,8 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
             bus.clone(),
             Arc::new(tools::ToolExecutor::new(bus.clone())),
             model.clone(),
-        );
+        )
+        .with_sequential_run_ids();
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -114,7 +115,7 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
                 let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
                     panic!("chat accepted: {events:?}");
                 };
-                runtime::RunId::new(run_id.strip_prefix("run-").unwrap().parse().unwrap())
+                run_id.parse::<runtime::RunId>().unwrap()
             }
         });
         // Both routes must resolve the same root, never a child or a fresh chat.

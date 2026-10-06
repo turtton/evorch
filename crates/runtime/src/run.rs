@@ -8,26 +8,130 @@ use serde::{Deserialize, Serialize};
 
 /// ランタイム内の AgentRun を一意に識別する newtype。
 ///
-/// [`Display`](std::fmt::Display) はイベントペイロードの `run_id` 文字列と
-/// 同一の `run-{n}` 形式を返す。イベントへの載せ替えはこの形式で行う。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RunId(u64);
+/// 新規 run は ULID と同じ配置 (上位 48 bit が UNIX ミリ秒、残り 80 bit が乱数) で
+/// 採番され、値の大小が作成順と一致する。[`Display`](std::fmt::Display) は
+/// `run-{26 桁の小文字 Crockford base32}` を返す。旧形式の連番 `run-{n}` は
+/// 時刻成分 0 の値として保持し、同じ形式で表示・解釈する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunId(u128);
+
+const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+const ENCODED_LEN: usize = 26;
+const RANDOM_BITS: u32 = 80;
 
 impl RunId {
-    /// 数値から ID を構築する。
+    /// 旧形式の連番 ID を構築する。
     pub const fn new(id: u64) -> Self {
-        Self(id)
+        Self(id as u128)
     }
 
-    /// 内部の数値表現を返す。
-    pub const fn get(self) -> u64 {
-        self.0
+    /// 指定時刻と乱数から時刻順の ID を構築する。乱数は下位 80 bit のみ使う。
+    pub(crate) const fn from_parts(unix_ms: u64, random: u128) -> Self {
+        let time = (unix_ms as u128 & ((1 << 48) - 1)) << RANDOM_BITS;
+        Self(time | (random & ((1 << RANDOM_BITS) - 1)))
+    }
+
+    const fn is_sequential(self) -> bool {
+        self.0 <= u64::MAX as u128
+    }
+
+    /// 旧形式の連番 ID であればその番号を返す。
+    pub const fn sequential_value(self) -> Option<u64> {
+        if self.is_sequential() {
+            Some(self.0 as u64)
+        } else {
+            None
+        }
+    }
+
+    /// 直後の ID を返す。同一ミリ秒内の単調増加に使う。
+    pub(crate) const fn successor(self) -> Self {
+        Self(self.0.wrapping_add(1))
     }
 }
 
 impl fmt::Display for RunId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "run-{}", self.0)
+        if self.is_sequential() {
+            return write!(f, "run-{}", self.0);
+        }
+        let mut encoded = [0_u8; ENCODED_LEN];
+        let mut value = self.0;
+        for slot in encoded.iter_mut().rev() {
+            *slot = CROCKFORD[(value & 0x1f) as usize];
+            value >>= 5;
+        }
+        f.write_str("run-")?;
+        // CROCKFORD は ASCII のみ。
+        f.write_str(std::str::from_utf8(&encoded).map_err(|_| fmt::Error)?)
+    }
+}
+
+/// `run-` 接頭辞付きの run ID として解釈できない文字列。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid run ID: {0}")]
+pub struct ParseRunIdError(String);
+
+impl std::str::FromStr for RunId {
+    type Err = ParseRunIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = || ParseRunIdError(value.to_owned());
+        let body = value.strip_prefix("run-").ok_or_else(invalid)?;
+        if body.len() == ENCODED_LEN {
+            let mut decoded = 0_u128;
+            for (index, byte) in body.bytes().enumerate() {
+                let digit = CROCKFORD
+                    .iter()
+                    .position(|candidate| *candidate == byte.to_ascii_lowercase())
+                    .ok_or_else(invalid)? as u128;
+                // 26 桁 x 5 bit = 130 bit のため、先頭桁は 0..=7 に限る。
+                if index == 0 && digit > 7 {
+                    return Err(invalid());
+                }
+                decoded = (decoded << 5) | digit;
+            }
+            let id = Self(decoded);
+            return if id.is_sequential() {
+                Err(invalid())
+            } else {
+                Ok(id)
+            };
+        }
+        if body.is_empty() || !body.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        body.parse::<u64>().map(Self::new).map_err(|_| invalid())
+    }
+}
+
+impl Serialize for RunId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = RunId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a run ID string or a legacy numeric run ID")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<RunId, E> {
+                Ok(RunId::new(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<RunId, E> {
+                value.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -115,8 +219,8 @@ pub struct RunConfig {
     /// isolated workspace の変更を統合する方法。
     pub merge_mode: MergeMode,
     /// isolated workspace で checkout する既存 branch。`None` なら run 専用の新規
-    /// branch (`evorch/task/run-N`) を作成する。既定は `None`。worktree path は
-    /// この値からは導出されず、常に run 名 (`run-N`) から決まる (issue #73 D2)。
+    /// branch (`evorch/task/run-<id>`) を作成する。既定は `None`。worktree path は
+    /// この値からは導出されず、常に run 名 (`run-<id>`) から決まる (issue #73 D2)。
     pub workspace_branch: Option<String>,
 }
 
@@ -240,18 +344,44 @@ mod tests {
         assert_eq!(RunId::new(0).to_string(), "run-0");
     }
 
-    // Given: 数値 42 の RunId / When: JSON 化 / Then: 内部数値として serialize される
+    // Given: 旧形式と時刻順の RunId / When: JSON 往復 / Then: 表示形式の文字列で保存し、旧数値形式も読める
     #[test]
-    fn run_id_serializes_as_number() {
-        let json = serde_json::to_value(RunId::new(42)).expect("serialize RunId");
+    fn run_id_serializes_as_display_string_and_reads_legacy_numbers() {
+        let timed = RunId::from_parts(1_700_000_000_000, 0xabc);
+        let json = serde_json::to_value(timed).expect("serialize RunId");
 
-        assert_eq!(json, serde_json::json!(42));
+        assert_eq!(json, serde_json::json!(timed.to_string()));
+        assert_eq!(serde_json::from_value::<RunId>(json).unwrap(), timed);
+        assert_eq!(
+            serde_json::from_value::<RunId>(serde_json::json!(42)).unwrap(),
+            RunId::new(42)
+        );
     }
 
-    // Given: 数値 123 の RunId / When: get / Then: 元の数値を返す
+    // Given: 時刻順 ID の文字列 / When: 解釈 / Then: 26 桁 base32 のみ受理し旧連番と衝突しない
     #[test]
-    fn run_id_get_returns_inner_value() {
-        assert_eq!(RunId::new(123).get(), 123);
+    fn run_id_parse_accepts_only_canonical_forms() {
+        let timed = RunId::from_parts(1_700_000_000_000, u128::MAX);
+        let text = timed.to_string();
+
+        assert_eq!(text.len(), "run-".len() + 26);
+        assert_eq!(text.parse::<RunId>(), Ok(timed));
+        assert_eq!(
+            text.to_uppercase().replace("RUN-", "run-").parse::<RunId>(),
+            Ok(timed)
+        );
+        assert_eq!("run-7".parse::<RunId>(), Ok(RunId::new(7)));
+        for invalid in [
+            "7",
+            "run-",
+            "run-+7",
+            "run-7x",
+            "run-00000000000000000000000007",
+            "run-8zzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert!(invalid.parse::<RunId>().is_err(), "{invalid}");
+        }
+        assert!(RunId::new(u64::MAX) < timed);
     }
 
     // Given: RunConfig / When: Default / Then: interactive は false (非対話が既定)

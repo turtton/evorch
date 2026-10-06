@@ -125,3 +125,32 @@ fn new_thread_has_current_unix_seconds_when_constructed() {
     assert!((before..=after).contains(&u64::try_from(thread.created_at).unwrap()));
     assert!(!thread.archived);
 }
+
+#[test]
+fn main_list_orders_by_latest_activity_when_older_threads_are_updated() {
+    // Given: an older thread that had activity after a newer one was created.
+    let project = ProjectId::new("p");
+    let mut threads: Vec<_> = ["older", "newer"]
+        .into_iter()
+        .map(|title| ThreadRecord::new(ThreadId::new(title), project.clone(), title))
+        .collect();
+    threads[0].created_at = 10;
+    threads[1].created_at = 20;
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    // When: the older thread is touched, including by a stale replayed event.
+    assert!(threads[0].touch(at(30)));
+    assert!(!threads[0].touch(at(25)));
+    // Then: activity, not creation, decides the order and survives a round trip.
+    let titles = |threads: &[ThreadRecord]| {
+        ThreadRecord::partition_for_project(threads, &project)
+            .0
+            .iter()
+            .map(|t| t.title.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&threads), ["older", "newer"]);
+    let saved: Vec<ThreadRecord> =
+        serde_json::from_value(serde_json::to_value(&threads).unwrap()).unwrap();
+    assert_eq!(saved[0].last_activity(), 30);
+    assert_eq!(titles(&saved), ["older", "newer"]);
+}

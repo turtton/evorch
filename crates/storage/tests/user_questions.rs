@@ -215,7 +215,12 @@ fn reserved_continuation_id_survives_restart_before_run_registration() {
         .unwrap();
     drop(storage);
     let reopened = Database::open(&config).unwrap();
-    assert_eq!(reopened.max_persisted_run_id().unwrap(), 1000);
+    assert!(
+        reopened
+            .persisted_run_ids()
+            .unwrap()
+            .contains(&"run-1000".to_owned())
+    );
 }
 
 #[test]

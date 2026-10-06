@@ -104,8 +104,7 @@ impl SupervisorActor {
         let parent = previous
             .parent_run_id
             .as_deref()
-            .and_then(|id| id.strip_prefix("run-")?.parse::<u64>().ok())
-            .map(RunId::new);
+            .and_then(|id| id.parse::<RunId>().ok());
         let mut run = self.runtime.reserve_run_id();
         while snapshot
             .attached_runs
@@ -194,11 +193,7 @@ impl SupervisorActor {
         }
         task.failure_reason = Some("cancelled by operator".into());
         if (!snapshot.detached || self.progress.contains_key(&request.run_id))
-            && let Some(run) = request
-                .run_id
-                .strip_prefix("run-")
-                .and_then(|id| id.parse::<u64>().ok())
-                .map(RunId::new)
+            && let Some(run) = request.run_id.parse::<RunId>().ok()
         {
             let _ = self.runtime.cancel(run);
         }

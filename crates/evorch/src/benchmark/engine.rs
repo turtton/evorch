@@ -100,7 +100,9 @@ pub(super) async fn compose(
         model_source: ModelSource::Configured,
         workspace: None,
     })?
-    .runtime;
+    .runtime
+    // Run IDs appear in model context; fixed IDs keep trial prompts comparable.
+    .with_sequential_run_ids();
     let runtime = match sandbox {
         SandboxChoice::Production => runtime.with_sandbox_root(workspace.into()),
         SandboxChoice::DirectUnchecked => runtime,

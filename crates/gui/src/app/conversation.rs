@@ -4,7 +4,7 @@
 //! This module projects sidebar conversations and transcripts: callers
 //! decide whether to persist or perform live UI effects.
 
-use event_bus::{Event, EventKind, LifecycleEvent, OrchestratorEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, OrchestratorEvent};
 
 use workspace_ui::ThreadChatRole;
 
@@ -83,8 +83,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             _ => {}
         }
+        let touched = self.touch_thread_activity(event);
         self.transcripts.apply(event);
-        changed || role_changed
+        changed || role_changed || touched
+    }
+
+    /// Run starts, completed turns, and terminal phases count as conversation activity.
+    fn touch_thread_activity(&mut self, event: &Event) -> bool {
+        let run_id = match &event.kind {
+            EventKind::Lifecycle(
+                LifecycleEvent::AgentRunStarted { run_id, .. }
+                | LifecycleEvent::TurnCompleted { run_id, .. },
+            ) => run_id,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped,
+                ..
+            }) => run_id,
+            _ => return false,
+        };
+        self.sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| thread.run_ids.iter().any(|run| run == run_id))
+            .is_some_and(|thread| thread.touch(event.meta.wall_clock))
     }
 
     fn bind_thread_role(&mut self, thread_id: &str, role: ThreadChatRole) -> bool {

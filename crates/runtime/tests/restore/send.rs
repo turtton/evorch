@@ -245,7 +245,7 @@ async fn restored_run_id_never_collides_with_future_runs() {
         .unwrap();
     // Then: new allocation is above the restored ID.
     let next = runtime.delegate_background(Role::Worker, "next".into(), RunConfig::default());
-    assert!(next.get() > child.get());
+    assert!(next > child);
     assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
     terminal(&runtime, next).await;
 }

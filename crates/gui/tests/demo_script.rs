@@ -15,7 +15,7 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
     let bus = Arc::new(EventBus::new(256));
     let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
     let model = Arc::new(DemoScriptModel::new(Arc::clone(&bus)));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
     let mut receiver = bus.subscribe();
 
     // When: the orchestrator executes the complete deterministic demo script.

@@ -40,7 +40,10 @@ fn runtime_with(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
+    (
+        AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids(),
+        bus,
+    )
 }
 
 async fn events_through_escalation(
@@ -61,12 +64,7 @@ async fn events_through_escalation(
             };
             events.push(event);
             if let Some(new_run_id) = escalated {
-                let number = new_run_id
-                    .strip_prefix("run-")
-                    .expect("run id prefix")
-                    .parse::<u64>()
-                    .expect("numeric run id");
-                return RunId::new(number);
+                return new_run_id.parse::<RunId>().expect("run id");
             }
         }
     })
@@ -276,7 +274,8 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
     let manager = WorktreeManager::new(Project::new(repo.clone()).expect("git repo is valid"));
     let (factory, mounts) = recording_factory();
     let runtime =
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory);
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
+            .with_sequential_run_ids();
     let mut receiver = bus.subscribe();
 
     // When: source が worktree を新 root run へ移譲し、新 run のモデル呼び出しで停止する

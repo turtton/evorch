@@ -146,14 +146,19 @@ fn subagents_cards_show_only_their_own_cost_cache_and_request_averages() {
 
     let mut harness = harness(telemetry);
     harness.run_steps(4);
-    let child_top = harness.get_by_label("worker-2").rect().top();
+    // Each metric sits under its own card label and above the other card, whichever is first.
+    let top = |label: &str| harness.get_by_label(label).rect().top();
+    let in_card = |label: &str, card: &str, other: &str| {
+        let metric = harness.get_by_label(label).rect();
+        metric.top() > top(card) && (top(other) < top(card) || metric.bottom() < top(other))
+    };
     for label in [
         "$0.414",
         "avg cache 100.0%",
         "avg 35.0 tok/s",
         "avg TTFT 300ms",
     ] {
-        assert!(harness.get_by_label(label).rect().bottom() < child_top);
+        assert!(in_card(label, "worker-1", "worker-2"), "{label}");
     }
     for label in [
         "$1.100",
@@ -161,7 +166,7 @@ fn subagents_cards_show_only_their_own_cost_cache_and_request_averages() {
         "avg 500.0 tok/s",
         "avg TTFT 900ms",
     ] {
-        assert!(harness.get_by_label(label).rect().top() > child_top);
+        assert!(in_card(label, "worker-2", "worker-1"), "{label}");
     }
 }
 

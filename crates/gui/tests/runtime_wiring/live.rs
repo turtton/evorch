@@ -122,7 +122,8 @@ fn provider_save_recomposes_live_model() {
         context.bus.clone(),
         Arc::new(ToolExecutor::new(context.bus.clone())),
         model.clone(),
-    );
+    )
+    .with_sequential_run_ids();
     let mut state = WorkbenchState::new(runtime, &UiSettings::default())
         .unwrap()
         .with_provider_settings_path(config::project_main_config_path(temp.path()))

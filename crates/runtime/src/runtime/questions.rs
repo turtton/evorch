@@ -315,7 +315,7 @@ impl AgentRuntime {
                 pending.push(child);
             }
         }
-        pending.sort_by_key(|id| id.get());
+        pending.sort();
         Ok(pending)
     }
 

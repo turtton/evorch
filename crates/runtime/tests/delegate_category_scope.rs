@@ -7,7 +7,7 @@ use std::sync::Arc;
 use agents::Role;
 use event_bus::{AgentRunPhase, EventBus};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
-use runtime::{AgentRuntime, RunConfig, RunId};
+use runtime::{AgentRuntime, RunConfig};
 use sandbox::DirectSandbox;
 use serde_json::{Value, json};
 use tools::ToolExecutor;
@@ -44,10 +44,13 @@ async fn delegate_case(args: Value, accepted: bool) -> String {
         runtime.delegate_background(Role::Orchestrator, "ORCH".to_owned(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
     if accepted {
-        assert_eq!(
-            runtime.wait(RunId::new(parent.get() + 1)).await,
-            Ok(AgentRunPhase::Done)
-        );
+        let child = runtime
+            .list_agents()
+            .into_iter()
+            .find(|agent| agent.parent_run_id == Some(parent))
+            .expect("delegated child run")
+            .run_id;
+        assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
     }
 
     // Then: 拒否ならエラー結果のみ、受理なら子の登録とモデル呼び出しがある

@@ -26,7 +26,7 @@ pub fn team_tasks_pane(
         return None;
     }
     for (coordinator, tasks) in teams {
-        ui.push_id(coordinator.get(), |ui| {
+        ui.push_id(coordinator, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(muted("Coordinator"));
                 if ui.link(coordinator.to_string()).clicked() {
