@@ -5,6 +5,7 @@ use secret_guard::SecretRedactor;
 use serde_json::Value;
 
 use super::LoopState;
+use crate::run::WorkspaceInspection;
 use crate::snapshot::WorkspaceSnapshotGuard;
 
 impl LoopState {
@@ -33,7 +34,7 @@ impl LoopState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.task.run_id)
-            .and_then(|workspace| workspace.worktree_path.clone());
+            .and_then(WorkspaceInspection::snapshot_root);
         let mut workspace = service
             .lock_observed(
                 root.as_deref(),

@@ -145,7 +145,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
                                         .cloned()?;
                                     Some(review_context(
                                         run,
-                                        shared.rules.get().map(Arc::as_ref),
+                                        shared.rules().as_deref(),
                                         cwd,
                                         command,
                                     ))

@@ -749,7 +749,7 @@ fn run() -> Result<(), GuiError> {
     let snapshot_directory = tempfile::tempdir()?;
     let snapshot_root = match demo_directory.as_ref() {
         Some(directory) => directory.path().join("repo"),
-        None => repo_root.clone(),
+        None => effective_project_root.clone(),
     };
     let runtime = runtime.with_snapshots(Arc::new(
         runtime::snapshot::SnapshotService::new(&snapshot_root, snapshot_directory.path())
