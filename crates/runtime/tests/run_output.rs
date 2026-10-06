@@ -36,7 +36,7 @@ async fn exercise(
         bus.clone(),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(bus, executor, model.clone());
+    let runtime = AgentRuntime::new(bus, executor, model.clone()).with_sequential_run_ids();
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);

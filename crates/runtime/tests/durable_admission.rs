@@ -89,7 +89,8 @@ impl Fixture {
                 Arc::new(sandbox::DirectSandbox::new_unchecked()),
             )),
             model.clone(),
-        );
+        )
+        .with_sequential_run_ids();
         let handle = GoalSupervisor::spawn(
             runtime.clone(),
             bus.clone(),
@@ -154,13 +155,9 @@ impl Fixture {
     }
 
     fn run(&self) -> RunId {
-        RunId::new(
-            self.handle.snapshot("goal").unwrap().task_runs["task"]
-                .strip_prefix("run-")
-                .unwrap()
-                .parse()
-                .unwrap(),
-        )
+        self.handle.snapshot("goal").unwrap().task_runs["task"]
+            .parse()
+            .unwrap()
     }
 
     async fn status(&mut self, expected: TaskStatus) {

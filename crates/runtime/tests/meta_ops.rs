@@ -29,7 +29,7 @@ fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    AgentRuntime::new(bus, executor, model)
+    AgentRuntime::new(bus, executor, model).with_sequential_run_ids()
 }
 
 fn runtime_with_workspace(
@@ -45,7 +45,8 @@ fn runtime_with_workspace(
         WorktreeManager::new(Project::new(repo.to_path_buf()).expect("git リポジトリを検証できる"));
     let (factory, mounts) = recording_factory();
     (
-        AgentRuntime::with_workspace_context(bus, executor, model, manager, factory),
+        AgentRuntime::with_workspace_context(bus, executor, model, manager, factory)
+            .with_sequential_run_ids(),
         mounts,
     )
 }
@@ -171,7 +172,7 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
     let (inspection, inspect_error) = tool_result(final_turn, "inspect").expect("inspect result");
     assert!(!inspect_error);
     let inspection: serde_json::Value = serde_json::from_str(&inspection).expect("inspection JSON");
-    assert_eq!(inspection["run_id"], json!(3));
+    assert_eq!(inspection["run_id"], json!("run-3"));
     assert_eq!(inspection["workspace"]["mode"], json!("shared"));
     assert_eq!(inspection["workspace"]["merge_mode"], json!("branch"));
     assert_eq!(
@@ -227,15 +228,15 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_compaction(
-        CompactionConfig {
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone())
+        .with_sequential_run_ids()
+        .with_compaction(CompactionConfig {
             context_window_tokens: 1_000_000,
             keep_recent_tokens: 1,
             max_summary_bytes: 1_024,
             summarizer: SummarizerKind::Structural,
             ..CompactionConfig::default()
-        },
-    );
+        });
     let mut receiver = bus.subscribe();
 
     // When: Orchestrator を finish まで実行する
@@ -498,7 +499,8 @@ async fn escalate_records_memo_and_terminates_run_done() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
+    let runtime =
+        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_sequential_run_ids();
     let mut receiver = bus.subscribe();
 
     // When: run を実行して終端を待つ

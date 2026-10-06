@@ -2,14 +2,15 @@
 
 /// scoped ID から run ID、元の call ID、任意の attempt を取り出す。
 ///
-/// `run-` に続く非空の ASCII 数字と `:` を必須とする。
+/// `run-` に続く非空の ASCII 数字、または時刻順の run ID と `:` を必須とする。
 /// 既存の run 解決との互換性のため空の call ID も受理し、
 /// 第3セグメントが u64 として解釈できない場合は attempt だけを `None` にする。
 /// 第4セグメント以降は解釈しない。
 pub fn parse_scoped_call_id(call_id: &str) -> Option<(String, String, Option<u64>)> {
     let (run_id, remainder) = call_id.split_once(':')?;
     let number = run_id.strip_prefix("run-")?;
-    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+    let digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits && run_id.parse::<runtime::RunId>().is_err() {
         return None;
     }
     let mut segments = remainder.split(':');

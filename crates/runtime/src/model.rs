@@ -28,7 +28,7 @@ pub struct ModelPreference {
 /// (`_invocation`)。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentInvocationContext {
-    /// モデル呼び出しを行う run の ID (`run-{n}` 形式)。
+    /// モデル呼び出しを行う run の ID ([`crate::RunId`] の表示形式)。
     pub run_id: String,
     pub model_preference: Option<ModelPreference>,
     pub category: Option<String>,

@@ -18,7 +18,7 @@ use event_bus::{AgentRunPhase, EventBus};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
 use runtime::prompt::SystemPromptCatalog;
 use runtime::skill::{SkillRegistry, SkillScope, discover_skills};
-use runtime::{AgentRuntime, RunConfig, RunId};
+use runtime::{AgentRuntime, RunConfig};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
@@ -166,12 +166,17 @@ fn error_tool_result<'a>(call: &'a [Message], tool_call_id: &str) -> &'a [ToolRe
         .unwrap_or_else(|| panic!("op はエラー ToolResult で拒否される"))
 }
 
-/// 親 run を終端まで実行し、子 run (直後の ID) も終端まで実行して観測を返す。
+/// 親 run を終端まで実行し、子 run も終端まで実行して観測を返す。
 async fn run_parent_and_child(runtime: &AgentRuntime, model: &ScriptedModel) -> Vec<Vec<Message>> {
     let parent =
         runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
-    let child = RunId::new(parent.get() + 1);
+    let child = runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.parent_run_id == Some(parent))
+        .expect("delegated child run")
+        .run_id;
     assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
     model.observed().await
 }

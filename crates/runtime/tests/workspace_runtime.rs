@@ -38,7 +38,8 @@ fn runtime_with_workspace(
         WorktreeManager::new(Project::new(repo.to_path_buf()).expect("git リポジトリを検証できる"));
     let (factory, mounts) = recording_factory();
     let runtime =
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory);
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
+            .with_sequential_run_ids();
     (runtime, mounts, bus)
 }
 
@@ -229,7 +230,8 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
         WorktreeManager::new(Project::new(repo.clone()).expect("git リポジトリを検証できる"));
     let (factory, entered_rx, proceed_tx) = gated_factory();
     let runtime =
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory);
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
+            .with_sequential_run_ids();
     let run_id = runtime.delegate_background(Role::Worker, "work".to_string(), isolated_config());
     let worktree_path = repo.join(".evorch/worktrees").join(run_id.to_string());
     let branch = format!("evorch/task/{run_id}");
@@ -337,7 +339,7 @@ async fn inspect_agent_reports_shared_workspace_default() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(bus, executor, model);
+    let runtime = AgentRuntime::new(bus, executor, model).with_sequential_run_ids();
     let run_id =
         runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
 
@@ -374,15 +376,15 @@ async fn shared_inspection_keeps_startup_root_after_default_cwd_changes() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(bus, executor, model.clone()).with_project_rules(Arc::new(
-        RulesSource::new(
+    let runtime = AgentRuntime::new(bus, executor, model.clone())
+        .with_sequential_run_ids()
+        .with_project_rules(Arc::new(RulesSource::new(
             ProjectTrust::Approved,
             RulesSettings::from(&config::RulesConfig::default()),
             None,
             Some(root.path().to_path_buf()),
             None,
-        ),
-    ));
+        )));
     let run_id = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
 
     // When: current-thread runtime が run を実行する前は、設定から root を合成しない。
@@ -440,6 +442,7 @@ async fn inspecting_workspace_preserves_already_sent_model_prefix() {
     ));
     let bus = Arc::new(EventBus::new(64));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_project_rules(Arc::new(RulesSource::new(
             ProjectTrust::Approved,
             RulesSettings::from(&config::RulesConfig::default()),
@@ -657,7 +660,8 @@ async fn isolated_without_workspace_context_fails_closed() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
+    let runtime =
+        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_sequential_run_ids();
 
     // When
     let run_id = runtime.delegate_background(Role::Worker, "work".to_string(), isolated_config());

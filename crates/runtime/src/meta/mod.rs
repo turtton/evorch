@@ -163,12 +163,8 @@ pub(super) fn parse_category(name: &str) -> Result<config::agent_categories::Cat
 }
 
 pub(crate) fn parse_run_id(value: &str) -> Result<RunId, String> {
-    let Some(number) = value.strip_prefix("run-") else {
-        return Err(format!("invalid run_id: {value}"));
-    };
-    number
-        .parse::<u64>()
-        .map(RunId::new)
+    value
+        .parse::<RunId>()
         .map_err(|_| format!("invalid run_id: {value}"))
 }
 

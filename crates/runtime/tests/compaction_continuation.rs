@@ -287,8 +287,9 @@ fn runtime_with(
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     let runtime_model: Arc<dyn AgentModel> = model;
-    let runtime =
-        AgentRuntime::new(Arc::clone(&bus), executor, runtime_model).with_compaction(settings);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, runtime_model)
+        .with_sequential_run_ids()
+        .with_compaction(settings);
     (runtime, bus)
 }
 

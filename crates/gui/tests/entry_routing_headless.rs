@@ -90,7 +90,8 @@ impl Fixture {
         let bus = Arc::new(EventBus::new(256));
         let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
         let model = Arc::new(HeldModel);
-        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+        let runtime =
+            AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -146,7 +147,7 @@ impl Fixture {
     }
 
     fn stop(&self, root: &str) {
-        let root = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
+        let root = root.parse::<RunId>().unwrap();
         self.agent_runtime.cancel(root).expect("cancel held root");
         self.runtime
             .block_on(self.agent_runtime.wait(root))
@@ -245,7 +246,7 @@ fn plain_goal_reuses_an_existing_worker_conversation_root() {
     assert_eq!(goal.objective, objective);
     assert_eq!(goal.original_request, objective);
     fixture.wait_for_goal_ui(&goal);
-    let root_id = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
+    let root_id = root.parse::<RunId>().unwrap();
     assert_eq!(
         fixture
             .agent_runtime

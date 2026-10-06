@@ -251,7 +251,7 @@ impl AgentRuntime {
             }
         };
         config.name = Some(name);
-        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let run_id = self.shared.run_ids.next();
         if let (Some(source), Some(restored)) = (restored_source, restored.as_ref()) {
             self.inherit_user_questions(source, run_id, &restored.messages)
                 .map_err(|reason| RuntimeError::RunRestoreFailed {

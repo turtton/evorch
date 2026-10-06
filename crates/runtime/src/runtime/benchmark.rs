@@ -27,7 +27,7 @@ impl AgentRuntime {
         selector: BenchmarkSelector,
         recorder: Arc<dyn BenchmarkRecorder>,
     ) -> Result<Self, RuntimeError> {
-        if selector.occurrence == 0 || self.shared.next_run_id.load(Ordering::Relaxed) != 1 {
+        if selector.occurrence == 0 || !self.shared.run_ids.is_fresh() {
             return Err(unsupported(
                 "attach a one-based selector before starting any runs",
             ));
@@ -53,9 +53,7 @@ impl AgentRuntime {
         workspace_root: PathBuf,
         candidate: crate::ModelPreference,
     ) -> Result<RunId, RuntimeError> {
-        if self.shared.next_run_id.load(Ordering::Relaxed) != 1
-            || self.shared.benchmark_recording.get().is_some()
-        {
+        if !self.shared.run_ids.is_fresh() || self.shared.benchmark_recording.get().is_some() {
             return Err(unsupported(
                 "replay requires a fresh runtime without a recorder",
             ));

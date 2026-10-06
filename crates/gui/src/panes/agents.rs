@@ -542,7 +542,8 @@ mod stop_tests {
         h.query_all_by_label("Confirm?").next().unwrap().click();
         frame_at(&mut h, 1.0);
         frame_at(&mut h, 1.0);
-        assert_eq!(h.state().1, [AgentsAction::StopRun("run-2".into())]);
+        // Rows list the newest run first, so the first live row is run-4.
+        assert_eq!(h.state().1, [AgentsAction::StopRun("run-4".into())]);
         assert_eq!(h.query_all_by_label("Confirm?").count(), 1);
     }
 

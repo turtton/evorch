@@ -99,7 +99,8 @@ async fn scenario(delivery: Delivery, batch: bool) {
     });
     let bus = Arc::new(EventBus::new(128));
     let mut events = bus.subscribe();
-    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids();
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
     model.wait_requested.notified().await;

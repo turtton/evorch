@@ -8,11 +8,7 @@ pub(super) struct SpawnIntent {
 
 impl AgentRuntime {
     pub(crate) fn track_goal_run(&self, run: RunId, owner: &str) {
-        let Some(parent) = owner
-            .strip_prefix("run-")
-            .and_then(|id| id.parse().ok())
-            .map(RunId::new)
-        else {
+        let Ok(parent) = owner.parse::<RunId>() else {
             return;
         };
         let mut intents = self
@@ -59,13 +55,7 @@ impl AgentRuntime {
         let mut runs: std::collections::HashSet<RunId> = snapshot
             .attached_runs
             .iter()
-            .filter_map(|run| {
-                run.run_id
-                    .strip_prefix("run-")?
-                    .parse()
-                    .ok()
-                    .map(RunId::new)
-            })
+            .filter_map(|run| run.run_id.parse::<RunId>().ok())
             .collect();
         loop {
             let descendants: Vec<_> = intents

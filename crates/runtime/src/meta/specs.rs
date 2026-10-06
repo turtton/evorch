@@ -143,7 +143,7 @@ pub(super) fn cancel(name: &str) -> ToolSpec {
 pub(super) fn list_agents(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Return registered runs with numeric run_id/parent_run_id, name, role_name, phase and model. IDs passed to other tools use the run-N string form. This is a current snapshot; use wait for completion instead of repeated list polling.",
+        "Return registered runs with run_id/parent_run_id, name, role_name, phase and model. Pass run IDs to other tools exactly as listed. This is a current snapshot; use wait for completion instead of repeated list polling.",
         json!({}),
         &[],
         true,
@@ -153,7 +153,7 @@ pub(super) fn list_agents(name: &str) -> ToolSpec {
 pub(super) fn inspect_agent(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Return a registered run's numeric run_id, role_name, phase, message_count and workspace metadata. An unknown run returns an error. This is an inspection snapshot; use wait for completion instead of polling.",
+        "Return a registered run's run_id, role_name, phase, message_count and workspace metadata. An unknown run returns an error. This is an inspection snapshot; use wait for completion instead of polling.",
         json!({"run_id":run_id()}),
         &["run_id"],
         false,
@@ -355,7 +355,7 @@ fn delegate_target_schema() -> Value {
 }
 
 fn run_id() -> Value {
-    json!({"type":"string", "pattern":"^run-[0-9]+$", "description":"Runtime ID in run-N form."})
+    json!({"type":"string", "pattern":"^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$", "description":"Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5."})
 }
 
 fn strings() -> Value {

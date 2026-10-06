@@ -103,7 +103,7 @@ pub(crate) struct Shared {
     pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
-    next_run_id: AtomicU64,
+    pub(crate) run_ids: crate::run_ids::RunIds,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -364,7 +364,7 @@ impl AgentRuntime {
                 goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
-                next_run_id: AtomicU64::new(1),
+                run_ids: crate::run_ids::RunIds::default(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -372,11 +372,21 @@ impl AgentRuntime {
         }
     }
 
+    /// 新規 run に `run-1` からの連番 ID を割り当てる。
+    ///
+    /// スクリプト化したテストやデモで ID を固定する用途。run の採番や
+    /// [`AgentRuntime::with_run_store`] より前に呼ぶ必要があり、後から呼んだ場合は無視する。
+    #[must_use]
+    pub fn with_sequential_run_ids(self) -> Self {
+        let _ = self.shared.run_ids.use_sequential();
+        self
+    }
+
     /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
     pub fn with_run_store(self, store: crate::RunStore) -> Self {
-        self.shared
-            .next_run_id
-            .fetch_max(store.next_run_id, Ordering::Relaxed);
+        if let Some(latest) = store.latest_run_id {
+            self.shared.run_ids.observe(latest);
+        }
         let _ = self.shared.run_store.set(store);
         self
     }
@@ -631,7 +641,7 @@ impl AgentRuntime {
                 learning_runs: Mutex::new(HashMap::new()),
                 snapshots: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
-                next_run_id: AtomicU64::new(1),
+                run_ids: crate::run_ids::RunIds::default(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -732,7 +742,7 @@ impl AgentRuntime {
     /// イベント発行との happens-before を組む用途 (issue #83)。採番後は
     /// [`AgentRuntime::spawn_reserved`] で必ず起動すること。
     pub fn reserve_run_id(&self) -> RunId {
-        RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed))
+        self.shared.run_ids.next()
     }
 
     /// [`AgentRuntime::reserve_run_id`] / [`AgentRuntime::reserve_child_run_id`]
@@ -780,7 +790,7 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> RunId {
-        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let run_id = self.shared.run_ids.next();
         self.spawn_run_with_handoff(run_id, parent, role, prompt, config, RunContinuation::Fresh)
     }
 
@@ -1183,7 +1193,7 @@ impl AgentRuntime {
             ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
-        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let run_id = self.shared.run_ids.next();
         // Escalation starts from the memo, not the source conversation. Every
         // source question/answer therefore still needs delivery to this root.
         // Persist the explicit recipient before any provider admission or spawn.
@@ -1458,7 +1468,7 @@ impl AgentRuntime {
                         }))
             })
             .collect();
-        live.sort_by_key(|id| id.get());
+        live.sort();
         live
     }
 
@@ -1595,7 +1605,7 @@ impl AgentRuntime {
                 category: entry.config.category.clone(),
             })
             .collect();
-        summaries.sort_by_key(|summary| summary.run_id.get());
+        summaries.sort_by_key(|summary| summary.run_id);
         summaries
     }
 

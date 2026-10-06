@@ -45,6 +45,7 @@ fn setup(
     let bus = Arc::new(EventBus::new(256));
     let events = bus.subscribe();
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     (dir, storage, config, runtime, events)
 }
@@ -58,7 +59,7 @@ async fn handoff(events: &mut event_bus::EventReceiver, source: RunId) -> RunId 
             }) = events.recv().await.unwrap().kind
                 && source_run_id == source.to_string()
             {
-                return RunId::new(new_run_id.strip_prefix("run-").unwrap().parse().unwrap());
+                return new_run_id.parse::<RunId>().unwrap();
             }
         }
     })

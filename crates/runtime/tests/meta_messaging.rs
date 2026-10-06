@@ -22,7 +22,10 @@ fn runtime_with(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
+    (
+        AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids(),
+        bus,
+    )
 }
 
 fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {

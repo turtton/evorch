@@ -186,7 +186,8 @@ impl DemoFixture {
             model,
             manager,
             factory,
-        );
+        )
+        .with_sequential_run_ids();
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -578,13 +579,7 @@ fn generic_demo_goal_completes_in_the_normal_conversation_without_a_pr() {
             .iter()
             .any(|event| matches!(event, OrchestratorEvent::GoalCreated { .. }))
     );
-    let root = runtime::RunId::new(
-        goal.root_run_id
-            .strip_prefix("run-")
-            .unwrap()
-            .parse()
-            .unwrap(),
-    );
+    let root = goal.root_run_id.parse::<runtime::RunId>().unwrap();
     fixture.agent_runtime.cancel(root).unwrap();
     fixture
         ._runtime

@@ -35,6 +35,7 @@ async fn question_yields_runs_independent_work_then_wakes_once_with_free_text() 
         Ok(text_response("Applied the answer.", FinishReason::Stop)),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
     let (mut question, mut continued) = (None, false);
@@ -121,6 +122,7 @@ async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
         Ok(text_response("Applied the answer.", FinishReason::Stop)),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run_config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
@@ -240,6 +242,7 @@ async fn pending_question_survives_cancel_and_storage_reopen() {
         Ok(text_response("waiting", FinishReason::Stop)),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
     let question = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -285,7 +288,8 @@ async fn unconfigured_question_storage_is_an_explicit_tool_error() {
         )),
         Ok(text_response("storage error handled", FinishReason::Stop)),
     ]));
-    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids();
     let run = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
     runtime.wait(run).await.unwrap();
     assert!(
@@ -330,14 +334,7 @@ impl runtime::AgentModel for FinishRaceModel {
                         .unwrap();
                 } else {
                     let runtime = self.runtime.lock().unwrap().as_ref().unwrap().clone();
-                    let id = runtime::RunId::new(
-                        invocation
-                            .run_id
-                            .strip_prefix("run-")
-                            .unwrap()
-                            .parse()
-                            .unwrap(),
-                    );
+                    let id = invocation.run_id.parse::<runtime::RunId>().unwrap();
                     let question = runtime.user_answers(id).unwrap().remove(0);
                     runtime
                         .answer_user_question(&question.id, "Use option A")
@@ -387,6 +384,7 @@ async fn finish_race(
         observed: std::sync::Mutex::new(Vec::new()),
     });
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     *model.runtime.lock().unwrap() = Some(runtime.clone());
     let run = runtime.delegate_background(Role::Orchestrator, "work".into(), RunConfig::default());
@@ -460,6 +458,7 @@ async fn new_chat_run_inherits_pending_question_and_receives_answer_once() {
         Ok(text_response("applied A", FinishReason::Stop)),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let old = runtime
         .delegate_chat("thread", Role::Worker, "work".into(), RunConfig::default())
@@ -546,6 +545,7 @@ async fn failed_question_inheritance_refuses_to_spawn_a_new_chat_run() {
         Ok(text_response("waiting", FinishReason::Stop)),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let old = runtime
         .delegate_chat("thread", Role::Worker, "work".into(), RunConfig::default())
@@ -598,6 +598,7 @@ async fn same_run_restore_does_not_reinject_an_answer_already_in_persisted_histo
         )),
     ]));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run = runtime.delegate_background(Role::Orchestrator, "work".into(), RunConfig::default());
     question_waiting(&mut events, run).await;
@@ -705,6 +706,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             Arc::new(ToolExecutor::new(bus)),
             Arc::new(PendingQuestionRecipientModel { admission }),
         )
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         let run = runtime.delegate_background(
             Role::Worker,
@@ -872,6 +874,7 @@ async fn resolve_child_question_through_parent(ask_user: bool) {
         ask_user,
     });
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
@@ -929,6 +932,7 @@ async fn only_direct_orchestrator_parent_can_read_or_answer_child_question() {
     let gate = Arc::new(tokio::sync::Notify::new());
     let model = Arc::new(ScriptedModel::gated([], gate));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let parent =
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());

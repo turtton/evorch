@@ -287,7 +287,7 @@ impl AgentRuntime {
         if entry.candidates.len() >= MAX_LESSON_CANDIDATES {
             return Err("at most 8 lesson candidates may be staged".into());
         }
-        let id = format!("lesson-{}-{}", extraction.get(), entry.candidates.len() + 1);
+        let id = format!("lesson-{}-{}", extraction, entry.candidates.len() + 1);
         entry.candidates.push(LessonCandidate {
             id: id.clone(),
             content: args.content,

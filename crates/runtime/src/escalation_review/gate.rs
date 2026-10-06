@@ -134,9 +134,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
                                 .as_ref()
                                 .and_then(Weak::upgrade)
                                 .and_then(|shared| {
-                                    let run_id = crate::RunId::new(
-                                        ctx.run_id.strip_prefix("run-")?.parse().ok()?,
-                                    );
+                                    let run_id = ctx.run_id.parse::<crate::RunId>().ok()?;
                                     let run = shared
                                         .review_runs
                                         .lock()

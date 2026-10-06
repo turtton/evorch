@@ -52,7 +52,8 @@ async fn execute_wait_with_message(arguments: Value, send_message: bool) -> (Str
         )
         .await;
     let bus = Arc::new(EventBus::new(128));
-    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids();
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);

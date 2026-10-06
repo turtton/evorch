@@ -331,3 +331,56 @@ fn restored_history_rebuilds_forks_and_versions() {
         ["first", "answer one", "second", "answer two"]
     );
 }
+
+#[test]
+fn completed_turn_marks_its_thread_updated_and_persists_the_time() {
+    // Given: thread "one" with a run, and a newer idle thread "two".
+    let temp = tempfile::tempdir().unwrap();
+    let conversation = Conversation::new(temp.path());
+    let mut gui = state(temp.path());
+    let project = ProjectId::new("project");
+    let mut sidebar = gui.sidebar().clone();
+    sidebar
+        .create_thread(ThreadId::new("two"), project.clone(), "Later")
+        .unwrap();
+    for thread in &mut sidebar.threads {
+        thread.created_at = if thread.id == ThreadId::new("one") {
+            10
+        } else {
+            20
+        };
+        thread.updated_at = 0;
+    }
+    gui = gui.with_sidebar(sidebar);
+    conversation.apply(
+        &mut gui,
+        vec![Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-1".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:one".into(),
+            role: "worker".into(),
+        })],
+    );
+    // When: the older thread's run completes a turn at a known time.
+    let mut turn = Event::new(LifecycleEvent::TurnCompleted {
+        run_id: "run-1".into(),
+        context_len: 2,
+    });
+    turn.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000);
+    conversation.apply(&mut gui, vec![turn]);
+    // Then: the saved activity time moves it above the newer thread.
+    let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    let one = saved
+        .threads
+        .iter()
+        .find(|thread| thread.id == ThreadId::new("one"))
+        .unwrap();
+    assert_eq!(one.updated_at, 4_000_000_000);
+    let (main, _) = ThreadRecord::partition_for_project(&saved.threads, &project);
+    assert_eq!(
+        main.iter()
+            .map(|thread| thread.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Topic", "Later"]
+    );
+}

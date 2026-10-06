@@ -105,7 +105,7 @@ async fn restarted_team_root_reuses_history_and_completed_board_only_with_curren
             fixture.authority(),
         )
         .unwrap();
-    assert!(new.get() > old.get());
+    assert!(new > old);
     assert_eq!(restarted.wait(new).await.unwrap(), AgentRunPhase::Done);
     let messages = serde_json::to_string(&fixture.model.observed().await[1]).unwrap();
     assert!(messages.contains("original team task"));

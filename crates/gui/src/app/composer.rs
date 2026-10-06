@@ -152,6 +152,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 text: text.into(),
                                 ..submission.clone()
                             });
+                        let sent_at = std::time::SystemTime::now();
                         if let Some(thread) = self
                             .sidebar
                             .threads
@@ -161,12 +162,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             thread
                                 .chat_role
                                 .get_or_insert(submission.composer_role.into());
+                            thread.touch(sent_at);
                             self.composer.restore_thread_role(thread);
                         }
                         self.history.push(super::history::UserMessage {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
-                            at: std::time::SystemTime::now(),
+                            at: sent_at,
                         });
                         // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
                         self.transcripts

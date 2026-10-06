@@ -70,25 +70,16 @@ impl Database {
             .optional()?)
     }
 
-    /// Highest numeric run ID reserved by a context, ledger, or question recipient.
+    /// Every run ID reserved by a context, ledger, or question recipient.
     ///
     /// # Errors
-    /// Returns an error for unreadable rows or invalid run IDs.
-    pub fn max_persisted_run_id(&self) -> Result<u64, StorageError> {
+    /// Returns an error for unreadable rows.
+    pub fn persisted_run_ids(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self
             .conn
             .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let mut maximum = 0;
-        for id in ids {
-            let id = id?;
-            let numeric = id
-                .strip_prefix("run-")
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| StorageError::Serialization(format!("invalid run ID: {id}")))?;
-            maximum = maximum.max(numeric);
-        }
-        Ok(maximum)
+        Ok(ids.collect::<Result<_, _>>()?)
     }
 
     /// Return a run's ledger entries in global sequence order.

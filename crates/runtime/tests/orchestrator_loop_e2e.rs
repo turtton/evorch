@@ -66,7 +66,8 @@ fn runtime_with_workspace(model: Arc<ScriptedModel>) -> (TempDir, AgentRuntime, 
     let (factory, _) = recording_factory();
     (
         temp,
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory),
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
+            .with_sequential_run_ids(),
         bus,
     )
 }
@@ -343,7 +344,7 @@ async fn early_finish_is_rejected_with_no_deliverable_branch_and_goal_stays_acti
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
     let mut events = bus.subscribe();
     let handle = GoalSupervisor::spawn(
         runtime.clone(),
@@ -398,7 +399,7 @@ async fn finish_after_head_change_rejected_stale_head() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
     let delivery = Arc::new(FixtureDeliveryAdapter::default());
     delivery.script_pr_status(Ok(GateEvidence::PullRequest {
         repo: "turtton/evorch".into(),
@@ -463,7 +464,7 @@ async fn finish_is_rejected_when_remote_head_unavailable() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
     let mut events = bus.subscribe();
     let handle = GoalSupervisor::spawn(
         runtime.clone(),

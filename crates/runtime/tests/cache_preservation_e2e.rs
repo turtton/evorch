@@ -195,6 +195,7 @@ summarizer = "structural"
     })
     .unwrap()
     .runtime
+    .with_sequential_run_ids()
     .with_system_prompts(Arc::new(prompts.build().unwrap()))
     .with_compaction(config.compaction.clone());
     Harness {
@@ -499,9 +500,9 @@ async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalat
     let recipient = loop {
         let event = harness.receiver.recv().await.unwrap();
         let target = match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => Some(
-                RunId::new(new_run_id.strip_prefix("run-").unwrap().parse().unwrap()),
-            ),
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => {
+                Some(new_run_id.parse::<RunId>().unwrap())
+            }
             _ => None,
         };
         events.push(event);
@@ -680,15 +681,15 @@ async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_pr
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
     // No prompt catalog, skills or rules files: workspace is the only System.
-    harness.runtime = AgentRuntime::new(bus, Arc::new(executor), model).with_project_rules(
-        Arc::new(runtime::RulesSource::new(
+    harness.runtime = AgentRuntime::new(bus, Arc::new(executor), model)
+        .with_sequential_run_ids()
+        .with_project_rules(Arc::new(runtime::RulesSource::new(
             runtime::ProjectTrust::Approved,
             runtime::RulesSettings::from(&config.rules),
             None,
             Some(root.into()),
             None,
-        )),
-    );
+        )));
     let storage_config = storage::StorageConfig {
         db_path: root.join("workspace-history.db"),
         ..Default::default()

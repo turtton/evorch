@@ -100,6 +100,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
         Arc::new(tools::ToolExecutor::new(bus.clone())),
         model.clone(),
     )
+    .with_sequential_run_ids()
     .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let supervisor = rt.block_on(async {
         GoalSupervisor::spawn(
@@ -220,7 +221,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     ui.run();
     ui.click_label("回答を送信");
     ui.run();
-    let run = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
+    let run = root.parse::<RunId>().unwrap();
     assert_eq!(rt.block_on(runtime.wait(run)).unwrap(), AgentRunPhase::Done);
     assert_eq!(runtime.user_answers(run).unwrap().len(), 1);
     let answered = runtime.user_question(&question.id).unwrap().unwrap();

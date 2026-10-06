@@ -32,7 +32,7 @@ async fn fresh_run_after_restart_preserves_snapshot_and_ledger() {
     let fresh = second.delegate_background(Role::Worker, "new".into(), RunConfig::default());
     terminal(&second, fresh).await;
     // Then: both durable namespaces remain disjoint.
-    assert!(fresh.get() > old.get());
+    assert!(fresh > old);
     assert_eq!(database.run_context(&old.to_string()).unwrap(), snapshot);
     assert_eq!(database.run_ledger(&old.to_string()).unwrap(), ledger);
 }
@@ -60,7 +60,7 @@ async fn ledger_only_run_id_is_reserved_after_restart() {
     let fresh = second.delegate_background(Role::Worker, "new".into(), RunConfig::default());
     terminal(&second, fresh).await;
     // Then: the old ledger remains exclusively associated with the old ID.
-    assert!(fresh.get() > old.get());
+    assert!(fresh > old);
     assert_eq!(database.run_ledger(&old.to_string()).unwrap(), ledger);
     assert!(database.run_ledger(&fresh.to_string()).unwrap().is_empty());
 }

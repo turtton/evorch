@@ -92,7 +92,8 @@ fn workbench(root: &std::path::Path) -> (HeadlessWorkbench<AgentRuntime>, tokio:
         bus.clone(),
         Arc::new(ToolExecutor::new(bus.clone())),
         Arc::new(PendingModel),
-    );
+    )
+    .with_sequential_run_ids();
     let supervisor = rt.block_on(async {
         GoalSupervisor::spawn(
             runtime.clone(),
@@ -506,7 +507,8 @@ fn parked_membership_and_order_survive_workspace_reload_and_tab_activation() {
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
         Arc::new(PendingModel),
-    );
+    )
+    .with_sequential_run_ids();
     let state = WorkbenchState::new(runtime, &settings)
         .expect("restored state")
         .with_sidebar(h.state().sidebar().clone());

@@ -13,7 +13,7 @@ use config::CompactionConfig;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
 use runtime::prompt::SystemPromptCatalogBuilder;
-use runtime::{AgentRuntime, RunConfig, RunId, SystemPromptCatalog};
+use runtime::{AgentRuntime, RunConfig, SystemPromptCatalog};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
@@ -326,7 +326,12 @@ async fn delegated_child_run_gets_role_and_category_specific_system_prompt() {
     let parent =
         runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
-    let child = RunId::new(parent.get() + 1);
+    let child = runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.parent_run_id == Some(parent))
+        .expect("delegated child run")
+        .run_id;
     assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
 
     let observed = model.observed().await;

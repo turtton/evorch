@@ -37,15 +37,15 @@ fn runtime_with_rules(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model).with_project_rules(
-        Arc::new(RulesSource::new(
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model)
+        .with_sequential_run_ids()
+        .with_project_rules(Arc::new(RulesSource::new(
             trust,
             settings(65_536),
             None,
             Some(project_root.to_path_buf()),
             None,
-        )),
-    );
+        )));
     (runtime, bus)
 }
 
@@ -102,15 +102,15 @@ async fn read_success_injects_single_user_rules_message() {
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     let settings = settings(65_536);
-    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_project_rules(
-        Arc::new(RulesSource::new(
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone())
+        .with_sequential_run_ids()
+        .with_project_rules(Arc::new(RulesSource::new(
             ProjectTrust::Approved,
             settings,
             None,
             Some(tmp.path().to_path_buf()),
             None,
-        )),
-    );
+        )));
 
     let run_id =
         runtime.delegate_background(Role::Worker, "read it".to_string(), RunConfig::default());
@@ -325,17 +325,17 @@ async fn run_read_fixture(
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     let runtime = if rules_enabled {
-        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_project_rules(Arc::new(
-            RulesSource::new(
+        AgentRuntime::new(Arc::clone(&bus), executor, model.clone())
+            .with_sequential_run_ids()
+            .with_project_rules(Arc::new(RulesSource::new(
                 ProjectTrust::Approved,
                 settings(65_536),
                 None,
                 Some(project_root.to_path_buf()),
                 None,
-            ),
-        ))
+            )))
     } else {
-        AgentRuntime::new(Arc::clone(&bus), executor, model.clone())
+        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_sequential_run_ids()
     };
     let mut receiver = bus.subscribe();
 

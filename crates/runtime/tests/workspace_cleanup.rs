@@ -30,7 +30,8 @@ fn runtime_with_workspace(repo: &Path, model: Arc<ScriptedModel>) -> (AgentRunti
         WorktreeManager::new(Project::new(repo.to_path_buf()).expect("git リポジトリを検証できる"));
     let (factory, _) = recording_factory();
     let runtime =
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory);
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
+            .with_sequential_run_ids();
     (runtime, bus)
 }
 

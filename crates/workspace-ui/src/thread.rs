@@ -73,6 +73,9 @@ pub struct ThreadRecord {
     pub archived: bool,
     #[serde(default)]
     pub created_at: i64,
+    /// Latest conversation activity in UNIX seconds; older records fall back to `created_at`.
+    #[serde(default)]
+    pub updated_at: i64,
     pub run_ids: Vec<String>,
     /// Current conversation root; historical roots and children remain in `run_ids`.
     #[serde(default)]
@@ -134,10 +137,8 @@ impl ThreadRecord {
             title: title.into(),
             pinned: false,
             archived: false,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-                .unwrap_or_default(),
+            created_at: unix_seconds(std::time::SystemTime::now()),
+            updated_at: 0,
             run_ids: Vec::new(),
             root_run_id: None,
             branch: None,
@@ -153,6 +154,19 @@ impl ThreadRecord {
         }
     }
 
+    /// When the conversation last had activity, never earlier than its creation.
+    pub fn last_activity(&self) -> i64 {
+        self.updated_at.max(self.created_at)
+    }
+
+    /// Records activity at `at`; returns whether the stored time moved forward.
+    pub fn touch(&mut self, at: std::time::SystemTime) -> bool {
+        let at = unix_seconds(at);
+        let changed = at > self.updated_at;
+        self.updated_at = self.updated_at.max(at);
+        changed
+    }
+
     pub fn partition_for_project<'a>(
         threads: &'a [Self],
         project: &ProjectId,
@@ -163,8 +177,8 @@ impl ThreadRecord {
             .partition(|thread| thread.archived);
         let newest_first = |left: &&Self, right: &&Self| {
             right
-                .created_at
-                .cmp(&left.created_at)
+                .last_activity()
+                .cmp(&left.last_activity())
                 .then_with(|| left.title.cmp(&right.title))
                 .then_with(|| left.id.cmp(&right.id))
         };
@@ -230,6 +244,12 @@ impl ThreadRecord {
             ThreadState::Active
         }
     }
+}
+
+fn unix_seconds(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
