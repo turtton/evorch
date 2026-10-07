@@ -333,6 +333,193 @@ fn nonblocking_mutation_guard_distinguishes_contention_from_fencing() {
     ));
 }
 
+#[tokio::test]
+async fn compound_event_fences_release_readers_before_waiting_and_revalidate_every_run() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use event_bus::{Event, EventBus, LifecycleEvent, MutationGuard, MutationGuardAttempt};
+
+    struct ReadGuard {
+        registry: Option<Registry>,
+        held: Arc<AtomicUsize>,
+        commit: Option<Arc<Mutex<rusqlite::Connection>>>,
+        commits: Arc<AtomicUsize>,
+    }
+    impl Drop for ReadGuard {
+        fn drop(&mut self) {
+            drop(self.registry.take());
+            self.held.fetch_sub(1, Ordering::SeqCst);
+            if let Some(writer) = self.commit.take() {
+                writer
+                    .lock()
+                    .unwrap()
+                    .execute_batch("COMMIT")
+                    .expect("releasing the partial read set lets the pending writer commit");
+                self.commits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    for entry in ["emit", "recv", "drain", "validator"] {
+        for revoke in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("owners.db");
+            let mut registry = Registry::open(&path).unwrap();
+            let mut source = owner();
+            source.thread_id = "source".into();
+            registry.start(&source).unwrap();
+            let mut child = owner();
+            child.thread_id = "child".into();
+            registry.start(&child).unwrap();
+            let mut replacement = source.clone();
+            replacement.lease.generation += 1;
+            let replacement = serde_json::to_string(&replacement).unwrap();
+            let writer = rusqlite::Connection::open(&path).unwrap();
+            writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+            let writer = Arc::new(Mutex::new(writer));
+            let armed = Arc::new(AtomicBool::new(false));
+            let held = Arc::new(AtomicUsize::new(0));
+            let commits = Arc::new(AtomicUsize::new(0));
+            let busy = Arc::new(AtomicUsize::new(0));
+            let waits = Arc::new(AtomicUsize::new(0));
+            let bus = EventBus::new(8);
+            let mut events = bus.subscribe();
+            for owner in [source, child] {
+                let run = owner.thread_id.clone();
+                let permit = OwnerPermit {
+                    registry_path: path.clone(),
+                    thread_id: run.clone(),
+                    lease: owner.lease,
+                    run_id: None,
+                };
+                let wrap = {
+                    let armed = Arc::clone(&armed);
+                    let held = Arc::clone(&held);
+                    let commits = Arc::clone(&commits);
+                    let writer = Arc::clone(&writer);
+                    let replacement = replacement.clone();
+                    let source = run == "source";
+                    Arc::new(move |registry: Registry| -> Box<dyn MutationGuard> {
+                        held.fetch_add(1, Ordering::SeqCst);
+                        let commit = if source && armed.swap(false, Ordering::SeqCst) {
+                            let writer_guard = writer.lock().unwrap();
+                            writer_guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+                            if revoke {
+                                writer_guard
+                                    .execute(
+                                        "UPDATE thread_owners SET state = ?1 WHERE thread_id = 'source'",
+                                        [&replacement],
+                                    )
+                                    .unwrap();
+                            } else {
+                                writer_guard
+                                    .execute_batch("UPDATE thread_owners SET state = state")
+                                    .unwrap();
+                            }
+                            let error = writer_guard
+                                .execute_batch("COMMIT")
+                                .expect_err("source reader forces the writer into PENDING");
+                            assert_eq!(
+                                error.sqlite_error_code(),
+                                Some(rusqlite::ErrorCode::DatabaseBusy)
+                            );
+                            Some(Arc::clone(&writer))
+                        } else {
+                            None
+                        };
+                        Box::new(ReadGuard {
+                            registry: Some(registry),
+                            held: Arc::clone(&held),
+                            commit,
+                            commits: Arc::clone(&commits),
+                        })
+                    })
+                };
+                let blocking = {
+                    let permit = permit.clone();
+                    let wrap = Arc::clone(&wrap);
+                    let held = Arc::clone(&held);
+                    let waits = Arc::clone(&waits);
+                    Arc::new(move || {
+                        assert_eq!(
+                            held.load(Ordering::SeqCst),
+                            0,
+                            "blocking ownership acquisition must never retain another reader"
+                        );
+                        waits.fetch_add(1, Ordering::SeqCst);
+                        permit.mutation_guard().ok().map(|guard| wrap(guard))
+                    })
+                };
+                let busy = Arc::clone(&busy);
+                assert!(bus.register_nonblocking_mutation_guard(
+                    run,
+                    blocking,
+                    Arc::new(move || match permit.try_mutation_guard() {
+                        Ok(Some(guard)) => MutationGuardAttempt::Acquired(wrap(guard)),
+                        Ok(None) => {
+                            busy.fetch_add(1, Ordering::SeqCst);
+                            MutationGuardAttempt::Busy
+                        }
+                        Err(_) => MutationGuardAttempt::Rejected,
+                    }),
+                ));
+            }
+            let event = Event::new(LifecycleEvent::EscalationRequested {
+                source_run_id: "source".into(),
+                new_run_id: "child".into(),
+                summary: event_bus::EscalationMemoSummary {
+                    original_request: String::new(),
+                    escalation_reason: String::new(),
+                    files_touched: Vec::new(),
+                    blockers: Vec::new(),
+                    suggested_next: String::new(),
+                },
+            });
+            let sentinel = Event::new(LifecycleEvent::Started {
+                session_id: "unfenced".into(),
+            });
+            if matches!(entry, "recv" | "drain") {
+                assert_eq!(bus.emit(event.clone()), 1);
+                if entry == "recv" {
+                    bus.emit(sentinel.clone());
+                }
+            }
+            waits.store(0, Ordering::SeqCst);
+            armed.store(true, Ordering::SeqCst);
+            match entry {
+                "emit" => {
+                    assert_eq!(bus.emit(event.clone()), usize::from(!revoke));
+                    assert_eq!(
+                        events.drain_pending_snapshot(),
+                        if revoke { vec![] } else { vec![event] }
+                    );
+                }
+                "recv" => assert_eq!(
+                    events.recv().await.unwrap(),
+                    if revoke { sentinel } else { event }
+                ),
+                "drain" => assert_eq!(
+                    events.drain_pending_snapshot(),
+                    if revoke { vec![] } else { vec![event] }
+                ),
+                "validator" => {
+                    let guards = bus.mutation_validator().acquire(&event);
+                    assert_eq!(guards.is_some(), !revoke);
+                    drop(guards);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(held.load(Ordering::SeqCst), 0);
+            assert_eq!(busy.load(Ordering::SeqCst), 1, "{entry}, revoke={revoke}");
+            assert_eq!(commits.load(Ordering::SeqCst), 1);
+            assert_eq!(waits.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn host_probes_observe_turns_and_handoff_after_reusing_the_reader() {

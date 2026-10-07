@@ -97,9 +97,62 @@ impl AgentRuntime {
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
         let restored = RestoredState::for_conversation(&record)?;
-        descriptor.restorable = false;
-        descriptor.non_restorable_reason = Some("snapshot_consumed".into());
-        record.restorable = false;
+        let pending_handoff = descriptor.pending_escalation.clone();
+        let pending_request = pending_handoff.as_ref().map(|pending| {
+            pending.trusted_request.as_deref().map_or_else(
+                || prompt.clone(),
+                |original| crate::thread_goals::continued_request(original, &prompt),
+            )
+        });
+        let retained_worktree = if let Some(pending) = &pending_handoff {
+            let child = event_bus::escalation_thread_id(&run_id.to_string());
+            if role != Role::Orchestrator
+                || authority
+                    .ownership
+                    .as_ref()
+                    .is_some_and(|permit| permit.thread_id != child)
+                || (pending.requires_ownership && authority.ownership.is_none())
+            {
+                return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                    "current child-thread ownership is required to retry escalation".into(),
+                )));
+            }
+            pending
+                .restore_worktree(&descriptor)
+                .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?
+        } else {
+            None
+        };
+        if pending_handoff.is_some() {
+            // Keep a retryable seed until a provider actually starts. Another
+            // failed admission must retain this new human submission as well.
+            let mut history = restored.messages.clone();
+            let mut content = vec![providers::ContentBlock::Text {
+                text: prompt.clone(),
+            }];
+            content.extend(
+                authority
+                    .images
+                    .iter()
+                    .map(|image| providers::ContentBlock::Image {
+                        media_type: image.media_type.clone(),
+                        data: image.data.clone(),
+                    }),
+            );
+            history.push(providers::Message {
+                role: providers::Role::User,
+                content,
+            });
+            record.messages_json = serde_json::to_string(&history)
+                .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+            if let Some(pending) = &mut descriptor.pending_escalation {
+                pending.trusted_request = pending_request.clone();
+            }
+        } else {
+            descriptor.restorable = false;
+            descriptor.non_restorable_reason = Some("snapshot_consumed".into());
+            record.restorable = false;
+        }
         record.config_json = serde_json::to_string(&descriptor)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         store
@@ -118,6 +171,17 @@ impl AgentRuntime {
             project_root,
             ..authority
         };
+        let continuation = if let Some(pending) = pending_handoff {
+            config.workspace_mode = descriptor.workspace_mode;
+            config.workspace_branch = pending.workspace_branch;
+            RunContinuation::Handoff(RunHandoff {
+                source_run_id: pending.source_run_id,
+                worktree: retained_worktree,
+                restored: Some(restored),
+            })
+        } else {
+            RunContinuation::Restored(restored)
+        };
         if let Some(thread) = &thread {
             self.bind_thread_root(thread, run_id)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
@@ -132,14 +196,10 @@ impl AgentRuntime {
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
         self.goal_user_input(run_id, &prompt);
-        Ok(self.spawn_run_with_handoff(
-            run_id,
-            None,
-            role,
-            prompt,
-            config,
-            RunContinuation::Restored(restored),
-        ))
+        if let Some(request) = pending_request {
+            self.remember_thread_request(run_id, &request);
+        }
+        Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
     }
 
     /// Resolve a thread's latest saved chat root without starting a new run.

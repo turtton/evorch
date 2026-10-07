@@ -38,3 +38,8 @@ pub use otel::{
 };
 pub use ring::RingBuffer;
 pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};
+
+/// Stable conversation identity shared by the runtime and escalation projections.
+pub fn escalation_thread_id(new_run_id: &str) -> String {
+    format!("escalation-{new_run_id}")
+}

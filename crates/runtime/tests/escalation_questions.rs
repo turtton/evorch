@@ -50,21 +50,17 @@ fn setup(
     (dir, storage, config, runtime, events)
 }
 async fn handoff(events: &mut event_bus::EventReceiver, source: RunId) -> RunId {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
-                source_run_id,
-                new_run_id,
-                ..
-            }) = events.recv().await.unwrap().kind
-                && source_run_id == source.to_string()
-            {
-                return new_run_id.parse::<RunId>().unwrap();
-            }
+    loop {
+        if let EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+            source_run_id,
+            new_run_id,
+            ..
+        }) = events.recv().await.unwrap().kind
+            && source_run_id == source.to_string()
+        {
+            return new_run_id.parse::<RunId>().unwrap();
         }
-    })
-    .await
-    .unwrap()
+    }
 }
 
 #[tokio::test]
@@ -87,21 +83,23 @@ async fn escalated_root_cannot_finish_until_inherited_required_answer_arrives() 
     let (_dir, _storage, _config, runtime, mut events) = setup(model.clone());
     let source = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
     let recipient = handoff(&mut events, source).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                run_id,
-                to: AgentRunPhase::Waiting,
-                ..
-            }) = events.recv().await.unwrap().kind
-                && run_id == recipient.to_string()
-            {
+    loop {
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+            events.recv().await.unwrap().kind
+            && run_id == recipient.to_string()
+        {
+            assert!(
+                !matches!(
+                    to,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                ),
+                "recipient ended before waiting for the required answer: {to:?}"
+            );
+            if to == AgentRunPhase::Waiting {
                 break;
             }
         }
-    })
-    .await
-    .unwrap();
+    }
     assert_eq!(
         runtime.inspect_agent(recipient).unwrap().phase,
         AgentRunPhase::Waiting
@@ -218,23 +216,30 @@ async fn failed_question_inheritance_reports_error_without_spawning_an_escalated
     let (_dir, _storage, config, runtime, mut events) = setup(model.clone());
     *model.drop_links.lock().unwrap() = Some(config.db_path);
     let source = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match events.recv().await.unwrap().kind {
-                EventKind::Diagnostic(event) if event.code == "EscalationHandoffFailed" => {
-                    assert_eq!(event.run_id.as_deref(), Some(source.to_string().as_str()));
-                    assert!(event.detail.contains("question inheritance failed"));
-                    break;
-                }
-                EventKind::Lifecycle(LifecycleEvent::EscalationRequested { .. }) => {
-                    panic!("failed inheritance must not start a root")
-                }
-                _ => {}
+    assert_eq!(runtime.wait(source).await.unwrap(), AgentRunPhase::Done);
+    let mut failure = None;
+    for event in events.drain_pending_snapshot() {
+        match event.kind {
+            EventKind::Diagnostic(event) if event.code == "EscalationHandoffFailed" => {
+                assert_eq!(event.run_id.as_deref(), Some(source.to_string().as_str()));
+                assert!(event.detail.contains("no such table"), "{}", event.detail);
+                assert!(
+                    event.detail.contains("user_question_links"),
+                    "{}",
+                    event.detail
+                );
+                assert!(
+                    failure.replace(event).is_none(),
+                    "duplicate handoff failure"
+                );
             }
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { .. }) => {
+                panic!("failed inheritance must not start a root")
+            }
+            _ => {}
         }
-    })
-    .await
-    .unwrap();
+    }
+    assert!(failure.is_some(), "missing handoff failure diagnostic");
     assert_eq!(runtime.list_agents().len(), 1);
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
 }

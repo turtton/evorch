@@ -68,6 +68,13 @@ pub struct RuntimeCommandSink {
 }
 
 impl RuntimeCommandSink {
+    fn rebind_conversation_root(&mut self, thread: &str, run: RunId) {
+        self.chat_runs
+            .retain(|owner, root| owner == thread || *root != run);
+        self.goal_runs
+            .retain(|owner, root| owner == thread || *root != run);
+    }
+
     pub fn start_background_run(&self, text: String) -> RunId {
         let _guard = self.handle.enter();
         self.runtime.delegate_background(
@@ -206,12 +213,14 @@ impl CommandSink for RuntimeCommandSink {
         self.goal_projects
             .insert(snapshot.thread_id.clone(), project.into());
         if let Ok(id) = snapshot.root_run_id.parse::<RunId>() {
+            self.rebind_conversation_root(&snapshot.thread_id, id);
             self.chat_runs.insert(snapshot.thread_id.clone(), id);
         }
     }
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
         if let Ok(id) = run.parse::<RunId>() {
+            self.rebind_conversation_root(thread, id);
             self.goal_runs.insert(thread.into(), id);
             self.goal_projects.insert(thread.into(), project.into());
         }
@@ -1362,6 +1371,24 @@ mod tests {
         let sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
         (rt, sink, runtime, supervisor)
+    }
+
+    #[test]
+    fn escalation_root_binding_keeps_worker_followups_independent() {
+        let (_rt, mut sink, _, _) = build_sink();
+        let worker = "run-1".parse::<runtime::RunId>().unwrap();
+        let orchestrator = "run-2".parse::<runtime::RunId>().unwrap();
+        sink.chat_runs.insert("parent".into(), worker);
+        sink.bind_goal_context("parent", "project", "run-1");
+        // Repair a duplicate run index without removing the worker's own root.
+        sink.chat_runs.insert("stale-owner".into(), orchestrator);
+        sink.bind_goal_context("stale-owner", "project", "run-2");
+        sink.bind_goal_context("escalation-run-2", "project", "run-2");
+        assert_eq!(sink.chat_runs.get("parent"), Some(&worker));
+        assert_eq!(sink.goal_runs.get("parent"), Some(&worker));
+        assert_eq!(sink.goal_runs.get("escalation-run-2"), Some(&orchestrator));
+        assert!(!sink.chat_runs.contains_key("stale-owner"));
+        assert!(!sink.goal_runs.contains_key("stale-owner"));
     }
 
     #[test]

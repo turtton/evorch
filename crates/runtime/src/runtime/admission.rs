@@ -6,6 +6,7 @@ pub(super) struct Admission {
     parent: Option<RunId>,
     pub(super) cancelled: bool,
     ownership: Option<crate::ownership::OwnerPermit>,
+    completion: Option<watch::Sender<Option<Result<(), RuntimeError>>>>,
     pub(super) result: watch::Receiver<Option<Result<(), RuntimeError>>>,
 }
 
@@ -20,12 +21,84 @@ impl Admission {
         AdmissionSnapshot {
             parent: self.parent,
             ownership: self.ownership.clone(),
-            result: self.result.borrow().clone(),
+            result: self.result.borrow().clone().or_else(|| {
+                self.result.has_changed().is_err().then(|| {
+                    Err(RuntimeError::Model {
+                        reason: "provider admission was interrupted".into(),
+                    })
+                })
+            }),
         }
     }
 }
 
 impl AgentRuntime {
+    /// Establish an awaitable identity before publishing a handoff. Provider
+    /// admission reuses this channel so event consumers can immediately wait.
+    pub(super) fn reserve_admission(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        ownership: Option<crate::ownership::OwnerPermit>,
+    ) {
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(admission) = admissions.get(&run_id) {
+            let pending = admission.snapshot().result.is_none();
+            if pending {
+                return;
+            }
+        }
+        let (completion, result) = watch::channel(None);
+        admissions.insert(
+            run_id,
+            Admission {
+                parent,
+                cancelled: false,
+                ownership,
+                completion: Some(completion),
+                result,
+            },
+        );
+    }
+
+    pub(super) fn register_without_admission(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+        continuation: RunContinuation,
+    ) -> RunId {
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cancelled = admissions
+            .get(&run_id)
+            .is_some_and(|admission| admission.result.borrow().is_none() && admission.cancelled);
+        if !cancelled {
+            self.register_run(run_id, parent, role, prompt, config, continuation);
+        }
+        if let Some(admission) = admissions.get_mut(&run_id)
+            && let Some(completion) = admission.completion.take()
+        {
+            completion.send_replace(Some(if cancelled {
+                Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                })
+            } else {
+                Ok(())
+            }));
+        }
+        run_id
+    }
+
     // The synchronous API reserves an ID; only successful admission registers a run.
     pub(super) fn admit_run(
         &self,
@@ -36,22 +109,18 @@ impl AgentRuntime {
         config: RunConfig,
         continuation: RunContinuation,
     ) -> RunId {
-        let (result, receiver) = watch::channel(None);
-        self.shared
+        self.reserve_admission(run_id, parent, config.ownership.clone());
+        let result = self
+            .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                run_id,
-                Admission {
-                    parent,
-                    cancelled: false,
-                    ownership: config.ownership.clone(),
-                    result: receiver,
-                },
-            );
+            .get_mut(&run_id)
+            .and_then(|admission| admission.completion.take())
+            .expect("reserved admission has one completion sender");
         let runtime = self.clone();
         tokio::spawn(async move {
+            let handoff = matches!(&continuation, RunContinuation::Handoff(_));
             let invocation = crate::AgentInvocationContext {
                 run_id: run_id.to_string(),
                 model_preference: config.model_preference.clone(),
@@ -79,6 +148,25 @@ impl AgentRuntime {
             }
             if admitted.is_ok() {
                 runtime.register_run(run_id, parent, role, prompt, config, continuation);
+            }
+            let failure = handoff
+                .then(|| admitted.as_ref().err().map(ToString::to_string))
+                .flatten();
+            drop(admissions);
+            if let Some(reason) = failure {
+                runtime.goal_work_stopped(run_id);
+                runtime
+                    .shared
+                    .bus
+                    .emit(Event::new(event_bus::DiagnosticEvent {
+                        source: "escalation_handoff".into(),
+                        severity: event_bus::DiagnosticSeverity::Error,
+                        code: "EscalationAdmissionFailed".into(),
+                        detail: reason,
+                        run_id: Some(run_id.to_string()),
+                        thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),
+                        call_id: None,
+                    }));
             }
             result.send_replace(Some(admitted));
         });
@@ -133,5 +221,52 @@ impl AgentRuntime {
         let sender = self.entry(run_id)?.cancel_tx.clone();
         sender.send_replace(RunInterrupt::Cancel);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Model;
+    #[async_trait::async_trait]
+    impl AgentModel for Model {
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            panic!("a stopped handoff must not call its provider");
+        }
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "test".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_handoff_reservation_never_registers_without_provider_admission() {
+        let bus = Arc::new(EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(Model),
+        );
+        let root = runtime.reserve_run_id();
+        runtime.reserve_admission(root, None, None);
+        runtime.stop(root, StopScope::SelfOnly).unwrap();
+        runtime.spawn_reserved(
+            root,
+            None,
+            Role::Orchestrator,
+            "pending handoff",
+            RunConfig::default(),
+        );
+        assert!(matches!(
+            runtime.wait(root).await,
+            Err(RuntimeError::RunTerminated { .. })
+        ));
+        assert!(runtime.list_agents().is_empty());
     }
 }

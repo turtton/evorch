@@ -359,6 +359,8 @@ impl TranscriptRegistry {
     }
 
     pub fn bind_run(&mut self, run: &str, thread: &str) {
+        self.thread_roots
+            .retain(|owner, root| owner == thread || root != run);
         self.run_threads.insert(run.into(), thread.into());
     }
 

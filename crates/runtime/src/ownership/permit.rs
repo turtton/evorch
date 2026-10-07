@@ -12,6 +12,29 @@ pub struct OwnerPermit {
 }
 
 impl OwnerPermit {
+    pub(crate) fn prepare_child<T>(
+        &self,
+        thread_id: &str,
+        prepare: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(Self, T), String> {
+        let (child, prepared) = Registry::open_existing(&self.registry_path)
+            .and_then(|mut registry| {
+                registry.prepare_child(self, thread_id, now_ms(), || {
+                    prepare().map_err(RegistryError::Preparation)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        Ok((
+            Self {
+                registry_path: self.registry_path.clone(),
+                thread_id: child.thread_id,
+                lease: child.lease,
+                run_id: None,
+            },
+            prepared,
+        ))
+    }
+
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
         let registry = Registry::open_readonly(&self.registry_path)?;
         registry.guard_generation(self)?;

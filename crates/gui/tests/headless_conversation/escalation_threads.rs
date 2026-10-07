@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use event_bus::{
-    AgentRunPhase, EscalationMemoSummary, Event, LifecycleEvent, MessageEvent, ToolEvent,
-    UserQuestion,
+    AgentRunPhase, EscalationMemoSummary, Event, LifecycleEvent, MessageEvent, OrchestratorEvent,
+    ThreadGoalPhase, ThreadGoalSnapshot, ThreadGoalUsage, ToolEvent, UserQuestion,
 };
 use gui::{
     app::WorkbenchState,
@@ -18,6 +18,9 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 type Bindings = Arc<Mutex<Vec<(String, String, String)>>>;
 struct CaptureSink(Bindings);
 impl CommandSink for CaptureSink {
+    fn bind_thread_goal(&mut self, snapshot: &ThreadGoalSnapshot, project: &str) {
+        self.bind_goal_context(&snapshot.thread_id, project, &snapshot.root_run_id);
+    }
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
         self.0
             .lock()
@@ -87,6 +90,191 @@ fn final_report() -> String {
         "Canonical report: {}end of report",
         "complete detail. ".repeat(40)
     )
+}
+
+fn goal_snapshot(thread: &str, run: &str) -> ThreadGoalSnapshot {
+    ThreadGoalSnapshot {
+        goal_id: "goal-worker".into(),
+        thread_id: thread.into(),
+        root_run_id: run.into(),
+        related_root_run_ids: if run == "run-2" {
+            vec!["run-1".into()]
+        } else {
+            vec![]
+        },
+        objective: "Implement the feature".into(),
+        original_request: "Implement the feature and verify it".into(),
+        criteria: vec!["Tests pass".into()],
+        checks: vec![],
+        phase: ThreadGoalPhase::Working,
+        review_enabled: true,
+        checks_paused: true,
+        work_stopped: false,
+        epoch: 2,
+        review_round: 1,
+        findings: vec!["Check the regression".into()],
+        reason: None,
+        usage: ThreadGoalUsage {
+            model_requests: 5,
+            input_tokens: 100,
+            output_tokens: 20,
+        },
+        max_review_rounds: 3,
+        max_tokens: Some(500),
+    }
+}
+
+fn goal_update(thread: &str, run: &str) -> Event {
+    Event::new(OrchestratorEvent::ThreadGoalUpdated {
+        snapshot: goal_snapshot(thread, run),
+    })
+}
+
+#[test]
+fn goal_handoff_has_one_owner_in_live_delivery_and_persisted_replay() {
+    // Canonical runtime order and a delayed escalation event must converge.
+    for goal_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let mut stream = vec![
+            started("run-1", None, "chat:Worker:parent"),
+            goal_update("parent", "run-1"),
+            message("run-1", "worker output"),
+        ];
+        let inherited = goal_update("escalation-run-2", "run-2");
+        if goal_first {
+            stream.push(inherited.clone());
+            stream.push(escalation());
+        } else {
+            stream.push(escalation());
+            stream.push(inherited.clone());
+        }
+        stream.extend([
+            escalation(),
+            inherited,
+            started("run-2", None, "escalation-orchestrator"),
+            message("run-2", "orchestrator output"),
+            started("run-3", Some("run-2"), "child worker"),
+            message("run-3", "private child output"),
+        ]);
+        for event in &stream {
+            storage.handle().append_event(Some("gui"), event).unwrap();
+        }
+        let bindings = Bindings::default();
+        let mut live = state(dir.path(), bindings.clone());
+        live.apply_events(stream);
+        assert_eq!(live.sidebar().active_thread, Some(ThreadId::new("other")));
+        let mut replay =
+            state(dir.path(), Bindings::default()).with_sidebar(live.sidebar().clone());
+        replay
+            .restore_history(&storage::Database::open(&config).unwrap())
+            .unwrap();
+        for state in [live, replay] {
+            assert_eq!(state.sidebar().threads[0].run_ids, ["run-1"]);
+            assert_eq!(
+                state.sidebar().threads[0].root_run_id.as_deref(),
+                Some("run-1")
+            );
+            assert_eq!(state.sidebar().threads[2].run_ids, ["run-2", "run-3"]);
+            assert_eq!(
+                state.sidebar().threads[2].root_run_id.as_deref(),
+                Some("run-2")
+            );
+            assert!(state.issued().is_empty(), "replay must not restart work");
+            let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
+            gui.state_mut()
+                .switch_thread(ThreadId::new("parent"))
+                .unwrap();
+            gui.run();
+            assert!(gui.has_label("worker output"));
+            assert!(!gui.has_label("Goal: Implement the feature"));
+            assert!(!gui.has_label("orchestrator output"));
+            gui.state_mut()
+                .switch_thread(ThreadId::new("escalation-run-2"))
+                .unwrap();
+            gui.run();
+            assert!(gui.has_label("orchestrator output"));
+            assert!(gui.has_label("Goal: Implement the feature"));
+            assert!(gui.has_label("Resume goal checks"));
+            assert!(gui.has_label("Disable independent review before completion"));
+            gui.click_label("Resume goal checks");
+            gui.run();
+            assert!(
+                matches!(gui.state().issued().last(), Some(WorkbenchCommand::SetGoalChecksPaused {
+                thread_id, goal_id, paused: false
+            }) if thread_id == "escalation-run-2" && goal_id == "goal-worker")
+            );
+        }
+        assert!(
+            bindings
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(thread, project, run)| thread == "escalation-run-2"
+                    && project == "project"
+                    && run == "run-2")
+        );
+        storage.close();
+    }
+}
+
+#[test]
+fn escalation_goal_binds_the_source_project_while_another_project_is_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let bindings = Bindings::default();
+    let mut sidebar = sidebar(dir.path());
+    let other = ProjectId::new("other-project");
+    let other_root = dir.path().join("other-project");
+    std::fs::create_dir(&other_root).unwrap();
+    sidebar
+        .add_project(other.clone(), "other", &other_root)
+        .unwrap();
+    sidebar.select_project(&other).unwrap();
+    sidebar
+        .create_thread(ThreadId::new("foreign"), other.clone(), "foreign")
+        .unwrap();
+    sidebar.switch_thread(&ThreadId::new("foreign")).unwrap();
+    let mut state = state(dir.path(), bindings.clone()).with_sidebar(sidebar);
+    state.apply_events([
+        started("run-1", None, "chat:Worker:parent"),
+        goal_update("escalation-run-2", "run-2"),
+        escalation(),
+    ]);
+    assert_eq!(state.sidebar().selected_project, Some(other));
+    assert_eq!(
+        state.sidebar().active_thread,
+        Some(ThreadId::new("foreign"))
+    );
+    let bindings = bindings.lock().unwrap();
+    assert!(!bindings.is_empty());
+    assert!(
+        bindings
+            .iter()
+            .all(|(thread, project, root)| thread == "escalation-run-2"
+                && project == "project"
+                && root == "run-2")
+    );
+}
+
+#[test]
+fn deleted_project_escalation_replay_cannot_restore_command_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let bindings = Bindings::default();
+    let mut sidebar = sidebar(dir.path());
+    sidebar.projects.clear();
+    let mut state = state(dir.path(), bindings.clone()).with_sidebar(sidebar);
+    state.apply_events([
+        started("run-1", None, "chat:Worker:parent"),
+        goal_update("parent", "run-1"),
+        goal_update("escalation-run-2", "run-2"),
+        escalation(),
+    ]);
+    assert!(bindings.lock().unwrap().is_empty());
+    assert!(state.issued().is_empty());
 }
 
 fn events() -> Vec<Event> {

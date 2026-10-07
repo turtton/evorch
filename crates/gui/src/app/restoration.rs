@@ -36,6 +36,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 &thread.project_id.to_string(),
                 new_run_id,
             );
+            // A goal update can precede creation of the sidebar child during replay.
+            if let Some(snapshot) = self.thread_goals.get(&thread.id.to_string()) {
+                self.sink
+                    .bind_thread_goal(snapshot, &thread.project_id.to_string());
+            }
         }
         if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
             thread_id,

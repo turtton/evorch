@@ -21,10 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
-use event_bus::{
-    AgentRunPhase, CompactionReason, EscalationMemoSummary, Event, EventBus, LifecycleEvent,
-    MessageEvent,
-};
+use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
@@ -66,7 +63,7 @@ pub(crate) struct RunTask {
 pub(crate) struct RunHandoff {
     pub(crate) source_run_id: RunId,
     pub(crate) worktree: Option<OwnedWorktree>,
-    pub(crate) summary: EscalationMemoSummary,
+    pub(crate) restored: Option<crate::restore::RestoredState>,
 }
 
 pub(crate) struct LoopChannels {

@@ -165,7 +165,15 @@ impl WorktreeManager {
     /// Existing paths must be registered in this repository on the run's own branch;
     /// foreign directories, moved worktrees, symlinks and branch mismatches fail closed.
     pub fn open_existing(&self, run_id: RunId) -> Result<OwnedWorktree, WorkspaceError> {
-        let (branch, path) = self.planned(run_id);
+        self.open_existing_on_branch(run_id, &format!("{BRANCH_PREFIX}{run_id}"))
+    }
+
+    pub(crate) fn open_existing_on_branch(
+        &self,
+        run_id: RunId,
+        branch: &str,
+    ) -> Result<OwnedWorktree, WorkspaceError> {
+        let (branch, path) = self.planned_on_branch(run_id, branch);
         match fs::symlink_metadata(&path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -345,6 +353,10 @@ pub struct OwnedWorktree {
 }
 
 impl OwnedWorktree {
+    pub(crate) fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+
     /// worktree を削除し、branch は保持する。
     ///
     /// # Errors

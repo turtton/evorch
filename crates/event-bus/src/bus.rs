@@ -58,9 +58,11 @@ impl EventBus {
         self.fences.register_guard(run, check)
     }
 
-    /// Register an ownership guard with a nonblocking acquisition for GUI batches.
-    /// `attempt` must return Busy immediately on lock contention. Existing bus
-    /// emission and synchronous consumers continue using the blocking callback.
+    /// Register an ownership guard with a nonblocking acquisition for compound
+    /// events and GUI batches, so partial guards can be released on contention.
+    /// `attempt` must return Busy immediately on lock contention. Synchronous
+    /// consumers use the blocking callback for single-run events or after
+    /// releasing partial guards before waiting on contention.
     pub fn register_nonblocking_mutation_guard(
         &self,
         run: String,
