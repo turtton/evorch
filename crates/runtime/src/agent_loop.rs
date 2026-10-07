@@ -919,11 +919,6 @@ impl LoopState {
                     }
                 }
             }
-            let invocation_model = self
-                .shared
-                .model
-                .invocation_snapshot()
-                .unwrap_or_else(|| Arc::clone(&self.shared.model));
             let invocation = AgentInvocationContext {
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -981,6 +976,13 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            // Benchmark capture can replace the model with its frozen settings.
+            // Retain that effective model for both chat and its hosted tools.
+            let invocation_model = self
+                .shared
+                .model
+                .invocation_snapshot()
+                .unwrap_or_else(|| Arc::clone(&self.shared.model));
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {

@@ -118,9 +118,12 @@ impl AgentModel for Flow {
                     serde_json::json!({"target":"run-1","message":"future?"}),
                 ));
             }
+            let settings = self.settings.as_ref().ok_or_else(|| RuntimeError::Model {
+                reason: "benchmark child request must use frozen model settings".into(),
+            })?;
             return Ok(call(
                 "write",
-                serde_json::json!({"path":"answer.txt","content":self.settings.as_ref().unwrap().preference.model}),
+                serde_json::json!({"path":"answer.txt","content":settings.preference.model}),
             ));
         }
         Ok(response(
@@ -445,6 +448,9 @@ async fn local_replay_preserves_input_and_settings_before_real_tool_writes() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(original[0].messages, checkpoint.messages);
+    for request in &original {
+        assert_eq!(request.settings.as_ref(), Some(&checkpoint.model));
+    }
     assert!(
         !serde_json::to_string(&checkpoint)
             .unwrap()
