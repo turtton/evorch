@@ -919,6 +919,11 @@ impl LoopState {
                     }
                 }
             }
+            let invocation_model = self
+                .shared
+                .model
+                .invocation_snapshot()
+                .unwrap_or_else(|| Arc::clone(&self.shared.model));
             let invocation = AgentInvocationContext {
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -985,7 +990,7 @@ impl LoopState {
                     }
                     continue;
                 }
-                result = self.shared.model.complete_streaming(
+                result = invocation_model.complete_streaming(
                     &invocation,
                     self.task.role,
                     &visible_messages,
@@ -1077,7 +1082,10 @@ impl LoopState {
                 return;
             }
             self.activity(event_bus::RunActivity::Tools);
-            if !self.execute_tools(tool_uses).await {
+            if !self
+                .execute_tools(tool_uses, &invocation, invocation_model.as_ref())
+                .await
+            {
                 return;
             }
             if let Some(permit) = &self.task.config.ownership

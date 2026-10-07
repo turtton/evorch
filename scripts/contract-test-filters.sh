@@ -8,7 +8,8 @@ CACHE_CONTRACT_FILTER='
       (kind(lib) & test(observe::cache))
       | binary(=cache_prefix_contract)
       | binary(=cache_regression_contract)
-      | binary(=codex_cache_regression)))
+      | binary(=codex_cache_regression)
+      | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)
       | binary(=benchmark_wire)

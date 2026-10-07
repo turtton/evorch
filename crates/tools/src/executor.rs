@@ -499,10 +499,11 @@ impl ToolExecutor {
             call_id: Some(call_id.into()),
             ..ctx.clone()
         };
-        self.execute_inner(&ctx, tool_name, call_id, args, None)
+        self.execute_inner(&ctx, tool_name, call_id, args, None, None)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_inner(
         &self,
         ctx: &ToolExecutionContext,
@@ -510,6 +511,7 @@ impl ToolExecutor {
         call_id: &str,
         args: serde_json::Value,
         authorized: Option<Action>,
+        search_provider: Option<&dyn crate::search::SearchProvider>,
     ) -> Result<ToolResult, ToolError> {
         let Some(registered) = self.tools.get(tool_name) else {
             return Err(ToolError::UnknownTool {
@@ -560,7 +562,12 @@ impl ToolExecutor {
             )
         });
         let outcome = match action {
-            Action::Proceed => registered.tool.execute_with_context(ctx, args).await,
+            Action::Proceed => {
+                registered
+                    .tool
+                    .execute_with_search_provider(ctx, args, search_provider)
+                    .await
+            }
             Action::Deny => {
                 return self.deny(ctx, tool_name, call_id, "policy により拒否されました");
             }
@@ -578,7 +585,10 @@ impl ToolExecutor {
                     .await
                 {
                     ApprovalOutcome::Approved => {
-                        registered.tool.execute_with_context(ctx, args).await
+                        registered
+                            .tool
+                            .execute_with_search_provider(ctx, args, search_provider)
+                            .await
                     }
                     ApprovalOutcome::Denied => {
                         return self.deny(ctx, tool_name, call_id, "承認要求が拒否されました");
@@ -596,7 +606,7 @@ impl ToolExecutor {
             Action::AskOnFailure => {
                 let first = registered
                     .tool
-                    .execute_with_context(ctx, args.clone())
+                    .execute_with_search_provider(ctx, args.clone(), search_provider)
                     .await;
                 if !is_failure(&first) {
                     first
@@ -610,7 +620,10 @@ impl ToolExecutor {
                         .await
                     {
                         ApprovalOutcome::Approved => {
-                            registered.tool.execute_with_context(ctx, args).await
+                            registered
+                                .tool
+                                .execute_with_search_provider(ctx, args, search_provider)
+                                .await
                         }
                         ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
                     }

@@ -18,6 +18,7 @@ mod capabilities;
 mod category;
 mod compaction_window;
 mod fallback;
+mod hosted_search;
 mod live;
 mod official_compaction;
 mod preference;

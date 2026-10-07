@@ -116,6 +116,17 @@ pub trait Tool: Send + Sync {
         self.execute(args).await
     }
 
+    /// Per-call hosted search capability, supplied only after the executor's gates.
+    /// Other tools retain their ordinary execution context and implementation.
+    async fn execute_with_search_provider(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+        _search_provider: Option<&dyn crate::search::SearchProvider>,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_with_context(ctx, args).await
+    }
+
     /// Cancel processes still owned by a terminal/cancelled run. No replay occurs.
     fn cancel_shell_jobs(&self, _run_id: &str) {}
 

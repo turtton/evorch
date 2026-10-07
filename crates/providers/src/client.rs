@@ -15,6 +15,11 @@ use crate::stream::DeltaStream;
 /// クライアントの状態として保持しない。
 #[async_trait]
 pub trait ProviderClient: Send + Sync {
+    /// Session-backed hosted web search, when the provider offers it.
+    fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
+        None
+    }
+
     /// 公式 compaction が利用可能な場合に専用境界を返します。
     fn compactor(&self) -> Option<&dyn crate::Compactor> {
         None
@@ -451,6 +456,7 @@ mod tests {
     fn trait_object_dispatches_capabilities() {
         let client: Box<dyn ProviderClient> = Box::new(FakeClient::succeeding());
         assert!(!client.supports_structured_output());
+        assert!(client.hosted_web_search().is_none());
 
         assert_eq!(
             client.capabilities(),

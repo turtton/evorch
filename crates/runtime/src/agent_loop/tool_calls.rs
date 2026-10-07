@@ -365,6 +365,8 @@ impl LoopState {
     pub(super) async fn execute_tools(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        invocation: &crate::AgentInvocationContext,
+        invocation_model: &dyn crate::AgentModel,
     ) -> bool {
         if let Err(error) = self.benchmark_tools_supported(&tool_uses) {
             self.finish_error(error.to_string());
@@ -597,6 +599,7 @@ impl LoopState {
                 let mut tasks = tokio::task::JoinSet::new();
                 let mut pending = std::collections::HashMap::new();
                 let mut prepared_wave = Vec::with_capacity(wave.len());
+                let search_usage = Arc::new(std::sync::Mutex::new(Vec::<providers::Usage>::new()));
                 for (index, call) in wave.into_iter().enumerate() {
                     if let Some(permit) = &self.task.config.ownership
                         && let Err(error) = permit.validate_mutation()
@@ -615,7 +618,42 @@ impl LoopState {
                         ready,
                     } = call;
                     match ready {
-                        ReadyCall::Tool(call) => {
+                        ReadyCall::Tool(mut call) => {
+                            // Every schema/role/global/network gate has passed. Freeze
+                            // this call's capability from the chat invocation, never the
+                            // preference receiver (which may change while chat streams).
+                            if name == "web_search" {
+                                let usage = Arc::clone(&search_usage);
+                                let sink = Arc::new(move |value| {
+                                    usage
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(value);
+                                });
+                                match invocation_model.web_search_provider(
+                                    invocation,
+                                    self.task.role,
+                                    &self.tool_specs,
+                                    sink,
+                                ) {
+                                    Ok(Some(provider)) => {
+                                        call = call.with_search_provider(provider)
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        completed.push((
+                                            index,
+                                            id,
+                                            name,
+                                            input,
+                                            ReadyCall::Rejected(ToolResult::error(
+                                                error.to_string(),
+                                            )),
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
                             let continuation = name == "shell"
                                 && matches!(
                                     input.get("action").and_then(Value::as_str),
@@ -669,11 +707,14 @@ impl LoopState {
                         ready => completed.push((index, id, name, input, ready)),
                     }
                 }
+                // Once the first task starts, every exit must join the wave and
+                // drain its completed usage. A mid-spawn elapsed-budget check
+                // could otherwise drop a sibling's already received usage.
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                }
                 for (index, id, name, input, call, guard) in prepared_wave {
-                    match self.publish_budget() {
-                        crate::budget_tracker::BudgetDecision::Continue => {}
-                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
-                    }
                     let metadata = (index, id.clone(), name.clone(), input.clone());
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
@@ -732,6 +773,19 @@ impl LoopState {
                                 ));
                             }
                         }
+                    }
+                }
+                // Drain every completed request in the wave before any individual
+                // result can exhaust a budget or terminate this run. The sidecar
+                // survives tool formatting failures, panic, and cancellation.
+                for usage in std::mem::take(
+                    &mut *search_usage
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ) {
+                    self.budget.usage(usage);
+                    if let Some(runtime) = self.runtime() {
+                        runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage);
                     }
                 }
                 completed.sort_by_key(|(index, ..)| *index);
@@ -865,10 +919,12 @@ impl LoopState {
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
-                    match self.publish_budget() {
-                        crate::budget_tracker::BudgetDecision::Continue => {}
-                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
-                    }
+                }
+                // A completed parallel wave belongs to one assistant tool batch.
+                // Preserve all its results before a token budget can stop the run.
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
                 }
                 if let Some(kind) = self.interrupted() {
                     self.finish_interrupted(kind);

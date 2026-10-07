@@ -702,6 +702,8 @@ pub enum RequestPurpose {
     Routing,
     /// sandbox escalation のレビュー。
     EscalationReview,
+    /// Provider-hosted web search invoked by a tool.
+    WebSearch,
 }
 
 impl RequestPurpose {
@@ -713,6 +715,7 @@ impl RequestPurpose {
             Self::Title => "title",
             Self::Routing => "routing",
             Self::EscalationReview => "escalation_review",
+            Self::WebSearch => "web_search",
         }
     }
 }

@@ -9,7 +9,7 @@ fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
     fixture_with_efforts(errors, &[])
 }
 
-fn fixture_with_efforts(
+pub(super) fn fixture_with_efforts(
     errors: Vec<Option<ProviderError>>,
     efforts: &[Option<&str>],
 ) -> (RoutedModel, Vec<Requests>) {

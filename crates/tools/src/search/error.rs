@@ -18,16 +18,22 @@ pub enum SearchError {
     /// provider が application level で拒否した。
     #[error("provider が拒否しました: {0}")]
     ProviderRejected(String),
+    /// The selected Codex endpoint explicitly rejects the hosted web_search tool.
+    #[error("Codex endpoint does not support hosted web_search")]
+    CodexUnsupported,
 }
 
 impl SearchError {
     /// 別 provider への fallback を発火させる error か。
     ///
-    /// interview Q3 の design lock: 429・5xx・timeout のみが fallback 対象。
+    /// 429・5xx・timeout と明示的な Codex hosted-search 未対応だけが対象。
     pub const fn is_fallback_trigger(&self) -> bool {
         matches!(
             self,
-            Self::HttpStatus(429) | Self::HttpStatus(500..=599) | Self::Timeout
+            Self::HttpStatus(429)
+                | Self::HttpStatus(500..=599)
+                | Self::Timeout
+                | Self::CodexUnsupported
         )
     }
 }
@@ -44,6 +50,7 @@ mod tests {
             SearchError::HttpStatus(500),
             SearchError::HttpStatus(599),
             SearchError::Timeout,
+            SearchError::CodexUnsupported,
         ];
         let non_triggers = [
             SearchError::HttpStatus(400),
