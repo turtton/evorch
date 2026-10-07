@@ -133,9 +133,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.role_settings.resolved_previews = rows
             .map(|(name, role, category)| {
                 let resolved = self
-                    .production_model
-                    .as_ref()
-                    .map(|(_, model)| {
+                    .active_model()
+                    .map(|model| {
                         runtime::AgentModel::selected_model(model.as_ref(), role, category)
                     })
                     .filter(|selected| !selected.starts_with("unresolved:"));

@@ -385,11 +385,13 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
     );
     // When: plain text is submitted.
     submit(&mut harness, "hello agent");
-    // Then: the typed chat is issued and the user line is visible.
+    // Then: the typed chat is issued in the thread's project and the user line is visible.
+    let project_root = harness.state().sidebar().projects[0].repo_root.clone();
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
             fork_seed: None,
+            project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),

@@ -114,6 +114,8 @@ pub struct WorkbenchState<S> {
         crate::model::production::ProductionModel,
         Arc<runtime::compose::SwitchableModel>,
     )>,
+    /// Models of projects other than the startup one, shared with the runtime.
+    pub(super) project_models: Option<crate::model::production::ProjectModels>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
@@ -217,6 +219,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             provider_save_rx: None,
             project_profile_rx: None,
             production_model: None,
+            project_models: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
                     pr: None,

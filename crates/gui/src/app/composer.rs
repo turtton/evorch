@@ -41,9 +41,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
-        self.production_model
-            .as_ref()
-            .map(|(_, model)| model.available_profiles())
+        self.active_model()
+            .map(|model| model.available_profiles())
             .unwrap_or_default()
     }
 
@@ -116,6 +115,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         };
                         let submission = ChatSubmission {
                             fork_seed: self.fork_seed(thread_id),
+                            project_root: self
+                                .thread_project(thread_id)
+                                .map(|project| project.repo_root.clone()),
                             composer_role: self.composer.role,
                             images: self
                                 .composer
@@ -216,6 +218,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         return;
                     }
                     let command = WorkbenchCommand::ContinueChat(ChatContinuation {
+                        project_root: self
+                            .thread_project(thread_id)
+                            .map(|project| project.repo_root.clone()),
                         thread_id: thread_id.to_string(),
                         composer_role: self.composer.role,
                         model_preference: self
@@ -349,7 +354,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn refresh_image_capability(&mut self) {
-        let Some((_, model)) = self.production_model.as_ref() else {
+        let Some(model) = self.active_model() else {
             return;
         };
         let preference = self

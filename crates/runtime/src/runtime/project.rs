@@ -11,6 +11,9 @@ use super::*;
 pub type ProjectModelResolver =
     Arc<dyn Fn(&std::path::Path) -> Option<Arc<dyn AgentModel>> + Send + Sync>;
 
+/// Names a project root for project-partitioned records such as learned memory.
+pub type ProjectSlugResolver = Arc<dyn Fn(&std::path::Path) -> String + Send + Sync>;
+
 /// Project-scoped inputs resolved once per project root and shared by its runs.
 pub(crate) struct ProjectContext {
     pub(crate) root: PathBuf,
@@ -18,6 +21,7 @@ pub(crate) struct ProjectContext {
     /// `None` while the project is not a git repository root (isolated runs fail closed).
     worktrees: Option<WorktreeManager>,
     pub(crate) model: Arc<dyn AgentModel>,
+    slug: OnceLock<String>,
 }
 
 impl ProjectContext {
@@ -70,6 +74,7 @@ impl Shared {
                 .map(|rules| Arc::new(rules.with_project_root(Some(root.to_path_buf())))),
             worktrees,
             model,
+            slug: OnceLock::new(),
         });
         projects.insert(root.to_path_buf(), Arc::clone(&project));
         project
@@ -88,6 +93,17 @@ impl Shared {
             .get(&run)
             .and_then(|entry| entry.config.project_root.clone())?;
         Some(self.project(&root))
+    }
+
+    /// The record partition of a run's project, when the host names projects.
+    pub(crate) fn project_slug(&self, root: &std::path::Path) -> Option<String> {
+        let resolve = self.project_slugs.get()?;
+        Some(
+            self.project(root)
+                .slug
+                .get_or_init(|| resolve(root))
+                .clone(),
+        )
     }
 
     /// The model that serves `config`'s project.
@@ -119,6 +135,14 @@ impl AgentRuntime {
     #[must_use]
     pub fn with_project_models(self, resolver: ProjectModelResolver) -> Self {
         let _ = self.shared.project_models.set(resolver);
+        self
+    }
+
+    /// Lets the host name each project for project-partitioned records, so a
+    /// run's learned memory lands in the project it worked in. First wins.
+    #[must_use]
+    pub fn with_project_slugs(self, resolver: ProjectSlugResolver) -> Self {
+        let _ = self.shared.project_slugs.set(resolver);
         self
     }
 }

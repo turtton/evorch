@@ -12,6 +12,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
+    /// Shares the per-project models the runtime resolves, so saves reload them too.
+    pub fn with_project_models(mut self, models: crate::model::production::ProjectModels) -> Self {
+        self.project_models = Some(models);
+        self
+    }
+
+    /// The model serving the active thread's project.
+    pub(super) fn active_model(&self) -> Option<std::sync::Arc<runtime::compose::SwitchableModel>> {
+        let (_, main) = self.production_model.as_ref()?;
+        Some(
+            self.active_repo_root()
+                .and_then(|root| self.project_models.as_ref()?.model_for(&root))
+                .unwrap_or_else(|| std::sync::Arc::clone(main)),
+        )
+    }
+
     pub fn open_provider_settings(&mut self) {
         if self.settings_save_in_progress() {
             return;
@@ -214,14 +230,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         operation: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) {
         let production = self.production_model.clone();
+        let projects = self.project_models.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.provider_save_rx = Some(rx);
         std::thread::spawn(move || {
             let result = operation().and_then(|()| {
-                if let Some((context, model)) = production {
-                    model.replace(context.reload()?);
-                }
-                Ok(())
+                crate::model::production::reload_models(production.as_ref(), projects.as_ref())
             });
             if let Err(error) = &result {
                 tracing::error!(%error, "provider update or recomposition failed");

@@ -227,11 +227,19 @@ fn load_sidebar(path: Option<&PathBuf>) -> Result<SidebarState, GuiError> {
     Ok(SidebarState::default())
 }
 
+/// The project the GUI was last working in; runs still bind to their thread's project.
+fn startup_project(sidebar: &SidebarState) -> Option<&workspace_ui::ProjectRecord> {
+    sidebar
+        .projects
+        .iter()
+        .find(|project| Some(&project.id) == sidebar.selected_project.as_ref())
+}
+
 fn effective_project_context(
     sidebar: &SidebarState,
     fallback_root: &Path,
 ) -> (PathBuf, config::LoadOptions) {
-    let root = sidebar.resolved_primary_project().map_or_else(
+    let root = startup_project(sidebar).map_or_else(
         || fallback_root.to_path_buf(),
         |project| project.repo_root.clone(),
     );
@@ -739,6 +747,14 @@ fn run() -> Result<(), GuiError> {
         }
     };
 
+    // Runs of other projects use models composed from those projects' role profiles.
+    let project_models = production_model
+        .as_ref()
+        .map(|(context, _)| gui::model::production::ProjectModels::new(context.clone()));
+    let runtime = match &project_models {
+        Some(models) => runtime.with_project_models(models.resolver()),
+        None => runtime,
+    };
     let runtime = if arguments.demo {
         runtime
     } else {
@@ -779,6 +795,8 @@ fn run() -> Result<(), GuiError> {
                 .get(&binding.logical_model)
         })
         .and_then(|routes| routes.first());
+    // Each run's lessons are partitioned by the project it worked in.
+    let runtime = runtime.with_project_slugs(Arc::new(derive_repo_slug));
     let runtime = match quick_route {
         Some(route) => runtime.with_learning(runtime::memory_queue::LearningSettings {
             writer: storage.handle(),
@@ -965,9 +983,7 @@ fn run() -> Result<(), GuiError> {
     let home = std::env::home_dir()
         .ok_or_else(|| GuiError::Arguments("No home directory for terminal cwd".into()))?;
     let terminal_cwd = resolve_terminal_cwd(
-        sidebar
-            .resolved_primary_project()
-            .map(|project| project.repo_root.as_path()),
+        startup_project(&sidebar).map(|project| project.repo_root.as_path()),
         &repo_root,
         &home,
     );
@@ -1037,6 +1053,9 @@ fn run() -> Result<(), GuiError> {
         state = state.with_credential_store(store);
         if let Some((context, model)) = production_model {
             state = state.with_production_model(context, model);
+        }
+        if let Some(models) = project_models {
+            state = state.with_project_models(models);
         }
     }
     state = state.with_sidebar(sidebar);
@@ -1486,7 +1505,7 @@ mod effective_project_tests {
     }
 
     #[tokio::test]
-    async fn primary_project_controls_composed_write_and_cannot_disable_trusted_checker() {
+    async fn selected_project_controls_composed_write_and_cannot_disable_trusted_checker() {
         {
             let cwd = tempfile::tempdir().unwrap();
             let primary = tempfile::tempdir().unwrap();
@@ -1514,10 +1533,7 @@ mod effective_project_tests {
             for (id, root) in [("a", &repo_a), ("b", &repo_b)] {
                 sidebar.add_project(ProjectId::new(id), id, root).unwrap();
             }
-            sidebar.select_project(&ProjectId::new("a")).unwrap();
-            sidebar
-                .set_primary_project(Some(ProjectId::new("b")))
-                .unwrap();
+            sidebar.select_project(&ProjectId::new("b")).unwrap();
             let (root, mut load_options) = effective_project_context(&sidebar, &repo_a);
             assert_eq!(root, repo_b);
             load_options.user_config_dir = Some(trusted.path().to_path_buf());

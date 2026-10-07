@@ -9,7 +9,7 @@ mod completion_relay;
 mod output;
 mod project;
 mod questions;
-pub use project::ProjectModelResolver;
+pub use project::{ProjectModelResolver, ProjectSlugResolver};
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
@@ -110,6 +110,7 @@ pub(crate) struct Shared {
     pub(crate) active_project_root: Mutex<Option<PathBuf>>,
     pub(crate) projects: Mutex<HashMap<PathBuf, Arc<project::ProjectContext>>>,
     pub(crate) project_models: OnceLock<project::ProjectModelResolver>,
+    pub(crate) project_slugs: OnceLock<project::ProjectSlugResolver>,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -379,6 +380,7 @@ impl AgentRuntime {
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
+                project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -659,6 +661,7 @@ impl AgentRuntime {
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
+                project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),

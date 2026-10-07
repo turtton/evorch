@@ -4,7 +4,7 @@ use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::folder_picker::FolderPicker;
 use gui::model::project_dialog::ProjectDialog;
-use gui::panes::project_dialog::{DIRECTORY_LABEL, NAME_LABEL, PATH_LABEL, PRIMARY_LABEL};
+use gui::panes::project_dialog::{DIRECTORY_LABEL, NAME_LABEL, PATH_LABEL};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use workspace_ui::{AllowedDirectory, ProjectId, SidebarState, TrustState};
@@ -282,32 +282,4 @@ fn browse_fills_directory_draft_in_settings_modal() {
         panic!("settings modal must stay open");
     };
     assert_eq!(directory, &picked.display().to_string());
-}
-
-#[test]
-fn settings_modal_toggles_primary_project_and_persists() {
-    // Given: a persisted project that is not primary.
-    let temp = tempfile::tempdir().expect("temp dir");
-    let save = temp.path().join("sidebar.json");
-    let mut harness = typing_harness(
-        state(MockSource::default(), sidebar_with_project(temp.path()))
-            .with_sidebar_path(save.clone()),
-    );
-    harness.run_steps(4);
-    click(&mut harness, "Project settings");
-    // When: the operator checks Primary project.
-    click(&mut harness, PRIMARY_LABEL);
-    // Then: the project becomes primary and that is persisted.
-    let demo = Some(ProjectId::new("demo"));
-    assert_eq!(harness.state().sidebar().primary_project, demo);
-    assert_eq!(
-        workspace_ui::load_sidebar(&save)
-            .expect("saved sidebar")
-            .primary_project,
-        demo
-    );
-    // When: the operator unchecks it again.
-    click(&mut harness, PRIMARY_LABEL);
-    // Then: no project is primary.
-    assert_eq!(harness.state().sidebar().primary_project, None);
 }

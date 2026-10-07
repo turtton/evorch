@@ -60,6 +60,8 @@ pub struct RuntimeCommandSink {
     stopped_by_us: BTreeSet<String>,
     goal_projects: BTreeMap<String, String>,
     chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
+    /// Project each thread last submitted from, for host follow-ups that carry none.
+    thread_roots: BTreeMap<String, PathBuf>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     events_tx: std::sync::mpsc::Sender<LoopEvent>,
     events_rx: std::sync::mpsc::Receiver<LoopEvent>,
@@ -102,6 +104,7 @@ impl RuntimeCommandSink {
             stopped_by_us: BTreeSet::new(),
             goal_projects: BTreeMap::new(),
             chat_permits: BTreeMap::new(),
+            thread_roots: BTreeMap::new(),
             ownership: None,
             events_tx,
             events_rx,
@@ -441,6 +444,7 @@ impl RuntimeCommandSink {
                 let mut events = self.submit_authorized(
                     WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
                         fork_seed: None,
+                        project_root: None,
                         thread_id,
                         text,
                         images: Vec::new(),
@@ -699,6 +703,7 @@ impl RuntimeCommandSink {
                 initial.initial_thread_goal = Some((objective, criteria));
                 let mut events = self.submit_chat_config(
                     crate::model::commands::ChatSubmission {
+                        project_root: submission.project_root.clone(),
                         thread_id: thread_id.clone(),
                         text: prompt,
                         composer_role: crate::model::composer::ComposerRole::Orchestrator,
@@ -766,6 +771,7 @@ impl RuntimeCommandSink {
             WorkbenchCommand::ContinueChat(continuation) => self.submit_chat(
                 crate::model::commands::ChatSubmission {
                     fork_seed: None,
+                    project_root: continuation.project_root,
                     thread_id: continuation.thread_id,
                     composer_role: continuation.composer_role,
                     model_preference: continuation.model_preference,
@@ -866,9 +872,16 @@ impl RuntimeCommandSink {
         submission: crate::model::commands::ChatSubmission,
         permit: Option<runtime::ownership::OwnerPermit>,
         resume_only: bool,
-        initial: RunConfig,
+        mut initial: RunConfig,
     ) -> Vec<LoopEvent> {
         let thread_id = submission.thread_id;
+        // New runs of a thread work in its project, even after the active project moved.
+        if let Some(root) = submission.project_root {
+            self.thread_roots.insert(thread_id.clone(), root);
+        }
+        if initial.project_root.is_none() {
+            initial.project_root = self.thread_roots.get(&thread_id).cloned();
+        }
         if resume_only {
             if !self.chat_runs.contains_key(&thread_id) && !self.goal_runs.contains_key(&thread_id)
             {
@@ -1265,6 +1278,7 @@ mod tests {
     ) -> GoalSubmission {
         GoalSubmission {
             delegation_value: None,
+            project_root: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
             goal: goal.into(),
@@ -1310,9 +1324,22 @@ mod tests {
         AgentRuntime,
         SupervisorHandle,
     ) {
+        build_sink_with(rt, model, |runtime| runtime)
+    }
+
+    fn build_sink_with(
+        rt: tokio::runtime::Runtime,
+        model: Arc<dyn AgentModel>,
+        configure: impl FnOnce(AgentRuntime) -> AgentRuntime,
+    ) -> (
+        tokio::runtime::Runtime,
+        RuntimeCommandSink,
+        AgentRuntime,
+        SupervisorHandle,
+    ) {
         let bus = Arc::new(EventBus::new(64));
         let executor = Arc::new(ToolExecutor::new(bus.clone()));
-        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+        let runtime = configure(AgentRuntime::new(Arc::clone(&bus), executor, model));
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -1601,6 +1628,7 @@ mod tests {
 
     fn chat_command(thread: &str) -> WorkbenchCommand {
         WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            project_root: None,
             fork_seed: None,
             composer_role: crate::model::composer::ComposerRole::Orchestrator,
             images: Vec::new(),
@@ -1612,6 +1640,7 @@ mod tests {
 
     fn continue_command(thread: &str) -> WorkbenchCommand {
         WorkbenchCommand::ContinueChat(crate::model::commands::ChatContinuation {
+            project_root: None,
             thread_id: thread.into(),
             composer_role: crate::model::composer::ComposerRole::Worker,
             model_preference: None,
@@ -2002,6 +2031,7 @@ mod tests {
         let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(WorkbenchCommand::SendChat(
             crate::model::commands::ChatSubmission {
+                project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Orchestrator,
                 images: Vec::new(),
@@ -2542,6 +2572,7 @@ mod tests {
         // Given: a model that holds the run until cancellation.
         let (rt, mut sink, runtime, _) = build_sink();
         let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            project_root: None,
             fork_seed: None,
             composer_role: crate::model::composer::ComposerRole::Worker,
             images: Vec::new(),
@@ -2563,6 +2594,58 @@ mod tests {
         assert_ne!(sink.chat_runs["chat-thread"], first);
         let phase = rt.block_on(async { runtime.wait(first).await.expect("run exists") });
         assert_eq!(phase, event_bus::AgentRunPhase::Error);
+    }
+
+    // A thread's chats work in its project even while another project is active,
+    // including host follow-ups that carry no project of their own.
+    #[test]
+    fn chat_runs_bind_the_thread_project_instead_of_the_active_one() {
+        let (thread_project, active_project) =
+            (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let resolved = Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+        let record = Arc::clone(&resolved);
+        let (rt, mut sink, runtime, _) = build_sink_with(
+            tokio::runtime::Runtime::new().unwrap(),
+            Arc::new(HeldModel::default()),
+            |runtime| {
+                runtime.with_project_models(Arc::new(move |root| {
+                    record.lock().unwrap().push(root.to_path_buf());
+                    None
+                }))
+            },
+        );
+        runtime
+            .set_project_root(active_project.path().to_path_buf())
+            .unwrap();
+        let chat = |project_root| {
+            WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                project_root,
+                fork_seed: None,
+                composer_role: crate::model::composer::ComposerRole::Worker,
+                images: Vec::new(),
+                thread_id: "chat-thread".into(),
+                text: "hello".into(),
+                model_preference: None,
+            })
+        };
+
+        sink.submit(chat(Some(thread_project.path().to_path_buf())));
+        let first = sink.chat_runs["chat-thread"];
+        sink.submit(WorkbenchCommand::CancelChat {
+            thread_id: "chat-thread".into(),
+        });
+        sink.submit(chat(None));
+        let second = sink.chat_runs["chat-thread"];
+
+        assert_ne!(first, second);
+        assert_eq!(*resolved.lock().unwrap(), [thread_project.path()]);
+        sink.submit(WorkbenchCommand::CancelChat {
+            thread_id: "chat-thread".into(),
+        });
+        rt.block_on(async {
+            runtime.wait(first).await.unwrap();
+            runtime.wait(second).await.unwrap();
+        });
     }
 
     #[test]

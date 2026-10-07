@@ -236,6 +236,13 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: ReviewMode) -> Self {
+        Self::with_runtime(mode, |runtime| runtime)
+    }
+
+    fn with_runtime(
+        mode: ReviewMode,
+        configure: impl FnOnce(AgentRuntime) -> AgentRuntime,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("memory.db"),
@@ -252,7 +259,7 @@ impl Fixture {
             bus.clone(),
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
         ));
-        let runtime = AgentRuntime::new(bus, executor, model.clone())
+        let runtime = configure(AgentRuntime::new(bus, executor, model.clone()))
             .with_sequential_run_ids()
             .with_run_store(RunStore::open(&config, store.handle()).unwrap())
             .with_learning(runtime::memory_queue::LearningSettings {
@@ -275,11 +282,13 @@ impl Fixture {
     }
 
     async fn start(&self) -> RunId {
-        let run = self.runtime.delegate_background(
-            Role::Worker,
-            "Complete bounded work".into(),
-            RunConfig::default(),
-        );
+        self.start_with(RunConfig::default()).await
+    }
+
+    async fn start_with(&self, config: RunConfig) -> RunId {
+        let run =
+            self.runtime
+                .delegate_background(Role::Worker, "Complete bounded work".into(), config);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), self.runtime.wait(run))
                 .await
@@ -298,9 +307,13 @@ impl Fixture {
     }
 
     fn entries(&self) -> Vec<storage::memory::MemoryEntry> {
+        self.entries_in("p")
+    }
+
+    fn entries_in(&self, project: &str) -> Vec<storage::memory::MemoryEntry> {
         Database::open(&self.config)
             .unwrap()
-            .search_memory("p", "", None)
+            .search_memory(project, "", None)
             .unwrap()
     }
 }
@@ -318,6 +331,32 @@ async fn typed_approval_promotes_despite_non_json_final_text() {
         3,
         "learning must not recurse"
     );
+}
+
+// Lessons are partitioned by the project the run worked in, not the startup one.
+#[tokio::test]
+async fn lessons_land_in_the_project_the_run_worked_in() {
+    let fixture = Fixture::with_runtime(ReviewMode::Approve, |runtime| {
+        runtime.with_project_slugs(Arc::new(|root| {
+            format!("slug:{}", root.file_name().unwrap().to_string_lossy())
+        }))
+    });
+    let project = tempfile::tempdir().unwrap();
+    let slug = format!(
+        "slug:{}",
+        project.path().file_name().unwrap().to_string_lossy()
+    );
+
+    let source = fixture
+        .start_with(RunConfig {
+            project_root: Some(project.path().to_path_buf()),
+            ..RunConfig::default()
+        })
+        .await;
+
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert_eq!(fixture.entries_in(&slug).len(), 1);
+    assert!(fixture.entries().is_empty());
 }
 
 #[tokio::test]
