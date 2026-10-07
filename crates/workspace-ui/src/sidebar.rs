@@ -52,7 +52,21 @@ impl SidebarState {
             name: name.into(),
             repo_root,
             allowed_directories: Vec::new(),
+            trust: TrustState::Unapproved,
         });
+        Ok(())
+    }
+
+    pub fn set_project_trust(
+        &mut self,
+        id: &ProjectId,
+        trust: TrustState,
+    ) -> Result<(), ProjectError> {
+        self.projects
+            .iter_mut()
+            .find(|project| &project.id == id)
+            .ok_or(ProjectError::UnknownProject)?
+            .trust = trust;
         Ok(())
     }
 

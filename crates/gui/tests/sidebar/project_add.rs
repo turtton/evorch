@@ -56,13 +56,18 @@ fn add_modal_expands_tilde_registers_persists_and_closes() {
         .with_home_dir(home)
         .with_sidebar_path(save.clone());
     let mut harness = typing_harness(workbench);
-    // When: the operator opens the add modal, types a tilde path and presses Add.
+    // When: the operator opens the add modal, types a tilde path, presses Add and declines trust.
     click(&mut harness, "Add project");
     type_into(&mut harness, PATH_LABEL, "~/repo");
     click(&mut harness, "Add");
-    // Then: the canonical home-relative root is registered, persisted and the modal closes.
+    click(&mut harness, "Add without trust");
+    // Then: the canonical home-relative root is registered untrusted, persisted and the modal closes.
     let canonical = repo.canonicalize().expect("canonical repo");
     assert_eq!(harness.state().sidebar().projects[0].repo_root, canonical);
+    assert_eq!(
+        harness.state().sidebar().projects[0].trust,
+        TrustState::Unapproved
+    );
     assert_eq!(
         workspace_ui::load_sidebar(&save)
             .expect("saved sidebar")
@@ -71,6 +76,90 @@ fn add_modal_expands_tilde_registers_persists_and_closes() {
         canonical
     );
     assert_eq!(harness.state().project_dialog(), &ProjectDialog::Closed);
+}
+
+#[derive(Clone, Default)]
+struct TrustSink(Arc<std::sync::Mutex<Vec<(PathBuf, bool)>>>);
+
+impl gui::model::commands::CommandSink for TrustSink {
+    fn set_project_trust(&mut self, root: PathBuf, trusted: bool) {
+        self.0.lock().expect("declared trust").push((root, trusted));
+    }
+
+    fn submit(
+        &mut self,
+        _: gui::model::commands::WorkbenchCommand,
+    ) -> Vec<gui::model::commands::LoopEvent> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn add_reviews_project_overrides_and_trust_reaches_the_runtime() {
+    // Given: a repository that selects a role profile and ships rules and a skill.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".evorch/skills/release")).expect("skill directory");
+    std::fs::write(
+        repo.join(".evorch/skills/release/SKILL.md"),
+        "---\nname: release\n---\n",
+    )
+    .expect("skill");
+    std::fs::write(repo.join("AGENTS.md"), "rules").expect("rules");
+    config::save_project_role_profile(&repo, Some("fast")).expect("profile");
+    let sink = TrustSink::default();
+    let save = temp.path().join("sidebar.json");
+    let workbench = state(MockSource::default(), SidebarState::default())
+        .with_sidebar_path(save.clone())
+        .with_command_sink(Box::new(sink.clone()));
+    let mut harness = typing_harness(workbench);
+
+    // When: the path is submitted.
+    click(&mut harness, "Add project");
+    type_into(&mut harness, PATH_LABEL, &repo.display().to_string());
+    click(&mut harness, "Add");
+
+    // Then: nothing is registered yet and each override is listed.
+    assert!(harness.state().sidebar().projects.is_empty());
+    for label in ["Role profile: fast", "Rules: AGENTS.md", "Skills: release"] {
+        harness.get_by_label(label);
+    }
+
+    // When: the operator trusts it.
+    click(&mut harness, "Trust and add");
+
+    // Then: it is registered trusted, persisted, and the runtime is told.
+    let root = repo.canonicalize().expect("canonical repo");
+    assert_eq!(
+        harness.state().sidebar().projects[0].trust,
+        TrustState::Approved
+    );
+    assert_eq!(
+        workspace_ui::load_sidebar(&save)
+            .expect("saved sidebar")
+            .projects[0]
+            .trust,
+        TrustState::Approved
+    );
+    assert_eq!(
+        *sink.0.lock().expect("declared trust"),
+        [(root.clone(), true)]
+    );
+    assert_eq!(harness.state().project_dialog(), &ProjectDialog::Closed);
+
+    // When: trust is withdrawn from the project settings.
+    click(&mut harness, "Project settings");
+    click(&mut harness, gui::panes::project_dialog::TRUST_LABEL);
+
+    // Then: the runtime stops loading the project's own instructions.
+    assert_eq!(
+        harness.state().sidebar().projects[0].trust,
+        TrustState::Unapproved
+    );
+    assert_eq!(
+        *sink.0.lock().expect("declared trust"),
+        [(root.clone(), true), (root, false)]
+    );
 }
 
 #[test]
@@ -117,6 +206,8 @@ fn browse_fills_add_modal_and_add_registers_selected_folder() {
         }
     );
     harness.click_label("Add");
+    harness.run();
+    harness.click_label("Add without trust");
     harness.run();
     assert_eq!(
         harness.state().sidebar().projects[0].repo_root,
@@ -282,4 +373,33 @@ fn browse_fills_directory_draft_in_settings_modal() {
         panic!("settings modal must stay open");
     };
     assert_eq!(directory, &picked.display().to_string());
+}
+
+#[test]
+#[ignore = "writes native offscreen project review evidence"]
+fn capture_project_review() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join(".evorch/skills/release")).expect("skills");
+    std::fs::write(
+        temp.path().join(".evorch/skills/release/SKILL.md"),
+        "---\nname: release\n---\n",
+    )
+    .expect("skill");
+    std::fs::write(temp.path().join("AGENTS.md"), "rules").expect("rules");
+    config::save_project_role_profile(temp.path(), Some("fast")).expect("profile");
+    let workbench = state(MockSource::default(), SidebarState::default())
+        .with_folder_picker(Arc::new(ScriptedFolderPicker(Ok(Some(temp.path().into())))));
+    let mut harness = HeadlessWorkbench::new(workbench, [1000.0, 700.0]);
+    harness.run();
+    harness.click_label("Add project");
+    harness.run();
+    harness.click_label("Browse…");
+    harness.run();
+    harness.click_label("Add");
+    harness.run();
+    harness
+        .capture()
+        .expect("capture")
+        .save_png(std::path::Path::new("/tmp/opencode/project-review.png"))
+        .expect("save");
 }

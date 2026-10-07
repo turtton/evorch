@@ -13,7 +13,33 @@ use crate::model::commands::{LoopEvent, MergeDecision, WorkbenchCommand};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Tells the runtime which projects' own instructions it may load, before any run starts.
+    pub(super) fn sync_project_trust(&mut self) {
+        for project in &self.sidebar.projects {
+            if self.declared_trust.get(&project.repo_root) != Some(&project.trust) {
+                self.sink.set_project_trust(
+                    project.repo_root.clone(),
+                    project.trust == TrustState::Approved,
+                );
+                self.declared_trust
+                    .insert(project.repo_root.clone(), project.trust);
+            }
+        }
+    }
+
+    pub fn set_project_trust(
+        &mut self,
+        project_id: &ProjectId,
+        trust: TrustState,
+    ) -> Result<(), WorkbenchError> {
+        self.sidebar.set_project_trust(project_id, trust)?;
+        self.save_sidebar();
+        self.sync_project_trust();
+        Ok(())
+    }
+
     pub(super) fn sync_shell_cwd(&mut self) -> bool {
+        self.sync_project_trust();
         // The active thread's project hosts the shell and the runtime's active project.
         let cwd = self
             .sidebar

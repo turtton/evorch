@@ -196,6 +196,7 @@ fn sidebar_fixture_types_are_public_and_serializable() {
         name: "One".to_owned(),
         repo_root: "/tmp/project".into(),
         allowed_directories: Vec::new(),
+        trust: TrustState::Unapproved,
     };
     let thread = ThreadRecord::new(ThreadId::new("t1"), project.id.clone(), "Thread");
 
@@ -212,4 +213,22 @@ fn sidebar_fixture_types_are_public_and_serializable() {
 
     // Then: project and thread identity, association, and display fields survive.
     assert_eq!(restored, state);
+}
+
+// Projects saved before trust existed load untrusted until the operator approves them.
+#[test]
+fn projects_saved_without_trust_load_untrusted() {
+    let root = tempfile::tempdir().expect("project root");
+    let root = root.path().canonicalize().expect("canonical root");
+    let json = serde_json::json!({
+        "version": 1,
+        "projects": [{"id": "p1", "name": "One", "repo_root": root, "allowed_directories": []}],
+        "selected_project": null,
+        "threads": [],
+        "active_thread": null,
+    });
+
+    let sidebar = workspace_ui::sidebar_from_json(&json.to_string()).expect("legacy sidebar");
+
+    assert_eq!(sidebar.projects[0].trust, TrustState::Unapproved);
 }

@@ -12,8 +12,12 @@ use crate::skill::{
     SkillDiagnostic, SkillRegistry, SkillScope, discover_with_builtin, repo_skill_dirs,
 };
 
+const fn is_repo_scope(scope: SkillScope) -> bool {
+    matches!(scope, SkillScope::Repo | SkillScope::RepoAgents)
+}
+
 fn replace_repo_dirs(dirs: &mut Vec<(SkillScope, PathBuf)>, repo_root: &Path) {
-    dirs.retain(|(scope, _)| !matches!(scope, SkillScope::Repo | SkillScope::RepoAgents));
+    dirs.retain(|(scope, _)| !is_repo_scope(*scope));
     dirs.splice(0..0, repo_skill_dirs(repo_root));
 }
 
@@ -104,12 +108,12 @@ impl SkillCatalogSource {
     /// 発見診断は直前の集合 (順序を含む) と異なる場合にのみ全件発行する。
     /// catalog 構築失敗は試行ごとに通知し、正常な catalog がまだ無ければ None を返す。
     pub fn snapshot(&self) -> SourceSnapshot {
-        self.snapshot_for(None)
+        self.snapshot_for(None, true)
     }
 
     /// [`Self::snapshot`] with repository skills discovered under `repo_root`
     /// instead of the configured repository, for runs bound to another project.
-    pub fn snapshot_for(&self, repo_root: Option<&Path>) -> SourceSnapshot {
+    pub fn snapshot_for(&self, repo_root: Option<&Path>, repo_skills: bool) -> SourceSnapshot {
         let (snapshot, diagnostics, error) = {
             let mut state = self
                 .state
@@ -120,7 +124,9 @@ impl SkillCatalogSource {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let Some(repo_root) = repo_root {
+            if !repo_skills {
+                skill_dirs.retain(|(scope, _)| !is_repo_scope(*scope));
+            } else if let Some(repo_root) = repo_root {
                 replace_repo_dirs(&mut skill_dirs, repo_root);
             }
             let registry = Arc::new(discover_with_builtin(&skill_dirs));

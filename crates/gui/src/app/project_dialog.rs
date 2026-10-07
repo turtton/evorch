@@ -51,7 +51,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// A picked folder only fills the open form; registration waits for its Add button.
     pub(super) fn apply_picked_folder(&mut self, picked: Result<Option<PathBuf>, String>) {
         let (path, error) = match &mut self.project_dialog {
-            ProjectDialog::Closed => return,
+            ProjectDialog::Closed | ProjectDialog::Review { .. } => return,
             ProjectDialog::Add { path, error } => (path, error),
             ProjectDialog::Settings {
                 directory, error, ..
@@ -84,11 +84,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ctx.request_repaint();
                 self.folder_picker.start()
             }
-            ProjectDialogAction::Add(path) => {
-                self.add_project(path).map_err(error_text).map(|_| {
-                    self.save_sidebar();
-                    self.project_dialog = ProjectDialog::Closed;
-                })
+            ProjectDialogAction::Review(path) => self.review_project(&path),
+            ProjectDialogAction::Confirm { path, trust } => self
+                .add_project(path)
+                .and_then(|project| self.set_project_trust(&project, trust))
+                .map_err(error_text)
+                .map(|()| self.project_dialog = ProjectDialog::Closed),
+            ProjectDialogAction::Back => {
+                if let ProjectDialog::Review { path, .. } = &self.project_dialog {
+                    self.project_dialog = ProjectDialog::Add {
+                        path: path.display().to_string(),
+                        error: None,
+                    };
+                }
+                Ok(())
+            }
+            ProjectDialogAction::SetProjectTrust { project, trust } => {
+                self.set_project_trust(&project, trust).map_err(error_text)
             }
             ProjectDialogAction::Rename { project, name } => {
                 self.rename_project(&project, &name).map_err(error_text)
@@ -121,6 +133,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Shows what a project at `path` overrides before registering it.
+    fn review_project(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let path = crate::model::project_path::expand_tilde(path, self.home_dir.as_deref())
+            .map_err(|error| error.to_string())?;
+        if !path.is_dir() {
+            return Err(format!("{} is not a directory", path.display()));
+        }
+        let overrides = crate::model::project_dialog::ProjectOverrides::read(&path);
+        self.project_dialog = ProjectDialog::Review {
+            path,
+            overrides,
+            error: None,
+        };
+        Ok(())
+    }
+
     /// Writes the selection to the project's config and recomposes when it is the active one.
     pub fn set_project_role_profile(
         &mut self,

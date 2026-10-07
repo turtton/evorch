@@ -273,6 +273,17 @@ impl CommandSink for RuntimeCommandSink {
         Ok(())
     }
 
+    fn set_project_trust(&mut self, root: PathBuf, trusted: bool) {
+        self.runtime.set_project_trust(
+            root,
+            if trusted {
+                runtime::ProjectTrust::Approved
+            } else {
+                runtime::ProjectTrust::Unapproved
+            },
+        );
+    }
+
     fn start_background_run(&self, text: String) -> Option<RunId> {
         Some(RuntimeCommandSink::start_background_run(self, text))
     }
