@@ -837,7 +837,8 @@ impl AgentRuntime {
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
         if parent.is_none()
-            && matches!(continuation, RunContinuation::Restored(_))
+            && (matches!(&continuation, RunContinuation::Restored(_))
+                || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()))
             && let Some(intent) = intents.get_mut(&run_id)
         {
             intent.cancelled = false;
@@ -860,7 +861,7 @@ impl AgentRuntime {
         let run = if self.shared.model_for(&config).requires_admission() {
             self.admit_run(run_id, parent, role, prompt, config, continuation)
         } else {
-            self.register_run(run_id, parent, role, prompt, config, continuation)
+            self.register_without_admission(run_id, parent, role, prompt, config, continuation)
         };
         if cancelled {
             let _ = self.cancel(run);
@@ -882,7 +883,10 @@ impl AgentRuntime {
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
             RunContinuation::Awaited => (None, None),
-            RunContinuation::Handoff(handoff) => (Some(handoff), None),
+            RunContinuation::Handoff(mut handoff) => {
+                let restored = handoff.restored.take();
+                (Some(handoff), restored)
+            }
             RunContinuation::Restored(restored) => (None, Some(restored)),
         };
         if config.budget == crate::budget_tracker::BudgetSettings::default()
@@ -1014,9 +1018,6 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id, review_run);
-        let escalation_link = handoff
-            .as_ref()
-            .map(|handoff| (handoff.source_run_id, handoff.summary.clone()));
         let prompt = match &config.memory {
             Some(memory) if handoff.is_none() => memory.augment(prompt),
             Some(_) | None => prompt,
@@ -1100,15 +1101,6 @@ impl AgentRuntime {
                 _join: None,
             },
         );
-        if let Some((source_run_id, summary)) = escalation_link {
-            self.shared
-                .bus
-                .emit(Event::new(LifecycleEvent::EscalationRequested {
-                    source_run_id: source_run_id.to_string(),
-                    new_run_id: run_id.to_string(),
-                    summary,
-                }));
-        }
         if task.restored.is_some() {
             self.shared
                 .bus
@@ -1205,9 +1197,8 @@ impl AgentRuntime {
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
         let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
-        let config = RunConfig {
+        let mut config = RunConfig {
             budget: source_config.budget.clone(),
-            ownership: source_config.ownership.clone(),
             interactive: carries_thread_goal && source_config.interactive,
             keep_alive: carries_thread_goal && source_config.keep_alive,
             name: Some("escalation-orchestrator".to_string()),
@@ -1216,6 +1207,11 @@ impl AgentRuntime {
             workspace_mode: source_config.workspace_mode,
             merge_mode: source_config.merge_mode,
             workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
+            project_root: source_config.project_root.clone().or_else(|| {
+                worktree
+                    .as_ref()
+                    .map(|owned| owned.repo_root().to_path_buf())
+            }),
             ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
@@ -1240,33 +1236,58 @@ impl AgentRuntime {
                     question: question.clone(),
                 }));
         }
-        // Detach before public terminal state permits a new incarnation of
-        // source_run_id. The adopter must never clear the source entry later.
-        if let Some(owned) = worktree.as_ref()
-            && let Some(source) = self
-                .shared
-                .workspaces
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get_mut(&source_run_id)
-            && source.worktree_path.as_ref() == Some(&owned.path)
-        {
-            source.worktree_path = None;
-            source.active_root = None;
-        }
-        self.transfer_thread_goal_root(source_run_id, run_id)?;
-        before_spawn();
         let summary = memo.summary();
+        let prompt = crate::escalation::prompt::render_escalation_prompt(&memo, &questions);
+        crate::restore::persist_escalation_seed(
+            self,
+            run_id,
+            source_run_id,
+            &prompt,
+            &config,
+            worktree.as_ref(),
+            source_config.ownership.is_some(),
+        )
+        .map_err(|error| error.to_string())?;
+        config.ownership = self.handoff_thread_goal(
+            source_run_id,
+            run_id,
+            source_config.ownership.as_ref(),
+            |owner| {
+                self.reserve_admission(run_id, None, owner.clone());
+                // No fallible work remains. Detach before the public terminal
+                // state allows a new incarnation of the source conversation.
+                if let Some(owned) = worktree.as_ref()
+                    && let Some(source) = self
+                        .shared
+                        .workspaces
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(&source_run_id)
+                    && source.worktree_path.as_ref() == Some(&owned.path)
+                {
+                    source.worktree_path = None;
+                    source.active_root = None;
+                }
+                before_spawn();
+                self.shared
+                    .bus
+                    .emit(Event::new(LifecycleEvent::EscalationRequested {
+                        source_run_id: source_run_id.to_string(),
+                        new_run_id: run_id.to_string(),
+                        summary,
+                    }));
+            },
+        )?;
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,
             Role::Orchestrator,
-            crate::escalation::prompt::render_escalation_prompt(&memo, &questions),
+            prompt,
             config,
             RunContinuation::Handoff(RunHandoff {
                 source_run_id,
                 worktree: worktree.take(),
-                summary,
+                restored: None,
             }),
         ))
     }

@@ -22,6 +22,9 @@ pub(crate) struct ThreadGoals {
     roots: HashMap<RunId, String>,
     requests: HashMap<RunId, String>,
     goals: HashMap<String, GoalEntry>,
+    // Only descendants alive at a handoff retain its budget. Reusing the old
+    // root RunId for a later user conversation must not inherit that budget.
+    inherited_runs: HashMap<RunId, RunId>,
 }
 
 pub(crate) struct GoalEntry {
@@ -58,6 +61,22 @@ impl AgentRuntime {
         {
             return Err("only a root run can own a thread goal".into());
         }
+        let previous_root = self
+            .thread_goal(thread_id)
+            .and_then(|goal| crate::meta::parse_run_id(&goal.root_run_id).ok())
+            .filter(|previous| *previous != run_id);
+        let mut inherited =
+            previous_root.map_or_else(Vec::new, |previous| self.live_descendants(previous));
+        if let Some(previous) = previous_root
+            && self.inspect_agent(previous).is_ok_and(|run| {
+                matches!(
+                    run.phase,
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            })
+        {
+            inherited.push(previous);
+        }
         let mut goals = self.goal_lock();
         if goals
             .roots
@@ -80,6 +99,17 @@ impl AgentRuntime {
         }
         goals.roots.retain(|_, thread| thread != thread_id);
         goals.roots.insert(run_id, thread_id.into());
+        goals.inherited_runs.remove(&run_id);
+        if let Some(previous) = previous_root {
+            for owner in goals.inherited_runs.values_mut() {
+                if *owner == previous {
+                    *owner = run_id;
+                }
+            }
+            for run in inherited {
+                goals.inherited_runs.insert(run, run_id);
+            }
+        }
         if let Some(entry) = goals.goals.get_mut(thread_id) {
             let changed =
                 entry.snapshot.root_run_id != run_id.to_string() || entry.snapshot.work_stopped;
@@ -247,6 +277,35 @@ impl AgentRuntime {
             snapshot.checks.clear();
         }
         let mut goals = self.goal_lock();
+        // A newer handoff may already have been restored before an older
+        // source snapshot. Its recorded lineage makes that source obsolete.
+        if goals.goals.values().any(|entry| {
+            entry.snapshot.goal_id == snapshot.goal_id
+                && entry.snapshot.thread_id != snapshot.thread_id
+                && entry
+                    .snapshot
+                    .related_root_run_ids
+                    .contains(&snapshot.root_run_id)
+                && !snapshot
+                    .related_root_run_ids
+                    .contains(&entry.snapshot.root_run_id)
+        }) {
+            return Ok(());
+        }
+        let replaced_threads: Vec<_> = goals
+            .goals
+            .iter()
+            .filter_map(|(thread, entry)| {
+                (thread == &snapshot.thread_id || entry.snapshot.goal_id == snapshot.goal_id)
+                    .then_some(thread.clone())
+            })
+            .collect();
+        goals
+            .roots
+            .retain(|_, thread| !replaced_threads.contains(thread));
+        for thread in replaced_threads {
+            goals.goals.remove(&thread);
+        }
         goals.roots.insert(root, snapshot.thread_id.clone());
         self.publish_thread_goal(&snapshot);
         goals.goals.insert(
@@ -357,36 +416,117 @@ impl AgentRuntime {
         self.goal_lock().roots.get(&root).cloned()
     }
 
-    pub(crate) fn transfer_thread_goal_root(
+    pub(crate) fn trusted_thread_request(&self, root: RunId) -> Option<String> {
+        self.goal_lock().requests.get(&root).cloned()
+    }
+
+    pub(crate) fn remember_thread_request(&self, root: RunId, request: &str) {
+        self.goal_lock()
+            .requests
+            .insert(root, bounded(request, MAX_TEXT));
+    }
+
+    /// Commit the trusted handoff with no fallible work after public terminal
+    /// state. Holding the goal lock also keeps old descendants' usage events
+    /// behind the child-thread creation event emitted by `before_transfer`.
+    pub(crate) fn handoff_thread_goal(
         &self,
         source: RunId,
         target: RunId,
-    ) -> Result<(), String> {
-        let Some(thread) = self.goal_thread(source) else {
-            return Ok(());
+        source_owner: Option<&crate::ownership::OwnerPermit>,
+        before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
+    ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        let descendants = self.live_descendants(source);
+        let child_thread = event_bus::escalation_thread_id(&target.to_string());
+        let prepare = || {
+            let goals = self.goal_lock();
+            if goals.roots.contains_key(&target)
+                || goals.goals.contains_key(&child_thread)
+                || goals.roots.values().any(|thread| thread == &child_thread)
+            {
+                return Err("escalation target thread already exists".into());
+            }
+            if let Some(entry) = goals
+                .roots
+                .get(&source)
+                .and_then(|thread| goals.goals.get(thread))
+                && !entry
+                    .snapshot
+                    .related_root_run_ids
+                    .contains(&source.to_string())
+                && entry.snapshot.related_root_run_ids.len() >= 128
+            {
+                return Err("goal root handoff limit reached".into());
+            }
+            Ok(goals)
         };
-        let request = self.goal_lock().requests.get(&source).cloned();
-        self.bind_thread_root(&thread, target)?;
-        if let Some(request) = request {
-            self.goal_lock().requests.insert(target, request);
+        // Acquire ownership before the goal mutex, matching GUI controls. The
+        // registry commits its exclusive transaction before any event is emitted.
+        let (owner, mut goals) = match source_owner {
+            Some(permit) => {
+                let (owner, goals) = permit.prepare_child(&child_thread, prepare)?;
+                (Some(owner), goals)
+            }
+            None => (None, prepare()?),
+        };
+        let source_thread = goals.roots.get(&source).cloned();
+        before_transfer(&owner);
+        goals.roots.insert(target, child_thread.clone());
+        if let Some(request) = goals.requests.remove(&source) {
+            goals.requests.insert(target, request);
         }
-        Ok(())
+        if let Some(thread) = source_thread
+            && let Some(mut entry) = goals.goals.remove(&thread)
+        {
+            goals.roots.remove(&source);
+            for owner in goals.inherited_runs.values_mut() {
+                if *owner == source {
+                    *owner = target;
+                }
+            }
+            for descendant in descendants {
+                goals.inherited_runs.insert(descendant, target);
+            }
+            entry.snapshot.thread_id = child_thread.clone();
+            entry.snapshot.root_run_id = target.to_string();
+            if !entry
+                .snapshot
+                .related_root_run_ids
+                .contains(&source.to_string())
+            {
+                entry.snapshot.related_root_run_ids.push(source.to_string());
+            }
+            let reviewer = entry.reviewer.take();
+            if entry.snapshot.phase != ThreadGoalPhase::Complete {
+                invalidate(&mut entry);
+            }
+            self.publish_thread_goal(&entry.snapshot);
+            goals.goals.insert(child_thread, entry);
+            drop(goals);
+            self.cancel_goal_reviewer(reviewer);
+        }
+        Ok(owner)
+    }
+
+    #[cfg(test)]
+    fn transfer_thread_goal_root(&self, source: RunId, target: RunId) -> Result<(), String> {
+        self.handoff_thread_goal(source, target, None, |_| {})
+            .map(|_| ())
     }
 
     pub(crate) fn goal_owner_for_run(&self, run: RunId) -> Option<RunId> {
         let roots = {
             let goals = self.goal_lock();
             let mut roots = HashMap::new();
-            for (root, thread) in &goals.roots {
+            for root in goals.roots.keys() {
                 roots.insert(*root, *root);
-                if let Some(entry) = goals.goals.get(thread) {
-                    for related in &entry.snapshot.related_root_run_ids {
-                        if let Ok(previous) = crate::meta::parse_run_id(related) {
-                            roots.insert(previous, *root);
-                        }
-                    }
-                }
             }
+            roots.extend(
+                goals
+                    .inherited_runs
+                    .iter()
+                    .map(|(run, owner)| (*run, *owner)),
+            );
             roots
         };
         let runs = self.list_agents();
@@ -405,21 +545,21 @@ impl AgentRuntime {
     pub(crate) fn active_goal_children(&self, root: RunId) -> Vec<RunId> {
         let mut descendants: std::collections::HashSet<_> =
             self.live_descendants(root).into_iter().collect();
-        if let Some(goal) = self.goal_for_root(root) {
-            for related in goal.related_root_run_ids {
-                if let Ok(previous) = crate::meta::parse_run_id(&related) {
-                    descendants.extend(self.live_descendants(previous));
-                    if self.inspect_agent(previous).is_ok_and(|run| {
-                        matches!(
-                            run.phase,
-                            AgentRunPhase::Pending
-                                | AgentRunPhase::Running
-                                | AgentRunPhase::Waiting
-                        )
-                    }) {
-                        descendants.insert(previous);
-                    }
-                }
+        let inherited: Vec<_> = self
+            .goal_lock()
+            .inherited_runs
+            .iter()
+            .filter_map(|(run, owner)| (*owner == root).then_some(*run))
+            .collect();
+        for inherited in inherited {
+            descendants.extend(self.live_descendants(inherited));
+            if self.inspect_agent(inherited).is_ok_and(|run| {
+                matches!(
+                    run.phase,
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            }) {
+                descendants.insert(inherited);
             }
         }
         descendants.remove(&root);
@@ -444,14 +584,7 @@ impl AgentRuntime {
             entry.snapshot.work_stopped = false;
             // Preserve the original request and the newest correction within a bounded record.
             let original = &entry.snapshot.original_request;
-            entry.snapshot.original_request = bounded(
-                &format!(
-                    "{}\nLatest user instruction: {}",
-                    bounded(original, MAX_TEXT / 2),
-                    bounded(text, MAX_TEXT / 2 - 32)
-                ),
-                MAX_TEXT,
-            );
+            entry.snapshot.original_request = continued_request(original, text);
             self.publish_thread_goal(&entry.snapshot);
             reviewer
         };
@@ -612,6 +745,17 @@ fn invalidate(entry: &mut GoalEntry) {
 }
 fn bounded(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+pub(crate) fn continued_request(original: &str, latest: &str) -> String {
+    bounded(
+        &format!(
+            "{}\nLatest user instruction: {}",
+            bounded(original, MAX_TEXT / 2),
+            bounded(latest, MAX_TEXT / 2 - 32)
+        ),
+        MAX_TEXT,
+    )
 }
 fn validate_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() || text.chars().count() > MAX_TEXT {

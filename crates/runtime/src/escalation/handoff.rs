@@ -39,16 +39,19 @@ pub(crate) async fn complete(
     }) {
         Ok(_) => {}
         Err(reason) => {
+            runtime.goal_work_stopped(source_run_id);
             state.shared.bus.emit(Event::new(DiagnosticEvent {
                 source: "escalation_handoff".into(),
                 severity: DiagnosticSeverity::Error,
                 code: "EscalationHandoffFailed".into(),
-                detail: format!("question inheritance failed: {reason}"),
+                detail: format!("escalation preparation failed: {reason}"),
                 run_id: Some(source_run_id.to_string()),
                 thread_id: None,
                 call_id: None,
             }));
-            cleanup_worktree(&state.shared, source_run_id, worktree).await;
+            // Preparation did not detach the source workspace. Retain its
+            // edits and restore metadata so the worker can be continued.
+            drop(worktree);
         }
     }
 }

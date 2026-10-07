@@ -1472,6 +1472,157 @@ async fn proactive_goal_self_check_preserves_wire_prefix_and_cache() {
 }
 
 #[tokio::test]
+async fn escalated_goal_moves_to_child_thread_and_preserves_each_roots_wire_cache() {
+    let call = |id: &str, name: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
+    };
+    let mut harness = harness(
+        vec![
+            call(
+                "goal",
+                "create_goal",
+                json!({"objective":"Research the requested options","criteria":["Explain verified differences"]}),
+            ),
+            call(
+                "handoff",
+                "escalate",
+                json!({"original_request":"Research the requested options","escalation_reason":"Need coordinated research"}),
+            ),
+            text_response("The coordinated comparison is ready"),
+            call(
+                "check",
+                "submit_goal_check",
+                json!({"epoch":2,"checks":[{"criterion":0,"met":true,"evidence":"Comparison cites the original sources"}]}),
+            ),
+            text_response("Verified the coordinated comparison"),
+            text_response("Answered the independent Worker follow-up"),
+        ],
+        1_000_000,
+    );
+    let storage_config = storage::StorageConfig {
+        db_path: harness._directory.path().join("escalated-goal.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let source = harness
+        .runtime
+        .delegate_chat(
+            "escalated-goal-cache",
+            Role::Worker,
+            "Research the requested options".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let mut events = Vec::new();
+    let recipient = loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let target = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => {
+                Some(new_run_id.parse::<RunId>().unwrap())
+            }
+            _ => None,
+        };
+        events.push(event);
+        if let Some(target) = target {
+            break target;
+        }
+    };
+    events.extend(through_phase(&mut harness.receiver, recipient, AgentRunPhase::Done).await);
+    let child_thread = event_bus::escalation_thread_id(&recipient.to_string());
+    assert!(
+        harness
+            .runtime
+            .thread_goal("escalated-goal-cache")
+            .is_none()
+    );
+    let inherited = harness.runtime.thread_goal(&child_thread).unwrap();
+    let original = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+                snapshot,
+            }) if snapshot.thread_id == "escalated-goal-cache" => Some(snapshot),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(inherited.goal_id, original.goal_id);
+    assert_eq!(inherited.phase, event_bus::ThreadGoalPhase::Complete);
+    assert_eq!(inherited.root_run_id, recipient.to_string());
+    assert_eq!(inherited.related_root_run_ids, [source.to_string()]);
+    // The request that creates a goal precedes that goal's accounting boundary.
+    assert_eq!(inherited.usage.model_requests, 4);
+    harness
+        .runtime
+        .continue_goal(
+            source,
+            "Explain an independent Worker question".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, source, AgentRunPhase::Waiting).await);
+    assert!(
+        harness
+            .runtime
+            .thread_goal("escalated-goal-cache")
+            .is_none()
+    );
+    assert_eq!(
+        harness.runtime.thread_goal(&child_thread).unwrap().usage,
+        inherited.usage,
+        "continuing the source conversation must not spend the transferred goal budget"
+    );
+    harness
+        .runtime
+        .stop(source, runtime::StopScope::SelfOnly)
+        .unwrap();
+    harness.runtime.wait(source).await.unwrap();
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(usage.len(), 6);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    assert_ne!(
+        requests[1]["tools"], requests[2]["tools"],
+        "the orchestrator starts at an explicit fresh role/run boundary"
+    );
+    for (previous, next, root) in [
+        (0, 1, source),
+        (2, 3, recipient),
+        (3, 4, recipient),
+        (1, 5, source),
+    ] {
+        assert_eq!(usage[previous].0, &root.to_string());
+        assert_eq!(usage[next].0, &root.to_string());
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+}
+
+#[tokio::test]
 async fn goal_review_repair_preserves_original_roots_wire_prefix_and_cumulative_cache() {
     let call = |id: &str, name: &str, input: Value| {
         ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])

@@ -20,7 +20,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         else {
             return false;
         };
-        let id = ThreadId::new(format!("escalation-{new_run_id}"));
+        let id = ThreadId::new(event_bus::escalation_thread_id(new_run_id));
         let created = !self.sidebar.threads.iter().any(|thread| thread.id == id);
         if created {
             let mut child = ThreadRecord::new(
@@ -84,25 +84,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         created || bound
     }
 
-    pub(super) fn prepare_escalation_thread(&mut self, source_run_id: &str, run_id: &str) {
-        // Live handoff follows the source window's ownership. History replay
-        // projects conversations without acquiring any execution authority.
-        if let (Some(host), Some(parent), Some(child)) = (
-            &self.ownership,
-            self.thread_for_run(source_run_id),
-            self.thread_for_run(run_id),
-        ) && !self.readonly_threads.contains(&parent)
-            && host.owned_permit(&parent).is_ok()
-            && let Err(error) =
-                crate::runtime_sink::finish_chat_start(host, &child, host.start(&child))
-        {
-            self.transcripts.push_to_thread(
-                &child,
-                TranscriptEntry::Notice {
-                    text: format!("write mode を取得できません: {error}"),
-                },
-            );
-        }
+    pub(super) fn prepare_escalation_thread(&mut self, _source_run_id: &str, run_id: &str) {
+        // Runtime acquires the child permit before starting the orchestrator.
+        // Conversation projection, including replay, grants no execution authority.
         let id = PanelId::new(format!("agent-{run_id}"));
         if let Some(path) = self.dock.find_tab(&id) {
             self.dock.remove_tab(path);

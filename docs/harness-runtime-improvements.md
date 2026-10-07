@@ -76,6 +76,33 @@ items must not turn an unanswered question into an assumed agreement. Question
 inheritance and workspace preparation still precede source termination and new
 root startup; failed preparation prevents startup (ADR 0027).
 
+### Escalation conversation and goal ownership
+
+A root Worker escalation starts an Orchestrator in the child conversation
+`escalation-{new_run_id}`. The source conversation retains its Worker root and
+history. The Orchestrator and its delegates belong to the child conversation;
+the source project and transferred workspace remain fixed across UI project
+changes. Runtime prepares the child's ownership permit before starting work.
+History replay reconstructs the conversation without acquiring write authority.
+Preparation failure retains the source workspace. If provider admission fails or
+is stopped, the child's memo and workspace remain available for explicit resume
+with current host authority, including after restart.
+
+An active thread goal moves to the child with the same goal ID, objective,
+original request, criteria, cumulative token usage and token budget. Review and
+pause settings, review rounds and findings also survive. The previous root stays
+in the goal's related roots so remaining work contributes to the same budget.
+Checks and in-progress review results are invalidated for the new root; a blocked
+goal remains blocked. Only the child owns the transferred goal, including after
+event replay and restart. Follow-up in the source conversation starts independent
+Worker work rather than reclaiming the child's goal.
+
+Public handoff events appear in this order: source terminal state,
+`EscalationRequested`, the child's `ThreadGoalUpdated` when a goal exists, and
+`AgentRunStarted`. The new Orchestrator begins a fresh provider context from the
+handoff memo. Subsequent requests within each root retain their existing wire
+prefix and prompt cache contract.
+
 ## Shell execution environment
 
 The shell tool describes its execution boundaries and a general diagnosis rule:

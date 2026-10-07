@@ -17,6 +17,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) =
             &event.kind
         {
+            self.thread_goals.retain(|thread, goal| {
+                thread == &snapshot.thread_id || goal.goal_id != snapshot.goal_id
+            });
             self.thread_goals
                 .insert(snapshot.thread_id.clone(), snapshot.clone());
         }
@@ -136,6 +139,28 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         run_id: &str,
         root: bool,
     ) -> bool {
+        if !self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| thread.id.to_string() == thread_id)
+        {
+            return false;
+        }
+        // A run has one conversation owner, including during replay of a handoff.
+        let mut changed = false;
+        for thread in &mut self.sidebar.threads {
+            if thread.id.to_string() == thread_id {
+                continue;
+            }
+            let count = thread.run_ids.len();
+            thread.run_ids.retain(|run| run != run_id);
+            changed |= count != thread.run_ids.len();
+            if thread.root_run_id.as_deref() == Some(run_id) {
+                thread.root_run_id = None;
+                changed = true;
+            }
+        }
         let Some(thread) = self
             .sidebar
             .threads
@@ -144,9 +169,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         else {
             return false;
         };
-        let mut changed = !thread.run_ids.iter().any(|run| run == run_id);
-        if changed {
+        if !thread.run_ids.iter().any(|run| run == run_id) {
             thread.run_ids.push(run_id.into());
+            changed = true;
         }
         if root {
             if thread.root_run_id.as_deref() != Some(run_id) {

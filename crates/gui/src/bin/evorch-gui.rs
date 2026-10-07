@@ -412,19 +412,31 @@ fn spawn_storage_bridge(
 }
 
 /// Restore each thread's latest objective without restarting work or old authority.
+fn latest_thread_goals(
+    events: impl IntoIterator<Item = event_bus::Event>,
+) -> std::collections::BTreeMap<String, event_bus::ThreadGoalSnapshot> {
+    let mut latest = std::collections::BTreeMap::new();
+    for event in events {
+        if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+            snapshot,
+        }) = event.kind
+        {
+            // One goal can move between threads, and a thread can later
+            // receive a different goal. Preserve both uniqueness rules.
+            latest.retain(|thread, goal: &mut event_bus::ThreadGoalSnapshot| {
+                thread == &snapshot.thread_id || goal.goal_id != snapshot.goal_id
+            });
+            latest.insert(snapshot.thread_id.clone(), snapshot);
+        }
+    }
+    latest
+}
+
 fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
     let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
     match result {
         Ok(events) => {
-            let mut latest = std::collections::BTreeMap::new();
-            for stored in events {
-                if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {
-                    snapshot,
-                }) = stored.event.kind
-                {
-                    latest.insert(snapshot.thread_id.clone(), snapshot);
-                }
-            }
+            let latest = latest_thread_goals(events.into_iter().map(|stored| stored.event));
             for snapshot in latest.into_values() {
                 if let Err(error) = runtime.restore_thread_goal(snapshot) {
                     tracing::warn!(%error, "failed to restore thread goal");
@@ -1190,6 +1202,53 @@ mod tests {
     use super::orchestration_settings_or_default;
     use config::ConfigError;
     use runtime::OrchestrationSettings;
+
+    #[test]
+    fn restoring_goals_keeps_latest_thread_objective_and_one_handoff_owner() {
+        let update = |goal: &str, thread: &str, run: &str| {
+            event_bus::Event::new(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+                snapshot: event_bus::ThreadGoalSnapshot {
+                    goal_id: goal.into(),
+                    thread_id: thread.into(),
+                    root_run_id: run.into(),
+                    related_root_run_ids: vec![],
+                    objective: "Verify the implementation".into(),
+                    original_request: "Implement".into(),
+                    criteria: vec![],
+                    checks: vec![],
+                    phase: event_bus::ThreadGoalPhase::Working,
+                    review_enabled: false,
+                    checks_paused: false,
+                    work_stopped: false,
+                    epoch: 1,
+                    review_round: 0,
+                    findings: vec![],
+                    reason: None,
+                    usage: event_bus::ThreadGoalUsage::default(),
+                    max_review_rounds: 3,
+                    max_tokens: None,
+                },
+            })
+        };
+        let mut events = vec![
+            update("goal-z", "worker", "run-1"),
+            update("goal-z", "escalation-run-2", "run-2"),
+        ];
+        let inherited = super::latest_thread_goals(events.clone());
+        assert_eq!(inherited.len(), 1);
+        assert!(!inherited.contains_key("worker"));
+        assert_eq!(inherited["escalation-run-2"].goal_id, "goal-z");
+        events.extend([
+            // A subsequent goal replaces the completed inherited objective.
+            update("goal-a", "escalation-run-2", "run-4"),
+            update("goal-new-worker", "worker", "run-5"),
+        ]);
+        let latest = super::latest_thread_goals(events);
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest["escalation-run-2"].goal_id, "goal-a");
+        assert_eq!(latest["escalation-run-2"].root_run_id, "run-4");
+        assert_eq!(latest["worker"].goal_id, "goal-new-worker");
+    }
 
     #[test]
     fn demo_repo_isolates_inherited_git_repository() {

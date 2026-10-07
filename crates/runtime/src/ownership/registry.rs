@@ -19,6 +19,8 @@ pub enum RegistryError {
     Exists,
     #[error("ownership reader lock is poisoned")]
     ReaderPoisoned,
+    #[error("handoff preparation failed: {0}")]
+    Preparation(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -27,7 +29,24 @@ pub struct Registry {
     connection: Connection,
 }
 
+#[cfg(test)]
+thread_local! {
+    static WRITER_CONTENTION: std::cell::RefCell<Option<(
+        std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>
+    )>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Registry {
+    /// An event-driven test seam: observe an actual SQLite writer/read conflict
+    /// and release it after the reader has performed its guarded GUI action.
+    #[cfg(test)]
+    pub(crate) fn observe_writer_contention(
+        entered: std::sync::mpsc::SyncSender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        WRITER_CONTENTION.with(|observer| *observer.borrow_mut() = Some((entered, resume)));
+    }
+
     pub fn guard_generation(&self, permit: &super::OwnerPermit) -> Result<(), RegistryError> {
         self.connection.execute_batch("BEGIN DEFERRED")?;
         let owner = self.attach(&permit.thread_id)?;
@@ -78,6 +97,21 @@ impl Registry {
         let connection =
             Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.busy_timeout(timeout)?;
+        #[cfg(test)]
+        if flags.contains(OpenFlags::SQLITE_OPEN_READ_WRITE)
+            && WRITER_CONTENTION.with(|observer| observer.borrow().is_some())
+        {
+            connection.busy_handler(Some(|_| {
+                WRITER_CONTENTION.with(|observer| {
+                    let Some((entered, resume)) = observer.borrow_mut().take() else {
+                        return false;
+                    };
+                    entered.send(()).expect("reader observes writer contention");
+                    resume.recv().expect("reader releases its generation guard");
+                    true
+                })
+            }))?;
+        }
         Ok(Self { connection })
     }
 
@@ -99,6 +133,55 @@ impl Registry {
             return Err(RegistryError::Exists);
         }
         Ok(())
+    }
+
+    /// Create an independent child owner only while the source generation still
+    /// accepts work. Checking the source and reserving the target share one write
+    /// transaction; a target collision never adopts an unrelated thread's lease.
+    pub(super) fn prepare_child<T>(
+        &mut self,
+        source: &super::OwnerPermit,
+        thread_id: &str,
+        now_ms: u64,
+        prepare: impl FnOnce() -> Result<T, RegistryError>,
+    ) -> Result<(ThreadOwner, T), RegistryError> {
+        // Drain ownership readers before taking the runtime goal lock. An
+        // IMMEDIATE transaction would defer that wait until commit and invert
+        // the GUI's ownership-read -> goal-control order.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        let json: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM thread_owners WHERE thread_id = ?1",
+                [&source.thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let parent: ThreadOwner = serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?;
+        parent.validate(&source.lease)?;
+        if parent.state != super::OwnerState::Running {
+            return Err(OwnershipError::Quiescing.into());
+        }
+        let mut child = ThreadOwner::new(
+            thread_id.into(),
+            super::Lease {
+                owner_id: parent.lease.owner_id,
+                generation: 1,
+                expires_at: now_ms.saturating_add(parent.settings.lease_ms.get()),
+            },
+        );
+        child.settings = parent.settings;
+        let changed = transaction.execute(
+            "INSERT OR IGNORE INTO thread_owners (thread_id, state) VALUES (?1, ?2)",
+            params![thread_id, serde_json::to_string(&child)?],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::Exists);
+        }
+        let prepared = prepare()?;
+        transaction.commit()?;
+        Ok((child, prepared))
     }
 
     pub fn update(

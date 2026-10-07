@@ -10,7 +10,6 @@ use runtime::{AgentRuntime, MergeMode, RunConfig, RunId, WorkspaceInspection, Wo
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
 use support::{
@@ -51,25 +50,21 @@ async fn events_through_escalation(
     source_run_id: RunId,
 ) -> (RunId, Vec<Event>) {
     let mut events = Vec::new();
-    let new_run_id = timeout(Duration::from_secs(5), async {
-        loop {
-            let event = receiver.recv().await.expect("event bus remains open");
-            let escalated = match &event.kind {
-                EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
-                    source_run_id: source,
-                    new_run_id,
-                    ..
-                }) if source == &source_run_id.to_string() => Some(new_run_id.clone()),
-                _ => None,
-            };
-            events.push(event);
-            if let Some(new_run_id) = escalated {
-                return new_run_id.parse::<RunId>().expect("run id");
-            }
+    let new_run_id = loop {
+        let event = receiver.recv().await.expect("event bus remains open");
+        let escalated = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                source_run_id: source,
+                new_run_id,
+                ..
+            }) if source == &source_run_id.to_string() => Some(new_run_id.clone()),
+            _ => None,
+        };
+        events.push(event);
+        if let Some(new_run_id) = escalated {
+            break new_run_id.parse::<RunId>().expect("run id");
         }
-    })
-    .await
-    .expect("escalation event timeout");
+    };
     (new_run_id, events)
 }
 
@@ -79,10 +74,7 @@ async fn complete_escalation(
     source: RunId,
 ) -> (RunId, Vec<Event>) {
     let (new_run, mut events) = events_through_escalation(receiver, source).await;
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(new_run)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(new_run).await, Ok(AgentRunPhase::Done));
     events.extend(drain_events(receiver).await);
     (new_run, events)
 }
@@ -201,6 +193,191 @@ async fn escalate_spawns_orchestrator_root_run_with_memo_prompt() {
 }
 
 #[tokio::test]
+async fn escalation_keeps_the_source_project_after_the_active_project_changes() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let source_gate = Arc::new(Notify::new());
+    let target_gate = Arc::new(Notify::new());
+    let first_model = Arc::new(ScriptedModel::new([
+        Ok(escalation_response()),
+        Ok(text_response(
+            "first project orchestrator",
+            FinishReason::Stop,
+        )),
+    ]));
+    first_model
+        .gate_key("SOURCE PROJECT", source_gate.clone())
+        .await;
+    first_model
+        .gate_key("[evorch escalation", target_gate.clone())
+        .await;
+    let second_model = Arc::new(ScriptedModel::new([]));
+    let (runtime, bus) = runtime_with(first_model.clone());
+    let first_path = first.path().to_path_buf();
+    let first_for_resolver = first_path.clone();
+    let first_for_model = first_model.clone();
+    let second_for_model = second_model.clone();
+    let runtime = runtime
+        .with_project_rules(Arc::new(runtime::RulesSource::new(
+            runtime::ProjectTrust::Approved,
+            runtime::RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(first_path.clone()),
+            None,
+        )))
+        .with_project_models(Arc::new(move |root| {
+            Some(if root == first_for_resolver {
+                first_for_model.clone() as Arc<dyn runtime::AgentModel>
+            } else {
+                second_for_model.clone() as Arc<dyn runtime::AgentModel>
+            })
+        }));
+    runtime.set_project_root(first_path.clone()).unwrap();
+    let mut events = bus.subscribe();
+    let source =
+        runtime.delegate_background(Role::Worker, "SOURCE PROJECT".into(), RunConfig::default());
+    first_model.wait_for_request(0).await;
+    runtime
+        .set_project_root(second.path().to_path_buf())
+        .unwrap();
+    source_gate.notify_one();
+    let (target, _) = events_through_escalation(&mut events, source).await;
+    first_model.wait_for_request(1).await;
+    assert_eq!(
+        runtime
+            .inspect_agent(target)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .active_root,
+        Some(first_path)
+    );
+    target_gate.notify_one();
+    assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(
+        runtime.run_result(target).unwrap().as_deref(),
+        Some("first project orchestrator")
+    );
+    assert!(second_model.observed().await.is_empty());
+}
+
+struct EscalationAdmissionModel {
+    script: ScriptedModel,
+    entered: Notify,
+    release: Notify,
+    failure: std::sync::atomic::AtomicU8,
+}
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for EscalationAdmissionModel {
+    fn requires_admission(&self) -> bool {
+        true
+    }
+
+    async fn admit(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        role: Role,
+    ) -> Result<(), runtime::RuntimeError> {
+        if role == Role::Orchestrator {
+            self.entered.notify_one();
+            self.release.notified().await;
+            match self.failure.swap(0, std::sync::atomic::Ordering::SeqCst) {
+                1 => {
+                    return Err(runtime::RuntimeError::Model {
+                        reason: "catalog unavailable".into(),
+                    });
+                }
+                2 => panic!("provider admission panicked"),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        context: &runtime::AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        specs: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        runtime::AgentModel::complete(&self.script, context, role, messages, specs).await
+    }
+
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "admission-test".into()
+    }
+}
+
+#[tokio::test]
+async fn escalation_publishes_child_and_goal_before_admission_and_can_stop_while_pending() {
+    for cancel in [false, true] {
+        let model = Arc::new(EscalationAdmissionModel {
+            script: ScriptedModel::new([
+                Ok(escalation_response()),
+                Ok(text_response("admitted orchestrator", FinishReason::Stop)),
+            ]),
+            entered: Notify::new(),
+            release: Notify::new(),
+            failure: std::sync::atomic::AtomicU8::new(0),
+        });
+        let bus = Arc::new(EventBus::new(128));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus.clone())),
+            model.clone(),
+        );
+        let mut events = bus.subscribe();
+        let source = runtime.reserve_run_id();
+        runtime.bind_thread_root("source-thread", source).unwrap();
+        let goal = runtime
+            .create_thread_goal(
+                "source-thread",
+                source,
+                "Objective".into(),
+                vec!["Evidence".into()],
+            )
+            .unwrap();
+        runtime
+            .set_goal_checks_paused("source-thread", &goal.goal_id, true)
+            .unwrap();
+        runtime.spawn_reserved(source, None, Role::Worker, "request", RunConfig::default());
+        let (target, before) = events_through_escalation(&mut events, source).await;
+        model.entered.notified().await;
+        let child = event_bus::escalation_thread_id(&target.to_string());
+        assert!(runtime.thread_goal("source-thread").is_none());
+        assert_eq!(runtime.thread_goal(&child).unwrap().goal_id, goal.goal_id);
+        assert!(matches!(events.recv().await.unwrap().kind,
+            EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot })
+                if snapshot.thread_id == child));
+        assert!(!runtime.list_agents().iter().any(|run| run.run_id == target));
+        assert!(source_done_event_index(&before, source) < before.len() - 1);
+        let waiter = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.wait(target).await }
+        });
+        if cancel {
+            runtime.stop(target, runtime::StopScope::SelfOnly).unwrap();
+        }
+        model.release.notify_one();
+        let result = waiter.await.unwrap();
+        if cancel {
+            assert!(matches!(
+                result,
+                Err(runtime::RuntimeError::RunTerminated { .. })
+            ));
+            assert!(runtime.thread_goal(&child).unwrap().work_stopped);
+            assert!(!runtime.list_agents().iter().any(|run| run.run_id == target));
+            assert_eq!(model.script.observed().await.len(), 1);
+        } else {
+            assert_eq!(result.unwrap(), AgentRunPhase::Done);
+            assert_eq!(model.script.observed().await.len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
 async fn child_worker_cannot_escalate_into_a_new_root() {
     let model = Arc::new(ScriptedModel::new([]));
     model
@@ -229,10 +406,7 @@ async fn child_worker_cannot_escalate_into_a_new_root() {
         .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
         .expect("parent run exists");
 
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(child)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
     assert_eq!(
         runtime.run_result(child),
         Ok(Some("child continued".to_string()))
@@ -273,9 +447,14 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
     ));
     let manager = WorktreeManager::new(Project::new(repo.clone()).expect("git repo is valid"));
     let (factory, mounts) = recording_factory();
-    let runtime =
-        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory)
-            .with_sequential_run_ids();
+    let runtime = AgentRuntime::with_workspace_context(
+        Arc::clone(&bus),
+        executor,
+        model.clone(),
+        manager,
+        factory,
+    )
+    .with_sequential_run_ids();
     let mut receiver = bus.subscribe();
 
     // When: source が worktree を新 root run へ移譲し、新 run のモデル呼び出しで停止する
@@ -290,21 +469,7 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
     let source_path = repo.join(".evorch/worktrees").join(source.to_string());
     let source_branch = format!("evorch/task/{source}");
     let (new_run, _events) = events_through_escalation(&mut receiver, source).await;
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if mounts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len()
-                == 2
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("adopted executor build timeout");
+    model.wait_for_request(1).await;
 
     // Then: 所有中は同じ path/branch が新 run だけに紐付き、source cleanup は走らない
     assert_eq!(
@@ -344,17 +509,11 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
     assert!(source_path.exists());
 
     gate.notify_one();
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(new_run)).await,
-        Ok(Ok(AgentRunPhase::Done))
+    assert_eq!(runtime.wait(new_run).await, Ok(AgentRunPhase::Done));
+    assert!(
+        !source_path.exists(),
+        "terminal publication follows workspace cleanup"
     );
-    timeout(Duration::from_secs(5), async {
-        while source_path.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("adopted worktree cleanup timeout");
     let branches = git(&repo, &["branch", "--list", &source_branch]);
     assert!(branches.status.success());
     assert!(String::from_utf8_lossy(&branches.stdout).contains(&source_branch));
@@ -502,4 +661,297 @@ async fn escalated_run_has_no_run_result() {
 
     // Then: source run は完了テキストを公開せず、結果は新 root の責務となる
     assert_eq!(runtime.run_result(source), Ok(None));
+}
+
+#[tokio::test]
+async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_authority() {
+    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+    for failure in ["error-after-restart", "stop", "cancel", "panic"] {
+        let (_repo_dir, repo) = init_git_repo();
+        let directory = tempfile::tempdir().unwrap();
+        let storage_config = storage::StorageConfig {
+            db_path: directory.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(storage_config.clone()).unwrap();
+        let registry_path = directory.path().join("owners.db");
+        let mut registry = Registry::open(&registry_path).unwrap();
+        let lease = Lease {
+            owner_id: "host".into(),
+            generation: 1,
+            expires_at: u64::MAX,
+        };
+        registry
+            .start(&ThreadOwner::new("source-thread".into(), lease.clone()))
+            .unwrap();
+        let model = Arc::new(EscalationAdmissionModel {
+            script: ScriptedModel::new([
+                Ok(escalation_response()),
+                Ok(text_response("continued in the child", FinishReason::Stop)),
+            ]),
+            entered: Notify::new(),
+            release: Notify::new(),
+            failure: std::sync::atomic::AtomicU8::new(match failure {
+                "error-after-restart" => 1,
+                "panic" => 2,
+                _ => 0,
+            }),
+        });
+        let make_runtime = || {
+            let bus = Arc::new(EventBus::new(256));
+            let executor = Arc::new(ToolExecutor::with_standard_tools(
+                bus.clone(),
+                Arc::new(DirectSandbox::new_unchecked()),
+            ));
+            let (factory, _) = recording_factory();
+            let runtime = AgentRuntime::with_workspace_context(
+                bus.clone(),
+                executor,
+                model.clone(),
+                WorktreeManager::new(Project::new(repo.clone()).unwrap()),
+                factory,
+            )
+            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+            runtime.set_project_root(repo.clone()).unwrap();
+            (runtime, bus)
+        };
+        let (mut runtime, mut bus) = make_runtime();
+        let mut events = bus.subscribe();
+        let source = runtime.reserve_run_id();
+        runtime.bind_thread_root("source-thread", source).unwrap();
+        let goal = runtime
+            .create_thread_goal(
+                "source-thread",
+                source,
+                "Objective".into(),
+                vec!["Evidence".into()],
+            )
+            .unwrap();
+        runtime
+            .set_goal_checks_paused("source-thread", &goal.goal_id, true)
+            .unwrap();
+        runtime.spawn_reserved(
+            source,
+            None,
+            Role::Worker,
+            "request",
+            RunConfig {
+                ownership: Some(OwnerPermit {
+                    registry_path: registry_path.clone(),
+                    thread_id: "source-thread".into(),
+                    lease,
+                    run_id: None,
+                }),
+                workspace_mode: WorkspaceMode::Isolated,
+                ..Default::default()
+            },
+        );
+        let (target, _) = events_through_escalation(&mut events, source).await;
+        model.entered.notified().await;
+        let child = event_bus::escalation_thread_id(&target.to_string());
+        let retained_path = repo.join(".evorch/worktrees").join(source.to_string());
+        std::fs::write(retained_path.join("keep.txt"), "pending handoff changes").unwrap();
+        if failure == "stop" {
+            runtime.stop(target, runtime::StopScope::SelfOnly).unwrap();
+        }
+        if failure == "cancel" {
+            runtime.cancel_subtree(target).unwrap();
+        }
+        model.release.notify_one();
+        assert!(runtime.wait(target).await.is_err());
+        assert!(retained_path.exists());
+        assert_eq!(model.script.observed().await.len(), 1);
+        let inherited = runtime.thread_goal(&child).unwrap();
+        let old_owner = registry.attach(&child).unwrap();
+        registry
+            .update(&child, |owner| {
+                owner.lease.generation += 1;
+                Ok(())
+            })
+            .unwrap();
+        let mut current = OwnerPermit {
+            registry_path: registry_path.clone(),
+            thread_id: child.clone(),
+            lease: old_owner.lease,
+            run_id: None,
+        };
+        assert!(matches!(
+            runtime.continue_goal(
+                target,
+                "retry".into(),
+                RunConfig {
+                    ownership: Some(current.clone()),
+                    ..Default::default()
+                }
+            ),
+            Err(runtime::RuntimeError::StaleOwnership { .. })
+        ));
+        current.lease = registry.attach(&child).unwrap().lease;
+        if failure == "error-after-restart" {
+            (runtime, bus) = make_runtime();
+            runtime.restore_thread_goal(inherited.clone()).unwrap();
+        }
+        events = bus.subscribe();
+        assert_eq!(
+            runtime
+                .continue_goal(
+                    target,
+                    "Retry after provider recovery".into(),
+                    RunConfig {
+                        ownership: Some(current),
+                        project_root: Some(directory.path().to_path_buf()),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+            target
+        );
+        model.entered.notified().await;
+        model.release.notify_one();
+        loop {
+            if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+                events.recv().await.unwrap().kind
+                && run_id == target.to_string()
+            {
+                if to == AgentRunPhase::Waiting {
+                    break;
+                }
+                assert!(
+                    !matches!(
+                        to,
+                        AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                    ),
+                    "unexpected {to:?}"
+                );
+            }
+        }
+        let requests = model.script.observed().await;
+        assert_eq!(requests.len(), 2);
+        let text = serde_json::to_string(&requests[1]).unwrap();
+        assert_eq!(text.matches("[evorch escalation").count(), 1);
+        assert!(text.contains("Retry after provider recovery"));
+        assert_eq!(
+            runtime.inspect_agent(target).unwrap().role_name,
+            Role::Orchestrator.name()
+        );
+        assert_eq!(
+            runtime
+                .inspect_agent(target)
+                .unwrap()
+                .workspace
+                .unwrap()
+                .active_root,
+            Some(retained_path.clone())
+        );
+        assert_eq!(
+            std::fs::read_to_string(retained_path.join("keep.txt")).unwrap(),
+            "pending handoff changes"
+        );
+        let resumed_goal = runtime.thread_goal(&child).unwrap();
+        assert_eq!(resumed_goal.goal_id, inherited.goal_id);
+        assert_eq!(
+            resumed_goal.usage.model_requests,
+            inherited.usage.model_requests + 1
+        );
+        runtime.stop(target, runtime::StopScope::SelfOnly).unwrap();
+        assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Stopped);
+    }
+}
+
+#[tokio::test]
+async fn goal_created_after_pending_restart_keeps_host_request_separate_from_the_memo() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage_config = storage::StorageConfig {
+        db_path: directory.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let model = Arc::new(EscalationAdmissionModel {
+        script: ScriptedModel::new([
+            Ok(escalation_response()),
+            Ok(tool_response(
+                "goal",
+                "create_goal",
+                json!({"objective":"Coordinate requested investigation", "criteria":["Evidence is reviewed"]}),
+            )),
+            Ok(text_response("continuation", FinishReason::Stop)),
+        ]),
+        entered: Notify::new(),
+        release: Notify::new(),
+        failure: std::sync::atomic::AtomicU8::new(1),
+    });
+    let model_gate = Arc::new(Notify::new());
+    model
+        .script
+        .gate_key("[evorch escalation", model_gate.clone())
+        .await;
+    let make_runtime = || {
+        let bus = Arc::new(EventBus::new(256));
+        (
+            AgentRuntime::new(
+                bus.clone(),
+                Arc::new(ToolExecutor::new(bus.clone())),
+                model.clone(),
+            )
+            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap()),
+            bus,
+        )
+    };
+    let (runtime, bus) = make_runtime();
+    let mut events = bus.subscribe();
+    let original = "Research the requested options under the original agreed constraints";
+    let source = runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            original.into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let (target, _) = events_through_escalation(&mut events, source).await;
+    model.entered.notified().await;
+    model.release.notify_one();
+    assert!(runtime.wait(target).await.is_err());
+    drop(runtime);
+    let (runtime, bus) = make_runtime();
+    events = bus.subscribe();
+    let child = event_bus::escalation_thread_id(&target.to_string());
+    assert_eq!(runtime.latest_chat_run(&child).unwrap(), Some(target));
+    runtime
+        .continue_goal(
+            target,
+            "Continue and preserve the agreed constraints".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    model.entered.notified().await;
+    model.release.notify_one();
+    model.script.wait_for_request(1).await;
+    model_gate.notify_one();
+    model.script.wait_for_request(2).await;
+    let goal = runtime.thread_goal(&child).unwrap();
+    assert!(goal.original_request.starts_with(original));
+    assert!(
+        goal.original_request
+            .contains("Continue and preserve the agreed constraints")
+    );
+    assert!(!goal.original_request.contains("[evorch escalation"));
+    assert!(!goal.original_request.contains("依存関係の更新"));
+    runtime
+        .set_goal_checks_paused(&child, &goal.goal_id, true)
+        .unwrap();
+    model_gate.notify_one();
+    loop {
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Waiting,
+            ..
+        }) = events.recv().await.unwrap().kind
+            && run_id == target.to_string()
+        {
+            break;
+        }
+    }
+    runtime.stop(target, runtime::StopScope::SelfOnly).unwrap();
+    assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Stopped);
 }

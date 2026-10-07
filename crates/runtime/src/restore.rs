@@ -10,9 +10,12 @@ use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 
 mod diagnostics;
+mod escalation;
 mod fork_seed;
 mod recovery;
 pub use diagnostics::RunRestoreDiagnostics;
+pub use escalation::PendingEscalation;
+pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
@@ -128,6 +131,9 @@ pub struct RunRestoreDescriptor {
     /// Project the run worked in; a restored run continues there. Older records omit it.
     #[serde(default)]
     pub project_root: Option<std::path::PathBuf>,
+    /// A memo-only child whose provider has not started. Contains no authority.
+    #[serde(default)]
+    pub pending_escalation: Option<PendingEscalation>,
 }
 
 impl RunRestoreDescriptor {
@@ -385,6 +391,7 @@ fn write_snapshot(
             .map(|spec| spec.name.clone())
             .collect(),
         project_root: config.project_root.clone(),
+        pending_escalation: None,
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
