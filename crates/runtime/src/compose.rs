@@ -21,6 +21,7 @@ use crate::skill_source::SkillCatalogSource;
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
+mod hosted_search;
 
 /// composition root に production workspace context を渡す seam。
 pub struct WorkspaceSeam {
@@ -543,6 +544,16 @@ impl RoutedModel {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn web_search_provider(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+        usage_sink: Arc<dyn Fn(providers::Usage) + Send + Sync>,
+    ) -> Result<Option<Arc<dyn tools::search::SearchProvider>>, RuntimeError> {
+        hosted_search::resolve(self, invocation, role, tools, usage_sink)
+    }
+
     fn benchmark_settings(
         &self,
         invocation: &AgentInvocationContext,

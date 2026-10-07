@@ -2,7 +2,9 @@
 //!
 //! OpenAI 資格情報があれば OpenAI primary・Exa keyless fallback、なければ
 //! Exa keyless primary・Tavily keyless fallback を使う。chain は常に 2 slot で、
-//! Tavily は keyless 構成専用。fallback は 429・5xx・timeout の場合に 1 回のみ。
+//! Tavily は keyless 構成専用。選択済みモデルの hosted search は呼び出し単位で
+//! primary を差し替え、Exa へ 1 回だけ fallback する。対象は 429・5xx・timeout
+//! および Codex による hosted web_search の明示的な未対応拒否。
 //! 資格情報の値を metadata に含めず、credential_status はリテラル値のみとする。
 
 use std::sync::Arc;
@@ -76,6 +78,7 @@ pub struct WebSearch {
     primary: Arc<dyn SearchProvider>,
     fallback: Arc<dyn SearchProvider>,
     env_lookup: EnvLookup,
+    hosted_fallback: Option<Arc<dyn SearchProvider>>,
 }
 
 impl WebSearch {
@@ -89,10 +92,11 @@ impl WebSearch {
     pub fn from_env_default() -> Result<Self, NetworkGuardError> {
         let guard = Arc::new(NetworkGuard::new()?);
         let env_lookup: EnvLookup = Arc::new(|key: &str| std::env::var(key).ok());
-        let (primary, fallback) = default_providers(guard, &*env_lookup);
-        Ok(Self::for_providers_with_env_lookup(
-            primary, fallback, env_lookup,
-        ))
+        let (primary, fallback) = default_providers(Arc::clone(&guard), &*env_lookup);
+        Ok(
+            Self::for_providers_with_env_lookup(primary, fallback, env_lookup)
+                .with_hosted_search_fallback(Arc::new(ExaKeylessProvider::with_guard(guard))),
+        )
     }
 
     /// production 用の既定構成（Exa keyless primary・Tavily keyless fallback）で
@@ -107,8 +111,8 @@ impl WebSearch {
     pub fn keyless_default() -> Result<Self, NetworkGuardError> {
         let guard = Arc::new(NetworkGuard::new()?);
         let primary = Arc::new(ExaKeylessProvider::with_guard(Arc::clone(&guard)));
-        let fallback = Arc::new(TavilyKeylessProvider::with_guard(guard));
-        Ok(Self::for_providers(primary, fallback))
+        let fallback = Arc::new(TavilyKeylessProvider::with_guard(Arc::clone(&guard)));
+        Ok(Self::for_providers(primary.clone(), fallback).with_hosted_search_fallback(primary))
     }
 
     /// provider を注入して構築する（credential 判定は実環境変数を参照する）。
@@ -142,7 +146,16 @@ impl WebSearch {
             primary,
             fallback,
             env_lookup,
+            hosted_fallback: None,
         }
+    }
+
+    /// Explicit fallback for a hosted primary. Production supplies Exa; tests may
+    /// inject its transport without contacting public services.
+    #[must_use]
+    pub fn with_hosted_search_fallback(mut self, fallback: Arc<dyn SearchProvider>) -> Self {
+        self.hosted_fallback = Some(fallback);
+        self
     }
 
     /// 環境変数の存在から credential_status を判定する。
@@ -195,6 +208,45 @@ impl Tool for WebSearch {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.execute_search(
+            args,
+            &*self.primary,
+            &*self.fallback,
+            self.credential_status(),
+        )
+        .await
+    }
+
+    async fn execute_with_search_provider(
+        &self,
+        _ctx: &crate::ToolExecutionContext,
+        args: serde_json::Value,
+        search_provider: Option<&dyn SearchProvider>,
+    ) -> Result<ToolResult, ToolError> {
+        let Some(primary) = search_provider else {
+            return self.execute(args).await;
+        };
+        let fallback: Arc<dyn SearchProvider> = match &self.hosted_fallback {
+            Some(fallback) => Arc::clone(fallback),
+            None => Arc::new(ExaKeylessProvider::with_guard(Arc::new(
+                NetworkGuard::new().map_err(|_| ToolError::Io {
+                    detail: "Could not initialize the hosted-search fallback".into(),
+                })?,
+            ))),
+        };
+        self.execute_search(args, primary, &*fallback, CREDENTIAL_STATUS_KEYED)
+            .await
+    }
+}
+
+impl WebSearch {
+    async fn execute_search(
+        &self,
+        args: serde_json::Value,
+        primary: &dyn SearchProvider,
+        fallback: &dyn SearchProvider,
+        credential_status: &'static str,
+    ) -> Result<ToolResult, ToolError> {
         // Executor 経由では schema 検証済み。直接呼び出しの防御として serde で
         // 境界パースし、不適合は InvalidArgs にする。
         let args: WebSearchArgs =
@@ -206,11 +258,11 @@ impl Tool for WebSearch {
             max_results: args.max_results,
         };
 
-        let flight = match self.primary.search(&args.query, &options).await {
+        let flight = match primary.search(&args.query, &options).await {
             Ok(results) => Flight::Primary(results),
             Err(error) if error.is_fallback_trigger() => {
                 // fallback は 1 回だけ試行し、その結果が再び fallback 対象でも連鎖させない。
-                match self.fallback.search(&args.query, &options).await {
+                match fallback.search(&args.query, &options).await {
                     Ok(results) => Flight::Fallback(results),
                     Err(fallback_error) => Flight::Both {
                         primary: error,
@@ -221,11 +273,10 @@ impl Tool for WebSearch {
             Err(error) => Flight::PrimaryOnly(error),
         };
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let credential_status = self.credential_status();
 
         let metadata = match &flight {
             Flight::Primary(results) => WebSearchMetadata {
-                provider: self.primary.name().to_owned(),
+                provider: primary.name().to_owned(),
                 request_id: results.request_id.clone(),
                 latency_ms,
                 result_count: results.result_count,
@@ -235,7 +286,7 @@ impl Tool for WebSearch {
                 usage: results.usage.clone(),
             },
             Flight::Fallback(results) => WebSearchMetadata {
-                provider: self.fallback.name().to_owned(),
+                provider: fallback.name().to_owned(),
                 request_id: results.request_id.clone(),
                 latency_ms,
                 result_count: results.result_count,
@@ -245,7 +296,7 @@ impl Tool for WebSearch {
                 usage: results.usage.clone(),
             },
             Flight::PrimaryOnly(_) => WebSearchMetadata {
-                provider: self.primary.name().to_owned(),
+                provider: primary.name().to_owned(),
                 request_id: None,
                 latency_ms,
                 result_count: 0,
@@ -255,7 +306,7 @@ impl Tool for WebSearch {
                 usage: None,
             },
             Flight::Both { .. } => WebSearchMetadata {
-                provider: self.fallback.name().to_owned(),
+                provider: fallback.name().to_owned(),
                 request_id: None,
                 latency_ms,
                 result_count: 0,
@@ -272,17 +323,17 @@ impl Tool for WebSearch {
                 Ok(ToolResult::success(results.content).with_detail(detail))
             }
             Flight::PrimaryOnly(error) => {
-                let content = format!(
-                    "web_search が失敗しました ({}): {error}",
-                    self.primary.name()
-                );
+                let content = format!("web_search が失敗しました ({}): {error}", primary.name());
                 Ok(ToolResult::error(content).with_detail(detail))
             }
-            Flight::Both { primary, fallback } => {
+            Flight::Both {
+                primary: primary_error,
+                fallback: fallback_error,
+            } => {
                 let content = format!(
-                    "web_search が失敗しました: primary({}): {primary}; fallback({}): {fallback}",
-                    self.primary.name(),
-                    self.fallback.name()
+                    "web_search が失敗しました: primary({}): {primary_error}; fallback({}): {fallback_error}",
+                    primary.name(),
+                    fallback.name()
                 );
                 Ok(ToolResult::error(content).with_detail(detail))
             }

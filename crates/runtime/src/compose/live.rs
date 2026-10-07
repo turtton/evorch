@@ -40,6 +40,11 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn invocation_snapshot(&self) -> Option<Arc<dyn AgentModel>> {
+        let current = self.current();
+        Some(current.invocation_snapshot().unwrap_or(current))
+    }
+
     fn benchmark_settings(
         &self,
         invocation: &AgentInvocationContext,

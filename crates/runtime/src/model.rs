@@ -44,6 +44,25 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Mutable composition wrappers expose the model to retain for a whole
+    /// invocation, including tool capabilities used after its response arrives.
+    fn invocation_snapshot(&self) -> Option<std::sync::Arc<dyn AgentModel>> {
+        None
+    }
+
+    /// Resolve an optional hosted search capability for the invocation that
+    /// produced the tool call. The callback accounts completed search usage even
+    /// when response parsing or cancellation prevents delivery of its result.
+    fn web_search_provider(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _tools: &[ToolSpec],
+        _usage_sink: std::sync::Arc<dyn Fn(providers::Usage) + Send + Sync>,
+    ) -> Result<Option<std::sync::Arc<dyn tools::search::SearchProvider>>, RuntimeError> {
+        Ok(None)
+    }
+
     /// Resolve exact model and effective generation for a trusted benchmark.
     fn benchmark_settings(
         &self,

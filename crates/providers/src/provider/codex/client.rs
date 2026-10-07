@@ -1,6 +1,7 @@
 //! Codex subscription backend の provider client を提供します。
 
 mod compaction;
+mod web_search;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -184,10 +185,29 @@ impl CodexClient {
         ))
     }
 
-    /// 通常生成と公式 compaction の認証・接続設定を同一に保つ。
+    /// 通常生成と公式 compaction の HTTP エラー処理。
     async fn send_response(
         &self,
         wire_request: &CodexResponsesRequest,
+        streaming: bool,
+        observer: &mut AttemptObserver,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let response = self
+            .post_response(wire_request, streaming, observer)
+            .await?;
+        if !response.status().is_success() {
+            let error = map_response_error(response).await;
+            observer.emit_failed(&error);
+            return Err(error);
+        }
+        Ok(response)
+    }
+
+    /// All Responses paths share the selected account, refresh manager and headers.
+    /// Status interpretation belongs to the caller (hosted search sanitizes errors).
+    async fn post_response(
+        &self,
+        wire_request: &impl serde::Serialize,
         streaming: bool,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
@@ -225,11 +245,6 @@ impl CodexClient {
             .await
             .map_err(map_request_error)
             .inspect_err(|error| observer.emit_failed(error))?;
-        if !response.status().is_success() {
-            let error = map_response_error(response).await;
-            observer.emit_failed(&error);
-            return Err(error);
-        }
         Ok(response)
     }
 }
@@ -237,6 +252,10 @@ impl CodexClient {
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
+        Some(self)
+    }
+
     fn compactor(&self) -> Option<&dyn crate::Compactor> {
         Some(self)
     }

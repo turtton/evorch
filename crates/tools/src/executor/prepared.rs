@@ -8,6 +8,7 @@ pub struct ValidatedToolCall {
     id: String,
     args: serde_json::Value,
     action: Action,
+    search_provider: Option<Arc<dyn crate::search::SearchProvider>>,
 }
 
 /// Single-use call whose pre-execution approval has been resolved.
@@ -88,6 +89,7 @@ impl ToolExecutor {
             id,
             args,
             action,
+            search_provider: None,
         })
     }
 }
@@ -138,6 +140,17 @@ impl ValidatedToolCall {
 }
 
 impl PreparedToolCall {
+    /// Bind a run-local search capability without replacing registered tool policy,
+    /// schema, origin, events, or output limiting.
+    #[must_use]
+    pub fn with_search_provider(
+        mut self,
+        provider: Arc<dyn crate::search::SearchProvider>,
+    ) -> Self {
+        self.0.search_provider = Some(provider);
+        self
+    }
+
     /// Execute once, preserving executor events, sanitation and AskOnFailure retries.
     ///
     /// # Errors
@@ -151,6 +164,7 @@ impl PreparedToolCall {
                 &call.id,
                 call.args,
                 Some(call.action),
+                call.search_provider.as_deref(),
             )
             .await
     }

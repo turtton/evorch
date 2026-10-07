@@ -1,5 +1,7 @@
 //! Offline cost-regression contract through runtime, routing, HTTP/SSE and usage.
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
+#[path = "hosted_search_cache/mod.rs"]
+mod hosted_search_cache;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};

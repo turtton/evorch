@@ -976,6 +976,13 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            // Benchmark capture can replace the model with its frozen settings.
+            // Retain that effective model for both chat and its hosted tools.
+            let invocation_model = self
+                .shared
+                .model
+                .invocation_snapshot()
+                .unwrap_or_else(|| Arc::clone(&self.shared.model));
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -985,7 +992,7 @@ impl LoopState {
                     }
                     continue;
                 }
-                result = self.shared.model.complete_streaming(
+                result = invocation_model.complete_streaming(
                     &invocation,
                     self.task.role,
                     &visible_messages,
@@ -1077,7 +1084,10 @@ impl LoopState {
                 return;
             }
             self.activity(event_bus::RunActivity::Tools);
-            if !self.execute_tools(tool_uses).await {
+            if !self
+                .execute_tools(tool_uses, &invocation, invocation_model.as_ref())
+                .await
+            {
                 return;
             }
             if let Some(permit) = &self.task.config.ownership

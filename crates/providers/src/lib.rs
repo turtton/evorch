@@ -6,6 +6,7 @@ mod codex_catalog_version;
 mod compaction;
 pub(crate) mod dedup;
 pub mod error;
+mod hosted_web_search;
 pub mod http;
 pub mod message;
 mod models;
@@ -24,6 +25,10 @@ pub use codex_catalog_version::{
 };
 pub use compaction::{CompactionResult, Compactor};
 pub use error::ProviderError;
+pub use hosted_web_search::{
+    HostedWebSearch, HostedWebSearchCitation, HostedWebSearchError, HostedWebSearchRequest,
+    HostedWebSearchResponse,
+};
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
     ProviderCapabilities, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,

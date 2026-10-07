@@ -127,6 +127,8 @@ pub(crate) fn map_request_error(err: reqwest::Error) -> ProviderError {
 /// (発行所有権は各 attempt に留まる)。このためリトライやフォールバックを
 /// 経て成功した論理リクエストでも usage イベントはちょうど 1 件だけ発行
 /// され、勝者 attempt のプロバイダラベルとモデルを載せる。
+/// Hosted search records valid completed usage before validating result content;
+/// a later citation/format error does not erase the completed provider cost.
 pub struct UsageEmitter {
     bus: Option<Arc<EventBus>>,
     provider: String,

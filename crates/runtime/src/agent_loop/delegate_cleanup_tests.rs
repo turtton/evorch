@@ -108,18 +108,22 @@ async fn cancellation_between_delegate_spawns_drains_first_child() {
     // When: execute a two-delegate wave without yielding at the attach seam.
     assert!(
         !state
-            .execute_tools(vec![
-                (
-                    "first".into(),
-                    "delegate".into(),
-                    serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
-                ),
-                (
-                    "second".into(),
-                    "delegate".into(),
-                    serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
-                ),
-            ])
+            .execute_tools(
+                vec![
+                    (
+                        "first".into(),
+                        "delegate".into(),
+                        serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
+                    ),
+                    (
+                        "second".into(),
+                        "delegate".into(),
+                        serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
+                    ),
+                ],
+                &crate::AgentInvocationContext::default(),
+                &BlockedModel
+            )
             .await
     );
     // Then: returning from the wave already implies child termination, not merely cancellation requested.
@@ -203,18 +207,22 @@ async fn stop_between_delegate_spawns_preserves_first_child_and_defers_terminal_
     state.transition(AgentRunPhase::Running, None).unwrap();
     assert!(
         !state
-            .execute_tools(vec![
-                (
-                    "first".into(),
-                    "delegate".into(),
-                    serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
-                ),
-                (
-                    "second".into(),
-                    "delegate".into(),
-                    serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
-                ),
-            ])
+            .execute_tools(
+                vec![
+                    (
+                        "first".into(),
+                        "delegate".into(),
+                        serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
+                    ),
+                    (
+                        "second".into(),
+                        "delegate".into(),
+                        serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
+                    ),
+                ],
+                &crate::AgentInvocationContext::default(),
+                &BlockedModel
+            )
             .await
     );
     let agents = runtime.list_agents();
