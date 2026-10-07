@@ -34,7 +34,6 @@ fn goal(thread: &str) -> ThreadGoalSnapshot {
         reason: None,
         usage: ThreadGoalUsage::default(),
         max_review_rounds: 3,
-        max_model_requests: 100,
     }
 }
 fn event(snapshot: ThreadGoalSnapshot) -> Event {

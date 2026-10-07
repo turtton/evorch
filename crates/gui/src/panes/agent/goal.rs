@@ -123,7 +123,7 @@ pub(super) fn goal_strip(ui: &mut egui::Ui, goal: &ThreadGoalSnapshot) -> Option
                             ui.label("Review findings");
                             for finding in &goal.findings { ui.label(finding); }
                         }
-                        ui.label(format!("Requests: {}/{} · input {} · output {} tokens", goal.usage.model_requests, goal.max_model_requests, goal.usage.input_tokens, goal.usage.output_tokens));
+                        ui.label(format!("Requests: {} · input {} · output {} tokens", goal.usage.model_requests, goal.usage.input_tokens, goal.usage.output_tokens));
                     });
                 }
                 });
