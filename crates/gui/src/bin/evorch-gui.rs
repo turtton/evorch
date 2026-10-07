@@ -1686,7 +1686,8 @@ mod storage_shutdown_tests {
         );
         let permit = host.start("thread").unwrap();
         let fence = permit.clone();
-        bus.register_mutation_guard(
+        let nonblocking_fence = permit.clone();
+        bus.register_nonblocking_mutation_guard(
             "run".into(),
             Arc::new(move || {
                 fence
@@ -1694,6 +1695,32 @@ mod storage_shutdown_tests {
                     .ok()
                     .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
             }),
+            Arc::new(move || match nonblocking_fence.try_mutation_guard() {
+                Ok(Some(guard)) => event_bus::MutationGuardAttempt::Acquired(Box::new(guard)),
+                Ok(None) => event_bus::MutationGuardAttempt::Busy,
+                Err(_) => event_bus::MutationGuardAttempt::Rejected,
+            }),
+        );
+        // Match runtime registration: contention must defer a guarded batch,
+        // not revoke a valid generation or wait while holding another guard.
+        let probe = Event::new(event_bus::MessageEvent::MessageDelta {
+            run_id: Some("run".into()),
+            delta: "probe".into(),
+        });
+        let writer = rusqlite::Connection::open(root.join("owners.db")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let validator = bus.mutation_validator();
+        assert!(matches!(
+            validator.acquire_batch(std::slice::from_ref(&probe)),
+            Err(event_bus::MutationBatchError::Busy)
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            validator
+                .acquire_batch(std::slice::from_ref(&probe))
+                .unwrap()
+                .accepted(),
+            &[true]
         );
         let bridge = spawn_storage_bridge(
             bus.clone(),

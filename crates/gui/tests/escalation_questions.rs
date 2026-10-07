@@ -153,11 +153,16 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
                     new_run_id, ..
                 }) => destination = Some(new_run_id),
                 EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                    run_id, to, ..
+                    run_id,
+                    to,
+                    reason,
+                    ..
                 }) if destination.as_ref() == Some(&run_id) => match to {
                     AgentRunPhase::Waiting => break run_id,
                     AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped => {
-                        panic!("escalated run {run_id} terminated before waiting: {to:?}")
+                        panic!(
+                            "escalated run {run_id} terminated before waiting: {to:?}: {reason:?}"
+                        )
                     }
                     AgentRunPhase::Pending | AgentRunPhase::Running => {}
                 },

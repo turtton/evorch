@@ -103,6 +103,12 @@ Public handoff events appear in this order: source terminal state,
 handoff memo. Subsequent requests within each root retain their existing wire
 prefix and prompt cache contract.
 
+Events linking the source and child validate both ownership generations. If
+acquiring a later guard encounters a writer, all previously acquired guards are
+released before waiting, then every generation is revalidated. This prevents
+ownership checkpoints and multi-run event validation from waiting on each
+other's SQLite locks without accepting an unvalidated event.
+
 ## Shell execution environment
 
 The shell tool describes its execution boundaries and a general diagnosis rule:

@@ -99,49 +99,9 @@ impl MutationValidator {
         } else {
             events
         };
-        let mut seen = BTreeSet::new();
-        let mut run_ids = Vec::new();
-        for event in events {
-            accepts_runs(event, |run| {
-                if seen.insert(run.to_owned()) {
-                    run_ids.push(run.to_owned());
-                }
-                true
-            });
-        }
-        let mut checked = BTreeMap::new();
-        let mut guards = Vec::new();
-        // In a mixed event, acquire legacy callbacks before holding any of the
-        // nonblocking guards. Multiple legacy callbacks retain their previous
-        // per-event semantics; runtime ownership always supplies try callbacks.
-        for run in &run_ids {
-            if let Some(Fence::Guard(check)) = runs.get(run) {
-                let accepted = match check() {
-                    Some(guard) => {
-                        guards.push(guard);
-                        true
-                    }
-                    None => false,
-                };
-                checked.insert(run.clone(), accepted);
-            }
-        }
-        for run in &run_ids {
-            let accepted = match runs.get(run) {
-                Some(Fence::NonblockingGuard { attempt, .. }) => match attempt() {
-                    MutationGuardAttempt::Acquired(guard) => {
-                        guards.push(guard);
-                        true
-                    }
-                    MutationGuardAttempt::Busy => return Err(MutationBatchError::Busy),
-                    MutationGuardAttempt::Rejected => false,
-                },
-                Some(Fence::Check(check)) => check(),
-                Some(Fence::Guard(_)) => continue,
-                None => true,
-            };
-            checked.insert(run.clone(), accepted);
-        }
+        let run_ids = event_run_ids(events);
+        let AcquiredRuns { checked, guards } =
+            try_acquire_runs(&runs, &run_ids).map_err(|_| MutationBatchError::Busy)?;
         let accepted = events
             .iter()
             .map(|event| accepts_runs(event, |run| checked[run]))
@@ -246,10 +206,93 @@ impl MutationFences {
 
     pub(crate) fn acquire(&self, event: &Event) -> Option<Vec<Box<dyn MutationGuard>>> {
         let runs = self.runs.read().ok()?;
-        let mut guards = Vec::new();
-        let accepted = accepts_runs(event, |run| acquire_run(&runs, run, &mut guards));
-        accepted.then_some(guards)
+        let run_ids = event_run_ids(std::slice::from_ref(event));
+        if run_ids.len() <= 1 {
+            let mut guards = Vec::new();
+            let accepted = run_ids
+                .iter()
+                .all(|run| acquire_run(&runs, run, &mut guards));
+            return accepted.then_some(guards);
+        }
+        loop {
+            match try_acquire_runs(&runs, &run_ids) {
+                Ok(AcquiredRuns { checked, guards }) => {
+                    return checked.values().all(|accepted| *accepted).then_some(guards);
+                }
+                Err(wait) => {
+                    // The failed attempt has dropped every partial guard. Wait
+                    // for only the contended run, then retry the complete set:
+                    // authority may have changed while the writer committed.
+                    // Never retain this temporary guard across another acquire.
+                    drop(wait()?);
+                }
+            }
+        }
     }
+}
+
+fn event_run_ids(events: &[Event]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut run_ids = Vec::new();
+    for event in events {
+        accepts_runs(event, |run| {
+            if seen.insert(run.to_owned()) {
+                run_ids.push(run.to_owned());
+            }
+            true
+        });
+    }
+    run_ids
+}
+
+struct AcquiredRuns {
+    guards: Vec<Box<dyn MutationGuard>>,
+    checked: BTreeMap<String, bool>,
+}
+
+/// On contention, drop the complete partial set before returning the one
+/// callback the synchronous caller may wait on. GUI batches return Busy
+/// instead. Both paths must use the same nonblocking multi-run acquisition.
+fn try_acquire_runs(
+    runs: &BTreeMap<String, Fence>,
+    run_ids: &[String],
+) -> Result<AcquiredRuns, MutationGuardCheck> {
+    let mut acquired = AcquiredRuns {
+        checked: BTreeMap::new(),
+        guards: Vec::new(),
+    };
+    // Legacy callbacks cannot report contention. Preserve their single-event
+    // semantics, but never call them while holding a nonblocking guard.
+    // Runtime ownership registrations always provide the nonblocking callback.
+    for run in run_ids {
+        if let Some(Fence::Guard(check)) = runs.get(run) {
+            let accepted = match check() {
+                Some(guard) => {
+                    acquired.guards.push(guard);
+                    true
+                }
+                None => false,
+            };
+            acquired.checked.insert(run.clone(), accepted);
+        }
+    }
+    for run in run_ids {
+        let accepted = match runs.get(run) {
+            Some(Fence::NonblockingGuard { attempt, blocking }) => match attempt() {
+                MutationGuardAttempt::Acquired(guard) => {
+                    acquired.guards.push(guard);
+                    true
+                }
+                MutationGuardAttempt::Busy => return Err(Arc::clone(blocking)),
+                MutationGuardAttempt::Rejected => false,
+            },
+            Some(Fence::Check(check)) => check(),
+            Some(Fence::Guard(_)) => continue,
+            None => true,
+        };
+        acquired.checked.insert(run.clone(), accepted);
+    }
+    Ok(acquired)
 }
 
 fn acquire_run(
