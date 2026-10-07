@@ -186,7 +186,6 @@ impl AgentRuntime {
             reason: None,
             usage: ThreadGoalUsage::default(),
             max_review_rounds: 3,
-            max_model_requests: 100,
             max_tokens: None,
         };
         let previous = goals.goals.insert(
@@ -494,7 +493,7 @@ impl AgentRuntime {
             }));
     }
 
-    /// Count both worker and reviewer requests in one durable, non-resetting budget.
+    /// Track worker and reviewer usage and enforce the shared cumulative token budget.
     pub(crate) fn goal_model_request(
         &self,
         run: RunId,
@@ -543,15 +542,7 @@ impl AgentRuntime {
             self.publish_thread_goal(&entry.snapshot);
             return false;
         }
-        if entry.snapshot.usage.model_requests >= entry.snapshot.max_model_requests {
-            entry.snapshot.phase = ThreadGoalPhase::Blocked;
-            entry.snapshot.reason = Some(format!(
-                "Goal model-request budget exhausted; automatic checking is stopped.{RECOVERY_HINT}"
-            ));
-            self.publish_thread_goal(&entry.snapshot);
-            return false;
-        }
-        entry.snapshot.usage.model_requests += 1;
+        entry.snapshot.usage.model_requests = entry.snapshot.usage.model_requests.saturating_add(1);
         self.publish_thread_goal(&entry.snapshot);
         true
     }

@@ -49,7 +49,6 @@ pub struct ThreadGoalSnapshot {
     pub reason: Option<String>,
     pub usage: ThreadGoalUsage,
     pub max_review_rounds: u32,
-    pub max_model_requests: u32,
     pub max_tokens: Option<u64>,
     /// The user's request, retained separately from the agent's proposed objective.
     pub original_request: String,

@@ -227,6 +227,40 @@ async fn natural_stop_and_finish_both_self_check_without_pr_and_preserve_context
 }
 
 #[tokio::test]
+async fn restored_goal_completes_past_one_hundred_model_requests_with_optional_review() {
+    for review_enabled in [false, true] {
+        let (original, _, _) = harness(vec![], vec![]);
+        let root = original.reserve_run_id();
+        original.bind_thread_root("thread", root).unwrap();
+        let mut saved = original
+            .create_thread_goal("thread", root, "Research".into(), vec!["Evidence".into()])
+            .unwrap();
+        saved.usage.model_requests = 99;
+        saved.review_enabled = review_enabled;
+
+        let (runtime, model, _) = harness(
+            vec![Step::Stop, Step::Check(true), Step::Stop],
+            if review_enabled {
+                vec![Step::Review(true)]
+            } else {
+                vec![]
+            },
+        );
+        runtime.restore_thread_goal(saved).unwrap();
+        let root = start(&runtime, Role::Worker, false);
+        assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+        let goal = runtime.thread_goal("thread").unwrap();
+        assert_eq!(goal.phase, ThreadGoalPhase::Complete);
+        assert_eq!(goal.review_round, u32::from(review_enabled));
+        assert_eq!(goal.usage.model_requests, 102 + u32::from(review_enabled));
+        assert_eq!(
+            model.requests.lock().unwrap().len(),
+            3 + usize::from(review_enabled)
+        );
+    }
+}
+
+#[tokio::test]
 async fn review_findings_repair_in_original_run_and_retry_to_completion() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -390,14 +424,6 @@ async fn restore_keeps_pause_and_usage_without_spawning_and_stop_resume_does_not
     assert!(restored.thread_goal("thread").unwrap().work_stopped);
     assert!(restored.list_agents().is_empty());
     assert!(model.requests.lock().unwrap().is_empty());
-    let mut exhausted = saved;
-    exhausted.max_model_requests = 1;
-    restored.restore_thread_goal(exhausted).unwrap();
-    restored.goal_model_request(root, crate::RunPurpose::General, None);
-    assert_eq!(
-        restored.thread_goal("thread").unwrap().phase,
-        ThreadGoalPhase::Blocked
-    );
 }
 
 #[tokio::test]
@@ -674,7 +700,8 @@ async fn blocked_goal_requires_explicit_host_replacement_to_start_new_budget() {
         )
         .unwrap();
     let mut exhausted = runtime.thread_goal("thread").unwrap();
-    exhausted.max_model_requests = 0;
+    exhausted.max_tokens = Some(12);
+    exhausted.usage.input_tokens = 12;
     runtime.restore_thread_goal(exhausted).unwrap();
     assert!(!runtime.goal_model_request(root, crate::RunPurpose::General, None));
     let blocked = runtime.thread_goal("thread").unwrap();
