@@ -111,6 +111,8 @@ pub(crate) struct Shared {
     pub(crate) projects: Mutex<HashMap<PathBuf, Arc<project::ProjectContext>>>,
     pub(crate) project_models: OnceLock<project::ProjectModelResolver>,
     pub(crate) project_slugs: OnceLock<project::ProjectSlugResolver>,
+    /// Trust the host declared per project root; undeclared roots keep the shared rules' trust.
+    pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -379,6 +381,7 @@ impl AgentRuntime {
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
+                project_trust: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
@@ -660,6 +663,7 @@ impl AgentRuntime {
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
+                project_trust: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
@@ -2147,7 +2151,10 @@ pub(crate) fn loop_shared(
     shared.upgrade().map(|shared| {
         let (system_prompts, skills) = match shared.skill_source.get() {
             Some(source) => {
-                let snapshot = source.snapshot_for(project.map(|project| project.root.as_path()));
+                let snapshot = source.snapshot_for(
+                    project.map(|project| project.root.as_path()),
+                    project.is_none_or(|project| project.repo_skills),
+                );
                 (snapshot.catalog, Some(snapshot.registry))
             }
             None => (

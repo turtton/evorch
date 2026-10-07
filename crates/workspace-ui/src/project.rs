@@ -41,6 +41,9 @@ pub struct ProjectRecord {
     pub name: String,
     pub repo_root: PathBuf,
     pub allowed_directories: Vec<AllowedDirectory>,
+    /// Whether the project's own instructions (`AGENTS.md`, repository skills) reach its runs.
+    #[serde(default)]
+    pub trust: TrustState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

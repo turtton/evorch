@@ -280,6 +280,9 @@ pub trait CommandSink: Send {
         Ok(())
     }
 
+    /// Declares whether a project's own instructions may reach its runs.
+    fn set_project_trust(&mut self, _root: std::path::PathBuf, _trusted: bool) {}
+
     fn start_background_run(&self, _text: String) -> Option<runtime::RunId> {
         None
     }

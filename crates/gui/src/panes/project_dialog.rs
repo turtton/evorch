@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{ProjectId, ProjectRecord, SidebarState, TrustState};
 
-use crate::model::project_dialog::ProjectDialog;
+use crate::model::project_dialog::{ProjectDialog, ProjectOverrides};
 use crate::theme::icons;
 use crate::theme::text::{h3, muted, section};
 use crate::theme::tokens::*;
@@ -15,11 +15,25 @@ pub const PATH_LABEL: &str = "Project path (~ allowed)";
 pub const NAME_LABEL: &str = "Project name";
 pub const DIRECTORY_LABEL: &str = "Directory path (~ allowed)";
 pub const ROLE_PROFILE_LABEL: &str = "Role profile";
+pub const TRUST_LABEL: &str = "Trust project instructions";
+const TRUST_HINT: &str = "Trusted projects' AGENTS.md and skills reach their agents.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectDialogAction {
     Browse,
-    Add(PathBuf),
+    /// Inspect a path before registering it.
+    Review(PathBuf),
+    /// Register the reviewed path with the chosen trust.
+    Confirm {
+        path: PathBuf,
+        trust: TrustState,
+    },
+    /// Return from the review to the path entry.
+    Back,
+    SetProjectTrust {
+        project: ProjectId,
+        trust: TrustState,
+    },
     Rename {
         project: ProjectId,
         name: String,
@@ -60,6 +74,11 @@ pub fn project_dialog_modal(
                 ProjectDialog::Add { path, error } => {
                     add_project(ui, path, error.as_deref(), picker_busy, &mut action);
                 }
+                ProjectDialog::Review {
+                    path,
+                    overrides,
+                    error,
+                } => review_project(ui, path, overrides, error.as_deref(), &mut action),
                 ProjectDialog::Settings {
                     project,
                     name,
@@ -107,10 +126,54 @@ fn add_project(
             .add_enabled_ui(!trimmed.is_empty(), |ui| primary_button(ui, "Add"))
             .inner;
         if (add.clicked() || submitted) && !trimmed.is_empty() {
-            *action = Some(ProjectDialogAction::Add(PathBuf::from(trimmed)));
+            *action = Some(ProjectDialogAction::Review(PathBuf::from(trimmed)));
         }
         if ui.button("Cancel").clicked() {
             *action = Some(ProjectDialogAction::Close);
+        }
+    });
+}
+
+/// Lists only what the project overrides, then asks whether to trust it.
+fn review_project(
+    ui: &mut Ui,
+    path: &std::path::Path,
+    overrides: &ProjectOverrides,
+    error: Option<&str>,
+    action: &mut Option<ProjectDialogAction>,
+) {
+    ui.label(h3("Review project"));
+    copyable_path(ui, &path.display().to_string());
+    ui.label(section("Overrides"));
+    if overrides.is_empty() {
+        ui.label(muted("Nothing. It runs on your settings as they are."));
+    }
+    if let Some(profile) = &overrides.role_profile {
+        ui.label(format!("Role profile: {profile}"));
+    }
+    if overrides.agents_md {
+        ui.label("Rules: AGENTS.md");
+    }
+    if !overrides.skills.is_empty() {
+        ui.label(format!("Skills: {}", overrides.skills.join(", ")));
+    }
+    ui.label(muted(TRUST_HINT));
+    if let Some(error) = error {
+        ui.colored_label(palette().ERROR_FG, error);
+    }
+    ui.horizontal(|ui| {
+        let confirm = |trust| ProjectDialogAction::Confirm {
+            path: path.to_path_buf(),
+            trust,
+        };
+        if primary_button(ui, "Trust and add").clicked() {
+            *action = Some(confirm(TrustState::Approved));
+        }
+        if ui.button("Add without trust").clicked() {
+            *action = Some(confirm(TrustState::Unapproved));
+        }
+        if ui.button("Back").clicked() {
+            *action = Some(ProjectDialogAction::Back);
         }
     });
 }
@@ -198,6 +261,22 @@ fn project_settings(
 
     ui.label(section("Path"));
     copyable_path(ui, &project.repo_root.display().to_string());
+
+    let mut trusted = project.trust == TrustState::Approved;
+    if ui
+        .checkbox(&mut trusted, TRUST_LABEL)
+        .on_hover_text(TRUST_HINT)
+        .changed()
+    {
+        *action = Some(ProjectDialogAction::SetProjectTrust {
+            project: project.id.clone(),
+            trust: if trusted {
+                TrustState::Approved
+            } else {
+                TrustState::Unapproved
+            },
+        });
+    }
 
     let label = ui.label(section(ROLE_PROFILE_LABEL));
     let mut selected = role_profile.to_owned();

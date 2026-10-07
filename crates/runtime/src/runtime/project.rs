@@ -6,6 +6,7 @@
 //! moves work that is already in flight.
 
 use super::*;
+use crate::rules::ProjectTrust;
 
 /// Composes the model a project's runs use; `None` keeps the runtime model.
 pub type ProjectModelResolver =
@@ -21,6 +22,8 @@ pub(crate) struct ProjectContext {
     /// `None` while the project is not a git repository root (isolated runs fail closed).
     worktrees: Option<WorktreeManager>,
     pub(crate) model: Arc<dyn AgentModel>,
+    /// Whether `<root>/.evorch/skills` may reach this project's runs.
+    pub(crate) repo_skills: bool,
     slug: OnceLock<String>,
 }
 
@@ -67,17 +70,31 @@ impl Shared {
             .get()
             .and_then(|resolve| resolve(root))
             .unwrap_or_else(|| Arc::clone(&self.model));
+        let declared = self.declared_trust(root);
         let project = Arc::new(ProjectContext {
             root: root.to_path_buf(),
-            rules: self
-                .rules()
-                .map(|rules| Arc::new(rules.with_project_root(Some(root.to_path_buf())))),
+            rules: self.rules().map(|rules| {
+                let rules = rules.with_project_root(Some(root.to_path_buf()));
+                Arc::new(match declared {
+                    Some(trust) => rules.with_trust(trust),
+                    None => rules,
+                })
+            }),
             worktrees,
             model,
+            repo_skills: declared.is_none_or(|trust| trust == ProjectTrust::Approved),
             slug: OnceLock::new(),
         });
         projects.insert(root.to_path_buf(), Arc::clone(&project));
         project
+    }
+
+    pub(crate) fn declared_trust(&self, root: &std::path::Path) -> Option<ProjectTrust> {
+        self.project_trust
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(root)
+            .copied()
     }
 
     pub(crate) fn run_project(&self, config: &RunConfig) -> Option<Arc<ProjectContext>> {
@@ -136,6 +153,22 @@ impl AgentRuntime {
     pub fn with_project_models(self, resolver: ProjectModelResolver) -> Self {
         let _ = self.shared.project_models.set(resolver);
         self
+    }
+
+    /// Declares whether a project's own instructions (`AGENTS.md` rules and
+    /// `.evorch/skills`) may reach its runs. Applies to runs started afterwards.
+    pub fn set_project_trust(&self, root: PathBuf, trust: ProjectTrust) {
+        self.shared
+            .project_trust
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(root.clone(), trust);
+        // Rebuilt on next use; running runs keep the context they started with.
+        self.shared
+            .projects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&root);
     }
 
     /// Lets the host name each project for project-partitioned records, so a

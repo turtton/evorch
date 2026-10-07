@@ -293,3 +293,52 @@ async fn root_binds_the_active_project_at_registration_for_later_children() {
     assert!(first.join("child.rs").exists());
     assert!(!second.join("child.rs").exists());
 }
+
+// A project's own instructions reach its runs only once the host trusts it, and
+// re-declaring trust applies to runs started afterwards.
+#[tokio::test]
+async fn declared_trust_gates_project_rules_and_repository_skills() {
+    let (_trusted_temp, trusted) = canonical_repo();
+    let (_untrusted_temp, untrusted) = canonical_repo();
+    write_skill(&trusted, "trusted-skill");
+    write_skill(&untrusted, "untrusted-skill");
+    let bus = Arc::new(EventBus::new(64));
+    let (factory, _mounts) = support::recording_factory();
+    let runtime = runtime_on(&bus, Arc::new(ScriptedModel::new([])), &trusted, factory)
+        .with_skill_source(Arc::new(SkillCatalogSource::new(
+            config::Config::default(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Arc::clone(&bus),
+        )));
+    runtime.set_project_trust(trusted.clone(), ProjectTrust::Approved);
+    runtime.set_project_trust(untrusted.clone(), ProjectTrust::Unapproved);
+    let inputs = |root: &std::path::Path| {
+        let project = runtime.shared.project(root);
+        let shared = loop_shared(&Arc::downgrade(&runtime.shared), Some(&project)).unwrap();
+        let skills: Vec<_> = shared
+            .skills
+            .unwrap()
+            .available_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        (shared.rules.unwrap().trust(), skills)
+    };
+
+    let (trust, skills) = inputs(&trusted);
+    assert_eq!(trust, ProjectTrust::Approved);
+    assert!(skills.contains(&"trusted-skill".to_owned()), "{skills:?}");
+    let (trust, skills) = inputs(&untrusted);
+    assert_eq!(trust, ProjectTrust::Unapproved);
+    assert!(
+        !skills.contains(&"untrusted-skill".to_owned()),
+        "{skills:?}"
+    );
+
+    runtime.set_project_trust(untrusted.clone(), ProjectTrust::Approved);
+    let (trust, skills) = inputs(&untrusted);
+    assert_eq!(trust, ProjectTrust::Approved);
+    assert!(skills.contains(&"untrusted-skill".to_owned()), "{skills:?}");
+}

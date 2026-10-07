@@ -47,6 +47,15 @@ impl RulesSource {
         self.project_root.as_deref()
     }
 
+    /// 他の設定を保ったまま信頼状態だけを差し替えた読み込み元を返す。
+    #[must_use]
+    pub fn with_trust(&self, trust: ProjectTrust) -> Self {
+        Self {
+            trust,
+            ..self.clone()
+        }
+    }
+
     /// 他の設定を保ったままプロジェクトルートだけを差し替えた読み込み元を返す。
     #[must_use]
     pub fn with_project_root(&self, project_root: Option<PathBuf>) -> Self {

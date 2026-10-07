@@ -120,6 +120,8 @@ pub struct WorkbenchState<S> {
     pub(super) loop_status: LoopStatusView,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
+    /// Project trust last declared to the sink, so only changes are re-sent.
+    pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
@@ -235,6 +237,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             loop_status: LoopStatusView::default(),
             thread_goals: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
+            declared_trust: std::collections::BTreeMap::new(),
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
@@ -381,6 +384,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_command_sink(mut self, sink: Box<dyn CommandSink>) -> Self {
         self.sink = sink;
+        self.declared_trust.clear();
         self
     }
 
