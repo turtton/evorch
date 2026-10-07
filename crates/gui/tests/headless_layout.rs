@@ -15,8 +15,6 @@ mod demo_fixture_headless;
 mod headless_options;
 #[path = "headless_layout/pane_typography.rs"]
 mod pane_typography;
-#[path = "headless_layout/primary_project.rs"]
-mod primary_project;
 #[path = "headless_layout/right_panes_headless.rs"]
 mod right_panes_headless;
 #[path = "headless_layout/status_line_headless.rs"]
@@ -29,3 +27,5 @@ mod tasks_navigation_headless;
 mod terminal_default_layout;
 #[path = "headless_layout/theme_hierarchy.rs"]
 mod theme_hierarchy;
+#[path = "headless_layout/thread_project.rs"]
+mod thread_project;

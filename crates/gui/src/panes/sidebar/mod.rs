@@ -17,7 +17,6 @@ struct SidebarUiState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarAction {
     SelectProject(ProjectId),
-    SetPrimaryProject(Option<ProjectId>),
     OpenAddProject,
     OpenProjectSettings(ProjectId),
     CreateThread(String),

@@ -402,6 +402,7 @@ impl Fixture {
             &self.supervisor,
             &mut sink,
             gui::model::commands::GoalSubmission {
+                project_root: None,
                 delegation_value: None,
                 project_id: "evorch".into(),
                 thread_id: "thread-73".into(),

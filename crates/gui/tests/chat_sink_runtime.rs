@@ -194,6 +194,7 @@ impl Fixture {
         model_preference: Option<runtime::ModelPreference>,
     ) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+            project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
@@ -269,6 +270,7 @@ fn composer_chat_grants_conversation_only_to_worker_on_start_and_restore() {
             let events = fixture
                 .sink
                 .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    project_root: None,
                     fork_seed: None,
                     composer_role,
                     images: Vec::new(),
@@ -353,6 +355,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
             let events = fixture
                 .sink
                 .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    project_root: None,
                     fork_seed: None,
                     composer_role: saved_composer,
                     images: Vec::new(),
@@ -390,12 +393,14 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
             );
             let command = if resume_only {
                 WorkbenchCommand::ContinueChat(ChatContinuation {
+                    project_root: None,
                     thread_id: "conversation".into(),
                     composer_role: next_composer,
                     model_preference: None,
                 })
             } else {
                 WorkbenchCommand::SendChat(ChatSubmission {
+                    project_root: None,
                     fork_seed: None,
                     composer_role: next_composer,
                     images: Vec::new(),

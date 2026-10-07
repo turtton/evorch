@@ -254,6 +254,7 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            project_root: Some(harness.state().sidebar().projects[0].repo_root.clone()),
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),

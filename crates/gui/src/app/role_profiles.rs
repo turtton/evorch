@@ -23,8 +23,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     /// The project directory whose config the runtime composes from.
+    /// The project whose role profile the settings describe: the active thread's.
     pub(super) fn config_project_dir(&self) -> Option<PathBuf> {
-        self.routing_load_options().project_dir
+        self.active_repo_root()
+            .or_else(|| self.routing_load_options().project_dir)
     }
 
     fn project_role_profile_state(&self, user: &config::Config) -> Option<ProjectRoleProfile> {
@@ -84,6 +86,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or_else(|| "No config path is configured".to_owned())?;
         let options = self.user_settings_options();
         let production = self.production_model.clone();
+        let projects = self.project_models.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = path
@@ -95,9 +98,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 })
                 .and_then(|current| write(&path, &current))
                 .and_then(|()| {
-                    if let Some((context, model)) = production {
-                        model.replace(context.reload()?);
-                    }
+                    crate::model::production::reload_models(
+                        production.as_ref(),
+                        projects.as_ref(),
+                    )?;
                     config::Config::load_unresolved(&options).map_err(|error| error.to_string())
                 });
             if let Err(error) = &result {

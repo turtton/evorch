@@ -101,9 +101,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         directory.clear();
                     }
                 }),
-            ProjectDialogAction::SetPrimary(project) => {
-                self.set_primary_project(project).map_err(error_text)
-            }
             ProjectDialogAction::SetRoleProfile { project, profile } => {
                 self.set_project_role_profile(&project, &profile)
             }
@@ -142,13 +139,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let ProjectDialog::Settings { role_profile, .. } = &mut self.project_dialog {
             profile.clone_into(role_profile);
         }
-        if self.config_project_dir().as_deref() == Some(root.as_path())
-            && let Some((context, model)) = self.production_model.clone()
-        {
+        // Recompose whichever model serves that project, startup or not.
+        if let Some((context, model)) = self.production_model.clone() {
+            let startup = context.load_options.project_dir.as_deref() == Some(root.as_path());
+            let projects = self.project_models.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             self.project_profile_rx = Some(rx);
             std::thread::spawn(move || {
-                let _ = tx.send(context.reload().map(|routed| model.replace(routed)));
+                let result = if startup {
+                    context.reload().map(|routed| model.replace(routed))
+                } else {
+                    projects.map_or(Ok(()), |projects| projects.reload(&root))
+                };
+                let _ = tx.send(result);
             });
         }
         Ok(())

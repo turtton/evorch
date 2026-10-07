@@ -53,8 +53,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
             .filter(|thread| thread.model_preference.is_none())
-            .and(self.production_model.as_ref())
-            .map(|(_, model)| {
+            .and(self.active_model())
+            .map(|model| {
                 let role = match self.composer.role {
                     crate::model::composer::ComposerRole::Worker => runtime::Role::Worker,
                     crate::model::composer::ComposerRole::Orchestrator => {
@@ -282,9 +282,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     Ok(())
                 }
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),
-                SidebarAction::SetPrimaryProject(project_id) => {
-                    self.set_primary_project(project_id)
-                }
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
                 SidebarAction::CreateThreadIn(project_id) => self
                     .select_project(project_id)

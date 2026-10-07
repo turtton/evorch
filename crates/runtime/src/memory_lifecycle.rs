@@ -24,7 +24,16 @@ impl AgentRuntime {
         if task.parent.is_some() || task.config.learning_internal || task.config.keep_alive {
             return None;
         }
-        let settings = self.shared.learning.get()?.clone();
+        let mut settings = self.shared.learning.get()?.clone();
+        // Lessons belong to the project the run worked in, not the startup one.
+        if let Some(slug) = task
+            .config
+            .project_root
+            .as_deref()
+            .and_then(|root| self.shared.project_slug(root))
+        {
+            settings.project = slug;
+        }
         let mut nonce = [0_u8; 16];
         if getrandom::fill(&mut nonce).is_err() {
             tracing::warn!(run = %task.run_id, "post-run learning identity unavailable");

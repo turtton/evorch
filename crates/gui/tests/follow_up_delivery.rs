@@ -105,6 +105,7 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
                 )
             } else {
                 let events = sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    project_root: None,
                     fork_seed: None,
                     thread_id: "thread-1".into(),
                     text: "original task".into(),

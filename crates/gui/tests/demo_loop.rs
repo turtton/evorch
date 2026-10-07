@@ -248,6 +248,7 @@ impl DemoFixture {
             &self.supervisor,
             &mut sink,
             gui::model::commands::GoalSubmission {
+                project_root: None,
                 delegation_value: None,
                 project_id: "demo".into(),
                 thread_id: "thread-1".into(),

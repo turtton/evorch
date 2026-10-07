@@ -18,6 +18,9 @@ pub struct PacketReference {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalSubmission {
+    /// Root of the project the thread belongs to; its runs work there.
+    #[serde(default)]
+    pub project_root: Option<std::path::PathBuf>,
     #[serde(default)]
     pub delegation_value: Option<String>,
     pub project_id: String,
@@ -50,6 +53,9 @@ pub struct MergeCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatSubmission {
+    /// Root of the project the thread belongs to; its runs work there.
+    #[serde(default)]
+    pub project_root: Option<std::path::PathBuf>,
     #[serde(default)]
     pub composer_role: super::composer::ComposerRole,
     #[serde(default)]
@@ -66,6 +72,9 @@ pub struct ChatSubmission {
 /// A host continuation request, not a new user message or a new conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatContinuation {
+    /// Root of the project the thread belongs to; its runs work there.
+    #[serde(default)]
+    pub project_root: Option<std::path::PathBuf>,
     pub thread_id: String,
     pub composer_role: super::composer::ComposerRole,
     pub model_preference: Option<runtime::ModelPreference>,
@@ -376,8 +385,14 @@ pub struct GoalFormModel {
 }
 
 impl GoalFormModel {
-    pub fn build_command(&self, project_id: &str, thread_id: &str) -> WorkbenchCommand {
+    pub fn build_command(
+        &self,
+        project_id: &str,
+        project_root: &std::path::Path,
+        thread_id: &str,
+    ) -> WorkbenchCommand {
         WorkbenchCommand::SubmitGoal(GoalSubmission {
+            project_root: Some(project_root.to_path_buf()),
             delegation_value: self.delegation_value.clone(),
             project_id: project_id.into(),
             thread_id: thread_id.into(),
@@ -598,6 +613,7 @@ mod tests {
         // When: both chats are submitted in order.
         let events = ["t1", "t2"].map(|thread_id| {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
                 images: Vec::new(),
@@ -642,6 +658,7 @@ mod tests {
     #[test]
     fn goal_submission_serializes_references_and_constraints() {
         let command = WorkbenchCommand::SubmitGoal(GoalSubmission {
+            project_root: None,
             delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
@@ -663,6 +680,7 @@ mod tests {
     fn fixture_adapter_accepts_goal_without_a_pr_flow() {
         let mut adapter = FixtureLoopAdapter::default();
         let events = adapter.submit(WorkbenchCommand::SubmitGoal(GoalSubmission {
+            project_root: None,
             delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
@@ -815,6 +833,7 @@ mod tests {
     fn recording_sink_records_in_order() {
         let mut sink = RecordingSink::default();
         let goal = WorkbenchCommand::SubmitGoal(GoalSubmission {
+            project_root: None,
             delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),

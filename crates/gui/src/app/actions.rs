@@ -14,10 +14,14 @@ use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn sync_shell_cwd(&mut self) -> bool {
+        // The active thread's project hosts the shell and the runtime's active project.
         let cwd = self
             .sidebar
-            .resolved_primary_project()
-            .map(|project| project.repo_root.clone());
+            .active_thread
+            .as_ref()
+            .and_then(|thread| self.thread_project(thread))
+            .map(|project| project.repo_root.clone())
+            .or_else(|| self.active_repo_root());
         match self.sink.set_default_cwd(cwd) {
             Ok(()) => true,
             Err(error) => {
@@ -25,15 +29,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 false
             }
         }
-    }
-
-    pub fn set_primary_project(
-        &mut self,
-        project_id: Option<ProjectId>,
-    ) -> Result<(), WorkbenchError> {
-        self.sidebar.set_primary_project(project_id)?;
-        self.save_sidebar();
-        Ok(())
     }
 
     pub fn select_project(&mut self, project_id: ProjectId) -> Result<(), WorkbenchError> {
@@ -154,6 +149,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.focus = ConversationFocus::Thread;
         self.sync_subagent_thread_panes();
+        // Previews, skills and the shell follow the thread now in view.
+        self.sync_shell_cwd();
         self.save_sidebar();
         Ok(())
     }
@@ -305,15 +302,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_goal(&mut self) {
-        let (Some(project_id), Some(thread_id)) = (
-            self.sidebar.selected_project.as_ref(),
-            self.sidebar.active_thread.as_ref(),
-        ) else {
+        let Some(thread_id) = self.sidebar.active_thread.clone() else {
             return;
         };
-        let command = self
-            .goal_form
-            .build_command(&project_id.to_string(), &thread_id.to_string());
+        let Some(project) = self.thread_project(&thread_id) else {
+            return;
+        };
+        let command = self.goal_form.build_command(
+            &project.id.to_string(),
+            &project.repo_root,
+            &thread_id.to_string(),
+        );
         self.submit_command(command);
     }
 
@@ -472,6 +471,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for event in self.sink.submit(command) {
             self.apply_loop_event(event);
         }
+    }
+
+    /// The project a thread was started in; its runs work there.
+    pub(super) fn thread_project(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<&workspace_ui::ProjectRecord> {
+        let thread = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| &thread.id == thread_id)?;
+        self.sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == thread.project_id)
     }
 
     pub(super) fn active_repo_root(&self) -> Option<PathBuf> {

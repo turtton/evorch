@@ -137,6 +137,7 @@ impl Fixture {
             &world.supervisor,
             &mut world.sink,
             GoalSubmission {
+                project_root: None,
                 delegation_value: None,
                 project_id: "project".into(),
                 thread_id: "thread".into(),
@@ -193,6 +194,7 @@ fn send(world: &mut World, text: &str) -> Vec<LoopEvent> {
     world
         .sink
         .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            project_root: None,
             fork_seed: None,
             thread_id: "thread".into(),
             text: text.into(),
@@ -320,6 +322,7 @@ fn team_busy_descendant_and_claim_failures_reach_chat_rejection() {
 fn continue_chat(world: &mut World) -> Vec<LoopEvent> {
     world.sink.submit(WorkbenchCommand::ContinueChat(
         gui::model::commands::ChatContinuation {
+            project_root: None,
             thread_id: "thread".into(),
             composer_role: gui::model::composer::ComposerRole::Worker,
             model_preference: None,
@@ -334,6 +337,7 @@ fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch()
     let events = original
         .sink
         .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            project_root: None,
             fork_seed: None,
             thread_id: "thread".into(),
             text: "original chat task".into(),

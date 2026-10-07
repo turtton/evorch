@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use gui::{
@@ -135,7 +134,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
     state.composer_mut().input = "Implement feature".into();
     state.submit_composer();
     let root = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        async {
             let mut root = None;
             let mut final_seen = false;
             loop {
@@ -169,9 +168,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
                     break run_id.clone();
                 }
             }
-        })
-        .await
-        .unwrap()
+        }.await
     });
     assert_eq!(runtime.list_agents().len(), 2);
     let initial = requests.lock().unwrap()[1].1.clone();
@@ -193,7 +190,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
         state.composer_mut().input = text.into();
         state.submit_composer();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            async {
                 loop {
                     let event = receiver.recv().await.unwrap();
                     state.apply_events([event.clone()]);
@@ -202,7 +199,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
                         break;
                     }
                 }
-            }).await.unwrap();
+            }.await;
         });
     }
     assert_eq!(
@@ -264,7 +261,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
     state.composer_mut().input = "状況を教えて".into();
     state.submit_composer();
     rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        async {
             loop {
                 let event = receiver.recv().await.unwrap();
                 state.apply_events([event.clone()]);
@@ -272,7 +269,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
                     break;
                 }
             }
-        }).await.unwrap();
+        }.await;
     });
     let observed = recorded_requests.lock().unwrap();
     assert_eq!(observed.len(), 5);

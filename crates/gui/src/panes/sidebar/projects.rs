@@ -3,10 +3,9 @@ use workspace_ui::{ProjectRecord, SidebarState};
 
 use crate::theme::icons;
 use crate::theme::text::{medium, muted};
-use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
+use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{
-    compact_row, empty_state, ghost_icon_button, icon_button, icon_button_rich, icon_text,
-    row_title,
+    compact_row, empty_state, ghost_icon_button, icon_button, icon_text, row_title,
 };
 
 use super::{SidebarAction, SidebarUiState};
@@ -120,24 +119,6 @@ fn project_row(
             ui.spacing_mut().item_spacing.x = SP_1;
             if icon_button(ui, icons::GEAR_SIX, "Project settings").clicked() {
                 *action = Some(SidebarAction::OpenProjectSettings(project.id.clone()));
-            }
-            let primary = sidebar.primary_project.as_ref() == Some(&project.id);
-            let star_label = if primary {
-                "Clear primary project"
-            } else {
-                "Set as primary project"
-            };
-            let star = if primary {
-                icons::filled(ui, icons::STAR)
-                    .size(FONT_ICON)
-                    .color(palette().WARNING_FG)
-            } else {
-                icon_text(icons::STAR).color(palette().TEXT_MUTED)
-            };
-            if icon_button_rich(ui, star, star_label).clicked() {
-                *action = Some(SidebarAction::SetPrimaryProject(
-                    (!primary).then(|| project.id.clone()),
-                ));
             }
             let new_thread = format!("New thread in {}", project.name);
             if icon_button(ui, icons::PLUS, &new_thread).clicked() {

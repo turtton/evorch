@@ -83,6 +83,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
 
     // When: B submits through the production sink, then its root spawns children.
     for event in sink.submit(WorkbenchCommand::SubmitGoal(GoalSubmission {
+        project_root: None,
         delegation_value: None,
         project_id: "project".into(),
         thread_id: "B".into(),

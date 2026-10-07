@@ -37,11 +37,13 @@ fn send_button_round_trip_issues_send_chat() {
     // When: the conversation's Send button is clicked.
     harness.click_label("Send");
     harness.run();
-    // Then: one chat is issued, rendered, and the composer remains available.
+    // Then: one chat is issued in the thread's project, rendered, and the composer remains available.
+    let project_root = harness.state().sidebar().projects[0].repo_root.clone();
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
             fork_seed: None,
+            project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),
@@ -101,6 +103,10 @@ fn goal_command_submits_via_state_without_goal_pane() {
         panic!("expected exactly one SubmitGoal");
     };
     assert_eq!(goal.goal, "implement issue #91");
+    assert_eq!(
+        goal.project_root.as_ref(),
+        Some(&harness.state().sidebar().projects[0].repo_root)
+    );
     assert!(
         harness
             .state()

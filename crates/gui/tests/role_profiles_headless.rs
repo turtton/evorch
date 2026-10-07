@@ -38,6 +38,21 @@ fn user_options(root: &Path) -> config::LoadOptions {
     }
 }
 
+/// The startup model context for `<root>/project`.
+fn production(root: &Path) -> gui::model::production::ProductionModel {
+    gui::model::production::ProductionModel {
+        load_options: config::LoadOptions {
+            project_dir: Some(root.join("project")),
+            ..user_options(root)
+        },
+        credential_store: Arc::new(
+            sandbox::FileCredentialStore::open(root.join("credentials")).expect("store"),
+        ),
+        bus: Arc::new(event_bus::EventBus::new(32)),
+        env: Arc::new(routing::MapEnv::from_iter([("TEST_KEY", "test-secret")])),
+    }
+}
+
 /// A user layer with a `fast` profile and an active project `demo` at `<root>/project`.
 fn fixture(
     root: &Path,
@@ -51,17 +66,7 @@ fn fixture(
     if project_profile.is_some() {
         config::save_project_role_profile(&project, project_profile).expect("project selection");
     }
-    let context = gui::model::production::ProductionModel {
-        load_options: config::LoadOptions {
-            project_dir: Some(project.clone()),
-            ..user_options(root)
-        },
-        credential_store: Arc::new(
-            sandbox::FileCredentialStore::open(root.join("credentials")).expect("store"),
-        ),
-        bus: Arc::new(event_bus::EventBus::new(32)),
-        env: Arc::new(routing::MapEnv::from_iter([("TEST_KEY", "test-secret")])),
-    };
+    let context = production(root);
     let model = Arc::new(SwitchableModel::new(context.reload().expect("runtime")));
     let mut sidebar = SidebarState::default();
     let id = ProjectId::new("demo");
@@ -265,4 +270,49 @@ fn project_settings_role_profile_writes_project_config_and_recomposes_active_mod
     };
     assert_eq!(role_profile, "fast");
     assert_eq!(error, &None);
+}
+
+// A project other than the startup one runs on its own role profile, and choosing
+// a profile for it in the project dialog recomposes that project's model only.
+#[test]
+fn each_project_runs_on_the_role_profile_it_selects() {
+    // Given: the startup project on the default profile and a second project.
+    let temp = tempfile::tempdir().expect("temp");
+    let (_startup_harness, startup) = fixture(temp.path(), None);
+    let other = temp.path().join("other");
+    std::fs::create_dir_all(&other).expect("other project");
+    let models = gui::model::production::ProjectModels::new(production(temp.path()));
+    let mut sidebar = SidebarState::default();
+    for (id, root) in [("demo", temp.path().join("project")), ("other", other)] {
+        sidebar
+            .add_project(ProjectId::new(id), id, &root)
+            .expect("project");
+    }
+    let other = sidebar.projects[1].repo_root.clone();
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
+        .expect("state")
+        .with_sidebar(sidebar)
+        .with_production_model(production(temp.path()), startup.clone())
+        .with_project_models(models.clone());
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+
+    // Then: the startup project keeps the runtime model; the other gets its own.
+    assert!(models.model_for(&temp.path().join("project")).is_none());
+    let model = models.model_for(&other).expect("project model");
+    assert_eq!(model.selected_model(Role::Worker, None), "local/base");
+
+    // When: the other project selects the `fast` profile.
+    harness
+        .state_mut()
+        .set_project_role_profile(&ProjectId::new("other"), "fast")
+        .expect("selection saved");
+    finish(&mut harness);
+
+    // Then: only that project's model switches.
+    assert_eq!(model.selected_model(Role::Worker, None), "accelerated/fast");
+    assert!(Arc::ptr_eq(
+        &model,
+        &models.model_for(&other).expect("cached")
+    ));
+    assert_eq!(startup.selected_model(Role::Worker, None), "local/base");
 }

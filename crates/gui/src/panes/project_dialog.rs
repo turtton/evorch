@@ -14,7 +14,6 @@ use crate::theme::widgets::{badge, fill_label, ghost, primary_button, surface_fr
 pub const PATH_LABEL: &str = "Project path (~ allowed)";
 pub const NAME_LABEL: &str = "Project name";
 pub const DIRECTORY_LABEL: &str = "Directory path (~ allowed)";
-pub const PRIMARY_LABEL: &str = "Primary project";
 pub const ROLE_PROFILE_LABEL: &str = "Role profile";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +28,6 @@ pub enum ProjectDialogAction {
         project: ProjectId,
         path: PathBuf,
     },
-    SetPrimary(Option<ProjectId>),
     SetRoleProfile {
         project: ProjectId,
         profile: String,
@@ -71,13 +69,11 @@ pub fn project_dialog_modal(
                     error,
                 } => match sidebar.projects.iter().find(|record| &record.id == project) {
                     Some(project) => {
-                        let primary = sidebar.primary_project.as_ref() == Some(&project.id);
                         let form = SettingsForm {
                             name,
                             directory,
                             role_profile,
                             role_profiles,
-                            primary,
                             picker_busy,
                         };
                         project_settings(ui, project, form, error.as_deref(), &mut action);
@@ -158,7 +154,6 @@ struct SettingsForm<'a> {
     directory: &'a mut String,
     role_profile: &'a str,
     role_profiles: &'a [String],
-    primary: bool,
     picker_busy: bool,
 }
 
@@ -174,7 +169,6 @@ fn project_settings(
         directory: new_directory,
         role_profile,
         role_profiles,
-        primary,
         picker_busy,
     } = form;
     ui.label(h3("Project settings"));
@@ -204,19 +198,6 @@ fn project_settings(
 
     ui.label(section("Path"));
     copyable_path(ui, &project.repo_root.display().to_string());
-
-    let mut checked = primary;
-    if ui
-        .checkbox(&mut checked, PRIMARY_LABEL)
-        .on_hover_text(
-            "Project config and the shell's default working directory come from this root.",
-        )
-        .changed()
-    {
-        *action = Some(ProjectDialogAction::SetPrimary(
-            checked.then(|| project.id.clone()),
-        ));
-    }
 
     let label = ui.label(section(ROLE_PROFILE_LABEL));
     let mut selected = role_profile.to_owned();
