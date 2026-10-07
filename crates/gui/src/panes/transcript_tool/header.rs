@@ -133,6 +133,23 @@ pub fn tool_header(
                 .unwrap_or_default();
             header
         }
+        "skill_load" => {
+            let mut header = header(icons::BOOK_OPEN, "Load skill");
+            header.subject = str_arg("name").map(one_line).unwrap_or_default();
+            header.location = str_arg("resource").map(one_line);
+            header
+        }
+        "create_goal" => {
+            let mut header = header(icons::TARGET, "Set goal");
+            header.subject = str_arg("objective").map(one_line).unwrap_or_default();
+            header.meta = input
+                .and_then(|input| input.get("criteria")?.as_array())
+                .map(|criteria| match criteria.len() {
+                    1 => "1 criterion".to_owned(),
+                    count => format!("{count} criteria"),
+                });
+            header
+        }
         _ => header(icons::WRENCH, tool_name),
     }
 }
@@ -308,6 +325,32 @@ mod tests {
         );
         // Then: the worktree prefix is gone and the file name leads.
         assert_eq!(header.text(), "Read lib.rs crates/gui/src · L10–59");
+    }
+
+    #[test]
+    fn skill_loads_and_goals_name_what_the_agent_picked_up() {
+        assert_eq!(
+            header("skill_load", json!({"name": "review"}), None).text(),
+            "Load skill review"
+        );
+        assert_eq!(
+            header(
+                "skill_load",
+                json!({"name": "review", "resource": "references/checklist.md"}),
+                None
+            )
+            .text(),
+            "Load skill review references/checklist.md"
+        );
+        assert_eq!(
+            header(
+                "create_goal",
+                json!({"objective": "Ship the\nsidebar", "criteria": ["a", "b"]}),
+                None
+            )
+            .text(),
+            "Set goal Ship the sidebar · 2 criteria"
+        );
     }
 
     #[test]

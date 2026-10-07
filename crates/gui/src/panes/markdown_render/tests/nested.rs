@@ -85,9 +85,17 @@ fn nested_blockquote_table_keeps_surrounding_prose_wrapped() {
         "abcdefghijklmno".repeat(10)
     );
     // When: rendering the message at 200px.
-    let mut harness = nested_harness(source);
-    // Then: only the table has a wide galley inside a local clip region.
-    assert_local_scroll(&mut harness, "wide_cell");
+    let harness = nested_harness(source);
+    // Then: the cell wraps inside the quote instead of hiding behind a scroller.
+    let cell = text_shape(&harness, "wide_cell");
+    assert!(cell.galley.rows.len() > 1, "cell must wrap");
+    let ink = cell.galley.mesh_bounds.translate(cell.pos.to_vec2());
+    assert!(ink.right() <= 209.0, "cell overflow: {ink:?}");
+    assert!(cell.pos.x > 8.0, "nested indentation retained");
+    let before = text_shape(&harness, "before");
+    let after = text_shape(&harness, "after");
+    assert!(cell.pos.y >= before.pos.y + before.galley.rect.bottom());
+    assert!(cell.pos.y + cell.galley.rect.bottom() <= after.pos.y);
 }
 
 #[test]

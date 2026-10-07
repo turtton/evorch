@@ -457,7 +457,7 @@ fn v02_end_to_end_chained_scenario() {
         fixture.workbench.state().thread_phases().get("run-2"),
         Some(&ThreadRunPhase::Running)
     );
-    for label in ["claude · anthropic", "tool-run-2", "120 / 34"] {
+    for label in ["claude · anthropic", "tool-run-2", "input 120", "output 34"] {
         assert!(
             fixture.workbench.count_labels(label) >= 1,
             "missing agents telemetry label: {label}"

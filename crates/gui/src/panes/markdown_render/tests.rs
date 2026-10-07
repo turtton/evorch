@@ -274,3 +274,45 @@ fn render_markdown_headings_emphasis_and_links() {
     );
     assert!(harness.query_by_label("quoted").is_some());
 }
+
+#[test]
+fn table_wider_than_message_wraps_cells_so_every_column_stays_visible() {
+    // Given: a four-column report table whose prose cells exceed a 400px message.
+    let source = format!(
+        "| File | Change | Scope | Note |\n| --- | --- | --- | --- |\n| `agent.rs` | {} | Conversation pane | - |",
+        "wrap the transcript rendering ".repeat(4)
+    );
+    // When: rendering it at the message width.
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 800.0))
+        .build_ui(move |ui| {
+            crate::theme::install(ui.ctx());
+            ui.set_width(400.0);
+            render_markdown(ui, &source, "report-table");
+        });
+    harness.run_steps(2);
+    // Then: every header is painted inside the message instead of being clipped.
+    for header in ["File", "Change", "Scope", "Note"] {
+        let clipped = harness
+            .output()
+            .shapes
+            .iter()
+            .find(|shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == header))
+            .expect("header cell");
+        let Shape::Text(text) = &clipped.shape else {
+            unreachable!()
+        };
+        let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
+        assert!(ink.right() <= 409.0, "{header} overflows: {ink:?}");
+        assert!(clipped.clip_rect.contains_rect(ink), "{header} clipped");
+    }
+    // And: the long cell wraps, while a lone `-` stays text rather than a bullet.
+    assert!(
+        text_shape(&harness, "wrap the transcript")
+            .galley
+            .rows
+            .len()
+            > 1
+    );
+    assert_eq!(text_shape(&harness, "-").galley.text(), "-");
+}

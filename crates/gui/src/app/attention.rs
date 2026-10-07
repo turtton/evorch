@@ -176,6 +176,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    /// Marks threads whose run finished while another thread was open, so the
+    /// sidebar can flag the unread report until the user opens the thread.
+    pub(super) fn observe_unread_threads(&mut self) {
+        use workspace_ui::ThreadState;
+        let active = self.sidebar.active_thread.as_ref();
+        let mut states = BTreeMap::new();
+        for thread in &self.sidebar.threads {
+            let state = thread.state(&self.phases);
+            let finished = matches!(
+                state,
+                ThreadState::Done | ThreadState::Waiting | ThreadState::Error
+            );
+            if finished
+                && self.thread_states.get(&thread.id) == Some(&ThreadState::Running)
+                && active != Some(&thread.id)
+            {
+                self.unread_threads.insert(thread.id.clone());
+            }
+            if state == ThreadState::Running {
+                self.unread_threads.remove(&thread.id);
+            }
+            states.insert(thread.id.clone(), state);
+        }
+        if let Some(active) = active {
+            self.unread_threads.remove(active);
+        }
+        self.unread_threads.retain(|id| states.contains_key(id));
+        self.thread_states = states;
+    }
+
     /// Creates state for one pane/thread lifetime; the renderer owns and retains it.
     pub fn new_attention_ack() -> ack::AttentionAck {
         ack::AttentionAck::default()

@@ -554,3 +554,65 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
         "metrics must not appear in the sidebar row"
     );
 }
+
+#[test]
+fn finished_background_thread_shows_unread_report_until_opened() {
+    // Given: thread-2 runs in the background while thread-1 is open.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut sidebar = sidebar_with_project(temp.path());
+    for id in ["thread-1", "thread-2"] {
+        sidebar
+            .create_thread(ThreadId::new(id), ProjectId::new("demo"), id)
+            .expect("thread can be created");
+    }
+    sidebar.threads[1].run_ids.push("run-2".into());
+    sidebar
+        .switch_thread(&ThreadId::new("thread-1"))
+        .expect("thread can be selected");
+    let mut harness = HeadlessWorkbench::new(
+        state(MockSource::default(), sidebar),
+        gui::window::MIN_INNER_SIZE,
+    );
+    let transition = |from, to| {
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-2".into(),
+            from,
+            to,
+            reason: None,
+        })
+    };
+    harness.state_mut().apply_events(vec![transition(
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    )]);
+    harness.step();
+    harness.step();
+    assert!(harness.has_label("Thread status: Running"));
+    assert!(!harness.has_label("Thread status: Unread report"));
+
+    // When: its run finishes.
+    harness.state_mut().apply_events(vec![transition(
+        AgentRunPhase::Running,
+        AgentRunPhase::Done,
+    )]);
+    harness.step();
+    harness.step();
+    // Then: the spinner's slot carries the unread report marker.
+    assert!(!harness.has_label("Thread status: Running"));
+    assert!(harness.has_label("Thread status: Unread report"));
+
+    // When: the user opens the thread, the marker is gone for good.
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("thread-2"))
+        .expect("switch thread");
+    harness.step();
+    harness.step();
+    assert!(!harness.has_label("Thread status: Unread report"));
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("thread-1"))
+        .expect("switch back");
+    harness.step();
+    assert!(!harness.has_label("Thread status: Unread report"));
+}

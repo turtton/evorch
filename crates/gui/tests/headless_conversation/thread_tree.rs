@@ -86,7 +86,14 @@ fn status_fixture(
             move |ui, action| {
                 let _keep_root = &root;
                 gui::theme::install(ui.ctx());
-                if let Some(next) = sidebar_pane(ui, &sidebar, &phases, &telemetry, &questions) {
+                if let Some(next) = sidebar_pane(
+                    ui,
+                    &sidebar,
+                    &phases,
+                    &telemetry,
+                    &questions,
+                    &Default::default(),
+                ) {
                     *action = Some(next);
                 }
             },

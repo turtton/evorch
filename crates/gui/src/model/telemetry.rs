@@ -26,6 +26,7 @@ mod context_pressure;
 
 #[path = "thread_metrics.rs"]
 mod thread_metrics;
+pub use thread_metrics::latency_label;
 
 #[path = "workspace_wait.rs"]
 mod workspace_wait;

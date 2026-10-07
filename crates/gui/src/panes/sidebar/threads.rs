@@ -56,20 +56,13 @@ pub(crate) fn family_has_running_runs(
     })
 }
 
-pub fn render(
+pub(super) fn render(
     ui: &mut Ui,
     sidebar: &SidebarState,
     project: &ProjectRecord,
-    phases: &BTreeMap<String, ThreadRunPhase>,
-    telemetry: &TelemetryOverlay,
-    question_threads: &BTreeSet<workspace_ui::ThreadId>,
+    indicators: &ThreadIndicators<'_>,
     action: &mut Option<SidebarAction>,
 ) {
-    let indicators = ThreadIndicators {
-        phases,
-        telemetry,
-        question_threads,
-    };
     let (project_threads, archived) =
         ThreadRecord::partition_for_project(&sidebar.threads, &project.id);
 
@@ -80,7 +73,7 @@ pub fn render(
         });
     }
 
-    render_tree(ui, sidebar, &project_threads, &indicators, false, action);
+    render_tree(ui, sidebar, &project_threads, indicators, false, action);
 
     if !archived.is_empty() {
         // Nested under the project row, level with its thread titles.
@@ -88,16 +81,18 @@ pub fn render(
             egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
                 .id_salt(("archived-threads", &project.id))
                 .show(ui, |ui| {
-                    render_tree(ui, sidebar, &archived, &indicators, true, action);
+                    render_tree(ui, sidebar, &archived, indicators, true, action);
                 });
         });
     }
 }
 
-struct ThreadIndicators<'a> {
-    phases: &'a BTreeMap<String, ThreadRunPhase>,
-    telemetry: &'a TelemetryOverlay,
-    question_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+pub(super) struct ThreadIndicators<'a> {
+    pub phases: &'a BTreeMap<String, ThreadRunPhase>,
+    pub telemetry: &'a TelemetryOverlay,
+    pub question_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+    /// Threads whose finished work has not been opened since it finished.
+    pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
 }
 
 fn render_tree(
@@ -192,7 +187,10 @@ fn render_tree(
                         ui,
                         (thread, display_root),
                         state,
-                        indicators.question_threads.contains(&thread.id),
+                        (
+                            indicators.question_threads.contains(&thread.id),
+                            indicators.unread_threads.contains(&thread.id),
+                        ),
                         family_running,
                         (sidebar, indicators.telemetry),
                         action,
@@ -232,7 +230,7 @@ fn active_row(
     ui: &mut Ui,
     (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
-    has_question: bool,
+    (has_question, unread): (bool, bool),
     family_running: bool,
     wait_context: (&SidebarState, &TelemetryOverlay),
     action: &mut Option<SidebarAction>,
@@ -245,7 +243,7 @@ fn active_row(
         // Runtime/question indicators stay at the trailing edge; workspace
         // contention is an additional independent signal beside them.
         ui.spacing_mut().item_spacing.x = SP_1;
-        thread_status_icon(ui, state, has_question);
+        thread_status_icon(ui, state, has_question, unread);
         workspace_wait_icon(ui, thread, wait_context.0, wait_context.1);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -491,9 +489,10 @@ fn nested_threads<'a>(
     output
 }
 
-fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
+fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool, unread: bool) {
     // Runtime status retains the display aggregation; questions are independent
     // and must remain visible alongside either the spinner or the error icon.
+    // An unread report takes the spinner's slot once the work has finished.
     let status = if matches!(state, ThreadState::Running) {
         Some((
             ui.add(
@@ -513,6 +512,12 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
             .sense(Sense::hover()),
         );
         Some((response, "Thread status: Error"))
+    } else if unread {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), SP_1 + 1.0, palette().ACCENT);
+        Some((response, "Thread status: Unread report"))
     } else {
         None
     };
@@ -564,7 +569,7 @@ mod tests {
                             ui,
                             (&thread, true),
                             ThreadState::Running,
-                            false,
+                            (false, false),
                             true,
                             (&sidebar, &telemetry),
                             action,

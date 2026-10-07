@@ -31,7 +31,6 @@ pub enum ComposerAction {
     ModelPreference(Option<workspace_ui::ModelPreference>),
     OpenSandboxSettings,
     OpenSelfImprovementSettings,
-    OpenStorageSettings,
 }
 
 pub fn stopped_banner(running_children: usize) -> String {
@@ -584,18 +583,6 @@ mod tests {
         harness.run();
         // Then
         assert_eq!(harness.state().action, Some(ComposerAction::Send));
-    }
-
-    #[test]
-    fn storage_button_opens_cleanup_controls() {
-        let mut harness = harness("");
-        harness.run();
-        harness.get_by_label("Storage settings").click();
-        harness.run();
-        assert_eq!(
-            harness.state().action,
-            Some(ComposerAction::OpenStorageSettings)
-        );
     }
 
     #[test]

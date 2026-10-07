@@ -73,7 +73,10 @@ fn persisted_candidates_filter_review_dismiss_and_refresh_on_project_change() {
             (pane, "p".to_owned()),
         );
     harness.run();
+    // The pane opens on untriaged candidates, each led by its status icon.
+    assert_eq!(harness.state().0.status, Some(ImprovementStatus::New));
     harness.get_by_label("Candidate first");
+    harness.get_by_label("new");
     harness.get_by_label("Evidence").click();
     harness.run();
     harness.get_by_label("Repeated tool calls");
@@ -85,17 +88,21 @@ fn persisted_candidates_filter_review_dismiss_and_refresh_on_project_change() {
         db.improvement_candidates("p", None, 200).unwrap()[0].status,
         ImprovementStatus::Reviewed
     );
+    // A triaged candidate leaves the default view.
+    harness.get_by_label("No improvement candidates yet.");
+    harness.get_by_label("Candidate status").click();
+    harness.run();
+    harness.get_by_label("All").click();
+    harness.run();
+    harness.get_by_label("Candidate first");
+    harness.get_by_label("reviewed");
     harness.get_by_label("Dismiss").click();
     harness.run();
     assert_eq!(
         db.improvement_candidates("p", None, 200).unwrap()[0].status,
         ImprovementStatus::Dismissed
     );
-    harness.get_by_label("Candidate status").click();
-    harness.run();
-    harness.get_by_label("new").click();
-    harness.run();
-    harness.get_by_label("No improvement candidates yet.");
+    harness.get_by_label("dismissed");
     harness.state_mut().1 = "other".into();
     harness.run();
     harness.get_by_label("Candidate second");
@@ -139,6 +146,8 @@ fn copy_draft_emits_clipboard_command_and_read_failure_is_visible() {
     pane.enabled = true;
     pane.config = Some(config.clone());
     pane.draft_dir = Some(dir.path().to_owned());
+    // Keep the candidate listed after the background status change below.
+    pane.status = None;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(

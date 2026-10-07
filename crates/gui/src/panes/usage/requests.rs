@@ -6,6 +6,7 @@ use workspace_ui::SidebarState;
 
 use super::charts;
 use super::{compact_tokens, key_label};
+use crate::model::telemetry::latency_label;
 use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::{
     CostCalculator, CostMode, UsageDataset, UsageDimension, UsageFact, UsageFilter,
@@ -257,7 +258,7 @@ impl RequestsData {
                                     .map_or_else(|| "—".into(), |rate| format!("{rate:.0}%")),
                                 row.reasoning.map_or_else(|| "—".into(), compact_tokens),
                                 row.ttft_ms
-                                    .map_or_else(|| "—".into(), |ms| format!("{ms} ms")),
+                                    .map_or_else(|| "—".into(), |ms| latency_label(ms as f64)),
                                 format!("{:.1} s", row.duration_ms as f64 / 1_000.0),
                                 row.tokens_per_second
                                     .map_or_else(|| "—".into(), |speed| format!("{speed:.0}")),

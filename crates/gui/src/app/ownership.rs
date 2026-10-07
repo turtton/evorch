@@ -77,6 +77,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_role_settings();
                     ui.close();
                 }
+                if ui
+                    .button("Storage")
+                    .on_hover_text("Diagnostic history and database usage")
+                    .clicked()
+                {
+                    self.open_storage_settings();
+                    ui.close();
+                }
                 if ui.button("Agent context").clicked() {
                     self.open_context_tab(
                         crate::panes::context_inspector::InspectorMode::Preview,

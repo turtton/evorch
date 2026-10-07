@@ -354,12 +354,7 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 if !matches!(activity.as_str(), "agents" | "idle" | "user input") {
                                     ui.label(muted(activity));
                                 }
-                                let tokens = value.tokens_label();
-                                let response = ui.label(muted(icons::with_icon(icons::COINS, &tokens)));
-                                response.widget_info(|| {
-                                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &tokens)
-                                });
-                                response.on_hover_text(value.diagnostics_label());
+                                render_token_metrics(ui, value);
                             }
                             render_run_metrics(
                                 ui,
@@ -448,12 +443,56 @@ fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
             ),
             metrics.average_ttft.map_or_else(
                 || "avg TTFT —".into(),
-                |ttft| format!("avg TTFT {}ms", ttft.as_millis()),
+                |ttft| {
+                    format!(
+                        "avg TTFT {}",
+                        crate::model::telemetry::latency_label(ttft.as_secs_f64() * 1_000.0)
+                    )
+                },
             ),
         ]
         .iter()
         {
             metric(ui, label);
+        }
+    });
+}
+
+/// Cumulative input/output tokens and the latest context pressure, each
+/// behind its own icon so the numbers are not a bare `in / out (ctx)` triple.
+fn render_token_metrics(ui: &mut egui::Ui, row: &TelemetryRow) {
+    use crate::panes::usage::compact_tokens;
+    let diagnostics = row.diagnostics_label();
+    let pressure = row.context_pressure_label();
+    let metrics = [
+        Some((
+            icons::ARROW_UP,
+            compact_tokens(row.usage.input),
+            "Input tokens sent (cumulative)",
+            format!("input {}", row.usage.input),
+        )),
+        Some((
+            icons::ARROW_DOWN,
+            compact_tokens(row.usage.output),
+            "Output tokens received (cumulative)",
+            format!("output {}", row.usage.output),
+        )),
+        pressure.map(|pressure| {
+            (
+                icons::STACK,
+                pressure.clone(),
+                "Context window usage of the latest request",
+                format!("context {pressure}"),
+            )
+        }),
+    ];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SP_3;
+        for (icon, value, hint, label) in metrics.into_iter().flatten() {
+            let response = ui.label(muted(icons::with_icon(icon, value)));
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+            response.on_hover_text(format!("{hint}\n\n{diagnostics}"));
         }
     });
 }
