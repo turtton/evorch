@@ -15,6 +15,7 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 - **UI 自己改善との連携**: Level 3 の framework implementation 変更は worktree → source modification → build → test harness instance → semantic inspection → screenshot / interaction replay で自己検証
 - **Role/model evaluation との連携（v0.7 Bundle E4）**: evaluation trace / failure attribution / prompt variant の試行結果を memory backend に保存し、改善候補の promotion 判断へ利用する
 - **Browser diagnostics（v0.7 Bundle Browser）**: headless browser の action log / screenshot / DOM diff を diagnostic evidence として記録可能にする
+- **Lesson 由来の改善候補は harness scope のみ（2026-10-08）**: 昇格済み lesson のうち scope が `harness` のものだけを `LessonPromoted` 候補にする。`project` / `user` lesson は task memory であり、改善候補には混ぜない（[storage-memory](../storage-memory/overview.md)）
 
 
 ## 受け入れ基準

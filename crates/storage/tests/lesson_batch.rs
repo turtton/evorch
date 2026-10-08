@@ -8,6 +8,7 @@ fn lesson(id: &str) -> Lesson {
         task_id: "t".into(),
         content: "Bound concurrency".into(),
         evidence: "test:bound".into(),
+        scope: storage::memory::LessonScope::Project,
     }
 }
 

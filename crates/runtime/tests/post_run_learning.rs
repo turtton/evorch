@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use storage::memory::MemoryStatus;
+use storage::memory::{LessonScope, MemoryStatus};
 use storage::{Database, Storage, StorageConfig};
 use tokio::sync::Notify;
 
@@ -132,7 +132,8 @@ impl AgentModel for Model {
                         "stack_lesson_candidate",
                         json!({
                             "content":"Keep the bounded completion check for future tasks",
-                            "evidence_refs":[reference]
+                            "evidence_refs":[reference],
+                            "scope":"harness"
                         }),
                     ));
                 }
@@ -150,7 +151,8 @@ impl AgentModel for Model {
                         "stack_lesson_candidate",
                         json!({
                             "content":"Keep a second distinct bounded check for future tasks",
-                            "evidence_refs":[reference]
+                            "evidence_refs":[reference],
+                            "scope":"project"
                         }),
                     ));
                 }
@@ -450,6 +452,7 @@ async fn self_improvement_observes_only_promoted_lessons_after_completion() {
             .entries()
             .into_iter()
             .filter(|entry| entry.status == MemoryStatus::Promoted)
+            .inspect(|entry| assert_eq!(entry.lesson.scope, LessonScope::Harness))
             .count();
         assert_eq!(candidates.len(), promoted);
         for candidate in candidates {

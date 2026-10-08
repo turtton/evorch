@@ -84,7 +84,9 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "DROP TABLE usage_requests; DROP TABLE usage_run_threads; DROP TABLE usage_daily;",
+        "DROP TABLE usage_requests; DROP TABLE usage_run_threads; DROP TABLE usage_daily;
+         DROP INDEX idx_memory_entries_scope_status;
+         ALTER TABLE memory_entries DROP COLUMN scope; ALTER TABLE memory_ledger DROP COLUMN scope;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 13).unwrap();

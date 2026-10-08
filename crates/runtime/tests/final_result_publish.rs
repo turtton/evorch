@@ -265,6 +265,7 @@ async fn subagent_prompt_includes_memory_and_team_task_augmentation() {
         task_id: "prior-task".into(),
         content: "Verify the full result text".into(),
         evidence: "test:result".into(),
+        scope: storage::memory::LessonScope::Project,
     };
     storage.handle().append_lesson(&lesson).unwrap();
     storage

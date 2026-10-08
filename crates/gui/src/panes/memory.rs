@@ -80,6 +80,7 @@ impl MemoryPane {
                         ui.horizontal_wrapped(|ui| {
                             ui.monospace(&entry.lesson.id);
                             ui.label(entry.status.as_str());
+                            ui.label(entry.lesson.scope.as_str());
                         });
                         ui.label(&entry.lesson.content);
                         ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
