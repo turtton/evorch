@@ -54,6 +54,23 @@ pub struct StreamAccumulator {
     tool_calls: BTreeMap<usize, ToolCallFragment>,
 }
 
+/// 引数文字列が JSON として解釈できなかったツール呼び出し。
+///
+/// 診断用に識別子・長さ・ハッシュだけを持ち、引数本文は持たない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedToolCall {
+    /// ツール呼び出し ID。
+    pub id: String,
+    /// ツール名。
+    pub name: String,
+    /// 引数文字列のバイト長。
+    pub arguments_len: usize,
+    /// 引数文字列の SHA-256 先頭 16 桁。
+    pub arguments_sha256: String,
+    /// JSON 解析エラー（位置と種別のみ）。
+    pub error: String,
+}
+
 /// インデックスごとに合算したツール呼び出し断片。
 ///
 /// `id` はどの断片でも送られなかった場合に備えて既定値を空文字列とする。
@@ -89,12 +106,33 @@ impl StreamAccumulator {
         }
     }
 
+    /// [`Self::finish`] が `null` 入力にするツール呼び出しを列挙する。
+    pub fn malformed_tool_calls(&self) -> Vec<MalformedToolCall> {
+        use sha2::{Digest, Sha256};
+        self.tool_calls
+            .values()
+            .filter(|fragment| !fragment.arguments.trim().is_empty())
+            .filter_map(|fragment| {
+                let error = serde_json::from_str::<serde_json::Value>(&fragment.arguments).err()?;
+                let digest = Sha256::digest(fragment.arguments.as_bytes());
+                Some(MalformedToolCall {
+                    id: fragment.id.clone(),
+                    name: fragment.name.clone(),
+                    arguments_len: fragment.arguments.len(),
+                    arguments_sha256: digest[..8].iter().map(|b| format!("{b:02x}")).collect(),
+                    error: error.to_string(),
+                })
+            })
+            .collect()
+    }
+
     /// 累積結果から最終応答を組み立てる。
     ///
     /// `role` は既定で [`Role::Assistant`]。内容ブロックは
     /// Reasoning → Text → ToolUse (index 昇順) の順で並ぶ。
     /// 引数が空のツール呼び出しは空オブジェクト入力として保持され、
-    /// 引数文字列が JSON として解釈できない場合は `null` になる。
+    /// 引数文字列が JSON として解釈できない場合は `null` になる
+    /// （[`Self::malformed_tool_calls`] で列挙でき、runtime はこの呼び出しを実行しない）。
     pub fn finish(self, usage: Usage, finish_reason: FinishReason) -> ChatResponse {
         let mut content = Vec::new();
         if !self.reasoning.is_empty() {
@@ -179,6 +217,29 @@ mod tests {
                 finish_reason,
             },
         }
+    }
+
+    // Given: 壊れた引数・正しい引数・空の引数 / When: 列挙する / Then: 壊れたものだけが識別子・長さ・ハッシュで並ぶ
+    #[test]
+    fn malformed_tool_calls_lists_only_unparsable_arguments() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator.feed(&tool_delta(0, Some("bad"), Some("read"), "{\"path\": "));
+        accumulator.feed(&tool_delta(
+            1,
+            Some("good"),
+            Some("read"),
+            "{\"path\": \"a\"}",
+        ));
+        accumulator.feed(&tool_delta(2, Some("empty"), Some("list"), ""));
+
+        let malformed = accumulator.malformed_tool_calls();
+
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].id, "bad");
+        assert_eq!(malformed[0].name, "read");
+        assert_eq!(malformed[0].arguments_len, 9);
+        assert_eq!(malformed[0].arguments_sha256.len(), 16);
+        assert!(malformed[0].error.contains("EOF"), "{}", malformed[0].error);
     }
 
     // Given: 空のアキュムレータ / When: TextDelta を 2 回 feed して finish / Then: 単一 Text ブロックに結合され Assistant 応答になる

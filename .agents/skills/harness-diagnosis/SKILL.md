@@ -109,5 +109,6 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 - **診断イベントは 30 日で消える**（sandbox の `escalation_review` を除く）。候補だけが残っていても、元のイベントがないことがある。ツール出力の artifact も 7 日で消える。
 - **Info 重大度の診断は既定では保存されない**（`[diagnostics].persistence` の既定は warnings）。
 - **SecretGuard が secret らしい文字列を検出すると、イベントも候補も丸ごと保存されない。** 痕跡も残らない。
-- **一部の障害は診断イベントを出さない。** agent run の panic、provider のプロトコル違反（壊れた tool-call JSON）、compaction 失敗、storage の書き込み停止などで、該当箇所は `tracing` のログ（stderr）にしか出ない。これらを疑うときは、GUI を stderr を保存した状態で起動して再現してもらう。
+- **記録のみの診断は候補にならない。** `ToolArgumentsMalformed`（ストリームで組み立てた tool-call 引数が JSON でなく、ツールは実行していない。detail に provider・model・ツール名・長さ・sha256 先頭 16 桁）、`CompactionFailed`（要約モデルや provider 側 compaction の失敗、要約サイズ制限）、`EscalationAdmissionFailed`（handoff 先 run を provider が受け付けなかった。ユーザーの停止では出ない）は一時的・外部要因に分類され、diagnostics にだけ残る。疑うときは `events --run <id>` で直接探す。
+- **storage の書き込み停止は診断イベントを出さない。** `tracing` のログ（stderr）にしか出ないので、疑うときは GUI を stderr を保存した状態で起動して再現してもらう。
 - **`events` テーブルの `session_id` は GUI では固定値。** run の絞り込みには `--run` を使う。

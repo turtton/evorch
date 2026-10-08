@@ -94,7 +94,7 @@ impl WireStreamInterpreter for FakeInterpreter {
                 index: 0,
                 id: Some("call-1".to_string()),
                 name: Some("tool".to_string()),
-                arguments_delta: String::new(),
+                arguments_delta: value["args"].as_str().unwrap_or_default().to_string(),
             }
         } else {
             StreamEvent::TextDelta {
@@ -407,6 +407,62 @@ async fn empty_text_does_not_trigger_but_tool_delta_triggers_once() {
             .await
             .is_err()
     );
+}
+
+// Given: 引数が JSON として壊れたツール呼び出し / When: 完了する / Then: 本文を含まない診断を 1 件だけ発行し、入力は null になる
+#[tokio::test]
+async fn malformed_tool_arguments_emit_one_diagnostic_without_the_arguments() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let mut pump = SsePump::new(
+        FakeInterpreter::new(),
+        UsageEmitter::new(None, "test"),
+        "model-a".to_string(),
+        observer(Some(bus)),
+    );
+
+    pump.push_chunk(b"data: {\"tool\":true,\"args\":\"{\\\"secret\\\": \"}\n\n");
+    pump.push_chunk(b"data: [DONE]\n\n");
+
+    let mut diagnostics = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
+        if let EventKind::Diagnostic(diagnostic) = event.kind {
+            diagnostics.push(diagnostic);
+        }
+    }
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, "ToolArgumentsMalformed");
+    assert_eq!(diagnostic.call_id.as_deref(), Some("call-1"));
+    assert!(
+        diagnostic.detail.contains("tool=tool"),
+        "{}",
+        diagnostic.detail
+    );
+    assert!(
+        diagnostic.detail.contains("arguments_len=11"),
+        "{}",
+        diagnostic.detail
+    );
+    assert!(
+        !diagnostic.detail.contains("secret"),
+        "{}",
+        diagnostic.detail
+    );
+    let completed = std::iter::from_fn(|| pump.pop_pending())
+        .filter_map(Result::ok)
+        .find_map(|event| match event {
+            StreamEvent::Completed { response } => Some(response),
+            _ => None,
+        })
+        .expect("completed");
+    assert!(matches!(
+        &completed.message.content[..],
+        [ContentBlock::ToolUse {
+            input: serde_json::Value::Null,
+            ..
+        }]
+    ));
 }
 
 // Given: pump の各失敗入口 / When: エラーを発生させる / Then: 対応する failure の RequestFailed をちょうど1回発行する

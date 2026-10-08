@@ -35,4 +35,4 @@ pub use message::{
 };
 pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
 pub use retry::RetryPolicy;
-pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};
+pub use stream::{DeltaStream, MalformedToolCall, StreamAccumulator, StreamEvent};

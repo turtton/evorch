@@ -212,6 +212,9 @@ impl<I: WireStreamInterpreter> SsePump<I> {
         }
         if let Some((usage, finish_reason)) = interpretation.completion {
             let accumulator = std::mem::take(&mut self.accumulator);
+            for call in accumulator.malformed_tool_calls() {
+                self.observer.emit_malformed_tool_call(&call);
+            }
             let response = accumulator.finish(usage, finish_reason);
             self.usage.emit_usage(&self.model, &response.usage);
             self.observer

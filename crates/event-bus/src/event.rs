@@ -171,6 +171,10 @@ pub mod diagnostic_codes {
     pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
+    /// A streamed tool call's arguments were not valid JSON; the call was not run.
+    pub const TOOL_ARGUMENTS_MALFORMED: &str = "ToolArgumentsMalformed";
+    /// An attempted context compaction failed (provider call, summary, or limits).
+    pub const COMPACTION_FAILED: &str = "CompactionFailed";
     /// Post-run lesson extraction or review failed.
     pub const LEARNING_PIPELINE_FAILED: &str = "LearningPipelineFailed";
     /// A restoration checkpoint was persisted.
@@ -212,6 +216,8 @@ pub mod diagnostic_codes {
         IDENTICAL_TOOL_CALLS,
         PROVIDER_UNAVAILABLE,
         CACHE_REGRESSION,
+        TOOL_ARGUMENTS_MALFORMED,
+        COMPACTION_FAILED,
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
         CONTEXT_SNAPSHOT_FAILED,

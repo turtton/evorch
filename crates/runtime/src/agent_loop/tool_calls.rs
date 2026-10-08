@@ -335,6 +335,9 @@ enum NetworkGate {
     Cancelled,
 }
 
+/// Returned for a tool call whose arguments were not valid JSON; the tool is not run.
+pub(crate) const MALFORMED_ARGUMENTS: &str = "The tool call arguments were not valid JSON, so the tool was not run. Call it again with a JSON object that matches the tool's input schema.";
+
 enum ReadyCall {
     Tool(PreparedToolCall),
     Local,
@@ -429,6 +432,11 @@ impl LoopState {
                         }
                     })
                 };
+                // providers::StreamAccumulator turns unparsable arguments into null; tools
+                // only take objects, so name the cause instead of a schema mismatch.
+                if input.is_null() {
+                    permission = Err(MALFORMED_ARGUMENTS.into());
+                }
                 // Delegate's parser preserves case-insensitive roles and structured domain errors.
                 if local
                     && name != "delegate"

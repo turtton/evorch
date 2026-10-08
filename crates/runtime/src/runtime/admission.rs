@@ -157,12 +157,15 @@ impl AgentRuntime {
             if admitted.is_ok() {
                 runtime.register_run(run_id, parent, role, prompt, config, continuation);
             }
-            let failure = handoff
-                .then(|| admitted.as_ref().err().map(ToString::to_string))
-                .flatten();
+            let failure = handoff.then(|| admitted.as_ref().err()).flatten();
             drop(admissions);
-            if let Some(reason) = failure {
+            if failure.is_some() {
                 runtime.goal_work_stopped(run_id);
+            }
+            // A cancelled admission is the user's stop, not an admission failure.
+            if let Some(error) = failure
+                && !matches!(error, RuntimeError::RunTerminated { .. })
+            {
                 runtime
                     .shared
                     .bus
@@ -170,7 +173,7 @@ impl AgentRuntime {
                         source: "escalation_handoff".into(),
                         severity: event_bus::DiagnosticSeverity::Error,
                         code: diagnostic_codes::ESCALATION_ADMISSION_FAILED.into(),
-                        detail: reason,
+                        detail: error.to_string(),
                         run_id: Some(run_id.to_string()),
                         thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),
                         call_id: None,
