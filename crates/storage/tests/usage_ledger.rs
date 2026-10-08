@@ -86,7 +86,10 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     conn.execute_batch(
         "DROP TABLE usage_requests; DROP TABLE usage_run_threads; DROP TABLE usage_daily;
          DROP INDEX idx_memory_entries_scope_status;
-         ALTER TABLE memory_entries DROP COLUMN scope; ALTER TABLE memory_ledger DROP COLUMN scope;",
+         ALTER TABLE memory_entries DROP COLUMN scope; ALTER TABLE memory_ledger DROP COLUMN scope;
+         ALTER TABLE improvement_candidates DROP COLUMN occurrences;
+         ALTER TABLE improvement_candidates DROP COLUMN last_seen_at_ns;
+         ALTER TABLE improvement_candidates DROP COLUMN recent_run_ids;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 13).unwrap();

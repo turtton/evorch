@@ -125,8 +125,17 @@ pub struct ImprovementCandidate {
     pub status: ImprovementStatus,
     /// Caller-supplied basename or relative path; storage does not create draft files.
     pub draft_path: Option<String>,
+    /// Run of the first occurrence.
     pub run_id: Option<String>,
+    /// Stored intake plus every duplicate folded into it during the cooldown.
+    pub occurrences: u32,
+    pub last_seen_at_ns: u64,
+    /// Distinct runs of the most recent occurrences, oldest first, at most [`RECENT_RUN_IDS`].
+    pub recent_run_ids: Vec<String>,
 }
+
+/// Bound on [`ImprovementCandidate::recent_run_ids`].
+pub const RECENT_RUN_IDS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImprovementWritePolicy {
@@ -154,7 +163,8 @@ impl Database {
     ) -> Result<Vec<ImprovementCandidate>, StorageError> {
         let mut statement = self.conn.prepare(
             "SELECT candidate_id, project, created_at_ns, source, code, severity,
-                    title, evidence, dedup_key, status, draft_path, run_id
+                    title, evidence, dedup_key, status, draft_path, run_id,
+                    occurrences, last_seen_at_ns, recent_run_ids
              FROM improvement_candidates
              WHERE project = ?1 AND (?2 IS NULL OR status = ?2)
              ORDER BY created_at_ns DESC, rowid DESC LIMIT ?3",
@@ -177,7 +187,8 @@ impl Database {
     ) -> Result<Option<ImprovementCandidate>, StorageError> {
         let mut statement = self.conn.prepare(
             "SELECT candidate_id, project, created_at_ns, source, code, severity,
-                    title, evidence, dedup_key, status, draft_path, run_id
+                    title, evidence, dedup_key, status, draft_path, run_id,
+                    occurrences, last_seen_at_ns, recent_run_ids
              FROM improvement_candidates WHERE candidate_id = ?1",
         )?;
         let mut rows = statement.query([id])?;
@@ -201,6 +212,12 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> Result<ImprovementCandidate, Storag
         status: ImprovementStatus::parse(&row.get::<_, String>(9)?)?,
         draft_path: row.get(10)?,
         run_id: row.get(11)?,
+        occurrences: u32::try_from(row.get::<_, i64>(12)?)
+            .map_err(|_| StorageError::OutOfRange("improvement occurrences"))?,
+        last_seen_at_ns: u64::try_from(row.get::<_, i64>(13)?)
+            .map_err(|_| StorageError::OutOfRange("improvement last_seen_at_ns"))?,
+        recent_run_ids: serde_json::from_str(&row.get::<_, String>(14)?)
+            .map_err(|error| StorageError::Serialization(error.to_string()))?,
     })
 }
 
@@ -264,6 +281,13 @@ fn record_at(
             .duration_since(ns_to_system_time(created_at_ns))
             .unwrap_or_default();
         if age < policy.duplicate_cooldown {
+            fold_duplicate(
+                &transaction,
+                &existing_id,
+                candidate.run_id.as_deref(),
+                now_ns,
+            )?;
+            transaction.commit()?;
             return Ok(ImprovementRecordOutcome::Duplicate { existing_id });
         }
     }
@@ -280,11 +304,13 @@ fn record_at(
         return Ok(ImprovementRecordOutcome::RateLimited);
     }
 
+    let recent_run_ids = serde_json::to_string(&candidate.run_id.iter().collect::<Vec<_>>())
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
     transaction.execute(
         "INSERT INTO improvement_candidates
          (candidate_id, project, created_at_ns, source, code, severity,
-          title, evidence, dedup_key, status, run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'new', ?10)",
+          title, evidence, dedup_key, status, run_id, last_seen_at_ns, recent_run_ids)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'new', ?10, ?3, ?11)",
         params![
             candidate.id,
             project,
@@ -296,6 +322,7 @@ fn record_at(
             candidate.evidence,
             candidate.dedup_key,
             candidate.run_id,
+            recent_run_ids,
         ],
     )?;
     transaction.execute(
@@ -334,6 +361,44 @@ fn record_at(
     Ok(ImprovementRecordOutcome::Stored {
         id: candidate.id.clone(),
     })
+}
+
+/// Count a cooldown duplicate on its candidate. An evicted candidate is left alone;
+/// the duplicate is still suppressed so eviction cannot bypass the cooldown.
+fn fold_duplicate(
+    transaction: &Transaction<'_>,
+    id: &str,
+    run_id: Option<&str>,
+    now_ns: i64,
+) -> Result<(), StorageError> {
+    let Some(recent): Option<String> = transaction
+        .query_row(
+            "SELECT recent_run_ids FROM improvement_candidates WHERE candidate_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let mut recent: Vec<String> = serde_json::from_str(&recent)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    if let Some(run_id) = run_id {
+        recent.retain(|existing| existing != run_id);
+        recent.push(run_id.to_owned());
+        let excess = recent.len().saturating_sub(RECENT_RUN_IDS);
+        recent.drain(..excess);
+    }
+    let recent = serde_json::to_string(&recent)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    transaction.execute(
+        "UPDATE improvement_candidates
+         SET occurrences = occurrences + 1, last_seen_at_ns = MAX(last_seen_at_ns, ?2),
+             recent_run_ids = ?3
+         WHERE candidate_id = ?1",
+        params![id, now_ns, recent],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn set_status(
@@ -487,6 +552,50 @@ mod tests {
             stored("third")
         );
         assert_eq!(ids(&db, "p"), ["second", "first"]);
+    }
+
+    #[test]
+    fn cooldown_duplicates_fold_into_the_existing_candidate() {
+        let db = Database::open_in_memory().unwrap();
+        record_test(&db, "first", 100, policy());
+        let first = db.improvement_candidate("first").unwrap().unwrap();
+        assert_eq!(first.occurrences, 1);
+        assert_eq!(first.last_seen_at_ns, first.created_at_ns);
+        assert_eq!(first.recent_run_ids, ["run-1"]);
+        // Repeats from new runs, an existing run and no run all count once each.
+        for (index, run_id) in (0..RECENT_RUN_IDS + 2)
+            .map(|n| Some(format!("run-{}", n + 2)))
+            .chain([Some("run-5".into()), None])
+            .enumerate()
+        {
+            let duplicate = NewImprovementCandidate {
+                id: format!("dup-{index}"),
+                run_id,
+                ..candidate("first")
+            };
+            assert_eq!(
+                record_at(&db.conn, "p", &duplicate, policy(), at(101 + index as u64)).unwrap(),
+                ImprovementRecordOutcome::Duplicate {
+                    existing_id: "first".into()
+                }
+            );
+        }
+        let folded = db.improvement_candidate("first").unwrap().unwrap();
+        assert_eq!(folded.occurrences, 1 + RECENT_RUN_IDS as u32 + 4);
+        assert_eq!(
+            folded.last_seen_at_ns,
+            at(101 + RECENT_RUN_IDS as u64 + 3)
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+        );
+        assert_eq!(folded.recent_run_ids.len(), RECENT_RUN_IDS);
+        assert_eq!(folded.recent_run_ids.last().unwrap(), "run-5");
+        assert!(!folded.recent_run_ids.contains(&"run-1".to_owned()));
+        assert_eq!(folded.run_id.as_deref(), Some("run-1"));
+        // Folding never creates rows or spends the daily limit.
+        assert_eq!(ids(&db, "p"), ["first"]);
+        assert_eq!(intake_ids(&db), ["first"]);
     }
 
     #[test]
@@ -1220,7 +1329,7 @@ mod tests {
             .unwrap();
         }
         let db = Database::open(&config).unwrap();
-        assert_eq!(db.pragma_i64("user_version").unwrap(), 15);
+        assert_eq!(db.pragma_i64("user_version").unwrap(), 16);
         assert_eq!(db.run_ledger_all().unwrap()[0].body, "preserved");
         assert!(ids(&db, "p").is_empty());
         let writer = Storage::open(config).unwrap();

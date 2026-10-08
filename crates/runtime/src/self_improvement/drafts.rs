@@ -10,12 +10,13 @@ pub(super) const DRAFT_MARKER: &str = "<!-- DRAFT — NOT FILED. Posting anywher
 pub fn render_issue_draft(c: &ImprovementCandidate) -> String {
     // Indented blocks keep untrusted evidence (including markdown fences) inert.
     format!(
-        "{DRAFT_MARKER}\n\n# Title\n\n{}\n\n## Summary\n\nPassive improvement candidate; not a validated defect.\n\nCode: {}\nSource: {}\nSeverity: {}\n\n## Evidence\n\n{}\n## Environment\n\nevorch version/commit: fill at filing time\n\n## Suggested next steps\n\n- Review and reproduce the evidence; rule out configuration or external causes.\n- Define acceptance criteria and a minimal regression test.\n- Obtain explicit operator confirmation before posting anywhere.\n",
+        "{DRAFT_MARKER}\n\n# Title\n\n{}\n\n## Summary\n\nPassive improvement candidate; not a validated defect.\n\nCode: {}\nSource: {}\nSeverity: {}\n\n## Evidence\n\n{}\n## Environment\n\nRecorded by: {}\nRecheck against the current build at filing time; crash evidence names the crashed build.\n\n## Suggested next steps\n\n- Review and reproduce the evidence; rule out configuration or external causes.\n- Define acceptance criteria and a minimal regression test.\n- Obtain explicit operator confirmation before posting anywhere.\n",
         indent(&super::title(&c.title)),
         indent(&c.code),
         c.source.as_str(),
         c.severity.as_str(),
         indent(&pretty_evidence(&c.evidence)),
+        super::build_info(),
     )
 }
 

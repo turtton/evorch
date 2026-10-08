@@ -91,7 +91,11 @@ impl PendingLearning {
                         source: "learning".into(),
                         severity: event_bus::DiagnosticSeverity::Warning,
                         code: "LearningPipelineFailed".into(),
-                        detail: "Lesson extraction or review failed; unapproved candidates remain unpromoted. Inspect the learning runs for details.".into(),
+                        // The cause stays in the detail so a candidate is diagnosable without logs.
+                        detail: format!(
+                            "Lesson extraction or review failed; unapproved candidates remain unpromoted. Inspect the learning runs of this source run for details.\ncause: {}",
+                            result.as_ref().err().map_or("", |error| error.as_str())
+                        ),
                         run_id: Some(run.to_string()),
                         thread_id: None,
                         call_id: None,
@@ -167,7 +171,7 @@ impl PendingLearning {
             match promoted {
                 Ok(lessons) => {
                     crate::self_improvement::ImprovementCollector::new(settings.clone())
-                        .ingest_lessons(&lessons);
+                        .ingest_lessons(&lessons, Some(&run.to_string()));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "improvement lesson intake skipped; learning result retained")

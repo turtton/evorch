@@ -233,6 +233,7 @@ struct Fixture {
     _store: Storage,
     config: StorageConfig,
     model: Arc<Model>,
+    bus: Arc<event_bus::EventBus>,
     runtime: AgentRuntime,
 }
 
@@ -261,7 +262,7 @@ impl Fixture {
             bus.clone(),
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
         ));
-        let runtime = configure(AgentRuntime::new(bus, executor, model.clone()))
+        let runtime = configure(AgentRuntime::new(bus.clone(), executor, model.clone()))
             .with_sequential_run_ids()
             .with_run_store(RunStore::open(&config, store.handle()).unwrap())
             .with_learning(runtime::memory_queue::LearningSettings {
@@ -279,6 +280,7 @@ impl Fixture {
             _store: store,
             config,
             model,
+            bus,
             runtime,
         }
     }
@@ -429,6 +431,28 @@ async fn incomplete_candidate_review_batch_promotes_none() {
 }
 
 #[tokio::test]
+async fn learning_failure_diagnostic_carries_its_cause() {
+    let fixture = Fixture::new(ReviewMode::PartialReview);
+    let mut receiver = fixture.bus.subscribe();
+    let source = fixture.start().await;
+    let error = fixture.learning(source).await.unwrap_err();
+    let diagnostic = receiver
+        .drain_pending_snapshot()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            event_bus::EventKind::Diagnostic(d) if d.code == "LearningPipelineFailed" => Some(d),
+            _ => None,
+        })
+        .expect("learning failure diagnostic");
+    assert_eq!(diagnostic.run_id, Some(source.to_string()));
+    assert!(
+        diagnostic.detail.ends_with(&format!("\ncause: {error}")),
+        "{}",
+        diagnostic.detail
+    );
+}
+
+#[tokio::test]
 async fn self_improvement_observes_only_promoted_lessons_after_completion() {
     use runtime::self_improvement::{ImprovementPolicy, ImprovementSettings};
     for mode in [ReviewMode::Approve, ReviewMode::Reject] {
@@ -457,6 +481,7 @@ async fn self_improvement_observes_only_promoted_lessons_after_completion() {
         assert_eq!(candidates.len(), promoted);
         for candidate in candidates {
             assert_eq!(candidate.code, "LessonPromoted");
+            assert_eq!(candidate.run_id, Some(source.to_string()));
             assert!(drafts.join(candidate.draft_path.unwrap()).exists());
         }
         assert_eq!(

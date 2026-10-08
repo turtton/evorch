@@ -320,3 +320,51 @@ fn unselected_project_does_not_open_storage() {
     harness.get_by_label("Select a project to browse improvement candidates.");
     assert!(!path.exists());
 }
+
+#[test]
+fn folded_duplicates_show_their_count_and_recent_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("store.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let handle = store.handle();
+    for (id, run) in [
+        ("first", "run-42"),
+        ("again", "run-43"),
+        ("third", "run-44"),
+    ] {
+        handle
+            .record_improvement_candidate(
+                "p",
+                NewImprovementCandidate {
+                    id: id.into(),
+                    dedup_key: "repeat".into(),
+                    run_id: Some(run.into()),
+                    ..candidate(id)
+                },
+                policy(),
+            )
+            .unwrap();
+    }
+    let mut pane = SelfImprovementPane::default();
+    pane.enabled = true;
+    pane.config = Some(config);
+    pane.handle = Some(handle);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 600.0))
+        .build_ui_state(
+            |ui, state: &mut (SelfImprovementPane, String)| state.0.render(ui, Some(&state.1)),
+            (pane, "p".to_owned()),
+        );
+    harness.run();
+    // Duplicates fold into the first candidate instead of creating rows.
+    harness.get_by_label("Candidate first");
+    assert!(harness.query_by_label("Candidate again").is_none());
+    harness.get_by_label_contains("Seen 3 times, last ");
+    harness.get_by_label("Evidence").click();
+    harness.run();
+    harness.get_by_label("Run: run-42");
+    harness.get_by_label("Recent runs: run-42, run-43, run-44");
+}

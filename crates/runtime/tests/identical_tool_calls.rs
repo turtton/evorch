@@ -87,6 +87,12 @@ async fn stops_at_ten_identical_calls_with_different_ids() {
         event_bus::DiagnosticSeverity::Error
     );
     assert!(diagnostics[0].run_id.is_some());
+    // The detail names the repeated tool and a stable input digest, never the input.
+    let detail = &diagnostics[0].detail;
+    let line = detail.lines().nth(1).unwrap();
+    assert!(line.starts_with("tool=read input_sha256="), "{detail}");
+    assert_eq!(line.rsplit('=').next().unwrap().len(), 16);
+    assert!(!detail.contains("missing-repeat-fixture"));
 }
 
 #[tokio::test]
