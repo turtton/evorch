@@ -12,10 +12,12 @@ pub use drafts::{render_issue_draft, render_packet_draft};
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use event_bus::{DiagnosticEvent, DiagnosticSeverity, EventKind, EventReceiver, FaultEvent};
+use event_bus::{
+    DiagnosticEvent, DiagnosticSeverity, EventKind, EventReceiver, FaultEvent, RecvError,
+};
 use serde_json::{Value, json};
 use storage::improvement::{
     ImprovementCandidate, ImprovementRecordOutcome, ImprovementSeverity, ImprovementSource,
@@ -158,6 +160,11 @@ impl ImprovementCollector {
 
     /// Synchronous intake. All persistence/draft/identity errors are warn-only.
     pub fn handle_diagnostic(&self, event: &DiagnosticEvent) {
+        self.diagnostic_observed_at(event, SystemTime::now());
+    }
+
+    /// `observed` is the bus event's wall clock, which storage keeps as `events.wall_clock_ns`.
+    fn diagnostic_observed_at(&self, event: &DiagnosticEvent, observed: SystemTime) {
         if !self.settings.policy.collect_diagnostics
             || classify_diagnostic(event) != CandidateClass::HarnessImprovement
         {
@@ -180,17 +187,20 @@ impl ImprovementCollector {
                     "source": event.source, "code": event.code, "severity": severity.as_str(),
                     "detail": bound_text(&event.detail, self.settings.policy.evidence_limit()),
                     "run_id": event.run_id, "thread_id": event.thread_id, "call_id": event.call_id,
+                    "observed_at_ns": unix_ns(observed),
                 })),
-                dedup_key: format!("diag:{}", event.code),
+                // Same code from different emitters (e.g. two NoProgress detectors) stays apart.
+                dedup_key: format!("diag:{}:{}", event.source, event.code),
                 run_id: event.run_id.clone(),
             },
         );
     }
 
     /// Only already-promoted harness-scoped lessons enter this passive intake; project
-    /// and user lessons are task memory, not harness feedback. Their evidence stays text.
-    /// Failure never changes the learning pipeline's outcome.
-    pub fn ingest_lessons(&self, lessons: &[storage::memory::Lesson]) {
+    /// and user lessons are task memory, not harness feedback. Lesson evidence stays an
+    /// opaque string inside the candidate JSON. `source_run_id` is the run the lessons
+    /// were extracted from. Failure never changes the learning pipeline's outcome.
+    pub fn ingest_lessons(&self, lessons: &[storage::memory::Lesson], source_run_id: Option<&str>) {
         if !self.settings.policy.collect_lessons {
             return;
         }
@@ -206,9 +216,12 @@ impl ImprovementCollector {
                     code: "LessonPromoted".into(),
                     severity: ImprovementSeverity::Info,
                     title: title(&lesson.content),
-                    evidence: bound_text(&lesson.evidence, self.settings.policy.evidence_limit()),
+                    evidence: self.json_evidence(json!({
+                        "lesson_id": lesson.id, "source_run_id": source_run_id,
+                        "content": lesson.content, "evidence_refs": lesson.evidence,
+                    })),
                     dedup_key: format!("lesson:{}", lesson.id),
-                    run_id: None,
+                    run_id: source_run_id.map(str::to_owned),
                 },
             );
         }
@@ -230,6 +243,8 @@ impl ImprovementCollector {
                     "message": bound_text(&crash.message, self.settings.policy.evidence_limit()),
                     "location": crash.location, "thread": crash.thread,
                     "timestamp_unix": crash.timestamp_unix,
+                    // The crashed build, which may differ from the recovering one.
+                    "build": crash.build.clone().unwrap_or_else(|| "unknown".into()),
                 })),
                 dedup_key: format!("crash:{}", crash.file_name),
                 run_id: None,
@@ -237,12 +252,26 @@ impl ImprovementCollector {
         }
     }
 
-    /// Broadcast lag and closure end this best-effort observer with a warning.
+    /// Broadcast lag is recorded as its own candidate and observation continues;
+    /// only bus closure ends this best-effort observer.
     pub async fn run(self, mut receiver: EventReceiver) {
+        // One candidate write per lag episode, so recording cannot deepen the lag.
+        let mut lagging = false;
         loop {
-            match receiver.recv().await {
+            let received = receiver.recv().await;
+            if let Err(RecvError::Lagged(skipped)) = received {
+                if !lagging {
+                    self.handle_lag(skipped);
+                }
+                lagging = true;
+                continue;
+            }
+            lagging = false;
+            match received {
                 Ok(event) => match event.kind {
-                    EventKind::Diagnostic(diagnostic) => self.handle_diagnostic(&diagnostic),
+                    EventKind::Diagnostic(diagnostic) => {
+                        self.diagnostic_observed_at(&diagnostic, event.meta.wall_clock)
+                    }
                     EventKind::Fault(FaultEvent::SkillDiagnostic {
                         kind,
                         skill,
@@ -275,7 +304,39 @@ impl ImprovementCollector {
         }
     }
 
+    /// Skipped events may have held harness diagnostics, so the gap itself is a candidate.
+    /// Later episodes fold into it as occurrences; `skipped` is the first lag of an episode.
+    fn handle_lag(&self, skipped: u64) {
+        tracing::warn!(skipped, "self-improvement observer lagged; continuing");
+        if !self.settings.policy.collect_diagnostics {
+            return;
+        }
+        self.intake(
+            "diag",
+            NewImprovementCandidate {
+                id: String::new(),
+                source: ImprovementSource::Diagnostic,
+                code: "ObserverLagged".into(),
+                severity: ImprovementSeverity::Warning,
+                title: title(&format!(
+                    "ObserverLagged: self-improvement observer skipped {skipped} events"
+                )),
+                evidence: self.json_evidence(json!({
+                    "skipped_events": skipped, "observed_at_ns": unix_ns(SystemTime::now()),
+                })),
+                dedup_key: "diag:self_improvement:ObserverLagged".into(),
+                run_id: None,
+            },
+        );
+    }
+
+    /// Every object also records the recording build unless the caller supplied one.
     fn json_evidence(&self, mut value: Value) -> String {
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("build")
+                .or_insert_with(|| Value::String(build_info()));
+        }
         let limit = self.settings.policy.evidence_limit();
         // Bound the whole serialized object, including escaping and metadata, not just detail.
         // Keep valid JSON and all keys where possible; shrink the largest text field first.
@@ -339,7 +400,10 @@ impl ImprovementCollector {
                 dedup_key: candidate.dedup_key,
                 status: ImprovementStatus::New,
                 draft_path: None,
+                recent_run_ids: candidate.run_id.iter().cloned().collect(),
                 run_id: candidate.run_id,
+                occurrences: 1,
+                last_seen_at_ns: 0,
             };
             let (issue, _) =
                 self.write_drafts(&id, &render_issue_draft(&c), &render_packet_draft(&c))?;
@@ -349,6 +413,23 @@ impl ImprovementCollector {
         }
         Ok(())
     }
+}
+
+/// Version, VCS revision (when the build provides `EVORCH_BUILD_REV`) and platform.
+pub fn build_info() -> String {
+    format!(
+        "evorch {} ({}) {}/{}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("EVORCH_BUILD_REV").unwrap_or("unknown revision"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+fn unix_ns(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
+        u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+    })
 }
 
 fn new_id(prefix: &str) -> Result<String, SelfImprovementError> {

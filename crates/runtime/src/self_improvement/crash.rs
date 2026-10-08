@@ -16,6 +16,8 @@ pub struct SpooledCrash {
     pub location: Option<String>,
     pub thread: Option<String>,
     pub timestamp_unix: u64,
+    /// [`super::build_info`] of the crashed process; absent in older spool entries.
+    pub build: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +27,8 @@ struct CrashEntry {
     thread: Option<String>,
     #[serde(alias = "timestamp_unix")]
     timestamp: u64,
+    #[serde(default)]
+    build: Option<String>,
 }
 
 /// Replaces the process panic hook; deliberately does NOT chain to the old hook.
@@ -57,6 +61,7 @@ pub fn install_crash_spool(spool_dir: PathBuf) {
                 .name()
                 .map(|name| bound_text(name, 1024)),
             timestamp,
+            build: Some(super::build_info()),
         };
         if let Ok(bytes) = serde_json::to_vec(&entry)
             && fs::create_dir_all(&spool_dir).is_ok()
@@ -106,6 +111,7 @@ pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
                 location: None,
                 thread: None,
                 timestamp: 0,
+                build: None,
             });
             Some(SpooledCrash {
                 file_name: entry.file_name().to_string_lossy().into_owned(),
@@ -113,6 +119,7 @@ pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
                 location: parsed.location,
                 thread: parsed.thread,
                 timestamp_unix: parsed.timestamp,
+                build: parsed.build,
             })
         })
         .collect()

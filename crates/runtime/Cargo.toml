@@ -28,6 +28,7 @@ serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 sandbox = { path = "../sandbox" }
 secret-guard = { path = "../secret-guard" }
+sha2 = { workspace = true }
 storage = { path = "../storage" }
 thiserror = { workspace = true }
 tools = { path = "../tools" }

@@ -20,7 +20,7 @@
   };
 
   outputs =
-    { nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }:
+    { self, nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -131,6 +131,8 @@
           inherit cargoArtifacts;
           cargoExtraArgs = "-p evorch -p gui";
           doCheck = false;
+          # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
+          EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
             wrapProgram "$out/bin/evorch-gui" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"

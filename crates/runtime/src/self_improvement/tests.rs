@@ -224,13 +224,21 @@ fn collector_persists_attaches_deduplicates_and_ignores() {
     }
     let evidence: Value = serde_json::from_str(&c.evidence).unwrap();
     assert_eq!(evidence["call_id"], "call-3");
-    collector.ingest_lessons(&[lesson()]);
-    collector.ingest_lessons(&[lesson()]);
+    collector.ingest_lessons(&[lesson()], Some("run-7"));
+    collector.ingest_lessons(&[lesson()], Some("run-7"));
     let rows = f.candidates();
     assert_eq!(rows.len(), 2);
     let promoted = rows.iter().find(|c| c.code == "LessonPromoted").unwrap();
     assert_eq!(promoted.source, ImprovementSource::Lesson);
-    assert_eq!(promoted.evidence, lesson().evidence);
+    assert_eq!(promoted.run_id.as_deref(), Some("run-7"));
+    assert_eq!(promoted.occurrences, 2);
+    let evidence: Value = serde_json::from_str(&promoted.evidence).unwrap();
+    assert_eq!(evidence["source_run_id"], "run-7");
+    assert_eq!(evidence["lesson_id"], lesson().id);
+    assert_eq!(evidence["content"], lesson().content);
+    // Lesson evidence stays an opaque string, never reparsed into the candidate JSON.
+    assert_eq!(evidence["evidence_refs"], lesson().evidence);
+    assert_eq!(evidence["build"], build_info());
     assert_eq!(f.draft_files().len(), 4);
 }
 
@@ -255,10 +263,13 @@ fn guarded_evidence_is_warn_only_and_never_written_to_drafts() {
         detail: format!("safe first line\n{SENTINEL}"),
         ..diagnostic("NoProgress")
     });
-    f.collector().ingest_lessons(&[Lesson {
-        evidence: SENTINEL.into(),
-        ..lesson()
-    }]);
+    f.collector().ingest_lessons(
+        &[Lesson {
+            evidence: SENTINEL.into(),
+            ..lesson()
+        }],
+        Some("run-7"),
+    );
     assert!(f.candidates().is_empty());
     assert!(f.draft_files().is_empty());
 }
@@ -271,11 +282,14 @@ fn only_harness_scoped_lessons_become_candidates() {
         scope,
         ..lesson()
     };
-    f.collector().ingest_lessons(&[
-        scoped("project-1", storage::memory::LessonScope::Project),
-        scoped("user-1", storage::memory::LessonScope::User),
-        scoped("harness-1", storage::memory::LessonScope::Harness),
-    ]);
+    f.collector().ingest_lessons(
+        &[
+            scoped("project-1", storage::memory::LessonScope::Project),
+            scoped("user-1", storage::memory::LessonScope::User),
+            scoped("harness-1", storage::memory::LessonScope::Harness),
+        ],
+        Some("run-7"),
+    );
     let rows = f.candidates();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].dedup_key, "lesson:harness-1");
@@ -287,7 +301,7 @@ fn draft_failure_does_not_undo_persistence_or_panic() {
     let blocked = f.dir.path().join("blocked");
     fs::write(&blocked, "not a directory").unwrap();
     f.settings.policy.draft_dir = Some(blocked);
-    f.collector().ingest_lessons(&[lesson()]);
+    f.collector().ingest_lessons(&[lesson()], Some("run-7"));
     let c = f.candidates().remove(0);
     assert_eq!(c.code, "LessonPromoted");
     assert!(c.draft_path.is_none());
@@ -354,13 +368,14 @@ fn collection_gates_and_write_limits_apply() {
     f.settings.policy.collect_lessons = false;
     let collector = f.collector();
     collector.handle_diagnostic(&diagnostic("NoProgress"));
-    collector.ingest_lessons(&[lesson()]);
+    collector.ingest_lessons(&[lesson()], Some("run-7"));
     collector.ingest_crashes(vec![SpooledCrash {
         file_name: "crash-1.json".into(),
         message: "panic".into(),
         location: None,
         thread: None,
         timestamp_unix: 1,
+        build: None,
     }]);
     assert!(f.candidates().is_empty());
     assert!(f.draft_files().is_empty());
@@ -528,7 +543,7 @@ fn unresolved_drafts_and_closed_writer_fail_without_panicking() {
     assert!(f.candidates()[0].draft_path.is_none());
     let collector = f.collector();
     drop(f._storage);
-    collector.ingest_lessons(&[lesson()]);
+    collector.ingest_lessons(&[lesson()], Some("run-7"));
     collector.handle_diagnostic(&diagnostic("LearningPipelineFailed"));
 }
 
@@ -536,26 +551,87 @@ fn unresolved_drafts_and_closed_writer_fail_without_panicking() {
 fn long_lesson_evidence_is_bounded_without_json_reparsing() {
     let f = Fixture::new();
     let evidence = format!("invalid-json {{ {}", "日本語".repeat(1000));
-    f.collector().ingest_lessons(&[Lesson {
-        evidence: evidence.clone(),
-        ..lesson()
-    }]);
+    f.collector().ingest_lessons(
+        &[Lesson {
+            evidence: evidence.clone(),
+            ..lesson()
+        }],
+        Some("run-7"),
+    );
     let c = f.candidates().remove(0);
-    assert_eq!(c.evidence, bound_text(&evidence, 2048));
-    assert!(c.evidence.ends_with("…[truncated]"));
     assert!(c.evidence.len() <= 2048);
+    let parsed: Value = serde_json::from_str(&c.evidence).unwrap();
+    let kept = parsed["evidence_refs"].as_str().unwrap();
+    assert!(kept.ends_with("…[truncated]"));
+    assert!(evidence.starts_with(kept.trim_end_matches("…[truncated]")));
+    assert_eq!(parsed["source_run_id"], "run-7");
 }
 
 #[tokio::test]
-async fn lag_is_warn_only_and_stops_the_observer() {
+async fn lag_is_recorded_once_and_the_observer_keeps_running() {
     let f = Fixture::new();
-    let bus = EventBus::new(1);
+    // Room for the lag fault plus at least one retained diagnostic.
+    let bus = EventBus::new(4);
     let receiver = bus.subscribe();
     for _ in 0..20 {
         bus.emit(Event::new(diagnostic("NoProgress")));
     }
-    tokio::time::timeout(Duration::from_secs(1), f.collector().run(receiver))
-        .await
+    // The observer only ends with the bus; it must outlive the lag.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), f.collector().run(receiver))
+            .await
+            .is_err()
+    );
+    let candidates = f.candidates();
+    let lagged: Vec<_> = candidates
+        .iter()
+        .filter(|c| c.code == "ObserverLagged")
+        .collect();
+    assert_eq!(lagged.len(), 1);
+    assert_eq!(lagged[0].occurrences, 1);
+    let evidence: Value = serde_json::from_str(&lagged[0].evidence).unwrap();
+    assert!(evidence["skipped_events"].as_u64().unwrap() > 0);
+    // The diagnostic retained after the lag is still observed.
+    assert!(candidates.iter().any(|c| c.code == "NoProgress"));
+}
+
+#[tokio::test]
+async fn bus_diagnostics_record_their_wall_clock_and_split_by_emitter() {
+    let f = Fixture::new();
+    let bus = EventBus::new(16);
+    let receiver = bus.subscribe();
+    let first = Event::new(diagnostic("NoProgress"));
+    let observed = first.meta.wall_clock;
+    bus.emit(first);
+    // The same code from another emitter is a separate candidate, not a duplicate.
+    bus.emit(Event::new(DiagnosticEvent {
+        source: "tool_calls".into(),
+        ..diagnostic("NoProgress")
+    }));
+    let _ = tokio::time::timeout(Duration::from_millis(300), f.collector().run(receiver)).await;
+    let candidates = f.candidates();
+    assert_eq!(candidates.len(), 2);
+    let original = candidates
+        .iter()
+        .find(|c| c.dedup_key == format!("diag:{}:NoProgress", diagnostic("NoProgress").source))
         .unwrap();
-    assert!(f.candidates().is_empty());
+    let evidence: Value = serde_json::from_str(&original.evidence).unwrap();
+    assert_eq!(
+        evidence["observed_at_ns"].as_u64().unwrap(),
+        unix_ns(observed)
+    );
+    assert_eq!(evidence["build"], build_info());
+    let draft = fs::read_to_string(
+        f.settings
+            .policy
+            .draft_dir
+            .as_ref()
+            .unwrap()
+            .join(original.draft_path.as_ref().unwrap()),
+    )
+    .unwrap();
+    assert!(
+        draft.contains(&format!("Recorded by: {}\n", build_info())),
+        "{draft}"
+    );
 }

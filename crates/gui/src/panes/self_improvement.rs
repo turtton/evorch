@@ -203,10 +203,23 @@ impl SelfImprovementPane {
                             }
                         });
                         ui.label(&entry.title);
+                        if entry.occurrences > 1 {
+                            ui.label(crate::theme::text::muted(format!(
+                                "Seen {} times, last {}",
+                                entry.occurrences,
+                                format_created_at(entry.last_seen_at_ns)
+                            )));
+                        }
                         ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
                             ui.monospace(&entry.evidence);
                             if let Some(run_id) = &entry.run_id {
                                 ui.monospace(format!("Run: {run_id}"));
+                            }
+                            if entry.recent_run_ids.len() > 1 {
+                                ui.monospace(format!(
+                                    "Recent runs: {}",
+                                    entry.recent_run_ids.join(", ")
+                                ));
                             }
                         });
                         if let Some(path) = &entry.draft_path {
