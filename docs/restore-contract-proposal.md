@@ -40,6 +40,28 @@ Regression coverage: `restore_tool_intent`, `shell_jobs_integration`, GUI
 `escalation_follow_up`, and the input-derived mock cache plus independent wire
 prefix checks in `cache_preservation_e2e`.
 
+## 2026-10-08 amendment: `/continue` resumes without a new message
+
+`/continue` uses `AgentRuntime::resume_chat` to resume the saved turn. It does not
+append a continuation prompt, an empty user message, the run ledger, or newly
+captured memory. Saved instructions, history and compaction checkpoints remain
+unchanged. Missing tool outcomes still append the recovery notices described
+above; old operations and shell jobs are not automatically replayed.
+
+An unfinished turn proceeds with that history. A normally completed turn restores
+to input waiting without another model request. Normal completion is recorded
+explicitly so a response interrupted by a length limit or content filter is not
+treated as completed. An already waiting run stays waiting; running or stopping
+runs keep the existing GUI notice instead of queuing another turn.
+
+Current authority, root identity and project/team validation still apply. The
+resume operation does not change the trusted goal request. Sending an actual new
+message continues to use `continue_goal` with its normal input behavior.
+
+Regression coverage includes identical wire input on unfinished resume (including
+compacted history), no ledger injection, completed-turn waiting followed by a real
+follow-up, restart with the saved role, and outcome-unknown recovery notifications.
+
 ## 承認済みの範囲
 
 - `continue_goal` / `delegate_chat` で、停止済みrootの会話履歴を引き継げる範囲を広げます。

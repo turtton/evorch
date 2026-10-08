@@ -796,9 +796,8 @@ impl RuntimeCommandSink {
                     composer_role: continuation.composer_role,
                     model_preference: continuation.model_preference,
                     images: Vec::new(),
-                    // The command is current human intent to continue, not replayed
-                    // history or permission to repeat interrupted side effects.
-                    text: AgentRuntime::CHAT_CONTINUE_PROMPT.into(),
+                    // The resume_only path never submits this placeholder as input.
+                    text: String::new(),
                 },
                 permit,
                 true,
@@ -810,7 +809,7 @@ impl RuntimeCommandSink {
         &self,
         thread: &str,
         run: RunId,
-        prompt: &str,
+        prompt: Option<&str>,
         authority: &mut RunConfig,
     ) -> Result<(), String> {
         if !self
@@ -835,7 +834,12 @@ impl RuntimeCommandSink {
             id: format!("{project}:{thread}"),
         });
         authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-        authority.delegation_value = Some(prompt.into());
+        // This renews the current team capability; it is not a model message.
+        authority.delegation_value = Some(
+            prompt
+                .unwrap_or("Resume the existing team coordination")
+                .into(),
+        );
         authority.finding_store = Some(config.db_path.clone());
         authority.memory = Some(
             runtime::memory::MemoryBoundary::capture(config, project)
@@ -929,9 +933,16 @@ impl RuntimeCommandSink {
                 .or_else(|| self.goal_runs.get(&thread_id))
                 .copied()
                 .expect("resolved conversation root");
-            if self.runtime.inspect_agent(run).ok().is_some_and(|run| {
+            let phase = self.runtime.inspect_agent(run).ok().map(|run| run.phase);
+            if phase == Some(event_bus::AgentRunPhase::Waiting) {
+                return vec![LoopEvent::ChatNotice {
+                    thread_id,
+                    text: "Run is already waiting for input".into(),
+                }];
+            }
+            if phase.is_some_and(|phase| {
                 matches!(
-                    run.phase,
+                    phase,
                     event_bus::AgentRunPhase::Pending | event_bus::AgentRunPhase::Running
                 )
             }) {
@@ -976,7 +987,11 @@ impl RuntimeCommandSink {
                     id: format!("{project}:{thread_id}"),
                 });
                 authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-                authority.delegation_value = Some(submission.text.clone());
+                authority.delegation_value = Some(if resume_only {
+                    "Resume the existing team coordination".into()
+                } else {
+                    submission.text.clone()
+                });
                 authority.finding_store = Some(config.db_path.clone());
                 authority.memory = match runtime::memory::MemoryBoundary::capture(config, project) {
                     Ok(memory) => Some(memory),
@@ -989,10 +1004,13 @@ impl RuntimeCommandSink {
                 };
             }
             let _guard = self.handle.enter();
-            match self
-                .runtime
-                .continue_goal(run_id, submission.text.clone(), authority)
-            {
+            let continuation = if resume_only {
+                self.runtime.resume_chat(run_id, authority)
+            } else {
+                self.runtime
+                    .continue_goal(run_id, submission.text.clone(), authority)
+            };
+            match continuation {
                 Ok(run_id) => {
                     self.chat_runs.insert(thread_id.clone(), run_id);
                     self.stop_marked.remove(&thread_id);
@@ -1058,16 +1076,22 @@ impl RuntimeCommandSink {
                 model_preference: submission.model_preference.clone(),
                 ..initial.clone()
             };
-            if let Err(reason) =
-                self.renew_team_authority(&thread_id, run_id, &submission.text, &mut authority)
-            {
+            if let Err(reason) = self.renew_team_authority(
+                &thread_id,
+                run_id,
+                (!resume_only).then_some(submission.text.as_str()),
+                &mut authority,
+            ) {
                 return vec![LoopEvent::ChatRejected { thread_id, reason }];
             }
             let _guard = self.handle.enter();
-            match self
-                .runtime
-                .continue_goal(run_id, submission.text.clone(), authority)
-            {
+            let continuation = if resume_only {
+                self.runtime.resume_chat(run_id, authority)
+            } else {
+                self.runtime
+                    .continue_goal(run_id, submission.text.clone(), authority)
+            };
+            match continuation {
                 Ok(run_id) => {
                     self.stop_marked.remove(&thread_id);
                     self.stopped_by_us.remove(&thread_id);
@@ -1723,6 +1747,7 @@ mod tests {
     struct ErrorOnceModel {
         fail: std::sync::atomic::AtomicBool,
         started: tokio::sync::Notify,
+        requests: std::sync::Mutex<Vec<Vec<Message>>>,
     }
     #[async_trait]
     impl AgentModel for ErrorOnceModel {
@@ -1736,15 +1761,12 @@ mod tests {
             messages: &[Message],
             _: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
+            self.requests.lock().unwrap().push(messages.to_vec());
             self.started.notify_one();
             if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(RuntimeError::Model {
                     reason: "test failure".into(),
                 });
-            }
-            if messages.len() > 1 {
-                assert!(messages.iter().any(|m| m.content.iter().any(|block|
-                    matches!(block, providers::ContentBlock::Text { text } if text == AgentRuntime::CHAT_CONTINUE_PROMPT))));
             }
             std::future::pending().await
         }
@@ -1757,6 +1779,7 @@ mod tests {
                 let model = Arc::new(ErrorOnceModel {
                     fail: std::sync::atomic::AtomicBool::new(error),
                     started: tokio::sync::Notify::new(),
+                    requests: Default::default(),
                 });
                 let (rt, mut sink, runtime, supervisor) =
                     build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
@@ -1804,6 +1827,13 @@ mod tests {
                 assert_eq!(sink.chat_runs["resume"], run);
                 assert_eq!(runtime.list_agents().len(), 1);
                 assert!(!sink.stopped_by_us.contains("resume"));
+                rt.block_on(async {
+                    model.started.notified().await;
+                });
+                let requests = model.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[1], requests[0], "resume must not add model input");
+                drop(requests);
                 let after = Database::open(&config)
                     .unwrap()
                     .run_context(&run.to_string())

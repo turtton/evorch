@@ -13,11 +13,41 @@ pub(super) enum RunContinuation {
     /// History reused by a host chat entry point alongside a new human prompt.
     /// The restored state itself supplies no review authorization.
     Restored(RestoredState),
+    /// Resume the saved turn without submitting any new model input.
+    Resume {
+        restored: RestoredState,
+        handoff: Option<RunHandoff>,
+    },
+}
+
+enum ChatContinuation {
+    Followup(String),
+    Resume,
+}
+
+impl ChatContinuation {
+    fn prompt(&self) -> Option<&str> {
+        match self {
+            Self::Followup(prompt) => Some(prompt),
+            Self::Resume => None,
+        }
+    }
 }
 
 impl AgentRuntime {
-    /// Current host intent supplied by `/continue`, appended without rewriting history.
-    pub const CHAT_CONTINUE_PROMPT: &str = "Continue the current task from the saved conversation. Do not start a new task or blindly repeat operations whose outcome is uncertain; inspect the current state first.";
+    /// Restore a stopped chat using only its saved history and current authority.
+    /// A completed turn returns to input waiting; an unfinished turn continues.
+    /// Already live runs are unchanged. Images and goal creation belong to a new
+    /// human submission through `continue_goal`, not to this scheduling operation.
+    pub fn resume_chat(
+        &self,
+        run_id: RunId,
+        mut authority: RunConfig,
+    ) -> Result<RunId, RuntimeError> {
+        authority.images.clear();
+        authority.initial_thread_goal = None;
+        self.continue_chat(run_id, ChatContinuation::Resume, authority)
+    }
 
     /// Continue a goal root in place, including after process restart.
     /// Persisted root identity supplies the role; the caller supplies current authority.
@@ -29,6 +59,16 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
+    }
+
+    fn continue_chat(
+        &self,
+        run_id: RunId,
+        continuation: ChatContinuation,
+        authority: RunConfig,
+    ) -> Result<RunId, RuntimeError> {
+        let prompt = continuation.prompt();
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: run_id.to_string(),
             reason,
@@ -52,10 +92,13 @@ impl AgentRuntime {
                 AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
             ))
         ) {
+            let Some(prompt) = prompt else {
+                return Ok(run_id);
+            };
             self.set_model_preference(run_id, authority.model_preference)?;
             self.send_inbox_message(
                 run_id,
-                prompt,
+                prompt.into(),
                 authority.images,
                 true,
                 authority.initial_thread_goal,
@@ -98,11 +141,15 @@ impl AgentRuntime {
         }
         let restored = RestoredState::for_conversation(&record)?;
         let pending_handoff = descriptor.pending_escalation.clone();
-        let pending_request = pending_handoff.as_ref().map(|pending| {
-            pending.trusted_request.as_deref().map_or_else(
-                || prompt.clone(),
-                |original| crate::thread_goals::continued_request(original, &prompt),
-            )
+        let pending_request = pending_handoff.as_ref().and_then(|pending| {
+            match (pending.trusted_request.as_deref(), prompt) {
+                (Some(original), Some(prompt)) => {
+                    Some(crate::thread_goals::continued_request(original, prompt))
+                }
+                (Some(original), None) => Some(original.into()),
+                (None, Some(prompt)) => Some(prompt.into()),
+                (None, None) => None,
+            }
         });
         let retained_worktree = if let Some(pending) = &pending_handoff {
             let child = event_bus::escalation_thread_id(&run_id.to_string());
@@ -123,12 +170,14 @@ impl AgentRuntime {
         } else {
             None
         };
-        if pending_handoff.is_some() {
+        if pending_handoff.is_some()
+            && let Some(prompt) = prompt
+        {
             // Keep a retryable seed until a provider actually starts. Another
             // failed admission must retain this new human submission as well.
             let mut history = restored.messages.clone();
             let mut content = vec![providers::ContentBlock::Text {
-                text: prompt.clone(),
+                text: prompt.into(),
             }];
             content.extend(
                 authority
@@ -148,7 +197,7 @@ impl AgentRuntime {
             if let Some(pending) = &mut descriptor.pending_escalation {
                 pending.trusted_request = pending_request.clone();
             }
-        } else {
+        } else if pending_handoff.is_none() {
             descriptor.restorable = false;
             descriptor.non_restorable_reason = Some("snapshot_consumed".into());
             record.restorable = false;
@@ -171,14 +220,22 @@ impl AgentRuntime {
             project_root,
             ..authority
         };
-        let continuation = if let Some(pending) = pending_handoff {
+        let handoff = if let Some(pending) = pending_handoff {
             config.workspace_mode = descriptor.workspace_mode;
             config.workspace_branch = pending.workspace_branch;
-            RunContinuation::Handoff(RunHandoff {
+            Some(RunHandoff {
                 source_run_id: pending.source_run_id,
                 worktree: retained_worktree,
-                restored: Some(restored),
+                restored: None,
             })
+        } else {
+            None
+        };
+        let continuation = if prompt.is_none() {
+            RunContinuation::Resume { restored, handoff }
+        } else if let Some(mut handoff) = handoff {
+            handoff.restored = Some(restored);
+            RunContinuation::Handoff(handoff)
         } else {
             RunContinuation::Restored(restored)
         };
@@ -195,15 +252,24 @@ impl AgentRuntime {
             self.create_thread_goal(&thread, run_id, objective, criteria)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
-        self.goal_user_input(run_id, &prompt);
+        if let Some(prompt) = prompt {
+            self.goal_user_input(run_id, prompt);
+        }
         if let Some(request) = pending_request {
             self.remember_thread_request(run_id, &request);
         }
-        Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
+        Ok(self.spawn_run_with_handoff(
+            run_id,
+            None,
+            role,
+            prompt.unwrap_or_default().into(),
+            config,
+            continuation,
+        ))
     }
 
     /// Resolve a thread's latest saved chat root without starting a new run.
-    /// The caller must still renew current authority through `continue_goal`.
+    /// The caller must still renew current authority through `resume_chat` or `continue_goal`.
     pub fn latest_chat_run(&self, thread_id: &str) -> Result<Option<RunId>, RuntimeError> {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(None);

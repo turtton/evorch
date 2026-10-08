@@ -35,6 +35,7 @@ impl RestoredState {
             if call.call_id == "unobserved-shell-jobs"
                 || !has_outcome_notice(&restored.messages, call)
             {
+                restored.turn_completed = false;
                 restored.messages.push(Message {
                     role: Role::User,
                     content: vec![ContentBlock::Text {

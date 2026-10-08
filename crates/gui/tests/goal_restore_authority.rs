@@ -355,6 +355,11 @@ fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch()
         .stop(root, runtime::StopScope::SelfOnly)
         .unwrap();
     fixture.rt.block_on(original.runtime.wait(root)).unwrap();
+    let before = storage::Database::open(&fixture.config)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
     drop(original);
 
     let mut restarted = fixture.world();
@@ -365,10 +370,18 @@ fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch()
         Role::Orchestrator.name()
     );
     let messages = fixture.messages.lock().unwrap();
-    let last = serde_json::to_string(messages.last().unwrap()).unwrap();
-    assert!(last.contains("original chat task"));
-    assert!(last.contains(AgentRuntime::CHAT_CONTINUE_PROMPT));
+    assert_eq!(
+        messages.len(),
+        1,
+        "completed history restores without a model call"
+    );
     drop(messages);
+    let after = storage::Database::open(&fixture.config)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.messages_json, before.messages_json);
     fixture.stop(&restarted, root);
 }
 
