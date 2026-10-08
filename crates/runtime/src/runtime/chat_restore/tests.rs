@@ -3,6 +3,7 @@ use super::*;
 mod fork_seed;
 mod invalidation;
 mod registration;
+mod resume;
 mod review_authority;
 
 struct CompletingModel;
@@ -342,11 +343,7 @@ async fn goal_restore_fails_closed_when_consumed_marker_cannot_be_persisted() {
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), events.recv())
-            .await
-            .is_err()
-    );
+    assert!(events.drain_pending_snapshot().is_empty());
 }
 
 #[tokio::test]

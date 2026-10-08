@@ -213,38 +213,54 @@ impl Fixture {
 
     fn wait_for_reply(&mut self, run_id: &str, reply: &str) {
         self.rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let mut observed_reply = false;
-                loop {
-                    let event = self.events.recv().await.expect("chat event");
-                    match event.kind {
-                        EventKind::Message(MessageEvent::MessageDelta {
-                            delta,
-                            run_id: Some(id),
-                        }) if id == run_id => {
-                            assert_eq!(delta, reply);
-                            observed_reply = true;
-                        }
-                        EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                            run_id: id,
-                            to: AgentRunPhase::Waiting,
-                            ..
-                        }) if id == run_id => {
-                            assert!(observed_reply, "Waiting must follow the reply");
-                            break;
-                        }
-                        _ => {}
+            let mut observed_reply = false;
+            loop {
+                let event = self.events.recv().await.expect("chat event");
+                match event.kind {
+                    EventKind::Message(MessageEvent::MessageDelta {
+                        delta,
+                        run_id: Some(id),
+                    }) if id == run_id => {
+                        assert_eq!(delta, reply);
+                        observed_reply = true;
                     }
+                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                        run_id: id,
+                        to: AgentRunPhase::Waiting,
+                        ..
+                    }) if id == run_id => {
+                        assert!(observed_reply, "Waiting must follow the reply");
+                        break;
+                    }
+                    _ => {}
                 }
-            })
-            .await
-            .expect("reply and Waiting within 5s");
+            }
         });
         let agent = self
             .runtime
             .inspect_agent(self.run_id(run_id))
             .expect("chat run");
         assert_eq!(agent.phase, AgentRunPhase::Waiting);
+    }
+
+    fn wait_for_restored_waiting(&mut self, run_id: &str) {
+        self.rt.block_on(async {
+            loop {
+                match self.events.recv().await.expect("restoration event").kind {
+                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                        run_id: id,
+                        to: AgentRunPhase::Waiting,
+                        ..
+                    }) if id == run_id => break,
+                    EventKind::Message(MessageEvent::MessageDelta {
+                        run_id: Some(id), ..
+                    }) if id == run_id => {
+                        panic!("completed history must not trigger another reply")
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
     fn run_id(&self, id: &str) -> RunId {
@@ -419,6 +435,11 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                 panic!("expected accepted continuation: {events:?}");
             };
             assert_eq!(continued, run_id, "saved root continues in place");
+            if resume_only {
+                fixture.wait_for_restored_waiting(continued);
+                assert_eq!(fixture.messages.lock().unwrap().len(), 1);
+                assert_eq!(fixture.send("conversation", "turn-2"), *run_id);
+            }
             fixture.wait_for_reply(continued, "reply-2");
             let agents = fixture.runtime.list_agents();
             assert_eq!(agents.len(), 1);
@@ -446,15 +467,10 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
             let messages = fixture.messages.lock().unwrap();
             assert_eq!(messages[0][0].role, MessageRole::System);
             assert!(messages[1].starts_with(&messages[0]));
-            let continued_prompt = if resume_only {
-                AgentRuntime::CHAT_CONTINUE_PROMPT
-            } else {
-                "turn-2"
-            };
             assert_eq!(
                 messages[1].last().unwrap().content,
                 vec![ContentBlock::Text {
-                    text: continued_prompt.into()
+                    text: "turn-2".into()
                 }]
             );
         }

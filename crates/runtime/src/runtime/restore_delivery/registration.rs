@@ -66,6 +66,7 @@ impl AgentRuntime {
             run_id,
             role,
             prompt: String::new(),
+            start: crate::agent_loop::RunStart::WithInput,
             config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),

@@ -837,8 +837,10 @@ impl AgentRuntime {
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
         if parent.is_none()
-            && (matches!(&continuation, RunContinuation::Restored(_))
-                || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()))
+            && (matches!(
+                &continuation,
+                RunContinuation::Restored(_) | RunContinuation::Resume { .. }
+            ) || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()))
             && let Some(intent) = intents.get_mut(&run_id)
         {
             intent.cancelled = false;
@@ -879,6 +881,7 @@ impl AgentRuntime {
         continuation: RunContinuation,
     ) -> RunId {
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
+        let history_only = matches!(continuation, RunContinuation::Resume { .. });
         let original_prompt = prompt.clone();
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
@@ -888,6 +891,7 @@ impl AgentRuntime {
                 (Some(handoff), restored)
             }
             RunContinuation::Restored(restored) => (None, Some(restored)),
+            RunContinuation::Resume { restored, handoff } => (handoff, Some(restored)),
         };
         if config.budget == crate::budget_tracker::BudgetSettings::default()
             && let Some(budget) = self.shared.budget.get()
@@ -969,10 +973,24 @@ impl AgentRuntime {
                 .get(&source)
                 .cloned()
         });
-        let review_run = match inherited_review {
-            Some(inherited) => {
+        let retained_review = history_only
+            .then(|| {
+                self.shared
+                    .review_runs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&run_id)
+                    .cloned()
+            })
+            .flatten();
+        let review_run = match (retained_review, inherited_review) {
+            (Some(retained), _) => retained,
+            (None, Some(inherited)) => {
                 let mut delegation_chain = inherited.delegation_chain;
-                delegation_chain.push(crate::escalation_review::bounded(&original_prompt, 1500));
+                if !history_only {
+                    delegation_chain
+                        .push(crate::escalation_review::bounded(&original_prompt, 1500));
+                }
                 if delegation_chain.len() > 4 {
                     delegation_chain.remove(0);
                 }
@@ -985,12 +1003,13 @@ impl AgentRuntime {
                     delegation_chain,
                 }
             }
-            None => {
+            (None, None) => {
                 // A root prompt comes from the current host submission, including
                 // continue_goal/delegate_chat restores. Persisted messages and
                 // compaction summaries are history only, never user authority.
                 let requests = if parent.is_none()
                     && escalated_from.is_none()
+                    && !history_only
                     && !original_prompt.trim().is_empty()
                 {
                     vec![crate::escalation_review::UserRequest {
@@ -1005,7 +1024,9 @@ impl AgentRuntime {
                     root_run_id: run_id.to_string(),
                     lineage_run_ids: vec![run_id.to_string()],
                     user_requests: Arc::new(Mutex::new(requests)),
-                    delegation_chain: if parent.is_some() || escalated_from.is_some() {
+                    delegation_chain: if !history_only
+                        && (parent.is_some() || escalated_from.is_some())
+                    {
                         vec![crate::escalation_review::bounded(&original_prompt, 1500)]
                     } else {
                         Vec::new()
@@ -1019,11 +1040,11 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id, review_run);
         let prompt = match &config.memory {
-            Some(memory) if handoff.is_none() => memory.augment(prompt),
+            Some(memory) if handoff.is_none() && !history_only => memory.augment(prompt),
             Some(_) | None => prompt,
         };
         let prompt = match (&config.team, &config.team_task) {
-            (Some(_), Some(task)) => format!(
+            (Some(_), Some(task)) if !history_only => format!(
                 "{prompt}\nTeam task id: {:?}. Claim it with task_claim before editing; pass its generation to task_complete. Owned paths: {:?}",
                 task.id, task.paths
             ),
@@ -1054,6 +1075,11 @@ impl AgentRuntime {
             run_id,
             role,
             prompt,
+            start: if history_only {
+                crate::agent_loop::RunStart::Resume
+            } else {
+                crate::agent_loop::RunStart::WithInput
+            },
             config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),

@@ -22,6 +22,7 @@ pub(crate) struct RestoredState {
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
     pub(crate) trigger: Option<event_bus::AgentMessage>,
+    pub(crate) turn_completed: bool,
 }
 
 impl RestoredState {
@@ -61,10 +62,20 @@ impl RestoredState {
                 ),
             });
         }
+        let turn_completed = (descriptor.completed_turn_end == Some(messages.len())
+            || record.terminal_phase == "Done")
+            && messages.last().is_some_and(|message| {
+                message.role == providers::Role::Assistant
+                    && !message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
+            });
         Ok(Self {
             messages,
             checkpoints,
             trigger: None,
+            turn_completed,
         })
     }
 }
@@ -134,6 +145,9 @@ pub struct RunRestoreDescriptor {
     /// A memo-only child whose provider has not started. Contains no authority.
     #[serde(default)]
     pub pending_escalation: Option<PendingEscalation>,
+    /// Raw history boundary of a normal final response; Length/ContentFilter are unfinished.
+    #[serde(default)]
+    pub completed_turn_end: Option<usize>,
 }
 
 impl RunRestoreDescriptor {
@@ -215,7 +229,7 @@ pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), Snapsho
     write_snapshot(state, phase, end)
 }
 
-/// Non-system message count. System messages are rewritten on every restore,
+/// Non-system message count. Host follow-ups may refresh system messages,
 /// so fork boundaries count only the append-only conversation.
 pub(crate) fn conversation_len(messages: &[providers::Message]) -> usize {
     messages
@@ -392,6 +406,9 @@ fn write_snapshot(
             .collect(),
         project_root: config.project_root.clone(),
         pending_escalation: None,
+        completed_turn_end: state
+            .completed_turn_end
+            .filter(|completed| *completed == end),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),

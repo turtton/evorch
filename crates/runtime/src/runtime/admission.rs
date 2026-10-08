@@ -120,7 +120,14 @@ impl AgentRuntime {
             .expect("reserved admission has one completion sender");
         let runtime = self.clone();
         tokio::spawn(async move {
-            let handoff = matches!(&continuation, RunContinuation::Handoff(_));
+            let handoff = matches!(
+                &continuation,
+                RunContinuation::Handoff(_)
+                    | RunContinuation::Resume {
+                        handoff: Some(_),
+                        ..
+                    }
+            );
             let invocation = crate::AgentInvocationContext {
                 run_id: run_id.to_string(),
                 model_preference: config.model_preference.clone(),

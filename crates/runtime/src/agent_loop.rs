@@ -49,11 +49,18 @@ pub(crate) struct RunTask {
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
     pub(crate) prompt: String,
+    pub(crate) start: RunStart,
     pub(crate) config: RunConfig,
     pub(crate) parent: Option<RunId>,
     pub(crate) mailbox: Arc<RunMailbox>,
     pub(crate) handoff: Option<RunHandoff>,
     pub(crate) restored: Option<crate::restore::RestoredState>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunStart {
+    WithInput,
+    Resume,
 }
 
 /// 終端済み run から新規 root run へ排他的に移す workspace 所有権。
@@ -111,6 +118,7 @@ pub(crate) struct LoopState {
     pub(crate) last_usage: Option<Usage>,
     answered_questions: std::collections::HashSet<String>,
     resumed: bool,
+    pub(crate) completed_turn_end: Option<usize>,
     pending_user_messages: Vec<crate::runtime::user_inbox::UserInput>,
     pub(crate) goal_wake_pending: bool,
     pending_escalation: Option<EscalationMemo>,
@@ -167,6 +175,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
+    let history_only = task.start == RunStart::Resume;
+    let completed_turn_end = restored.as_ref().and_then(|restored| {
+        (history_only && restored.turn_completed).then_some(restored.messages.len())
+    });
     let context = if let Some(checkpoint) = &benchmark {
         AgentContext::from_restored(
             task.run_id,
@@ -183,7 +195,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.messages,
                     restored.checkpoints,
                 );
-                if let Some(runtime) = shared.upgrade()
+                if !history_only
+                    && let Some(runtime) = shared.upgrade()
                     && let Some(store) = runtime.run_store.get()
                 {
                     match store.ledger_entries(task.run_id) {
@@ -206,7 +219,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 }
                 match restored.trigger {
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
-                    None => {
+                    None if !history_only => {
                         context.push_user(&task.prompt);
                         if let Some(message) = context.messages.last_mut() {
                             message
@@ -219,6 +232,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                                 }));
                         }
                     }
+                    None => {}
                 }
                 context
             }
@@ -241,6 +255,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         last_usage: None,
         answered_questions: Default::default(),
         resumed: is_restored,
+        completed_turn_end,
         pending_user_messages: Vec::new(),
         goal_wake_pending: false,
         pending_escalation: None,
@@ -496,6 +511,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
         if let Some(root) = &active_root
             && !benchmark_replay
+            && !history_only
         {
             update_workspace_system_message(&mut state.context, root);
         }
@@ -517,6 +533,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             return;
         }
         state.save_checkpoint();
+        if completed_turn_end.is_some() && !state.wait_for_input().await {
+            return;
+        }
         state.execute().await;
     }
     .await;
@@ -1064,6 +1083,8 @@ impl LoopState {
                 })
                 .collect::<String>();
             self.context.push_assistant(response.message);
+            self.completed_turn_end = (!has_tool_uses && finish_reason == FinishReason::Stop)
+                .then_some(self.context.messages.len());
             self.shared
                 .bus
                 .emit(Event::new(MessageEvent::MessageCompleted {

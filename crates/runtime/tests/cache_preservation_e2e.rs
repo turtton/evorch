@@ -568,17 +568,17 @@ async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalat
 
 #[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
-    interrupted_tool_recovery("Explain the interrupted result", false).await;
+    interrupted_tool_recovery(Some("Explain the interrupted result"), false).await;
 }
 
 #[tokio::test]
 async fn continue_after_stop_or_error_preserves_the_wire_prefix() {
     for stopped in [false, true] {
-        interrupted_tool_recovery(AgentRuntime::CHAT_CONTINUE_PROMPT, stopped).await;
+        interrupted_tool_recovery(None, stopped).await;
     }
 }
 
-async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
+async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
     let read = Arc::new(GatedRead {
         started: Notify::new(),
         release: Notify::new(),
@@ -622,10 +622,17 @@ async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
     };
     let mut events = through_phase(&mut harness.receiver, run, phase).await;
     harness.runtime.wait(run).await.unwrap();
-    harness
-        .runtime
-        .continue_goal(run, prompt.into(), RunConfig::default())
-        .unwrap();
+    if let Some(prompt) = prompt {
+        harness
+            .runtime
+            .continue_goal(run, prompt.into(), RunConfig::default())
+            .unwrap();
+    } else {
+        harness
+            .runtime
+            .resume_chat(run, RunConfig::default())
+            .unwrap();
+    }
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
     harness.runtime.cancel(run).unwrap();
     harness.runtime.wait(run).await.unwrap();
@@ -639,10 +646,271 @@ async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
         .body;
     let text = request.to_string();
     assert!(text.contains("ToolExecutionOutcomeUnknown"));
-    assert!(text.contains(prompt));
+    if let Some(prompt) = prompt {
+        assert!(text.contains(prompt));
+    } else {
+        let users = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            users.len(),
+            2,
+            "only the original request and recovery notice are user input"
+        );
+        assert!(users[1].to_string().contains("ToolExecutionOutcomeUnknown"));
+    }
     if !stopped {
         assert!(text.contains("cancelled"));
     }
+}
+
+#[tokio::test]
+async fn continue_unfinished_model_request_reuses_identical_wire_input_without_ledger() {
+    for compacted in [false, true] {
+        for restart in [false, true] {
+            resume_unfinished_model_request(compacted, restart).await;
+        }
+    }
+}
+
+async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    let mut script = vec![read_response(2)];
+    if compacted {
+        script.push(text_response(
+            &"Prior analysis that can be summarized ".repeat(100),
+        ));
+    }
+    script.extend([
+        text_response("interrupted").with_gate(gate.clone()),
+        text_response("resumed"),
+    ]);
+    let mut harness = harness(script, 1_000_000);
+    // Release before the mock joins its HTTP workers, including on panic.
+    struct ReleaseOnDrop(mock_openai::ResponseGate);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release_on_drop = ReleaseOnDrop(gate.clone());
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Keep this original task".into(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    if compacted {
+        through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+        harness.runtime.compact(run).unwrap();
+        harness
+            .runtime
+            .send_message(run, "Actual next turn before interruption".into())
+            .unwrap();
+    }
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await;
+    harness.runtime.wait(run).await.unwrap();
+    gate.release();
+    let saved = storage::Database::open(&config)
+        .unwrap()
+        .run_context(&run.to_string())
+        .unwrap()
+        .unwrap();
+    let checkpoints: Vec<runtime::CompactionCheckpoint> =
+        serde_json::from_str(&saved.checkpoints_json).unwrap();
+    assert_eq!(!checkpoints.is_empty(), compacted);
+    storage
+        .handle()
+        .append_run_ledger(&run.to_string(), "Saved ledger entry must not become input")
+        .unwrap();
+    let lesson = storage::memory::Lesson {
+        id: "new-lesson".into(),
+        project: "project".into(),
+        task_id: "another-task".into(),
+        content: "Newly captured memory must not become resume input".into(),
+        evidence: "resume contract fixture".into(),
+    };
+    storage.handle().append_lesson(&lesson).unwrap();
+    storage
+        .handle()
+        .validate_lesson(&lesson.id, &lesson.evidence)
+        .unwrap();
+    storage.handle().promote_lesson(&lesson.id).unwrap();
+    let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
+    assert_eq!(memory.entries().len(), 1);
+    if restart {
+        let root = harness._directory.path();
+        let current = Config::load(&LoadOptions {
+            project_dir: Some(root.into()),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+            read_env: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let bus = Arc::new(EventBus::new(1024));
+        harness.receiver = bus.subscribe();
+        let mut executor = ToolExecutor::new(bus.clone());
+        executor.register(Arc::new(BulkRead)).unwrap();
+        harness.runtime = compose_runtime(RuntimeComposition {
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        })
+        .unwrap()
+        .runtime
+        .with_compaction(current.compaction.clone())
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        assert!(harness.runtime.list_agents().is_empty());
+    }
+    harness
+        .runtime
+        .resume_chat(
+            run,
+            RunConfig {
+                memory: Some(memory),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), if compacted { 4 } else { 3 });
+    let previous = &requests[requests.len() - 2];
+    let resumed = requests.last().unwrap();
+    assert_eq!(
+        resumed, previous,
+        "resume must send exactly the interrupted request input"
+    );
+    assert_append_only(CacheProtocol::OpenAi, previous, resumed).unwrap();
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
+        if id == &run.to_string() && *cache_read_tokens > 0)));
+}
+
+#[tokio::test]
+async fn continue_completed_turn_waits_without_input_then_real_followup_reuses_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            read_response(2),
+            text_response("completed"),
+            text_response("followup"),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Keep this original task".into(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    let before = storage::Database::open(&config)
+        .unwrap()
+        .run_context(&run.to_string())
+        .unwrap()
+        .unwrap();
+    storage
+        .handle()
+        .append_run_ledger(&run.to_string(), "Saved ledger entry must not become input")
+        .unwrap();
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    assert_eq!(
+        harness
+            .mock
+            .recorded_requests()
+            .iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .count(),
+        2
+    );
+    let after = storage::Database::open(&config)
+        .unwrap()
+        .run_context(&run.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.messages_json, before.messages_json);
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    harness
+        .runtime
+        .send_message(run, "Actual followup".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+    verify_trace(&harness, run, &events, 0);
+    let request = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .rfind(|request| request.path == "/v1/chat/completions")
+        .unwrap()
+        .body;
+    let users = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[1]["content"], "Actual followup");
 }
 
 #[tokio::test]

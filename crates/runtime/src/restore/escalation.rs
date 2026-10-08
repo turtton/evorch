@@ -63,6 +63,7 @@ pub(crate) fn persist_escalation_seed(
             requires_ownership,
             trusted_request: runtime.trusted_thread_request(source_run_id),
         }),
+        completed_turn_end: None,
     };
     let messages = [providers::Message {
         role: providers::Role::User,

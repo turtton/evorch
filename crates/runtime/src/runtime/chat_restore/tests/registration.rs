@@ -1,7 +1,7 @@
 use super::*;
 
-struct AdmissionModel {
-    reject: AtomicBool,
+pub(super) struct AdmissionModel {
+    pub(super) reject: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -47,10 +47,7 @@ async fn restored_event_observes_registered_entry_before_execution() {
         .runtime
         .continue_goal(run, "continue".into(), RunConfig::default())
         .unwrap();
-    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let event = events.recv().await.unwrap();
     // Then: publication observes the new Pending entry, never the old terminal entry.
     assert!(
         matches!(event.kind, event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunRestored {
@@ -79,11 +76,7 @@ async fn restored_event_is_absent_when_admission_fails() {
         .unwrap();
     assert!(fixture.runtime.wait_admission(run).await.is_err());
     // Then: no restore was announced and the old entry remains terminal.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), events.recv())
-            .await
-            .is_err()
-    );
+    assert!(events.drain_pending_snapshot().is_empty());
     assert_eq!(
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done
