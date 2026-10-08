@@ -22,7 +22,6 @@ pub enum SidebarAction {
     CreateThread(String),
     /// Start a thread in the given project and make it the active one.
     CreateThreadIn(ProjectId),
-    ForkThread(ThreadId),
     /// Fork a child thread from a completed turn (transcript entry id).
     ForkAtTurn {
         thread: ThreadId,

@@ -5,7 +5,6 @@ mod project_add;
 #[path = "sidebar/workspace_visibility.rs"]
 mod workspace_visibility;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
 use gui::app::WorkbenchState;
@@ -293,9 +292,7 @@ fn thread_state_follows_lifecycle_events() {
         agent_name: "chat:Worker:thread-1".into(),
         role: "worker".into(),
     }));
-    repaint_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("start repaint");
+    repaint_rx.recv().expect("start repaint");
     harness.run();
     for (from, to, badge) in [
         (AgentRunPhase::Pending, AgentRunPhase::Running, "Running"),
@@ -309,9 +306,7 @@ fn thread_state_follows_lifecycle_events() {
             to,
             reason: None,
         }));
-        repaint_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("state repaint");
+        repaint_rx.recv().expect("state repaint");
         harness.run();
         assert_eq!(
             harness.has_label(&format!("Thread status: {badge}")),
@@ -320,9 +315,8 @@ fn thread_state_follows_lifecycle_events() {
         );
     }
     // Then: thread actions cannot override the runtime status with a display-only pause.
-    harness.click_label("⋯");
-    harness.run();
-    assert!(harness.has_label("Fork"));
+    assert!(!harness.has_label("Fork"));
+    assert!(!harness.has_label("⋯"));
     assert!(!harness.has_label("Pause"));
     assert!(!harness.has_label("Resume"));
     assert!(harness.has_label("Thread status: Error"));
@@ -446,14 +440,14 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
     // When: the populated sidebar layout settles
     harness.run();
 
-    // Then: titles stay dense, while narrow rows expose actions through a menu
+    // Then: titles stay dense, with archive and status icons on the same row.
     let project = harness.label_rects("evorch")[0];
     let title = harness.label_rects("Refine GUI design system")[0];
-    let menus = harness.label_rects("⋯");
+    let archives = harness.label_rects("Archive");
     let running = harness.label_rects("Thread status: Running");
     assert!(
         (project.height() - ROW_DENSE).abs() <= 0.5,
-        "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, menus={menus:?}, running={running:?}",
+        "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, archives={archives:?}, running={running:?}",
         project.height()
     );
     assert!(
@@ -462,10 +456,10 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
         title.height()
     );
     assert!(
-        menus
+        archives
             .iter()
             .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
-        "Actions menu must share the title line: title={title:?}, menus={menus:?}"
+        "Archive must share the title line: title={title:?}, archives={archives:?}"
     );
     assert!(
         running
