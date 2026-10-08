@@ -10,8 +10,16 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   deserialization are checked together, including roles and structured failures.
 - `shell` without `yield_ms` retains synchronous execution. `yield_ms: 0..60000`
   starts a bounded background job; `action: poll | stdin | stop` uses its `job_id`
-  and output cursor. A poll can wait up to 1,800,000 ms (30 minutes) for new
-  output or completion; other uses of `yield_ms` remain capped at 60,000 ms.
+  and output cursor. For start and stop, a positive `yield_ms` waits until
+  completion or the specified deadline; intermediate output neither returns
+  control nor extends the deadline. Start with `yield_ms: 1000` for commands the
+  agent may need to monitor or cancel. Use
+  `{"action":"stop","job_id":"...","yield_ms":1000}` to stop the process
+  group and wait up to one second for teardown. If it is still running, poll
+  for its terminal result. Stop does not roll back prior filesystem effects.
+  Zero returns immediately; omitted control yields default to zero. Poll and
+  stdin still return early on new output or completion. A poll can wait up to
+  1,800,000 ms (30 minutes); other yields remain capped at 60,000 ms.
   A job belongs to its launching run and retains its sandbox and cwd. It is not
   a durable task and cannot survive process restart.
 - At most 8 running jobs / 32 retained handles per executor registry, 64 KiB live output per job, and

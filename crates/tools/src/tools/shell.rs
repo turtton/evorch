@@ -266,7 +266,7 @@ impl Tool for Shell {
                 "justification": {"type":"string", "description":"Why this command needs network or unsandboxed access. Required and nonempty for either mode."},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
-                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start async job or wait for new output/completion, returning early when either is available. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
+                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start with this field to return an async job handle; omit it for synchronous completion. Start/stop: wait for completion or the specified deadline, ignoring intermediate output. Poll/stdin: return early on new output or completion. 0 returns immediately; omitted control yields default to 0. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
                 "job_id": {"type":"string", "minLength":1, "description":"ID returned by this run's asynchronous shell start."},
                 "cursor": {"type":"integer", "minimum":0, "default":0, "description":"Returned output cursor, in redacted UTF-8 bytes. Older live output may expire."},
                 "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},

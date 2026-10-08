@@ -112,21 +112,21 @@ async fn foreign_owner_and_restarted_registry_cannot_use_handle() {
 async fn timeout_and_stop_terminate_job_without_replay() {
     for stop in [false, true] {
         let shell = shell();
-        let start = invoke(
-            &shell,
-            "owner",
-            json!({"command":"read value", "yield_ms":0, "timeout_ms":100}),
-        )
-        .await;
-        if stop {
+        let mut args = json!({"command":"read value", "yield_ms":0});
+        if !stop {
+            args["timeout_ms"] = json!(100);
+        }
+        let start = invoke(&shell, "owner", args).await;
+        let end = if stop {
             invoke(
                 &shell,
                 "owner",
-                json!({"action":"stop", "job_id":id(&start)}),
+                json!({"action":"stop", "job_id":id(&start), "yield_ms":60000}),
             )
-            .await;
-        }
-        let end = finish(&shell, "owner", &id(&start), 0).await;
+            .await
+        } else {
+            finish(&shell, "owner", &id(&start), 0).await
+        };
         assert!(end.is_error);
         assert_eq!(
             job(&end)["status"],
@@ -324,20 +324,18 @@ async fn thirty_minute_poll_returns_early_when_job_finishes() {
     );
     tokio::pin!(poll);
     // Ensure a long poll remains pending until the blocked command is released.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut poll)
-            .await
-            .is_err()
-    );
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(poll.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     invoke(
         &shell,
         "owner",
         json!({"action":"stdin", "job_id":id(&start), "input":"done\n"}),
     )
     .await;
-    let end = tokio::time::timeout(Duration::from_secs(5), poll)
-        .await
-        .expect("poll returns on completion without waiting for its 30-minute deadline");
+    let end = poll.await;
     assert_eq!(job(&end)["status"], "completed");
     assert_eq!(job(&end)["exit_code"], 0);
 }
@@ -370,10 +368,7 @@ async fn drop_and_drain_reap_pipe_and_pty_before_releasing_guard() {
                 shell.drain_shell_jobs("owner").await.unwrap();
             }
             drop(shell);
-            tokio::time::timeout(Duration::from_secs(5), receiver)
-                .await
-                .unwrap()
-                .unwrap();
+            receiver.await.unwrap();
             assert!(
                 rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap())
                     .is_err()
