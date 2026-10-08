@@ -17,6 +17,8 @@ use crate::{ToolError, ToolExecutionContext, ToolResult};
 
 mod output;
 mod process;
+#[cfg(test)]
+mod wait_tests;
 use output::LiveOutput;
 use process::{run_pipe, run_pty};
 
@@ -225,7 +227,7 @@ impl JobRegistry {
             job: Arc::clone(&job),
             delivered: false,
         };
-        job.wait_for_change(0, yield_ms).await;
+        job.wait_for_completion(yield_ms).await;
         let result = job.snapshot(0);
         launch.delivered = true;
         Ok(result)
@@ -307,7 +309,11 @@ impl JobRegistry {
             }
             _ => return Err(invalid("shell action must be start, poll, stdin, or stop")),
         }
-        job.wait_for_change(args.cursor, args.yield_ms).await;
+        if args.action == "stop" {
+            job.wait_for_completion(args.yield_ms).await;
+        } else {
+            job.wait_for_change(args.cursor, args.yield_ms).await;
+        }
         Ok(job.snapshot(args.cursor))
     }
 
@@ -618,6 +624,15 @@ impl Job {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
     async fn wait_for_change(&self, cursor: u64, ms: u64) {
+        self.wait(ms, Some(cursor)).await;
+    }
+    async fn wait_for_completion(&self, ms: u64) {
+        self.wait(ms, None).await;
+    }
+    // Subscribe before inspecting state, and keep one deadline across output
+    // notifications. Start/stop wait only for teardown; poll/stdin may yield on
+    // retained output beyond their cursor.
+    async fn wait(&self, ms: u64, output_cursor: Option<u64>) {
         if ms == 0 {
             return;
         }
@@ -630,7 +645,9 @@ impl Job {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if state.completion.is_some()
-                        || state.output.offset + state.output.text.len() as u64 > cursor
+                        || output_cursor.is_some_and(|cursor| {
+                            state.output.offset + state.output.text.len() as u64 > cursor
+                        })
                     {
                         return;
                     }
