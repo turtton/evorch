@@ -17,6 +17,7 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 - **Browser diagnostics（v0.7 Bundle Browser）**: headless browser の action log / screenshot / DOM diff を diagnostic evidence として記録可能にする
 - **Lesson 由来の改善候補は harness scope のみ（2026-10-08）**: 昇格済み lesson のうち scope が `harness` のものだけを `LessonPromoted` 候補にする。`project` / `user` lesson は task memory であり、改善候補には混ぜない（[storage-memory](../storage-memory/overview.md)）
 - **候補は元 run への索引（2026-10-08）**: cooldown 内の重複は捨てずに既存候補の `occurrences` / `last_seen_at_ns` / `recent_run_ids`（最大 10）へ畳み込む。dedup key は `diag:{source}:{code}` で emitter ごとに分ける。evidence には bus event の wall clock（`observed_at_ns`、`events.wall_clock_ns` と一致）と記録した build（version・`EVORCH_BUILD_REV`・OS/arch）を入れ、lesson 由来候補は抽出元 run を `run_id` に持つ。IdenticalToolCalls はツール名と入力の SHA-256 先頭 16 桁、LearningPipelineFailed は失敗原因を detail に含める。observer は bus lag で止まらず、lag エピソードごとに `ObserverLagged` 候補を残す
+- **外部エージェント向けの調査経路（2026-10-08）**: `evorch inspect` が store を read-only（migration なし、スキーマ版一致必須）で開き、`candidates` / `candidate <id>` / `run <run-id> [--full]` / `events (--run <id> | --around <ns>)` を JSON で返す。候補の `next` に元 run・イベントへ辿るコマンドを示す。手順は repo skill `harness-diagnosis`（`.agents/skills/`）にまとめ、evorch 内エージェントは sandbox のため対象外
 
 
 ## 受け入れ基準

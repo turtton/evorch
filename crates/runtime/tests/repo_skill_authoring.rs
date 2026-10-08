@@ -118,3 +118,21 @@ fn test_policy_loads_from_standard_repo_agents_scope() {
     assert_eq!(snapshot.registry.load_body(name).unwrap(), body);
     assert!(discover_with_builtin(&[]).get(name).is_none());
 }
+
+#[test]
+fn every_repo_agents_skill_has_valid_frontmatter() {
+    // Given: each skill directory under the repository's .agents scope.
+    let skills = repo_root().join(".agents/skills");
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&skills).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // When: its SKILL.md is parsed with the loader's validation.
+        let text = std::fs::read_to_string(entry.path().join("SKILL.md")).unwrap();
+        // Then: the frontmatter is valid and its name matches the directory.
+        parse_and_validate(&text, &name).unwrap_or_else(|error| panic!("{name}: {error}"));
+        names.push(name);
+    }
+    names.sort();
+    assert!(names.contains(&"harness-diagnosis".to_owned()), "{names:?}");
+}
