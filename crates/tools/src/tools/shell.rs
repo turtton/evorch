@@ -299,6 +299,10 @@ impl Tool for Shell {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
     }
 
+    fn set_event_bus(&self, bus: Arc<event_bus::EventBus>) {
+        self.jobs.set_event_bus(bus);
+    }
+
     fn set_shell_escalation(
         &self,
         gate: Arc<dyn ShellEscalationGate>,

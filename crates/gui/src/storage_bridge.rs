@@ -3,7 +3,8 @@
 use std::{future::Future, sync::Arc, task::Poll, time::Duration};
 
 use event_bus::{
-    DiagnosticSeverity, Event, EventBus, EventKind, OwnershipAction, RecvError, UsageAggregator,
+    DiagnosticSeverity, Event, EventBus, EventKind, OwnershipAction, RecvError, ToolEvent,
+    UsageAggregator,
 };
 use storage::{StorageError, StorageHandle};
 
@@ -57,6 +58,9 @@ impl PersistencePolicy {
                 true
             }
             EventKind::Usage(_) if !self.metrics_enabled => true,
+            // Live shell output is display-only; the job's output artifact is
+            // the durable record.
+            EventKind::Tool(ToolEvent::ShellJobOutput { .. }) => true,
             _ => false,
         }
     }

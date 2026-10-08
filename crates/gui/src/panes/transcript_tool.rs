@@ -6,27 +6,97 @@ use egui::{
     text::{LayoutJob, TextFormat},
 };
 
+use crate::model::transcript::shell_jobs::{ShellJob, ShellJobs, result_body};
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
-use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, SP_2, palette};
-use crate::theme::widgets::soft_frame;
+use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette};
+use crate::theme::widgets::{icon_button, soft_frame};
 
 mod header;
 
+const LIVE_TAIL_LINES: usize = 4;
+
 use header::ToolHeader;
 
-pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
-    tool_card_with_repo_root(ui, entry, pane_id, None);
+/// What a tool card needs beyond its entries.
+#[derive(Clone, Copy)]
+pub struct ToolCardContext<'a> {
+    pub repo_root: Option<&'a Path>,
+    pub jobs: &'a ShellJobs,
+    /// Whether the card is the latest one about its shell job, which alone
+    /// previews the job's live output.
+    pub latest_for_job: bool,
 }
 
-pub fn tool_card_with_repo_root(
-    ui: &mut Ui,
-    entry: &TranscriptEntry,
-    pane_id: egui::Id,
-    repo_root: Option<&Path>,
-) {
+pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
+    let jobs = ShellJobs::default();
+    let context = ToolCardContext {
+        repo_root: None,
+        jobs: &jobs,
+        latest_for_job: false,
+    };
+    tool_card_group(ui, std::slice::from_ref(entry), pane_id, context);
+}
+
+/// The shell job an entry starts or controls.
+pub fn shell_job_id(entry: &TranscriptEntry) -> Option<&str> {
     let TranscriptEntry::Tool {
+        tool_name,
+        input,
+        detail,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    if !matches!(tool_name.as_str(), "bash" | "shell") {
+        return None;
+    }
+    detail
+        .as_ref()
+        .and_then(|detail| detail.pointer("/shell_job/job_id"))
+        .or_else(|| input.as_ref()?.get("job_id"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn shell_control(entry: &TranscriptEntry) -> Option<&str> {
+    let TranscriptEntry::Tool { input, .. } = entry else {
+        return None;
+    };
+    input
+        .as_ref()?
+        .get("action")?
+        .as_str()
+        .filter(|action| matches!(*action, "poll" | "stdin" | "stop"))
+}
+
+/// How many entries from the start of `entries` share one card: consecutive
+/// polls of the same shell job fold together, everything else stands alone.
+pub fn card_len(entries: &[TranscriptEntry]) -> usize {
+    let Some(first) = entries.first() else {
+        return 0;
+    };
+    let Some(job) = shell_job_id(first).filter(|_| shell_control(first) == Some("poll")) else {
+        return 1;
+    };
+    1 + entries[1..]
+        .iter()
+        .take_while(|entry| {
+            shell_control(entry) == Some("poll") && shell_job_id(entry) == Some(job)
+        })
+        .count()
+}
+
+/// Renders one card for `group`, a single call or a run of folded polls
+/// (see [`card_len`]). A folded card reports the latest poll.
+pub fn tool_card_group(
+    ui: &mut Ui,
+    group: &[TranscriptEntry],
+    pane_id: egui::Id,
+    context: ToolCardContext<'_>,
+) {
+    let Some(TranscriptEntry::Tool {
         tool_name,
         call_id,
         input,
@@ -34,10 +104,11 @@ pub fn tool_card_with_repo_root(
         detail,
         is_error,
         status,
-    } = entry
+    }) = group.last()
     else {
         return;
     };
+    let folded = group.len();
     let id = pane_id.with(("tool-expanded", call_id));
     let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
@@ -49,13 +120,28 @@ pub fn tool_card_with_repo_root(
         ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
         ToolStatus::AwaitingApproval => palette().WARNING_FG,
     };
-    let header = header::tool_header(
+    let mut header = header::tool_header(
         tool_name,
         input.as_ref(),
         output.as_deref(),
         *is_error,
-        repo_root,
+        context.repo_root,
     );
+    let last = &group[folded - 1];
+    let job = shell_job_id(last).and_then(|job| context.jobs.get(job));
+    if let Some(job) = job {
+        header::with_shell_job(&mut header, job, shell_control(last).is_some());
+    }
+    if folded > 1 {
+        let outcome = header.meta.take();
+        header.meta = Some(
+            [Some(format!("×{folded}")), outcome]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+    }
     let header_text = header.text();
     // The accessible name keeps a textual status mark; the painted header
     // only colors the icon and leaves successful calls muted.
@@ -69,7 +155,10 @@ pub fn tool_card_with_repo_root(
     let label = format!("{mark}{header_text}");
     let tooltip = match focused_input(tool_name, input.as_ref()) {
         Some(full) => format!("{call_id}\n{full}"),
-        None => format!("{call_id}\n{header_text}"),
+        None => match job.and_then(|job| job.command.as_deref()) {
+            Some(command) => format!("{call_id}\n{command}"),
+            None => format!("{call_id}\n{header_text}"),
+        },
     };
     soft_frame(palette().SURFACE).show(ui, |ui| {
         let response = ui.horizontal(|ui| {
@@ -80,16 +169,30 @@ pub fn tool_card_with_repo_root(
                         .color(palette().RUNNING),
                 );
             }
-            let width = ui.available_width() - ui.spacing().button_padding.x * 2.0;
-            let job = fitted_header_job(ui, glyph, color, &header, width);
-            let button = ui.add_enabled(!running, egui::Button::new(job).frame(false).truncate());
+            let reserved = if job.is_some() { ROW_DENSE } else { 0.0 };
+            let width = ui.available_width() - ui.spacing().button_padding.x * 2.0 - reserved;
+            let layout = fitted_header_job(ui, glyph, color, &header, width);
+            let button =
+                ui.add_enabled(!running, egui::Button::new(layout).frame(false).truncate());
             button.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
             });
+            if let Some(job) = job {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, icons::SCROLL, "Open shell job log").clicked() {
+                        crate::panes::shell_jobs::request_open(ui.ctx(), &job.id);
+                    }
+                });
+            }
             button
                 .on_hover_text(&tooltip)
                 .on_disabled_hover_text(&tooltip)
         });
+        // An expanded card already shows the output in full.
+        let preview = context.latest_for_job && (running || !expanded);
+        if let Some(job) = job.filter(|job| preview && job.is_running()) {
+            live_tail(ui, job);
+        }
         if running {
             return;
         }
@@ -97,7 +200,28 @@ pub fn tool_card_with_repo_root(
             expanded = !expanded;
             ui.data_mut(|data| data.insert_temp(id, expanded));
         }
-        if expanded {
+        if expanded && folded > 1 {
+            let combined: String = group
+                .iter()
+                .filter_map(|entry| match entry {
+                    TranscriptEntry::Tool {
+                        output: Some(output),
+                        ..
+                    } => Some(result_body(output)),
+                    _ => None,
+                })
+                .collect();
+            ui.label(format!("Output of {folded} polls"));
+            code(
+                ui,
+                if combined.is_empty() {
+                    "(no new output)"
+                } else {
+                    &combined
+                },
+                palette().TEXT,
+            );
+        } else if expanded {
             if let Some(input) = input {
                 ui.label("Input");
                 let content = focused_input(tool_name, Some(input))
@@ -145,6 +269,22 @@ pub fn tool_card_with_repo_root(
             }
         }
     });
+}
+
+/// The last few lines of a running job, muted, so progress shows without
+/// expanding anything.
+fn live_tail(ui: &mut Ui, job: &ShellJob) {
+    for line in job.tail(LIVE_TAIL_LINES) {
+        ui.add(
+            egui::Label::new(
+                RichText::new(line)
+                    .monospace()
+                    .size(FONT_SMALL)
+                    .color(palette().TEXT_MUTED),
+            )
+            .truncate(),
+        );
+    }
 }
 
 fn focused_input<'a>(tool_name: &str, input: Option<&'a serde_json::Value>) -> Option<&'a str> {

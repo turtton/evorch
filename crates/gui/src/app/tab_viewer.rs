@@ -46,6 +46,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
+    pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
     pub(super) transcripts: &'a TranscriptRegistry,
@@ -83,7 +84,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) rewind_block: Option<&'static str>,
 }
 
-impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
+impl<'a, S: AgentRunSource> WorkbenchTabViewer<'a, S> {
     fn subagent_count(&self) -> usize {
         let Some(thread) = self
             .sidebar
@@ -113,6 +114,24 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .filter(|run| thread.run_ids.contains(run) && !self.transcripts.is_thread_root(run))
             .collect::<BTreeSet<_>>()
             .len()
+    }
+
+    /// Shell jobs of the active conversation and its subagents, oldest first.
+    fn active_shell_jobs(&self) -> Vec<&'a crate::model::transcript::shell_jobs::ShellJob> {
+        let transcripts = self.transcripts;
+        let runs = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+            .map(|thread| thread.run_ids.as_slice())
+            .unwrap_or_default();
+        let mut seen = BTreeSet::new();
+        std::iter::once(transcripts.thread())
+            .chain(runs.iter().filter_map(|run| transcripts.run(run)))
+            .flat_map(|model| model.shell_jobs().iter())
+            .filter(|job| seen.insert(job.id.as_str()))
+            .collect()
     }
 
     fn attention_for_tab(&self, tab: &PanelId) -> PaneAttention {
@@ -145,6 +164,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::Arena => icons::SCALES,
         PanelKind::Usage => icons::CHART_BAR,
         PanelKind::ContextInspector => icons::STACK,
+        PanelKind::ShellJobs => icons::TERMINAL,
     }
 }
 
@@ -185,7 +205,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Memory
                     | PanelKind::Arena
                     | PanelKind::Usage
-                    | PanelKind::ContextInspector => None,
+                    | PanelKind::ContextInspector
+                    | PanelKind::ShellJobs => None,
                 };
                 match owner {
                     Some(thread) => format!("{} · {}", panel.title, thread.id),
@@ -229,7 +250,10 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             || self.panels.get(tab).is_some_and(|panel| {
                 matches!(
                     panel.kind,
-                    PanelKind::FileViewer | PanelKind::Usage | PanelKind::ContextInspector
+                    PanelKind::FileViewer
+                        | PanelKind::Usage
+                        | PanelKind::ContextInspector
+                        | PanelKind::ShellJobs
                 )
             })
     }
@@ -398,6 +422,10 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         workspace_ui::ThreadId::new(thread),
                     ));
                 }
+            }
+            PanelKind::ShellJobs => {
+                let jobs = self.active_shell_jobs();
+                self.shell_jobs.render(ui, &jobs);
             }
             PanelKind::ContextInspector => {
                 let choices = self.context_run_choices();

@@ -602,6 +602,24 @@ pub enum ToolEvent {
         #[serde(default)]
         run_id: Option<String>,
     },
+    /// Redacted live output of an asynchronous shell job, batched for display.
+    /// Live progress only: the output artifact remains the durable record.
+    ShellJobOutput {
+        job_id: String,
+        /// The call that started the job.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default)]
+        run_id: Option<String>,
+        /// Byte offset of `chunk` in the job's live output stream. A value past
+        /// the previous chunk's end means the omitted bytes expired.
+        offset: u64,
+        chunk: String,
+        /// `running`, `completed`, `failed`, `timed_out` or `cancelled`.
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
     /// ツール実行の承認が要求された。
     ApprovalRequested {
         tool_name: String,

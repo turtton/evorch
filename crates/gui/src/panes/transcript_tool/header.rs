@@ -6,6 +6,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::model::transcript::shell_jobs::ShellJob;
 use crate::theme::icons;
 
 const MAX_SUBJECT_CHARS: usize = 120;
@@ -105,12 +106,13 @@ pub fn tool_header(
         }
         "bash" | "shell" => {
             let mut header = header(icons::TERMINAL_WINDOW, "Shell");
-            header.subject = match (str_arg("action"), str_arg("job_id")) {
+            match (str_arg("action"), str_arg("job_id")) {
                 (Some(action @ ("poll" | "stdin" | "stop")), Some(job)) => {
-                    format!("{action} {job}")
+                    header.verb = control_verb(action).into();
+                    header.subject = format!("#{}", short_job_id(job));
                 }
-                _ => str_arg("command").map(one_line).unwrap_or_default(),
-            };
+                _ => header.subject = str_arg("command").map(one_line).unwrap_or_default(),
+            }
             header.meta = output.and_then(failed_exit_code);
             header
         }
@@ -263,6 +265,27 @@ fn grep_matches(output: &str) -> Option<String> {
     let plus = if at_least { "+" } else { "" };
     let noun = if total == 1 { "match" } else { "matches" };
     Some(format!("{total}{plus} {noun}"))
+}
+
+const fn control_verb(action: &str) -> &'static str {
+    match action.as_bytes() {
+        b"poll" => "Poll",
+        b"stdin" => "Input",
+        _ => "Stop",
+    }
+}
+
+fn short_job_id(job: &str) -> &str {
+    job.get(..8).unwrap_or(job)
+}
+
+/// Names a shell job's command and state: control calls show the command
+/// instead of the bare job ID, which moves to the location.
+pub fn with_shell_job(header: &mut ToolHeader, job: &ShellJob, control: bool) {
+    if control && let Some(command) = &job.command {
+        header.location = Some(std::mem::replace(&mut header.subject, one_line(command)));
+    }
+    header.meta = Some(job.outcome());
 }
 
 fn failed_exit_code(output: &str) -> Option<String> {
@@ -434,8 +457,26 @@ mod tests {
         );
         assert_eq!(
             header("shell", json!({"action": "poll", "job_id": "job-1"}), None).text(),
-            "Shell poll job-1"
+            "Poll #job-1"
         );
+    }
+
+    #[test]
+    fn shell_job_controls_name_the_command_and_job_state() {
+        let mut jobs = crate::model::transcript::shell_jobs::ShellJobs::default();
+        let id = "3f9c2a1e-0000-4000-8000-000000000000";
+        jobs.apply_result(
+            Some(&json!({"command": "cargo\n test"})),
+            None,
+            Some(&json!({"shell_job": {"job_id": id, "status": "running"}})),
+        );
+        let job = jobs.get(id).unwrap();
+        let mut poll = header("shell", json!({"action": "poll", "job_id": id}), None);
+        with_shell_job(&mut poll, job, true);
+        assert_eq!(poll.text(), "Poll cargo test #3f9c2a1e · running");
+        let mut start = header("shell", json!({"command": "cargo test"}), None);
+        with_shell_job(&mut start, job, false);
+        assert_eq!(start.text(), "Shell cargo test · running");
     }
 
     #[test]

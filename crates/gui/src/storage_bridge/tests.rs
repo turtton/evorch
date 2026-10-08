@@ -120,6 +120,24 @@ fn flush_usage_produces_metrics_bucket() {
 }
 
 #[test]
+fn live_shell_output_is_not_persisted() {
+    let (_dir, storage, db) = fixture();
+    let mut bridge = StorageBridge::new(storage.handle(), "session");
+    bridge
+        .handle_event(&Event::new(event_bus::ToolEvent::ShellJobOutput {
+            job_id: "job".into(),
+            call_id: None,
+            run_id: Some("run".into()),
+            offset: 0,
+            chunk: "line\n".into(),
+            status: "running".into(),
+            exit_code: None,
+        }))
+        .unwrap();
+    assert!(db.events_all_ordered().unwrap().is_empty());
+}
+
+#[test]
 fn heartbeat_is_observational_but_ownership_transitions_are_durable() {
     let (_dir, storage, db) = fixture();
     let mut bridge = StorageBridge::new(storage.handle(), "session");

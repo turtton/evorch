@@ -148,7 +148,8 @@ impl TranscriptRegistry {
                 None => Vec::new(),
             },
             EventKind::Tool(ToolEvent::ToolStarted { run_id, .. })
-            | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
+            | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. })
+            | EventKind::Tool(ToolEvent::ShellJobOutput { run_id, .. }) => {
                 run_id.as_ref().map_or_else(
                     || vec![TranscriptKey::Thread],
                     |run_id| self.route_run(run_id),

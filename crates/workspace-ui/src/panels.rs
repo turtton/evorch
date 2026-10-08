@@ -49,6 +49,8 @@ pub enum PanelKind {
     Usage,
     /// Base context inspector for orchestrator and worker runs.
     ContextInspector,
+    /// Output of the active conversation's background shell jobs.
+    ShellJobs,
 }
 
 impl PanelKind {
@@ -71,6 +73,7 @@ impl PanelKind {
             Self::Arena => "Arena",
             Self::Usage => "Usage",
             Self::ContextInspector => "Context",
+            Self::ShellJobs => "Shell jobs",
         }
     }
 }

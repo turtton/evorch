@@ -27,6 +27,7 @@ impl SpanMapper {
                 })
             }
             ToolEvent::UserQuestionUpdated { .. }
+            | ToolEvent::ShellJobOutput { .. }
             | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }
             | ToolEvent::ExecutionDenied { .. } => Vec::new(),

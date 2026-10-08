@@ -347,7 +347,9 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             MessageEvent::MessageDelta { run_id, .. } | MessageEvent::ReasoningDelta { run_id, .. },
         )
         | EventKind::Tool(
-            ToolEvent::ToolStarted { run_id, .. } | ToolEvent::ToolCompleted { run_id, .. },
+            ToolEvent::ToolStarted { run_id, .. }
+            | ToolEvent::ToolCompleted { run_id, .. }
+            | ToolEvent::ShellJobOutput { run_id, .. },
         )
         | EventKind::Provider(
             ProviderEvent::RequestStarted { run_id, .. }
