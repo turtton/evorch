@@ -15,6 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use event_bus::event::diagnostic_codes;
 use event_bus::{
     DiagnosticEvent, DiagnosticSeverity, EventKind, EventReceiver, FaultEvent, RecvError,
 };
@@ -99,42 +100,51 @@ pub enum CandidateClass {
 }
 
 /// Conservative allowlist of actual DiagnosticEvent producers (plus reserved crash intake).
-/// Severity alone never establishes a harness fault; new codes default to ignored.
+/// Severity alone never establishes a harness fault; unknown codes are ignored.
 pub fn classify_diagnostic(event: &DiagnosticEvent) -> CandidateClass {
+    known_class(&event.code).unwrap_or(CandidateClass::Ignored)
+}
+
+/// The explicit decision for each code in [`diagnostic_codes::ALL`]; `None` for any other.
+fn known_class(code: &str) -> Option<CandidateClass> {
     use CandidateClass::*;
-    match event.code.as_str() {
+    use diagnostic_codes::*;
+    Some(match code {
         // identical_calls: repeated calls stopped by the harness's loop detector.
-        "IdenticalToolCalls" => HarnessImprovement,
+        IDENTICAL_TOOL_CALLS => HarnessImprovement,
         // budget_tracker / escalation_detector: execution stopped making progress.
-        "NoProgress" => HarnessImprovement,
+        NO_PROGRESS => HarnessImprovement,
         // memory_lifecycle: extraction/review failed; candidates remain unpromoted.
-        "LearningPipelineFailed" => HarnessImprovement,
+        LEARNING_PIPELINE_FAILED => HarnessImprovement,
         // run_context: failed to persist restoration context; previous checkpoint retained.
-        "ContextSnapshotFailed" => HarnessImprovement,
+        CONTEXT_SNAPSHOT_FAILED => HarnessImprovement,
         // escalation/handoff: terminal direct -> orchestrator ownership/question transfer failed.
-        "EscalationHandoffFailed" => HarnessImprovement,
-        // Reserved for the durable panic spool, not an existing bus emitter.
-        "CrashRecovered" => HarnessImprovement,
+        ESCALATION_HANDOFF_FAILED => HarnessImprovement,
+        // The durable panic spool, ingested on the next start rather than emitted on the bus.
+        CRASH_RECOVERED => HarnessImprovement,
+        // admission: also emitted when the user cancels the run, so it is unattributed
+        // until cancellation gets its own code.
+        ESCALATION_ADMISSION_FAILED => Ignored,
         // compose: no verified provider, which is provider/auth/config dependent.
-        "ProviderUnavailable" => TransientOrExternal,
+        PROVIDER_UNAVAILABLE => TransientOrExternal,
         // budget_tracker: user-configured execution limits, not harness defects.
-        "BudgetWarning" | "BudgetExhausted" => TransientOrExternal,
+        BUDGET_WARNING | BUDGET_EXHAUSTED => TransientOrExternal,
         // providers/cache: unchanged wire prefix but reduced provider cache retention.
-        "CacheRegression" => TransientOrExternal,
+        CACHE_REGRESSION => TransientOrExternal,
         // run_context: successful checkpoint is routine telemetry.
-        "ContextCheckpointSaved" => Ignored,
+        CONTEXT_CHECKPOINT_SAVED => Ignored,
         // sandbox/network/MCP: access decisions and scope policy, not internal faults.
-        "escalation_review" | "tool_call_access" | "scope_denied" => Ignored,
+        ESCALATION_REVIEW | TOOL_CALL_ACCESS | SCOPE_DENIED => Ignored,
         // LSP and MCP: diagnostics from external tools/user code, no harness attribution.
-        "publish_diagnostics" | "tool_result" => Ignored,
+        PUBLISH_DIAGNOSTICS | TOOL_RESULT => Ignored,
         // Browser errors may be site/action/environment dependent; no harness attribution.
-        "browser.error" | "browser.close_error" | "browser.action_error" => Ignored,
+        BROWSER_ERROR | BROWSER_CLOSE_ERROR | BROWSER_ACTION_ERROR => Ignored,
         // Browser session/action/DOM/screenshot telemetry is not a fault signal.
-        "browser.session" | "browser.stopped" | "browser.action" | "browser.dom_diff"
-        | "browser.screenshot" => Ignored,
+        BROWSER_SESSION | BROWSER_STOPPED | BROWSER_ACTION | BROWSER_DOM_DIFF
+        | BROWSER_SCREENSHOT => Ignored,
         // Includes tool-result codes (unknown_run/run_output_denied), not bus diagnostics.
-        _ => Ignored,
-    }
+        _ => return None,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -235,7 +245,7 @@ impl ImprovementCollector {
             self.intake("crash", NewImprovementCandidate {
                 id: String::new(),
                 source: ImprovementSource::Diagnostic,
-                code: "CrashRecovered".into(),
+                code: diagnostic_codes::CRASH_RECOVERED.into(),
                 severity: ImprovementSeverity::Error,
                 title: title(&format!("Recovered crash: {}", first_line(&crash.message))),
                 evidence: self.json_evidence(json!({
@@ -245,8 +255,14 @@ impl ImprovementCollector {
                     "timestamp_unix": crash.timestamp_unix,
                     // The crashed build, which may differ from the recovering one.
                     "build": crash.build.clone().unwrap_or_else(|| "unknown".into()),
+                    "backtrace": crash.backtrace,
                 })),
-                dedup_key: format!("crash:{}", crash.file_name),
+                // The same panic site folds into one candidate's occurrences instead
+                // of one candidate per spool file.
+                dedup_key: format!(
+                    "crash:{}",
+                    crash.location.as_deref().unwrap_or_else(|| first_line(&crash.message))
+                ),
                 run_id: None,
             });
         }

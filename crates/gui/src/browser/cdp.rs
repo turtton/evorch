@@ -11,6 +11,7 @@ use chromiumoxide::{
         target::{CreateTargetParams, WindowState},
     },
 };
+use event_bus::event::diagnostic_codes;
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -51,7 +52,7 @@ pub(super) async fn run(
     });
     diagnostics::emit(
         &bus,
-        "browser.session",
+        diagnostic_codes::BROWSER_SESSION,
         if headful { "headful" } else { "headless" },
         false,
     );
@@ -61,12 +62,22 @@ pub(super) async fn run(
     };
     let closed = browser.close().await;
     if let Err(error) = closed {
-        diagnostics::emit(&bus, "browser.close_error", &error.to_string(), true);
+        diagnostics::emit(
+            &bus,
+            diagnostic_codes::BROWSER_CLOSE_ERROR,
+            &error.to_string(),
+            true,
+        );
     }
     let _ = browser.wait().await;
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    diagnostics::emit(&bus, "browser.stopped", "session closed", false);
+    diagnostics::emit(
+        &bus,
+        diagnostic_codes::BROWSER_STOPPED,
+        "session closed",
+        false,
+    );
     result
 }
 
@@ -111,7 +122,7 @@ async fn stream(
                     let report = match diagnostics::perform(&page, action, bus).await {
                         Ok(report) => report,
                         Err(error) => {
-                            diagnostics::emit(bus, "browser.action_error", &error.to_string(), true);
+                            diagnostics::emit(bus, diagnostic_codes::BROWSER_ACTION_ERROR, &error.to_string(), true);
                             super::BrowserReport {
                                 action: action_name.into(),
                                 error: Some(error.to_string()),

@@ -76,7 +76,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | `NoProgress` | dedup key の source（`budget_tracker` か `tool_calls`）で発生元が分かれる。`usage_requests` の失敗や `finish_reason`、直前のツール結果を確認する |
 | `LearningPipelineFailed` | detail の `cause:` 行。学習用の run は元 run の子ではなく別の root run（`agent_name` が `lesson` / `learning-evidence-review`）。`events --around <observed_at_ns>` の `AgentRunStarted` から見つける |
 | `ContextSnapshotFailed` / `EscalationHandoffFailed` | detail と、その run の `context.terminal_phase` / `ledger`。escalation なら移譲先の run も `children` と events で確認する |
-| `CrashRecovered` | evidence の `location` / `message` / `thread` / `build`（クラッシュしたプロセスの build）。backtrace は残っていないので、location から読む |
+| `CrashRecovered` | evidence の `location` / `message` / `thread` / `build`（クラッシュしたプロセスの build）/ `backtrace`。backtrace は std・executor を除いた 1 行 1 フレームで、シンボルのない release build では空になる。同じ location の crash は 1 候補の `occurrences` に集まる |
 | `LessonPromoted` | `content` は harness scope の lesson 本文。`evidence_refs` は `"<run_id>@<updated_at_ns>:m<i>:b<j>"` の配列で、`inspect run <run_id> --full` の `messages_json[i].content[j]` に当たる。ただしスナップショットの `updated_at_ns` が変わっていれば位置はずれ得る |
 | `ObserverLagged` | `skipped_events` 件の取りこぼしがあった。その時間帯の診断は候補になっていない可能性があるので、`events --around` で直接確かめる |
 | `SkillDiagnostic:*` | skill の読み込みや検証の問題。evidence の `skill` / `scope` / `detail` |

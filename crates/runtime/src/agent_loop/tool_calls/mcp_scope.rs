@@ -6,6 +6,7 @@
 use super::LoopState;
 use crate::network::NetworkAccessDecision;
 use crate::scope::{ScopeDecision, ScopeDimension, judge_tool_scope};
+use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, ToolEvent};
 use sandbox::PolicyDecision;
 
@@ -51,7 +52,7 @@ impl LoopState {
         self.shared.bus.emit(Event::new(DiagnosticEvent {
             source: "mcp_scope".into(),
             severity: DiagnosticSeverity::Warning,
-            code: "scope_denied".into(),
+            code: diagnostic_codes::SCOPE_DENIED.into(),
             detail: reason.into(),
             run_id: Some(self.task.run_id.to_string()),
             thread_id: None,

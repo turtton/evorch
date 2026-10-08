@@ -1,4 +1,5 @@
 use super::*;
+use event_bus::event::diagnostic_codes;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
 
@@ -168,7 +169,7 @@ impl AgentRuntime {
                     .emit(Event::new(event_bus::DiagnosticEvent {
                         source: "escalation_handoff".into(),
                         severity: event_bus::DiagnosticSeverity::Error,
-                        code: "EscalationAdmissionFailed".into(),
+                        code: diagnostic_codes::ESCALATION_ADMISSION_FAILED.into(),
                         detail: reason,
                         run_id: Some(run_id.to_string()),
                         thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),

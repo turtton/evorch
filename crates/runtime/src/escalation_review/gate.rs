@@ -5,6 +5,7 @@ use std::{
 };
 
 use config::EscalationApproval;
+use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sandbox::approval::{ApprovalGate, ApprovalOutcome};
 use tools::{
@@ -49,7 +50,7 @@ impl SandboxEscalationGate {
         self.bus.emit(Event::new(DiagnosticEvent {
             source: "sandbox".into(),
             severity,
-            code: "escalation_review".into(),
+            code: diagnostic_codes::ESCALATION_REVIEW.into(),
             detail: verdict.to_owned(),
             run_id: Some(ctx.run_id.clone()),
             thread_id: ctx.thread_id.clone(),

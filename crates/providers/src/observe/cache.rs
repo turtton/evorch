@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
+use event_bus::event::diagnostic_codes;
 use event_bus::{
     CACHE_RETENTION_WARNING_THRESHOLD, CacheBaselineMissing, CacheComparison, DiagnosticEvent,
     DiagnosticSeverity, Event, EventBus, ProviderEvent,
@@ -164,7 +165,7 @@ impl AttemptObserver {
             bus.emit(Event::new(DiagnosticEvent {
                 source: "providers.cache".into(),
                 severity: DiagnosticSeverity::Warning,
-                code: "CacheRegression".into(),
+                code: diagnostic_codes::CACHE_REGRESSION.into(),
                 detail: format!(
                     "provider={} profile={:?} protocol={} model={} input_tokens={} cache_read_tokens={} cache_hit_ratio={} previous_request_id={} previous_cache_tokens={} cache_retention_ratio={} threshold={CACHE_RETENTION_WARNING_THRESHOLD}",
                     self.provider, self.profile, self.protocol, self.model,

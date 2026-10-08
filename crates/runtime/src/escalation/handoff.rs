@@ -2,6 +2,7 @@
 
 use std::sync::Weak;
 
+use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event};
 
 use super::EscalationMemo;
@@ -43,7 +44,7 @@ pub(crate) async fn complete(
             state.shared.bus.emit(Event::new(DiagnosticEvent {
                 source: "escalation_handoff".into(),
                 severity: DiagnosticSeverity::Error,
-                code: "EscalationHandoffFailed".into(),
+                code: diagnostic_codes::ESCALATION_HANDOFF_FAILED.into(),
                 detail: format!("escalation preparation failed: {reason}"),
                 run_id: Some(source_run_id.to_string()),
                 thread_id: None,
