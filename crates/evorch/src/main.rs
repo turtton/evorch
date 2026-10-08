@@ -12,6 +12,8 @@ fn main() -> ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
+    // Panicking runs then report where they panicked, not only the payload.
+    runtime::panic_capture::install();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().is_some_and(|command| command == "benchmark") {

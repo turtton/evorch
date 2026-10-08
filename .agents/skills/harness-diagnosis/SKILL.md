@@ -1,6 +1,6 @@
 ---
 name: harness-diagnosis
-description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, LearningPipelineFailed, CrashRecovered, LessonPromoted, ObserverLagged, 診断イベント調査"
+description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, LearningPipelineFailed, CrashRecovered, AgentRunPanicked, LessonPromoted, ObserverLagged, 診断イベント調査"
 ---
 
 # harness-diagnosis — 改善候補から evorch の不具合を直す
@@ -77,6 +77,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | `LearningPipelineFailed` | detail の `cause:` 行。学習用の run は元 run の子ではなく別の root run（`agent_name` が `lesson` / `learning-evidence-review`）。`events --around <observed_at_ns>` の `AgentRunStarted` から見つける |
 | `ContextSnapshotFailed` / `EscalationHandoffFailed` | detail と、その run の `context.terminal_phase` / `ledger`。escalation なら移譲先の run も `children` と events で確認する |
 | `CrashRecovered` | evidence の `location` / `message` / `thread` / `build`（クラッシュしたプロセスの build）/ `backtrace`。backtrace は std・executor を除いた 1 行 1 フレームで、シンボルのない release build では空になる。同じ location の crash は 1 候補の `occurrences` に集まる |
+| `AgentRunPanicked` | run のタスクが panic し、runtime が Error にした。detail の 1 行目が panic メッセージ、`site=` 行が発生位置（候補は位置ごとに分かれる）、`backtrace:` 以降がフレーム。finalize を通っていないので workspace は残り、shell job は停止済み。`inspect run <run_id>` の `context` で panic 直前の状態を見る |
 | `LessonPromoted` | `content` は harness scope の lesson 本文。`evidence_refs` は `"<run_id>@<updated_at_ns>:m<i>:b<j>"` の配列で、`inspect run <run_id> --full` の `messages_json[i].content[j]` に当たる。ただしスナップショットの `updated_at_ns` が変わっていれば位置はずれ得る |
 | `ObserverLagged` | `skipped_events` 件の取りこぼしがあった。その時間帯の診断は候補になっていない可能性があるので、`events --around` で直接確かめる |
 | `SkillDiagnostic:*` | skill の読み込みや検証の問題。evidence の `skill` / `scope` / `detail` |

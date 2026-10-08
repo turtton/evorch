@@ -35,6 +35,7 @@ pub mod model_resolve;
 pub mod network;
 pub mod orchestration;
 pub mod ownership;
+pub mod panic_capture;
 pub mod policy;
 pub mod prompt;
 pub mod restore;
