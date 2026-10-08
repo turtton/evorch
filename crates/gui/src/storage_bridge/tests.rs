@@ -414,3 +414,38 @@ async fn real_owner_handoff_still_rejects_an_already_queued_old_generation() {
     ));
     assert!(db.events_all_ordered().unwrap().is_empty());
 }
+
+#[test]
+fn a_closed_writer_spools_one_halt_per_episode() {
+    // Given: a bridge spooling halts, whose storage writer has shut down.
+    let (dir, storage, _db) = fixture();
+    let spool = dir.path().join("crash-spool");
+    let mut bridge =
+        StorageBridge::new(storage.handle(), "session").with_fault_spool(spool.clone());
+    drop(storage);
+    let event = || {
+        Event::new(LifecycleEvent::Started {
+            session_id: "session".into(),
+        })
+    };
+    // When: several events are refused in a row.
+    for _ in 0..3 {
+        assert!(matches!(
+            bridge.handle_event(&event()),
+            Err(StorageError::WriterClosed)
+        ));
+    }
+    // Then: one spooled StorageWriterHalted fault, ingestible on the next start.
+    let spooled = runtime::self_improvement::drain_crash_spool(&spool);
+    assert_eq!(spooled.len(), 1);
+    assert_eq!(spooled[0].code.as_deref(), Some("StorageWriterHalted"));
+    assert_eq!(
+        spooled[0].location.as_deref(),
+        Some("storage:writer_closed")
+    );
+    assert!(
+        spooled[0].message.starts_with("event writes halted:"),
+        "{}",
+        spooled[0].message
+    );
+}

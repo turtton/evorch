@@ -392,6 +392,7 @@ fn spawn_storage_bridge(
     diagnostics: config::DiagnosticPersistence,
     metrics_enabled: bool,
     usage_pricing: SharedUsagePricing,
+    fault_spool: Option<std::path::PathBuf>,
 ) -> Result<OwnedStorageBridge, GuiError> {
     let persistence = match diagnostics {
         config::DiagnosticPersistence::Off => storage_bridge::DiagnosticPersistence::Off,
@@ -402,10 +403,14 @@ fn spawn_storage_bridge(
         bus,
         storage,
         |handle| {
-            StorageBridge::new(handle, session_id)
+            let bridge = StorageBridge::new(handle, session_id)
                 .with_diagnostic_persistence(persistence)
                 .with_metrics_enabled(metrics_enabled)
-                .with_usage_ledger(usage_pricing)
+                .with_usage_ledger(usage_pricing);
+            match fault_spool {
+                Some(dir) => bridge.with_fault_spool(dir),
+                None => bridge,
+            }
         },
         Duration::from_secs(60),
     )?)
@@ -1025,6 +1030,10 @@ fn run() -> Result<(), GuiError> {
         composition_config.diagnostics.persistence,
         composition_config.metrics.enabled,
         Arc::clone(&usage_pricing),
+        // The crash spool the runtime drains at startup (see the panic hook above).
+        improvement_draft_dir
+            .as_ref()
+            .map(|drafts| drafts.join("crash-spool")),
     )?;
     restore_goals(&storage_config, &supervisor);
     restore_thread_goals(&storage_config, &runtime);
@@ -1767,6 +1776,7 @@ mod storage_shutdown_tests {
             config::DiagnosticPersistence::Warnings,
             true,
             SharedUsagePricing::default(),
+            None,
         )
         .unwrap();
         let monitor = bridge.monitor();
