@@ -191,8 +191,7 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
             let mut harness = status_fixture(Some(phase), question, width);
             let title = harness.get_by_label("Status thread").rect();
             let icon = harness.get_by_label(label).rect();
-            let action_label = if width < 300.0 { "⋯" } else { "Fork" };
-            let action = harness.get_by_label(action_label).rect();
+            let action = harness.get_by_label("Archive").rect();
             assert!(title.right() <= action.left(), "{title:?} {action:?}");
             assert!(
                 action.right() + SP_1 <= icon.left() + 0.5,
@@ -200,23 +199,18 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
             );
             assert!((title.center().y - icon.center().y).abs() <= 0.5);
             assert!(icon.right() <= width);
-            assert!(title.right() <= harness.get_by_label("Archive").rect().left());
-            // Moving the icon must not steal the title's or Fork's click target.
+            // Moving the icon must not steal the title's or Pin's click target.
             harness.get_by_label("Status thread").click();
             harness.run_steps(3);
             assert_eq!(
                 harness.state(),
                 &Some(SidebarAction::SwitchThread(ThreadId::new("status")))
             );
-            if action_label == "⋯" {
-                harness.get_by_label(action_label).click();
-                harness.run_steps(3);
-            }
-            harness.get_by_label("Fork").click();
+            harness.get_by_label("☆").click();
             harness.run_steps(3);
             assert_eq!(
                 harness.state(),
-                &Some(SidebarAction::ForkThread(ThreadId::new("status")))
+                &Some(SidebarAction::TogglePin(ThreadId::new("status")))
             );
         }
     }
@@ -234,8 +228,7 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
             let title = harness.get_by_label("Status thread").rect();
             let icon = harness.get_by_label(status).rect();
             let blob = harness.get_by_label(QUESTION_LABEL).rect();
-            let action_label = if width < 300.0 { "⋯" } else { "Fork" };
-            let action = harness.get_by_label(action_label).rect();
+            let action = harness.get_by_label("Archive").rect();
             assert!(title.right() <= action.left(), "{title:?} {action:?}");
             assert!(
                 action.right() + SP_1 <= blob.left() + 0.5,
@@ -253,7 +246,6 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
                 without_question.get_by_label(status).rect().right()
             );
             assert!(icon.right() <= width);
-            assert!(title.right() <= harness.get_by_label("Archive").rect().left());
 
             harness.get_by_label("Status thread").click();
             harness.run_steps(3);
@@ -261,15 +253,11 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
                 harness.state(),
                 &Some(SidebarAction::SwitchThread(ThreadId::new("status")))
             );
-            if action_label == "⋯" {
-                harness.get_by_label(action_label).click();
-                harness.run_steps(3);
-            }
-            harness.get_by_label("Fork").click();
+            harness.get_by_label("☆").click();
             harness.run_steps(3);
             assert_eq!(
                 harness.state(),
-                &Some(SidebarAction::ForkThread(ThreadId::new("status")))
+                &Some(SidebarAction::TogglePin(ThreadId::new("status")))
             );
         }
     }
@@ -299,7 +287,6 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     let mut gui = fixture(temp.path());
     gui.run();
     assert_eq!(gui.count_labels("Archive"), 1);
-    assert_eq!(gui.count_labels("Fork"), 3);
     assert!(!gui.has_label("Pause"));
     assert!(!gui.has_label("Resume"));
     assert!(gui.has_label("↳ Child"));
@@ -366,7 +353,6 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     assert!(gui.has_label("↳ Child"));
     assert!(!gui.has_label("↳ Grandchild"));
     assert_eq!(gui.count_labels("Archive"), 1);
-    assert_eq!(gui.count_labels("Fork"), 2);
     assert!(!gui.has_label("Pause"));
     assert!(!gui.has_label("Resume"));
     assert!(gui.has_label("★"));

@@ -9,16 +9,12 @@ use workspace_ui::{
 use crate::model::telemetry::{TelemetryOverlay, WorkspaceWaitEntry};
 use crate::theme::icons;
 use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{
-    compact_row, ghost, ghost_icon_button, icon_button, icon_text, labeled, row_title,
-};
+use crate::theme::widgets::{compact_row, ghost, icon_text, row_title};
 
 use super::SidebarAction;
 
-/// Side of the square pin/archive/fork action buttons.
+/// Side of the square pin/archive action buttons.
 const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
-/// Below this row width Fork moves into the overflow menu.
-const NARROW_ROW_WIDTH: f32 = 240.0;
 
 /// A root's family, including every rewound version and their forks.
 pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
@@ -235,10 +231,6 @@ fn active_row(
     wait_context: (&SidebarState, &TelemetryOverlay),
     action: &mut Option<SidebarAction>,
 ) {
-    // At the minimum window size the action buttons leave little room for the
-    // title, so Fork moves into an overflow menu and the title keeps its own
-    // hit region.
-    let narrow = ui.available_width() < NARROW_ROW_WIDTH;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         // Runtime/question indicators stay at the trailing edge; workspace
         // contention is an additional independent signal beside them.
@@ -247,21 +239,6 @@ fn active_row(
         workspace_wait_icon(ui, thread, wait_context.0, wait_context.1);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
-        if narrow {
-            let menu = egui::containers::menu::MenuButton::from_button(
-                ghost(icon_text(icons::DOTS_THREE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
-            )
-            .ui(ui, |ui| {
-                if ghost_icon_button(ui, icons::GIT_FORK, "Fork").clicked() {
-                    *action = Some(SidebarAction::ForkThread(thread.id.clone()));
-                    ui.close();
-                }
-            })
-            .0;
-            labeled(menu, "⋯").on_hover_text("Thread actions");
-        } else if icon_button(ui, icons::GIT_FORK, "Fork").clicked() {
-            *action = Some(SidebarAction::ForkThread(thread.id.clone()));
-        }
         if display_root {
             let can_archive = !thread.pinned && !family_running;
             let disabled_reason = if family_running {
@@ -554,61 +531,49 @@ mod tests {
     use super::{active_row, family_has_running_runs, nested_threads, thread_family};
     use crate::panes::sidebar::SidebarAction;
 
-    fn assert_thread_actions_without_pause(width: f32, narrow: bool) {
-        // Given: a thread row rendered at the requested width.
-        let thread = ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("demo"), "Thread");
-        let sidebar = workspace_ui::SidebarState::default();
-        let telemetry = crate::model::telemetry::TelemetryOverlay::new();
-        let mut harness = Harness::builder()
-            .with_size(egui::vec2(width, 100.0))
-            .build_ui_state(
-                |ui, action| {
-                    crate::theme::install(ui.ctx());
-                    ui.horizontal(|ui| {
-                        active_row(
-                            ui,
-                            (&thread, true),
-                            ThreadState::Running,
-                            (false, false),
-                            true,
-                            (&sidebar, &telemetry),
-                            action,
-                        );
-                    });
-                },
-                None,
-            );
-        // A spinner continuously requests repaint; advance bounded frames.
-        harness.run_steps(2);
-
-        // When: opening the thread actions menu if the row is narrow.
-        if narrow {
-            harness.get_by_label("⋯").click();
+    #[test]
+    fn thread_rows_keep_status_and_pin_without_fork_controls() {
+        for width in [220.0, 600.0] {
+            // Given: a thread row rendered at the requested width.
+            let thread =
+                ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("demo"), "Thread");
+            let sidebar = workspace_ui::SidebarState::default();
+            let telemetry = crate::model::telemetry::TelemetryOverlay::new();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, 100.0))
+                .build_ui_state(
+                    |ui, action| {
+                        crate::theme::install(ui.ctx());
+                        ui.horizontal(|ui| {
+                            active_row(
+                                ui,
+                                (&thread, true),
+                                ThreadState::Running,
+                                (false, false),
+                                true,
+                                (&sidebar, &telemetry),
+                                action,
+                            );
+                        });
+                    },
+                    None,
+                );
+            // A spinner continuously requests repaint; advance bounded frames.
             harness.run_steps(2);
-        } else {
+
+            // Then: runtime status and Pin remain available at either width.
+            assert!(harness.query_by_label("Fork").is_none());
             assert!(harness.query_by_label("⋯").is_none());
+            assert!(harness.query_by_label("Pause").is_none());
+            assert!(harness.query_by_label("Resume").is_none());
+            assert!(harness.query_by_label("Thread status: Running").is_some());
+            harness.get_by_label("☆").click();
+            harness.run_steps(2);
+            assert_eq!(
+                harness.state(),
+                &Some(SidebarAction::TogglePin(thread.id.clone()))
+            );
         }
-
-        // Then: Pause/Resume are absent, while runtime status and Fork still work.
-        assert!(harness.query_by_label("Pause").is_none());
-        assert!(harness.query_by_label("Resume").is_none());
-        assert!(harness.query_by_label("Thread status: Running").is_some());
-        harness.get_by_label("Fork").click();
-        harness.run_steps(2);
-        assert_eq!(
-            harness.state(),
-            &Some(SidebarAction::ForkThread(thread.id.clone()))
-        );
-    }
-
-    #[test]
-    fn wide_thread_row_has_no_pause_or_resume_control() {
-        assert_thread_actions_without_pause(600.0, false);
-    }
-
-    #[test]
-    fn narrow_thread_menu_has_no_pause_or_resume_control() {
-        assert_thread_actions_without_pause(220.0, true);
     }
 
     #[test]
