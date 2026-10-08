@@ -11,6 +11,7 @@ mod project;
 mod questions;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 mod restore_delivery;
+mod run_panic;
 use chat_restore::RunContinuation;
 
 use std::collections::{HashMap, HashSet};
@@ -1204,9 +1205,18 @@ impl AgentRuntime {
                     channels.phase_tx.subscribe(),
                 )
             });
-            run_agent(weak.clone(), task, channels).await;
-            if let Some(learning) = learning {
-                learning.complete(weak, run_id).await;
+            match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
+                Ok(()) => {
+                    if let Some(learning) = learning {
+                        learning.complete(weak, run_id).await;
+                    }
+                }
+                // No lessons from a run whose loop state is unknown.
+                Err(panic) => {
+                    if let Some(shared) = weak.upgrade() {
+                        AgentRuntime { shared }.run_panicked(run_id, panic).await;
+                    }
+                }
             }
         });
         if let Some(entry) = lock_runs(&self.shared.runs).get_mut(&run_id) {

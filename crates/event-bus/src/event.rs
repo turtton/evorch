@@ -151,6 +151,10 @@ pub struct DiagnosticEvent {
     pub call_id: Option<String>,
 }
 
+/// A `DiagnosticEvent::detail` line starting with this names the fault site (for
+/// example a panic location). Consumers that group occurrences keep sites apart.
+pub const DIAGNOSTIC_SITE_PREFIX: &str = "site=";
+
 /// Stable diagnostic codes shared by execution producers and consumers.
 ///
 /// Every `DiagnosticEvent` producer names its code through these constants, and
@@ -179,6 +183,8 @@ pub mod diagnostic_codes {
     pub const ESCALATION_ADMISSION_FAILED: &str = "EscalationAdmissionFailed";
     /// A panic recorded by the crash spool, surfaced on the next start.
     pub const CRASH_RECOVERED: &str = "CrashRecovered";
+    /// An agent run's task panicked; the runtime moved the run to Error.
+    pub const AGENT_RUN_PANICKED: &str = "AgentRunPanicked";
     /// Sandbox escalation review decisions.
     pub const ESCALATION_REVIEW: &str = "escalation_review";
     /// Tool call access decisions.
@@ -212,6 +218,7 @@ pub mod diagnostic_codes {
         ESCALATION_HANDOFF_FAILED,
         ESCALATION_ADMISSION_FAILED,
         CRASH_RECOVERED,
+        AGENT_RUN_PANICKED,
         ESCALATION_REVIEW,
         TOOL_CALL_ACCESS,
         SCOPE_DENIED,

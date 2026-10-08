@@ -7,6 +7,7 @@ mod crash;
 mod drafts;
 pub(crate) mod lifecycle;
 
+pub(crate) use crash::compact_backtrace;
 pub use crash::{SpooledCrash, drain_crash_spool, install_crash_spool};
 pub use drafts::{render_issue_draft, render_packet_draft};
 
@@ -122,6 +123,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         ESCALATION_HANDOFF_FAILED => HarnessImprovement,
         // The durable panic spool, ingested on the next start rather than emitted on the bus.
         CRASH_RECOVERED => HarnessImprovement,
+        // runtime: an agent run's task panicked and was moved to Error.
+        AGENT_RUN_PANICKED => HarnessImprovement,
         // admission: also emitted when the user cancels the run, so it is unattributed
         // until cancellation gets its own code.
         ESCALATION_ADMISSION_FAILED => Ignored,
@@ -199,8 +202,12 @@ impl ImprovementCollector {
                     "run_id": event.run_id, "thread_id": event.thread_id, "call_id": event.call_id,
                     "observed_at_ns": unix_ns(observed),
                 })),
-                // Same code from different emitters (e.g. two NoProgress detectors) stays apart.
-                dedup_key: format!("diag:{}:{}", event.source, event.code),
+                // Same code from different emitters (e.g. two NoProgress detectors) or
+                // different fault sites (e.g. two panic locations) stays apart.
+                dedup_key: match diagnostic_site(&event.detail) {
+                    Some(site) => format!("diag:{}:{}:{site}", event.source, event.code),
+                    None => format!("diag:{}:{}", event.source, event.code),
+                },
                 run_id: event.run_id.clone(),
             },
         );
@@ -454,6 +461,12 @@ fn new_id(prefix: &str) -> Result<String, SelfImprovementError> {
     Ok(format!("{prefix}-{:032x}", u128::from_le_bytes(bytes)))
 }
 
+fn diagnostic_site(detail: &str) -> Option<&str> {
+    detail
+        .lines()
+        .find_map(|line| line.strip_prefix(event_bus::event::DIAGNOSTIC_SITE_PREFIX))
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or_default()
 }
@@ -464,7 +477,7 @@ fn title(text: &str) -> String {
 
 /// UTF-8-safe byte bound, including the truncation marker. For caps smaller than
 /// the marker itself, only its fitting UTF-8 prefix is returned (zero stays empty).
-fn bound_text(text: &str, max_bytes: usize) -> String {
+pub(crate) fn bound_text(text: &str, max_bytes: usize) -> String {
     const MARKER: &str = "…[truncated]";
     if text.len() <= max_bytes {
         return text.to_owned();

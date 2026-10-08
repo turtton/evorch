@@ -92,6 +92,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ContextSnapshotFailed", HarnessImprovement),
         ("EscalationHandoffFailed", HarnessImprovement),
         ("CrashRecovered", HarnessImprovement),
+        ("AgentRunPanicked", HarnessImprovement),
         ("EscalationAdmissionFailed", Ignored),
         ("BudgetWarning", TransientOrExternal),
         ("BudgetExhausted", TransientOrExternal),
@@ -381,6 +382,65 @@ fn panic_hook_spools_in_an_isolated_process() {
         "{backtrace}"
     );
     assert!(!backtrace.contains("std::panicking"), "{backtrace}");
+}
+
+#[test]
+fn caught_panics_are_left_to_their_catcher_not_spooled() {
+    const CHILD: &str = "EVORCH_RUNTIME_CAUGHT_PANIC_CHILD";
+    let f = Fixture::new();
+    if let Some(path) = std::env::var_os(CHILD) {
+        install_crash_spool(PathBuf::from(path));
+        let caught = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(crate::panic_capture::catch_panic(async {
+                panic!("caught by the runtime")
+            }))
+            .unwrap_err();
+        assert_eq!(caught.message, "caught by the runtime");
+        assert!(caught.location.is_some());
+        assert!(std::panic::catch_unwind(|| panic!("outside any run")).is_err());
+        return;
+    }
+    let spool = f.dir.path().join("hook");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "self_improvement::tests::caught_panics_are_left_to_their_catcher_not_spooled",
+        ])
+        .env(CHILD, &spool)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let crashes = drain_crash_spool(&spool);
+    assert_eq!(crashes.len(), 1);
+    assert_eq!(crashes[0].message, "outside any run");
+}
+
+#[test]
+fn diagnostic_sites_keep_occurrences_apart() {
+    let f = Fixture::new();
+    let panicked = |site: &str| DiagnosticEvent {
+        detail: format!("boom\nsite={site}\nbacktrace:\nframe"),
+        ..diagnostic("AgentRunPanicked")
+    };
+    let collector = f.collector();
+    collector.handle_diagnostic(&panicked("crates/runtime/src/a.rs:1:1"));
+    collector.handle_diagnostic(&panicked("crates/runtime/src/a.rs:1:1"));
+    collector.handle_diagnostic(&panicked("crates/runtime/src/b.rs:2:2"));
+    let mut rows = f.candidates();
+    rows.sort_by_key(|c| c.dedup_key.clone());
+    let keys: Vec<_> = rows
+        .iter()
+        .map(|c| (c.dedup_key.as_str(), c.occurrences))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("diag:test:AgentRunPanicked:crates/runtime/src/a.rs:1:1", 2),
+            ("diag:test:AgentRunPanicked:crates/runtime/src/b.rs:2:2", 1),
+        ]
+    );
 }
 
 #[test]

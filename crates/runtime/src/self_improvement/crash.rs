@@ -36,7 +36,8 @@ struct CrashEntry {
 }
 
 /// Wraps the process panic hook: spools the panic, then runs the previous hook so
-/// stderr reporting is unchanged. The composition owner decides whether/when to
+/// stderr reporting is unchanged. Panics inside [`crate::panic_capture::catch_panic`]
+/// are recorded for their catcher instead of spooled. The composition owner decides whether/when to
 /// install this global hook. It is not installed by the collector or builder.
 /// Disk/serialization/clock/randomness failures are ignored; the spooling part never
 /// unwraps, logs, or invokes user formatting.
@@ -47,13 +48,12 @@ pub fn install_crash_spool(spool_dir: PathBuf) {
     }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            *s
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.as_str()
-        } else {
-            "<non-string panic payload>"
-        };
+        // A caught panic is reported live by its catcher; the process keeps running.
+        if crate::panic_capture::record_if_caught(info) {
+            previous(info);
+            return;
+        }
+        let message = crate::panic_capture::payload_message(info.payload());
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -90,7 +90,7 @@ const BACKTRACE_MAX_FRAMES: usize = 24;
 /// and executor frames, and folds each frame onto one `symbol @ file:line` line
 /// (paths shortened to the workspace-relative `crates/...` part). Frames without
 /// symbols (stripped release builds) are dropped, so this can be empty.
-pub(super) fn compact_backtrace(rendered: &str) -> String {
+pub(crate) fn compact_backtrace(rendered: &str) -> String {
     const NOISE: &[&str] = &[
         "std::",
         "core::",

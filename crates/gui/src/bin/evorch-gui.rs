@@ -627,6 +627,8 @@ fn codex_auth_model(
 
 fn run() -> Result<(), GuiError> {
     gui::logging::init();
+    // Panicking runs then report where they panicked; the crash spool wraps this later.
+    runtime::panic_capture::install();
     let arguments = parse_arguments()?;
     let mut settings = load_settings(&arguments)?;
     let repo_root = std::fs::canonicalize(std::env::current_dir()?)?;
