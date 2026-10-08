@@ -5,6 +5,7 @@ mod detail;
 mod protocol;
 
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
+use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sandbox::{CommandSpec, Sandbox};
 use serde::Deserialize;
@@ -101,7 +102,7 @@ impl LspDiagnostics {
             bus.emit(Event::new(DiagnosticEvent {
                 source: "lsp".into(),
                 severity,
-                code: "publish_diagnostics".into(),
+                code: diagnostic_codes::PUBLISH_DIAGNOSTICS.into(),
                 detail: detail.to_string(),
                 run_id: ctx.map(|ctx| ctx.run_id.clone()),
                 thread_id: ctx.and_then(|ctx| ctx.thread_id.clone()),

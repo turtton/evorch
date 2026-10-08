@@ -1,5 +1,6 @@
 use super::{McpToolDefinition, McpToolRegistry};
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
+use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use std::sync::Arc;
 
@@ -47,7 +48,7 @@ impl McpTool {
             bus.emit(Event::new(DiagnosticEvent {
                 source: "mcp".into(),
                 severity,
-                code: "tool_result".into(),
+                code: diagnostic_codes::TOOL_RESULT.into(),
                 detail: detail.to_string(),
                 run_id: ctx.map(|ctx| ctx.run_id.clone()),
                 thread_id: ctx.and_then(|ctx| ctx.thread_id.clone()),

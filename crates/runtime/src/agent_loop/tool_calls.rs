@@ -1140,7 +1140,7 @@ impl LoopState {
             } else {
                 DiagnosticSeverity::Warning
             },
-            code: "tool_call_access".into(),
+            code: diagnostic_codes::TOOL_CALL_ACCESS.into(),
             detail,
             run_id: Some(self.task.run_id.to_string()),
             thread_id: None,

@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
+use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
@@ -1385,7 +1386,7 @@ impl LoopState {
             self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
                 source: "run_context".into(),
                 severity: event_bus::DiagnosticSeverity::Info,
-                code: "ContextCheckpointSaved".into(),
+                code: diagnostic_codes::CONTEXT_CHECKPOINT_SAVED.into(),
                 detail: "Valid conversation checkpoint saved".into(),
                 run_id: Some(self.task.run_id.to_string()),
                 thread_id: None,
@@ -1397,7 +1398,7 @@ impl LoopState {
     fn snapshot_diagnostic(&self, error: &impl std::fmt::Display) {
         self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
             source: "run_context".into(), severity: event_bus::DiagnosticSeverity::Warning,
-            code: "ContextSnapshotFailed".into(),
+            code: diagnostic_codes::CONTEXT_SNAPSHOT_FAILED.into(),
             detail: format!("復元用コンテキストを保存できませんでした。以前の有効なチェックポイントがあれば保持します: {error}"),
             run_id: Some(self.task.run_id.to_string()), thread_id: None, call_id: None,
         }));

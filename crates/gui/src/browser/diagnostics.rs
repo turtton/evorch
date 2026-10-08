@@ -2,6 +2,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use chromiumoxide::{
     Page, cdp::browser_protocol::page::CaptureScreenshotFormat, page::ScreenshotParams,
 };
+use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sha2::{Digest, Sha256};
 
@@ -35,7 +36,7 @@ pub(super) async fn perform(
     };
     emit(
         bus,
-        "browser.action",
+        diagnostic_codes::BROWSER_ACTION,
         &serde_json::json!({
             "id": id, "action": action_name, "phase": "started",
         })
@@ -53,7 +54,7 @@ pub(super) async fn perform(
     };
     emit(
         bus,
-        "browser.action",
+        diagnostic_codes::BROWSER_ACTION,
         &serde_json::json!({
             "id": id, "action": action_name,
             "phase": if result.is_ok() { "completed" } else { "failed" },
@@ -66,7 +67,7 @@ pub(super) async fn perform(
     let after = page.content().await?;
     emit(
         bus,
-        "browser.dom_diff",
+        diagnostic_codes::BROWSER_DOM_DIFF,
         &serde_json::json!({
             "id": id, "diff": dom_diff(&before, &after),
         })
@@ -113,7 +114,7 @@ fn emit_screenshot(
     let omitted = bytes.len() > MAX_INLINE_SCREENSHOT_BYTES;
     emit(
         bus,
-        "browser.screenshot",
+        diagnostic_codes::BROWSER_SCREENSHOT,
         &serde_json::json!({
             "id": identity.0, "phase": identity.1, "mime": "image/jpeg",
             "sha256": hash, "width": width, "height": height,

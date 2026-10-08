@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use event_bus::event::diagnostic_codes;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{BrowserAction, BrowserError, FrameSource, cdp, diagnostics, validate_action};
@@ -36,7 +37,12 @@ impl ChromiumSource {
             )
             .await
             {
-                diagnostics::emit(&bus, "browser.error", &error.to_string(), true);
+                diagnostics::emit(
+                    &bus,
+                    diagnostic_codes::BROWSER_ERROR,
+                    &error.to_string(),
+                    true,
+                );
                 error_tx.send_replace(Some(error.to_string()));
             }
         });

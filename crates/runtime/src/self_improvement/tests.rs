@@ -92,6 +92,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ContextSnapshotFailed", HarnessImprovement),
         ("EscalationHandoffFailed", HarnessImprovement),
         ("CrashRecovered", HarnessImprovement),
+        ("EscalationAdmissionFailed", Ignored),
         ("BudgetWarning", TransientOrExternal),
         ("BudgetExhausted", TransientOrExternal),
         ("ProviderUnavailable", TransientOrExternal),
@@ -117,6 +118,17 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("CompactionFailed", Ignored),
         ("future-code", Ignored),
     ];
+    // A new shared code needs its own pinned decision here, not the unknown fallback.
+    for code in diagnostic_codes::ALL {
+        assert!(known_class(code).is_some(), "{code} has no explicit class");
+        assert!(
+            cases.iter().any(|(pinned, _)| pinned == code),
+            "{code} is not pinned"
+        );
+    }
+    for code in ["unknown_run", "run_output_denied", "future-code"] {
+        assert_eq!(known_class(code), None, "{code}");
+    }
     for (code, class) in cases {
         for severity in [
             DiagnosticSeverity::Info,
@@ -349,16 +361,90 @@ fn panic_hook_spools_in_an_isolated_process() {
         .args([
             "--exact",
             "self_improvement::tests::panic_hook_spools_in_an_isolated_process",
+            // Lets the previous hook's report reach stderr instead of libtest's capture.
+            "--nocapture",
         ])
         .env(CHILD, &spool)
         .output()
         .unwrap();
     assert!(output.status.success());
+    // The previous (default) hook still reports to stderr.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("panicked at"));
     let crashes = drain_crash_spool(&spool);
     assert_eq!(crashes.len(), 1);
     assert!(crashes[0].message.len() <= 4096);
     assert!(crashes[0].message.ends_with("…[truncated]"));
     assert!(crashes[0].location.is_some());
+    let backtrace = crashes[0].backtrace.as_deref().unwrap();
+    assert!(
+        backtrace.contains("panic_hook_spools_in_an_isolated_process"),
+        "{backtrace}"
+    );
+    assert!(!backtrace.contains("std::panicking"), "{backtrace}");
+}
+
+#[test]
+fn compact_backtrace_keeps_harness_frames_on_one_line_each() {
+    let rendered = "   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/abc/library/std/src/../../backtrace/src/backtrace/libunwind.rs:116:5
+   1: runtime::self_improvement::crash::install_crash_spool::{{closure}}
+             at /build/crates/runtime/src/self_improvement/crash.rs:60:13
+   2: std::panicking::rust_panic_with_hook
+   3: runtime::agent_loop::LoopState::step
+             at /nix/store/x-source/crates/runtime/src/agent_loop.rs:812:9
+   4: <unknown>
+   5: tokio::runtime::task::harness::poll_future
+   6: serde_json::de::from_str
+";
+    assert_eq!(
+        crash::compact_backtrace(rendered),
+        "runtime::agent_loop::LoopState::step @ crates/runtime/src/agent_loop.rs:812:9\n\
+         serde_json::de::from_str"
+    );
+    let many: String = (0..30)
+        .map(|i| format!("  {i}: runtime::frame{i}\n"))
+        .collect();
+    let compact = crash::compact_backtrace(&many);
+    assert_eq!(compact.lines().count(), 25);
+    assert!(compact.ends_with("… 6 more frames"));
+}
+
+#[test]
+fn crashes_at_the_same_site_fold_into_one_candidate() {
+    let f = Fixture::new();
+    let crash = |file: &str, location: Option<&str>| SpooledCrash {
+        file_name: file.into(),
+        message: "boom".into(),
+        location: location.map(Into::into),
+        thread: None,
+        timestamp_unix: 1,
+        build: None,
+        backtrace: Some("runtime::agent_loop::LoopState::step".into()),
+    };
+    f.collector().ingest_crashes(vec![
+        crash(
+            "crash-1-1.json",
+            Some("crates/runtime/src/agent_loop.rs:812:9"),
+        ),
+        crash(
+            "crash-2-1.json",
+            Some("crates/runtime/src/agent_loop.rs:812:9"),
+        ),
+        crash("crash-3-1.json", Some("crates/runtime/src/compose.rs:10:1")),
+    ]);
+    let mut rows = f.candidates();
+    rows.sort_by_key(|c| c.occurrences);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].occurrences, 2);
+    assert_eq!(
+        rows[1].dedup_key,
+        "crash:crates/runtime/src/agent_loop.rs:812:9"
+    );
+    let evidence: Value = serde_json::from_str(&rows[1].evidence).unwrap();
+    assert_eq!(
+        evidence["backtrace"],
+        "runtime::agent_loop::LoopState::step"
+    );
 }
 
 #[test]
@@ -376,6 +462,7 @@ fn collection_gates_and_write_limits_apply() {
         thread: None,
         timestamp_unix: 1,
         build: None,
+        backtrace: None,
     }]);
     assert!(f.candidates().is_empty());
     assert!(f.draft_files().is_empty());

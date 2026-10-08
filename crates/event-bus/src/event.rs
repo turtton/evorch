@@ -152,6 +152,10 @@ pub struct DiagnosticEvent {
 }
 
 /// Stable diagnostic codes shared by execution producers and consumers.
+///
+/// Every `DiagnosticEvent` producer names its code through these constants, and
+/// [`ALL`](diagnostic_codes::ALL) lists them so consumers that classify codes
+/// (self-improvement) must make an explicit decision for each new one.
 pub mod diagnostic_codes {
     pub const BUDGET_WARNING: &str = "BudgetWarning";
     /// Execution stopped because its budget was exhausted.
@@ -161,6 +165,67 @@ pub mod diagnostic_codes {
     pub const IDENTICAL_TOOL_CALLS: &str = "IdenticalToolCalls";
     /// No verified provider is available for execution.
     pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
+    /// Unchanged wire prefix but reduced provider cache retention.
+    pub const CACHE_REGRESSION: &str = "CacheRegression";
+    /// Post-run lesson extraction or review failed.
+    pub const LEARNING_PIPELINE_FAILED: &str = "LearningPipelineFailed";
+    /// A restoration checkpoint was persisted.
+    pub const CONTEXT_CHECKPOINT_SAVED: &str = "ContextCheckpointSaved";
+    /// A restoration checkpoint could not be persisted.
+    pub const CONTEXT_SNAPSHOT_FAILED: &str = "ContextSnapshotFailed";
+    /// Direct -> orchestrator ownership or question transfer failed.
+    pub const ESCALATION_HANDOFF_FAILED: &str = "EscalationHandoffFailed";
+    /// The orchestrator run for an escalation handoff was not admitted.
+    pub const ESCALATION_ADMISSION_FAILED: &str = "EscalationAdmissionFailed";
+    /// A panic recorded by the crash spool, surfaced on the next start.
+    pub const CRASH_RECOVERED: &str = "CrashRecovered";
+    /// Sandbox escalation review decisions.
+    pub const ESCALATION_REVIEW: &str = "escalation_review";
+    /// Tool call access decisions.
+    pub const TOOL_CALL_ACCESS: &str = "tool_call_access";
+    /// MCP scope policy denials.
+    pub const SCOPE_DENIED: &str = "scope_denied";
+    /// LSP diagnostics about user code.
+    pub const PUBLISH_DIAGNOSTICS: &str = "publish_diagnostics";
+    /// MCP tool result errors.
+    pub const TOOL_RESULT: &str = "tool_result";
+    pub const BROWSER_SESSION: &str = "browser.session";
+    pub const BROWSER_STOPPED: &str = "browser.stopped";
+    pub const BROWSER_ERROR: &str = "browser.error";
+    pub const BROWSER_CLOSE_ERROR: &str = "browser.close_error";
+    pub const BROWSER_ACTION: &str = "browser.action";
+    pub const BROWSER_ACTION_ERROR: &str = "browser.action_error";
+    pub const BROWSER_DOM_DIFF: &str = "browser.dom_diff";
+    pub const BROWSER_SCREENSHOT: &str = "browser.screenshot";
+
+    /// Every code above.
+    pub const ALL: &[&str] = &[
+        BUDGET_WARNING,
+        BUDGET_EXHAUSTED,
+        NO_PROGRESS,
+        IDENTICAL_TOOL_CALLS,
+        PROVIDER_UNAVAILABLE,
+        CACHE_REGRESSION,
+        LEARNING_PIPELINE_FAILED,
+        CONTEXT_CHECKPOINT_SAVED,
+        CONTEXT_SNAPSHOT_FAILED,
+        ESCALATION_HANDOFF_FAILED,
+        ESCALATION_ADMISSION_FAILED,
+        CRASH_RECOVERED,
+        ESCALATION_REVIEW,
+        TOOL_CALL_ACCESS,
+        SCOPE_DENIED,
+        PUBLISH_DIAGNOSTICS,
+        TOOL_RESULT,
+        BROWSER_SESSION,
+        BROWSER_STOPPED,
+        BROWSER_ERROR,
+        BROWSER_CLOSE_ERROR,
+        BROWSER_ACTION,
+        BROWSER_ACTION_ERROR,
+        BROWSER_DOM_DIFF,
+        BROWSER_SCREENSHOT,
+    ];
 }
 
 impl From<DiagnosticEvent> for EventKind {

@@ -1,5 +1,6 @@
 use std::sync::Weak;
 
+use event_bus::event::diagnostic_codes;
 use tokio::sync::watch;
 
 use crate::agent_loop::RunTask;
@@ -90,7 +91,7 @@ impl PendingLearning {
                     shared.bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
                         source: "learning".into(),
                         severity: event_bus::DiagnosticSeverity::Warning,
-                        code: "LearningPipelineFailed".into(),
+                        code: diagnostic_codes::LEARNING_PIPELINE_FAILED.into(),
                         // The cause stays in the detail so a candidate is diagnosable without logs.
                         detail: format!(
                             "Lesson extraction or review failed; unapproved candidates remain unpromoted. Inspect the learning runs of this source run for details.\ncause: {}",
