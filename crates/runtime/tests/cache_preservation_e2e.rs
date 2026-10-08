@@ -1264,6 +1264,310 @@ async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;
 }
 
+fn todo_response(id: &str, items: Value) -> ScriptedResponse {
+    ScriptedResponse::tool_call(
+        id,
+        MODEL,
+        0,
+        id,
+        "todo_write",
+        [json!({"items": items}).to_string()],
+    )
+}
+
+fn wire_todo_snapshots(request: &Value) -> Vec<(usize, event_bus::ThreadTodoSnapshot)> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message["role"] == "user")
+        .filter_map(|(index, message)| {
+            let content = &message["content"];
+            let text = content.as_str().map(str::to_owned).or_else(|| {
+                content.as_array().map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            })?;
+            serde_json::from_str(text.lines().last()?)
+                .ok()
+                .map(|snapshot| (index, snapshot))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn procedure_replacement_parallel_steps_and_clear_preserve_the_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            todo_response(
+                "todo-start",
+                json!([
+                    {"content":"Inspect the implementation","status":"in_progress"},
+                    {"content":"Inspect the user interface","status":"in_progress"}
+                ]),
+            ),
+            read_response(0),
+            todo_response(
+                "todo-replace",
+                json!([
+                    {"content":"Inspect the implementation","status":"completed"},
+                    {"content":"Verify the changes","status":"pending"}
+                ]),
+            ),
+            read_response(2),
+            todo_response("todo-clear", json!([])),
+            text_response("The requested work is ready"),
+        ],
+        1_000_000,
+    );
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "procedure-cache",
+            Role::Worker,
+            "Inspect and verify the requested changes".into(),
+            RunConfig {
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert!(harness.runtime.thread_goal("procedure-cache").is_none());
+    assert!(
+        harness
+            .runtime
+            .thread_todo("procedure-cache")
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let revisions = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadTodoUpdated {
+                snapshot,
+            }) => Some(snapshot),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(revisions.len(), 3);
+    assert!(
+        revisions.windows(2).all(|pair| {
+            pair[0].list_id == pair[1].list_id && pair[0].revision < pair[1].revision
+        })
+    );
+    verify_trace(&harness, run, &events, 0);
+}
+
+async fn procedure_compaction_reuses_new_prefix(reason: CompactionReason, cleared: bool) {
+    let automatic = reason == CompactionReason::Automatic;
+    let latest = if cleared {
+        json!([])
+    } else {
+        json!([{"content":"Latest authoritative procedure step","status":"pending"}])
+    };
+    let old_reply =
+        "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
+    let mut script = vec![
+        todo_response(
+            "obsolete-procedure",
+            json!([{"content":"Superseded procedure step","status":"in_progress"}]),
+        ),
+        todo_response("latest-procedure", latest.clone()),
+        text_response(&old_reply),
+    ];
+    if reason == CompactionReason::Agent {
+        script.push(ScriptedResponse::tool_call(
+            "compact-procedure",
+            MODEL,
+            0,
+            "compact-procedure",
+            "compact",
+            ["{}"],
+        ));
+    }
+    script.extend([read_response(0), read_response(2), text_response("done")]);
+    let mut harness = harness(script, if automatic { 64_000 } else { 1_000_000 });
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "compacted-procedure",
+            if reason == CompactionReason::Agent {
+                Role::Orchestrator
+            } else {
+                Role::Worker
+            },
+            "Inspect the requested changes".into(),
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    if reason == CompactionReason::Manual {
+        harness.runtime.compact(run).unwrap();
+    }
+    harness
+        .runtime
+        .send_message(run, "Continue after the context boundary".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    let current = harness.runtime.thread_todo("compacted-procedure").unwrap();
+    assert_eq!(serde_json::to_value(&current.items).unwrap(), latest);
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::Compaction(CompactionEvent::Compacted { reason: actual, .. }) if *actual == reason)),
+        "expected successful {reason:?} compaction, cleared={cleared}"
+    );
+    let requests = harness.mock.recorded_requests();
+    let final_request = &requests.last().unwrap().body;
+    let messages = final_request["messages"].as_array().unwrap();
+    let snapshots = wire_todo_snapshots(final_request);
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "latest state is explicitly presented once"
+    );
+    assert_eq!(snapshots[0].1, current);
+    if reason == CompactionReason::Agent {
+        let result_index = messages
+            .iter()
+            .position(|message| message["tool_call_id"] == "compact-procedure")
+            .expect("compact result must precede restored procedure context");
+        assert!(result_index < snapshots[0].0);
+    }
+    verify_trace(&harness, run, &events, 1);
+}
+
+#[tokio::test]
+async fn latest_procedure_and_clear_survive_compaction_then_reuse_the_wire_prefix() {
+    for reason in [
+        CompactionReason::Manual,
+        CompactionReason::Automatic,
+        CompactionReason::Agent,
+    ] {
+        for cleared in [false, true] {
+            procedure_compaction_reuses_new_prefix(reason, cleared).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn procedure_only_handoff_presents_current_state_then_reuses_each_roots_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            todo_response(
+                "handoff-procedure",
+                json!([{"content":"Verify the delegated findings","status":"pending"}]),
+            ),
+            read_response(0),
+            ScriptedResponse::tool_call(
+                "handoff",
+                MODEL,
+                0,
+                "handoff",
+                "escalate",
+                [json!({"original_request":"Inspect the requested changes","escalation_reason":"Need coordinated verification"}).to_string()],
+            ),
+            read_response(0),
+            read_response(2),
+            text_response("The coordinated verification is ready"),
+        ],
+        1_000_000,
+    );
+    let storage_config = storage::StorageConfig {
+        db_path: harness._directory.path().join("procedure-handoff.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let source = harness
+        .runtime
+        .delegate_chat(
+            "procedure-handoff",
+            Role::Worker,
+            "Inspect the requested changes".into(),
+            RunConfig {
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = Vec::new();
+    let recipient = loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let recipient = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => {
+                Some(new_run_id.parse::<RunId>().unwrap())
+            }
+            _ => None,
+        };
+        events.push(event);
+        if let Some(recipient) = recipient {
+            break recipient;
+        }
+    };
+    events.extend(through_phase(&mut harness.receiver, recipient, AgentRunPhase::Done).await);
+    assert_eq!(
+        harness.runtime.wait(source).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    assert!(harness.runtime.thread_todo("procedure-handoff").is_none());
+    assert!(harness.runtime.thread_goal("procedure-handoff").is_none());
+    let child = event_bus::escalation_thread_id(&recipient.to_string());
+    let current = harness.runtime.thread_todo(&child).unwrap();
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(usage.len(), requests.len());
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let inherited = wire_todo_snapshots(&requests[3]);
+    assert_eq!(inherited.len(), 1);
+    assert_eq!(inherited[0].1, current);
+    for (previous, next, root) in [
+        (0, 1, source),
+        (1, 2, source),
+        (3, 4, recipient),
+        (4, 5, recipient),
+    ] {
+        assert_eq!(usage[previous].0, &root.to_string());
+        assert_eq!(usage[next].0, &root.to_string());
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+}
+
 #[tokio::test]
 async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     let read = Arc::new(GatedRead {

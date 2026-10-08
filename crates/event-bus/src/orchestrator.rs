@@ -436,6 +436,8 @@ pub enum CloseoutStep {
 pub enum OrchestratorEvent {
     /// Latest bounded durable state of a generic thread objective.
     ThreadGoalUpdated { snapshot: crate::ThreadGoalSnapshot },
+    /// Latest durable procedure list, independent of the thread objective.
+    ThreadTodoUpdated { snapshot: crate::ThreadTodoSnapshot },
     /// task の進捗を記録した。
     TaskProgressed {
         /// task の永続識別子。

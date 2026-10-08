@@ -209,6 +209,12 @@ impl CommandSink for RuntimeCommandSink {
         }
     }
 
+    fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
+        if let Err(error) = self.runtime.restore_thread_todo(snapshot.clone()) {
+            tracing::warn!(%error, "failed to restore thread procedures");
+        }
+    }
+
     fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
         self.goal_projects
             .insert(snapshot.thread_id.clone(), project.into());
@@ -1062,15 +1068,19 @@ impl RuntimeCommandSink {
         }
         if let Some(&run_id) = self.chat_runs.get(&thread_id) {
             // continue_goal preserves the saved role, regardless of the current composer.
-            let conversation = self
+            let saved_role = self
                 .runtime
                 .restore_diagnostics(run_id)
                 .ok()
                 .flatten()
-                .is_some_and(|saved| saved.role_name == Role::Worker.name());
+                .map(|saved| saved.role_name);
+            let conversation = saved_role.as_deref().is_some_and(|role| {
+                role == Role::Worker.name() || role == Role::Orchestrator.name()
+            });
+            let worker = saved_role.as_deref() == Some(Role::Worker.name());
             let mut authority = RunConfig {
                 conversation,
-                category: conversation.then(|| CategoryId::Conversation.to_string()),
+                category: worker.then(|| CategoryId::Conversation.to_string()),
                 ownership: permit.clone(),
                 images: submission.images.clone(),
                 model_preference: submission.model_preference.clone(),
@@ -1119,7 +1129,7 @@ impl RuntimeCommandSink {
                 text: "No conversation to continue; send a message first".into(),
             }];
         }
-        let conversation = submission.composer_role == crate::model::composer::ComposerRole::Worker;
+        let worker = submission.composer_role == crate::model::composer::ComposerRole::Worker;
         let _guard = self.handle.enter();
         let run_id = self.runtime.delegate_chat_seeded(
             &thread_id,
@@ -1129,8 +1139,8 @@ impl RuntimeCommandSink {
             },
             submission.text,
             RunConfig {
-                conversation,
-                category: conversation.then(|| CategoryId::Conversation.to_string()),
+                conversation: true,
+                category: worker.then(|| CategoryId::Conversation.to_string()),
                 images: submission.images,
                 ownership: permit,
                 interactive: true,

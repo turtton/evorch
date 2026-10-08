@@ -593,7 +593,8 @@ impl GoalLedger {
                 Ok(())
             }
             OrchestratorEvent::ShellCommandDenied { .. }
-            | OrchestratorEvent::ThreadGoalUpdated { .. } => Ok(()),
+            | OrchestratorEvent::ThreadGoalUpdated { .. }
+            | OrchestratorEvent::ThreadTodoUpdated { .. } => Ok(()),
         }
     }
 
@@ -737,6 +738,7 @@ pub(super) fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
         OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
         OrchestratorEvent::ThreadGoalUpdated { .. }
+        | OrchestratorEvent::ThreadTodoUpdated { .. }
         | OrchestratorEvent::TaskProgressed { .. }
         | OrchestratorEvent::TaskCheckpoint { .. }
         | OrchestratorEvent::TaskStaleMarked { .. } => None,

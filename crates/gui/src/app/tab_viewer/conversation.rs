@@ -63,6 +63,9 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
         });
         let default_model = self.composer.resolved_model.clone();
         let ctx = ConversationContext {
+            todo: thread_id
+                .as_deref()
+                .and_then(|id| self.thread_todos.get(id)),
             goal: thread_id
                 .as_deref()
                 .and_then(|id| self.thread_goals.get(id)),

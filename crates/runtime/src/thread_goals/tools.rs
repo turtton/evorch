@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 pub(crate) fn spec(name: &str) -> ToolSpec {
     let (description, properties, required) = match name {
         "create_goal" => (
-            "Proactively track an objective from the user's request when it benefits from sustained work or verification. Any kind of requested work can be a goal, including research and local edits. Never add scope or permissions. One unfinished objective per thread. Completion requires an end-of-turn self-check; optional independent review is controlled by the user. Only the trusted thread root may create a goal.",
+            "Track an objective when the user clearly requests sustained iteration until an evidence-checked outcome is achieved. Routine edits, research, verification, or the number of steps alone do not warrant a goal; optionally use todo_write to manage procedure instead. Never add scope or permissions. One unfinished objective per thread. Completion requires an end-of-turn self-check; optional independent review is controlled by the user. Only the trusted thread root may create a goal.",
             json!({"objective":{"type":"string"},"criteria":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32}}),
             vec!["objective", "criteria"],
         ),

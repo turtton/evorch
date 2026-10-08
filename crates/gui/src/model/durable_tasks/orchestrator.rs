@@ -166,6 +166,7 @@ impl DurableTasksModel {
                 }
             }
             OrchestratorEvent::ThreadGoalUpdated { .. }
+            | OrchestratorEvent::ThreadTodoUpdated { .. }
             | OrchestratorEvent::GoalStageChanged { .. }
             | OrchestratorEvent::DeliverableBranchBound { .. }
             | OrchestratorEvent::FinishRejected { .. }

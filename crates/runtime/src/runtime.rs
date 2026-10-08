@@ -1233,10 +1233,14 @@ impl AgentRuntime {
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
         let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
+        let conversation = source_config.conversation
+            && source_config.purpose == crate::RunPurpose::General
+            && self.goal_thread(memo.source_run_id).is_some();
         let mut config = RunConfig {
             budget: source_config.budget.clone(),
-            interactive: carries_thread_goal && source_config.interactive,
-            keep_alive: carries_thread_goal && source_config.keep_alive,
+            conversation,
+            interactive: (carries_thread_goal || conversation) && source_config.interactive,
+            keep_alive: (carries_thread_goal || conversation) && source_config.keep_alive,
             name: Some("escalation-orchestrator".to_string()),
             category: None,
             load_skills: Vec::new(),

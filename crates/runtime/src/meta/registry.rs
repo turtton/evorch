@@ -55,6 +55,9 @@ macro_rules! define_meta_ops {
 }
 
 define_meta_ops! {
+    TodoWrite => "todo_write" => crate::thread_todos::spec => |state, runtime, input| {
+        crate::thread_todos::dispatch(state, runtime, input)
+    },
     CreateGoal => "create_goal" => crate::thread_goals::tools::spec => |state, runtime, input| {
         crate::thread_goals::tools::dispatch(state, runtime, "create_goal", input)
     },

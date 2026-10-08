@@ -28,6 +28,7 @@ pub mod self_improvement_settings;
 pub mod tasks;
 pub mod telemetry;
 pub mod terminal;
+pub mod thread_todos;
 pub mod transcript;
 pub mod transcript_registry;
 pub mod usage_stats;

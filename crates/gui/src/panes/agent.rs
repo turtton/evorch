@@ -32,6 +32,7 @@ pub struct AgentIdentity<'a> {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
+    pub todo: Option<&'a event_bus::ThreadTodoSnapshot>,
     pub goal: Option<&'a event_bus::ThreadGoalSnapshot>,
     pub requests: Option<super::requests::ConversationRequests<'a>>,
     pub task_rows: &'a [crate::model::tasks::TaskRow],
@@ -114,9 +115,9 @@ pub fn agent_pane_with_repo_root(
             .show(ui, |ui| {
                 let strip = ui.scope(|ui| {
                     let vertical_spacing = ui.spacing().item_spacing.y;
-                    if let Some(goal) = ctx.goal {
+                    if ctx.goal.is_some() || ctx.todo.is_some() {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        if let Some(goal_action) = goal::goal_strip(ui, goal) {
+                        if let Some(goal_action) = goal::progress_strip(ui, ctx.goal, ctx.todo) {
                             action = Some(AgentPaneAction::Goal(goal_action));
                         }
                     }
@@ -661,6 +662,7 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
+                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],

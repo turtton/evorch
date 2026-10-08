@@ -243,6 +243,8 @@ pub trait CommandSink: Send {
     }
     fn bind_goal_id(&mut self, _thread: &str, _goal: &str) {}
     fn bind_thread_goal(&mut self, _snapshot: &event_bus::ThreadGoalSnapshot, _project: &str) {}
+    /// Restore procedure data only; this cannot authorize or wake a root run.
+    fn bind_thread_todo(&mut self, _snapshot: &event_bus::ThreadTodoSnapshot) {}
     /// Refresh counts on lifecycle events, including descendants that just settled.
     fn observe_lifecycle(&mut self, _event: &event_bus::Event) {}
     /// Live count for the stopped banner; None leaves fixture/event state intact.
@@ -520,6 +522,7 @@ fn orchestrator_goal_id(ev: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::MergeExecuted { goal_id, .. }
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
         OrchestratorEvent::ThreadGoalUpdated { .. }
+        | OrchestratorEvent::ThreadTodoUpdated { .. }
         | OrchestratorEvent::TaskProgressed { .. }
         | OrchestratorEvent::TaskCheckpoint { .. }
         | OrchestratorEvent::TaskRetryScheduled { .. }

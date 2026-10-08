@@ -23,6 +23,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.thread_goals
                 .insert(snapshot.thread_id.clone(), snapshot.clone());
         }
+        if let EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) =
+            &event.kind
+        {
+            crate::model::thread_todos::apply_snapshot(&mut self.thread_todos, snapshot);
+        }
         let role_changed = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                 agent_name,

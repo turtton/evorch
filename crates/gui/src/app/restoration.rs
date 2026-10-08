@@ -17,6 +17,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.sink
                 .bind_thread_goal(snapshot, &thread.project_id.to_string());
         }
+        if let EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) =
+            &event.kind
+            && self.thread_todos.get(&snapshot.thread_id) == Some(snapshot)
+            && self.sidebar.threads.iter().any(|thread| {
+                thread.id.to_string() == snapshot.thread_id
+                    && self
+                        .sidebar
+                        .projects
+                        .iter()
+                        .any(|project| project.id == thread.project_id)
+            })
+        {
+            self.sink.bind_thread_todo(snapshot);
+        }
         if let EventKind::Lifecycle(event_bus::LifecycleEvent::EscalationRequested {
             new_run_id,
             ..
@@ -36,6 +50,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 &thread.project_id.to_string(),
                 new_run_id,
             );
+            // A procedure update can precede creation of the sidebar child during replay.
+            if let Some(snapshot) = self.thread_todos.get(&thread.id.to_string()) {
+                self.sink.bind_thread_todo(snapshot);
+            }
             // A goal update can precede creation of the sidebar child during replay.
             if let Some(snapshot) = self.thread_goals.get(&thread.id.to_string()) {
                 self.sink

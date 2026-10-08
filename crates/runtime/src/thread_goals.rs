@@ -19,7 +19,8 @@ pub(crate) const RECOVERY_HINT: &str =
 
 #[derive(Default)]
 pub(crate) struct ThreadGoals {
-    roots: HashMap<RunId, String>,
+    pub(crate) roots: HashMap<RunId, String>,
+    pub(crate) todos: HashMap<String, event_bus::ThreadTodoSnapshot>,
     requests: HashMap<RunId, String>,
     goals: HashMap<String, GoalEntry>,
     // Only descendants alive at a handoff retain its budget. Reusing the old
@@ -42,7 +43,7 @@ pub(crate) struct GoalReview {
 }
 
 impl AgentRuntime {
-    fn goal_lock(&self) -> std::sync::MutexGuard<'_, ThreadGoals> {
+    pub(crate) fn goal_lock(&self) -> std::sync::MutexGuard<'_, ThreadGoals> {
         self.shared
             .thread_goals
             .lock()
@@ -442,6 +443,7 @@ impl AgentRuntime {
             let goals = self.goal_lock();
             if goals.roots.contains_key(&target)
                 || goals.goals.contains_key(&child_thread)
+                || goals.todos.contains_key(&child_thread)
                 || goals.roots.values().any(|thread| thread == &child_thread)
             {
                 return Err("escalation target thread already exists".into());
@@ -457,6 +459,14 @@ impl AgentRuntime {
                 && entry.snapshot.related_root_run_ids.len() >= 128
             {
                 return Err("goal root handoff limit reached".into());
+            }
+            if goals
+                .roots
+                .get(&source)
+                .and_then(|thread| goals.todos.get(thread))
+                .is_some_and(|snapshot| snapshot.revision == u64::MAX)
+            {
+                return Err("procedure revision limit reached".into());
             }
             Ok(goals)
         };
@@ -474,6 +484,15 @@ impl AgentRuntime {
         goals.roots.insert(target, child_thread.clone());
         if let Some(request) = goals.requests.remove(&source) {
             goals.requests.insert(target, request);
+        }
+        if let Some(thread) = &source_thread {
+            goals.roots.remove(&source);
+            if let Some(mut snapshot) = goals.todos.remove(thread) {
+                snapshot.thread_id = child_thread.clone();
+                snapshot.revision += 1;
+                self.publish_thread_todo(&snapshot);
+                goals.todos.insert(child_thread.clone(), snapshot);
+            }
         }
         if let Some(thread) = source_thread
             && let Some(mut entry) = goals.goals.remove(&thread)

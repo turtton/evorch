@@ -88,6 +88,8 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         completed_turn_end: None,
         pending_user_messages: Vec::new(),
         goal_wake_pending: false,
+        todo_context_pending: false,
+        todo_context_deferred: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),

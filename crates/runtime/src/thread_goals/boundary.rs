@@ -195,7 +195,12 @@ impl AgentRuntime {
     pub(crate) fn goal_tool_activity(&self, actor: RunId, name: &str) {
         if matches!(
             name,
-            "finish" | "get_goal" | "create_goal" | "submit_goal_check" | "submit_goal_review"
+            "finish"
+                | "get_goal"
+                | "create_goal"
+                | "submit_goal_check"
+                | "submit_goal_review"
+                | "todo_write"
         ) {
             return;
         }
