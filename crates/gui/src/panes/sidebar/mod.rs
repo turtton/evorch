@@ -51,7 +51,14 @@ pub fn sidebar_pane(
     phases: &BTreeMap<String, ThreadRunPhase>,
     telemetry: &crate::model::telemetry::TelemetryOverlay,
     question_threads: &BTreeSet<ThreadId>,
+    unread_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
+    let indicators = threads::ThreadIndicators {
+        phases,
+        telemetry,
+        question_threads,
+        unread_threads,
+    };
     let pane_state = ui
         .ctx()
         .data(|data| data.get_temp::<SidebarUiState>(egui::Id::new(UI_STATE_ID)))
@@ -72,15 +79,7 @@ pub fn sidebar_pane(
                     &pane_state,
                     &mut action,
                     |ui, project, action| {
-                        threads::render(
-                            ui,
-                            sidebar,
-                            project,
-                            phases,
-                            telemetry,
-                            question_threads,
-                            action,
-                        );
+                        threads::render(ui, sidebar, project, &indicators, action);
                     },
                 );
             });

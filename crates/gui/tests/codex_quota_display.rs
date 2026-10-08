@@ -165,6 +165,14 @@ fn quota_snapshot_renders_compact_remaining_windows_with_hover_details() {
     state.accept(Ok(snapshot(false)));
     let mut harness = quota_harness(state);
     harness.run();
+    // Each window is a labelled bar, including the five-hour window.
+    harness.get_by_label("5h");
+    harness.get_by_label("wk");
+    let remaining: Vec<_> = harness
+        .get_all_by_role(egui::accesskit::Role::ProgressIndicator)
+        .map(|bar| bar.accesskit_node().numeric_value())
+        .collect();
+    assert_eq!(remaining, [Some(75.0), Some(40.0)]);
     harness.get_by_label("Codex · 75% 5h · 40% wk").hover();
     harness.run_steps(3);
     harness.get_by_label("Codex · plus · remaining quota");
@@ -257,6 +265,9 @@ fn multiple_codex_subscriptions_show_first_usage_and_switch_from_details() {
     harness.get_by_label("work · Codex").click();
     harness.run();
     harness.get_by_label("Codex · work · 10% 5h");
+    // The picker is followed by the selected subscription's bars.
+    let bar = harness.get_by_role(egui::accesskit::Role::ProgressIndicator);
+    assert_eq!(bar.accesskit_node().numeric_value(), Some(10.0));
     assert!(
         harness
             .query_by_label("Codex · personal · 75% 5h · 40% wk")
@@ -347,7 +358,7 @@ fn weekly_only_plan_labels_primary_window_by_its_duration() {
     state.accept(Ok(weekly));
     let mut harness = quota_harness(state);
     harness.run();
-    harness.get_by_label("Codex");
+    harness.get_by_label("Codex · 75% wk");
     harness.get_by_label("wk");
     let bar = harness.get_by_role(egui::accesskit::Role::ProgressIndicator);
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));

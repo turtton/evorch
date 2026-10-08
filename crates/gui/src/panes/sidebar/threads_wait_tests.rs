@@ -77,6 +77,7 @@ fn harness(width: f32, fixture: Fixture) -> Harness<'static, Fixture> {
                     phases: &fixture.phases,
                     telemetry: &fixture.telemetry,
                     question_threads: &fixture.questions,
+                    unread_threads: &BTreeSet::new(),
                 };
                 let threads = fixture.sidebar.threads.iter().take(2).collect::<Vec<_>>();
                 render_tree(

@@ -7,7 +7,6 @@ use storage::{Database, StorageConfig, StorageHandle};
 
 const POLL_INTERVAL_SECS: f64 = 1.0;
 
-#[derive(Default)]
 pub struct SelfImprovementPane {
     pub config: Option<StorageConfig>,
     pub handle: Option<StorageHandle>,
@@ -28,6 +27,40 @@ pub struct SelfImprovementPane {
     data_version: Option<i64>,
     next_poll_at: f64,
     loaded_status: Option<ImprovementStatus>,
+}
+
+impl Default for SelfImprovementPane {
+    /// Opens on the untriaged candidates; the other statuses are a filter away.
+    fn default() -> Self {
+        Self {
+            config: None,
+            handle: None,
+            enabled: false,
+            draft_dir: None,
+            status: Some(ImprovementStatus::New),
+            project: None,
+            entries: Vec::new(),
+            error: None,
+            draft_errors: BTreeMap::new(),
+            refresh: false,
+            resolved_project: None,
+            database: None,
+            database_path: None,
+            data_version: None,
+            next_poll_at: 0.0,
+            loaded_status: None,
+        }
+    }
+}
+
+/// Icon and color that stand for a candidate's triage status.
+fn status_icon(status: ImprovementStatus) -> (&'static str, egui::Color32) {
+    use crate::theme::{icons, tokens::palette};
+    match status {
+        ImprovementStatus::New => (icons::SPARKLE, palette().ACCENT),
+        ImprovementStatus::Reviewed => (icons::CHECK_CIRCLE, palette().SUCCESS),
+        ImprovementStatus::Dismissed => (icons::PROHIBIT, palette().TEXT_MUTED),
+    }
 }
 
 impl SelfImprovementPane {
@@ -145,9 +178,22 @@ impl SelfImprovementPane {
                 for entry in &self.entries {
                     ui.push_id(&entry.id, |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            let (icon, color) = status_icon(entry.status);
+                            let status = entry.status.as_str();
+                            let response = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(icon)
+                                        .size(crate::theme::tokens::FONT_ICON)
+                                        .color(color),
+                                )
+                                .sense(egui::Sense::hover()),
+                            );
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status)
+                            });
+                            response.on_hover_text(format!("Status: {status}"));
                             ui.monospace(&entry.id);
                             ui.monospace(format_created_at(entry.created_at_ns));
-                            ui.label(entry.status.as_str());
                         });
                         ui.horizontal_wrapped(|ui| {
                             for badge in

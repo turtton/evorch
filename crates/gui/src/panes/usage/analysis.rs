@@ -7,6 +7,7 @@ use workspace_ui::SidebarState;
 use super::charts::{self, SERIES};
 use super::overview::share_list;
 use super::{compact_tokens, format_cost, key_label};
+use crate::model::telemetry::latency_label;
 use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::series::{self, LatencySample, Matrix, Share};
 use crate::model::usage_stats::{
@@ -268,8 +269,7 @@ impl AnalysisData {
         let duration_p95 = series::percentile(self.latency.iter().map(|s| s.duration_ms), 0.95);
         let speed =
             series::percentile(self.latency.iter().filter_map(|s| s.tokens_per_second), 0.5);
-        let format_ms =
-            |value: Option<f64>| value.map_or_else(|| "—".into(), |value| format!("{value:.0} ms"));
+        let format_ms = |value: Option<f64>| value.map_or_else(|| "—".into(), latency_label);
         ui.label(muted(format!(
             "TTFT p50 {} · p95 {} · duration p95 {} · median {} tok/s · {} requests",
             format_ms(ttft_p50),

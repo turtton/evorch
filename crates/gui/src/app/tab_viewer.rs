@@ -61,6 +61,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) panels: &'a BTreeMap<PanelId, Panel>,
     pub(super) sidebar: &'a SidebarState,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
+    pub(super) unread_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) sidebar_action: &'a mut Option<SidebarAction>,
     pub(super) agents_action: &'a mut Option<AgentsAction>,
     pub(super) focus: &'a ConversationFocus,
@@ -289,6 +290,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     self.phases,
                     self.telemetry,
                     &question_threads,
+                    self.unread_threads,
                 ) {
                     *self.sidebar_action = Some(action);
                 }

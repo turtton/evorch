@@ -234,8 +234,11 @@ fn agents_cell_shows_pressure_when_window_is_known() {
     let mut gui = workbench(Some(1000));
     // When: the real workbench renders its Agents pane.
     gui.run();
-    // Then: cumulative in/out remains intact beside latest-request pressure.
-    assert!(gui.has_label("1500 / 1800 (130%)"));
+    // Then: cumulative in/out stay intact beside latest-request pressure, each
+    // as its own named metric rather than a bare `in / out (ctx)` triple.
+    for label in ["input 1500", "output 1800", "context 130%"] {
+        assert!(gui.has_label(label), "missing {label}");
+    }
     if let Some(path) = std::env::var_os("CONTEXT_AGENTS_CAPTURE") {
         let mut tasks = gui::model::tasks::TasksModel::new(DemoSource(vec![]));
         tasks.update(&[runtime::AgentSummary {
@@ -295,6 +298,7 @@ fn agents_cell_preserves_tokens_when_window_is_unknown() {
     let mut gui = workbench(None);
     // When: the workbench renders.
     gui.run();
-    // Then: the existing token display remains available without a percentage.
-    assert!(gui.has_label("1500 / 1800"));
+    // Then: the token counts remain available without a percentage.
+    assert!(gui.has_label("input 1500") && gui.has_label("output 1800"));
+    assert!(!gui.has_label("context 130%"));
 }

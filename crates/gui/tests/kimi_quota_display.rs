@@ -43,7 +43,7 @@ fn kimi_footer_uses_bars_and_preserves_last_good_quota_on_failure() {
             ui.horizontal(|ui| gui::panes::quota_footer::kimi_quota_footer(ui, &state));
         });
     harness.run();
-    harness.get_by_label("Kimi · stale");
+    harness.get_by_label("Kimi · 75% wk · stale");
     let bar = harness.get_by_role(egui::accesskit::Role::ProgressIndicator);
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
     bar.hover();
@@ -208,7 +208,7 @@ fn one_configured_kimi_subscription_keeps_the_compact_footer() {
         .accept(Ok(snapshot()));
     let mut harness = subscriptions_harness(state);
     harness.run();
-    harness.get_by_label("Kimi");
+    harness.get_by_label("Kimi · 75% wk");
     assert_eq!(
         harness
             .get_by_role(egui::accesskit::Role::ProgressIndicator)

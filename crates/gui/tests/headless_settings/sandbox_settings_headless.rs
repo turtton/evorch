@@ -181,9 +181,27 @@ fn settings_menu_no_longer_offers_sandbox() {
     harness.run();
     // Then: sandbox settings have moved, while other settings remain available.
     assert!(!harness.has_label("Sandbox"));
-    for label in ["Theme", "Providers", "Agent roles", "Routing"] {
+    for label in ["Theme", "Providers", "Agent roles", "Routing", "Storage"] {
         assert!(harness.has_label(label), "missing settings entry: {label}");
     }
+}
+
+#[test]
+fn storage_settings_open_from_the_settings_menu_not_the_composer() {
+    // Given: the workbench with no modal open.
+    let dir = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
+    harness.click_label("Cancel");
+    harness.run();
+    // Then: the composer no longer carries a storage shortcut.
+    assert!(!harness.has_label("Storage"));
+    // When: choosing Storage from the settings menu.
+    harness.click_label("⚙");
+    harness.run();
+    harness.click_label("Storage");
+    harness.run();
+    // Then: the storage modal explains its retention policy.
+    assert!(harness.has_label("Conversation, task, and approval audit records are kept."));
 }
 
 #[test]

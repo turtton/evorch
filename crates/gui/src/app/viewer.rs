@@ -103,6 +103,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let ctx = ui.ctx().clone();
         self.observe_attention();
+        self.observe_unread_threads();
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut tasks_action = None;
@@ -161,6 +162,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 panels: &self.panels,
                 sidebar: &self.sidebar,
                 phases: &self.phases,
+                unread_threads: &self.unread_threads,
                 sidebar_action: &mut sidebar_action,
                 agents_action: &mut agents_action,
                 focus: &self.focus,
@@ -319,7 +321,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::OpenSelfImprovementSettings => {
                     self.open_self_improvement_settings()
                 }
-                ComposerAction::OpenStorageSettings => self.open_storage_settings(),
                 ComposerAction::Complete(item) => self.composer.apply_completion(&item),
                 ComposerAction::ToggleRole => self.composer.toggle_role(),
             }

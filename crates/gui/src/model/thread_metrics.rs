@@ -1,6 +1,20 @@
 use super::{CacheReuseSummary, TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
 use std::time::{Duration, Instant};
 
+/// Latency such as TTFT: milliseconds below one second, seconds from there
+/// (`840ms`, `1.2s`) so four-digit millisecond counts stay readable.
+pub fn latency_label(ms: f64) -> String {
+    if ms.round() < 1_000.0 {
+        format!("{ms:.0}ms")
+    } else {
+        format!("{:.1}s", ms / 1_000.0)
+    }
+}
+
+fn duration_label(duration: Duration) -> String {
+    latency_label(duration.as_secs_f64() * 1_000.0)
+}
+
 impl ThreadMetrics {
     pub fn context_label(&self) -> String {
         match (self.context_used_tokens, self.context_pressure) {
@@ -12,10 +26,10 @@ impl ThreadMetrics {
     pub fn ttft_label(&self) -> String {
         let current = self.ttft.map_or_else(
             || "TTFT —".into(),
-            |ttft| format!("TTFT {}ms", ttft.as_millis()),
+            |ttft| format!("TTFT {}", duration_label(ttft)),
         );
         match self.average_ttft {
-            Some(average) => format!("{current} (avg {}ms)", average.as_millis()),
+            Some(average) => format!("{current} (avg {})", duration_label(average)),
             None => current,
         }
     }
@@ -150,6 +164,18 @@ impl TelemetryOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ttft_switches_to_seconds_from_four_digit_milliseconds() {
+        let metrics = ThreadMetrics {
+            ttft: Some(Duration::from_millis(840)),
+            average_ttft: Some(Duration::from_millis(1_240)),
+            ..Default::default()
+        };
+        assert_eq!(metrics.ttft_label(), "TTFT 840ms (avg 1.2s)");
+        assert_eq!(latency_label(999.7), "1.0s");
+        assert_eq!(latency_label(12_345.0), "12.3s");
+    }
 
     #[test]
     fn context_label_truncates_to_whole_thousands() {

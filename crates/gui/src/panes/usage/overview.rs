@@ -6,6 +6,7 @@ use workspace_ui::SidebarState;
 
 use super::charts::{self, SERIES};
 use super::{compact_tokens, format_cost, key_label};
+use crate::model::telemetry::latency_label;
 use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::series::{self, Share};
 use crate::model::usage_stats::{
@@ -156,7 +157,7 @@ impl OverviewData {
                 "Avg TTFT",
                 total
                     .average_ttft_ms()
-                    .map_or_else(|| "—".into(), |ttft| format!("{ttft} ms")),
+                    .map_or_else(|| "—".into(), |ttft| latency_label(ttft as f64)),
                 format!("{} reasoning", compact_tokens(total.reasoning)),
                 daily(|totals| totals.average_ttft_ms().unwrap_or_default() as f64),
             ),

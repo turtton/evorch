@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agents::Role;
-use event_bus::{AgentRunPhase, EventBus};
+use event_bus::{AgentRunPhase, EventBus, EventKind, ToolEvent};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
 use runtime::skill::{SkillRegistry, SkillScope, discover_skills};
 use runtime::{AgentRuntime, RunConfig};
@@ -51,12 +51,16 @@ fn demo_registry() -> (SkillRegistry, tempfile::TempDir) {
 }
 
 fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
+    runtime_with_bus(model).0
+}
+
+fn runtime_with_bus(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(128));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    AgentRuntime::new(bus, executor, model)
+    (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
 }
 
 /// モデル履歴から指定 tool_call_id の ToolResult 本文と is_error を取り出す。
@@ -100,7 +104,9 @@ async fn worker_skill_load_returns_skill_body() {
             ],
         )
         .await;
-    let runtime = runtime_with(Arc::clone(&model)).with_skills(Arc::new(registry));
+    let (runtime, bus) = runtime_with_bus(Arc::clone(&model));
+    let runtime = runtime.with_skills(Arc::new(registry));
+    let mut events = bus.subscribe();
 
     let run =
         runtime.delegate_background(Role::Worker, "SKILL-BODY".to_string(), RunConfig::default());
@@ -112,6 +118,30 @@ async fn worker_skill_load_returns_skill_body() {
         tool_result(final_turn, "c1"),
         Some((BODY_SENTINEL.to_string(), false))
     );
+    // And: the load reaches the conversation as an ordinary tool lifecycle.
+    let mut started = false;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match events.recv().await.expect("event").kind {
+                EventKind::Tool(ToolEvent::ToolStarted {
+                    tool_name, input, ..
+                }) if tool_name == "skill_load" => {
+                    assert_eq!(input, Some(json!({ "name": "demo" })));
+                    started = true;
+                }
+                EventKind::Tool(ToolEvent::ToolCompleted {
+                    tool_name,
+                    is_error,
+                    ..
+                }) if tool_name == "skill_load" => break is_error,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("skill_load completion event");
+    assert!(started, "skill_load start event");
+    assert!(!completed, "skill_load succeeded");
 }
 
 // Given: references/note.md を持つ demo skill と skill_load を 1 回要求する Worker

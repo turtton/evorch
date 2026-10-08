@@ -8,6 +8,13 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::theme::tokens::palette;
 
+mod table;
+
+enum Block {
+    Code(String),
+    Table(table::Table),
+}
+
 pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
     render_markdown_with_base(ui, source, id_salt, None);
 }
@@ -31,7 +38,8 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
         let mut blocks = Vec::new();
         let mut markdown = String::new();
         let mut block = String::new();
-        let mut table_separator = String::new();
+        let mut table = table::Table::default();
+        let mut in_head = false;
         let mut fence = String::from("~~~");
         while source.contains(&fence) {
             fence.push('~');
@@ -50,25 +58,18 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
                     }
                     block.push('\n');
                 }
-                Event::Start(Tag::Table(alignments)) => {
+                Event::Start(Tag::Table(_)) => {
                     block_start = Some((range.start, TagEnd::Table));
-                    table_separator = alignments
-                        .iter()
-                        .map(|alignment| match alignment {
-                            pulldown_cmark::Alignment::None => "| --- ",
-                            pulldown_cmark::Alignment::Left => "| :--- ",
-                            pulldown_cmark::Alignment::Center => "| :---: ",
-                            pulldown_cmark::Alignment::Right => "| ---: ",
-                        })
-                        .collect::<String>();
-                    table_separator.push_str("|\n");
                 }
-                Event::Start(Tag::TableHead | Tag::TableRow) => {
-                    block.push_str(source[range].trim_end());
-                    block.push('\n');
-                }
-                Event::End(TagEnd::TableHead) => {
-                    block.push_str(&table_separator);
+                Event::Start(Tag::TableHead) => in_head = true,
+                Event::End(TagEnd::TableHead) => in_head = false,
+                Event::Start(Tag::TableRow) => table.rows.push(Vec::new()),
+                Event::Start(Tag::TableCell) => {
+                    let cell = table::cell_source(&source[range]);
+                    match table.rows.last_mut() {
+                        Some(row) if !in_head => row.push(cell),
+                        _ => table.header.push(cell),
+                    }
                 }
                 Event::Text(text) if matches!(block_start, Some((_, TagEnd::CodeBlock))) => {
                     block.push_str(&text);
@@ -87,7 +88,12 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
                         let placeholder = format!("<!--{marker}-{}-->", blocks.len());
                         markdown.push_str(&placeholder);
                         markdown.push('\n');
-                        blocks.push((placeholder, std::mem::take(&mut block)));
+                        let content = if end == TagEnd::Table {
+                            Block::Table(std::mem::take(&mut table))
+                        } else {
+                            Block::Code(std::mem::take(&mut block))
+                        };
+                        blocks.push((placeholder, content));
                         start = range.end;
                     }
                 }
@@ -97,7 +103,14 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
         markdown.push_str(&source[start..]);
         CommonMarkViewer::new()
             .render_html_fn(Some(&move |ui, html| {
-                if let Some((id, block)) = blocks.iter().find(|(id, _)| html.trim() == id) {
+                if let Some((id, Block::Table(table))) =
+                    blocks.iter().find(|(id, _)| html.trim() == id)
+                {
+                    table::show(ui, id, table, ui.available_width().min(width));
+                    ui.end_row();
+                } else if let Some((id, Block::Code(block))) =
+                    blocks.iter().find(|(id, _)| html.trim() == id)
+                {
                     let width = ui.available_width().min(width);
                     ui.allocate_ui_with_layout(
                         egui::vec2(width, 0.0),

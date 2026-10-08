@@ -2,6 +2,17 @@ use crate::model::telemetry::quota::{QuotaData, QuotaState};
 use crate::theme::text::muted;
 use providers::provider::kimi_quota::KimiQuotaSnapshot;
 
+/// How much of one subscription's quota a call draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// Service name followed by one bar per window.
+    Footer,
+    /// Bars only, after a profile picker that already names the service.
+    Bars,
+    /// Every detail line, inside the profile picker.
+    Details,
+}
+
 /// Compact remaining quota, with window duration and reset details on hover.
 pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
     subscriptions_footer(ui, "Codex", state, render_codex, codex_summary);
@@ -15,7 +26,7 @@ fn subscriptions_footer<T: QuotaData>(
     ui: &mut egui::Ui,
     service: &str,
     state: &QuotaState<T>,
-    render_quota: fn(&mut egui::Ui, &QuotaState<T>, bool),
+    render_quota: fn(&mut egui::Ui, &QuotaState<T>, View),
     summary: fn(&QuotaState<T>) -> String,
 ) {
     let selection_id = ui.id().with(("selected_quota_profile", service));
@@ -27,7 +38,7 @@ fn subscriptions_footer<T: QuotaData>(
             .map(|(name, subscription)| (name.as_str(), subscription))
             .unwrap_or(("", state));
         ui.data_mut(|data| data.insert_temp(selection_id, profile.to_owned()));
-        render_quota(ui, subscription, false);
+        render_quota(ui, subscription, View::Footer);
         return;
     }
     let selected = ui
@@ -36,34 +47,30 @@ fn subscriptions_footer<T: QuotaData>(
         .unwrap_or_else(|| state.subscriptions.keys().next().unwrap().clone());
     ui.data_mut(|data| data.insert_temp(selection_id, selected.clone()));
     let selected_state = &state.subscriptions[&selected];
-    ui.menu_button(
-        muted(format!(
-            "{service} · {selected} · {}",
-            summary(selected_state)
-        )),
-        |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(360.0)
-                .show(ui, |ui| {
-                    for (index, (profile, state)) in state.subscriptions.iter().enumerate() {
-                        if index > 0 {
-                            ui.separator();
-                        }
-                        if ui
-                            .selectable_label(
-                                selected == *profile,
-                                format!("{profile} · {service}"),
-                            )
-                            .clicked()
-                        {
-                            ui.data_mut(|data| data.insert_temp(selection_id, profile.clone()));
-                            ui.close();
-                        }
-                        ui.push_id(profile, |ui| render_quota(ui, state, true));
+    let label = format!("{service} · {selected} · {}", summary(selected_state));
+    let picker = ui.menu_button(muted(format!("{service} · {selected}")), |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for (index, (profile, state)) in state.subscriptions.iter().enumerate() {
+                    if index > 0 {
+                        ui.separator();
                     }
-                });
-        },
-    );
+                    if ui
+                        .selectable_label(selected == *profile, format!("{profile} · {service}"))
+                        .clicked()
+                    {
+                        ui.data_mut(|data| data.insert_temp(selection_id, profile.clone()));
+                        ui.close();
+                    }
+                    ui.push_id(profile, |ui| render_quota(ui, state, View::Details));
+                }
+            });
+    });
+    picker
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    render_quota(ui, selected_state, View::Bars);
 }
 
 fn codex_summary(state: &QuotaState) -> String {
@@ -127,9 +134,9 @@ fn status<T: QuotaData>(state: &QuotaState<T>) -> String {
     }
 }
 
-fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
+fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View) {
     let Some(snapshot) = &state.snapshot else {
-        unavailable(ui, "Codex", state, expanded);
+        unavailable(ui, "Codex", state, view);
         return;
     };
     let mut details = vec![format!(
@@ -140,9 +147,6 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
         .into_iter()
         .flatten()
         .collect();
-    let use_bars = !windows
-        .iter()
-        .any(|window| window.window_duration.as_secs() == 5 * 3600);
     let segments: Vec<_> = windows
         .iter()
         .map(|window| {
@@ -160,7 +164,7 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
             (duration, window.remaining_percent)
         })
         .collect();
-    if expanded {
+    if view == View::Details {
         if let Some(window) = &snapshot.quota.code_review {
             details.push(format!(
                 "Code review: {:.1}% remaining · {:.1}% used · resets {}",
@@ -174,18 +178,17 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
     }
     render(
         ui,
-        "Codex",
+        (view == View::Footer).then_some("Codex"),
         &segments,
-        use_bars,
         snapshot.stale,
         &state.error,
         details,
     );
 }
 
-fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, expanded: bool) {
+fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, view: View) {
     let Some(snapshot) = &state.snapshot else {
-        unavailable(ui, "Kimi", state, expanded);
+        unavailable(ui, "Kimi", state, view);
         return;
     };
     let mut details = vec!["Kimi · remaining quota".into()];
@@ -204,25 +207,28 @@ fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, expande
             (window.label.clone(), window.remaining_percent)
         })
         .collect();
-    if expanded {
+    if view == View::Details {
         show_expanded(ui, details, snapshot.stale, &state.error);
         return;
     }
     render(
         ui,
-        "Kimi",
+        (view == View::Footer).then_some("Kimi"),
         &segments,
-        true,
         snapshot.stale,
         &state.error,
         details,
     );
 }
 
-fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>, expanded: bool) {
+fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>, view: View) {
+    if view == View::Bars {
+        // The profile picker already reads "<service> · <profile> · unavailable".
+        return;
+    }
     let response = ui.label(muted(format!("{name} · {}", status(state))));
     if let Some(error) = &state.error {
-        if expanded {
+        if view == View::Details {
             ui.label(muted(format!("Quota error: {error}")));
         } else {
             response.on_hover_text(error.to_string());
@@ -247,11 +253,11 @@ fn show_expanded(
     }
 }
 
+/// One bar per window, after the service `name` when it is not already shown.
 fn render(
     ui: &mut egui::Ui,
-    name: &str,
+    name: Option<&str>,
     segments: &[(String, f64)],
-    use_bars: bool,
     stale: bool,
     error: &Option<providers::provider::codex::quota::QuotaError>,
     mut details: Vec<String>,
@@ -263,36 +269,44 @@ fn render(
         details.push(format!("Quota error: {error}"));
     }
     let suffix = if stale { " · stale" } else { "" };
-    if use_bars && !segments.is_empty() {
-        ui.label(muted(format!("{name}{suffix}")))
-            .on_hover_ui(|ui| show_details(ui, &details));
-        for (label, remaining) in segments {
-            // Keep the percentage in the tooltip/accessibility value; the footer stays compact.
-            ui.label(muted(label))
-                .on_hover_ui(|ui| show_details(ui, &details));
-            let remaining = remaining.clamp(0.0, 100.0);
-            // The clamped percentage is always finite and representable as f32.
-            #[allow(clippy::cast_possible_truncation)]
-            let ratio = (remaining / 100.0) as f32;
-            ui.add(
-                egui::ProgressBar::new(ratio)
-                    .desired_width(54.0)
-                    .desired_height(7.0),
-            )
-            .on_hover_ui(|ui| show_details(ui, &details));
-        }
-    } else {
+    if let Some(name) = name {
+        // Bars carry no text, so the title keeps the textual summary as its
+        // accessible name; the visible footer stays compact.
         let parts: Vec<_> = segments
             .iter()
             .map(|(label, remaining)| format!("{:.0}% {label}", remaining.clamp(0.0, 100.0)))
             .collect();
-        let joined = if parts.is_empty() {
-            "unavailable".into()
+        let summary = if parts.is_empty() {
+            format!("{name} · unavailable{suffix}")
         } else {
-            parts.join(" · ")
+            format!("{name} · {}{suffix}", parts.join(" · "))
         };
-        ui.label(muted(format!("{name} · {joined}{suffix}")))
+        let visible = if segments.is_empty() {
+            summary.clone()
+        } else {
+            format!("{name}{suffix}")
+        };
+        let response = ui.label(muted(visible));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &summary));
+        response.on_hover_ui(|ui| show_details(ui, &details));
+    } else if stale {
+        ui.label(muted("stale"))
             .on_hover_ui(|ui| show_details(ui, &details));
+    }
+    for (label, remaining) in segments {
+        // Keep the percentage in the tooltip/accessibility value; the footer stays compact.
+        ui.label(muted(label))
+            .on_hover_ui(|ui| show_details(ui, &details));
+        let remaining = remaining.clamp(0.0, 100.0);
+        // The clamped percentage is always finite and representable as f32.
+        #[allow(clippy::cast_possible_truncation)]
+        let ratio = (remaining / 100.0) as f32;
+        ui.add(
+            egui::ProgressBar::new(ratio)
+                .desired_width(54.0)
+                .desired_height(7.0),
+        )
+        .on_hover_ui(|ui| show_details(ui, &details));
     }
 }
 

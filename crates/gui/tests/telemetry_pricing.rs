@@ -190,7 +190,7 @@ fn telemetry_usage_renders_in_thread_subagents_pane() {
         );
     });
     harness.run();
-    for label in ["worker", "98300 / 15400"] {
+    for label in ["worker", "input 98300", "output 15400"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }
