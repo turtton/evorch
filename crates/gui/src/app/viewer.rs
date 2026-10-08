@@ -149,6 +149,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 arena: &mut self.arena,
                 usage: &mut self.usage,
                 context_inspector: &mut self.context_inspector,
+                shell_jobs: &mut self.shell_jobs,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -192,6 +193,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         for link in file_requests {
             self.open_file_preview(&ctx, link);
+        }
+        if let Some(job_id) = crate::panes::shell_jobs::take_open_request(&ctx) {
+            self.open_shell_jobs_tab(job_id);
         }
         if context_request {
             let run = self.active_thread_runs().last().cloned();
@@ -412,6 +416,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.dock.push_to_focused_leaf(id.clone());
         }
         self.context_inspector.show(mode, run);
+        self.focus_panel(id.as_str());
+    }
+
+    /// Reveal `job_id` in the shell jobs pane, opening it in the tall side
+    /// column so the log keeps the conversation visible.
+    pub fn open_shell_jobs_tab(&mut self, job_id: String) {
+        use workspace_ui::{Panel, PanelId, PanelKind};
+        let id = PanelId::new("shell-jobs-main");
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::ShellJobs,
+            title: PanelKind::ShellJobs.default_title().into(),
+            target: None,
+        });
+        if self.dock.find_tab(&id).is_none() {
+            let neighbor = self
+                .dock
+                .find_tab(&PanelId::new("subagents-home"))
+                .or_else(|| self.dock.find_tab(&PanelId::new("diff-main")))
+                .or_else(|| self.dock.find_tab(&PanelId::new("agent-main")));
+            if let Some(path) = neighbor {
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+            self.dock.push_to_focused_leaf(id.clone());
+        }
+        self.shell_jobs.select(job_id);
         self.focus_panel(id.as_str());
     }
 

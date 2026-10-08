@@ -170,6 +170,10 @@ pub trait Tool: Send + Sync {
     /// ツールが cwd を持つ場合、既定の作業ディレクトリを更新する。
     fn set_default_cwd(&self, _cwd: std::path::PathBuf) {}
 
+    /// Receive the executor's bus for progress the tool reports outside its
+    /// result, such as live shell job output. Other tools ignore it.
+    fn set_event_bus(&self, _bus: std::sync::Arc<event_bus::EventBus>) {}
+
     /// shell の呼び出し単位の隔離解除を構成する。他のツールでは何もしない。
     fn set_shell_escalation(
         &self,

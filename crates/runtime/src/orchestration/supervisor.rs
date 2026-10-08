@@ -893,7 +893,9 @@ impl SupervisorActor {
                     };
                 }
             }
-            ToolEvent::ToolStarted { run_id: None, .. }
+            // Background output is not the run's own progress.
+            ToolEvent::ShellJobOutput { .. }
+            | ToolEvent::ToolStarted { run_id: None, .. }
             | ToolEvent::ToolCompleted { run_id: None, .. }
             | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }

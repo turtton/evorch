@@ -305,6 +305,9 @@ impl SecretGuard {
             EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => {
                 self.check_text("event", "ReasoningDelta.delta", delta)
             }
+            EventKind::Tool(ToolEvent::ShellJobOutput { chunk, .. }) => {
+                self.check_text("event", "ShellJobOutput.chunk", chunk)
+            }
             EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) => {
                 self.check_text("event", "ExecutionDenied.reason", reason)
             }

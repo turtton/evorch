@@ -4,6 +4,7 @@ mod branch;
 mod compaction;
 mod diagnostics;
 mod lifecycle;
+pub mod shell_jobs;
 mod thinking;
 
 #[cfg(test)]
@@ -100,6 +101,7 @@ pub struct TranscriptModel {
     streaming_messages: std::collections::BTreeMap<Option<String>, Vec<usize>>,
     completed_messages: std::collections::BTreeMap<String, event_bus::EventMeta>,
     agent_names: std::collections::BTreeMap<String, String>,
+    shell_jobs: shell_jobs::ShellJobs,
 }
 
 impl Default for TranscriptModel {
@@ -124,7 +126,12 @@ impl TranscriptModel {
             streaming_messages: std::collections::BTreeMap::new(),
             completed_messages: std::collections::BTreeMap::new(),
             agent_names: std::collections::BTreeMap::new(),
+            shell_jobs: shell_jobs::ShellJobs::default(),
         }
+    }
+
+    pub fn shell_jobs(&self) -> &shell_jobs::ShellJobs {
+        &self.shell_jobs
     }
 
     pub fn entries(&self) -> &[TranscriptEntry] {
@@ -294,7 +301,9 @@ impl TranscriptModel {
                     ToolStatus::Succeeded
                 },
                 );
+                let mut input = None;
                 if let Some(TranscriptEntry::Tool {
+                    input: current_input,
                     output: current_output,
                     detail: current_detail,
                     is_error: current_is_error,
@@ -303,8 +312,29 @@ impl TranscriptModel {
                     current_output.clone_from(output);
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
+                    input = current_input.clone();
+                }
+                if matches!(tool_name.as_str(), "shell" | "bash") {
+                    self.shell_jobs
+                        .apply_result(input.as_ref(), output.as_deref(), detail.as_ref());
                 }
             }
+            event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+                job_id,
+                run_id,
+                offset,
+                chunk,
+                status,
+                exit_code,
+                ..
+            }) => self.shell_jobs.apply_live(
+                job_id,
+                run_id.as_deref(),
+                *offset,
+                chunk,
+                status,
+                *exit_code,
+            ),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
                 tool_name,
                 call_id,

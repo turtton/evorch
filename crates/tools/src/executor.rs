@@ -139,6 +139,7 @@ impl ToolExecutor {
     /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`] を返す。
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
         let validator = schema::compile(tool.name(), &tool.schema())?;
+        tool.set_event_bus(Arc::clone(&self.event_bus));
         self.tools
             .insert(tool.name().to_owned(), RegisteredTool { tool, validator });
         Ok(())

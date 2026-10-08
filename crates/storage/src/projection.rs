@@ -176,6 +176,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         }
         EventKind::Tool(
             ToolEvent::UserQuestionUpdated { .. }
+            | ToolEvent::ShellJobOutput { .. }
             | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }
             | ToolEvent::ExecutionDenied { .. },

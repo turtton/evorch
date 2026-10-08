@@ -27,6 +27,7 @@ pub mod role_profiles;
 pub mod role_settings;
 pub mod routing_settings;
 pub mod self_improvement;
+pub mod shell_jobs;
 pub mod sidebar;
 pub mod tasks;
 pub mod team;

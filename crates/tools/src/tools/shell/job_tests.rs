@@ -570,3 +570,49 @@ async fn observed_completion_does_not_generate_a_notice() {
     assert_eq!(job(&start)["status"], "completed");
     assert!(shell.take_shell_job_notifications("owner").is_empty());
 }
+
+#[tokio::test]
+async fn live_output_events_stream_redacted_output_without_consuming_polls() {
+    let shell = shell();
+    let bus = Arc::new(event_bus::EventBus::new(256));
+    let mut events = bus.subscribe();
+    shell.set_event_bus(Arc::clone(&bus));
+    let start = invoke(
+        &shell,
+        "owner",
+        json!({"command":"printf 'one\\ntoken sk-test-evorch-9f8e7d6c5b4a3f2e1d\\n'; printf 'err\\n' >&2; exit 3", "yield_ms":0}),
+    )
+    .await;
+    let job_id = id(&start);
+    let mut log = String::new();
+    let (status, exit_code) = loop {
+        let event = events.recv().await.expect("bus event");
+        let event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+            job_id: event_job,
+            call_id,
+            run_id,
+            offset,
+            chunk,
+            status,
+            exit_code,
+        }) = event.kind
+        else {
+            continue;
+        };
+        assert_eq!(event_job, job_id);
+        assert_eq!(call_id.as_deref(), Some("call"));
+        assert_eq!(run_id.as_deref(), Some("owner"));
+        assert_eq!(offset, log.len() as u64, "chunks are contiguous");
+        log.push_str(&chunk);
+        if status != "running" {
+            break (status, exit_code);
+        }
+    };
+    assert_eq!((status.as_str(), exit_code), ("failed", Some(3)));
+    assert!(log.contains("one\n") && log.contains("err\n"));
+    assert!(!log.contains("sk-test-evorch-9f8e7d6c5b4a3f2e1d"));
+    // Observers do not move the agent's cursor or acknowledge completion.
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    let poll = invoke(&shell, "owner", json!({"action":"poll", "job_id":job_id})).await;
+    assert!(poll.content.contains("one\n"));
+}

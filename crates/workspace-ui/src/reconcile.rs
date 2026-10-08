@@ -125,6 +125,7 @@ fn retire_agents(workspace: &mut Workspace) {
                     | PanelKind::Arena
                     | PanelKind::Usage
                     | PanelKind::ContextInspector
+                    | PanelKind::ShellJobs
             )
         })
         .map(|panel| panel.id.clone())

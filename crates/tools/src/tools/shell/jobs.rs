@@ -2,9 +2,10 @@
 //! never replay a command. The runtime transfers its workspace mutation lease
 //! to a running job, then releases it only after the child has been reaped.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use event_bus::{Event, EventBus, ToolEvent};
 use sandbox::{Sandbox, WrappedCommand};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -25,6 +26,10 @@ const MAX_INPUT_BYTES: usize = 16 * 1024;
 pub(super) const MAX_YIELD_MS: u64 = 60_000;
 pub(super) const MAX_POLL_YIELD_MS: u64 = 30 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+// Live output events are display-only, so batching keeps the bus quiet
+// without affecting what polls observe.
+const OUTPUT_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const OUTPUT_EVENT_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +67,7 @@ pub(super) struct EscalatedInput {
 #[derive(Default)]
 pub(super) struct JobRegistry {
     jobs: Mutex<HashMap<String, Arc<Job>>>,
+    events: RwLock<Option<Arc<EventBus>>>,
 }
 
 impl Drop for JobRegistry {
@@ -116,6 +122,13 @@ struct Completion {
 }
 
 impl JobRegistry {
+    pub(super) fn set_event_bus(&self, bus: Arc<EventBus>) {
+        *self
+            .events
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bus);
+    }
+
     pub(super) async fn start(
         &self,
         ctx: &ToolExecutionContext,
@@ -198,6 +211,14 @@ impl JobRegistry {
                 error: Some(error.to_string()),
             }));
         });
+        let events = self
+            .events
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(bus) = events {
+            tokio::spawn(forward_output(Arc::clone(&job), bus));
+        }
         // Cancelling the starting tool before the handle is delivered must not
         // orphan its process. Later control calls do not own process lifetime.
         let mut launch = LaunchGuard {
@@ -482,6 +503,44 @@ fn validate_yield(ms: u64, action: &str) -> Result<(), ToolError> {
         Ok(())
     }
 }
+/// Publishes redacted live output until the job completes. Observers get their
+/// own copy; polls keep reading from their cursor and still own observation.
+async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
+    let mut changed = job.changed.subscribe();
+    let mut sent = 0;
+    loop {
+        loop {
+            let (offset, chunk, completion) = job.output_since(sent);
+            sent = offset + chunk.len() as u64;
+            // A finished job stops writing, so its last event is the one that
+            // reaches the end of its output.
+            let done = completion.is_some() && sent == job.output_end();
+            if chunk.is_empty() && !done {
+                break;
+            }
+            bus.emit(Event::new(ToolEvent::ShellJobOutput {
+                job_id: job.id.clone(),
+                call_id: job.call_id.clone(),
+                run_id: Some(job.owner.clone()),
+                offset,
+                chunk,
+                status: completion
+                    .as_ref()
+                    .map_or("running", |done| done.status)
+                    .to_owned(),
+                exit_code: completion.and_then(|done| done.exit_code),
+            }));
+            if done {
+                return;
+            }
+        }
+        if changed.changed().await.is_err() {
+            return;
+        }
+        tokio::time::sleep(OUTPUT_EVENT_INTERVAL).await;
+    }
+}
+
 struct LaunchGuard {
     job: Arc<Job>,
     delivered: bool,
@@ -583,6 +642,42 @@ impl Job {
         })
         .await;
     }
+    /// Retained output from `cursor` (or the oldest retained byte), bounded to
+    /// one event, with the completion observed under the same lock.
+    fn output_since(&self, cursor: u64) -> (u64, String, Option<Completion>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let output = &state.output;
+        let offset = cursor.max(output.offset);
+        let mut start = usize::try_from(offset - output.offset)
+            .unwrap_or(usize::MAX)
+            .min(output.text.len());
+        while !output.text.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut end = start
+            .saturating_add(OUTPUT_EVENT_BYTES)
+            .min(output.text.len());
+        while !output.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (
+            output.offset + start as u64,
+            output.text[start..end].to_owned(),
+            state.completion.clone(),
+        )
+    }
+
+    fn output_end(&self) -> u64 {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output.offset + state.output.text.len() as u64
+    }
+
     fn snapshot(&self, cursor: u64) -> ToolResult {
         let mut state = self
             .state
