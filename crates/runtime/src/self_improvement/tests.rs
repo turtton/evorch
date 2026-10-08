@@ -77,6 +77,7 @@ fn lesson() -> Lesson {
         task_id: "task-1".into(),
         content: "Check evidence before proposing changes".into(),
         evidence: "{\"finding\":\"verified observation\"}".into(),
+        scope: storage::memory::LessonScope::Harness,
     }
 }
 
@@ -260,6 +261,24 @@ fn guarded_evidence_is_warn_only_and_never_written_to_drafts() {
     }]);
     assert!(f.candidates().is_empty());
     assert!(f.draft_files().is_empty());
+}
+
+#[test]
+fn only_harness_scoped_lessons_become_candidates() {
+    let f = Fixture::new();
+    let scoped = |id: &str, scope| Lesson {
+        id: id.into(),
+        scope,
+        ..lesson()
+    };
+    f.collector().ingest_lessons(&[
+        scoped("project-1", storage::memory::LessonScope::Project),
+        scoped("user-1", storage::memory::LessonScope::User),
+        scoped("harness-1", storage::memory::LessonScope::Harness),
+    ]);
+    let rows = f.candidates();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dedup_key, "lesson:harness-1");
 }
 
 #[test]

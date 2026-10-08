@@ -61,12 +61,12 @@ fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageErr
                 return Err(invalid("candidate requires identity, content and evidence"));
             }
             let existing = transaction.query_row(
-                "SELECT id, project, task_id, content, evidence, status FROM memory_entries WHERE id = ?1",
+                "SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries WHERE id = ?1",
                 [&lesson.id],
                 entry_row,
-            ).optional()?;
-            if let Some((existing, _)) = existing {
-                return if existing == *lesson {
+            ).optional()?.map(decode).transpose()?;
+            if let Some(existing) = existing {
+                return if existing.lesson == *lesson {
                     Ok(())
                 } else {
                     Err(invalid("conflicting duplicate lesson"))
@@ -75,7 +75,7 @@ fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageErr
             (lesson.clone(), MemoryStatus::Candidate)
         }
         Mutation::Validate { id, .. } | Mutation::Promote(id) | Mutation::Reject(id) => {
-            let entry = transaction.query_row("SELECT id, project, task_id, content, evidence, status FROM memory_entries WHERE id = ?1", [id], entry_row).optional()?.map(decode).transpose()?.ok_or_else(|| invalid("lesson not found"))?;
+            let entry = transaction.query_row("SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries WHERE id = ?1", [id], entry_row).optional()?.map(decode).transpose()?.ok_or_else(|| invalid("lesson not found"))?;
             let status = match mutation {
                 Mutation::Validate { evidence, .. } => {
                     if entry.status != MemoryStatus::Candidate
@@ -114,9 +114,9 @@ fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageErr
             return Err(invalid("invalid transition"));
         }
     };
-    transaction.execute("INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status) VALUES(?1,?2,?3,?4,?5,?6)", params![lesson.id,lesson.project,lesson.task_id,lesson.content,lesson.evidence,status.as_str()])?;
+    transaction.execute("INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status,scope) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![lesson.id,lesson.project,lesson.task_id,lesson.content,lesson.evidence,status.as_str(),lesson.scope.as_str()])?;
     let seq = transaction.last_insert_rowid();
-    transaction.execute("INSERT INTO memory_entries(id,project,task_id,content,evidence,status,ledger_seq) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET status=excluded.status, ledger_seq=excluded.ledger_seq", params![lesson.id,lesson.project,lesson.task_id,lesson.content,lesson.evidence,status.as_str(),seq])?;
+    transaction.execute("INSERT INTO memory_entries(id,project,task_id,content,evidence,status,ledger_seq,scope) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET status=excluded.status, ledger_seq=excluded.ledger_seq", params![lesson.id,lesson.project,lesson.task_id,lesson.content,lesson.evidence,status.as_str(),seq,lesson.scope.as_str()])?;
     Ok(())
 }
 

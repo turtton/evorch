@@ -123,6 +123,7 @@ impl LoopState {
                     task_id: args.task_id,
                     content: args.content,
                     evidence: args.evidence,
+                    scope: storage::memory::LessonScope::Project,
                 };
                 tokio::task::spawn_blocking(move || writer.append_finding(&finding))
                     .await

@@ -20,6 +20,7 @@ fn memory_pane_search_and_filter_use_persisted_projection() {
             task_id: "t".into(),
             content: "Bound concurrency".into(),
             evidence: "test:bound".into(),
+            scope: storage::memory::LessonScope::Project,
         })
         .unwrap();
     let mut pane = MemoryPane::default();

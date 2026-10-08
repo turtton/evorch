@@ -36,6 +36,42 @@ impl MemoryStatus {
     }
 }
 
+/// Who a lesson is about, which decides where a promoted lesson is used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LessonScope {
+    /// Knowledge about the project the run worked in; injected into that project only.
+    #[default]
+    Project,
+    /// Feedback about evorch itself (tools, prompts, runtime); self-improvement intake only.
+    Harness,
+    /// The user's cross-project preferences and working style; injected into every project.
+    User,
+}
+
+impl LessonScope {
+    pub const ALL: [Self; 3] = [Self::Project, Self::Harness, Self::User];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Harness => "harness",
+            Self::User => "user",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "project" => Ok(Self::Project),
+            "harness" => Ok(Self::Harness),
+            "user" => Ok(Self::User),
+            _ => Err(StorageError::Serialization(format!(
+                "invalid lesson scope: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lesson {
     pub id: String,
@@ -43,6 +79,8 @@ pub struct Lesson {
     pub task_id: String,
     pub content: String,
     pub evidence: String,
+    #[serde(default)]
+    pub scope: LessonScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,19 +109,19 @@ pub(crate) fn append_finding(
         }
     }
     conn.execute(
-            "INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status,kind) VALUES(?1,?2,?3,?4,?5,'candidate','finding')",
-            params![finding.id, finding.project, finding.task_id, finding.content, finding.evidence],
+            "INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status,kind,scope) VALUES(?1,?2,?3,?4,?5,'candidate','finding',?6)",
+            params![finding.id, finding.project, finding.task_id, finding.content, finding.evidence, finding.scope.as_str()],
         )?;
     Ok(())
 }
 
 impl Database {
     pub fn findings(&self, project: &str) -> Result<Vec<Lesson>, StorageError> {
-        let mut statement = self.conn.prepare("SELECT entry_id,project,task_id,content,evidence,status FROM memory_ledger WHERE project=?1 AND kind='finding' ORDER BY seq")?;
-        Ok(statement
+        let mut statement = self.conn.prepare("SELECT entry_id,project,task_id,content,evidence,status,scope FROM memory_ledger WHERE project=?1 AND kind='finding' ORDER BY seq")?;
+        statement
             .query_map([project], entry_row)?
-            .map(|row| row.map(|(lesson, _)| lesson))
-            .collect::<Result<Vec<_>, _>>()?)
+            .map(|row| decode(row?).map(|entry| entry.lesson))
+            .collect()
     }
 
     pub fn search_memory(
@@ -93,7 +131,7 @@ impl Database {
         status: Option<MemoryStatus>,
     ) -> Result<Vec<MemoryEntry>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, project, task_id, content, evidence, status FROM memory_entries
+            "SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries
              WHERE project = ?1 AND (?2 IS NULL OR status = ?2)
              AND (?3 = '' OR rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?3))
              ORDER BY ledger_seq DESC LIMIT 100",
@@ -105,8 +143,22 @@ impl Database {
         rows.map(|row| decode(row?)).collect()
     }
 
+    /// Promoted lessons a task in `project` may see: that project's own project
+    /// lessons plus user lessons from any project. Harness lessons never enter
+    /// task prompts; they feed self-improvement intake instead.
+    pub fn boundary_memory(&self, project: &str) -> Result<Vec<MemoryEntry>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries
+             WHERE status = 'promoted'
+             AND ((project = ?1 AND scope = 'project') OR scope = 'user')
+             ORDER BY ledger_seq DESC LIMIT 100",
+        )?;
+        let rows = statement.query_map([project], entry_row)?;
+        rows.map(|row| decode(row?)).collect()
+    }
+
     pub fn memory_history(&self, id: &str) -> Result<Vec<MemoryEntry>, StorageError> {
-        let mut statement = self.conn.prepare("SELECT entry_id, project, task_id, content, evidence, status FROM memory_ledger WHERE entry_id = ?1 AND kind='lesson' ORDER BY seq")?;
+        let mut statement = self.conn.prepare("SELECT entry_id, project, task_id, content, evidence, status, scope FROM memory_ledger WHERE entry_id = ?1 AND kind='lesson' ORDER BY seq")?;
         statement
             .query_map([id], entry_row)?
             .map(|row| decode(row?))
@@ -114,7 +166,10 @@ impl Database {
     }
 }
 
-pub(crate) fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Lesson, String)> {
+/// Row of `id, project, task_id, content, evidence, status, scope` in that order.
+pub(crate) type EntryRow = (Lesson, String, String);
+
+pub(crate) fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
     Ok((
         Lesson {
             id: row.get(0)?,
@@ -122,12 +177,15 @@ pub(crate) fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Lesson, St
             task_id: row.get(2)?,
             content: row.get(3)?,
             evidence: row.get(4)?,
+            scope: LessonScope::Project,
         },
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
-pub(crate) fn decode((lesson, status): (Lesson, String)) -> Result<MemoryEntry, StorageError> {
+pub(crate) fn decode((mut lesson, status, scope): EntryRow) -> Result<MemoryEntry, StorageError> {
+    lesson.scope = LessonScope::parse(&scope)?;
     Ok(MemoryEntry {
         lesson,
         status: MemoryStatus::parse(&status)?,

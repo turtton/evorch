@@ -228,9 +228,9 @@ pub(super) fn inspect_learning_source(name: &str) -> ToolSpec {
 pub(super) fn stack_lesson_candidate(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Stage one durable lesson candidate for later independent review. Requires exact evidence reference strings already read with inspect_learning_source. content is 1-2000 UTF-8 bytes; evidence_refs contains 1-8 unique references. At most 8 candidates; identical repeats return the same candidate_id. Does not promote memory. The extractor must complete successfully before review starts.",
-        json!({"content":{"type":"string","minLength":1,"maxLength":2000},"evidence_refs":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}}}),
-        &["content", "evidence_refs"],
+        "Stage one durable lesson candidate for later independent review. Requires exact evidence reference strings already read with inspect_learning_source. content is 1-2000 UTF-8 bytes; evidence_refs contains 1-8 unique references. scope says who the lesson is about: project (this codebase, its conventions and domain; reused only in this project), user (the user's cross-project preferences and working style; reused in every project), or harness (evorch itself: its tools, prompts, runtime or UI behaved poorly or needed a workaround; never reused in task prompts, collected as a harness improvement candidate). At most 8 candidates; identical repeats return the same candidate_id. Does not promote memory. The extractor must complete successfully before review starts.",
+        json!({"content":{"type":"string","minLength":1,"maxLength":2000},"evidence_refs":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"scope":{"type":"string","enum":["project","user","harness"]}}),
+        &["content", "evidence_refs", "scope"],
         true,
     )
 }

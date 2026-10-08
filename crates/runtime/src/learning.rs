@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use storage::memory::LessonScope;
 
 use crate::{AgentRunPhase, AgentRuntime, RunConfig, RunId, RunPurpose};
 
@@ -23,6 +24,7 @@ pub struct LessonCandidate {
     pub id: String,
     pub content: String,
     pub evidence_refs: Vec<String>,
+    pub scope: LessonScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +101,7 @@ fn default_source_limit() -> usize {
 pub(crate) struct StackCandidateArgs {
     pub content: String,
     pub evidence_refs: Vec<String>,
+    pub scope: LessonScope,
 }
 
 #[derive(Deserialize)]
@@ -280,7 +283,9 @@ impl AgentRuntime {
             );
         }
         if let Some(existing) = entry.candidates.iter().find(|candidate| {
-            candidate.content == args.content && candidate.evidence_refs == args.evidence_refs
+            candidate.content == args.content
+                && candidate.evidence_refs == args.evidence_refs
+                && candidate.scope == args.scope
         }) {
             return Ok(json!({"candidate_id":existing.id,"status":"staged"}));
         }
@@ -292,6 +297,7 @@ impl AgentRuntime {
             id: id.clone(),
             content: args.content,
             evidence_refs: args.evidence_refs,
+            scope: args.scope,
         });
         Ok(json!({"candidate_id":id,"status":"staged"}))
     }

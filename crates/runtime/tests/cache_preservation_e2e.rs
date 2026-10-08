@@ -749,6 +749,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
         task_id: "another-task".into(),
         content: "Newly captured memory must not become resume input".into(),
         evidence: "resume contract fixture".into(),
+        scope: storage::memory::LessonScope::Project,
     };
     storage.handle().append_lesson(&lesson).unwrap();
     storage

@@ -15,6 +15,7 @@ fn findings_are_append_only_and_do_not_become_lessons() {
         task_id: "t".into(),
         content: "observed".into(),
         evidence: "test:x".into(),
+        scope: storage::memory::LessonScope::Project,
     };
     writer.handle().append_finding(&finding).unwrap();
     writer.handle().append_finding(&finding).unwrap();
@@ -50,6 +51,7 @@ fn finding_is_rejected_when_writer_is_suspended() {
         task_id: "t".into(),
         content: "observed".into(),
         evidence: "test:x".into(),
+        scope: storage::memory::LessonScope::Project,
     };
     // When / Then: findings obey the same suspension as lessons.
     assert!(writer.handle().append_finding(&finding).is_err());

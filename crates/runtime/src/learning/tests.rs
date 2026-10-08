@@ -293,6 +293,7 @@ async fn typed_review_requires_independent_evidence_and_is_idempotent() {
     let args = || StackCandidateArgs {
         content: "Always verify child tool outcomes".into(),
         evidence_refs: vec!["run-2@42:m1:b0".into()],
+        scope: LessonScope::Project,
     };
     assert!(
         fixture
@@ -325,7 +326,8 @@ async fn typed_review_requires_independent_evidence_and_is_idempotent() {
                 &config,
                 StackCandidateArgs {
                     content: "fabricated".into(),
-                    evidence_refs: vec!["run-4@42:m1:b0".into()]
+                    evidence_refs: vec!["run-4@42:m1:b0".into()],
+                    scope: LessonScope::Project,
                 }
             )
             .is_err()

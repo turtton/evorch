@@ -1,7 +1,7 @@
-use storage::memory::{MemoryEntry, MemoryStatus};
+use storage::memory::MemoryEntry;
 use storage::{Database, StorageConfig, StorageError};
 
-/// Promoted lessons captured once at the start of a task.
+/// Promoted project and user lessons captured once at the start of a task.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemoryBoundary {
     entries: Vec<MemoryEntry>,
@@ -11,7 +11,7 @@ impl MemoryBoundary {
     pub fn capture(config: &StorageConfig, project: &str) -> Result<Self, StorageError> {
         let db = Database::open(config)?;
         Ok(Self {
-            entries: db.search_memory(project, "", Some(MemoryStatus::Promoted))?,
+            entries: db.boundary_memory(project)?,
         })
     }
 

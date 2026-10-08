@@ -181,6 +181,7 @@ async fn unfinished_response_resumes_without_ledger_memory_or_new_review_evidenc
                 task_id: "task".into(),
                 content: "a newer memory lesson".into(),
                 evidence: "test".into(),
+                scope: storage::memory::LessonScope::Project,
             })
             .unwrap();
         fixture

@@ -187,13 +187,17 @@ impl ImprovementCollector {
         );
     }
 
-    /// Only already-promoted lessons enter this passive intake. Their evidence stays text.
+    /// Only already-promoted harness-scoped lessons enter this passive intake; project
+    /// and user lessons are task memory, not harness feedback. Their evidence stays text.
     /// Failure never changes the learning pipeline's outcome.
     pub fn ingest_lessons(&self, lessons: &[storage::memory::Lesson]) {
         if !self.settings.policy.collect_lessons {
             return;
         }
-        for lesson in lessons {
+        for lesson in lessons
+            .iter()
+            .filter(|lesson| lesson.scope == storage::memory::LessonScope::Harness)
+        {
             self.intake(
                 "lesson",
                 NewImprovementCandidate {
