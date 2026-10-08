@@ -13,6 +13,8 @@ pub use ownership::{OwnershipAction, OwnershipEvent};
 pub mod otel;
 pub mod ring;
 pub mod thread_goal;
+pub mod thread_todo;
+pub use thread_todo::{ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus};
 pub mod usage;
 pub use thread_goal::{ThreadGoalCheck, ThreadGoalPhase, ThreadGoalSnapshot, ThreadGoalUsage};
 

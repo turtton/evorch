@@ -122,6 +122,8 @@ pub(crate) struct LoopState {
     pub(crate) completed_turn_end: Option<usize>,
     pending_user_messages: Vec<crate::runtime::user_inbox::UserInput>,
     pub(crate) goal_wake_pending: bool,
+    pub(crate) todo_context_pending: bool,
+    pub(crate) todo_context_deferred: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -145,9 +147,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let Some(runtime) = crate::AgentRuntime::from_weak(&shared) else {
         return;
     };
-    let policy = runtime
+    let mut policy = runtime
         .execution_policy(task.role)
         .for_run_config(&task.config, task.parent.is_none());
+    // Trusted host binding is checked once for the fixed tool set, and again
+    // on every dispatch in case this conversation hands off its ownership.
+    if runtime.goal_thread(task.run_id).is_none() {
+        policy.capabilities.allowed_tools.remove("todo_write");
+    }
     drop(runtime);
     // A sandboxed runtime mounts the run's own project instead of the active one.
     let sandbox_root = shared.upgrade().and_then(|runtime| {
@@ -177,6 +184,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let restored = task.restored.take();
     let is_restored = restored.is_some();
     let history_only = task.start == RunStart::Resume;
+    // An interrupted provider request retries its exact saved input. Restore
+    // procedure context only after that response, or a new compaction boundary.
+    // A pending handoff seed has never reached its provider and needs it now.
+    let todo_context_deferred = history_only
+        && task.handoff.is_none()
+        && restored.as_ref().is_some_and(|state| !state.turn_completed);
     let completed_turn_end = restored.as_ref().and_then(|restored| {
         (history_only && restored.turn_completed).then_some(restored.messages.len())
     });
@@ -259,6 +272,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         completed_turn_end,
         pending_user_messages: Vec::new(),
         goal_wake_pending: false,
+        todo_context_pending: true,
+        todo_context_deferred,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -947,6 +962,7 @@ impl LoopState {
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
             }
             let (window, _) = self.resolved_context_window();
+            self.append_todo_context();
             let mut visible_messages = self.context.visible_messages();
             let mut estimated = self.estimated_context_tokens(&visible_messages);
             // A cooldown or the post-compaction latch must not terminate a run
@@ -960,6 +976,7 @@ impl LoopState {
                 }
                 match compaction::compact_now(self, CompactionReason::Automatic).await {
                     Ok(_) => {
+                        self.append_todo_context();
                         visible_messages = self.context.visible_messages();
                         let after = self.estimated_context_tokens(&visible_messages);
                         if after >= estimated {
@@ -1027,6 +1044,7 @@ impl LoopState {
                     return;
                 }
             };
+            self.todo_context_deferred = false;
             if let Some(session) = &mut self.rules_session {
                 session.set_last_usage(response.usage);
             }

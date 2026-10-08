@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 #[derive(Clone)]
 enum Step {
     Create,
+    Todo(bool),
     Escalate,
     Stop,
     Finish,
@@ -62,6 +63,10 @@ impl AgentModel for Model {
             Step::Escalate => Some((
                 "escalate",
                 json!({"original_request":"Compare the requested options", "escalation_reason":"Need coordinated verification"}),
+            )),
+            Step::Todo(clear) => Some((
+                "todo_write",
+                json!({"items":if clear {json!([])} else {json!([{"content":"Report","status":"completed"}])}}),
             )),
             Step::Create => Some((
                 "create_goal",
@@ -189,6 +194,7 @@ fn start(runtime: &AgentRuntime, role: Role, keep_alive: bool) -> RunId {
         role,
         "Compare the requested options",
         RunConfig {
+            conversation: true,
             interactive: keep_alive,
             keep_alive,
             ..Default::default()
@@ -1291,4 +1297,63 @@ async fn escalation_without_a_goal_retains_the_trusted_request_for_later_goal_cr
         .unwrap();
     release.notify_one();
     assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Done);
+}
+
+#[tokio::test]
+async fn procedure_bookkeeping_preserves_submitted_goal_evidence() {
+    let (runtime, model, _) = harness(
+        vec![
+            Step::Create,
+            Step::Stop,
+            Step::Check(true),
+            Step::Todo(false),
+            Step::Todo(true),
+            Step::Stop,
+        ],
+        vec![],
+    );
+    let root = start(&runtime, Role::Worker, false);
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+    let goal = runtime.thread_goal("thread").unwrap();
+    assert_eq!(goal.phase, ThreadGoalPhase::Complete);
+    assert_eq!(goal.checks.len(), 1);
+    assert_eq!(model.requests.lock().unwrap().len(), 6);
+    assert!(runtime.thread_todo("thread").unwrap().items.is_empty());
+}
+
+#[tokio::test]
+async fn completing_a_procedure_does_not_complete_a_goal_with_paused_checks() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (runtime, _, mut events) = harness(
+        vec![
+            Step::Create,
+            Step::Hold(entered.clone(), release.clone()),
+            Step::Todo(false),
+            Step::Stop,
+        ],
+        vec![],
+    );
+    let root = start(&runtime, Role::Worker, true);
+    entered.notified().await;
+    let goal = runtime.thread_goal("thread").unwrap();
+    runtime
+        .set_goal_checks_paused("thread", &goal.goal_id, true)
+        .unwrap();
+    release.notify_one();
+    phase(&mut events, root, AgentRunPhase::Waiting).await;
+    runtime
+        .send_message(root, "Update procedure".into())
+        .unwrap();
+    phase(&mut events, root, AgentRunPhase::Waiting).await;
+    assert_eq!(
+        runtime.thread_todo("thread").unwrap().items[0].status,
+        event_bus::ThreadTodoStatus::Completed
+    );
+    let goal = runtime.thread_goal("thread").unwrap();
+    assert_ne!(goal.phase, ThreadGoalPhase::Complete);
+    assert!(goal.checks.is_empty());
+    assert!(goal.checks_paused);
+    runtime.stop(root, StopScope::SelfOnly).unwrap();
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Stopped);
 }

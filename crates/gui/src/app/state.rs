@@ -120,6 +120,7 @@ pub struct WorkbenchState<S> {
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
+    pub(super) thread_todos: BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
     /// Project trust last declared to the sink, so only changes are re-sent.
     pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
@@ -242,6 +243,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             },
             loop_status: LoopStatusView::default(),
             thread_goals: BTreeMap::new(),
+            thread_todos: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
             declared_trust: std::collections::BTreeMap::new(),
             issued: Vec::new(),

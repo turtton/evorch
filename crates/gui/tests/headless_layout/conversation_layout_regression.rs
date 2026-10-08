@@ -22,6 +22,7 @@ fn narrow_conversation_keeps_message_input_and_send_inside_its_width() {
                         &model,
                         None,
                         gui::panes::agent::ConversationContext {
+                            todo: None,
                             goal: None,
                             requests: None,
                             task_rows: &[],
@@ -314,6 +315,7 @@ fn multiline_composer_grows_upward_and_shrinks_without_covering_the_transcript()
                     &model,
                     None,
                     gui::panes::agent::ConversationContext {
+                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],

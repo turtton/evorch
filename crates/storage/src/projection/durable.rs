@@ -90,6 +90,7 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
             }
             EventKind::Orchestrator(
                 OrchestratorEvent::ThreadGoalUpdated { .. }
+                | OrchestratorEvent::ThreadTodoUpdated { .. }
                 | OrchestratorEvent::TaskCheckpoint { .. }
                 | OrchestratorEvent::TaskStaleMarked { .. }
                 | OrchestratorEvent::GoalCreated { .. }

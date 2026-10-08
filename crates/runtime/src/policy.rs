@@ -41,6 +41,12 @@ impl ExecutionPolicy {
                     );
                 }
                 if config.conversation
+                    && is_root
+                    && matches!(self.role_name.as_str(), "Worker" | "Orchestrator")
+                {
+                    self.capabilities.allowed_tools.insert("todo_write".into());
+                }
+                if config.conversation
                     && config.category.as_deref() == Some(CategoryId::Conversation.as_str())
                     && is_root
                     && self.role_name == Role::Worker.name()
@@ -163,6 +169,7 @@ mod tests {
             [
                 "web_search",
                 "web_fetch",
+                "todo_write",
                 "create_goal",
                 "get_goal",
                 "submit_goal_check",
@@ -227,6 +234,12 @@ mod tests {
                     .allowed_tools
                     .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
             }
+            if config.conversation && is_root {
+                expected
+                    .capabilities
+                    .allowed_tools
+                    .insert("todo_write".into());
+            }
             assert_eq!(policy, expected);
             for tool in ["web_search", "web_fetch"] {
                 assert!(matches!(
@@ -258,6 +271,12 @@ mod tests {
                 .capabilities
                 .allowed_tools
                 .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
+            if role == Role::Orchestrator {
+                expected
+                    .capabilities
+                    .allowed_tools
+                    .insert("todo_write".into());
+            }
             assert_eq!(policy, expected);
             // Orchestrator already allows fetch and WebResearcher already allows both.
             for tool in ["web_search", "web_fetch"] {

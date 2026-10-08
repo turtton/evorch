@@ -447,6 +447,41 @@ fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::Agent
     }
 }
 
+/// Restore procedures for current sidebar conversations without binding old run authority.
+fn restore_thread_todos(
+    storage_config: &StorageConfig,
+    runtime: &runtime::AgentRuntime,
+    sidebar: &workspace_ui::SidebarState,
+) {
+    let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
+    match result {
+        Ok(events) => {
+            let mut latest = std::collections::BTreeMap::new();
+            for stored in events {
+                if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadTodoUpdated {
+                    snapshot,
+                }) = stored.event.kind
+                {
+                    gui::model::thread_todos::apply_snapshot(&mut latest, &snapshot);
+                }
+            }
+            for snapshot in latest.into_values() {
+                if sidebar.threads.iter().any(|thread| {
+                    thread.id.to_string() == snapshot.thread_id
+                        && sidebar
+                            .projects
+                            .iter()
+                            .any(|project| project.id == thread.project_id)
+                }) && let Err(error) = runtime.restore_thread_todo(snapshot)
+                {
+                    tracing::warn!(%error, "failed to restore thread procedures");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "failed to read thread procedures"),
+    }
+}
+
 /// 前セッションの PR goal 状態を永続化イベントから復元し、supervisor へ移管する。
 ///
 /// `Database::events_all_ordered()` → `GoalLedger::replay_partial` で goal ごとの
@@ -993,6 +1028,7 @@ fn run() -> Result<(), GuiError> {
     )?;
     restore_goals(&storage_config, &supervisor);
     restore_thread_goals(&storage_config, &runtime);
+    restore_thread_todos(&storage_config, &runtime, &sidebar);
 
     let home = std::env::home_dir()
         .ok_or_else(|| GuiError::Arguments("No home directory for terminal cwd".into()))?;

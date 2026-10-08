@@ -239,6 +239,10 @@ pub(crate) async fn compact_now(
     };
 
     state.context.apply_checkpoint(checkpoint);
+    // A compact tool may still have an outstanding ToolUse. Append the latest
+    // procedure only at the next complete request boundary, after all results.
+    state.todo_context_pending = true;
+    state.todo_context_deferred = false;
     // Provider usage describes the pre-compaction input and cannot be reused.
     state.last_usage = None;
     state.compaction.last_usage_estimated_tokens = None;
