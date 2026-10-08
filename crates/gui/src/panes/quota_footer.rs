@@ -26,7 +26,7 @@ fn subscriptions_footer<T: QuotaData>(
     ui: &mut egui::Ui,
     service: &str,
     state: &QuotaState<T>,
-    render_quota: fn(&mut egui::Ui, &QuotaState<T>, View),
+    render_quota: impl Fn(&mut egui::Ui, &QuotaState<T>, View),
     summary: fn(&QuotaState<T>) -> String,
 ) {
     let selection_id = ui.id().with(("selected_quota_profile", service));
@@ -314,4 +314,87 @@ fn show_details(ui: &mut egui::Ui, details: &[String]) {
     for detail in details {
         ui.label(detail);
     }
+}
+
+pub fn subscription_quota_footer(
+    ui: &mut egui::Ui,
+    service: &str,
+    state: &QuotaState<crate::model::subscription_quota::SubscriptionQuotaSnapshot>,
+) {
+    // Each service has an independent profile picker and worker tree.
+    subscriptions_footer(
+        ui,
+        service,
+        state,
+        |ui, state, view| render_subscription(ui, service, state, view),
+        subscription_summary,
+    );
+}
+fn subscription_summary(
+    state: &QuotaState<crate::model::subscription_quota::SubscriptionQuotaSnapshot>,
+) -> String {
+    let Some(snapshot) = &state.snapshot else {
+        return status(state);
+    };
+    summary_with_stale(
+        snapshot
+            .windows
+            .iter()
+            .map(|window| {
+                window.remaining_percent.map_or_else(
+                    || format!("{} unknown", window.label),
+                    |p| format!("{p:.0}% {}", window.label),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
+        snapshot.stale,
+    )
+}
+fn render_subscription(
+    ui: &mut egui::Ui,
+    service: &str,
+    state: &QuotaState<crate::model::subscription_quota::SubscriptionQuotaSnapshot>,
+    view: View,
+) {
+    let Some(snapshot) = &state.snapshot else {
+        unavailable(ui, service, state, view);
+        return;
+    };
+    let mut details = vec![format!("{service} · remaining quota")];
+    let mut segments = Vec::new();
+    for window in &snapshot.windows {
+        match (window.remaining_percent, window.used_percent) {
+            (Some(remaining), Some(used)) => {
+                details.push(format!(
+                    "{}: {remaining:.1}% remaining · {used:.1}% used · resets {}",
+                    window.label, window.resets_at
+                ));
+                segments.push((window.label.clone(), remaining));
+            }
+            _ => details.push(format!(
+                "{}: quota percentage unavailable · resets {}",
+                window.label, window.resets_at
+            )),
+        }
+        if let Some(usage) = &window.usage {
+            details.push(usage.clone());
+        }
+    }
+    if view == View::Details {
+        show_expanded(ui, details, snapshot.stale, &state.error);
+        return;
+    }
+    if segments.is_empty() {
+        ui.label(muted(format!("{service} · percentage unavailable")))
+            .on_hover_ui(|ui| show_details(ui, &details));
+    }
+    render(
+        ui,
+        (view == View::Footer && !segments.is_empty()).then_some(service),
+        &segments,
+        snapshot.stale,
+        &state.error,
+        details,
+    );
 }

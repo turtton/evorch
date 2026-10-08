@@ -173,8 +173,13 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
                 ui.label(muted("Loading models…"));
             }
             ModelsFetchState::Loaded => {
+                let catalog = match editor.provider_type {
+                    config::ProviderTypeConfig::AnthropicSubscription => "Claude",
+                    config::ProviderTypeConfig::Cursor => "Cursor",
+                    _ => "/v1/models",
+                };
                 ui.label(muted(format!(
-                    "Loaded {} models from /v1/models",
+                    "Loaded {} models from {catalog}",
                     editor.available_models.as_ref().map_or(0, Vec::len)
                 )));
             }

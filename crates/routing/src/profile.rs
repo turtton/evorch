@@ -48,6 +48,7 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
         }
 
         let provider_type = match config.provider_type {
+            config::ProviderTypeConfig::Cursor => model::ProviderType::Cursor,
             config::ProviderTypeConfig::Anthropic => model::ProviderType::Anthropic,
             config::ProviderTypeConfig::AnthropicSubscription => {
                 model::ProviderType::AnthropicSubscription
@@ -60,6 +61,7 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
             config::ProviderTypeConfig::KimiSubscription => model::ProviderType::KimiSubscription,
         };
         let api_protocol = match config.api_protocol {
+            config::ApiProtocolConfig::CursorAgent => model::ApiProtocol::CursorAgent,
             config::ApiProtocolConfig::AnthropicMessages => model::ApiProtocol::AnthropicMessages,
             config::ApiProtocolConfig::OpenAiResponses => model::ApiProtocol::OpenAiResponses,
             config::ApiProtocolConfig::OpenAiCompletions => model::ApiProtocol::OpenAiCompletions,

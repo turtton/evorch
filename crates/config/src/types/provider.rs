@@ -31,6 +31,8 @@ pub enum ProviderTypeConfig {
     OpenAiCompatible,
     /// Kimi サブスクリプション (Kimi For Coding)。
     KimiSubscription,
+    /// Cursor subscription through the native agent protocol.
+    Cursor,
 }
 
 impl ProviderTypeConfig {
@@ -45,6 +47,7 @@ impl ProviderTypeConfig {
             Self::Openrouter => "openrouter",
             Self::OpenAiCompatible => "openai-compatible",
             Self::KimiSubscription => "kimi-subscription",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -55,6 +58,7 @@ impl ProviderTypeConfig {
         match self {
             Self::KimiSubscription => &["kimi-code-plan-global", "kimi-code-plan-cn"],
             Self::OpenAi | Self::OpenAiCodex => &["openai"],
+            Self::Cursor => &["cursor"],
             Self::Anthropic
             | Self::AnthropicSubscription
             | Self::GithubCopilot
@@ -84,6 +88,8 @@ pub enum ApiProtocolConfig {
     /// OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。
     #[serde(rename = "openai-codex-responses")]
     OpenAiCodexResponses,
+    /// Cursor Connect agent protocol.
+    CursorAgent,
 }
 
 /// 認証情報の参照方法。
@@ -511,11 +517,13 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             ProviderTypeConfig::OpenAiCompatible | ProviderTypeConfig::KimiSubscription => {
                 ApiProtocolConfig::OpenAiCompletions
             }
+            ProviderTypeConfig::Cursor => ApiProtocolConfig::CursorAgent,
             _ => ApiProtocolConfig::default(),
         });
         let (default_models, default_model): (&[&str], &str) = match value.provider_type {
             ProviderTypeConfig::OpenAiCodex => (CODEX_DEFAULT_MODELS, CODEX_DEFAULT_MODEL),
             ProviderTypeConfig::KimiSubscription => (KIMI_DEFAULT_MODELS, KIMI_DEFAULT_MODEL),
+            ProviderTypeConfig::Cursor => (CURSOR_DEFAULT_MODELS, CURSOR_DEFAULT_MODEL),
             ProviderTypeConfig::Anthropic
             | ProviderTypeConfig::AnthropicSubscription
             | ProviderTypeConfig::OpenAi
@@ -539,6 +547,7 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
         };
         let base_url = value.base_url.unwrap_or_else(|| match value.provider_type {
             ProviderTypeConfig::KimiSubscription => KIMI_DEFAULT_BASE_URL.to_owned(),
+            ProviderTypeConfig::Cursor => CURSOR_DEFAULT_BASE_URL.to_owned(),
             _ => "https://api.anthropic.com".to_owned(),
         });
         Ok(Self {
@@ -590,6 +599,15 @@ fn add_sugar_properties(schema: &mut schemars::Schema) {
         }),
     );
 }
+
+/// Native Cursor defaults; authenticated discovery can supply additional models.
+pub const CURSOR_DEFAULT_BASE_URL: &str = "https://api2.cursor.sh";
+pub const CURSOR_DEFAULT_MODEL: &str = "default";
+pub const CURSOR_DEFAULT_MODELS: &[&str] = &[CURSOR_DEFAULT_MODEL];
+pub const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
+pub const CLAUDE_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const CLAUDE_DEFAULT_MODELS: &[&str] =
+    &["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"];
 
 #[cfg(test)]
 mod tests {

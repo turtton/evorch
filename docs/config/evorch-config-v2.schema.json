@@ -321,6 +321,11 @@
           "description": "OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。",
           "type": "string",
           "const": "openai-codex-responses"
+        },
+        {
+          "description": "Cursor Connect agent protocol.",
+          "type": "string",
+          "const": "cursor-agent"
         }
       ]
     },
@@ -1079,6 +1084,11 @@
           "description": "Kimi サブスクリプション (Kimi For Coding)。",
           "type": "string",
           "const": "kimi-subscription"
+        },
+        {
+          "description": "Cursor subscription through the native agent protocol.",
+          "type": "string",
+          "const": "cursor"
         }
       ]
     },

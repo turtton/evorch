@@ -6,3 +6,6 @@ pub mod openai;
 pub mod openai_compatible;
 
 pub mod kimi_quota;
+
+pub mod claude;
+pub mod cursor;

@@ -33,3 +33,6 @@ pub mod transcript_registry;
 pub mod usage_stats;
 
 pub mod kimi_quota;
+
+pub mod subscription_provider;
+pub mod subscription_quota;

@@ -189,7 +189,8 @@ impl StreamingMockOpenAi {
                     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
                     let request = read_request(&mut stream)?;
                     let streaming = request.stream;
-                    let listing_models = request.method == "GET" && request.path == "/v1/models";
+                    let listing_models = request.method == "GET"
+                        && request.path.split('?').next() == Some("/v1/models");
                     let prompt = (prompt_cache.is_some()
                         && request.method == "POST"
                         && request.path == "/v1/chat/completions")

@@ -6,12 +6,15 @@ CACHE_CONTRACT_FILTER='
   package(=mock-openai)
   | (package(=providers) & (
       (kind(lib) & test(observe::cache))
+      | (kind(lib) & test(provider::cursor::tests))
       | binary(=cache_prefix_contract)
       | binary(=cache_regression_contract)
       | binary(=codex_cache_regression)
+      | binary(=claude_contract)
       | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)
+      | binary(=claude_cache_e2e)
       | binary(=benchmark_wire)
       | binary(=structured_escalation)
       | binary(=tool_output_history)

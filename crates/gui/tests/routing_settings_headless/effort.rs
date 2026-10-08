@@ -56,3 +56,49 @@ fn candidate_reasoning_effort_offers_model_levels_and_saves() {
         Some("high")
     );
 }
+
+#[test]
+fn native_candidate_hides_and_clears_unsupported_generic_effort() {
+    for kind in ["anthropic", "anthropic-subscription", "cursor"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, _) = fixture(temp.path());
+        let path = config::project_main_config_path(temp.path());
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{text}
+[providers.target]
+type = "{kind}"
+models = [{{id = "selected-model", enabled = true, effort_levels = ["high"]}}]
+default_model = "selected-model"
+[routing.routes]
+worker = [{{profile = "local", model = "fast", reasoning_effort = "high"}}]
+"#
+            ),
+        )
+        .unwrap();
+        state.open_routing_settings();
+        state
+            .routing_settings_mut()
+            .expanded
+            .insert("worker".into());
+        let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+        harness.run();
+        harness.click_label("worker candidate 1 profile");
+        harness.run();
+        harness.click_label("target");
+        harness.run();
+        assert!(
+            !harness.has_label("worker candidate 1 reasoning effort"),
+            "{kind}"
+        );
+        let routing = harness
+            .state()
+            .routing_settings()
+            .validated_routing()
+            .unwrap();
+        assert_eq!(routing.routes["worker"][0].profile, "target");
+        assert_eq!(routing.routes["worker"][0].reasoning_effort, None, "{kind}");
+    }
+}

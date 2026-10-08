@@ -30,6 +30,15 @@ pub(super) fn freeze(
         ));
     }
     match settings.protocol {
+        model::ApiProtocol::CursorAgent
+            if settings.generation.temperature.is_some()
+                || settings.generation.max_tokens.is_some()
+                || settings.service_tier.is_some() =>
+        {
+            return Err(unsupported(
+                "Cursor agent wire does not preserve temperature, max_tokens or service_tier",
+            ));
+        }
         model::ApiProtocol::OpenAiCodexResponses
             if settings.generation.temperature.is_some()
                 || settings.generation.max_tokens.is_some() =>

@@ -14,6 +14,9 @@ pub enum ProviderSettingsAction {
     Save,
     Cancel,
     StartCodexLogin,
+    StartSubscriptionLogin,
+    CompleteSubscriptionLogin,
+    CancelSubscriptionLogin,
     RefreshModels,
     Delete(String),
 }
@@ -49,6 +52,18 @@ pub fn provider_settings_modal(
                             action = openai_body(ui, editor, &sources);
                         });
                 }
+                Some(ProfileEditor::Subscription(editor)) => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("subscription-editor")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .show(ui, |ui| {
+                            action = super::subscription_provider::subscription_body(
+                                ui, editor, &sources,
+                            );
+                        });
+                }
                 Some(ProfileEditor::Codex(editor)) => {
                     egui::ScrollArea::vertical()
                         .id_salt("codex-editor")
@@ -71,9 +86,10 @@ pub fn provider_settings_modal(
                                         "OpenAI-compatible"
                                     }
                                     config::ProviderTypeConfig::OpenAiCodex => "Codex subscription",
-                                    config::ProviderTypeConfig::Anthropic => "Anthropic",
+                                    config::ProviderTypeConfig::Anthropic => "Claude API",
+                                    config::ProviderTypeConfig::Cursor => "Cursor",
                                     config::ProviderTypeConfig::AnthropicSubscription => {
-                                        "Anthropic subscription"
+                                        "Claude subscription"
                                     }
                                     config::ProviderTypeConfig::OpenAi => "OpenAI",
                                     config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
@@ -120,6 +136,15 @@ pub fn provider_settings_modal(
                     if ui.button("+ Add Codex subscription").clicked() {
                         model.add(ProviderKind::CodexSubscription);
                     }
+                    if ui.button("+ Add Claude API").clicked() {
+                        model.add(ProviderKind::ClaudeApi);
+                    }
+                    if ui.button("+ Add Claude subscription").clicked() {
+                        model.add(ProviderKind::ClaudeSubscription);
+                    }
+                    if ui.button("+ Add Cursor").clicked() {
+                        model.add(ProviderKind::Cursor);
+                    }
                     if ui.button("+ Add Kimi subscription").clicked() {
                         model.add(ProviderKind::KimiSubscription);
                     }
@@ -129,8 +154,11 @@ pub fn provider_settings_modal(
                 ui.label(egui::RichText::new(error).color(palette().ERROR_FG));
             }
             ui.horizontal(|ui| {
-                if model.editor.is_some() && primary_button(ui, "Save").clicked() {
-                    action = Some(ProviderSettingsAction::Save);
+                if model.editor.is_some() {
+                    let busy = matches!(&model.editor, Some(ProfileEditor::Subscription(editor)) if editor.busy());
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if primary_button(ui, "Save").clicked() { action = Some(ProviderSettingsAction::Save); }
+                    });
                 }
                 if ui.button("Close").clicked() {
                     action = Some(ProviderSettingsAction::Cancel);
@@ -200,6 +228,9 @@ fn openai_body(
             )
             .labelled_by(label.id);
         }
+    }
+    if model.provider_type == config::ProviderTypeConfig::Anthropic {
+        ui.label(muted("API-key subscription quota is unavailable; API rate limits are separate from Claude subscription usage."));
     }
     if super::provider_models::provider_models(ui, model, sources) {
         action = Some(ProviderSettingsAction::RefreshModels);

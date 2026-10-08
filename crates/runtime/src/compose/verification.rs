@@ -15,6 +15,17 @@ impl RoutedModel {
                 let mut profiles = BTreeMap::new();
                 let mut codex_version: Option<providers::CodexCatalogVersion> = None;
                 for (name, provider) in &self.providers {
+                    match provider.client.list_models(&provider.auth).await {
+                        Ok(Some(models)) => {
+                            profiles.insert(name.clone(), Ok(models));
+                            continue;
+                        }
+                        Err(error) => {
+                            profiles.insert(name.clone(), Err(error));
+                            continue;
+                        }
+                        Ok(None) => {}
+                    }
                     let (auth, account) = match self.verification_auth(provider) {
                         Ok(auth) => auth,
                         Err(error) => {
@@ -186,6 +197,7 @@ impl RoutedModel {
             model::ProviderType::OpenAiCodex => {}
             model::ProviderType::OpenAiCompatible
             | model::ProviderType::KimiSubscription
+            | model::ProviderType::Cursor
             | model::ProviderType::Anthropic
             | model::ProviderType::AnthropicSubscription
             | model::ProviderType::OpenAi

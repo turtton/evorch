@@ -142,7 +142,12 @@ fn resolve_auth(
             Ok(ProviderAuth::new(value))
         }
         CredentialRef::Keyring { .. }
-            if profile.provider_type == model::ProviderType::OpenAiCodex =>
+            if matches!(
+                profile.provider_type,
+                model::ProviderType::OpenAiCodex
+                    | model::ProviderType::AnthropicSubscription
+                    | model::ProviderType::Cursor
+            ) =>
         {
             Ok(ProviderAuth::new(""))
         }

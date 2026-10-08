@@ -103,6 +103,7 @@ impl TelemetryRow {
 pub struct TelemetryOverlay {
     pub quota: quota::QuotaState,
     pub kimi_quota: super::kimi_quota::KimiQuotaState,
+    pub subscription_quota: super::subscription_quota::SubscriptionQuotaState,
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
     costs: BTreeMap<String, f64>,

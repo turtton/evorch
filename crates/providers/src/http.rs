@@ -35,13 +35,29 @@ const READ_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) fn build_http_client(
     timeout: Option<Duration>,
 ) -> Result<reqwest::Client, ProviderError> {
+    http_client_builder(timeout)
+        .build()
+        .map_err(map_request_error)
+}
+
+/// Prevent API-key headers from being forwarded to redirect destinations.
+pub(crate) fn build_http_client_without_redirects(
+    timeout: Option<Duration>,
+) -> Result<reqwest::Client, ProviderError> {
+    http_client_builder(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(map_request_error)
+}
+
+fn http_client_builder(timeout: Option<Duration>) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT);
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
-    builder.build().map_err(map_request_error)
+    builder
 }
 
 /// エラーレスポンスを [`ProviderError`] へ変換する。

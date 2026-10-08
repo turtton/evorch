@@ -17,6 +17,7 @@ pub struct RoutingSettingsModel {
     pub expanded: BTreeSet<String>,
     pub profile_names: Vec<String>,
     pub profile_defaults: BTreeMap<String, String>,
+    pub profile_types: BTreeMap<String, config::ProviderTypeConfig>,
     pub profile_models: BTreeMap<String, Vec<String>>,
     /// Configured effort levels by profile, then model ID.
     pub profile_effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
@@ -31,9 +32,20 @@ pub struct RoutingSettingsModel {
 /// 候補の実モデル (上書き、なければ profile 既定) で選べる推論強度。
 pub fn candidate_effort_choices(
     profile_defaults: &BTreeMap<String, String>,
+    profile_types: &BTreeMap<String, config::ProviderTypeConfig>,
     profile_effort_levels: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
     candidate: &RouteCandidateConfig,
 ) -> Vec<String> {
+    if profile_types.get(&candidate.profile).is_some_and(|kind| {
+        matches!(
+            kind,
+            config::ProviderTypeConfig::Anthropic
+                | config::ProviderTypeConfig::AnthropicSubscription
+                | config::ProviderTypeConfig::Cursor
+        )
+    }) {
+        return Vec::new();
+    }
     let model = candidate
         .model
         .as_ref()
@@ -53,7 +65,8 @@ impl RoutingSettingsModel {
             let group = match profile.provider_type {
                 Provider::AnthropicSubscription
                 | Provider::OpenAiCodex
-                | Provider::KimiSubscription => 0,
+                | Provider::KimiSubscription
+                | Provider::Cursor => 0,
                 Provider::Anthropic
                 | Provider::OpenAi
                 | Provider::GithubCopilot
@@ -92,6 +105,11 @@ impl RoutingSettingsModel {
                 .providers
                 .iter()
                 .map(|(name, profile)| (name.clone(), profile.default_model.clone()))
+                .collect(),
+            profile_types: config
+                .providers
+                .iter()
+                .map(|(name, profile)| (name.clone(), profile.provider_type))
                 .collect(),
             profile_models: config
                 .providers
@@ -196,6 +214,20 @@ impl RoutingSettingsModel {
                         path: format!("routing.routes.{name}.profile"),
                         message: "Select an existing provider profile".into(),
                     });
+                }
+                if self
+                    .profile_types
+                    .get(&candidate.profile)
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            config::ProviderTypeConfig::Anthropic
+                                | config::ProviderTypeConfig::AnthropicSubscription
+                                | config::ProviderTypeConfig::Cursor
+                        )
+                    })
+                {
+                    candidate.reasoning_effort = None;
                 }
                 if candidate
                     .model

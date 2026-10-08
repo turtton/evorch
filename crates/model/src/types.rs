@@ -29,6 +29,8 @@ pub enum ProviderType {
     OpenAiCompatible,
     /// Kimi サブスクリプション (Kimi For Coding)。
     KimiSubscription,
+    /// Cursor subscription.
+    Cursor,
 }
 
 /// モデルとの通信に用いる API プロトコル。
@@ -50,6 +52,8 @@ pub enum ApiProtocol {
     /// OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。
     #[serde(rename = "openai-codex-responses")]
     OpenAiCodexResponses,
+    /// Cursor Connect agent protocol.
+    CursorAgent,
 }
 
 /// 論理モデル ID。

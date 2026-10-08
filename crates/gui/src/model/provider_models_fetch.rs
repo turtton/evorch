@@ -25,7 +25,10 @@ impl ProviderSettingsModel {
         match self.credential_mode {
             CredentialMode::Env => self.start_models_fetch(),
             CredentialMode::Keyring => {
-                let account = self.name.clone();
+                let account = match &self.original_credential {
+                    Some(config::CredentialRefConfig::Keyring { account, .. }) => account.clone(),
+                    _ => self.name.clone(),
+                };
                 let input = sandbox::Secret::from(self.api_key_input.clone());
                 self.start_models_fetch_resolving(move || {
                     if !input.expose().is_empty() {
@@ -54,6 +57,7 @@ impl ProviderSettingsModel {
         self.models_fetch_state = ModelsFetchState::Loading;
         self.available_models = None;
         self.fetch_selected.clear();
+        let provider_type = self.provider_type;
         let base_url = self.base_url.clone();
         self.models_fetch_base_url = Some(base_url.clone());
         let (tx, rx) = channel();
@@ -63,12 +67,33 @@ impl ProviderSettingsModel {
                     .enable_all()
                     .build()
                     .map_err(|error| error.to_string())?;
-                runtime
-                    .block_on(providers::list_models(
-                        &base_url,
-                        &providers::ProviderAuth::new(api_key),
-                    ))
-                    .map_err(|error| error.to_string())
+                runtime.block_on(async {
+                    let auth = providers::ProviderAuth::new(api_key);
+                    if provider_type == config::ProviderTypeConfig::Anthropic {
+                        use providers::ProviderClient;
+                        let client = providers::provider::anthropic::AnthropicClient::new(
+                            providers::provider::anthropic::AnthropicConfig {
+                                base_url: crate::model::provider_settings::anthropic_base_url(
+                                    &base_url,
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(|_| "Could not initialize Claude API client".to_owned())?;
+                        client
+                            .list_models(&auth)
+                            .await
+                            .map_err(|_| {
+                                "Could not fetch Claude models; check API key and connection"
+                                    .to_owned()
+                            })?
+                            .ok_or_else(|| "Claude model catalog unavailable".to_owned())
+                    } else {
+                        providers::list_models(&base_url, &auth)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                })
             });
             let _ = tx.send(result);
         });

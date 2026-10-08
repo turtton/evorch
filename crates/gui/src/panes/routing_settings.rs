@@ -105,11 +105,6 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     for (index, candidate) in candidates.iter_mut().enumerate() {
                         ui.push_id(index, |ui| {
                             ui.label(muted(format!("Priority {}", index + 1)));
-                            let efforts = candidate_effort_choices(
-                                &model.profile_defaults,
-                                &model.profile_effort_levels,
-                                candidate,
-                            );
                             candidate_picker(
                                 ui,
                                 candidate,
@@ -118,7 +113,12 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                                     &model.profile_models,
                                     &format!("{name} candidate {}", index + 1),
                                 ),
-                                &efforts,
+                                |candidate| candidate_effort_choices(
+                                    &model.profile_defaults,
+                                    &model.profile_types,
+                                    &model.profile_effort_levels,
+                                    candidate,
+                                ),
                             );
                             ui.horizontal_wrapped(|ui| {
                                 if ui

@@ -356,6 +356,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ProviderSettingsAction::Delete(name) => self.delete_provider_settings(name),
                 ProviderSettingsAction::Cancel => self.close_provider_settings(),
                 ProviderSettingsAction::StartCodexLogin => self.start_codex_login(),
+                ProviderSettingsAction::StartSubscriptionLogin => self.start_subscription_login(),
+                ProviderSettingsAction::CompleteSubscriptionLogin => {
+                    self.complete_subscription_login()
+                }
+                ProviderSettingsAction::CancelSubscriptionLogin => {
+                    if let Some(editor) = self.provider_settings.subscription_mut() {
+                        editor.cancel_login();
+                    }
+                }
                 ProviderSettingsAction::RefreshModels => self
                     .provider_settings
                     .start_models_fetch_with_store(self.credential_store.clone()),

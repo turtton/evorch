@@ -152,26 +152,22 @@ async fn factory_builds_openai_compatible_client_from_keyring_profile() {
         .expect("keyringプロファイルのclientが送信できる");
 }
 
-// Given: anthropic type / When: factoryで構築 / Then: UnsupportedProviderTypeを維持する
+// Given: AnthropicをOpenAI protocolで設定 / When: factoryで構築 / Then: 混在protocolを拒否する
 #[test]
-fn factory_keeps_anthropic_unsupported() {
+fn factory_rejects_wrong_protocol_for_anthropic() {
     let (_directory, store) = credential_store();
     let profile = profile(
         model::ProviderType::Anthropic,
-        model::ApiProtocol::AnthropicMessages,
+        model::ApiProtocol::OpenAiCompletions,
         env_credential(),
     );
 
     let error = build_provider_client(&profile, store, None, &FactoryOptions::default())
         .err()
-        .expect("anthropicは未対応");
+        .expect("Claude は Anthropic Messages を要求する");
 
-    assert_eq!(
-        error,
-        RoutingError::UnsupportedProviderType {
-            provider_type: "anthropic".to_string()
-        }
-    );
+    assert!(matches!(error, RoutingError::InvalidProfile { .. }));
+    assert!(error.to_string().contains("anthropic-messages"));
 }
 
 // Given: Kimi subscriptionプロファイル / When: factory clientで送信 / Then: Chat Completions protocolとプロファイルのbase URL・モデルを使う

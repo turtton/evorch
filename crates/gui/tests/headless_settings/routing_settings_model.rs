@@ -52,6 +52,7 @@ fn candidate_effort_choices_follow_override_or_profile_default_model() {
     // Given: the profile default model has restricted levels, the override model has none.
     let mut config = fixture();
     let profile = config.providers.get_mut("local").expect("profile");
+    profile.provider_type = config::ProviderTypeConfig::OpenAiCompatible;
     profile.default_model = "base".into();
     let mut base = config::ModelEntryConfig::enabled("base");
     base.effort_levels = Some(vec!["minimal".into(), "high".into()]);
@@ -60,6 +61,7 @@ fn candidate_effort_choices_follow_override_or_profile_default_model() {
     let choices = |candidate: &RouteCandidateConfig| {
         candidate_effort_choices(
             &model.profile_defaults,
+            &model.profile_types,
             &model.profile_effort_levels,
             candidate,
         )

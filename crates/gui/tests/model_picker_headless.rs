@@ -9,6 +9,14 @@ use runtime::compose::SwitchableModel;
 use workspace_ui::{ModelPreference, ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn workbench(root: &std::path::Path, configured: bool) -> HeadlessWorkbench<DemoSource> {
+    workbench_with_provider(root, configured, "")
+}
+
+fn workbench_with_provider(
+    root: &std::path::Path,
+    configured: bool,
+    extra_provider: &str,
+) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("demo");
     sidebar.add_project(project.clone(), "demo", root).unwrap();
@@ -41,7 +49,9 @@ type = "openai-compatible"
 base_url = "https://example.test/v1"
 models = ["model-c"]
 default_model = "model-c"
-"#,
+"#
+            .to_owned()
+                + extra_provider,
         )
         .unwrap();
         let context = ProductionModel {
@@ -246,4 +256,61 @@ fn picker_disabled_without_profiles_offers_settings() {
     // Then
     assert!(harness.state().provider_settings().open);
     assert!(harness.has_label("Select model"));
+}
+
+#[test]
+fn selecting_native_model_clears_prior_effort_and_hides_generic_effort_choices() {
+    for kind in ["anthropic", "anthropic-subscription", "cursor"] {
+        let temp = tempfile::tempdir().unwrap();
+        let credential = if kind != "anthropic" {
+            r#"credential = {type = "keyring", service = "evorch", account = "native-test"}"#
+        } else {
+            ""
+        };
+        let mut harness = workbench_with_provider(
+            temp.path(),
+            true,
+            &format!(
+                r#"
+[providers.codex]
+type = "openai-codex"
+api_protocol = "openai-codex-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = {{type = "keyring", service = "evorch", account = "codex-test"}}
+models = [{{ id = "model-b", enabled = true, effort_levels = ["high"] }}]
+default_model = "model-b"
+[providers.a-native]
+type = "{kind}"
+{credential}
+models = [{{ id = "selected-model", enabled = true, effort_levels = ["high"] }}]
+default_model = "selected-model"
+"#
+            ),
+        );
+        harness
+            .state_mut()
+            .set_thread_model_preference(Some(ModelPreference {
+                profile: "codex".into(),
+                model: Some("model-b".into()),
+                reasoning_effort: Some("high".into()),
+            }));
+        harness.run();
+        harness.click_label("codex / model-b · high");
+        harness.run();
+        harness.click_label("a-native / selected-model");
+        harness.run();
+        assert_eq!(
+            harness.state().sidebar().threads[0].model_preference,
+            Some(ModelPreference {
+                profile: "a-native".into(),
+                model: Some("selected-model".into()),
+                reasoning_effort: None,
+            }),
+            "{kind}"
+        );
+        harness.click_label("a-native / selected-model");
+        harness.run();
+        assert!(!harness.has_label("Reasoning effort"), "{kind}");
+        assert!(!harness.has_label("high"), "{kind}");
+    }
 }

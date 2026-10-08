@@ -58,16 +58,26 @@ pub fn same_model(a: &ModelPreference, b: &ModelPreference) -> bool {
 
 /// Effort levels offered for the preference's model (explicit or profile default).
 pub fn effort_choices(preference: &ModelPreference, profiles: &[ProfileSummary]) -> Vec<String> {
-    let levels = profiles
+    let profile = profiles
         .iter()
-        .find(|profile| profile.name == preference.profile)
-        .and_then(|profile| {
-            let model = preference
-                .model
-                .as_ref()
-                .or(profile.default_model.as_ref())?;
-            profile.effort_levels.get(model)
-        });
+        .find(|profile| profile.name == preference.profile);
+    if profile.is_some_and(|profile| {
+        matches!(
+            profile.provider_type,
+            model::ProviderType::Anthropic
+                | model::ProviderType::AnthropicSubscription
+                | model::ProviderType::Cursor
+        )
+    }) {
+        return Vec::new();
+    }
+    let levels = profile.and_then(|profile| {
+        let model = preference
+            .model
+            .as_ref()
+            .or(profile.default_model.as_ref())?;
+        profile.effort_levels.get(model)
+    });
     super::effort::effort_choices(levels.map(Vec::as_slice))
 }
 

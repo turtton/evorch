@@ -6,7 +6,7 @@ pub(super) fn candidate_picker(
         &std::collections::BTreeMap<String, Vec<String>>,
         &str,
     ),
-    efforts: &[String],
+    effort_choices: impl Fn(&config::RouteCandidateConfig) -> Vec<String>,
 ) {
     let previous_profile = candidate.profile.clone();
     let label = ui.label(format!("{} profile", choices.2));
@@ -43,13 +43,18 @@ pub(super) fn candidate_picker(
         })
         .response
         .labelled_by(label.id);
+    let efforts = effort_choices(candidate);
+    if efforts.is_empty() {
+        candidate.reasoning_effort = None;
+        return;
+    }
     let label = ui.label(format!("{} reasoning effort", choices.2));
     effort_picker(
         ui,
         "reasoning-effort",
         "(provider default)",
         &mut candidate.reasoning_effort,
-        efforts,
+        &efforts,
     )
     .labelled_by(label.id);
 }

@@ -115,10 +115,13 @@ fn preserves_chat_script_when_models_are_requested() {
     let server = StreamingMockOpenAi::spawn(vec![response.clone()]);
     // When
     get(&server, "/v1/models");
+    let catalog_path = "/v1/models?limit=1000&after_id=earlier-model";
+    assert!(get(&server, catalog_path).0.starts_with("HTTP/1.1 200 OK"));
     // Then
     assert_eq!(server.remaining_scripts(), 1);
     assert_eq!(post(&server, &json!({"stream": true})).1, response.body());
-    assert_eq!(server.recorded_requests()[1].method, "POST");
+    assert_eq!(server.recorded_requests()[1].path, catalog_path);
+    assert_eq!(server.recorded_requests()[2].method, "POST");
     assert_eq!(server.remaining_scripts(), 0);
 }
 

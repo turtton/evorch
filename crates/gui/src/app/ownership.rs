@@ -110,6 +110,39 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.open_usage_tab();
             }
             crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
+            if self.provider_settings.profiles.iter().any(|profile| profile.kind == crate::model::provider_settings::ProviderKind::ClaudeApi) {
+                ui.separator();
+                ui.label(crate::theme::text::muted("Claude API · quota unavailable"))
+                    .on_hover_text("Claude API-key rate limits are separate from subscription quotas. Subscription usage is shown after OAuth sign-in.");
+            }
+            if !self
+                .telemetry
+                .subscription_quota
+                .claude
+                .subscriptions
+                .is_empty()
+            {
+                ui.separator();
+                crate::panes::quota_footer::subscription_quota_footer(
+                    ui,
+                    "Claude",
+                    &self.telemetry.subscription_quota.claude,
+                );
+            }
+            if !self
+                .telemetry
+                .subscription_quota
+                .cursor
+                .subscriptions
+                .is_empty()
+            {
+                ui.separator();
+                crate::panes::quota_footer::subscription_quota_footer(
+                    ui,
+                    "Cursor",
+                    &self.telemetry.subscription_quota.cursor,
+                );
+            }
             if self.telemetry.kimi_quota.configured() {
                 ui.separator();
                 crate::panes::quota_footer::kimi_quota_footer(ui, &self.telemetry.kimi_quota.state);

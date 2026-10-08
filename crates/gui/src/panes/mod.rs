@@ -34,3 +34,5 @@ pub mod team;
 pub mod terminal;
 pub mod transcript_tool;
 pub mod usage;
+
+pub mod subscription_provider;

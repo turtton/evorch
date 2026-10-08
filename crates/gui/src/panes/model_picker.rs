@@ -37,15 +37,14 @@ pub fn model_picker(
                 .show_ui(ui, |ui| {
                     // Effort belongs to an explicit selection; automatic routing uses
                     // each candidate's configured effort.
-                    if let Some(preference) = context.preference {
+                    if let Some(preference) = context.preference
+                        && let efforts = effort_choices(preference, context.profiles)
+                        && !efforts.is_empty()
+                    {
                         ui.label(crate::theme::text::muted("Reasoning effort"));
                         let current = preference.reasoning_effort.as_ref();
                         let mut options = vec![None];
-                        options.extend(
-                            effort_choices(preference, context.profiles)
-                                .into_iter()
-                                .map(Some),
-                        );
+                        options.extend(efforts.into_iter().map(Some));
                         if let Some(custom) =
                             current.filter(|effort| !options.contains(&Some((*effort).clone())))
                         {

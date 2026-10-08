@@ -15,6 +15,7 @@ providers = { path = "../providers" }
 sandbox = { path = "../sandbox" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }

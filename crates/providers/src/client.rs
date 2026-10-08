@@ -15,6 +15,14 @@ use crate::stream::DeltaStream;
 /// クライアントの状態として保持しない。
 #[async_trait]
 pub trait ProviderClient: Send + Sync {
+    /// Native authenticated discovery. `None` uses the legacy catalog adapter.
+    async fn list_models(
+        &self,
+        _auth: &ProviderAuth,
+    ) -> Result<Option<Vec<String>>, ProviderError> {
+        Ok(None)
+    }
+
     /// Session-backed hosted web search, when the provider offers it.
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         None

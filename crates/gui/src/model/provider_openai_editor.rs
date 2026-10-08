@@ -191,13 +191,17 @@ impl ProviderSettingsModel {
                 ..Self::default()
             };
         };
+        Self::from_profile(name, profile)
+    }
+
+    pub fn from_profile(name: &str, profile: &config::ProviderProfileConfig) -> Self {
         let api_key_env = match &profile.credential {
             config::CredentialRefConfig::Env { var } => var.clone(),
             config::CredentialRefConfig::Keyring { .. } => String::new(),
         };
         Self {
-            name: name.clone(),
-            original_name: Some(name.clone()),
+            name: name.into(),
+            original_name: Some(name.into()),
             original_credential: Some(profile.credential.clone()),
             provider_type: profile.provider_type,
             credential_mode: match &profile.credential {

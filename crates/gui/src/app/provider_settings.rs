@@ -98,6 +98,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    pub fn start_subscription_login(&mut self) {
+        let store = self.credential_store.clone();
+        if let Some(editor) = self.provider_settings.subscription_mut() {
+            editor.start_login(store);
+        }
+    }
+
+    pub fn complete_subscription_login(&mut self) {
+        if let Some(editor) = self.provider_settings.subscription_mut() {
+            editor.submit_code();
+        }
+    }
+
     pub fn submit_provider_settings(&mut self) {
         if self.settings_save_in_progress() {
             return;
@@ -167,6 +180,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     Ok(())
                 });
             }
+            Some(ProfileEditor::Subscription(editor)) => {
+                let original_name = editor.models.original_name.clone();
+                let input = editor.to_input();
+                self.provider_operation(move || {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|_| "Could not create config directory".to_owned())?;
+                    }
+                    config::save_subscription_provider_edit(&path, &input, original_name.as_deref())
+                        .map_err(|e| e.to_string())
+                });
+            }
             Some(ProfileEditor::Codex(editor)) => {
                 let original_name = editor.original_name.clone();
                 let input = config::CodexProviderInput {
@@ -206,14 +231,34 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         let credential = self.provider_settings.credential(&name).cloned();
+        let provider_type = self.provider_settings.provider_type(Some(&name));
+        let shared_account = match &credential {
+            Some(config::CredentialRefConfig::Keyring { account, .. }) => self
+                .provider_settings
+                .credential_account_referenced(account, &name),
+            _ => false,
+        };
         let store = self.credential_store.clone();
         self.provider_operation(move || {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
             config::delete_provider(&path, &name).map_err(|e| e.to_string())?;
-            if let Some(config::CredentialRefConfig::Keyring { account, .. }) = credential {
+            if !shared_account
+                && let Some(config::CredentialRefConfig::Keyring { account, .. }) = credential
+            {
                 if let Some(store) = store {
+                    // Serialize deletion with native refresh/read/save for this account.
+                    let lock = match provider_type {
+                        Some(config::ProviderTypeConfig::AnthropicSubscription) => Some(
+                            routing::factory::subscription_refresh_lock("claude", &account),
+                        ),
+                        Some(config::ProviderTypeConfig::Cursor) => Some(
+                            routing::factory::subscription_refresh_lock("cursor", &account),
+                        ),
+                        _ => None,
+                    };
+                    let _guard = lock.as_ref().map(|lock| lock.blocking_lock());
                     if let Err(error) = store.delete(&account) {
                         tracing::warn!(%error, "provider credential deletion failed");
                     }
@@ -252,6 +297,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let close_after_save = match &self.provider_settings.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => editor.original_name.is_none(),
             Some(ProfileEditor::Codex(editor)) => editor.original_name.is_none(),
+            Some(ProfileEditor::Subscription(editor)) => editor.models.original_name.is_none(),
             None => false,
         };
         let Some(rx) = self.provider_save_rx.take() else {
@@ -291,3 +337,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provider_subscription_tests.rs"]
+mod subscription_tests;

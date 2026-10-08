@@ -57,6 +57,27 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }
+        if let Some(editor) = self.provider_settings.subscription_mut() {
+            editor.load_auth(self.credential_store.clone());
+            if editor.poll_login() {
+                if matches!(
+                    editor.auth,
+                    crate::model::subscription_provider::SubscriptionAuthState::SignedIn { .. }
+                ) {
+                    self.telemetry
+                        .subscription_quota
+                        .invalidate_account(&editor.account);
+                    editor.models.available_models = None;
+                    editor.models.models_rx = None;
+                    editor.models.models_fetch_state =
+                        crate::model::provider_settings::ModelsFetchState::Idle;
+                }
+                ctx.request_repaint();
+            }
+            if let Some(url) = editor.take_authorize_url() {
+                ctx.open_url(egui::OpenUrl::new_tab(url));
+            }
+        }
         self.prepare_codex_editor();
         if self.codex_auth_mut().poll() {
             ctx.request_repaint();
@@ -88,6 +109,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .kimi_quota
             .state
             .poll(std::time::Instant::now());
+        self.telemetry
+            .subscription_quota
+            .configure(&self.provider_settings, self.credential_store.clone());
+        self.telemetry
+            .subscription_quota
+            .claude
+            .poll(Instant::now());
+        self.telemetry
+            .subscription_quota
+            .cursor
+            .poll(Instant::now());
         let ownership_started = Instant::now();
         self.ownership_ui(ui);
         let ownership_time = ownership_started.elapsed();

@@ -2405,6 +2405,7 @@ dependencies = [
  "base64 0.22.1",
  "catalog",
  "chromiumoxide",
+ "chrono",
  "config",
  "eframe",
  "egui",

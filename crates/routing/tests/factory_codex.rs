@@ -277,14 +277,15 @@ fn factory_rejects_protocol_mismatch() {
     );
 }
 
-// Given: codex 以外の provider type
+// Given: 未実装の provider type
 // When: build_provider_client を呼び出す
 // Then: UnsupportedProviderType が設定識別子を保持する
 #[test]
-fn factory_returns_unsupported_for_other_types() {
+fn factory_returns_unsupported_for_unimplemented_types() {
     for (provider_type, label) in [
-        (model::ProviderType::Anthropic, "anthropic"),
+        (model::ProviderType::OpenAi, "openai"),
         (model::ProviderType::GithubCopilot, "github-copilot"),
+        (model::ProviderType::Openrouter, "openrouter"),
     ] {
         let (_dir, store) = temp_file_store();
         let profile = profile(
@@ -295,7 +296,7 @@ fn factory_returns_unsupported_for_other_types() {
 
         let error = build_provider_client(&profile, store, None, &FactoryOptions::default())
             .err()
-            .expect("codex 以外は未対応");
+            .expect("未実装の provider を拒否する");
 
         assert_eq!(
             error,

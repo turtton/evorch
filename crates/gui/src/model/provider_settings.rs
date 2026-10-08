@@ -11,11 +11,25 @@ pub use codex_models::{CodexFetchedModels, CodexModelsFetch};
 pub use openai::ProviderSettingsModel as OpenAiEditorModel;
 pub use openai::{CredentialMode, ModelsFetchState, ProviderSettingsTab, provider_status_of};
 
+pub(crate) fn anthropic_base_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.is_empty() {
+        config::types::provider::CLAUDE_DEFAULT_BASE_URL.into()
+    } else if base.ends_with("/v1") {
+        base.into()
+    } else {
+        format!("{base}/v1")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     OpenAiCompatible,
     CodexSubscription,
     KimiSubscription,
+    ClaudeApi,
+    ClaudeSubscription,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +57,7 @@ pub struct CodexEditorModel {
 pub enum ProfileEditor {
     OpenAiCompatible(OpenAiEditorModel),
     Codex(CodexEditorModel),
+    Subscription(super::subscription_provider::SubscriptionEditorModel),
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +85,11 @@ impl ProviderSettingsModel {
                         config::ProviderTypeConfig::KimiSubscription => {
                             ProviderKind::KimiSubscription
                         }
+                        config::ProviderTypeConfig::Anthropic => ProviderKind::ClaudeApi,
+                        config::ProviderTypeConfig::AnthropicSubscription => {
+                            ProviderKind::ClaudeSubscription
+                        }
+                        config::ProviderTypeConfig::Cursor => ProviderKind::Cursor,
                         _ => ProviderKind::OpenAiCompatible,
                     },
                     default_model: profile.default_model.clone(),
@@ -92,6 +112,9 @@ impl ProviderSettingsModel {
             ProviderKind::OpenAiCompatible => "openai-compat",
             ProviderKind::CodexSubscription => "codex",
             ProviderKind::KimiSubscription => "kimi",
+            ProviderKind::ClaudeApi => "claude-api",
+            ProviderKind::ClaudeSubscription => "claude",
+            ProviderKind::Cursor => "cursor",
         };
         let mut name = prefix.to_owned();
         let mut suffix = 2;
@@ -104,6 +127,21 @@ impl ProviderSettingsModel {
                 name,
                 ..Default::default()
             }),
+            ProviderKind::ClaudeApi => ProfileEditor::OpenAiCompatible(OpenAiEditorModel {
+                name,
+                provider_type: config::ProviderTypeConfig::Anthropic,
+                base_url: config::types::provider::CLAUDE_DEFAULT_BASE_URL.into(),
+                api_key_env: "ANTHROPIC_API_KEY".into(),
+                models: config::types::provider::CLAUDE_DEFAULT_MODELS
+                    .iter()
+                    .map(|id| config::ModelEntryConfig::enabled(*id))
+                    .collect(),
+                default_model: config::types::provider::CLAUDE_DEFAULT_MODEL.into(),
+                ..Default::default()
+            }),
+            ProviderKind::ClaudeSubscription | ProviderKind::Cursor => ProfileEditor::Subscription(
+                super::subscription_provider::SubscriptionEditorModel::new(name, kind),
+            ),
             ProviderKind::KimiSubscription => ProfileEditor::OpenAiCompatible(OpenAiEditorModel {
                 name,
                 provider_type: config::ProviderTypeConfig::KimiSubscription,
@@ -142,6 +180,9 @@ impl ProviderSettingsModel {
             config::ProviderTypeConfig::OpenAiCompatible
                 | config::ProviderTypeConfig::OpenAiCodex
                 | config::ProviderTypeConfig::KimiSubscription
+                | config::ProviderTypeConfig::Anthropic
+                | config::ProviderTypeConfig::AnthropicSubscription
+                | config::ProviderTypeConfig::Cursor
         ) {
             self.error = Some(
                 "This provider type must be edited in config.toml; its configuration is preserved."
@@ -150,6 +191,10 @@ impl ProviderSettingsModel {
             return;
         }
         self.editor = Some(match profile.provider_type {
+            config::ProviderTypeConfig::AnthropicSubscription
+            | config::ProviderTypeConfig::Cursor => ProfileEditor::Subscription(
+                super::subscription_provider::SubscriptionEditorModel::from_profile(name, profile),
+            ),
             config::ProviderTypeConfig::OpenAiCodex => {
                 let account = match &profile.credential {
                     config::CredentialRefConfig::Keyring { account, .. } => account.clone(),
@@ -177,12 +222,7 @@ impl ProviderSettingsModel {
                     },
                 })
             }
-            _ => {
-                let mut cfg = config::Config::default();
-                let profile = profile.clone();
-                cfg.providers.insert(name.into(), profile);
-                ProfileEditor::OpenAiCompatible(OpenAiEditorModel::seed_from_config(&cfg))
-            }
+            _ => ProfileEditor::OpenAiCompatible(OpenAiEditorModel::from_profile(name, profile)),
         });
         self.error = None;
         self.confirm_delete = None;
@@ -196,6 +236,10 @@ impl ProviderSettingsModel {
 
     pub fn credential(&self, name: &str) -> Option<&config::CredentialRefConfig> {
         self.entries.get(name).map(|profile| &profile.credential)
+    }
+
+    pub fn credential_account_referenced(&self, account: &str, except_profile: &str) -> bool {
+        self.entries.iter().any(|(name, profile)| name != except_profile && matches!(&profile.credential, config::CredentialRefConfig::Keyring { account: configured, .. } if configured == account))
     }
 
     /// Snapshot of the current profiles and catalog for request cost recording.
@@ -225,21 +269,32 @@ impl ProviderSettingsModel {
     pub fn openai_mut(&mut self) -> Option<&mut OpenAiEditorModel> {
         match &mut self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => Some(editor),
-            Some(ProfileEditor::Codex(_)) | None => None,
+            Some(ProfileEditor::Codex(_)) | Some(ProfileEditor::Subscription(_)) | None => None,
         }
     }
 
     pub fn openai(&self) -> Option<&OpenAiEditorModel> {
         match &self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => Some(editor),
-            Some(ProfileEditor::Codex(_)) | None => None,
+            Some(ProfileEditor::Codex(_)) | Some(ProfileEditor::Subscription(_)) | None => None,
         }
     }
 
     pub fn codex_mut(&mut self) -> Option<&mut CodexEditorModel> {
         match &mut self.editor {
             Some(ProfileEditor::Codex(editor)) => Some(editor),
-            Some(ProfileEditor::OpenAiCompatible(_)) | None => None,
+            Some(ProfileEditor::OpenAiCompatible(_))
+            | Some(ProfileEditor::Subscription(_))
+            | None => None,
+        }
+    }
+
+    pub fn subscription_mut(
+        &mut self,
+    ) -> Option<&mut super::subscription_provider::SubscriptionEditorModel> {
+        match &mut self.editor {
+            Some(ProfileEditor::Subscription(editor)) => Some(editor),
+            _ => None,
         }
     }
 
@@ -252,6 +307,7 @@ impl ProviderSettingsModel {
                 editor.start_models_fetch_with_store(store)
             }
             Some(ProfileEditor::Codex(editor)) => editor.start_models_fetch_with_store(store),
+            Some(ProfileEditor::Subscription(editor)) => editor.start_models_fetch(store),
             None => {}
         }
     }
@@ -260,6 +316,7 @@ impl ProviderSettingsModel {
         match &mut self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => editor.poll_models(),
             Some(ProfileEditor::Codex(editor)) => editor.poll_models(),
+            Some(ProfileEditor::Subscription(editor)) => editor.models.poll_models(),
             None => false,
         }
     }
