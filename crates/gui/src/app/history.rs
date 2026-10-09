@@ -33,6 +33,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, None)
+    }
+
+    /// Reconcile orphaned phases only when the owner registry can be inspected.
+    pub fn restore_history_with_ownership(
+        &mut self,
+        db: &storage::Database,
+        registry_path: &std::path::Path,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, Some(registry_path))
+    }
+
+    fn restore_history_inner(
+        &mut self,
+        db: &storage::Database,
+        registry_path: Option<&std::path::Path>,
+    ) -> Result<(), storage::StorageError> {
         let events = db.events_all_ordered()?;
         self.tasks
             .restore_events(events.iter().map(|stored| &stored.event));
@@ -238,6 +255,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ));
             }
         }
+        self.reconcile_restored_phases(db, registry_path);
         for message in messages {
             self.restore_user_message(message);
         }
@@ -249,6 +267,63 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         self.refresh_active_thread_workspace();
         Ok(())
+    }
+
+    fn reconcile_restored_phases(
+        &mut self,
+        db: &storage::Database,
+        registry_path: Option<&std::path::Path>,
+    ) {
+        use workspace_ui::ThreadRunPhase;
+        // An absent registry or an expired lease is not proof of an orphan.
+        let Some(path) = registry_path else { return };
+        let owners = match runtime::ownership::Registry::open_readonly(path)
+            .and_then(|registry| registry.list())
+        {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::warn!(%error, "history phase reconciliation skipped: ownership unknown");
+                return;
+            }
+        };
+        // Legacy active turns cannot be attributed to a run: protect all runs.
+        if owners
+            .iter()
+            .any(|owner| owner.active_turn && owner.active_runs.is_empty())
+        {
+            tracing::warn!("history phase reconciliation skipped: legacy active turn");
+            return;
+        }
+        for (run_id, phase) in &mut self.phases {
+            if !matches!(
+                phase,
+                ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
+            ) || owners
+                .iter()
+                .any(|owner| owner.active_runs.contains(run_id))
+            {
+                continue;
+            }
+            let record = match db.run_context(run_id) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    tracing::warn!(%run_id, "history phase reconciliation skipped: snapshot missing");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "history phase reconciliation skipped: snapshot unreadable");
+                    continue;
+                }
+            };
+            let restored = match record.terminal_phase.as_str() {
+                "Done" => ThreadRunPhase::Done,
+                "Error" => ThreadRunPhase::Error,
+                "Stopped" | "Checkpoint" => ThreadRunPhase::Stopped,
+                _ => continue,
+            };
+            tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
+            *phase = restored;
+        }
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {

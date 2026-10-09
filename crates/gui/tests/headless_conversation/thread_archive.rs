@@ -478,3 +478,229 @@ fn capture_archive_icons() {
             .unwrap();
     }
 }
+
+fn persisted_archive_run(
+    storage: &storage::Storage,
+    run: &str,
+    thread: &str,
+    phase: AgentRunPhase,
+    snapshot: Option<&str>,
+    restorable: bool,
+) {
+    for event in [
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: run.into(),
+            parent_run_id: None,
+            agent_name: format!("chat:Worker:{thread}"),
+            role: "Worker".into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: run.into(),
+            from: AgentRunPhase::Pending,
+            to: phase,
+            reason: None,
+        }),
+    ] {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    if let Some(snapshot) = snapshot {
+        storage
+            .handle()
+            .upsert_run_context(&storage::RunContextRecord {
+                run_id: run.into(),
+                role: "Worker".into(),
+                name: format!("chat:Worker:{thread}"),
+                parent_run_id: None,
+                config_json: "{}".into(),
+                messages_json: "[]".into(),
+                checkpoints_json: "[]".into(),
+                terminal_phase: snapshot.into(),
+                restorable,
+                updated_at_ns: 1,
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
+    use workspace_ui::ThreadRunPhase as P;
+    for (input, snapshot, expected, archive) in [
+        (AgentRunPhase::Running, Some("Done"), P::Done, true),
+        (AgentRunPhase::Running, Some("Checkpoint"), P::Stopped, true),
+        (AgentRunPhase::Running, None, P::Running, false),
+        (AgentRunPhase::Done, Some("Checkpoint"), P::Done, true),
+        (AgentRunPhase::Pending, Some("Error"), P::Error, true),
+        (AgentRunPhase::Waiting, Some("Stopped"), P::Stopped, true),
+    ] {
+        for restorable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = storage::StorageConfig {
+                db_path: dir.path().join("events.db"),
+                ..Default::default()
+            };
+            let storage = storage::Storage::open(config.clone()).unwrap();
+            persisted_archive_run(
+                &storage,
+                "run-target",
+                "target",
+                input,
+                snapshot,
+                restorable,
+            );
+            storage.close();
+            let registry = dir.path().join("owners.db");
+            drop(runtime::ownership::Registry::open(&registry).unwrap());
+            let mut state = fixture_state(dir.path(), false, false);
+            state
+                .restore_history_with_ownership(
+                    &storage::Database::open(&config).unwrap(),
+                    &registry,
+                )
+                .unwrap();
+            assert_eq!(state.thread_phases()["run-target"], expected);
+            state.toggle_archive(ThreadId::new("target")).unwrap();
+            assert_eq!(state.sidebar().threads[0].archived, archive);
+        }
+    }
+}
+
+#[test]
+fn restored_live_owner_and_legacy_turn_protect_archive() {
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        persisted_archive_run(
+            &storage,
+            "run-target",
+            "target",
+            AgentRunPhase::Running,
+            Some("Checkpoint"),
+            true,
+        );
+        storage.close();
+        let host = runtime::ownership::OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            std::sync::Arc::new(event_bus::EventBus::new(32)),
+        )
+        .unwrap();
+        let mut permit = host.start("different-owner-thread").unwrap();
+        if !legacy {
+            permit.run_id = Some("run-target".into());
+        }
+        permit.begin_turn().unwrap();
+        let mut state = fixture_state(dir.path(), false, false);
+        state
+            .restore_history_with_ownership(
+                &storage::Database::open(&config).unwrap(),
+                &permit.registry_path,
+            )
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Running
+        );
+        state.toggle_archive(ThreadId::new("target")).unwrap();
+        assert!(!state.sidebar().threads[0].archived);
+    }
+}
+
+#[test]
+fn restored_orphan_with_live_descendant_cannot_archive_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = fixture_state(dir.path(), false, false);
+    let child = state.fork_thread(ThreadId::new("target")).unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    persisted_archive_run(
+        &storage,
+        "orphan",
+        "target",
+        AgentRunPhase::Running,
+        Some("Done"),
+        false,
+    );
+    persisted_archive_run(
+        &storage,
+        "live",
+        &child.to_string(),
+        AgentRunPhase::Running,
+        Some("Checkpoint"),
+        true,
+    );
+    storage.close();
+    let host = runtime::ownership::OwnerHost::open(
+        dir.path(),
+        Default::default(),
+        std::sync::Arc::new(event_bus::EventBus::new(32)),
+    )
+    .unwrap();
+    let mut permit = host.start("another-owner").unwrap();
+    permit.run_id = Some("live".into());
+    permit.begin_turn().unwrap();
+    state
+        .restore_history_with_ownership(
+            &storage::Database::open(&config).unwrap(),
+            &permit.registry_path,
+        )
+        .unwrap();
+    assert_eq!(
+        state.thread_phases()["orphan"],
+        workspace_ui::ThreadRunPhase::Done
+    );
+    assert_eq!(
+        state.thread_phases()["live"],
+        workspace_ui::ThreadRunPhase::Running
+    );
+    state.toggle_archive(ThreadId::new("target")).unwrap();
+    assert!(
+        state
+            .sidebar()
+            .threads
+            .iter()
+            .all(|thread| !thread.archived)
+    );
+}
+
+#[test]
+fn unreadable_ownership_never_reconciles_restored_runs() {
+    for corrupt in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        persisted_archive_run(
+            &storage,
+            "run-target",
+            "target",
+            AgentRunPhase::Running,
+            Some("Done"),
+            false,
+        );
+        storage.close();
+        let registry = dir.path().join("owners.db");
+        if corrupt {
+            std::fs::write(&registry, "invalid database").unwrap();
+        }
+        let mut state = fixture_state(dir.path(), false, false);
+        state
+            .restore_history_with_ownership(&storage::Database::open(&config).unwrap(), &registry)
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Running
+        );
+        state.toggle_archive(ThreadId::new("target")).unwrap();
+        assert!(!state.sidebar().threads[0].archived);
+    }
+}
