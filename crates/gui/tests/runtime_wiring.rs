@@ -224,6 +224,7 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
         status: AgentRunPhase::Done,
         model: "test-worker".into(),
         category: None,
+        cancelled: false,
     }];
     let deadline = Instant::now() + Duration::from_secs(10);
     while harness.state().tasks().rows() != expected.as_slice() {

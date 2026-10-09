@@ -85,7 +85,7 @@ impl NotificationsModel {
                             reason: reason.clone(),
                         },
                         match reason.as_deref() {
-                            Some("cancelled") => format!("Run {run_id} cancelled"),
+                            Some(event_bus::CANCELLED_REASON) => format!("Run {run_id} cancelled"),
                             Some(reason) => format!("Run {run_id} failed: {reason}"),
                             None => format!("Run {run_id} failed"),
                         },
