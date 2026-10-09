@@ -19,6 +19,7 @@ base64 = { workspace = true }
 futures-util = { workspace = true, optional = true }
 arena = { path = "../arena" }
 agents = { path = "../agents" }
+alacritty_terminal = { workspace = true }
 ashpd = { workspace = true }
 async-trait = { workspace = true }
 catalog = { path = "../catalog" }

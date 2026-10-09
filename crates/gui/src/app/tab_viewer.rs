@@ -12,7 +12,6 @@ use crate::model::notifications::NotificationsModel;
 use crate::model::pending_approvals::PendingApprovalsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
-use crate::model::terminal::TerminalBuffer;
 use crate::model::transcript_registry::TranscriptRegistry;
 use crate::panes::{
     agent_transcript::agent_transcript_pane_with_repo_root,
@@ -26,7 +25,6 @@ use crate::panes::{
     tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
-use crate::pty::PtySession;
 
 mod context;
 mod conversation;
@@ -56,9 +54,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) durable_tasks: &'a crate::model::durable_tasks::DurableTasksModel,
     pub(super) selected_task: Option<&'a str>,
     pub(super) tasks_action: &'a mut Option<TasksAction>,
-    pub(super) terminal: &'a mut TerminalBuffer,
-    pub(super) terminal_input: &'a mut String,
-    pub(super) pty: &'a mut Option<PtySession>,
+    pub(super) terminals: &'a mut crate::terminal::TerminalSessions,
+    pub(super) terminal_target: (crate::terminal::TerminalKey, std::path::PathBuf),
     pub(super) panels: &'a BTreeMap<PanelId, Panel>,
     pub(super) sidebar: &'a SidebarState,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
@@ -368,7 +365,12 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         .request_repaint_after(crate::diff::AUTO_REFRESH_INTERVAL);
                 }
             }
-            PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
+            PanelKind::Terminal => terminal_pane(
+                ui,
+                self.terminals,
+                &self.terminal_target.0,
+                &self.terminal_target.1,
+            ),
             PanelKind::Tasks => {
                 if let Some(action) = tasks_pane(
                     ui,

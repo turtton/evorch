@@ -51,6 +51,33 @@ Delivery has been verified on Linux. Windows builds currently use the default
 PowerShell notification identity, so their notification settings belong to
 PowerShell rather than a separate evorch application entry.
 
+## Terminal
+
+The Terminal pane is an xterm-compatible emulator (alacritty_terminal) attached
+to a real PTY. Each project gets its own shell, started in the project's repo
+root the first time the pane shows it; with no project selected the shell starts
+in the home directory. Switching projects keeps the other shells running, and
+removing a project ends its shell. The shell is `$SHELL` (falling back to
+`/bin/sh`) with `TERM=xterm-256color` and `COLORTERM=truecolor`. The grid
+resizes with the pane and the PTY follows.
+
+Click the grid to focus it. While focused, every key goes to the shell,
+including Tab, arrows, Escape and Ctrl+letter. Workbench shortcuts that are not
+Ctrl+letter (for example Ctrl+1/2/3 and Ctrl+Shift+R) still reach the
+workbench.
+
+- Drag to select; double-click selects a word and triple-click a line. Ctrl+C
+  copies while text is selected and sends an interrupt otherwise;
+  Ctrl+Shift+C always copies. Ctrl+V pastes, using bracketed paste when the
+  application asks for it. The right-click menu has Copy and Paste.
+- The mouse wheel scrolls the 10,000-line scrollback, as do Shift+PageUp and
+  Shift+PageDown. Full-screen applications get wheel events as mouse reports,
+  or as arrow keys when they did not enable mouse reporting.
+- Hold Shift to select text in an application that captures the mouse.
+- When the shell exits, the header shows its exit code. Press Enter or the
+  restart button to start a new shell; the restart button also replaces a
+  running shell.
+
 ## Saved layouts
 
 Workspace schema v3 migrates v1/v2 JSON layouts and embedded TOML settings before

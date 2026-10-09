@@ -22,10 +22,8 @@ use crate::model::pending_approvals::PendingApprovalsModel;
 use crate::model::provider_settings::ProviderSettingsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
-use crate::model::terminal::TerminalBuffer;
 use crate::model::transcript::TranscriptModel;
 use crate::model::transcript_registry::TranscriptRegistry;
-use crate::pty::PtySession;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationFocus {
@@ -73,12 +71,10 @@ pub struct WorkbenchState<S> {
     pub(super) tasks: TasksModel<S>,
     pub(super) durable_tasks: crate::model::durable_tasks::DurableTasksModel,
     pub(super) selected_task: Option<String>,
-    pub(super) terminal: TerminalBuffer,
-    pub(super) pty: Option<PtySession>,
+    pub(super) terminals: crate::terminal::TerminalSessions,
     pub(super) dock: DockState<PanelId>,
     pub(super) panels: BTreeMap<PanelId, Panel>,
     pub(super) keymap: Keymap,
-    pub(super) terminal_input: String,
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
@@ -192,12 +188,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tasks: TasksModel::new(source),
             durable_tasks: crate::model::durable_tasks::DurableTasksModel::default(),
             selected_task: None,
-            terminal: TerminalBuffer::new(10_000),
-            pty: None,
+            terminals: crate::terminal::TerminalSessions::default(),
             dock,
             panels: workspace.panels,
             keymap: Keymap::from_settings(&settings.keybinds),
-            terminal_input: String::new(),
             save_path: None,
             sidebar: SidebarState::default(),
             sidebar_path: None,
@@ -339,8 +333,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
-    pub fn with_pty(mut self, pty: PtySession) -> Self {
-        self.pty = Some(pty);
+    /// Terminal ペインがプロジェクトごとのシェルを起動するための spawner を設定します。
+    pub fn with_terminal_spawner(mut self, spawner: Arc<dyn crate::pty::TerminalSpawner>) -> Self {
+        self.terminals.set_spawner(spawner);
         self
     }
 
@@ -430,11 +425,37 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn notifications_mut(&mut self) -> &mut NotificationsModel {
         &mut self.notifications
     }
-    pub const fn terminal(&self) -> &TerminalBuffer {
-        &self.terminal
+    pub const fn terminals(&self) -> &crate::terminal::TerminalSessions {
+        &self.terminals
     }
+    /// 選択中プロジェクトの端末セッションです (未表示なら `None`)。
+    pub fn active_terminal(&self) -> Option<&crate::terminal::TerminalSession> {
+        self.terminals.get(&self.sidebar.selected_project)
+    }
+    /// 選択中プロジェクトの端末画面へ、PTY 出力として `bytes` を流し込みます。
     pub fn feed_terminal(&mut self, bytes: &[u8]) {
-        self.terminal.feed(bytes);
+        let (key, cwd) = self.terminal_target();
+        self.terminals
+            .session_mut(&key, &cwd)
+            .emulator_mut()
+            .feed(bytes);
+    }
+    /// 選択中プロジェクトの端末セッションのキーと起動ディレクトリです。
+    pub(super) fn terminal_target(&self) -> (crate::terminal::TerminalKey, PathBuf) {
+        let key = self.sidebar.selected_project.clone();
+        let root = key.as_ref().and_then(|id| {
+            self.sidebar
+                .projects
+                .iter()
+                .find(|project| &project.id == id)
+                .map(|project| project.repo_root.as_path())
+        });
+        let home = self
+            .home_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(std::env::temp_dir);
+        (key, crate::pty::resolve_terminal_cwd(root, &home))
     }
     pub const fn sidebar(&self) -> &SidebarState {
         &self.sidebar

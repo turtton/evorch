@@ -160,6 +160,11 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.get_by_label(label).scroll_to_me();
     }
 
+    /// 指定ラベルの UI node が公開している値 (accesskit の value) を返します。
+    pub fn label_value(&self, label: &str) -> Option<String> {
+        self.harness.query_by_label(label)?.value()
+    }
+
     /// 指定ラベルの UI node が存在するか返します。
     pub fn has_label(&self, label: &str) -> bool {
         self.harness.query_all_by_label(label).next().is_some()

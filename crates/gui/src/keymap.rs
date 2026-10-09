@@ -83,19 +83,49 @@ impl Keymap {
         Self { bindings }
     }
 
-    /// 現在の egui 入力状態に対応するアクションを返します。
-    pub fn action_for_input(&self, input: &egui::InputState) -> Option<KeyAction> {
-        for (action, resolved) in &self.bindings {
-            if input.key_pressed(resolved.key)
-                && (input.modifiers.command || input.modifiers.ctrl) == resolved.ctrl
-                && input.modifiers.shift == resolved.shift
-                && input.modifiers.alt == resolved.alt
-            {
-                return Some(*action);
-            }
-        }
-        None
+    /// 端末フォーカス中でも workbench へ渡すキーかどうかを返します。
+    ///
+    /// Ctrl+英字は端末の制御文字 (Ctrl+S = XOFF など) として使うため、割り当てがあっても端末を優先します。
+    pub fn passes_through_terminal(&self, key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        let ctrl = modifiers.command || modifiers.ctrl;
+        self.action_for_key(key, modifiers).is_some()
+            && !(ctrl && !modifiers.shift && !modifiers.alt && is_letter(key))
     }
+
+    /// 現在の egui 入力状態に対応するアクションを返します。
+    ///
+    /// 修飾キーはフレーム終了時点の状態ではなく、各キーイベントが押下時に持っていた値で判定します。
+    /// アイドル中のウィンドウでは Ctrl の押下と S の押下・Ctrl の解放が別フレームに届くことがあり、
+    /// フレーム終了時点の状態では Ctrl+S を取りこぼすためです。
+    pub fn action_for_input(&self, input: &egui::InputState) -> Option<KeyAction> {
+        input.events.iter().find_map(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => self.action_for_key(*key, *modifiers),
+            _ => None,
+        })
+    }
+
+    fn action_for_key(&self, key: egui::Key, modifiers: egui::Modifiers) -> Option<KeyAction> {
+        let ctrl = modifiers.command || modifiers.ctrl;
+        self.bindings
+            .iter()
+            .find(|(_, resolved)| {
+                resolved.key == key
+                    && resolved.ctrl == ctrl
+                    && resolved.shift == modifiers.shift
+                    && resolved.alt == modifiers.alt
+            })
+            .map(|(action, _)| *action)
+    }
+}
+
+fn is_letter(key: egui::Key) -> bool {
+    let name = key.name();
+    name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase()
 }
 
 #[cfg(test)]
@@ -199,10 +229,65 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_resolves_when_ctrl_is_released_in_the_same_frame() {
+        // Given: an idle window that received Ctrl in one frame, then S press,
+        // S release and Ctrl release together in the next frame.
+        let keymap = Keymap::from_settings(&KeybindSettings::default());
+        let ctx = egui::Context::default();
+        let frame = |events| {
+            let mut actual = None;
+            let raw = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                actual = ui.input(|input| keymap.action_for_input(input));
+            });
+            output.textures_delta.clear();
+            actual
+        };
+        let key = |pressed| egui::Event::Key {
+            key: Key::S,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::CTRL,
+        };
+        assert_eq!(
+            frame(vec![egui::Event::ModifiersChanged(Modifiers::CTRL)]),
+            None
+        );
+
+        // When: the second frame is resolved
+        let actual = frame(vec![
+            key(true),
+            key(false),
+            egui::Event::ModifiersChanged(Modifiers::NONE),
+        ]);
+
+        // Then: the chord uses the modifiers held when S was pressed
+        assert_eq!(actual, Some(KeyAction::SaveLayout));
+    }
+
+    #[test]
     fn unmatched_input_returns_none() {
         let keymap = Keymap::from_settings(&KeybindSettings::default());
 
         let ctx = run_with_key(Key::Num4, Modifiers::COMMAND);
         assert_eq!(keymap.action_for_input(&ctx.input(|i| i.clone())), None);
+    }
+
+    #[test]
+    fn terminal_keeps_control_letters_but_releases_workbench_chords() {
+        // Given: the default bindings (Ctrl+1/2/3, Ctrl+S, Ctrl+Shift+R).
+        let keymap = Keymap::from_settings(&KeybindSettings::default());
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+
+        // Then: pane focus and layout reset still reach the workbench,
+        // while Ctrl+S stays a terminal control key (XOFF / readline search).
+        assert!(keymap.passes_through_terminal(Key::Num1, Modifiers::CTRL));
+        assert!(keymap.passes_through_terminal(Key::R, ctrl_shift));
+        assert!(!keymap.passes_through_terminal(Key::S, Modifiers::CTRL));
+        assert!(!keymap.passes_through_terminal(Key::C, Modifiers::CTRL));
     }
 }
