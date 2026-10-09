@@ -96,7 +96,7 @@ impl OwnerHost {
 
     pub fn claim(&self, expected: &ThreadOwner) -> Result<OwnerPermit, RegistryError> {
         let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
-        let socket = self.socket(&expected.lease.owner_id)?;
+        let socket = socket_path(&self.root, &expected.lease.owner_id)?;
         let owner = ipc::claim_configured(
             &mut registry,
             ipc::ClaimRequest {
@@ -214,13 +214,13 @@ impl OwnerHost {
             run_id: None,
         }
     }
+}
 
-    fn socket(&self, id: &str) -> Result<PathBuf, RegistryError> {
-        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(super::OwnershipError::Fenced.into());
-        }
-        Ok(self.root.join(format!("{id}.sock")))
+pub(super) fn socket_path(root: &Path, id: &str) -> Result<PathBuf, RegistryError> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(super::OwnershipError::Fenced.into());
     }
+    Ok(root.join(format!("{id}.sock")))
 }
 
 impl Drop for OwnerHost {

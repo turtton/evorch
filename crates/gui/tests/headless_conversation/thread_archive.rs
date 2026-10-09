@@ -611,6 +611,190 @@ fn restored_live_owner_and_legacy_turn_protect_archive() {
 }
 
 #[test]
+fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
+    for release in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        persisted_archive_run(
+            &storage,
+            "run-target",
+            "target",
+            AgentRunPhase::Running,
+            Some("Checkpoint"),
+            true,
+        );
+        storage.close();
+        let host = runtime::ownership::OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            std::sync::Arc::new(event_bus::EventBus::new(32)),
+        )
+        .unwrap();
+        let mut permit = host.start("target").unwrap();
+        permit.run_id = Some("run-target".into());
+        permit.begin_turn().unwrap();
+        // The agent loop checkpoints after tools while its phase stays Running.
+        permit.checkpoint(&[]).unwrap();
+        assert!(host.attach("target").unwrap().active_runs.is_empty());
+        let db = storage::Database::open(&config).unwrap();
+        let mut state = fixture_state(dir.path(), false, false);
+        state
+            .restore_history_with_ownership(&db, &permit.registry_path)
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Running
+        );
+        // Resuming the very next round must not expose an archiveable thread.
+        permit.begin_turn().unwrap();
+        state.toggle_archive(ThreadId::new("target")).unwrap();
+        assert!(!state.sidebar().threads[0].archived);
+        permit.checkpoint(&[]).unwrap();
+        let host = if release {
+            assert!(!host.quiesce().unwrap());
+            // A responsive process owning another thread cannot keep the
+            // released target's orphan from being reconciled.
+            let mut unrelated = host.start("unrelated").unwrap();
+            unrelated.run_id = Some("unrelated-run".into());
+            unrelated.begin_turn().unwrap();
+            Some(host)
+        } else {
+            drop(host);
+            None
+        };
+        state
+            .restore_history_with_ownership(&db, &permit.registry_path)
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Stopped
+        );
+        state.toggle_archive(ThreadId::new("target")).unwrap();
+        assert!(state.sidebar().threads[0].archived);
+        drop(host);
+    }
+}
+
+#[test]
+fn restored_checkpoint_probes_expired_owner_before_reconciling() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    persisted_archive_run(
+        &storage,
+        "run-target",
+        "target",
+        AgentRunPhase::Running,
+        Some("Checkpoint"),
+        true,
+    );
+    storage.close();
+    let registry_path = dir.path().join("owners.db");
+    let owner = runtime::ownership::ThreadOwner::new(
+        "target".into(),
+        runtime::ownership::Lease {
+            owner_id: "a".repeat(32),
+            generation: 1,
+            expires_at: 0,
+        },
+    );
+    runtime::ownership::Registry::open(&registry_path)
+        .unwrap()
+        .start(&owner)
+        .unwrap();
+    let socket = dir.path().join(format!("{}.sock", owner.lease.owner_id));
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let db = storage::Database::open(&config).unwrap();
+    let mut state = fixture_state(dir.path(), false, false);
+    state
+        .restore_history_with_ownership(&db, &registry_path)
+        .unwrap();
+    assert_eq!(
+        state.thread_phases()["run-target"],
+        workspace_ui::ThreadRunPhase::Running
+    );
+    // Model an owner exit without a graceful release, leaving a stale socket.
+    drop(listener);
+    for stale_socket in [true, false] {
+        if !stale_socket {
+            std::fs::remove_file(&socket).unwrap();
+        }
+        state
+            .restore_history_with_ownership(&db, &registry_path)
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Stopped
+        );
+    }
+    state.toggle_archive(ThreadId::new("target")).unwrap();
+    assert!(state.sidebar().threads[0].archived);
+}
+
+#[test]
+fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
+    for invalid_id in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        persisted_archive_run(
+            &storage,
+            "run-target",
+            "target",
+            AgentRunPhase::Running,
+            Some("Checkpoint"),
+            true,
+        );
+        storage.close();
+        let registry_path = dir.path().join("owners.db");
+        let owner = runtime::ownership::ThreadOwner::new(
+            "target".into(),
+            runtime::ownership::Lease {
+                owner_id: if invalid_id {
+                    "../invalid-owner".into()
+                } else {
+                    "a".repeat(32)
+                },
+                generation: 1,
+                expires_at: 0,
+            },
+        );
+        runtime::ownership::Registry::open(&registry_path)
+            .unwrap()
+            .start(&owner)
+            .unwrap();
+        if !invalid_id {
+            // ELOOP is an unknown endpoint failure, not proof of owner death.
+            let socket = dir.path().join(format!("{}.sock", owner.lease.owner_id));
+            std::os::unix::fs::symlink(&socket, &socket).unwrap();
+        }
+        let mut state = fixture_state(dir.path(), false, false);
+        state
+            .restore_history_with_ownership(
+                &storage::Database::open(&config).unwrap(),
+                &registry_path,
+            )
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-target"],
+            workspace_ui::ThreadRunPhase::Running
+        );
+        state.toggle_archive(ThreadId::new("target")).unwrap();
+        assert!(!state.sidebar().threads[0].archived);
+    }
+}
+
+#[test]
 fn restored_orphan_with_live_descendant_cannot_archive_family() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = fixture_state(dir.path(), false, false);

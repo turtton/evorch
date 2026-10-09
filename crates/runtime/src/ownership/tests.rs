@@ -200,6 +200,38 @@ fn claim_refuses_reachable_owner_even_when_lease_is_stale() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn saturated_owner_endpoint_protects_runs_without_waiting_for_accept() {
+    use socket2::{Domain, SockAddr, Socket, Type};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let owner_id = "a".repeat(32);
+    let path = directory.path().join(format!("{owner_id}.sock"));
+    let address = SockAddr::unix(&path).expect("socket address");
+    let listener = Socket::new(Domain::UNIX, Type::STREAM, None).expect("listener");
+    listener.bind(&address).expect("bind");
+    listener.listen(0).expect("listen with a minimal backlog");
+    let mut queued = Vec::new();
+    loop {
+        let client = Socket::new(Domain::UNIX, Type::STREAM, None).expect("queued client");
+        client.set_nonblocking(true).expect("nonblocking client");
+        match client.connect(&address) {
+            Ok(()) => queued.push(client),
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                break;
+            }
+        }
+    }
+    // No acceptor is running and all queued clients stay alive. A blocking
+    // liveness probe hangs here; nextest, not a test deadline, detects that.
+    assert!(ipc::owner_may_be_live(directory.path(), &owner_id));
+    drop(listener);
+    assert!(!ipc::owner_may_be_live(directory.path(), &owner_id));
+    drop(queued);
+}
+
+#[test]
 fn missing_registry_probes_and_permits_never_create_a_database() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("owners.db");

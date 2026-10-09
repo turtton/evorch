@@ -277,10 +277,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         use workspace_ui::ThreadRunPhase;
         // An absent registry or an expired lease is not proof of an orphan.
         let Some(path) = registry_path else { return };
-        let owners = match runtime::ownership::Registry::open_readonly(path)
-            .and_then(|registry| registry.list())
+        let (registry, owners) = match runtime::ownership::Registry::open_readonly(path)
+            .and_then(|registry| registry.list().map(|owners| (registry, owners)))
         {
-            Ok(owners) => owners,
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::warn!(%error, "history phase reconciliation skipped: ownership unknown");
                 return;
@@ -294,13 +294,67 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tracing::warn!("history phase reconciliation skipped: legacy active turn");
             return;
         }
+        // Checkpoint removes active_runs after each tool round even while the
+        // run stays Running. Protect its thread for the owner's full lifetime,
+        // including expired leases and endpoint failures of unknown cause.
+        let Some(root) = path.parent() else { return };
+        let mut liveness = std::collections::BTreeMap::new();
+        let mut protected_threads: std::collections::BTreeSet<_> = owners
+            .iter()
+            .filter(|owner| {
+                owner.state != runtime::ownership::OwnerState::Released
+                    && *liveness.entry(&owner.lease.owner_id).or_insert_with(|| {
+                        runtime::ownership::ipc::owner_may_be_live(root, &owner.lease.owner_id)
+                    })
+            })
+            .map(|owner| owner.thread_id.clone())
+            .collect();
+        // Do not hold a registry transaction across the socket probes. If a
+        // claim, release, or new turn raced with them, keep the replayed phase.
+        let current_owners = match registry.list() {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::warn!(%error, "history phase reconciliation skipped: ownership changed or unreadable");
+                return;
+            }
+        };
+        let before: std::collections::BTreeMap<_, _> = owners
+            .iter()
+            .map(|owner| (&owner.thread_id, owner))
+            .collect();
+        let after: std::collections::BTreeMap<_, _> = current_owners
+            .iter()
+            .map(|owner| (&owner.thread_id, owner))
+            .collect();
+        for thread in before.keys().chain(after.keys()) {
+            if before.get(thread) != after.get(thread) {
+                protected_threads.insert((*thread).clone());
+            }
+        }
+        if current_owners
+            .iter()
+            .any(|owner| owner.active_turn && owner.active_runs.is_empty())
+        {
+            return;
+        }
+        let protected_runs: std::collections::BTreeSet<_> = self
+            .phases
+            .keys()
+            .filter(|run| {
+                self.thread_for_run(run)
+                    .is_none_or(|thread| protected_threads.contains(&thread))
+            })
+            .cloned()
+            .collect();
         for (run_id, phase) in &mut self.phases {
             if !matches!(
                 phase,
                 ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
-            ) || owners
-                .iter()
-                .any(|owner| owner.active_runs.contains(run_id))
+            ) || protected_runs.contains(run_id)
+                || owners
+                    .iter()
+                    .chain(&current_owners)
+                    .any(|owner| owner.active_runs.contains(run_id))
             {
                 continue;
             }
