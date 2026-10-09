@@ -93,11 +93,13 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("EscalationHandoffFailed", HarnessImprovement),
         ("CrashRecovered", HarnessImprovement),
         ("AgentRunPanicked", HarnessImprovement),
-        ("EscalationAdmissionFailed", Ignored),
+        ("EscalationAdmissionFailed", TransientOrExternal),
         ("BudgetWarning", TransientOrExternal),
         ("BudgetExhausted", TransientOrExternal),
         ("ProviderUnavailable", TransientOrExternal),
         ("CacheRegression", TransientOrExternal),
+        ("ToolArgumentsMalformed", TransientOrExternal),
+        ("CompactionFailed", TransientOrExternal),
         ("ContextCheckpointSaved", Ignored),
         ("escalation_review", Ignored),
         ("tool_call_access", Ignored),
@@ -116,7 +118,6 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("unknown_run", Ignored),
         ("run_output_denied", Ignored),
         ("UnexpectedModelSwitch", Ignored),
-        ("CompactionFailed", Ignored),
         ("future-code", Ignored),
     ];
     // A new shared code needs its own pinned decision here, not the unknown fallback.

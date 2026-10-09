@@ -14,6 +14,7 @@ use crate::stream::StreamEvent;
 mod cache;
 #[cfg(test)]
 mod cache_tests;
+mod tool_arguments;
 
 /// プロセス内で一意な request ID を生成する。
 pub(crate) fn next_request_id() -> String {

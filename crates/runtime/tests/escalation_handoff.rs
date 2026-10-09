@@ -759,6 +759,21 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
         }
         model.release.notify_one();
         assert!(runtime.wait(target).await.is_err());
+        // Only a provider refusal is an admission failure; the user's stop is not.
+        let mut admission_failures = 0;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await
+        {
+            if matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "EscalationAdmissionFailed")
+            {
+                admission_failures += 1;
+            }
+        }
+        assert_eq!(
+            admission_failures,
+            usize::from(failure == "error-after-restart"),
+            "{failure}"
+        );
         assert!(retained_path.exists());
         assert_eq!(model.script.observed().await.len(), 1);
         let inherited = runtime.thread_goal(&child).unwrap();

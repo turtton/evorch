@@ -575,6 +575,7 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
     compaction_settings.max_compactions_per_run = 1;
     let (runtime, bus) = runtime_with(Arc::clone(&model), compaction_settings);
     let mut receiver = bus.subscribe();
+    let mut diagnostics = bus.subscribe();
     let run_id = runtime.delegate_background(
         Role::Orchestrator,
         "agent-failed-double".to_string(),
@@ -609,6 +610,30 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
             "compaction already completed at the current turn boundary".to_string(),
             true,
         ))
+    );
+    // Only the attempted compaction is diagnosed; the guard rejection is routine.
+    let mut failures = Vec::new();
+    while let Ok(Ok(event)) = timeout(Duration::from_millis(100), diagnostics.recv()).await {
+        if let EventKind::Diagnostic(diagnostic) = event.kind
+            && diagnostic.code == "CompactionFailed"
+        {
+            failures.push(diagnostic);
+        }
+    }
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0].run_id.as_deref(),
+        Some(run_id.to_string().as_str())
+    );
+    assert!(
+        failures[0]
+            .detail
+            .starts_with("compaction summary failed: summary model failed:")
+            && failures[0]
+                .detail
+                .contains("\nreason=Agent summarizer=Model"),
+        "{}",
+        failures[0].detail
     );
 }
 

@@ -8,7 +8,8 @@ mod window_tests;
 
 use std::sync::atomic::Ordering;
 
-use event_bus::{CompactionEvent, CompactionReason, Event};
+use event_bus::event::diagnostic_codes;
+use event_bus::{CompactionEvent, CompactionReason, DiagnosticEvent, DiagnosticSeverity, Event};
 use providers::{ContentBlock, Message, Role};
 
 use crate::agent_loop::LoopState;
@@ -145,9 +146,14 @@ pub(crate) async fn compact_now(
         .await;
     let official = match official {
         Ok(result) => result,
-        Err(_) => {
+        Err(error) => {
             state.compaction.record_failure(&settings);
             tracing::warn!("公式 compaction に失敗したため Summarizer へフォールバックします");
+            failure_diagnostic(
+                state,
+                reason,
+                &format!("official compaction failed; falling back to the summarizer: {error}"),
+            );
             None
         }
     };
@@ -194,15 +200,19 @@ pub(crate) async fn compact_now(
         Ok(summary) => enforce_max_bytes(&summary, settings.max_summary_bytes),
         Err(error) => {
             state.compaction.record_failure(&settings);
-            return Err(CompactionError::SummarizeFailed(error.to_string()));
+            let error = CompactionError::SummarizeFailed(error.to_string());
+            failure_diagnostic(state, reason, &error.to_string());
+            return Err(error);
         }
     };
     // max_summary_bytes=0 などで要約本文が空になる設定を黙って成功扱いしない。
     if summary.is_empty() {
         state.compaction.record_failure(&settings);
-        return Err(CompactionError::SummarizeFailed(
+        let error = CompactionError::SummarizeFailed(
             "summary became empty after max_summary_bytes enforcement".to_string(),
-        ));
+        );
+        failure_diagnostic(state, reason, &error.to_string());
+        return Err(error);
     }
 
     let checkpoint_id = format!(
@@ -272,6 +282,23 @@ pub(crate) async fn compact_now(
         }));
 
     Ok(outcome)
+}
+
+/// Guard skips (cooldown, below threshold, ...) are routine and not reported; only an
+/// attempted compaction whose provider call or summary failed is.
+fn failure_diagnostic(state: &LoopState, reason: CompactionReason, error: &str) {
+    state.shared.bus.emit(Event::new(DiagnosticEvent {
+        source: "compaction".into(),
+        severity: DiagnosticSeverity::Warning,
+        code: diagnostic_codes::COMPACTION_FAILED.into(),
+        detail: format!(
+            "{error}\nreason={reason:?} summarizer={:?}",
+            state.shared.compaction.summarizer
+        ),
+        run_id: Some(state.task.run_id.to_string()),
+        thread_id: None,
+        call_id: None,
+    }));
 }
 
 const fn error_from_guard(decision: GuardDecision) -> CompactionError {
