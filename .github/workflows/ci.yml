@@ -26,8 +26,18 @@ jobs:
       EVORCH_CI_METADATA_DIR: target/ci-metadata
     steps:
       - uses: actions/checkout@v4
+      # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
+      # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: |
+          df -h /
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          if [ "$avail_gb" -ge 60 ]; then
+            echo "skip cleanup: ${avail_gb}G available"
+            exit 0
+          fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.0
@@ -37,12 +47,14 @@ jobs:
         # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
         run: sudo apt-get update && sudo apt-get install -y mold ripgrep
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
+      # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
       # Keep CARGO_TARGET_DIR scoped to Cargo steps below: the cache action's
       # restore key and post-save cargo metadata both need it to be absent.
       # The action recursively caches target/, including target/ci-shared.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -111,6 +123,10 @@ jobs:
         run: |
           cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
           git diff --exit-code docs/config/evorch-config-v2.schema.json
+      # 削除省略の閾値を見直せるよう、ビルド後の使用量を残す。
+      - name: Report disk usage
+        if: always()
+        run: df -h /
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
@@ -139,8 +155,10 @@ jobs:
           # out-link を明示する。
           nix build -L .#evorch --out-link ./result-evorch
           nix build -L .#evorch-deps --out-link ./result-deps
+      # PR 同士の並行 push が tailscaled ingress を詰まらせるため (issue #72)、
+      # attic への push は main の push に限る。PR は main の closure を substitute する。
       - name: Push to attic
-        if: success()
+        if: success() && github.ref == 'refs/heads/main'
         run: |
           # 最終 out のみでは build-time 依存 (crane cargoArtifacts / fenix toolchain /
           # vendored crate sources) が attic に入らず毎回再 build になるため、
@@ -173,6 +191,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install headless rendering and isolated X11/Wayland deps
         run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0
       - name: Prepare evidence directories
@@ -241,6 +260,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
       - name: Locate Chrome/Chromium executable
