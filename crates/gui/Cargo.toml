@@ -55,6 +55,9 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+notify-rust = "4"
+
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }
 tools = { path = "../tools" }

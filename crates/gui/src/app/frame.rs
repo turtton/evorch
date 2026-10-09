@@ -11,6 +11,13 @@ use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Process validated runtime events even when eframe skips painting a hidden window.
+    pub fn logic(&mut self, ctx: &egui::Context) {
+        self.drain_pump();
+        self.dispatch_system_notifications(ctx);
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
     pub fn with_quota_backend(
         mut self,
         backend: Box<dyn crate::model::telemetry::quota::QuotaBackend>,
@@ -22,12 +29,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         let ctx = ui.ctx().clone();
+        self.dispatch_system_notifications(&ctx);
         self.handle_input(&ctx);
         if !self.theme_installed {
             crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
         }
         let (event_count, drain_time, fold_time) = self.drain_pump();
+        self.dispatch_system_notifications(&ctx);
         self.poll_external();
         self.poll_auto_titles();
         if self.external_command_running() && ui.button("Cancel external command").clicked() {
@@ -237,6 +246,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.tasks.apply_event(event);
         self.durable_tasks.apply_event(event);
         self.telemetry.apply_event(event);
+        self.fold_system_notification(event);
     }
 
     fn apply_runtime_event(&mut self, event: &Event) {
