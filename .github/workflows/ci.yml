@@ -26,16 +26,17 @@ jobs:
       EVORCH_CI_METADATA_DIR: target/ci-metadata
     steps:
       - uses: actions/checkout@v4
-      # 削除対象ごとの所要時間と空き容量を記録し、削減対象を決める根拠にする。
+      # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
+      # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
         run: |
           df -h /
-          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; do
-            before=$(df -BM --output=avail / | tail -1)
-            start=$SECONDS
-            sudo rm -rf "$dir"
-            echo "removed $dir in $((SECONDS - start))s (avail ${before// /} -> $(df -BM --output=avail / | tail -1 | tr -d ' '))"
-          done
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          if [ "$avail_gb" -ge 60 ]; then
+            echo "skip cleanup: ${avail_gb}G available"
+            exit 0
+          fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: dtolnay/rust-toolchain@v1
         with:
@@ -122,6 +123,10 @@ jobs:
         run: |
           cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
           git diff --exit-code docs/config/evorch-config-v2.schema.json
+      # 削除省略の閾値を見直せるよう、ビルド後の使用量を残す。
+      - name: Report disk usage
+        if: always()
+        run: df -h /
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
