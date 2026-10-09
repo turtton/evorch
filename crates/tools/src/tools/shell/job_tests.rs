@@ -151,6 +151,7 @@ async fn snapshot_guard_outlives_yield_and_releases_after_stop() {
         json!({"command":"read value", "yield_ms":0}),
     )
     .await;
+    assert_eq!(id(&start), "job-0");
     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
     shell.retain_shell_job_guard("owner", &id(&start), Box::new(Guard(Arc::clone(&released))));
     assert!(!released.load(std::sync::atomic::Ordering::SeqCst));

@@ -20,7 +20,7 @@ use crate::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::{Permissions, Tool, ToolExecutionMode};
+use crate::tool::{Permissions, ShellJobSummary, Tool, ToolExecutionMode};
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
 
 mod prepared;
@@ -325,6 +325,12 @@ impl ToolExecutor {
         self.tools
             .get("shell")
             .is_some_and(|shell| shell.tool.has_running_shell_jobs(run_id))
+    }
+
+    pub fn running_shell_job_summary(&self, run_id: &str) -> Option<ShellJobSummary> {
+        self.tools
+            .get("shell")
+            .and_then(|shell| shell.tool.running_shell_job_summary(run_id))
     }
 
     pub fn has_unobserved_shell_jobs(&self, run_id: &str) -> bool {

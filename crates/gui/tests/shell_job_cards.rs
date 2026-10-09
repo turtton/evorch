@@ -170,3 +170,57 @@ fn shell_jobs_pane_explains_an_empty_conversation() {
     harness.run_steps(2);
     assert!(harness.query_by_label("No shell jobs").is_some());
 }
+
+#[test]
+fn short_shell_job_handle_joins_result_and_live_output_in_one_card() {
+    for live_first in [false, true] {
+        let mut model = TranscriptModel::new();
+        let live = Event::new(ToolEvent::ShellJobOutput {
+            job_id: "job-0".into(),
+            call_id: Some("short-start".into()),
+            run_id: None,
+            offset: 0,
+            chunk: "short handle output\n".into(),
+            status: "running".into(),
+            exit_code: None,
+        });
+        model.apply(&Event::new(ToolEvent::ToolStarted {
+            tool_name: "shell".into(),
+            call_id: "short-start".into(),
+            input: Some(json!({"command":"cargo test", "yield_ms":0})),
+            run_id: None,
+        }));
+        if live_first {
+            model.apply(&live);
+        }
+        model.apply(&Event::new(ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: "short-start".into(),
+            is_error: false,
+            output: Some("shell job: job-0\nstatus: running\ncursor: 0\n".into()),
+            detail: Some(json!({"shell_job":{"job_id":"job-0", "status":"running"}})),
+            run_id: None,
+        }));
+        if !live_first {
+            model.apply(&live);
+        }
+        assert_eq!(model.shell_jobs().iter().count(), 1);
+        let job = model.shell_jobs().get("job-0").unwrap();
+        assert_eq!(job.command.as_deref(), Some("cargo test"));
+        assert_eq!(job.log(), "short handle output\n");
+        let mut harness = harness(model);
+        assert_eq!(
+            harness
+                .query_all_by_label("✓ Shell cargo test · running")
+                .count(),
+            1
+        );
+        assert_eq!(harness.query_all_by_label("short handle output").count(), 1);
+        harness.get_by_label("Open shell job log").click();
+        harness.run_steps(1);
+        assert_eq!(
+            gui::panes::shell_jobs::take_open_request(&harness.ctx).as_deref(),
+            Some("job-0")
+        );
+    }
+}

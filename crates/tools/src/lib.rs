@@ -38,7 +38,7 @@ pub use search::{
     ResponsesTransport, SearchError, SearchOptions, SearchProvider, SearchResults,
     TavilyKeylessProvider, count_search_results,
 };
-pub use tool::{Permissions, Tool, ToolExecutionMode};
+pub use tool::{Permissions, ShellJobSummary, Tool, ToolExecutionMode};
 pub use tools::{
     CommandVerdict, Edit, GitDiff, Grep, Read, Shell, ShellCommandContract, WebFetch, WebSearch,
     Write,

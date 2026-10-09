@@ -71,6 +71,13 @@ pub enum ToolExecutionMode {
     Exclusive,
 }
 
+/// Model-facing identity and bounded command preview of a running shell job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellJobSummary {
+    pub handle: String,
+    pub command_summary: String,
+}
+
 /// 標準ツールの抽象。
 ///
 /// ツールの実行は必ず ToolExecutor（wave 3 で追加）経由で行うこと。ToolExecutor
@@ -140,6 +147,11 @@ pub trait Tool: Send + Sync {
     /// effects. This never acknowledges results and refuses to forget live jobs.
     fn release_shell_jobs(&self, _run_id: &str) -> Result<(), ToolError> {
         Ok(())
+    }
+
+    /// Optional diagnostic detail; occupancy still depends on the boolean hook.
+    fn running_shell_job_summary(&self, _run_id: &str) -> Option<ShellJobSummary> {
+        None
     }
 
     /// Whether this run still owns a live shell process.

@@ -184,6 +184,7 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
         ));
         let call = next(&mut calls).await;
         let job = call.job("start");
+        assert_eq!(job, format!("job-{index}"));
         assert!(!call.result("start").1, "run {index} must fit the registry");
         runtime.cancel(run).unwrap();
         assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
@@ -256,4 +257,78 @@ async fn failed_terminal_snapshot_keeps_unobserved_handles_and_prior_uncertainty
         matches!(&event.kind, event_bus::EventKind::Diagnostic(d) if d.code == "ContextSnapshotFailed")
     }));
     drop(call);
+}
+
+// Deliberately uses Tool's default summary hook while forwarding occupancy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absent_summary_still_blocks_mutation_but_allows_reads_and_all_continuations() {
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let (started, _draining) = mpsc::unbounded_channel();
+    let shell = Arc::new(GatedShell {
+        shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+        drains: AtomicUsize::new(1),
+        started,
+        gate: tokio::sync::Semaphore::new(0),
+    });
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(shell.clone()).unwrap();
+    executor.register(Arc::new(tools::Read)).unwrap();
+    executor.register(Arc::new(tools::Write)).unwrap();
+    let executor = Arc::new(executor);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "fallback occupancy".into(),
+        RunConfig::default(),
+    );
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read first; read second", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    assert_eq!(job, "job-0");
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
+    assert_eq!(executor.running_shell_job_summary(&run.to_string()), None);
+    call.respond(tool_response(
+        "blocked",
+        "write",
+        json!({"path":root.join("README.md"), "content":"blocked"}),
+    ));
+    let call = next(&mut calls).await;
+    assert!(call.result("blocked").1);
+    assert!(call.result("blocked").0.contains(
+        "A shell job still owns this workspace. Poll or stop it before another mutation."
+    ));
+    call.respond(tool_response(
+        "read",
+        "read",
+        json!({"path":root.join("README.md")}),
+    ));
+    let mut call = next(&mut calls).await;
+    assert!(!call.result("read").1);
+    for action in ["poll", "stdin", "stop"] {
+        let mut input = json!({"action":action, "job_id":job, "yield_ms":0});
+        if action == "stdin" {
+            input["input"] = json!("first\n");
+        }
+        if action == "stop" {
+            input["yield_ms"] = json!(1000);
+        }
+        call.respond(tool_response(action, "shell", input));
+        call = next(&mut calls).await;
+        assert_eq!(call.job(action), job);
+        assert!(!call.result(action).0.contains("owns this workspace"));
+        if action == "stop" {
+            assert_eq!(field(&call.result(action).0, "status: "), "cancelled");
+        } else {
+            assert!(!call.result(action).1);
+            assert!(executor.has_running_shell_jobs(&run.to_string()));
+        }
+    }
+    call.respond(text_response("observed", FinishReason::Stop));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
 }
