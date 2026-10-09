@@ -8,7 +8,7 @@ mod drafts;
 pub(crate) mod lifecycle;
 
 pub(crate) use crash::compact_backtrace;
-pub use crash::{SpooledCrash, drain_crash_spool, install_crash_spool};
+pub use crash::{SpooledCrash, drain_crash_spool, install_crash_spool, spool_fault};
 pub use drafts::{render_issue_draft, render_packet_draft};
 
 use std::{
@@ -125,6 +125,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         CRASH_RECOVERED => HarnessImprovement,
         // runtime: an agent run's task panicked and was moved to Error.
         AGENT_RUN_PANICKED => HarnessImprovement,
+        // storage bridge (spooled): the writer stopped accepting events entirely.
+        STORAGE_WRITER_HALTED => HarnessImprovement,
         // admission: the provider refused or could not admit the handoff run (quota,
         // credentials, availability); user cancellation is not reported.
         ESCALATION_ADMISSION_FAILED => TransientOrExternal,
@@ -254,12 +256,38 @@ impl ImprovementCollector {
             return;
         }
         for crash in crashes {
+            let code = crash
+                .code
+                .clone()
+                .unwrap_or_else(|| diagnostic_codes::CRASH_RECOVERED.into());
+            // A spooled fault bypasses the bus, so it must pass the same allowlist.
+            if known_class(&code) != Some(CandidateClass::HarnessImprovement) {
+                tracing::warn!(code, "ignoring spooled fault with a non-harness code");
+                continue;
+            }
+            let site = crash
+                .location
+                .as_deref()
+                .unwrap_or_else(|| first_line(&crash.message));
+            let (title_text, dedup_key) = if crash.code.is_some() {
+                (
+                    format!("{code}: {}", first_line(&crash.message)),
+                    format!("spool:{code}:{site}"),
+                )
+            } else {
+                (
+                    format!("Recovered crash: {}", first_line(&crash.message)),
+                    // The same panic site folds into one candidate's occurrences
+                    // instead of one candidate per spool file.
+                    format!("crash:{site}"),
+                )
+            };
             self.intake("crash", NewImprovementCandidate {
                 id: String::new(),
                 source: ImprovementSource::Diagnostic,
-                code: diagnostic_codes::CRASH_RECOVERED.into(),
+                code,
                 severity: ImprovementSeverity::Error,
-                title: title(&format!("Recovered crash: {}", first_line(&crash.message))),
+                title: title(&title_text),
                 evidence: self.json_evidence(json!({
                     "file_name": crash.file_name,
                     "message": bound_text(&crash.message, self.settings.policy.evidence_limit()),
@@ -269,12 +297,7 @@ impl ImprovementCollector {
                     "build": crash.build.clone().unwrap_or_else(|| "unknown".into()),
                     "backtrace": crash.backtrace,
                 })),
-                // The same panic site folds into one candidate's occurrences instead
-                // of one candidate per spool file.
-                dedup_key: format!(
-                    "crash:{}",
-                    crash.location.as_deref().unwrap_or_else(|| first_line(&crash.message))
-                ),
+                dedup_key,
                 run_id: None,
             });
         }

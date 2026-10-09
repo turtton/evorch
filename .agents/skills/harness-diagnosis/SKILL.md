@@ -1,6 +1,6 @@
 ---
 name: harness-diagnosis
-description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, LearningPipelineFailed, CrashRecovered, AgentRunPanicked, LessonPromoted, ObserverLagged, 診断イベント調査"
+description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, LearningPipelineFailed, CrashRecovered, AgentRunPanicked, StorageWriterHalted, LessonPromoted, ObserverLagged, 診断イベント調査"
 ---
 
 # harness-diagnosis — 改善候補から evorch の不具合を直す
@@ -78,6 +78,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | `ContextSnapshotFailed` / `EscalationHandoffFailed` | detail と、その run の `context.terminal_phase` / `ledger`。escalation なら移譲先の run も `children` と events で確認する |
 | `CrashRecovered` | evidence の `location` / `message` / `thread` / `build`（クラッシュしたプロセスの build）/ `backtrace`。backtrace は std・executor を除いた 1 行 1 フレームで、シンボルのない release build では空になる。同じ location の crash は 1 候補の `occurrences` に集まる |
 | `AgentRunPanicked` | run のタスクが panic し、runtime が Error にした。detail の 1 行目が panic メッセージ、`site=` 行が発生位置（候補は位置ごとに分かれる）、`backtrace:` 以降がフレーム。finalize を通っていないので workspace は残り、shell job は停止済み。`inspect run <run_id>` の `context` で panic 直前の状態を見る |
+| `StorageWriterHalted` | storage が全イベントを拒むようになった（`location` が `storage:writer_closed` / `storage:db_size_limit` / `storage:session_size_limit` / `storage:daily_bytes_limit` / `storage:wal_size_limit`）。storage に書けないので、その間のイベントと診断は残っていない。GUI が crash spool に書き、次回起動時に候補になる。writer_closed なら同時刻の `CrashRecovered`（thread `storage-writer`）を探す。サイズ上限なら `[storage]` の上限と retention を確認する（GUI はセッション ID が固定なので session 上限に達しやすい） |
 | `LessonPromoted` | `content` は harness scope の lesson 本文。`evidence_refs` は `"<run_id>@<updated_at_ns>:m<i>:b<j>"` の配列で、`inspect run <run_id> --full` の `messages_json[i].content[j]` に当たる。ただしスナップショットの `updated_at_ns` が変わっていれば位置はずれ得る |
 | `ObserverLagged` | `skipped_events` 件の取りこぼしがあった。その時間帯の診断は候補になっていない可能性があるので、`events --around` で直接確かめる |
 | `SkillDiagnostic:*` | skill の読み込みや検証の問題。evidence の `skill` / `scope` / `detail` |
@@ -110,5 +111,5 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 - **Info 重大度の診断は既定では保存されない**（`[diagnostics].persistence` の既定は warnings）。
 - **SecretGuard が secret らしい文字列を検出すると、イベントも候補も丸ごと保存されない。** 痕跡も残らない。
 - **記録のみの診断は候補にならない。** `ToolArgumentsMalformed`（ストリームで組み立てた tool-call 引数が JSON でなく、ツールは実行していない。detail に provider・model・ツール名・長さ・sha256 先頭 16 桁）、`CompactionFailed`（要約モデルや provider 側 compaction の失敗、要約サイズ制限）、`EscalationAdmissionFailed`（handoff 先 run を provider が受け付けなかった。ユーザーの停止では出ない）は一時的・外部要因に分類され、diagnostics にだけ残る。疑うときは `events --run <id>` で直接探す。
-- **storage の書き込み停止は診断イベントを出さない。** `tracing` のログ（stderr）にしか出ないので、疑うときは GUI を stderr を保存した状態で起動して再現してもらう。
+- **storage の書き込み停止は self-improvement が有効なときだけ残る。** `StorageWriterHalted` は crash spool 経由なので、無効なら `tracing` のログ（stderr）にしか出ない。停止している間のイベントそのものは、どちらでも残らない。
 - **`events` テーブルの `session_id` は GUI では固定値。** run の絞り込みには `--run` を使う。

@@ -189,6 +189,9 @@ pub mod diagnostic_codes {
     pub const CRASH_RECOVERED: &str = "CrashRecovered";
     /// An agent run's task panicked; the runtime moved the run to Error.
     pub const AGENT_RUN_PANICKED: &str = "AgentRunPanicked";
+    /// Storage stopped accepting events (writer gone or a hard size limit hit).
+    /// Spooled rather than emitted, since storage cannot record it.
+    pub const STORAGE_WRITER_HALTED: &str = "StorageWriterHalted";
     /// Sandbox escalation review decisions.
     pub const ESCALATION_REVIEW: &str = "escalation_review";
     /// Tool call access decisions.
@@ -225,6 +228,7 @@ pub mod diagnostic_codes {
         ESCALATION_ADMISSION_FAILED,
         CRASH_RECOVERED,
         AGENT_RUN_PANICKED,
+        STORAGE_WRITER_HALTED,
         ESCALATION_REVIEW,
         TOOL_CALL_ACCESS,
         SCOPE_DENIED,

@@ -9,6 +9,7 @@ use event_bus::{
 use storage::{StorageError, StorageHandle};
 
 mod coalescing;
+mod halt;
 mod lifecycle;
 mod monitor;
 mod usage_ledger;
@@ -76,6 +77,7 @@ pub struct StorageBridge {
     policy: PersistencePolicy,
     monitor: StorageBridgeMonitor,
     ledger: Option<usage_ledger::UsageRecorder>,
+    halt: halt::HaltRecorder,
     #[cfg(test)]
     automatic_flush_enabled: bool,
 }
@@ -91,6 +93,7 @@ impl StorageBridge {
             policy: PersistencePolicy::default(),
             monitor: StorageBridgeMonitor::default(),
             ledger: None,
+            halt: halt::HaltRecorder::default(),
             #[cfg(test)]
             automatic_flush_enabled: true,
         }
@@ -124,6 +127,13 @@ impl StorageBridge {
         self
     }
 
+    /// Spool a `StorageWriterHalted` fault into `dir` (the self-improvement crash
+    /// spool) when writes stop, since storage itself cannot record it.
+    pub fn with_fault_spool(mut self, dir: std::path::PathBuf) -> Self {
+        self.halt = halt::HaltRecorder::spooling_to(dir);
+        self
+    }
+
     /// Retain this handle before passing the bridge to [`run`].
     pub fn monitor(&self) -> StorageBridgeMonitor {
         self.monitor.clone()
@@ -150,10 +160,15 @@ impl StorageBridge {
         let result =
             self.storage
                 .append_stream_event(self.session_id, event, self.validator.clone());
-        if result.is_ok() {
-            self.monitor.persisted();
-        } else {
-            self.monitor.failed();
+        match &result {
+            Ok(()) => {
+                self.monitor.persisted();
+                self.halt.resumed();
+            }
+            Err(error) => {
+                self.monitor.failed();
+                self.halt.failed(error);
+            }
         }
         result
     }

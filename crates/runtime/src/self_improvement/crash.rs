@@ -20,6 +20,8 @@ pub struct SpooledCrash {
     pub build: Option<String>,
     /// [`compact_backtrace`] of the panicking thread; absent in older spool entries.
     pub backtrace: Option<String>,
+    /// The diagnostic code of a [`spool_fault`] entry; `None` for a panic.
+    pub code: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,6 +35,8 @@ struct CrashEntry {
     build: Option<String>,
     #[serde(default)]
     backtrace: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// Wraps the process panic hook: spools the panic, then runs the previous hook so
@@ -68,6 +72,7 @@ pub fn install_crash_spool(spool_dir: PathBuf) {
                 .map(|name| bound_text(name, 1024)),
             timestamp,
             build: Some(super::build_info()),
+            code: None,
             backtrace: Some(bound_text(
                 &compact_backtrace(&std::backtrace::Backtrace::force_capture().to_string()),
                 BACKTRACE_MAX_BYTES,
@@ -140,6 +145,38 @@ pub(crate) fn compact_backtrace(rendered: &str) -> String {
     frames.join("\n")
 }
 
+/// Durably records a harness fault that cannot reach storage (for example storage
+/// itself stopped writing), to be ingested on the next start like a crash. `site`
+/// groups occurrences the way a panic location does. Only codes the classifier
+/// treats as harness faults are ingested.
+pub fn spool_fault(spool_dir: &Path, code: &str, site: &str, message: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let entry = CrashEntry {
+        message: bound_text(message, 4096),
+        location: Some(bound_text(site, 4096)),
+        thread: std::thread::current()
+            .name()
+            .map(|name| bound_text(name, 1024)),
+        timestamp,
+        build: Some(super::build_info()),
+        backtrace: None,
+        code: Some(code.to_string()),
+    };
+    let bytes = serde_json::to_vec(&entry).map_err(std::io::Error::other)?;
+    fs::create_dir_all(spool_dir)?;
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = spool_dir.join(format!(
+        "crash-{timestamp}-{}-{sequence}.json",
+        std::process::id()
+    ));
+    atomic_write(&path, &bytes).map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 /// Best-effort, deterministic read-and-delete of crash-*.json only. Missing dirs
 /// return empty; unreadable/corrupt/oversized entries become explicit evidence.
 /// Symlinks are not followed. Failed deletion is ignored (re-intake folds into the
@@ -182,6 +219,7 @@ pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
                 timestamp: 0,
                 build: None,
                 backtrace: None,
+                code: None,
             });
             Some(SpooledCrash {
                 file_name: entry.file_name().to_string_lossy().into_owned(),
@@ -191,6 +229,7 @@ pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
                 timestamp_unix: parsed.timestamp,
                 build: parsed.build,
                 backtrace: parsed.backtrace,
+                code: parsed.code,
             })
         })
         .collect()

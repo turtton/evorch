@@ -93,6 +93,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("EscalationHandoffFailed", HarnessImprovement),
         ("CrashRecovered", HarnessImprovement),
         ("AgentRunPanicked", HarnessImprovement),
+        ("StorageWriterHalted", HarnessImprovement),
         ("EscalationAdmissionFailed", TransientOrExternal),
         ("BudgetWarning", TransientOrExternal),
         ("BudgetExhausted", TransientOrExternal),
@@ -419,6 +420,40 @@ fn caught_panics_are_left_to_their_catcher_not_spooled() {
 }
 
 #[test]
+fn spooled_harness_faults_become_candidates_and_others_are_dropped() {
+    let f = Fixture::new();
+    let spool = f.dir.path().join("spool");
+    for _ in 0..2 {
+        spool_fault(
+            &spool,
+            "StorageWriterHalted",
+            "storage:writer_closed",
+            "event writes halted: writer closed",
+        )
+        .unwrap();
+    }
+    // Not a harness code: a spooled fault must not bypass the allowlist.
+    spool_fault(&spool, "CompactionFailed", "compaction", "summary failed").unwrap();
+    let spooled = drain_crash_spool(&spool);
+    assert_eq!(spooled.len(), 3);
+    f.collector().ingest_crashes(spooled);
+    let rows = f.candidates();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].code, "StorageWriterHalted");
+    assert_eq!(rows[0].occurrences, 2);
+    assert_eq!(
+        rows[0].dedup_key,
+        "spool:StorageWriterHalted:storage:writer_closed"
+    );
+    assert_eq!(
+        rows[0].title,
+        "StorageWriterHalted: event writes halted: writer closed"
+    );
+    let evidence: Value = serde_json::from_str(&rows[0].evidence).unwrap();
+    assert_eq!(evidence["location"], "storage:writer_closed");
+}
+
+#[test]
 fn diagnostic_sites_keep_occurrences_apart() {
     let f = Fixture::new();
     let panicked = |site: &str| DiagnosticEvent {
@@ -481,6 +516,7 @@ fn crashes_at_the_same_site_fold_into_one_candidate() {
         timestamp_unix: 1,
         build: None,
         backtrace: Some("runtime::agent_loop::LoopState::step".into()),
+        code: None,
     };
     f.collector().ingest_crashes(vec![
         crash(
@@ -524,6 +560,7 @@ fn collection_gates_and_write_limits_apply() {
         timestamp_unix: 1,
         build: None,
         backtrace: None,
+        code: None,
     }]);
     assert!(f.candidates().is_empty());
     assert!(f.draft_files().is_empty());
