@@ -1,0 +1,74 @@
+implementation_issue_packet:
+  issue_title: "Conversation への成果物提示 Phase 1（render_artifact / present と画像・HTML カード）"
+  issue_kind: feature
+  source_execution_unit: v12-conversation-artifacts
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/event-bus/ crates/runtime/ crates/agents/ crates/config/assets/presets/ crates/storage/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0029 Phase 1: 作成（render_artifact）と提示（present）を別権限の meta op として追加し、content-addressed artifact store、ArtifactsPresented イベント、conversation transcript の画像・HTML カード、外部で開く操作、イベント再生による復元を実装する。HTML の Chromium スナップショット、model への画像返却、ask_user の artifacts 指定は後続 Phase とする"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0029（intents/evorch/decisions/0029-conversation-artifacts.md）で方針合意済み。新しい role は作らず、ExecutionPolicy::for_run_config の runtime 由来 category / root 判定で tool を付与する"
+    - "todo_write（PR #193）が root conversation 限定 meta op の前例。authorized(): parent なし・conversation・RunPurpose::General・Worker|Orchestrator。ownership permit の validate_mutation / mutation_guard を通す"
+    - "meta op は crates/runtime/src/meta/registry.rs の define_meta_ops! で名前・spec・handler を登録し、provider tool spec の順序はこの登録順に従う"
+    - "root run は runtime.entry(run).parent を辿って求める（runtime/questions.rs の request_user_question と同じ）。thread は goal_thread(root) で得る"
+    - "run の workspace は state.shared.executor.default_cwd()。read/write 等は相対 path をここで解決する"
+    - "ContentBlock::Image は user message 専用で、ToolResultContent は Text のみ。Phase 1 では model に画像を返さない"
+    - "GUI は file_viewer::image_uri + LocalImageLoader で拡張子から画像形式を判定してローカル画像を表示できる。file:// の OpenUrl は take_file_links により in-app file viewer へ横取りされるため、外部で開く操作は別経路が必要"
+    - "ashpd 0.13 は file_chooser feature のみ有効。folder_picker.rs が専用 thread + current_thread tokio runtime で portal を呼ぶ前例"
+    - "transcript は storage のイベント再生で復元され、TranscriptRegistry::route が run_id から thread / run transcript を決める"
+  intent_references:
+    - intents/evorch/decisions/0029-conversation-artifacts.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/orchestration/overview.md
+  acceptance_criteria:
+    - "render_artifact は visual category の Worker と conversation category の root Worker にだけ公開され、他の role / category / 子 run の conversation category では policy と dispatch の両方で拒否される"
+    - "present は conversation の root Worker / root Orchestrator にだけ公開され、子 run（visual Worker を含む）では拒否される"
+    - "render_artifact は run の workspace 内に実在する通常ファイル（png / jpeg / gif / webp / html）だけを受け付け、workspace 外・symlink による脱出・ディレクトリ・未対応形式・サイズ上限超過・拡張子と内容の不一致を拒否する"
+    - "render_artifact は呼び出し時点の内容を content-addressed に保存し、元ファイルを上書き・削除しても保存済み artifact の内容は変わらない"
+    - "HTML に secret-guard が秘密情報を検出した場合は保存せず拒否する"
+    - "present は自分の run 木（同じ root、または同じ thread）に属する artifact だけを受け付け、別 thread の artifact id や存在しない id を拒否する。部分的な提示はしない"
+    - "present 成功時に ArtifactsPresented イベントが root run の id 付きで発行され、conversation（thread）transcript にカードとして表示される"
+    - "カードは title / caption と、画像なら縮小プレビュー、HTML ならファイル種別の表示を持ち、どちらも外部アプリで開く操作を持つ。保存ファイルが失われた場合は利用不可と表示する"
+    - "アプリ再起動後のイベント再生で、提示済みカードが同じ内容で復元される"
+    - "tool 結果には [artifact <id>: <title>] 形式の参照テキストが含まれ、compaction 後も参照が残る"
+    - "visual category overlay と tool 説明に、自己完結した HTML（外部 CSS/JS/画像を参照しない）で作ること、subagent は id を返し Orchestrator が present することを記載する"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0029-conversation-artifacts.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/orchestration/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0029 と feature の要件追記（commit 7f8f0ba4）で方針は記録済み。Phase 1 は ADR の段階 1 に HTML の外部表示（スナップショットなし）を加えた最小の縦切りであり、新しい intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0029 と矛盾する判断が生じた場合だけ ADR と feature overview を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/conversation-artifacts.md
+    summary: "render_artifact / present の利用条件、保存先とサイズ上限、HTML の制約、復元の挙動を記載する"
+closeout_learning:
+  expected: "作成と提示の権限分離、run 木による artifact 所有権検証、content-addressed 保存による版比較が実装・テストで確認できる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - "crates/runtime/src/meta/registry.rs の ToolSpec 説明（render_artifact / present）"
+    - "crates/config/assets/presets/category-visual.md"
