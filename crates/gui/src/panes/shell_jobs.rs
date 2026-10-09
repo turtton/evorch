@@ -3,7 +3,7 @@
 
 use egui::{Color32, RichText, Ui};
 
-use crate::model::transcript::shell_jobs::ShellJob;
+use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey};
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::{FONT_SMALL, R_SM, SP_1, SP_2, palette};
@@ -12,12 +12,12 @@ use crate::theme::widgets::{compact_row, empty_state, icon_button, row_title, st
 const OPEN_REQUEST: &str = "shell-jobs-open-request";
 
 /// Asks the workbench to reveal `job_id` in the shell jobs pane.
-pub fn request_open(ctx: &egui::Context, job_id: &str) {
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new(OPEN_REQUEST), job_id.to_owned()));
+pub fn request_open(ctx: &egui::Context, key: &ShellJobKey) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(OPEN_REQUEST), key.clone()));
 }
 
-pub fn take_open_request(ctx: &egui::Context) -> Option<String> {
-    ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new(OPEN_REQUEST)))
+pub fn take_open_request(ctx: &egui::Context) -> Option<ShellJobKey> {
+    ctx.data_mut(|data| data.remove_temp::<ShellJobKey>(egui::Id::new(OPEN_REQUEST)))
 }
 
 pub fn status_color(job: &ShellJob) -> Color32 {
@@ -32,7 +32,7 @@ pub fn status_color(job: &ShellJob) -> Color32 {
 
 #[derive(Debug, Clone)]
 pub struct ShellJobsPane {
-    selected: Option<String>,
+    selected: Option<ShellJobKey>,
     follow: bool,
 }
 
@@ -46,8 +46,8 @@ impl Default for ShellJobsPane {
 }
 
 impl ShellJobsPane {
-    pub fn select(&mut self, job_id: String) {
-        self.selected = Some(job_id);
+    pub fn select(&mut self, key: ShellJobKey) {
+        self.selected = Some(key);
         self.follow = true;
     }
 
@@ -65,8 +65,8 @@ impl ShellJobsPane {
         // Without an explicit choice, show the newest running job, else the newest.
         let selected = self
             .selected
-            .as_deref()
-            .and_then(|id| jobs.iter().find(|job| job.id == id))
+            .as_ref()
+            .and_then(|id| jobs.iter().find(|job| &job.key == id))
             .or_else(|| jobs.iter().rev().find(|job| job.is_running()))
             .or_else(|| jobs.last())
             .copied();
@@ -77,15 +77,17 @@ impl ShellJobsPane {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for job in jobs.iter().rev() {
-                    let current = selected.is_some_and(|selected| selected.id == job.id);
+                    let current = selected.is_some_and(|selected| selected.key == job.key);
                     let mut clicked = false;
-                    compact_row(ui, current, |ui| {
-                        status_dot(ui, status_color(job));
-                        ui.label(muted(format!("{} · {}", job.short_id(), job.outcome())));
-                        clicked = row_title(ui, command_label(job)).clicked();
+                    ui.push_id(&job.key, |ui| {
+                        compact_row(ui, current, |ui| {
+                            status_dot(ui, status_color(job));
+                            ui.label(muted(format!("{} · {}", job.short_id(), job.outcome())));
+                            clicked = row_title(ui, command_label(job)).clicked();
+                        });
                     });
                     if clicked {
-                        self.select(job.id.clone());
+                        self.select(job.key.clone());
                     }
                 }
             });
@@ -159,7 +161,7 @@ fn log_view(ui: &mut Ui, job: &ShellJob, follow: bool) {
         .inner_margin(SP_2)
         .show(ui, |ui| {
             egui::ScrollArea::both()
-                .id_salt(("shell-job-log", &job.id))
+                .id_salt(("shell-job-log", &job.key))
                 .auto_shrink([false, false])
                 .stick_to_bottom(follow)
                 .show_rows(ui, row_height, lines.len(), |ui, rows| {

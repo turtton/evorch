@@ -171,6 +171,7 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
     let (model, mut calls) = model();
     let runtime = AgentRuntime::new(bus, executor.clone(), model)
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let mut previous = None;
     for index in 0..35 {
         let run = runtime.delegate_background(
             Role::Worker,
@@ -184,7 +185,9 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
         ));
         let call = next(&mut calls).await;
         let job = call.job("start");
-        assert_eq!(job, format!("job-{index}"));
+        let number = job.strip_prefix("job-").unwrap().parse::<u64>().unwrap();
+        assert!(previous.is_none_or(|previous| number > previous));
+        previous = Some(number);
         assert!(!call.result("start").1, "run {index} must fit the registry");
         runtime.cancel(run).unwrap();
         assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
@@ -290,7 +293,7 @@ async fn absent_summary_still_blocks_mutation_but_allows_reads_and_all_continuat
     ));
     let call = next(&mut calls).await;
     let job = call.job("start");
-    assert_eq!(job, "job-0");
+    assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
     assert!(executor.has_running_shell_jobs(&run.to_string()));
     assert_eq!(executor.running_shell_job_summary(&run.to_string()), None);
     call.respond(tool_response(

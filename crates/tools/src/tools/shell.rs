@@ -315,6 +315,10 @@ impl Tool for Shell {
             Some(ShellEscalation { gate, unsandboxed });
     }
 
+    fn reserve_shell_job_handles(&self, next: u64) -> Result<(), ToolError> {
+        self.jobs.reserve_handles(next)
+    }
+
     fn cancel_shell_jobs(&self, run_id: &str) {
         self.jobs.cancel(run_id);
     }

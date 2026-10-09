@@ -20,6 +20,7 @@ pub mod result;
 pub mod sanitize;
 pub(crate) mod schema;
 pub mod search;
+mod shell_handles;
 pub mod tool;
 pub mod tools;
 

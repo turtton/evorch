@@ -6,7 +6,7 @@ use egui::{
     text::{LayoutJob, TextFormat},
 };
 
-use crate::model::transcript::shell_jobs::{ShellJob, ShellJobs, result_body};
+use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey, ShellJobs, result_body};
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
@@ -60,6 +60,37 @@ pub fn shell_job_id(entry: &TranscriptEntry) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+/// Scope the public handle to its owner and optional historical instance.
+pub fn shell_job_key(entry: &TranscriptEntry) -> Option<ShellJobKey> {
+    let handle = shell_job_id(entry)?;
+    let TranscriptEntry::Tool { run_id, detail, .. } = entry else {
+        return None;
+    };
+    let uid = detail
+        .as_ref()
+        .and_then(|detail| detail.pointer("/shell_job/job_uid"))
+        .and_then(serde_json::Value::as_str);
+    Some(ShellJobKey::new(run_id.as_deref(), handle, uid))
+}
+
+/// Only an unfinished control call may resolve a UUID from the live store.
+/// Completed legacy results keep their exact historical identity.
+pub fn resolved_shell_job_key(entry: &TranscriptEntry, jobs: &ShellJobs) -> Option<ShellJobKey> {
+    if let TranscriptEntry::Tool {
+        run_id,
+        detail: None,
+        status: ToolStatus::Running,
+        ..
+    } = entry
+        && shell_control(entry).is_some()
+    {
+        return jobs
+            .get_scoped(run_id.as_deref(), shell_job_id(entry)?)
+            .map(|job| job.key.clone());
+    }
+    shell_job_key(entry)
+}
+
 fn shell_control(entry: &TranscriptEntry) -> Option<&str> {
     let TranscriptEntry::Tool { input, .. } = entry else {
         return None;
@@ -73,17 +104,20 @@ fn shell_control(entry: &TranscriptEntry) -> Option<&str> {
 
 /// How many entries from the start of `entries` share one card: consecutive
 /// polls of the same shell job fold together, everything else stands alone.
-pub fn card_len(entries: &[TranscriptEntry]) -> usize {
+pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
     let Some(first) = entries.first() else {
         return 0;
     };
-    let Some(job) = shell_job_id(first).filter(|_| shell_control(first) == Some("poll")) else {
+    let Some(job) =
+        resolved_shell_job_key(first, jobs).filter(|_| shell_control(first) == Some("poll"))
+    else {
         return 1;
     };
     1 + entries[1..]
         .iter()
         .take_while(|entry| {
-            shell_control(entry) == Some("poll") && shell_job_id(entry) == Some(job)
+            shell_control(entry) == Some("poll")
+                && resolved_shell_job_key(entry, jobs).as_ref() == Some(&job)
         })
         .count()
 }
@@ -104,12 +138,13 @@ pub fn tool_card_group(
         detail,
         is_error,
         status,
+        run_id,
     }) = group.last()
     else {
         return;
     };
     let folded = group.len();
-    let id = pane_id.with(("tool-expanded", call_id));
+    let id = pane_id.with(("tool-expanded", run_id, call_id));
     let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     // Only states that need attention get a color; finished calls stay muted.
@@ -128,7 +163,7 @@ pub fn tool_card_group(
         context.repo_root,
     );
     let last = &group[folded - 1];
-    let job = shell_job_id(last).and_then(|job| context.jobs.get(job));
+    let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
         header::with_shell_job(&mut header, job, shell_control(last).is_some());
     }
@@ -180,7 +215,7 @@ pub fn tool_card_group(
             if let Some(job) = job {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icon_button(ui, icons::SCROLL, "Open shell job log").clicked() {
-                        crate::panes::shell_jobs::request_open(ui.ctx(), &job.id);
+                        crate::panes::shell_jobs::request_open(ui.ctx(), &job.key);
                     }
                 });
             }

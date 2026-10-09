@@ -143,6 +143,12 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Reserve historical shell handles before restoring model-visible history.
+    /// The default also covers custom shells which may later be replaced.
+    fn reserve_shell_job_handles(&self, next: u64) -> Result<(), ToolError> {
+        crate::shell_handles::HandleAllocator::default().reserve(next)
+    }
+
     /// Forget reaped handles only after the terminal snapshot recorded uncertain
     /// effects. This never acknowledges results and refuses to forget live jobs.
     fn release_shell_jobs(&self, _run_id: &str) -> Result<(), ToolError> {

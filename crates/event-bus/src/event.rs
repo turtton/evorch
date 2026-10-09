@@ -693,6 +693,9 @@ pub enum ToolEvent {
     /// Redacted live output of an asynchronous shell job, batched for display.
     /// Live progress only: the output artifact remains the durable record.
     ShellJobOutput {
+        /// GUI-only identity; never used to control a job or sent to the model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_uid: Option<String>,
         /// Model-facing shell handle (for example, job-0), not the internal UUID.
         job_id: String,
         /// The call that started the job.

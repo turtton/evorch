@@ -293,6 +293,19 @@ impl ToolExecutor {
         args
     }
 
+    /// Advance the durable allocator before any saved shell handle is reused
+    /// as model context. Executors rebuilt later share the same state directory.
+    pub fn reserve_shell_job_handles(&self, next: u64) -> Result<(), ToolError> {
+        // Always protect the shared allocator, including when a custom shell
+        // overrides its reservation hook or is replaced on a later turn.
+        crate::shell_handles::HandleAllocator::default().reserve(next)?;
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.reserve_shell_job_handles(next)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Cancel all yielded shell processes owned by this run. Call at every
     /// terminal/cancellation boundary, even if the executor is shared.
     pub fn cancel_shell_jobs(&self, run_id: &str) {
@@ -757,6 +770,43 @@ mod tests {
     use super::*;
     use crate::Permissions;
     use crate::origin::ContentOrigin;
+
+    #[test]
+    fn custom_shell_cannot_bypass_durable_reservation_limits() {
+        struct CustomShell(std::sync::atomic::AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl crate::Tool for CustomShell {
+            fn name(&self) -> &str {
+                "shell"
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn permissions(&self) -> Permissions {
+                Permissions::process()
+            }
+            async fn execute(&self, _: serde_json::Value) -> Result<ToolResult, ToolError> {
+                unreachable!("reservation does not execute commands")
+            }
+            fn reserve_shell_job_handles(&self, _: u64) -> Result<(), ToolError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let allocator = crate::shell_handles::HandleAllocator::default();
+        let previous = allocator.allocate().unwrap();
+        let shell = Arc::new(CustomShell(std::sync::atomic::AtomicUsize::new(0)));
+        let mut executor = ToolExecutor::new(Arc::new(EventBus::new(16)));
+        executor.register(shell.clone()).unwrap();
+        assert!(executor.reserve_shell_job_handles(u64::MAX).is_err());
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // A refused restore cannot prevent later ordinary shell launches.
+        assert!(allocator.allocate().unwrap() > previous);
+        executor.reserve_shell_job_handles(previous).unwrap();
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[tokio::test]
     async fn executor_emits_input_and_output_for_read() {

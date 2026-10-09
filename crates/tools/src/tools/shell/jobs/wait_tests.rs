@@ -43,7 +43,6 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
         .lock()
         .unwrap()
         .insert(job.handle.clone(), Arc::clone(&job));
-    *registry.next_handle.lock().unwrap() = 1;
     (registry, job, received)
 }
 

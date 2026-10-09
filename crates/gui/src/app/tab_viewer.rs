@@ -128,7 +128,7 @@ impl<'a, S: AgentRunSource> WorkbenchTabViewer<'a, S> {
         std::iter::once(transcripts.thread())
             .chain(runs.iter().filter_map(|run| transcripts.run(run)))
             .flat_map(|model| model.shell_jobs().iter())
-            .filter(|job| seen.insert(job.id.as_str()))
+            .filter(|job| seen.insert(&job.key))
             .collect()
     }
 

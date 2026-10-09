@@ -13,6 +13,7 @@ mod questions;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 mod restore_delivery;
 mod run_panic;
+mod shell_handle_restore;
 use chat_restore::RunContinuation;
 
 use std::collections::{HashMap, HashSet};

@@ -72,9 +72,9 @@ pub(super) struct EscalatedInput {
 #[derive(Default)]
 pub(super) struct JobRegistry {
     // Writers hold jobs across updates to both indexes. Lock order is jobs →
-    // next_handle → by_handle → job state; handle-only readers never lock jobs.
+    // by_handle → allocator → job state; handle-only readers never lock jobs.
     jobs: Mutex<HashMap<String, Arc<Job>>>,
-    next_handle: Mutex<u64>,
+    allocator: crate::shell_handles::HandleAllocator,
     by_handle: Mutex<HashMap<String, Arc<Job>>>,
     events: RwLock<Option<Arc<EventBus>>>,
 }
@@ -133,6 +133,10 @@ struct Completion {
 }
 
 impl JobRegistry {
+    pub(super) fn reserve_handles(&self, next: u64) -> Result<(), ToolError> {
+        self.allocator.reserve(next)
+    }
+
     pub(super) fn set_event_bus(&self, bus: Arc<EventBus>) {
         *self
             .events
@@ -171,10 +175,6 @@ impl JobRegistry {
                     "shell job capacity reached; stop or finish an existing job before starting another",
                 ));
             }
-            let mut next_handle = self
-                .next_handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut by_handle = self
                 .by_handle
                 .lock()
@@ -195,10 +195,7 @@ impl JobRegistry {
                     ));
                 }
             }
-            let handle = format!("job-{}", *next_handle);
-            *next_handle = next_handle
-                .checked_add(1)
-                .ok_or_else(|| invalid("shell job handle capacity exhausted"))?;
+            let handle = format!("job-{}", self.allocator.allocate()?);
             let job = Arc::new(Job {
                 id: uuid::Uuid::new_v4().to_string(),
                 handle,
@@ -595,6 +592,7 @@ async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
                 break;
             }
             bus.emit(Event::new(ToolEvent::ShellJobOutput {
+                job_uid: Some(job.id.clone()),
                 job_id: job.handle.clone(),
                 call_id: job.call_id.clone(),
                 run_id: Some(job.owner.clone()),
@@ -816,7 +814,7 @@ impl Job {
             content.push_str(notice);
         }
         let mut result = ToolResult::success(content).with_detail(serde_json::json!({
-            "shell_job": {"job_id": self.handle, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": cursor < available_from, "recoverable_after_restart": false},
+            "shell_job": {"job_id": self.handle, "job_uid": self.id, "run_id": self.owner, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": cursor < available_from, "recoverable_after_restart": false},
             "output_artifact": state.artifact.as_ref().and_then(|value| value.get("output_artifact"))
         }));
         result.is_error = matches!(status, "failed" | "timed_out" | "cancelled");

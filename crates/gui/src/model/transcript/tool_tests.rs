@@ -32,6 +32,7 @@ fn tool_started_stores_input_and_running_status() {
     assert_eq!(
         model.entries(),
         &[TranscriptEntry::Tool {
+            run_id: Some("run-1".into()),
             tool_name: "read_file".into(),
             call_id: "c1".into(),
             input: Some(json!({"path": "README.md"})),
@@ -57,6 +58,7 @@ fn tool_completed_updates_output_detail_and_status() {
         model.entries(),
         &[
             TranscriptEntry::Tool {
+                run_id: Some("run-1".into()),
                 tool_name: "read_file".into(),
                 call_id: "c1".into(),
                 input: Some(json!({"path": "README.md"})),
@@ -94,6 +96,7 @@ fn tool_completed_without_prior_started_creates_entry() {
     assert_eq!(
         model.entries(),
         &[TranscriptEntry::Tool {
+            run_id: Some("run-1".into()),
             tool_name: "read_file".into(),
             call_id: "c1".into(),
             input: None,

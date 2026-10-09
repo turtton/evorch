@@ -151,7 +151,13 @@ async fn snapshot_guard_outlives_yield_and_releases_after_stop() {
         json!({"command":"read value", "yield_ms":0}),
     )
     .await;
-    assert_eq!(id(&start), "job-0");
+    assert!(
+        id(&start)
+            .strip_prefix("job-")
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
     shell.retain_shell_job_guard("owner", &id(&start), Box::new(Guard(Arc::clone(&released))));
     assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
@@ -584,6 +590,7 @@ async fn live_output_events_stream_redacted_output_without_consuming_polls() {
     let (status, exit_code) = loop {
         let event = events.recv().await.expect("bus event");
         let event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+            job_uid,
             job_id: event_job,
             call_id,
             run_id,
@@ -596,6 +603,9 @@ async fn live_output_events_stream_redacted_output_without_consuming_polls() {
             continue;
         };
         assert_eq!(event_job, job_id);
+        assert_eq!(job_uid.as_deref(), job(&start)["job_uid"].as_str());
+        assert!(uuid::Uuid::parse_str(job_uid.as_deref().unwrap()).is_ok());
+        assert!(!start.content.contains(job_uid.as_deref().unwrap()));
         assert_eq!(call_id.as_deref(), Some("call"));
         assert_eq!(run_id.as_deref(), Some("owner"));
         assert_eq!(offset, log.len() as u64, "chunks are contiguous");

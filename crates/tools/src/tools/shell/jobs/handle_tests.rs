@@ -17,10 +17,11 @@ async fn start(shell: &Shell, ctx: &ToolExecutionContext, command: &str) -> Stri
         .execute_with_context(ctx, json!({"command":command, "yield_ms":0}))
         .await
         .unwrap();
-    let handle = result.detail.unwrap()["shell_job"]["job_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let state = &result.detail.as_ref().unwrap()["shell_job"];
+    let uid = state["job_uid"].as_str().unwrap();
+    assert!(uuid::Uuid::parse_str(uid).is_ok());
+    assert!(!result.content.contains(uid));
+    let handle = state["job_id"].as_str().unwrap().to_owned();
     assert!(
         result
             .content
@@ -56,22 +57,48 @@ async fn assert_unavailable(shell: &Shell, ctx: &ToolExecutionContext, handle: &
     ));
 }
 
+fn number(handle: &str) -> u64 {
+    handle.strip_prefix("job-").unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn rebuilt_shell_for_the_same_run_rejects_every_stale_control() {
+    let ctx = owner();
+    let old = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    let stale = start(&old, &ctx, "true").await;
+    observe(&old, &ctx, &stale).await;
+    let rebuilt = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    let fresh = start(&rebuilt, &ctx, "read value").await;
+    assert!(number(&fresh) > number(&stale));
+    drop(old);
+    assert_unavailable(&rebuilt, &ctx, &stale).await;
+    let job = rebuilt.jobs.by_handle.lock().unwrap()[&fresh].clone();
+    assert!(job.running());
+    assert!(!*job.cancel.borrow());
+    control(&rebuilt, &ctx, &fresh, "stop").await.unwrap();
+    observe(&rebuilt, &ctx, &fresh).await;
+}
+
 #[tokio::test]
 async fn released_handles_never_control_a_successor_or_reset_the_counter() {
     let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
     let ctx = owner();
-    for number in 0..3 {
+    let mut handles: Vec<String> = Vec::new();
+    for _ in 0..3 {
         let handle = start(&shell, &ctx, "true").await;
-        assert_eq!(handle, format!("job-{number}"));
+        if let Some(previous) = handles.last() {
+            assert!(number(&handle) > number(previous));
+        }
         observe(&shell, &ctx, &handle).await;
+        handles.push(handle);
     }
     shell.release_shell_jobs(&ctx.run_id).unwrap();
     assert!(shell.jobs.jobs.lock().unwrap().is_empty());
     assert!(shell.jobs.by_handle.lock().unwrap().is_empty());
     let successor = start(&shell, &ctx, "read value").await;
-    assert_eq!(successor, "job-3");
-    for number in 0..3 {
-        assert_unavailable(&shell, &ctx, &format!("job-{number}")).await;
+    assert!(number(&successor) > number(handles.last().unwrap()));
+    for handle in &handles {
+        assert_unavailable(&shell, &ctx, handle).await;
     }
     assert!(shell.has_running_shell_jobs(&ctx.run_id));
     let job = shell.jobs.by_handle.lock().unwrap()[&successor].clone();
@@ -84,14 +111,14 @@ async fn released_handles_never_control_a_successor_or_reset_the_counter() {
 async fn retained_capacity_eviction_removes_both_indexes() {
     let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
     let ctx = owner();
-    let mut handles = Vec::new();
+    let mut handles: Vec<String> = Vec::new();
     for _ in 0..MAX_RETAINED {
         let handle = start(&shell, &ctx, "true").await;
         observe(&shell, &ctx, &handle).await;
         handles.push(handle);
     }
     let successor = start(&shell, &ctx, "read value").await;
-    assert_eq!(successor, format!("job-{MAX_RETAINED}"));
+    assert!(number(&successor) > number(handles.last().unwrap()));
     let evicted: Vec<_> = {
         let jobs = shell.jobs.jobs.lock().unwrap();
         let by_handle = shell.jobs.by_handle.lock().unwrap();
@@ -121,16 +148,16 @@ async fn concurrent_starts_allocate_unique_monotonic_handles() {
         let shell = shell.clone();
         tasks.spawn(async move { start(&shell, &owner(), "read value").await });
     }
-    let mut handles = Vec::new();
+    let mut handles: Vec<String> = Vec::new();
     while let Some(result) = tasks.join_next().await {
         handles.push(result.unwrap());
     }
-    handles.sort();
-    assert_eq!(
-        handles,
-        (0..MAX_RUNNING)
-            .map(|n| format!("job-{n}"))
-            .collect::<Vec<_>>()
+    handles.sort_by_key(|handle| number(handle));
+    assert_eq!(handles.len(), MAX_RUNNING);
+    assert!(
+        handles
+            .windows(2)
+            .all(|pair| number(&pair[0]) < number(&pair[1]))
     );
     shell.drain_shell_jobs(&owner().run_id).await.unwrap();
 }
@@ -165,6 +192,7 @@ async fn handles_keep_run_and_thread_scope_and_internal_ids_are_rejected() {
 async fn running_summary_chooses_numeric_minimum_and_excludes_other_runs() {
     let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
     let ctx = owner();
+    let mut running = Vec::new();
     for number in 0..=10 {
         let handle = start(
             &shell,
@@ -178,6 +206,8 @@ async fn running_summary_chooses_numeric_minimum_and_excludes_other_runs() {
         .await;
         if ![2, 10].contains(&number) {
             observe(&shell, &ctx, &handle).await;
+        } else {
+            running.push(handle);
         }
     }
     let other = ToolExecutionContext {
@@ -188,18 +218,18 @@ async fn running_summary_chooses_numeric_minimum_and_excludes_other_runs() {
     assert_eq!(
         shell.running_shell_job_summary(&ctx.run_id),
         Some(ShellJobSummary {
-            handle: "job-2".into(),
+            handle: running[0].clone(),
             command_summary: "read value".into(),
         })
     );
-    control(&shell, &ctx, "job-2", "stop").await.unwrap();
-    observe(&shell, &ctx, "job-2").await;
+    control(&shell, &ctx, &running[0], "stop").await.unwrap();
+    observe(&shell, &ctx, &running[0]).await;
     assert_eq!(
         shell.running_shell_job_summary(&ctx.run_id).unwrap().handle,
-        "job-10"
+        running[1]
     );
-    control(&shell, &ctx, "job-10", "stop").await.unwrap();
-    observe(&shell, &ctx, "job-10").await;
+    control(&shell, &ctx, &running[1], "stop").await.unwrap();
+    observe(&shell, &ctx, &running[1]).await;
     assert_eq!(shell.running_shell_job_summary(&ctx.run_id), None);
     assert_eq!(shell.running_shell_job_summary("missing"), None);
     assert_eq!(
@@ -248,4 +278,27 @@ async fn summary_uses_the_combined_command_and_args() {
         "read value  "
     );
     shell.drain_shell_jobs(&ctx.run_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn allocator_failure_never_launches_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("broken-state");
+    std::fs::create_dir(&state).unwrap();
+    let marker = dir.path().join("must-not-exist");
+    let mut shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    Arc::get_mut(&mut shell.jobs).unwrap().allocator =
+        crate::shell_handles::HandleAllocator::for_test(state);
+    assert!(
+        shell
+            .execute_with_context(
+                &owner(),
+                json!({"command": format!("touch {}", marker.display()), "yield_ms": 0})
+            )
+            .await
+            .is_err()
+    );
+    assert!(!marker.exists());
+    assert!(shell.jobs.jobs.lock().unwrap().is_empty());
+    assert!(shell.jobs.by_handle.lock().unwrap().is_empty());
 }
