@@ -1,5 +1,6 @@
 //! egui-free view models shared by the panes.
 
+pub mod artifact_opener;
 pub mod codex_auth;
 pub mod codex_auth_backend;
 pub mod commands;

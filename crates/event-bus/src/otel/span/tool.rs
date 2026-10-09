@@ -27,6 +27,7 @@ impl SpanMapper {
                 })
             }
             ToolEvent::UserQuestionUpdated { .. }
+            | ToolEvent::ArtifactsPresented { .. }
             | ToolEvent::ShellJobOutput { .. }
             | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }

@@ -835,6 +835,18 @@ fn run() -> Result<(), GuiError> {
             runtime
         }
     };
+    // Presented artifacts must outlive the session so restored conversations show them.
+    let artifact_directory = storage_config.db_path.parent().map_or_else(
+        || PathBuf::from("artifacts"),
+        |parent| parent.join("artifacts"),
+    );
+    let runtime = match runtime::artifacts::ArtifactStore::new(&artifact_directory) {
+        Ok(store) => runtime.with_artifact_store(Arc::new(store)),
+        Err(error) => {
+            tracing::warn!(%error, path = %artifact_directory.display(), "artifact store unavailable; artifact tools are disabled");
+            runtime
+        }
+    };
     let quick_route = composition_config
         .agents
         .binding_for("worker", Some(CategoryId::Quick.as_str()))
@@ -1066,6 +1078,7 @@ fn run() -> Result<(), GuiError> {
     // production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
+        .with_artifact_opener(Arc::new(gui::model::artifact_opener::PortalArtifactOpener))
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_settings_load_options(settings_load_options)

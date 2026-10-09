@@ -45,6 +45,14 @@ impl ExecutionPolicy {
                     && matches!(self.role_name.as_str(), "Worker" | "Orchestrator")
                 {
                     self.capabilities.allowed_tools.insert("todo_write".into());
+                    self.capabilities.allowed_tools.insert("present".into());
+                }
+                if Role::from_name(&self.role_name)
+                    .is_ok_and(|role| crate::artifacts::may_render(role, config, is_root))
+                {
+                    self.capabilities
+                        .allowed_tools
+                        .insert("render_artifact".into());
                 }
                 if config.conversation
                     && config.category.as_deref() == Some(CategoryId::Conversation.as_str())
@@ -170,6 +178,8 @@ mod tests {
                 "web_search",
                 "web_fetch",
                 "todo_write",
+                "present",
+                "render_artifact",
                 "create_goal",
                 "get_goal",
                 "submit_goal_check",
@@ -238,7 +248,7 @@ mod tests {
                 expected
                     .capabilities
                     .allowed_tools
-                    .insert("todo_write".into());
+                    .extend(["todo_write", "present"].map(str::to_owned));
             }
             assert_eq!(policy, expected);
             for tool in ["web_search", "web_fetch"] {
@@ -275,7 +285,7 @@ mod tests {
                 expected
                     .capabilities
                     .allowed_tools
-                    .insert("todo_write".into());
+                    .extend(["todo_write", "present"].map(str::to_owned));
             }
             assert_eq!(policy, expected);
             // Orchestrator already allows fetch and WebResearcher already allows both.
@@ -286,6 +296,86 @@ mod tests {
                     baseline.filter_tool_specs(vec![spec(tool)])
                 );
             }
+        }
+    }
+
+    #[test]
+    fn render_artifact_requires_visual_worker_or_conversation_root_worker() {
+        let visual = crate::RunConfig {
+            category: Some("visual".into()),
+            ..Default::default()
+        };
+        let cases = [
+            (Role::Worker, visual.clone(), false, true),
+            (Role::Worker, visual.clone(), true, true),
+            (Role::Worker, conversation_config(), true, true),
+            // A delegated child never inherits the conversation category's authority.
+            (Role::Worker, conversation_config(), false, false),
+            (
+                Role::Worker,
+                crate::RunConfig {
+                    category: Some("quick".into()),
+                    ..Default::default()
+                },
+                false,
+                false,
+            ),
+            (Role::Worker, crate::RunConfig::default(), true, false),
+            (
+                Role::Worker,
+                crate::RunConfig {
+                    purpose: crate::RunPurpose::LessonExtract {
+                        source_run_id: crate::RunId::new(1),
+                    },
+                    learning_internal: true,
+                    ..visual.clone()
+                },
+                false,
+                false,
+            ),
+            (Role::Orchestrator, conversation_config(), true, false),
+            (Role::Reviewer, visual.clone(), false, false),
+            (Role::MultimodalLooker, visual, false, false),
+        ];
+        for (role, config, is_root, allowed) in cases {
+            let policy = ExecutionPolicy::for_role(role).for_run_config(&config, is_root);
+            assert_eq!(
+                policy.authorize("render_artifact").is_ok(),
+                allowed,
+                "{role:?} {:?} root={is_root}",
+                config.category
+            );
+        }
+    }
+
+    #[test]
+    fn present_is_limited_to_conversation_roots() {
+        let visual_child = crate::RunConfig {
+            category: Some("visual".into()),
+            ..Default::default()
+        };
+        for (role, config, is_root, allowed) in [
+            (Role::Worker, conversation_config(), true, true),
+            (
+                Role::Orchestrator,
+                crate::RunConfig {
+                    conversation: true,
+                    ..Default::default()
+                },
+                true,
+                true,
+            ),
+            (Role::Worker, conversation_config(), false, false),
+            (Role::Worker, visual_child, false, false),
+            (Role::Orchestrator, crate::RunConfig::default(), true, false),
+            (Role::Reviewer, conversation_config(), true, false),
+        ] {
+            let policy = ExecutionPolicy::for_role(role).for_run_config(&config, is_root);
+            assert_eq!(
+                policy.authorize("present").is_ok(),
+                allowed,
+                "{role:?} root={is_root}"
+            );
         }
     }
 

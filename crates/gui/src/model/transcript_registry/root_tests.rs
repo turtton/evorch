@@ -102,3 +102,39 @@ fn terminal_notices_are_metadata_only() {
         );
     }
 }
+
+#[test]
+fn presented_artifacts_reach_the_conversation_as_one_card() {
+    // Given: the conversation root presents a capture its child produced.
+    let mut registry = registry();
+    registry.apply(&started());
+    let presentation = event_bus::ArtifactPresentation {
+        presentation_id: "presentation-1".into(),
+        title: Some("Mocks".into()),
+        caption: None,
+        artifacts: vec![event_bus::PresentedArtifact {
+            artifact_id: "artifact-1".into(),
+            title: "Login".into(),
+            caption: None,
+            media_type: "image/png".into(),
+            path: "/store/blobs/a.png".into(),
+            byte_len: 3,
+            sha256: "a".into(),
+        }],
+    };
+    // When: the presentation event arrives, as during live use or replay.
+    registry.apply(&Event::new(ToolEvent::ArtifactsPresented {
+        run_id: "root".into(),
+        presentation: presentation.clone(),
+    }));
+    // Then: the user-facing thread shows the card; the child's pane does not.
+    let card = TranscriptEntry::Artifacts { presentation };
+    assert_eq!(registry.thread().entries().last(), Some(&card));
+    assert!(
+        !registry
+            .run("child")
+            .expect("child")
+            .entries()
+            .contains(&card)
+    );
+}

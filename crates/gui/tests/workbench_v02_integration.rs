@@ -333,6 +333,7 @@ fn assert_run_transcript(
             | TranscriptEntry::Error { .. }
             | TranscriptEntry::Compaction { .. }
             | TranscriptEntry::TurnEnd { .. }
+            | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -349,6 +350,7 @@ fn assert_run_transcript(
             | TranscriptEntry::Error { .. }
             | TranscriptEntry::Compaction { .. }
             | TranscriptEntry::TurnEnd { .. }
+            | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();

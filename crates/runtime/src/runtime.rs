@@ -1,6 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 mod admission;
+mod artifacts;
 mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
@@ -84,6 +85,7 @@ pub(crate) struct Shared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Mutex<Arc<ToolExecutor>>,
     pub(crate) snapshots: OnceLock<Arc<crate::snapshot::SnapshotService>>,
+    pub(crate) artifacts: OnceLock<Arc<crate::artifacts::ArtifactStore>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
@@ -359,6 +361,7 @@ impl AgentRuntime {
                 bus,
                 executor: Mutex::new(executor),
                 snapshots: OnceLock::new(),
+                artifacts: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
@@ -660,6 +663,7 @@ impl AgentRuntime {
                 self_improvement_task: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
                 snapshots: OnceLock::new(),
+                artifacts: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),

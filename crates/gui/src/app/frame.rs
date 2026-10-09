@@ -134,6 +134,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ownership_time = ownership_started.elapsed();
         let render_started = Instant::now();
         self.render(ui);
+        self.open_requested_artifacts(&ctx);
         let render_time = render_started.elapsed();
         let draft_started = Instant::now();
         self.persist_composer_draft();
@@ -234,6 +235,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Reasoning { .. }
                         | TranscriptEntry::AgentMessage { .. }
                         | TranscriptEntry::TurnEnd { .. }
+                        | TranscriptEntry::Artifacts { .. }
                         | TranscriptEntry::Branch { .. } => None,
                     })
                     .flatten()
@@ -344,6 +346,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // fold_event persists before this inspection pass; persist the refreshed roots too.
         if changed {
             self.save_sidebar();
+        }
+    }
+
+    /// Hand artifacts the user chose to open to the desktop, after panes render.
+    fn open_requested_artifacts(&self, ctx: &egui::Context) {
+        for path in crate::panes::artifact_card::take_open_requests(ctx) {
+            match &self.artifact_opener {
+                Some(opener) => opener.open(&path),
+                None => tracing::warn!(path = %path.display(), "no artifact opener configured"),
+            }
         }
     }
 

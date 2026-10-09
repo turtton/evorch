@@ -81,6 +81,7 @@ pub struct WorkbenchState<S> {
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) home_dir: Option<PathBuf>,
     pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
+    pub(super) artifact_opener: Option<Arc<dyn crate::model::artifact_opener::ArtifactOpener>>,
     pub(super) project_dialog: crate::model::project_dialog::ProjectDialog,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
@@ -198,6 +199,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             history: Vec::new(),
             home_dir: std::env::home_dir(),
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
+            artifact_opener: None,
             project_dialog: crate::model::project_dialog::ProjectDialog::default(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
@@ -381,6 +383,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         picker: Arc<dyn crate::model::folder_picker::FolderPicker>,
     ) -> Self {
         self.folder_picker = crate::model::folder_picker::FolderPickerModel::new(picker);
+        self
+    }
+
+    pub fn with_artifact_opener(
+        mut self,
+        opener: Arc<dyn crate::model::artifact_opener::ArtifactOpener>,
+    ) -> Self {
+        self.artifact_opener = Some(opener);
         self
     }
 

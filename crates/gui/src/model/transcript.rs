@@ -78,6 +78,10 @@ pub enum TranscriptEntry {
         kind: AgentMessageKind,
         content: String,
     },
+    /// Artifacts the conversation owner showed to the user.
+    Artifacts {
+        presentation: event_bus::ArtifactPresentation,
+    },
     /// A completed turn of `run_id`; a fork or rewind boundary, not visible text.
     TurnEnd {
         run_id: String,
@@ -227,6 +231,11 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
+            event_bus::EventKind::Tool(event_bus::ToolEvent::ArtifactsPresented {
+                presentation, ..
+            }) => self.push(TranscriptEntry::Artifacts {
+                presentation: presentation.clone(),
+            }),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                 run_id, context_len,
             }) => self.push(TranscriptEntry::TurnEnd {
@@ -437,6 +446,7 @@ impl TranscriptModel {
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. }
                     | TranscriptEntry::TurnEnd { .. }
+                    | TranscriptEntry::Artifacts { .. }
                     | TranscriptEntry::Branch { .. } => {}
                 }
             }
