@@ -148,9 +148,9 @@ steps; do not silently proceed with parent-state mutation.
 
 ## Cache correctness gate
 
-Prompt cache preservation is a cost-sensitive correctness contract. Before
-pushing changes, run `scripts/check-cache-contracts.sh`; the pre-push hook and
-CI run the same offline gate.
+Prompt cache preservation is a cost-sensitive correctness contract. CI enforces
+this contract with `scripts/check-cache-contracts.sh`. Run the script manually
+when focused local cache validation is needed.
 
 - Normal turns must preserve the already-sent provider input prefix and stable
   instructions, model/settings, tool schemas/order, and cache affinity key.
