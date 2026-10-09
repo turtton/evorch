@@ -80,7 +80,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
         .map(|tool| WireTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
-            input_schema: tool.input_schema.clone(),
+            input_schema: wire_input_schema(&tool.input_schema),
             cache_control: None,
         })
         .collect();
@@ -97,6 +97,20 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
         temperature: request.temperature,
         stream,
     }
+}
+
+/// Anthropic が拒否するトップレベルの `oneOf` / `allOf` / `anyOf` を除いた入力 schema を返します。
+///
+/// 除いた条件はツール実行前のローカル検証が元の schema で引き続き強制する。
+/// ネストした位置の合成キーワードは受理されるため残す。
+fn wire_input_schema(schema: &serde_json::Value) -> serde_json::Value {
+    let mut schema = schema.clone();
+    if let Some(object) = schema.as_object_mut() {
+        for keyword in ["oneOf", "allOf", "anyOf"] {
+            object.remove(keyword);
+        }
+    }
+    schema
 }
 
 /// Anthropic Messages API 応答を canonical response へ変換します。
