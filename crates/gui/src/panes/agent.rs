@@ -309,6 +309,14 @@ fn run_detail_body(
                     continue;
                 }
                 ui.add_space(SP_1);
+                if let TranscriptEntry::Artifacts { presentation } = entry {
+                    crate::panes::artifact_card::show(
+                        ui,
+                        pane_id.with(("artifacts", entry_id)),
+                        presentation,
+                    );
+                    continue;
+                }
                 if let TranscriptEntry::UserMessage { text } = entry {
                     user_bubble(ui, text);
                     if let Some(branch) = branch {
@@ -339,6 +347,7 @@ fn run_detail_body(
                         | TranscriptEntry::Tool { .. }
                         | TranscriptEntry::AgentMessage { .. }
                         | TranscriptEntry::TurnEnd { .. }
+                        | TranscriptEntry::Artifacts { .. }
                         | TranscriptEntry::Branch { .. } => {}
                     }
                     if let TranscriptEntry::Message { text, .. } = entry {
@@ -406,6 +415,7 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::Reasoning { .. }
         | TranscriptEntry::Tool { .. }
         | TranscriptEntry::TurnEnd { .. }
+        | TranscriptEntry::Artifacts { .. }
         | TranscriptEntry::Branch { .. } => None,
     }
 }
@@ -551,6 +561,9 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             source_thread_id, ..
         } => {
             format!("Branched from {source_thread_id}")
+        }
+        TranscriptEntry::Artifacts { presentation } => {
+            crate::panes::artifact_card::summary(presentation)
         }
     }
 }

@@ -866,7 +866,7 @@ impl SupervisorActor {
 
     fn on_tool(&mut self, event: ToolEvent) {
         match event {
-            ToolEvent::UserQuestionUpdated { .. } => {}
+            ToolEvent::UserQuestionUpdated { .. } | ToolEvent::ArtifactsPresented { .. } => {}
             ToolEvent::ToolStarted {
                 run_id: Some(run_id),
                 ..

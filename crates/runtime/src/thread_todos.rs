@@ -114,7 +114,8 @@ struct Write {
     items: Vec<ThreadTodoItem>,
 }
 
-fn authorized(state: &LoopState) -> bool {
+/// The trusted root Worker or Orchestrator of a user-facing conversation.
+pub(crate) fn conversation_root(state: &LoopState) -> bool {
     state.task.parent.is_none()
         && state.run_config().conversation
         && state.run_config().purpose == RunPurpose::General
@@ -127,7 +128,7 @@ pub(crate) fn dispatch(
     input: Value,
 ) -> crate::meta::DispatchResult {
     let result: Result<Value, String> = (|| {
-        if !authorized(state) {
+        if !conversation_root(state) {
             return Err(
                 "only a trusted conversation Worker or Orchestrator root may manage its procedure"
                     .into(),
@@ -169,7 +170,7 @@ impl LoopState {
     /// Called only after a complete tool round, immediately before estimating
     /// and submitting the next provider input. Existing history is never edited.
     pub(crate) fn append_todo_context(&mut self) {
-        if !self.todo_context_pending || self.todo_context_deferred || !authorized(self) {
+        if !self.todo_context_pending || self.todo_context_deferred || !conversation_root(self) {
             return;
         }
         self.todo_context_pending = false;

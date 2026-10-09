@@ -644,6 +644,12 @@ impl UserQuestion {
 pub enum ToolEvent {
     /// A durable user question changed. Answers always allow free text.
     UserQuestionUpdated { question: UserQuestion },
+    /// The conversation owner showed stored artifacts to the user.
+    ArtifactsPresented {
+        /// The presenting conversation root.
+        run_id: String,
+        presentation: crate::ArtifactPresentation,
+    },
     /// ツール呼び出しが開始した。
     ToolStarted {
         /// 呼び出されたツール名。

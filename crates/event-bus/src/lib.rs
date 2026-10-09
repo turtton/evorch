@@ -1,5 +1,7 @@
 //! 型付きイベントストリームの内部配信基盤であり、tokio broadcast ベースで ADR 0012 の計測収集層の土台となります。
 
+pub mod artifact;
+pub use artifact::{ArtifactPresentation, PresentedArtifact};
 pub mod bus;
 mod fencing;
 pub use fencing::{

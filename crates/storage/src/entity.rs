@@ -254,6 +254,11 @@ impl SecretGuard {
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 self.check_text("event", "UserQuestionUpdated", &payload)
             }
+            EventKind::Tool(ToolEvent::ArtifactsPresented { presentation, .. }) => {
+                let payload = serde_json::to_string(presentation)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                self.check_text("event", "ArtifactsPresented", &payload)
+            }
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { body, .. }) => {
                 self.check_text("event", "RunLedgerAppended.body", body)
             }

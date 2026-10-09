@@ -513,3 +513,54 @@ fn unrelated_root_never_attaches_to_the_only_active_thread() {
         original.transcripts().run("unrelated").unwrap().entries()
     );
 }
+
+#[test]
+fn presented_artifacts_replay_as_the_same_card_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut original = state(dir.path(), &["one"]);
+    original.composer_mut().input = "show me a login mock".into();
+    original.submit_composer();
+    let presentation = event_bus::ArtifactPresentation {
+        presentation_id: "presentation-1".into(),
+        title: Some("Login".into()),
+        caption: Some("Two layouts".into()),
+        artifacts: vec![event_bus::PresentedArtifact {
+            artifact_id: "artifact-1".into(),
+            title: "Variant A".into(),
+            caption: None,
+            media_type: "text/html".into(),
+            path: dir.path().join("a.html").to_string_lossy().into_owned(),
+            byte_len: 10,
+            sha256: "a".repeat(64),
+        }],
+    };
+    let name = "chat:Worker:one";
+    persist_and_apply(
+        &storage,
+        &mut original,
+        vec![
+            started("root", None, name),
+            prompt("root", None, name, "show me a login mock"),
+            Event::new(ToolEvent::ArtifactsPresented {
+                run_id: "root".into(),
+                presentation: presentation.clone(),
+            }),
+            final_result("root", "Here are the mocks"),
+        ],
+    );
+    storage.close();
+    let expected = original.transcript().entries().to_vec();
+    assert!(expected.contains(&TranscriptEntry::Artifacts { presentation }));
+
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path(), &["one"]).with_sidebar(sidebar);
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    assert_eq!(reopened.transcript().entries(), expected);
+}

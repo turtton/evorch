@@ -139,7 +139,7 @@ define_categories! {
         role: "worker",
         settings_visible: true,
         delegation: Delegation::Public {
-            guidance: "UI layout, styling, design, or screenshot-driven visual work; use multimodal_looker for image interpretation alone.",
+            guidance: "UI layout, styling, design, mockups to show the user (returns artifact_id values for present), or screenshot-driven visual work; use multimodal_looker for image interpretation alone.",
         },
         overlay_preset: "category-visual",
         overlay_body: include_str!("../assets/presets/category-visual.md"),

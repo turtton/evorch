@@ -159,6 +159,12 @@ define_meta_ops! {
             runtime.submit_lesson_review(state.caller_run_id(), state.run_config(), args)
         }))
     },
+    RenderArtifact => "render_artifact" => crate::artifacts::render_spec => |state, runtime, input| {
+        crate::artifacts::render(state, runtime, input)
+    },
+    Present => "present" => crate::artifacts::present_spec => |state, runtime, input| {
+        crate::artifacts::present(state, runtime, input)
+    },
 }
 
 fn learning_result(result: Result<Value, String>) -> DispatchResult {

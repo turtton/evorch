@@ -90,6 +90,7 @@ impl TranscriptRegistry {
             EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
                 self.route_run(run_id)
             }
+            EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => self.route_run(run_id),
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
