@@ -41,8 +41,17 @@ impl AgentRuntime {
         let LifecycleEvent::AgentRunStateChanged { to, ref reason, .. } = event else {
             return;
         };
+        if !matches!(
+            to,
+            AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+        ) {
+            return;
+        }
         let mut runs = lock_runs(&self.shared.runs);
         let Some(child) = runs.get_mut(&run_id) else {
+            tracing::warn!(%run_id, ?to, "publishing terminal event for run missing from registry");
+            // Preserve the normal bus mutation fence and same-ID registration lock.
+            self.shared.bus.emit(Event::new(event));
             return;
         };
         let content = match to {

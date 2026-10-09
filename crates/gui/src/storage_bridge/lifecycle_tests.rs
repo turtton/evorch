@@ -74,8 +74,19 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
     result.expect("live producer must not prevent bounded shutdown");
     closer.join().unwrap();
     let stored = db.events_all_ordered().unwrap();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].event, event);
+    // Heartbeats are skipped, but a live producer can cause persisted lag faults.
+    // Only those faults are outside the exactly-once delta assertion.
+    let events: Vec<_> = stored
+        .iter()
+        .filter(|row| {
+            !matches!(
+                row.event.kind,
+                event_bus::EventKind::Fault(event_bus::FaultEvent::SubscriberLagged { .. })
+            )
+        })
+        .map(|row| &row.event)
+        .collect();
+    assert_eq!(events, [&event]);
     assert_eq!(monitor.snapshot().pending_events, 0);
     assert_eq!(monitor.snapshot().failed_events, 0);
     // Producers can still emit, but events after closure are outside its snapshot.

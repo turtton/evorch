@@ -10,6 +10,36 @@ use super::{Lease, Registry, RegistryError, ThreadOwner};
 
 const MAX_FRAME: usize = 16 * 1024;
 
+/// Probe an OwnerHost endpoint without blocking or taking any registry lock.
+/// A responsive or uncertain endpoint protects its runs; only absence/refusal
+/// proves death.
+/// This observation is not authority to mutate or claim an ownership generation.
+pub fn owner_may_be_live(root: &Path, owner_id: &str) -> bool {
+    super::host::socket_path(root, owner_id).map_or(true, |socket| endpoint_may_be_live(&socket))
+}
+
+fn endpoint_may_be_live(socket: &Path) -> bool {
+    let Ok(address) = socket2::SockAddr::unix(socket) else {
+        return true;
+    };
+    let Ok(client) = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+    else {
+        return true;
+    };
+    // Configure this before connect: a live owner's accept backlog can be full
+    // while its server is stalled. EAGAIN/EINPROGRESS still protect that owner.
+    if client.set_nonblocking(true).is_err() {
+        return true;
+    }
+    match client.connect(&address) {
+        Ok(()) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+    }
+}
+
 pub fn claim(
     registry: &mut Registry,
     request: ClaimRequest<'_>,
@@ -32,14 +62,10 @@ fn claim_inner(
 ) -> Result<ThreadOwner, RegistryError> {
     registry.update(request.thread_id, |owner| {
         owner.validate(request.expected)?;
-        if owner.state != super::OwnerState::Released {
-            match UnixStream::connect(request.previous_socket) {
-                Ok(_) => return Err(super::OwnershipError::OwnerResponsive),
-                Err(error) => match error.kind() {
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {}
-                    _ => return Err(super::OwnershipError::OwnerResponsive),
-                },
-            }
+        if owner.state != super::OwnerState::Released
+            && endpoint_may_be_live(request.previous_socket)
+        {
+            return Err(super::OwnershipError::OwnerResponsive);
         }
         let grace_ms = settings.map_or(request.grace_ms, |_| owner.settings.grace_ms.get());
         if let Some(settings) = settings {

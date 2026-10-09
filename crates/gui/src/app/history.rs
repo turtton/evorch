@@ -33,6 +33,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, None)
+    }
+
+    /// Reconcile orphaned phases only when the owner registry can be inspected.
+    pub fn restore_history_with_ownership(
+        &mut self,
+        db: &storage::Database,
+        registry_path: &std::path::Path,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, Some(registry_path))
+    }
+
+    fn restore_history_inner(
+        &mut self,
+        db: &storage::Database,
+        registry_path: Option<&std::path::Path>,
+    ) -> Result<(), storage::StorageError> {
         let events = db.events_all_ordered()?;
         self.tasks
             .restore_events(events.iter().map(|stored| &stored.event));
@@ -238,6 +255,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ));
             }
         }
+        self.reconcile_restored_phases(db, registry_path);
         for message in messages {
             self.restore_user_message(message);
         }
@@ -249,6 +267,117 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         self.refresh_active_thread_workspace();
         Ok(())
+    }
+
+    fn reconcile_restored_phases(
+        &mut self,
+        db: &storage::Database,
+        registry_path: Option<&std::path::Path>,
+    ) {
+        use workspace_ui::ThreadRunPhase;
+        // An absent registry or an expired lease is not proof of an orphan.
+        let Some(path) = registry_path else { return };
+        let (registry, owners) = match runtime::ownership::Registry::open_readonly(path)
+            .and_then(|registry| registry.list().map(|owners| (registry, owners)))
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, "history phase reconciliation skipped: ownership unknown");
+                return;
+            }
+        };
+        // Legacy active turns cannot be attributed to a run: protect all runs.
+        if owners
+            .iter()
+            .any(|owner| owner.active_turn && owner.active_runs.is_empty())
+        {
+            tracing::warn!("history phase reconciliation skipped: legacy active turn");
+            return;
+        }
+        // Checkpoint removes active_runs after each tool round even while the
+        // run stays Running. Protect its thread for the owner's full lifetime,
+        // including expired leases and endpoint failures of unknown cause.
+        let Some(root) = path.parent() else { return };
+        let mut liveness = std::collections::BTreeMap::new();
+        let mut protected_threads: std::collections::BTreeSet<_> = owners
+            .iter()
+            .filter(|owner| {
+                owner.state != runtime::ownership::OwnerState::Released
+                    && *liveness.entry(&owner.lease.owner_id).or_insert_with(|| {
+                        runtime::ownership::ipc::owner_may_be_live(root, &owner.lease.owner_id)
+                    })
+            })
+            .map(|owner| owner.thread_id.clone())
+            .collect();
+        // Do not hold a registry transaction across the socket probes. If a
+        // claim, release, or new turn raced with them, keep the replayed phase.
+        let current_owners = match registry.list() {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::warn!(%error, "history phase reconciliation skipped: ownership changed or unreadable");
+                return;
+            }
+        };
+        let before: std::collections::BTreeMap<_, _> = owners
+            .iter()
+            .map(|owner| (&owner.thread_id, owner))
+            .collect();
+        let after: std::collections::BTreeMap<_, _> = current_owners
+            .iter()
+            .map(|owner| (&owner.thread_id, owner))
+            .collect();
+        for thread in before.keys().chain(after.keys()) {
+            if before.get(thread) != after.get(thread) {
+                protected_threads.insert((*thread).clone());
+            }
+        }
+        if current_owners
+            .iter()
+            .any(|owner| owner.active_turn && owner.active_runs.is_empty())
+        {
+            return;
+        }
+        let protected_runs: std::collections::BTreeSet<_> = self
+            .phases
+            .keys()
+            .filter(|run| {
+                self.thread_for_run(run)
+                    .is_none_or(|thread| protected_threads.contains(&thread))
+            })
+            .cloned()
+            .collect();
+        for (run_id, phase) in &mut self.phases {
+            if !matches!(
+                phase,
+                ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
+            ) || protected_runs.contains(run_id)
+                || owners
+                    .iter()
+                    .chain(&current_owners)
+                    .any(|owner| owner.active_runs.contains(run_id))
+            {
+                continue;
+            }
+            let record = match db.run_context(run_id) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    tracing::warn!(%run_id, "history phase reconciliation skipped: snapshot missing");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "history phase reconciliation skipped: snapshot unreadable");
+                    continue;
+                }
+            };
+            let restored = match record.terminal_phase.as_str() {
+                "Done" => ThreadRunPhase::Done,
+                "Error" => ThreadRunPhase::Error,
+                "Stopped" | "Checkpoint" => ThreadRunPhase::Stopped,
+                _ => continue,
+            };
+            tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
+            *phase = restored;
+        }
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {

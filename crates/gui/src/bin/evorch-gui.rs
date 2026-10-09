@@ -1140,7 +1140,10 @@ fn run() -> Result<(), GuiError> {
             improvement_draft_dir,
         )
         .with_usage_ledger(storage.handle(), usage_pricing);
-    state.restore_history(&storage::Database::open(&storage_config)?)?;
+    state.restore_history_with_ownership(
+        &storage::Database::open(&storage_config)?,
+        &ownership_root.join("owners.db"),
+    )?;
 
     if arguments.demo {
         state = state.with_diff_source(Arc::new(demo_diff_source()));
