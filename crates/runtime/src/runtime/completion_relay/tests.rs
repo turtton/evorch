@@ -277,3 +277,37 @@ async fn stop_cancels_pending_admission_for_self_and_subtree() {
         assert!(runtime.entry(pending).is_err());
     }
 }
+
+#[tokio::test]
+async fn publish_terminal_emits_event_when_run_missing_from_registry() {
+    let runtime = fixture();
+    let mut events = runtime.shared.bus.subscribe();
+    let missing = RunId::new(u64::MAX);
+    for phase in [
+        AgentRunPhase::Done,
+        AgentRunPhase::Error,
+        AgentRunPhase::Stopped,
+    ] {
+        publish(&runtime, missing, phase);
+        assert!(matches!(events.recv().await.unwrap().kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { to, .. }) if to == phase));
+        // No legacy completion/cancel or parent mailbox delivery event.
+        runtime.shared.bus.emit(Event::new(LifecycleEvent::Started {
+            session_id: "marker".into(),
+        }));
+        assert!(matches!(events.recv().await.unwrap().kind,
+            EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "marker"));
+    }
+    for phase in [
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+        AgentRunPhase::Waiting,
+    ] {
+        publish(&runtime, missing, phase);
+        runtime.shared.bus.emit(Event::new(LifecycleEvent::Started {
+            session_id: "marker".into(),
+        }));
+        assert!(matches!(events.recv().await.unwrap().kind,
+            EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "marker"));
+    }
+}
