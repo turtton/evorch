@@ -107,10 +107,10 @@ the next main CI run validates the complete tree again.
 
 ## Prompt-cache regression gate
 
-Run `scripts/check-cache-contracts.sh` for the offline cache contract. The same
-script runs in the Lefthook pre-push hook, the harness checks, and a named CI step.
-Hooks must be installed locally; CI provides the shared check. Repository branch
-protection is separate from this change.
+CI enforces the offline cache contract with `scripts/check-cache-contracts.sh` in
+a named step. The harness checks also run the script, and it can be run manually
+for focused local validation. Repository branch protection is separate from
+this change.
 
 `StreamingMockOpenAi::spawn_with_prompt_cache` derives cached usage from the
 actual HTTP requests, instead of returning scripted high cache counts. It puts

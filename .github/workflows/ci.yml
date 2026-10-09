@@ -72,7 +72,7 @@ jobs:
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
           cargo nextest list --workspace --locked --list-type binaries-only --message-format json > "$EVORCH_CI_METADATA_DIR/default-binaries.json"
           cargo build -p config --example dump_schema
-      # Cost-sensitive invariants also run in the local pre-push hook. The mock
+      # CI enforces cost-sensitive invariants with this offline gate. The mock
       # computes cache usage from received input; compaction has an explicit boundary.
       - name: Cache preservation contracts (offline)
         env:
