@@ -42,7 +42,7 @@ pub(super) fn attention_for(
         PanelKind::Agents => inputs
             .tasks_rows
             .iter()
-            .map(|row| agent_run_attention(row.status))
+            .map(agent_row_attention)
             .fold(PaneAttention::None, PaneAttention::max),
         PanelKind::AgentTranscript
         | PanelKind::SubagentTranscript
@@ -62,6 +62,15 @@ pub(super) fn attention_for(
         | PanelKind::Usage
         | PanelKind::ContextInspector
         | PanelKind::ShellJobs => PaneAttention::None,
+    }
+}
+
+/// A cancelled child finished on its owner's request, so it reads like a done run.
+const fn agent_row_attention(row: &TaskRow) -> PaneAttention {
+    if row.cancelled {
+        PaneAttention::Info
+    } else {
+        agent_run_attention(row.status)
     }
 }
 
@@ -134,6 +143,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .iter()
                     .map(|row| {
                         let phase = match row.status {
+                            // Cancelled on its owner's request: finished, not an error alert.
+                            AgentRunPhase::Error if row.cancelled => ThreadRunPhase::Done,
                             AgentRunPhase::Pending => ThreadRunPhase::Pending,
                             AgentRunPhase::Running => ThreadRunPhase::Running,
                             AgentRunPhase::Waiting => ThreadRunPhase::Waiting,
@@ -252,6 +263,7 @@ mod tests {
             status,
             model: "demo".to_owned(),
             category: None,
+            cancelled: false,
         }
     }
 
@@ -347,6 +359,27 @@ mod tests {
             PaneAttention::None
         );
         assert_eq!(PaneAttention::Info.color(), Some(palette().INFO));
+    }
+
+    #[test]
+    fn cancelled_agents_are_info_while_failed_agents_stay_errors() {
+        let cancelled = TaskRow {
+            cancelled: true,
+            ..task_row(AgentRunPhase::Error)
+        };
+        for (rows, expected) in [
+            (vec![cancelled.clone()], PaneAttention::Info),
+            (
+                vec![cancelled, task_row(AgentRunPhase::Error)],
+                PaneAttention::Error,
+            ),
+        ] {
+            let inputs = AttentionInputs {
+                phases: &BTreeMap::new(),
+                tasks_rows: &rows,
+            };
+            assert_eq!(attention_for(PanelKind::Agents, None, &inputs), expected);
+        }
     }
 
     #[test]

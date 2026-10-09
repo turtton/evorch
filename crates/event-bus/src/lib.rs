@@ -23,12 +23,13 @@ pub use thread_goal::{ThreadGoalCheck, ThreadGoalPhase, ThreadGoalSnapshot, Thre
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase,
-    CACHE_RETENTION_WARNING_THRESHOLD, CacheBaselineMissing, CacheComparison, CompactionEvent,
-    CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
-    EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
-    FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent,
-    ToolEvent, UsageEvent, UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
+    CACHE_RETENTION_WARNING_THRESHOLD, CANCELLED_REASON, CacheBaselineMissing, CacheComparison,
+    CompactionEvent, CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent,
+    DiagnosticSeverity, EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta,
+    FallbackAxis, FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent,
+    ProviderFailureKind, RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION,
+    SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent, UserQuestion, WindowSource,
+    WorkspaceLockHolder, WorkspaceWait,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

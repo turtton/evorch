@@ -75,6 +75,7 @@ fn role_lookup_uses_the_speakers_task_row() {
         status: event_bus::AgentRunPhase::Running,
         model: "model".into(),
         category: None,
+        cancelled: false,
     });
     // When / Then: resolving each speaker returns its role, never a fallback.
     assert_eq!(

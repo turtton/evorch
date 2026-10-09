@@ -117,6 +117,41 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
     assert_eq!(wire["stream"], false);
 }
 
+// Given: トップレベルとネストに合成キーワードを持つ tool schema / When: wire request に変換 / Then: Anthropic が拒否するトップレベルだけを除く
+#[test]
+fn top_level_schema_combinators_are_omitted_for_anthropic() {
+    let nested = json!({"anyOf": [{"type": "string"}, {"type": "integer"}]});
+    let request = ChatRequest {
+        model: "claude-test".to_string(),
+        messages: vec![],
+        tools: vec![ToolSpec {
+            name: "wait".to_string(),
+            description: "待機".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"run_id": nested.clone()},
+                "additionalProperties": false,
+                "oneOf": [{"required": ["run_id"]}],
+                "allOf": [{"if": {"required": ["run_id"]}, "then": {"required": ["run_id"]}}],
+                "anyOf": [{"required": ["run_id"]}]
+            }),
+        }],
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        service_tier: None,
+        output_schema: None,
+        observation: None,
+    };
+
+    let wire = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+
+    assert_eq!(
+        wire["tools"][0]["input_schema"],
+        json!({"type": "object", "properties": {"run_id": nested}, "additionalProperties": false})
+    );
+}
+
 // Given: cache usage と全 content block を含む wire response / When: canonical response に変換 / Then: role・内容・4 usage フィールドが保存される
 #[test]
 fn wire_response_converts_to_canonical_response() {

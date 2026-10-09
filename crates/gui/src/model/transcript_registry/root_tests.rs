@@ -68,7 +68,7 @@ fn terminal_notices_are_metadata_only() {
             Some("private failure output"),
             "failed",
         ),
-        (AgentRunPhase::Error, Some("cancelled"), "failed"),
+        (AgentRunPhase::Error, Some("cancelled"), "cancelled"),
     ] {
         // Given: a child has streamed output into its own pane.
         let mut registry = registry();

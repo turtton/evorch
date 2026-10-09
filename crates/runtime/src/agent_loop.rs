@@ -13,6 +13,7 @@ mod identical_calls;
 mod messages;
 mod observability;
 mod questions;
+mod retracted_delegates;
 mod snapshots;
 mod team;
 mod tool_calls;
@@ -128,6 +129,7 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
+    retracted_delegates: retracted_delegates::RetractedDelegates,
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
 }
@@ -278,6 +280,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,
     };
@@ -1080,6 +1083,7 @@ impl LoopState {
             if !self.guard_identical_calls(&tool_uses) {
                 return;
             }
+            self.observe_retracted_delegates(&tool_uses);
             if let Some(permit) = &self.task.config.ownership
                 && let Err(error) = permit.validate_mutation()
             {
@@ -1527,7 +1531,7 @@ impl LoopState {
     }
 
     fn finish_cancelled(&mut self) {
-        self.finish_error("cancelled".to_string());
+        self.finish_error(event_bus::CANCELLED_REASON.to_owned());
     }
 }
 
