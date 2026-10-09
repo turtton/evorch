@@ -26,6 +26,7 @@ mod self_improvement_settings;
 mod state;
 mod storage_settings;
 mod subagent_dock;
+mod system_notifications;
 mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
@@ -62,6 +63,10 @@ pub enum WorkbenchError {
 pub struct WorkbenchApp<S>(pub WorkbenchState<S>);
 
 impl<S: AgentRunSource> eframe::App for WorkbenchApp<S> {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.0.logic(ctx);
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.0.raw_input_hook(raw_input);
     }

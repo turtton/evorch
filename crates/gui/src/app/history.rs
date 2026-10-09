@@ -204,6 +204,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.telemetry.apply_event_at(&stored.event, at);
             self.transcripts.select_thread(None);
             self.apply_conversation_event(&stored.event);
+            self.seed_system_notification(&stored.event);
             if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                 run_id,
                 context_len,
@@ -241,6 +242,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_user_message(message);
         }
         self.transcripts.finish_history();
+        self.seed_pending_question_notifications();
         self.telemetry.finish_history();
         self.ledger.load_all(db.run_ledger_all()?);
         self.transcripts

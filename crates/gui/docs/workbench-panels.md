@@ -29,6 +29,28 @@ sessions must explicitly Start or Claim write mode first.
 The command appears in completion suggestions and `/help`. Demo mode reports
 that no resumable conversation is available.
 
+## Desktop notifications
+
+The native GUI sends system notifications when an agent asks the user a
+question or finishes a conversation turn. Notifications are sent only while
+evorch is inactive, including when its window is minimized. A question shows
+its title; completion shows the conversation title so the user can find the
+relevant chat.
+
+Internal questions and completions from child agents do not produce desktop
+notifications. Waiting for an answer, stopping a run, and unfinished goals do
+not count as completed work. Opening saved history does not resend old
+notifications, and returning to an inactive window does not send notifications
+for events already handled while evorch was active.
+
+Notifications use the operating system's notification service and respect its
+notification settings. A delivery failure is logged without interrupting the
+agent. Headless runs do not send desktop notifications.
+
+Delivery has been verified on Linux. Windows builds currently use the default
+PowerShell notification identity, so their notification settings belong to
+PowerShell rather than a separate evorch application entry.
+
 ## Saved layouts
 
 Workspace schema v3 migrates v1/v2 JSON layouts and embedded TOML settings before

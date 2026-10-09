@@ -1090,6 +1090,10 @@ fn run() -> Result<(), GuiError> {
                 .with_memory_storage(storage_config.clone())
                 .with_team_writer(storage.handle()),
         ));
+    match gui::model::system_notifications::NativeSystemNotificationSink::new() {
+        Ok(sink) => state = state.with_system_notifications(Arc::new(sink)),
+        Err(error) => tracing::warn!(%error, "system notification worker unavailable"),
+    }
     if let Some(path) = ui_settings_path(&arguments) {
         if let Some(parent) = path
             .parent()

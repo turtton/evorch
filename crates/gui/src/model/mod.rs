@@ -25,6 +25,7 @@ pub mod role_settings;
 pub mod routing_settings;
 pub mod scoped_call;
 pub mod self_improvement_settings;
+pub mod system_notifications;
 pub mod tasks;
 pub mod telemetry;
 pub mod terminal;
