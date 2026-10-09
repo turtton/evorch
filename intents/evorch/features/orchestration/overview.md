@@ -8,6 +8,7 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 
 ## 要件
 
+- **成果物の提示経路（2026-10-09）**: subagent（`visual` category）は成果物を`render_artifact`で保存しidを結果として返す。会話への掲載はroot Orchestratorが`present`で行い、自分のrun木に属するartifactだけを受け付ける。[ADR 0029](../../decisions/0029-conversation-artifacts.md)参照。
 - **汎用thread goal（2026-10-04）**: root agentは依頼の完遂に必要と判断したら会話途中でgoalを設定できる。調査やローカル修正も対象とし、PRは必須にしない。ターン終了時の自己確認を基本とし、利用者が有効化した独立reviewで未達が見つかれば修正・再確認・再reviewしてから完了する。checks Pauseは作業を止めず確認機構だけを止める。詳細は[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)。
 - **Intent Gate**: task type / required capabilities / mutation allowed? / scope / uncertainty / expected output / completion criteria / likely need for delegation を抽出する。workflow は決めない
 - **Execution Shape**: Direct（単純な質問・局所的修正）または Coordinated（複雑な調査・実装・並列探索）だけを決める
