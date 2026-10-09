@@ -37,6 +37,12 @@ impl TranscriptModel {
             }) => (run_id, "completed"),
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                 run_id,
+                to: to @ AgentRunPhase::Error,
+                reason,
+                ..
+            }) if to.is_cancellation(reason.as_deref()) => (run_id, "cancelled"),
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
                 to: AgentRunPhase::Error,
                 ..
             }) => (run_id, "failed"),

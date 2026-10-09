@@ -167,6 +167,9 @@ pub mod diagnostic_codes {
     /// Execution stopped making progress.
     pub const NO_PROGRESS: &str = "NoProgress";
     pub const IDENTICAL_TOOL_CALLS: &str = "IdenticalToolCalls";
+    /// A parent repeatedly cancelled background children in the turn right after
+    /// delegating them, i.e. it retracted its own delegation target choice.
+    pub const DELEGATION_RETRACTED: &str = "DelegationRetracted";
     /// No verified provider is available for execution.
     pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
     /// Unchanged wire prefix but reduced provider cache retention.
@@ -217,6 +220,7 @@ pub mod diagnostic_codes {
         BUDGET_EXHAUSTED,
         NO_PROGRESS,
         IDENTICAL_TOOL_CALLS,
+        DELEGATION_RETRACTED,
         PROVIDER_UNAVAILABLE,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
@@ -320,6 +324,17 @@ pub enum AgentRunPhase {
     Done,
     /// 異常終了しました。
     Error,
+}
+
+/// `AgentRunStateChanged::reason` of a run its owner cancelled; the run ends in `Error`.
+pub const CANCELLED_REASON: &str = "cancelled";
+
+impl AgentRunPhase {
+    /// Whether a transition to `self` with `reason` ended the run by cancellation
+    /// rather than by a failure, so displays can tell the two apart.
+    pub fn is_cancellation(self, reason: Option<&str>) -> bool {
+        self == Self::Error && reason == Some(CANCELLED_REASON)
+    }
 }
 
 /// entry pre-routing 判定の出所 (使用ルール or 再分類モデル)。

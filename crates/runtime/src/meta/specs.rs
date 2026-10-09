@@ -14,7 +14,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
         description: format!(
-            "Delegate a task to a child agent using the required target object. Choose target.role first, then an optional target.category from that role's branch. For planning use target={{\"role\":\"planner\"}} without category; for plan review use target={{\"role\":\"reviewer\",\"category\":\"{plan_review}\"}}. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.",
+            "Delegate a task to a child agent using the required target object. Choose target.role by what the child must do: worker implements, fixes, runs commands or commits; explorer only reads local code; planner writes a plan before implementation; reviewer only judges work that already exists and never carries out the task. Then choose target.category only from that role's branch. Reviewer category {plan_review} is solely for reviewing a planner-produced plan before execution. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.",
             plan_review = CategoryId::PlanReview
         ),
         input_schema: serde_json::json!({
@@ -446,6 +446,13 @@ mod tests {
             assert_eq!(schema["properties"][name]["type"], "boolean");
             assert_eq!(schema["properties"][name]["default"], false);
         }
+        // A lone copyable literal anchors models onto that one role/category, so
+        // the always-visible guidance stays prose; rejections carry exact targets.
+        assert!(
+            !spec.description.contains("target={"),
+            "{}",
+            spec.description
+        );
     }
 
     #[test]

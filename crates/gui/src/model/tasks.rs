@@ -64,6 +64,7 @@ mod tests {
                 status: AgentRunPhase::Running,
                 model: "model-y".into(),
                 category: None,
+                cancelled: false,
             }
         );
     }
@@ -121,6 +122,58 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_error_is_marked_apart_from_failures_and_survives_refresh() {
+        let transition = |run_id: &str, to, reason: Option<&str>| {
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: run_id.into(),
+                from: AgentRunPhase::Running,
+                to,
+                reason: reason.map(Into::into),
+            })
+        };
+        // Given: two children that both end in Error, one of them by cancellation.
+        let mut model = TasksModel::new(Source(vec![
+            summary(2, AgentRunPhase::Error),
+            summary(3, AgentRunPhase::Error),
+        ]));
+        model.refresh();
+        model.apply_event(&transition(
+            "run-2",
+            AgentRunPhase::Error,
+            Some("cancelled"),
+        ));
+        model.apply_event(&transition("run-3", AgentRunPhase::Error, Some("boom")));
+        // When: a later child start rebuilds the rows from live summaries without reasons.
+        model.refresh();
+        // Then: only the cancelled child is marked, and a restore clears the mark.
+        let cancelled = |model: &TasksModel<Source>, id| {
+            model
+                .rows()
+                .iter()
+                .find(|row| row.run_id == RunId::new(id))
+                .unwrap()
+                .cancelled
+        };
+        assert!(cancelled(&model, 2));
+        assert!(!cancelled(&model, 3));
+        model.apply_event(&transition("run-2", AgentRunPhase::Running, None));
+        assert!(!cancelled(&model, 2));
+
+        // Restored history derives the same mark from the stored transition.
+        let mut restored = TasksModel::new(Source(Vec::new()));
+        restored.restore_events(&[
+            Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: "run-4".into(),
+                parent_run_id: Some("run-1".into()),
+                agent_name: "child".into(),
+                role: "reviewer".into(),
+            }),
+            transition("run-4", AgentRunPhase::Error, Some("cancelled")),
+        ]);
+        assert!(restored.rows()[0].cancelled);
+    }
+
+    #[test]
     fn rows_list_the_most_recently_updated_run_first() {
         // Given: two child runs whose latest activity times differ from their creation order
         let mut model = TasksModel::new(Source(vec![
@@ -175,7 +228,7 @@ mod tests {
 }
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::{AgentInspection, AgentRuntime, AgentSummary, RunId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait AgentRunSource: Send {
@@ -210,6 +263,8 @@ pub struct TaskRow {
     pub status: AgentRunPhase,
     pub model: String,
     pub category: Option<String>,
+    /// The run ended in `Error` because its owner cancelled it, not because it failed.
+    pub cancelled: bool,
 }
 
 pub struct TasksModel<S> {
@@ -218,6 +273,8 @@ pub struct TasksModel<S> {
     history_rows: Vec<TaskRow>,
     /// Latest lifecycle event time per run; rows are listed most recently updated first.
     updated_at: HashMap<RunId, SystemTime>,
+    /// Runs whose latest transition was a cancellation; live summaries carry no reason.
+    cancelled: HashSet<RunId>,
 }
 
 pub fn role_for_run<'a>(rows: &'a [TaskRow], run_id: &str) -> Option<&'a str> {
@@ -236,6 +293,7 @@ impl<S: AgentRunSource> TasksModel<S> {
             rows: Vec::new(),
             history_rows: Vec::new(),
             updated_at: HashMap::new(),
+            cancelled: HashSet::new(),
         }
     }
 
@@ -264,6 +322,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                 status: summary.phase,
                 model: summary.model.clone(),
                 category: summary.category.clone(),
+                cancelled: false,
             })
         {
             if let Some(row) = self.rows.iter_mut().find(|row| row.run_id == live.run_id) {
@@ -272,6 +331,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                 self.rows.push(live);
             }
         }
+        self.mark_cancelled();
         self.sort_rows();
     }
 
@@ -280,6 +340,13 @@ impl<S: AgentRunSource> TasksModel<S> {
         self.rows.sort_by_key(|row| {
             std::cmp::Reverse((updated_at.get(&row.run_id).copied(), row.run_id))
         });
+    }
+
+    fn mark_cancelled(&mut self) {
+        for row in self.rows.iter_mut().chain(&mut self.history_rows) {
+            row.cancelled =
+                row.status == AgentRunPhase::Error && self.cancelled.contains(&row.run_id);
+        }
     }
 
     fn touch(&mut self, event: &Event) {
@@ -291,9 +358,19 @@ impl<S: AgentRunSource> TasksModel<S> {
             ) => run_id,
             _ => return,
         };
-        if let Ok(run_id) = run_id.parse() {
-            let updated = self.updated_at.entry(run_id).or_insert(UNIX_EPOCH);
-            *updated = (*updated).max(event.meta.wall_clock);
+        let Ok(run_id) = run_id.parse() else {
+            return;
+        };
+        let updated = self.updated_at.entry(run_id).or_insert(UNIX_EPOCH);
+        *updated = (*updated).max(event.meta.wall_clock);
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { to, reason, .. }) =
+            &event.kind
+        {
+            if to.is_cancellation(reason.as_deref()) {
+                self.cancelled.insert(run_id);
+            } else {
+                self.cancelled.remove(&run_id);
+            }
         }
     }
 
@@ -319,6 +396,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                         status: AgentRunPhase::Pending,
                         model: String::new(),
                         category: None,
+                        cancelled: false,
                     });
                 }
                 EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
@@ -353,6 +431,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                     .find(|row| row.run_id.to_string() == *run_id)
                 {
                     row.status = *to;
+                    self.mark_cancelled();
                     self.sort_rows();
                 } else {
                     self.refresh();

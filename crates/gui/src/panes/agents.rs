@@ -212,8 +212,8 @@ fn render_data_row(
             egui::vec2(widths[4], ROW_DENSE),
             Layout::left_to_right(Align::Center),
             |ui| {
-                status_dot(ui, agent_phase_color(row.status));
-                ui.add(Label::new(format!("{:?}", row.status)).truncate());
+                status_dot(ui, status_color(row));
+                ui.add(Label::new(status_label(row)).truncate());
             },
         );
         if ui
@@ -289,11 +289,11 @@ pub fn subagents_pane<S: AgentRunSource>(
                             ui.horizontal_wrapped(|ui| {
                                 halo_dot(
                                     ui,
-                                    agent_phase_color(row.status),
+                                    status_color(row),
                                     row.status == event_bus::AgentRunPhase::Running,
                                 );
                                 ui.label(semibold(&row.name).color(palette().TEXT));
-                                ui.label(muted(format!("{} · {:?}", role_label(row), row.status)));
+                                ui.label(muted(format!("{} · {}", role_label(row), status_label(row))));
                                 let value = telemetry.row(&run_id);
                                 let model = value
                                     .and_then(|value| value.model.as_deref())
@@ -410,6 +410,23 @@ fn stop_run_button(ui: &mut egui::Ui, run_id: &str, phase: event_bus::AgentRunPh
             .request_repaint_after(std::time::Duration::from_secs_f64(deadline - now));
     }
     false
+}
+
+/// A run its owner cancelled ends in `Error` on the wire but is not a failure.
+fn status_label(row: &TaskRow) -> String {
+    if row.cancelled {
+        "Cancelled".to_owned()
+    } else {
+        format!("{:?}", row.status)
+    }
+}
+
+fn status_color(row: &TaskRow) -> egui::Color32 {
+    if row.cancelled {
+        palette().TEXT_MUTED
+    } else {
+        agent_phase_color(row.status)
+    }
 }
 
 fn role_label(row: &TaskRow) -> String {
@@ -624,5 +641,23 @@ mod stop_tests {
         frame_at(&mut h, 2.5);
         h.get_by_label("Stop");
         assert!(h.query_by_label("Confirm?").is_none());
+    }
+
+    #[test]
+    fn parent_cancelled_child_reads_cancelled_not_error() {
+        let mut h = harness(&[AgentRunPhase::Error, AgentRunPhase::Error]);
+        for (run_id, reason) in [("run-2", "cancelled"), ("run-3", "boom")] {
+            h.state_mut()
+                .0
+                .apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+                    run_id: run_id.into(),
+                    from: AgentRunPhase::Running,
+                    to: AgentRunPhase::Error,
+                    reason: Some(reason.into()),
+                }));
+        }
+        frame_at(&mut h, 1.0);
+        h.get_by_label("worker · Cancelled");
+        h.get_by_label("worker · Error");
     }
 }

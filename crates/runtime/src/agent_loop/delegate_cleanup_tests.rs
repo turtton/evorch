@@ -94,6 +94,7 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,
     };
