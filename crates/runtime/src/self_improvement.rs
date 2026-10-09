@@ -113,6 +113,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
     Some(match code {
         // identical_calls: repeated calls stopped by the harness's loop detector.
         IDENTICAL_TOOL_CALLS => HarnessImprovement,
+        // retracted_delegates: delegate guidance led the parent to a target it undid at once.
+        DELEGATION_RETRACTED => HarnessImprovement,
         // budget_tracker / escalation_detector: execution stopped making progress.
         NO_PROGRESS => HarnessImprovement,
         // memory_lifecycle: extraction/review failed; candidates remain unpromoted.

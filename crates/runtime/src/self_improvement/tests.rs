@@ -87,6 +87,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
     // Full producer inventory: runtime, providers/cache, tools LSP/MCP, GUI browser.
     let cases = [
         ("IdenticalToolCalls", HarnessImprovement),
+        ("DelegationRetracted", HarnessImprovement),
         ("NoProgress", HarnessImprovement),
         ("LearningPipelineFailed", HarnessImprovement),
         ("ContextSnapshotFailed", HarnessImprovement),

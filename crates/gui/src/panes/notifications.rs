@@ -1,4 +1,5 @@
 use egui::{RichText, Ui};
+use event_bus::AgentRunPhase;
 use workspace_ui::ThreadId;
 
 use crate::model::notifications::{NotificationKind, NotificationsModel};
@@ -35,6 +36,11 @@ pub fn notifications_pane(
                 NotificationKind::QuestionPending { .. } => ("question", palette().INFO),
                 NotificationKind::RunStopped => ("stopped (resumable)", palette().WARNING_FG),
                 NotificationKind::RunCompleted => ("completed", palette().SUCCESS),
+                NotificationKind::RunFailed { reason }
+                    if AgentRunPhase::Error.is_cancellation(reason.as_deref()) =>
+                {
+                    ("cancelled", palette().TEXT_MUTED)
+                }
                 NotificationKind::RunFailed { .. } => ("failed", palette().ERROR),
                 NotificationKind::ApprovalPending { .. } => ("approval", palette().INFO),
                 NotificationKind::MergeApprovalPending { .. } => ("merge approval", palette().INFO),

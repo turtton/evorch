@@ -1,6 +1,5 @@
 //! delegate メタ操作のハンドラ。
 
-use config::agent_categories::CategoryId;
 use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
@@ -75,11 +74,19 @@ impl DelegateTarget {
             .map(|category| category.id)
             .collect();
         if categories.is_empty() {
+            let owner = parse_category(&category).map_or_else(
+                |_| String::new(),
+                |category| {
+                    format!(
+                        " Category `{category}` belongs to target.role={}.",
+                        category.role()
+                    )
+                },
+            );
             return Err(format!(
-                "target.role={} has no public categories; omit target.category. Use target={{\"role\":\"{}\"}}. For plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
+                "target.role={} has no public categories; omit target.category. Use target={}.{owner}",
                 self.role,
-                self.role,
-                CategoryId::PlanReview
+                serde_json::json!({"role": self.role}),
             ));
         }
         let category = parse_category(&category)?;
@@ -92,6 +99,24 @@ impl DelegateTarget {
         }
         Ok((role, Some(category.to_string())))
     }
+}
+
+/// Rejects top-level role/category, echoing the caller's own values as a target.
+fn misplaced_target_error(input: &serde_json::Value) -> String {
+    let message = "invalid arguments: put role and category inside the required target object.";
+    let role = input.get("role").and_then(serde_json::Value::as_str);
+    let category = input
+        .get("category")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|category| parse_category(category).ok());
+    let target = match (role, category) {
+        (_, Some(category)) => {
+            serde_json::json!({"role": category.role(), "category": category.as_str()})
+        }
+        (Some(role), None) if DELEGATE_ROLES.contains(&role) => serde_json::json!({"role": role}),
+        _ => return message.to_owned(),
+    };
+    format!("{message} Use target={target}.")
 }
 
 /// load_skills を検証し、重複を除去した注入名リストを返す (issue #53 / AC6)。
@@ -150,10 +175,7 @@ pub(crate) fn spawn_delegate(
     input: serde_json::Value,
 ) -> Result<crate::RunId, DispatchResult> {
     if input.get("role").is_some() || input.get("category").is_some() {
-        return Err(error(format!(
-            "invalid arguments: put role and category inside the required target object. For planning use target={{\"role\":\"planner\"}}; for plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
-            CategoryId::PlanReview
-        )));
+        return Err(error(misplaced_target_error(&input)));
     }
     let args = match parse::<DelegateArgs>(input) {
         Ok(args) => args,
@@ -164,6 +186,11 @@ pub(crate) fn spawn_delegate(
             "invalid arguments: interactive=true requires background=true",
         ));
     }
+    let target = format!(
+        "role={} category={}",
+        args.target.role,
+        args.target.category.as_deref().unwrap_or("-")
+    );
     let (role, category) = match args.target.resolve() {
         Ok(target) => target,
         Err(message) => return Err(error(message)),
@@ -196,6 +223,7 @@ pub(crate) fn spawn_delegate(
             ) {
                 Ok(run_id) => {
                     runtime.attach_goal_child(state.caller_run_id(), run_id, role);
+                    state.record_background_delegate(run_id.to_string(), target);
                     success(run_id.to_string())
                 }
                 Err(runtime_error) => error(runtime_error.to_string()),

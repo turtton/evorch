@@ -253,7 +253,7 @@ impl TranscriptModel {
                     reason: Some(reason),
                     ..
                 },
-            ) if reason == "cancelled" => self.push(TranscriptEntry::Notice {
+            ) if reason == event_bus::CANCELLED_REASON => self.push(TranscriptEntry::Notice {
                 text: "Run cancelled".into(),
             }),
             event_bus::EventKind::Lifecycle(

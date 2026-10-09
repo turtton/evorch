@@ -1,6 +1,6 @@
 ---
 name: harness-diagnosis
-description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, LearningPipelineFailed, CrashRecovered, AgentRunPanicked, StorageWriterHalted, LessonPromoted, ObserverLagged, 診断イベント調査"
+description: "evorch 自身の不具合を、自己改善候補（improvement candidate）や診断イベントから根本原因まで辿り、再現テスト・修正・検証まで進める手順。`evorch inspect` で永続化済みの run・イベント・provider 要求を読み取り専用で調べる。trigger: 自己改善候補, improvement candidate, self-improvement draft, ハーネス不具合, harness bug, evorch inspect, NoProgress, IdenticalToolCalls, DelegationRetracted, LearningPipelineFailed, CrashRecovered, AgentRunPanicked, StorageWriterHalted, LessonPromoted, ObserverLagged, 診断イベント調査"
 ---
 
 # harness-diagnosis — 改善候補から evorch の不具合を直す
@@ -73,6 +73,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | code | まず見るもの |
 |---|---|
 | `IdenticalToolCalls` | detail の `tool=<name> input_sha256=<16桁>`。`events --run` の Tool イベントで、そのツールの結果が毎回同じ失敗でないか確認する。ツールの結果がモデルに伝わっていない、エラーが曖昧、といったハーネス側の原因を探す |
+| `DelegationRetracted` | detail の `site=role=<role> category=<category>` が、親が委譲直後に取り消した target。親 run の `inspect run <run-id> --full` の `messages_json` で `delegate` の `target` と直後の `cancel` を並べ、作業内容と role/category が食い違っていないかを見る。食い違っていれば `delegate` の説明（`crates/runtime/src/meta/specs.rs`）やスキーマがその選択を誘っていないかを疑う。provider のフォールバックでモデルが変わった直後に始まることもあるので、`usage_requests` の model の切り替わりも確認する |
 | `NoProgress` | dedup key の source（`budget_tracker` か `tool_calls`）で発生元が分かれる。`usage_requests` の失敗や `finish_reason`、直前のツール結果を確認する |
 | `LearningPipelineFailed` | detail の `cause:` 行。学習用の run は元 run の子ではなく別の root run（`agent_name` が `lesson` / `learning-evidence-review`）。`events --around <observed_at_ns>` の `AgentRunStarted` から見つける |
 | `ContextSnapshotFailed` / `EscalationHandoffFailed` | detail と、その run の `context.terminal_phase` / `ledger`。escalation なら移譲先の run も `children` と events で確認する |

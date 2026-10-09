@@ -147,24 +147,58 @@ async fn delegate_rejects_invalid_targets_before_spawning_in_both_modes() {
     }
 }
 
+/// Parses the `Use target={...}.` correction out of an actual error response.
+fn correction(error: &str) -> Value {
+    let (_, rest) = error.split_once("Use target=").expect("correction");
+    let (target, _) = rest.split_once("}.").expect("correction end");
+    serde_json::from_str(&format!("{target}}}")).unwrap()
+}
+
 #[tokio::test]
 async fn invalid_planner_category_returns_an_executable_planner_correction() {
-    for category in ["plan", "plan-review", "deep", "research"] {
+    for (category, owner) in [
+        ("plan", None),
+        ("plan-review", Some("reviewer")),
+        ("deep", Some("worker")),
+        ("research", Some("worker")),
+    ] {
         let error = delegate_case(
             json!({"target":{"role":"planner","category":category},"prompt":"CHILD"}),
             false,
         )
         .await;
-        // Execute the correction extracted from the actual error response.
-        let correction = error
-            .split("Use target=")
-            .nth(1)
-            .unwrap()
-            .split(". For plan review")
-            .next()
-            .unwrap();
-        let target: Value = serde_json::from_str(correction).unwrap();
+        // The hint names the given category's owner rather than an unrelated example.
+        assert_eq!(
+            owner.map(|owner| format!("Category `{category}` belongs to target.role={owner}.")),
+            error
+                .split_once(" Category ")
+                .map(|(_, hint)| format!("Category {hint}")),
+            "{error}"
+        );
+        let target = correction(&error);
         assert_eq!(target, json!({"role":"planner"}));
+        delegate_case(json!({"target":target,"prompt":"CHILD"}), true).await;
+    }
+}
+
+#[tokio::test]
+async fn misplaced_top_level_target_returns_the_callers_own_target() {
+    for (args, expected) in [
+        (
+            json!({"role":"worker","category":"quick"}),
+            json!({"role":"worker","category":"quick"}),
+        ),
+        (
+            json!({"category":"plan-review"}),
+            json!({"role":"reviewer","category":"plan-review"}),
+        ),
+        (json!({"role":"explorer"}), json!({"role":"explorer"})),
+    ] {
+        let mut call = args.clone();
+        call["prompt"] = json!("CHILD");
+        let error = delegate_case(call, false).await;
+        let target = correction(&error);
+        assert_eq!(target, expected, "{error}");
         delegate_case(json!({"target":target,"prompt":"CHILD"}), true).await;
     }
 }
