@@ -94,6 +94,7 @@ async fn invalid_restored_handles_preserve_snapshots_and_never_reach_custom_shel
                 .handle()
                 .upsert_run_context(&record)
                 .unwrap();
+            let before = store.restore_record(run).unwrap().unwrap();
             let result = match entry {
                 "same_run" => {
                     fixture
@@ -130,7 +131,7 @@ async fn invalid_restored_handles_preserve_snapshots_and_never_reach_custom_shel
             );
             assert_eq!(shell.reservations.load(Ordering::Relaxed), 0);
             assert_eq!(shell.floor.load(Ordering::Relaxed), 0);
-            assert_eq!(store.restore_record(run).unwrap().unwrap(), record);
+            assert_eq!(store.restore_record(run).unwrap().unwrap(), before);
             assert_eq!(
                 *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
                 AgentRunPhase::Done

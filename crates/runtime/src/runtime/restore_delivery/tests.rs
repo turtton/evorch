@@ -104,6 +104,7 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
     );
     record.messages_json = serde_json::to_string(&history).unwrap();
     storage.handle().upsert_run_context(&record).unwrap();
+    let before = store.restore_record(child).unwrap().unwrap();
     let mut events = runtime.shared.bus.subscribe();
     let result =
         runtime.prepare_delivery(parent, child, AgentMessageKind::Send, "resume".into(), None);
@@ -114,7 +115,7 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
             ..
         })
     ));
-    assert_eq!(store.restore_record(child).unwrap().unwrap(), record);
+    assert_eq!(store.restore_record(child).unwrap().unwrap(), before);
     assert_eq!(
         *runtime.entry(child).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done
