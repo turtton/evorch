@@ -16,7 +16,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ///
     /// Only a focused composer claims it, so other panes keep Tab.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
-        if self.settings_owns_input() || !self.composer.focused {
+        if self.settings_owns_input() {
+            return;
+        }
+        if self.terminals.focused {
+            self.capture_terminal_input(raw_input);
+            return;
+        }
+        if !self.composer.focused {
             return;
         }
         raw_input.events.retain(|event| match event {
@@ -38,6 +45,33 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 false
             }
             _ => true,
+        });
+    }
+
+    /// Routes keyboard input to the focused terminal before egui sees it.
+    ///
+    /// Tab, arrows and Escape would otherwise move or drop focus, and global shortcuts
+    /// would steal control keys the shell needs. Workbench shortcuts that a terminal has no
+    /// use for (see [`crate::keymap::Keymap::passes_through_terminal`]) still reach the keymap.
+    fn capture_terminal_input(&mut self, raw_input: &mut egui::RawInput) {
+        let keymap = &self.keymap;
+        let pending = &mut self.terminals.pending_events;
+        raw_input.events.retain(|event| {
+            let captured = match event {
+                egui::Event::Key { key, modifiers, .. } => {
+                    !keymap.passes_through_terminal(*key, *modifiers)
+                }
+                egui::Event::Text(_)
+                | egui::Event::Paste(_)
+                | egui::Event::Copy
+                | egui::Event::Cut
+                | egui::Event::Ime(_) => true,
+                _ => false,
+            };
+            if captured {
+                pending.push(event.clone());
+            }
+            !captured
         });
     }
 }

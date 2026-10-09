@@ -16,12 +16,11 @@ use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::model::telemetry::pricing::SharedUsagePricing;
-use gui::pty::{PtySession, resolve_terminal_cwd};
+use gui::pty::ShellSpawner;
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
 use gui::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
-use portable_pty::CommandBuilder;
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
 use runtime::orchestration::delivery::DeliveryPort;
@@ -49,8 +48,6 @@ enum GuiError {
     Layout(#[from] workspace_ui::PersistError),
     #[error("workbench initialization failed: {0}")]
     Workbench(#[from] gui::app::WorkbenchError),
-    #[error("PTY initialization failed: {0}")]
-    Terminal(#[from] gui::pty::TerminalError),
     #[error("GUI initialization failed: {0}")]
     Eframe(String),
     #[error("runtime initialization failed: {0}")]
@@ -1039,16 +1036,6 @@ fn run() -> Result<(), GuiError> {
     restore_thread_goals(&storage_config, &runtime);
     restore_thread_todos(&storage_config, &runtime, &sidebar);
 
-    let home = std::env::home_dir()
-        .ok_or_else(|| GuiError::Arguments("No home directory for terminal cwd".into()))?;
-    let terminal_cwd = resolve_terminal_cwd(
-        startup_project(&sidebar).map(|project| project.repo_root.as_path()),
-        &repo_root,
-        &home,
-    );
-    let mut terminal_command = CommandBuilder::new("/bin/sh");
-    terminal_command.cwd(&terminal_cwd);
-    let pty = PtySession::spawn(terminal_command, 24, 80, None)?;
     let ownership_root = match demo_directory.as_ref() {
         Some(directory) => directory.path().join("threads"),
         None => std::env::var_os("XDG_STATE_HOME")
@@ -1089,7 +1076,7 @@ fn run() -> Result<(), GuiError> {
             settings_store.clone(),
         ))
         .with_pump(pump)
-        .with_pty(pty)
+        .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(
             RuntimeCommandSink::new(runtime.clone(), handle.clone(), supervisor)

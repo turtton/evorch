@@ -83,6 +83,19 @@ impl Keymap {
         Self { bindings }
     }
 
+    /// 端末フォーカス中でも workbench へ渡すキーかどうかを返します。
+    ///
+    /// Ctrl+英字は端末の制御文字 (Ctrl+S = XOFF など) として使うため、割り当てがあっても端末を優先します。
+    pub fn passes_through_terminal(&self, key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        let ctrl = modifiers.command || modifiers.ctrl;
+        self.bindings.values().any(|resolved| {
+            resolved.key == key
+                && resolved.ctrl == ctrl
+                && resolved.shift == modifiers.shift
+                && resolved.alt == modifiers.alt
+        }) && !(ctrl && !modifiers.shift && !modifiers.alt && is_letter(key))
+    }
+
     /// 現在の egui 入力状態に対応するアクションを返します。
     pub fn action_for_input(&self, input: &egui::InputState) -> Option<KeyAction> {
         for (action, resolved) in &self.bindings {
@@ -96,6 +109,11 @@ impl Keymap {
         }
         None
     }
+}
+
+fn is_letter(key: egui::Key) -> bool {
+    let name = key.name();
+    name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase()
 }
 
 #[cfg(test)]
@@ -204,5 +222,19 @@ mod tests {
 
         let ctx = run_with_key(Key::Num4, Modifiers::COMMAND);
         assert_eq!(keymap.action_for_input(&ctx.input(|i| i.clone())), None);
+    }
+
+    #[test]
+    fn terminal_keeps_control_letters_but_releases_workbench_chords() {
+        // Given: the default bindings (Ctrl+1/2/3, Ctrl+S, Ctrl+Shift+R).
+        let keymap = Keymap::from_settings(&KeybindSettings::default());
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+
+        // Then: pane focus and layout reset still reach the workbench,
+        // while Ctrl+S stays a terminal control key (XOFF / readline search).
+        assert!(keymap.passes_through_terminal(Key::Num1, Modifiers::CTRL));
+        assert!(keymap.passes_through_terminal(Key::R, ctrl_shift));
+        assert!(!keymap.passes_through_terminal(Key::S, Modifiers::CTRL));
+        assert!(!keymap.passes_through_terminal(Key::C, Modifiers::CTRL));
     }
 }

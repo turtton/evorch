@@ -2,12 +2,16 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::thread;
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-pub fn resolve_terminal_cwd(primary: Option<&Path>, _process_cwd: &Path, home: &Path) -> PathBuf {
+/// PTY の出力到着・子プロセス終了を UI へ知らせるコールバックです。
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
+/// 端末の初期 cwd を決めます。プロジェクトルートを優先し、`/` は使わずホームへ倒します。
+pub fn resolve_terminal_cwd(primary: Option<&Path>, home: &Path) -> PathBuf {
     primary
         .filter(|path| *path != Path::new("/"))
         .map_or_else(|| home.to_path_buf(), Path::to_path_buf)
@@ -22,17 +26,79 @@ pub enum TerminalError {
     Io(String),
     #[error("PTY resize failed: {0}")]
     Resize(String),
-    #[error("PTY session is closed")]
-    Closed,
+}
+
+/// 端末セッション用のプロセスを PTY 上に起動します。
+pub trait TerminalSpawner: Send + Sync {
+    fn spawn(
+        &self,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        wake: Wake,
+    ) -> Result<PtySession, TerminalError>;
+}
+
+/// ユーザーのシェル (`$SHELL`、未設定なら `/bin/sh`) を起動する spawner です。
+#[derive(Debug, Clone)]
+pub struct ShellSpawner {
+    program: String,
+    args: Vec<String>,
+}
+
+impl ShellSpawner {
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let program = std::env::var("SHELL")
+            .ok()
+            .filter(|shell| !shell.trim().is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_owned());
+        Self::new(program, Vec::new())
+    }
+
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    fn command(&self, cwd: &Path) -> CommandBuilder {
+        let mut command = CommandBuilder::new(&self.program);
+        command.args(&self.args);
+        command.cwd(cwd);
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.env("TERM_PROGRAM", "evorch");
+        command
+    }
+}
+
+impl TerminalSpawner for ShellSpawner {
+    fn spawn(
+        &self,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        wake: Wake,
+    ) -> Result<PtySession, TerminalError> {
+        PtySession::spawn(self.command(cwd), rows, cols, Some(wake))
+    }
 }
 
 /// portable-ptyプロセスと、その入出力を管理するセッションです。
+///
+/// 出力の読み取りと子プロセスの終了待ちはそれぞれ専用スレッドで行います。
+/// 背景ジョブが PTY を握り続けても UI が待たされないよう、Drop ではスレッドを join しません。
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
     output_rx: mpsc::Receiver<Vec<u8>>,
-    reader: Option<JoinHandle<()>>,
+    exit_code: Arc<OnceLock<u32>>,
 }
 
 impl PtySession {
@@ -41,7 +107,7 @@ impl PtySession {
         command: CommandBuilder,
         rows: u16,
         cols: u16,
-        on_output: Option<Arc<dyn Fn() + Send + Sync>>,
+        on_output: Option<Wake>,
     ) -> Result<Self, TerminalError> {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -51,7 +117,7 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|error| TerminalError::Spawn(error.to_string()))?;
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(|error| TerminalError::Spawn(error.to_string()))?;
@@ -64,10 +130,12 @@ impl PtySession {
             .master
             .take_writer()
             .map_err(|error| TerminalError::Spawn(error.to_string()))?;
-        let master = pair.master;
+        let killer = child.clone_killer();
+        let wake = on_output.unwrap_or_else(|| Arc::new(|| {}));
         let (output_tx, output_rx) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            let mut buffer = [0_u8; 4096];
+        let reader_wake = Arc::clone(&wake);
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
@@ -75,20 +143,25 @@ impl PtySession {
                         if output_tx.send(buffer[..length].to_vec()).is_err() {
                             break;
                         }
-                        if let Some(callback) = &on_output {
-                            callback();
-                        }
+                        reader_wake();
                     }
                 }
             }
         });
+        let exit_code = Arc::new(OnceLock::new());
+        let exit = Arc::clone(&exit_code);
+        thread::spawn(move || {
+            let code = child.wait().map_or(1, |status| status.exit_code());
+            let _ = exit.set(code);
+            wake();
+        });
 
         Ok(Self {
-            master,
+            master: pair.master,
             writer,
-            child,
+            killer,
             output_rx,
-            reader: Some(reader),
+            exit_code,
         })
     }
 
@@ -117,128 +190,129 @@ impl PtySession {
         self.output_rx.try_iter().flatten().collect()
     }
 
-    /// 子プロセスを終了し、reader threadの終了を待ちます。
-    pub fn kill(&mut self) -> Result<(), TerminalError> {
-        let result = self
-            .child
-            .kill()
-            .map_err(|error| TerminalError::Io(error.to_string()));
-        self.join_reader();
-        result
+    /// 子プロセスが終了していればその終了コードを返します。
+    pub fn exit_code(&self) -> Option<u32> {
+        self.exit_code.get().copied()
     }
 
-    fn join_reader(&mut self) {
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+    /// 子プロセスへ終了を要求します。終了は [`Self::exit_code`] で観測できます。
+    pub fn kill(&mut self) -> Result<(), TerminalError> {
+        self.killer
+            .kill()
+            .map_err(|error| TerminalError::Io(error.to_string()))
     }
 }
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        self.join_reader();
+        if self.exit_code().is_none() {
+            let _ = self.killer.kill();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::Arc;
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::sync::{Arc, mpsc};
 
     use portable_pty::CommandBuilder;
 
-    use super::{PtySession, resolve_terminal_cwd};
+    use super::{PtySession, ShellSpawner, TerminalSpawner, resolve_terminal_cwd};
 
     #[test]
     fn terminal_cwd_uses_primary_or_home_and_never_root() {
-        // Given: a primary project, root process cwd, and home directory
+        // Given: a primary project and home directory
         let primary = Path::new("/projects/primary");
         let home = Path::new("/home/tester");
 
-        // When: the terminal cwd is resolved
-        let primary_cwd = resolve_terminal_cwd(Some(primary), Path::new("/"), home);
-        let root_primary_cwd = resolve_terminal_cwd(Some(Path::new("/")), primary, home);
-        let fallback_cwd = resolve_terminal_cwd(None, Path::new("/"), home);
-        let non_root_fallback = resolve_terminal_cwd(None, Path::new("/workspace"), home);
-
-        // Then: primary wins, otherwise home is always used
-        assert_eq!(primary_cwd, primary);
-        assert_eq!(root_primary_cwd, home);
-        assert_eq!(fallback_cwd, home);
-        assert_eq!(non_root_fallback, home);
+        // When/Then: primary wins, a root primary and no primary fall back to home
+        assert_eq!(resolve_terminal_cwd(Some(primary), home), primary);
+        assert_eq!(resolve_terminal_cwd(Some(Path::new("/")), home), home);
+        assert_eq!(resolve_terminal_cwd(None, home), home);
     }
 
-    #[test]
-    fn pty_starts_in_command_builder_cwd() {
-        // Given: a shell whose builder explicitly requests a fresh directory
-        let directory = tempfile::tempdir().expect("temporary directory must be created");
-        let expected = directory.path().to_string_lossy().into_owned();
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "pwd"]);
-        command.cwd(directory.path());
-        let session = PtySession::spawn(command, 24, 80, None).expect("shell must spawn");
+    /// Spawns a command whose output and exit are signalled on the returned channel.
+    fn spawn_signalled(command: CommandBuilder) -> (PtySession, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        let wake = Arc::new(move || {
+            let _ = tx.send(());
+        });
+        let session = PtySession::spawn(command, 24, 80, Some(wake)).expect("PTY must spawn");
+        (session, rx)
+    }
 
-        // When: the reader receives the shell's output
+    fn read_until(session: &mut PtySession, wake: &mpsc::Receiver<()>, expected: &[u8]) -> Vec<u8> {
         let mut output = Vec::new();
         while !output
             .windows(expected.len())
-            .any(|window| window == expected.as_bytes())
+            .any(|window| window == expected)
         {
-            output.extend(session.output_rx.recv().expect("shell must report output"));
-        }
-
-        // Then: pwd reports the requested directory
-        assert!(String::from_utf8_lossy(&output).contains(&expected));
-    }
-
-    fn echo_session() -> PtySession {
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "read line; printf '%s\\n' \"$line\""]);
-        PtySession::spawn(command, 24, 80, None).expect("echo shell must spawn")
-    }
-
-    fn wait_for_output(session: &mut PtySession, expected: &[u8]) -> Vec<u8> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut output = Vec::new();
-        while Instant::now() < deadline {
+            wake.recv().expect("PTY must report output");
             output.extend(session.drain_output());
-            if output
-                .windows(expected.len())
-                .any(|window| window == expected)
-            {
-                return output;
-            }
-            thread::sleep(Duration::from_millis(10));
         }
         output
     }
 
+    fn wait_exit(session: &PtySession, wake: &mpsc::Receiver<()>) -> u32 {
+        loop {
+            if let Some(code) = session.exit_code() {
+                return code;
+            }
+            wake.recv().expect("PTY must report exit");
+        }
+    }
+
+    #[test]
+    fn shell_spawner_starts_in_cwd_with_terminal_env() {
+        // Given: a spawner for /bin/sh that prints its cwd and TERM
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let spawner = ShellSpawner::new(
+            "/bin/sh",
+            vec!["-c".into(), "printf '%s|%s\\n' \"$PWD\" \"$TERM\"".into()],
+        );
+        let (tx, wake) = mpsc::channel();
+        let mut session = spawner
+            .spawn(
+                directory.path(),
+                24,
+                80,
+                Arc::new(move || {
+                    let _ = tx.send(());
+                }),
+            )
+            .expect("shell must spawn");
+
+        // When: the shell reports its environment
+        let expected = format!("{}|xterm-256color", directory.path().display());
+        let output = read_until(&mut session, &wake, expected.as_bytes());
+
+        // Then: the session runs in the requested directory as an xterm-256color terminal
+        assert!(String::from_utf8_lossy(&output).contains(&expected));
+    }
+
     #[test]
     fn pty_echo_roundtrip() {
-        // Given: a real cat process attached to a PTY
-        let mut session = echo_session();
+        // Given: a shell that echoes one line read from the PTY
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "read line; printf 'got:%s\\n' \"$line\""]);
+        let (mut session, wake) = spawn_signalled(command);
 
         // When: input is written to the session
         session
             .write(b"hello from pty\n")
             .expect("PTY write must succeed");
-        let output = wait_for_output(&mut session, b"hello from pty\r\n");
 
-        // Then: the PTY returns the echoed line
-        assert!(
-            output
-                .windows(16)
-                .any(|window| window == b"hello from pty\r\n")
-        );
+        // Then: the PTY returns the processed line
+        read_until(&mut session, &wake, b"got:hello from pty");
     }
 
     #[test]
     fn pty_resize_succeeds() {
-        // Given: a real cat process attached to a PTY
-        let mut session = echo_session();
+        // Given: a process attached to a PTY
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let (mut session, _wake) = spawn_signalled(command);
 
         // When: the terminal dimensions change
         session.resize(40, 120).expect("resize must succeed");
@@ -252,32 +326,39 @@ mod tests {
     }
 
     #[test]
-    fn pty_kill_terminates_reader() {
+    fn exit_code_is_reported_after_the_child_exits() {
+        // Given: a command that exits with a specific status
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "exit 3"]);
+        let (session, wake) = spawn_signalled(command);
+
+        // When/Then: the waiter thread records the status and wakes the UI
+        assert_eq!(wait_exit(&session, &wake), 3);
+    }
+
+    #[test]
+    fn kill_terminates_the_child() {
         // Given: a process that remains alive until explicitly killed
         let mut command = CommandBuilder::new("/bin/sh");
         command.args(["-c", "sleep 30"]);
-        let mut session = PtySession::spawn(command, 24, 80, None).expect("shell must spawn");
+        let (mut session, wake) = spawn_signalled(command);
 
         // When: the process is killed
         session.kill().expect("child kill must succeed");
 
-        // Then: dropping the session can join the reader without waiting for the shell
+        // Then: the exit is observed without waiting for the sleep
+        wait_exit(&session, &wake);
     }
 
     #[test]
-    fn pty_drop_terminates_child() {
-        // Given: a process that would otherwise outlive the test
+    fn drop_does_not_wait_for_background_jobs_holding_the_pty() {
+        // Given: a shell whose background job keeps the PTY slave open
         let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "sleep 30"]);
-        let on_output = Arc::new(|| {});
-        let started = Instant::now();
-        let session =
-            PtySession::spawn(command, 24, 80, Some(on_output)).expect("shell must spawn");
+        command.args(["-c", "sleep 30 & echo started; wait"]);
+        let (mut session, wake) = spawn_signalled(command);
+        read_until(&mut session, &wake, b"started");
 
-        // When: the session is dropped
+        // When/Then: dropping the session returns instead of joining the blocked reader
         drop(session);
-
-        // Then: Drop returns promptly after terminating the child
-        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

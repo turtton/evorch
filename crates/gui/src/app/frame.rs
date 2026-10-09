@@ -348,12 +348,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn drain_pty(&mut self, ctx: &egui::Context) {
-        if let Some(pty) = &mut self.pty {
-            let output = pty.drain_output();
-            if !output.is_empty() {
-                self.terminal.feed(&output);
-                ctx.request_repaint();
-            }
+        // The terminal pane re-asserts focus while it renders this frame.
+        self.terminals.focused = false;
+        let projects = &self.sidebar.projects;
+        self.terminals
+            .retain_projects(|id| projects.iter().any(|project| &project.id == id));
+        if self.terminals.poll() {
+            ctx.request_repaint();
         }
     }
 

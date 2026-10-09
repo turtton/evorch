@@ -119,6 +119,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut preference_action = None;
         let profiles = self.available_profiles();
         let active_repo_root = self.active_repo_root();
+        let terminal_target = self.terminal_target();
         let dock_style = crate::theme::dock::dock_style(ui.style());
         let tab_style = dock_style.tab.clone();
         let sandbox_picker = crate::panes::composer::SandboxPickerContext {
@@ -157,9 +158,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 durable_tasks: &self.durable_tasks,
                 selected_task: self.selected_task.as_deref(),
                 tasks_action: &mut tasks_action,
-                terminal: &mut self.terminal,
-                terminal_input: &mut self.terminal_input,
-                pty: &mut self.pty,
+                terminals: &mut self.terminals,
+                terminal_target,
                 panels: &self.panels,
                 sidebar: &self.sidebar,
                 phases: &self.phases,
