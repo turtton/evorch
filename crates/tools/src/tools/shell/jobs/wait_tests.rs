@@ -10,7 +10,9 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
     let (cancel, _) = watch::channel(false);
     let (input, received) = mpsc::channel(4);
     let job = Arc::new(Job {
-        id: "job".into(),
+        id: "internal-job-id".into(),
+        handle: "job-0".into(),
+        command: "read value".into(),
         owner: "owner".into(),
         call_id: None,
         thread: None,
@@ -36,6 +38,11 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
         .lock()
         .unwrap()
         .insert(job.id.clone(), Arc::clone(&job));
+    registry
+        .by_handle
+        .lock()
+        .unwrap()
+        .insert(job.handle.clone(), Arc::clone(&job));
     (registry, job, received)
 }
 
@@ -49,7 +56,7 @@ fn owner() -> ToolExecutionContext {
 
 fn args(action: &str, yield_ms: u64) -> ControlArgs {
     serde_json::from_value(serde_json::json!({
-        "action": action, "job_id": "job", "yield_ms": yield_ms,
+        "action": action, "job_id": "job-0", "yield_ms": yield_ms,
         "input": (action == "stdin").then_some("hello\n")
     }))
     .unwrap()
@@ -148,8 +155,8 @@ async fn zero_start_and_zero_or_omitted_stop_return_immediately() {
     ready(starting.as_mut()).await;
     let owner = owner();
     for value in [
-        serde_json::json!({"action": "stop", "job_id": "job", "yield_ms": 0}),
-        serde_json::json!({"action": "stop", "job_id": "job"}),
+        serde_json::json!({"action": "stop", "job_id": "job-0", "yield_ms": 0}),
+        serde_json::json!({"action": "stop", "job_id": "job-0"}),
     ] {
         let mut stopping =
             std::pin::pin!(registry.control(&owner, serde_json::from_value(value).unwrap()));

@@ -273,6 +273,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shell_gui_uuid_detail_never_enters_serialized_provider_messages() {
+        let mut context = AgentContext::new(RunId::new(9), Role::Explorer);
+        let uid = "3f9c2a1e-0000-4000-8000-000000000000";
+        context.push_tool_result(
+            "shell-start",
+            ToolResult::success("shell job: job-42\n").with_detail(
+                serde_json::json!({"shell_job": {"job_id": "job-42", "job_uid": uid}}),
+            ),
+        );
+        let serialized = serde_json::to_string(&context.messages).unwrap();
+        assert!(serialized.contains("job-42"));
+        assert!(!serialized.contains(uid));
+        assert!(!serialized.contains("job_uid"));
+    }
+
     // Given: 空のコンテキスト / When: user / assistant / tool_result を順に push
     // Then: 履歴が時系列どおり 3 件 (User / Assistant / User) で蓄積される
     #[test]

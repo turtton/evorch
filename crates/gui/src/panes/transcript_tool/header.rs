@@ -6,7 +6,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::model::transcript::shell_jobs::ShellJob;
+use crate::model::transcript::shell_jobs::{ShellJob, short_job_id};
 use crate::theme::icons;
 
 const MAX_SUBJECT_CHARS: usize = 120;
@@ -273,10 +273,6 @@ const fn control_verb(action: &str) -> &'static str {
         b"stdin" => "Input",
         _ => "Stop",
     }
-}
-
-fn short_job_id(job: &str) -> &str {
-    job.get(..8).unwrap_or(job)
 }
 
 /// Names a shell job's command and state: control calls show the command

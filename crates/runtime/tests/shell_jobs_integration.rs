@@ -139,6 +139,7 @@ async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after
     next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"printf 'ready\\n'; IFS= read -r reply; printf '%s' \"$reply\" > result.txt; printf 'done\\n'", "yield_ms":1000})));
     let call = next(&mut calls).await;
     let job = call.job("start");
+    assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
     assert!(executor.has_running_shell_jobs(&run.to_string()));
     assert!(
         snapshots.lock(None).now_or_never().is_none(),
@@ -155,11 +156,15 @@ async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after
     ));
     let call = next(&mut calls).await;
     assert!(call.result("blocked-write").1);
-    assert!(
-        call.result("blocked-write")
-            .0
-            .contains("owns this workspace")
-    );
+    let summary = executor
+        .running_shell_job_summary(&run.to_string())
+        .unwrap();
+    assert_eq!(summary.handle, job);
+    assert!(summary.command_summary.starts_with("printf 'ready"));
+    assert!(call.result("blocked-write").0.contains(&format!(
+        "A shell job still owns this workspace: {} ({}). Poll or stop it before another mutation.",
+        job, summary.command_summary
+    )));
     assert_eq!(
         std::fs::read_to_string(root.join("README.md")).unwrap(),
         "# test\n"
@@ -560,6 +565,7 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
     ));
     let active = calls.recv().await.unwrap();
     let job = active.job("start");
+    assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
     let previous_input = serde_json::to_value(&active.messages).unwrap();
     tokio::task::spawn_blocking(move || std::fs::write(release, "go\n"))
         .await

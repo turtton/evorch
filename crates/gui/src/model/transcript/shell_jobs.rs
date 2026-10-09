@@ -12,8 +12,37 @@ const LOG_BYTES: usize = 256 * 1024;
 const MAX_JOBS: usize = 64;
 const GAP_MARKER: &str = "[… earlier output expired …]\n";
 
+/// Keep counter handles distinct; only historical UUIDs use a short prefix.
+pub fn short_job_id(id: &str) -> &str {
+    if id.starts_with("job-") {
+        id
+    } else {
+        id.get(..8).unwrap_or(id)
+    }
+}
+
+/// GUI identity, never a model-facing shell control handle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShellJobKey {
+    pub run_id: Option<String>,
+    pub handle: String,
+    /// Separates historical jobs from a restored run that reused an old handle.
+    pub uid: Option<String>,
+}
+
+impl ShellJobKey {
+    pub fn new(run_id: Option<&str>, handle: &str, uid: Option<&str>) -> Self {
+        Self {
+            run_id: run_id.map(str::to_owned),
+            handle: handle.to_owned(),
+            uid: uid.map(str::to_owned),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJob {
+    pub key: ShellJobKey,
     pub id: String,
     pub command: Option<String>,
     pub run_id: Option<String>,
@@ -36,11 +65,12 @@ struct LiveLog {
 }
 
 impl ShellJob {
-    fn new(id: &str) -> Self {
+    fn new(key: ShellJobKey) -> Self {
         Self {
-            id: id.to_owned(),
+            id: key.handle.clone(),
+            run_id: key.run_id.clone(),
+            key,
             command: None,
-            run_id: None,
             status: "running".into(),
             exit_code: None,
             artifact: None,
@@ -55,7 +85,7 @@ impl ShellJob {
     }
 
     pub fn short_id(&self) -> &str {
-        self.id.get(..8).unwrap_or(&self.id)
+        short_job_id(&self.id)
     }
 
     /// Live output when it streamed, otherwise what polls returned.
@@ -118,8 +148,26 @@ pub struct ShellJobs {
 }
 
 impl ShellJobs {
+    /// Legacy lookup is deliberately unavailable when the handle is ambiguous.
     pub fn get(&self, id: &str) -> Option<&ShellJob> {
-        self.jobs.iter().find(|job| job.id == id)
+        let mut matches = self.jobs.iter().filter(|job| job.id == id);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    pub fn get_key(&self, key: &ShellJobKey) -> Option<&ShellJob> {
+        self.jobs.iter().find(|job| &job.key == key)
+    }
+
+    /// Resolves a control call before its result supplies the job UUID.
+    /// Historical instances make the handle ambiguous even within one run.
+    pub fn get_scoped(&self, run_id: Option<&str>, handle: &str) -> Option<&ShellJob> {
+        let mut matches = self
+            .jobs
+            .iter()
+            .filter(|job| job.key.run_id.as_deref() == run_id && job.key.handle == handle);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     /// Jobs in the order they were first seen.
@@ -127,8 +175,8 @@ impl ShellJobs {
         self.jobs.iter()
     }
 
-    fn job_mut(&mut self, id: &str) -> &mut ShellJob {
-        if let Some(index) = self.jobs.iter().position(|job| job.id == id) {
+    fn job_mut(&mut self, key: ShellJobKey) -> &mut ShellJob {
+        if let Some(index) = self.jobs.iter().position(|job| job.key == key) {
             return &mut self.jobs[index];
         }
         if self.jobs.len() >= MAX_JOBS {
@@ -139,23 +187,19 @@ impl ShellJobs {
                 .unwrap_or(0);
             self.jobs.remove(evict);
         }
-        self.jobs.push_back(ShellJob::new(id));
+        self.jobs.push_back(ShellJob::new(key));
         self.jobs.back_mut().expect("job was just pushed")
     }
 
     pub(crate) fn apply_live(
         &mut self,
-        job_id: &str,
-        run_id: Option<&str>,
+        key: ShellJobKey,
         offset: u64,
         chunk: &str,
         status: &str,
         exit_code: Option<i32>,
     ) {
-        let job = self.job_mut(job_id);
-        if job.run_id.is_none() {
-            job.run_id = run_id.map(str::to_owned);
-        }
+        let job = self.job_mut(key);
         job.set_status(status, exit_code);
         let live = job.live.get_or_insert_with(|| LiveLog {
             text: String::new(),
@@ -196,7 +240,12 @@ impl ShellJobs {
         let Some(job_id) = state.get("job_id").and_then(serde_json::Value::as_str) else {
             return;
         };
-        let job = self.job_mut(job_id);
+        let key = ShellJobKey::new(
+            state.get("run_id").and_then(serde_json::Value::as_str),
+            job_id,
+            state.get("job_uid").and_then(serde_json::Value::as_str),
+        );
+        let job = self.job_mut(key);
         if let Some(command) = input
             .and_then(|input| input.get("command"))
             .and_then(serde_json::Value::as_str)
@@ -270,7 +319,7 @@ mod tests {
         jobs.apply_result(
             Some(&json!({"command": "cargo test"})),
             Some("shell job: job-12345678\nstatus: running\ncursor: 6\nfirst\n"),
-            Some(&json!({"shell_job": {"job_id": "job-12345678", "status": "running"}})),
+            Some(&json!({"shell_job": {"job_id": "job-12345678", "run_id": "run-1", "status": "running"}})),
         );
     }
 
@@ -282,7 +331,7 @@ mod tests {
             Some(&json!({"action": "poll", "job_id": "job-12345678"})),
             Some("shell job: job-12345678\nstatus: failed\ncursor: 12\nexit_code: 2\nsecond\n"),
             Some(&json!({
-                "shell_job": {"job_id": "job-12345678", "status": "failed", "exit_code": 2},
+                "shell_job": {"job_id": "job-12345678", "run_id": "run-1", "status": "failed", "exit_code": 2},
                 "output_artifact": {"path": "/tmp/out.log"}
             })),
         );
@@ -292,25 +341,29 @@ mod tests {
         assert_eq!(job.outcome(), "exit 2");
         assert!(job.failed());
         assert_eq!(job.artifact.as_deref(), Some("/tmp/out.log"));
-        assert_eq!(job.short_id(), "job-1234");
+        assert_eq!(job.short_id(), "job-12345678");
     }
 
     #[test]
     fn live_output_takes_precedence_and_skips_overlap_and_marks_gaps() {
         let mut jobs = ShellJobs::default();
         started(&mut jobs);
-        jobs.apply_live("job-12345678", Some("run-1"), 0, "one\n", "running", None);
         jobs.apply_live(
-            "job-12345678",
-            Some("run-1"),
+            ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            0,
+            "one\n",
+            "running",
+            None,
+        );
+        jobs.apply_live(
+            ShellJobKey::new(Some("run-1"), "job-12345678", None),
             2,
             "e\ntwo\n",
             "running",
             None,
         );
         jobs.apply_live(
-            "job-12345678",
-            Some("run-1"),
+            ShellJobKey::new(Some("run-1"), "job-12345678", None),
             20,
             "late\n",
             "completed",
@@ -326,7 +379,13 @@ mod tests {
     #[test]
     fn stale_running_result_does_not_reopen_a_finished_job() {
         let mut jobs = ShellJobs::default();
-        jobs.apply_live("job-12345678", None, 0, "", "completed", Some(0));
+        jobs.apply_live(
+            ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            0,
+            "",
+            "completed",
+            Some(0),
+        );
         started(&mut jobs);
         let job = jobs.get("job-12345678").unwrap();
         assert_eq!((job.status.as_str(), job.exit_code), ("completed", Some(0)));
@@ -337,7 +396,13 @@ mod tests {
         let mut jobs = ShellJobs::default();
         let line = "x".repeat(1023) + "\n";
         for index in 0..300u64 {
-            jobs.apply_live("job", None, index * 1024, &line, "running", None);
+            jobs.apply_live(
+                ShellJobKey::new(None, "job", None),
+                index * 1024,
+                &line,
+                "running",
+                None,
+            );
         }
         let job = jobs.get("job").unwrap();
         assert!(job.log().len() <= LOG_BYTES);
