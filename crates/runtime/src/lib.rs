@@ -32,6 +32,7 @@ mod memory_lifecycle;
 pub mod memory_queue;
 mod meta;
 pub mod model;
+pub mod model_grouping;
 pub mod model_resolve;
 pub mod network;
 pub mod orchestration;

@@ -2,6 +2,7 @@
 
 mod actions;
 mod attention;
+mod auto_grouping;
 pub mod auto_title;
 mod branching;
 mod composer;

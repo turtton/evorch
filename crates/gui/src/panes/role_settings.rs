@@ -72,10 +72,15 @@ pub fn role_settings_modal(
                         ] {
                             ui.push_id(name, |ui| {
                                 ui.collapsing(badge(name), |ui| {
-                                    chain_head_editor(
+                                    chain_editor(
                                         ui,
                                         &mut binding.models,
-                                        (&model.logical_models, &model.route_efforts, "Role route"),
+                                        ChainChoices {
+                                            routes: &model.logical_models,
+                                            existing: &model.route_names,
+                                            efforts: &model.route_efforts,
+                                            name: "Role route",
+                                        },
                                     );
                                     let effective = effective_route(binding.head_route(), None, role_key);
                                     if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
@@ -96,14 +101,15 @@ pub fn role_settings_modal(
                                                     .get(category)
                                                     .cloned()
                                                     .unwrap_or_default();
-                                                chain_head_editor(
+                                                chain_editor(
                                                     ui,
                                                     &mut draft.models,
-                                                    (
-                                                        &model.logical_models,
-                                                        &model.route_efforts,
-                                                        &format!("{category} route"),
-                                                    ),
+                                                    ChainChoices {
+                                                        routes: &model.logical_models,
+                                                        existing: &model.route_names,
+                                                        efforts: &model.route_efforts,
+                                                        name: &format!("{category} route"),
+                                                    },
                                                 );
                                                 let effective = effective_route(
                                                     draft.head_route(),
@@ -167,15 +173,21 @@ fn effective_route<'a>(
     explicit.or(inherited).unwrap_or(role_key)
 }
 
-/// チェーンの先頭要素の route と推論強度を編集する。後続の要素は変更せずに残す。
+/// ロールのチェーンを編集する。先頭の route は未作成の名前も表示でき、後続の要素は
+/// 既存の route からだけ選べる。各要素は推論強度を持ち、並べ替え・削除・追加ができる。
 ///
 /// 2 要素以上のチェーンでは、チェーンごと消してしまわないよう継承 (空のチェーン) を選べない。
-fn chain_head_editor(
+fn chain_editor(
     ui: &mut egui::Ui,
     models: &mut Vec<config::ChainEntryConfig>,
-    choices: (&[String], &BTreeMap<String, Vec<String>>, &str),
+    choices: ChainChoices<'_>,
 ) {
-    let (routes, efforts, name) = choices;
+    let ChainChoices {
+        routes,
+        existing,
+        efforts,
+        name,
+    } = choices;
     let mut head = models.first().map(|entry| entry.route.clone());
     let can_inherit = models.len() <= 1;
     let label = ui.label(name);
@@ -198,24 +210,95 @@ fn chain_head_editor(
         (Some(route), None) => models.push(config::ChainEntryConfig::route(route)),
     }
     if let Some(entry) = models.first_mut() {
-        let choices = efforts.get(&entry.route).map_or(&[][..], Vec::as_slice);
-        if !choices.is_empty() || entry.reasoning_effort.is_some() {
-            let label = ui.label(format!("{name} reasoning effort"));
-            effort_picker(
-                ui,
-                (name, "reasoning-effort"),
-                "(provider default)",
-                &mut entry.reasoning_effort,
-                choices,
-            )
-            .labelled_by(label.id);
-        }
+        entry_effort(ui, entry, efforts, name);
     }
-    if let [_, rest @ ..] = models.as_slice()
-        && !rest.is_empty()
+    let mut movement = None;
+    let mut removal = None;
+    let count = models.len();
+    for (index, entry) in models.iter_mut().enumerate().skip(1) {
+        let entry_name = format!("{name} fallback {index}");
+        ui.push_id(&entry_name, |ui| {
+            let label = ui.label(&entry_name);
+            egui::ComboBox::from_id_salt(&entry_name)
+                .width(ui.available_width())
+                .selected_text(entry.route.as_str())
+                .show_ui(ui, |ui| {
+                    for route in existing {
+                        ui.selectable_value(&mut entry.route, route.clone(), route);
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+            entry_effort(ui, entry, efforts, &entry_name);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(format!("Move {entry_name} up")).clicked() {
+                    movement = Some((index, index - 1));
+                }
+                if ui
+                    .add_enabled(
+                        index + 1 < count,
+                        egui::Button::new(format!("Move {entry_name} down")),
+                    )
+                    .clicked()
+                {
+                    movement = Some((index, index + 1));
+                }
+                if ui.button(format!("Remove {entry_name}")).clicked() {
+                    removal = Some(index);
+                }
+            });
+        });
+    }
+    if let Some((from, to)) = movement {
+        models.swap(from, to);
+    } else if let Some(index) = removal {
+        models.remove(index);
+    }
+    let next = existing
+        .iter()
+        .find(|route| !models.iter().any(|entry| &entry.route == *route));
+    if ui
+        .add_enabled(
+            !models.is_empty() && next.is_some(),
+            egui::Button::new(format!("Add {name} fallback")),
+        )
+        .on_disabled_hover_text("Choose the first route, and define another route to fall back to")
+        .clicked()
+        && let Some(route) = next
     {
-        let rest: Vec<_> = rest.iter().map(|entry| entry.route.as_str()).collect();
-        ui.label(muted(format!("Falls back to {}", rest.join(" → "))));
+        models.push(config::ChainEntryConfig::route(route.clone()));
+    }
+}
+
+/// The route lists and effort choices a chain editor offers.
+#[derive(Clone, Copy)]
+struct ChainChoices<'a> {
+    /// Every name a head may show, including routes not created yet.
+    routes: &'a [String],
+    /// Routes that exist, the only ones a fallback can pick.
+    existing: &'a std::collections::BTreeSet<String>,
+    efforts: &'a BTreeMap<String, Vec<String>>,
+    name: &'a str,
+}
+
+/// The entry's reasoning-effort picker, shown when its route offers levels or one is set.
+fn entry_effort(
+    ui: &mut egui::Ui,
+    entry: &mut config::ChainEntryConfig,
+    efforts: &BTreeMap<String, Vec<String>>,
+    name: &str,
+) {
+    let choices = efforts.get(&entry.route).map_or(&[][..], Vec::as_slice);
+    if !choices.is_empty() || entry.reasoning_effort.is_some() {
+        let label = ui.label(format!("{name} reasoning effort"));
+        effort_picker(
+            ui,
+            (name, "reasoning-effort"),
+            "(provider default)",
+            &mut entry.reasoning_effort,
+            choices,
+        )
+        .labelled_by(label.id);
     }
 }
 

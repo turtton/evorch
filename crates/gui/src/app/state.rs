@@ -106,7 +106,9 @@ pub struct WorkbenchState<S> {
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) settings_load_options: config::LoadOptions,
     pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
-    pub(super) provider_save_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub(super) provider_save_rx:
+        Option<std::sync::mpsc::Receiver<Result<super::auto_grouping::AutoGroupOutcome, String>>>,
+    pub(super) auto_grouping: super::auto_grouping::AutoGroupingState,
     /// Recomposition after the active project switched role profile.
     pub(super) project_profile_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) production_model: Option<(
@@ -224,6 +226,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             settings_load_options: config::LoadOptions::default(),
             credential_store: None,
             provider_save_rx: None,
+            auto_grouping: super::auto_grouping::AutoGroupingState::default(),
             project_profile_rx: None,
             production_model: None,
             project_models: None,

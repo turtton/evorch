@@ -25,6 +25,8 @@ pub struct ModelMetadata {
     pub tool_call: Option<bool>,
     pub reasoning: Option<bool>,
     pub modalities: Modalities,
+    /// models.dev's provider-independent identity, such as `moonshotai/kimi-k3`.
+    pub canonical_model_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,6 +47,7 @@ struct WireModel {
     reasoning: Option<bool>,
     #[serde(default)]
     modalities: Modalities,
+    canonical_model_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -78,6 +81,7 @@ impl From<WireModel> for ModelMetadata {
             tool_call: model.tool_call,
             reasoning: model.reasoning,
             modalities: model.modalities,
+            canonical_model_id: model.canonical_model_id.filter(|id| !id.trim().is_empty()),
         }
     }
 }

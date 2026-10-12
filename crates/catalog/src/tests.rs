@@ -195,3 +195,32 @@ fn duplicate_agreement_compares_output_limit_too() {
     // Then: 出力制限が異なる重複も拒否する。
     assert!(model.is_none());
 }
+
+#[test]
+fn canonical_model_id_is_read_and_blank_ids_are_absent() {
+    // Given: two carriers name the same model differently, and one entry has a blank id.
+    let catalog = catalog_with_models(
+        r#"{
+            "kimi-code-plan-global": {"models": {
+                "k3": {"id": "k3", "canonical_model_id": "moonshotai/kimi-k3"},
+                "kimi-for-coding": {"id": "kimi-for-coding", "canonical_model_id": " "}
+            }},
+            "neuralwatt": {"models": {"kimi-k3": {"id": "kimi-k3", "canonical_model_id": "moonshotai/kimi-k3"}}}
+        }"#,
+    );
+    // When / Then: both carriers share the canonical id; a blank one is treated as unknown.
+    let canonical = |provider, model| {
+        catalog
+            .find(provider, model)
+            .and_then(|metadata| metadata.canonical_model_id.as_deref())
+    };
+    assert_eq!(
+        canonical("kimi-code-plan-global", "k3"),
+        Some("moonshotai/kimi-k3")
+    );
+    assert_eq!(
+        canonical("neuralwatt", "kimi-k3"),
+        Some("moonshotai/kimi-k3")
+    );
+    assert_eq!(canonical("kimi-code-plan-global", "kimi-for-coding"), None);
+}

@@ -104,7 +104,14 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     let count = candidates.len();
                     for (index, candidate) in candidates.iter_mut().enumerate() {
                         ui.push_id(index, |ui| {
-                            ui.label(muted(format!("Priority {}", index + 1)));
+                            ui.horizontal(|ui| {
+                                ui.label(muted(format!("Priority {}", index + 1)));
+                                if candidate.auto {
+                                    ui.label(muted("auto")).on_hover_text(
+                                        "Added automatically for the same models.dev model",
+                                    );
+                                }
+                            });
                             candidate_picker(
                                 ui,
                                 candidate,
