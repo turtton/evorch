@@ -74,6 +74,24 @@ fn is_kimi_usage_limit(body: &str) -> bool {
         .any(|marker| body.contains(marker))
 }
 
+/// 時間をおけば回復しうる一時的な失敗 (429・408・5xx・timeout・transport) か (ADR 0030)。
+///
+/// 一周するフォールバックで、失敗した位置を最後にもう一度試すかの判断に使います。
+pub fn is_transient(error: &providers::ProviderError) -> bool {
+    match error {
+        providers::ProviderError::RateLimited { .. }
+        | providers::ProviderError::Timeout
+        | providers::ProviderError::Transport { .. } => true,
+        providers::ProviderError::Http { status, .. } => {
+            matches!(status, 408 | 429 | 500..=599)
+        }
+        providers::ProviderError::RetriesExhausted { last, .. } => is_transient(last),
+        providers::ProviderError::Request(_)
+        | providers::ProviderError::InvalidSse { .. }
+        | providers::ProviderError::InvalidJson { .. } => false,
+    }
+}
+
 /// 障害が示す待機時間 (Retry-After) を返します。
 pub fn retry_after(error: &providers::ProviderError) -> Option<std::time::Duration> {
     match error {

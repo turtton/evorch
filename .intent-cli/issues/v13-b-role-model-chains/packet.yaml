@@ -24,8 +24,8 @@ implementation_issue_packet:
     - intents/evorch/decisions/0027-restore-contract.md
     - intents/evorch/features/provider-routing/overview.md
   acceptance_criteria:
-    - "設定 v3 で route 候補は profile / model（と auto）だけを持ち、ロールとカテゴリは models = [{ route, reasoning_effort? }] を持つ。存在しない route の参照はロード時にエラーになる"
-    - "v2 の設定は v3 に移行され、logical_model と route 候補の reasoning_effort がロール側の models に書き換わる。候補間で effort が異なる場合と参照先 route が同じファイルにない場合は警告する"
+    - "設定 v3 で route 候補は profile / model（と auto）だけを持ち、ロールとカテゴリは models = [{ route, reasoning_effort? }] を持つ。存在しない route の参照は厳格な読み込みでエラーになり、通常の読み込みでは警告して、そのロールを使うときに失敗する"
+    - "v2 の設定は v3 に移行され、logical_model と route 候補の reasoning_effort がロール側の models に書き換わる。候補間で effort が異なる場合と参照先 route が同じファイルにない場合は警告する。v2 のファイルは次に保存したとき v3 として書き直す"
     - "チェーンは展開され、位置 i の失敗後は i+1 から末尾、先頭から i-1 の順に一周だけ試す。元の位置は一時的な失敗だった場合だけ最後に再試行する"
     - "プールの全メンバーがこの一周で失敗済みかクールダウン中になったら、失敗の種類に関係なく次のプールへ進む"
     - "Retry-After が既定 30 秒以下の一時的な失敗でプールが尽きた場合は、プールを越える前に一度だけ待って再試行する。待機の上限は設定できる"

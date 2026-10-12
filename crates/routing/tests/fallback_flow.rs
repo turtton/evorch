@@ -4,7 +4,7 @@ use model::{
     Availability, CatalogCapabilities, CatalogEntry, CatalogSource, LogicalModelId, ModelCatalog,
     ProviderType,
 };
-use routing::{FailureKind, ProviderProfile, Router, SessionAffinity};
+use routing::{FallbackCycle, FallbackStep, ProviderProfile, Router, SessionAffinity};
 
 fn profile(name: &str, default_model: &str) -> ProviderProfile {
     let profile_config = config::ProviderProfileConfig {
@@ -27,7 +27,7 @@ fn candidate(profile: &str) -> config::RouteCandidateConfig {
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: None,
-        reasoning_effort: None,
+        auto: false,
     }
 }
 
@@ -58,8 +58,8 @@ fn catalog(model_ids: &[&str]) -> ModelCatalog {
 }
 
 // Given: 2 候補 (primary, secondary) を宣言順に持つルーティング構成とピンなしセッション
-// When: 解決してピンされたプロファイルを失敗扱いでフォールバックし、再度解決する
-// Then: 次候補が返って再ピンされ、再解決は再ピンされたフォールバック先を返す
+// When: 解決してピンされたプロファイルを失敗扱いでフォールバックし、成功した次候補をピンして再度解決する
+// Then: 次候補が返り、再解決は再ピンされたフォールバック先を返す
 #[test]
 fn fallback_after_pin_resolve_roundtrip() {
     let profiles = vec![
@@ -68,6 +68,7 @@ fn fallback_after_pin_resolve_roundtrip() {
     ];
     let routing = config::RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: [(
             "summary".to_string(),
             vec![candidate("primary"), candidate("secondary")],
@@ -85,27 +86,23 @@ fn fallback_after_pin_resolve_roundtrip() {
         .expect("宣言順先頭の候補へ解決できる");
     assert_eq!(resolved.profile, "primary");
     assert_eq!(
-        affinity.pinned("session-1", "summary"),
+        affinity
+            .pinned("session-1", "summary")
+            .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
         Some(("primary", "model-a")),
         "解決勝者がピンされる"
     );
 
-    let fallback = router
-        .next_fallback(
-            &mut affinity,
-            "session-1",
-            &LogicalModelId::from("summary"),
-            &resolved,
-            FailureKind::Server,
-            None,
-        )
-        .expect("失敗プロファイルの次候補へフォールバックできる");
-    assert_eq!(fallback.profile, "secondary");
-    assert_eq!(
-        affinity.pinned("session-1", "summary"),
-        Some(("secondary", "model-b")),
-        "フォールバック先が再ピンされる"
-    );
+    let chain = router
+        .chain("summary", &[config::ChainEntryConfig::route("summary")])
+        .expect("chain");
+    let mut cycle = FallbackCycle::new(&chain, 0);
+    cycle.record_failure(0, true, None);
+    let FallbackStep::Try(position) = cycle.next(&router, &chain, std::time::Duration::ZERO) else {
+        panic!("失敗プロファイルの次候補へフォールバックできる");
+    };
+    assert_eq!(chain.member(position).target.profile, "secondary");
+    routing::pin(&mut affinity, "session-1", &chain, position);
 
     let resolved_again = router
         .resolve(&mut affinity, "session-1", &LogicalModelId::from("summary"))

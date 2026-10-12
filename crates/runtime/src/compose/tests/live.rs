@@ -79,6 +79,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
         )]),
         routing: RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: ["worker", "orchestrator"]
                 .into_iter()
                 .map(|logical| {
@@ -87,7 +88,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
                         vec![RouteCandidateConfig {
                             profile: "local".into(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         }],
                     )
                 })

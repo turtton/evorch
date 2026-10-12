@@ -45,7 +45,7 @@ fn diagnostic_persistence_is_strictly_validated_and_defaults_to_warnings() {
 #[test]
 fn unknown_fields_do_not_discard_valid_provider_and_routing() {
     let document = r#"
-version = 2
+version = 3
 [providers.primary]
 type = "openai-compatible"
 base_url = "https://example.com/v1"
@@ -54,14 +54,14 @@ models = [{ id = "model-a", enabled = true, old_property = "ignored" }]
 default_model = "model-a"
 timeout = 30
 [agents.roles.librarian]
-logical_model = "retired"
+models = [{ route = "retired" }]
 [agents.roles.web_researcher]
-logical_model = "research"
+models = [{ route = "research" }]
 [agents.worker]
-logical_model = "worker-model"
+models = [{ route = "worker-model" }]
 old_property = true
 [agents.worker.categories.qucik]
-logical_model = "ignored"
+models = [{ route = "ignored" }]
 [[routing.routes.worker-model]]
 profile = "primary"
 model = "model-a"
@@ -75,12 +75,9 @@ obsolete = "ignored"
     assert!(config.providers.contains_key("primary"));
     assert_eq!(config.providers["primary"].default_model, "model-a");
     assert_eq!(config.routing.routes["worker-model"][0].profile, "primary");
+    assert_eq!(config.agents.worker.head_route(), Some("worker-model"));
     assert_eq!(
-        config.agents.worker.logical_model.as_deref(),
-        Some("worker-model")
-    );
-    assert_eq!(
-        config.agents.roles.web_researcher.logical_model.as_deref(),
+        config.agents.roles.web_researcher.head_route(),
         Some("research")
     );
     assert!(load(document, true).is_err());
@@ -132,13 +129,13 @@ fn plaintext_credential_still_fails() {
 fn tolerant_category_pruning_preserves_internal_worker_bindings() {
     let document = r#"
 [agents.worker.categories.quick]
-logical_model = "quick-model"
+models = [{ route = "quick-model" }]
 [agents.worker.categories.lesson]
-logical_model = "lesson-model"
+models = [{ route = "lesson-model" }]
 [agents.worker.categories.lesson_review]
-logical_model = "wrong-role-model"
+models = [{ route = "wrong-role-model" }]
 [agents.worker.categories.unknown]
-logical_model = "unknown-model"
+models = [{ route = "unknown-model" }]
 "#;
 
     let config = load(document, false).expect("invalid categories are ignored");
@@ -149,7 +146,7 @@ logical_model = "unknown-model"
             .agents
             .binding_for("worker", Some("quick"))
             .unwrap()
-            .logical_model,
+            .head_route(),
         "quick-model"
     );
     assert_eq!(
@@ -157,7 +154,7 @@ logical_model = "unknown-model"
             .agents
             .binding_for("worker", Some("lesson"))
             .unwrap()
-            .logical_model,
+            .head_route(),
         "lesson-model"
     );
     assert!(
@@ -174,9 +171,9 @@ logical_model = "unknown-model"
 fn tolerant_category_pruning_preserves_reviewer_bindings_and_known_fields() {
     let document = r#"
 [agents.reviewer]
-logical_model = "review-base"
+models = [{ route = "review-base" }]
 [agents.reviewer.categories.plan-review]
-logical_model = "plan-model"
+models = [{ route = "plan-model" }]
 unknown = "ignored"
 [agents.reviewer.categories.plan-review.generation]
 max_tokens = 1024
@@ -184,11 +181,11 @@ seed = 42
 [agents.reviewer.categories.tool-execution]
 preset = "tool-preset"
 [agents.reviewer.categories.lesson_review]
-logical_model = "lesson-model"
+models = [{ route = "lesson-model" }]
 [agents.reviewer.categories.quick]
-logical_model = "wrong-role"
+models = [{ route = "wrong-role" }]
 [agents.reviewer.categories.unknown]
-logical_model = "unknown-model"
+models = [{ route = "unknown-model" }]
 "#;
     let config = load(document, false).expect("invalid category fields are ignored");
     assert_eq!(config.agents.reviewer.categories.len(), 3);
@@ -196,18 +193,16 @@ logical_model = "unknown-model"
         .agents
         .binding_for("reviewer", Some("plan-review"))
         .unwrap();
-    assert_eq!(plan.logical_model, "plan-model");
+    assert_eq!(plan.head_route(), "plan-model");
     assert_eq!(plan.generation.max_tokens, Some(1024));
     let tool = config
         .agents
         .binding_for("reviewer", Some("tool-execution"))
         .unwrap();
-    assert_eq!(tool.logical_model, "review-base");
+    assert_eq!(tool.head_route(), "review-base");
     assert_eq!(tool.preset.as_deref(), Some("tool-preset"));
     assert_eq!(
-        config.agents.reviewer.categories["lesson_review"]
-            .logical_model
-            .as_deref(),
+        config.agents.reviewer.categories["lesson_review"].head_route(),
         Some("lesson-model")
     );
     assert!(!config.agents.reviewer.categories.contains_key("quick"));

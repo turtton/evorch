@@ -67,12 +67,15 @@ fn category_status_uses_override_then_worker_binding_then_worker_name() {
         let temp = tempfile::tempdir().expect("temp");
         let (mut harness, _) = fixture(temp.path());
         let model = harness.state_mut().role_settings_mut();
-        model.agents.worker.base.logical_model = worker.map(str::to_owned);
+        model.agents.worker.base.models = worker
+            .map(config::ChainEntryConfig::route)
+            .into_iter()
+            .collect();
         if let Some(category) = category {
             model.agents.worker.categories.insert(
                 "quick".into(),
                 config::CategoryBindingConfig {
-                    logical_model: Some(category.into()),
+                    models: vec![config::ChainEntryConfig::route(category.to_string())],
                     ..Default::default()
                 },
             );
@@ -122,7 +125,7 @@ fn implicit_category_without_worker_route_warns_without_creating_an_override() {
     assert_eq!(harness.count_labels("未定義 (route なし)"), 2);
     assert_eq!(harness.count_labels("route を作成"), 2);
     assert_eq!(
-        harness.state().role_settings().agents.worker.logical_model,
+        harness.state().role_settings().agents.worker.head_route(),
         None
     );
     assert!(

@@ -331,7 +331,15 @@ fn model_facts(ui: &mut egui::Ui, report: &BaseContextReport) {
         let generation = &binding.generation;
         let unset = || "provider default".to_owned();
         facts.extend([
-            ("Logical model", binding.logical_model.clone()),
+            (
+                "Model chain",
+                binding
+                    .models
+                    .iter()
+                    .map(|entry| entry.route.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" → "),
+            ),
             (
                 "Preset",
                 binding.preset.clone().unwrap_or_else(|| "none".into()),

@@ -21,7 +21,7 @@ fn save_replaces_only_self_improvement_and_preserves_unrelated_bytes() {
     let directory = tempfile::tempdir().expect("temp");
     std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
     let path = directory.path().join(".evorch/config.toml");
-    let before = "# user config\nversion = 2\n\n[providers.keep] # provider comment\nprovider_type = 'openai'\n\n[diagnostics]\nlog_level  = 'debug' # keep spacing\n";
+    let before = "# user config\nversion = 3\n\n[providers.keep] # provider comment\nprovider_type = 'openai'\n\n[diagnostics]\nlog_level  = 'debug' # keep spacing\n";
     let after = "\n[metrics] # metrics comment\nenabled = false\nretention_days = 90\n";
     std::fs::write(
         &path,
@@ -71,7 +71,7 @@ fn save_defaults_creates_a_file_and_removes_a_previous_draft_dir() {
 
     assert_eq!(load(directory.path()).self_improvement, defaults);
     let saved = std::fs::read_to_string(&path).expect("read");
-    assert!(saved.contains("version = 2"));
+    assert!(saved.contains("version = 3"));
     assert!(!saved.contains("draft_dir"));
 }
 
@@ -80,7 +80,7 @@ fn invalid_input_never_changes_existing_file_or_creates_a_new_one() {
     let directory = tempfile::tempdir().expect("temp");
     let path = directory.path().join("evorch.toml");
     let missing = directory.path().join("new.toml");
-    let original = "version = 2\n# unchanged\n[metrics]\nretention_days = 7\n";
+    let original = "version = 3\n# unchanged\n[metrics]\nretention_days = 7\n";
     std::fs::write(&path, original).expect("write");
     for invalid in [
         SelfImprovementConfig {
@@ -116,7 +116,7 @@ fn invalid_input_never_changes_existing_file_or_creates_a_new_one() {
 fn save_strictly_revalidates_unrelated_sections_before_writing() {
     let directory = tempfile::tempdir().expect("temp");
     let path = directory.path().join("evorch.toml");
-    let original = "version = 2\n[metrics]\nretention_dayz = 7\n";
+    let original = "version = 3\n[metrics]\nretention_dayz = 7\n";
     std::fs::write(&path, original).expect("write");
 
     let error = save_self_improvement(&path, &SelfImprovementConfig::default())
@@ -133,7 +133,7 @@ fn save_strictly_revalidates_unrelated_sections_before_writing() {
 fn existing_save_api_also_rejects_invalid_self_improvement_values() {
     let directory = tempfile::tempdir().expect("temp");
     let path = directory.path().join("evorch.toml");
-    let original = "version = 2\n[self_improvement]\ndaily_limit = 0\n";
+    let original = "version = 3\n[self_improvement]\ndaily_limit = 0\n";
     std::fs::write(&path, original).expect("write");
 
     let error = save_sandbox(&path, SandboxConfig::default()).expect_err("invalid range");
@@ -150,7 +150,7 @@ fn save_does_not_overwrite_existing_temporary_file() {
     let directory = tempfile::tempdir().expect("temp");
     let path = directory.path().join("evorch.toml");
     let temporary_path = path.with_extension("toml.tmp");
-    let original = "version = 2\n";
+    let original = "version = 3\n";
     std::fs::write(&path, original).expect("write config");
     std::fs::write(&temporary_path, "keep temporary file").expect("write temporary file");
 

@@ -1,3 +1,5 @@
+#[path = "role_settings_headless/chain.rs"]
+mod chain;
 #[path = "role_settings_headless/evidence.rs"]
 mod evidence;
 #[path = "role_settings_headless/implicit.rs"]
@@ -20,7 +22,7 @@ fn logical_model_options_come_from_routing_routes() {
         ..Default::default()
     })
     .expect("config");
-    config.agents.explorer.logical_model = Some("legacy".into());
+    config.agents.explorer.models = vec![config::ChainEntryConfig::route("legacy")];
     config.routing.routes.clear();
     for name in ["X", "Y"] {
         config
@@ -35,7 +37,7 @@ fn logical_model_options_come_from_routing_routes() {
     harness.run();
     harness.click_label("Explorer");
     harness.run();
-    harness.click_label("Role logical model");
+    harness.click_label("Role route");
     harness.run();
     // Then: route keys and the legacy binding appear, not provider model IDs.
     assert_eq!(
@@ -60,7 +62,7 @@ fn empty_routes_options_keep_only_explicit_bindings() {
     std::fs::write(
         &path,
         format!(
-            "{}\n[agents.worker.categories.quick]\nlogical_model = 'legacy'",
+            "{}\n[agents.worker.categories.quick]\nmodels = [{{ route = 'legacy' }}]",
             text.split("[routing.routes]").next().expect("profiles")
         ),
     )
@@ -81,7 +83,7 @@ fn undefined_binding_shows_warning_and_route_create_button() {
         .role_settings_mut()
         .agents
         .explorer
-        .logical_model = Some("unknown".into());
+        .models = vec![config::ChainEntryConfig::route("unknown")];
     harness.run();
     // When: opening the binding's row.
     harness.click_label("Explorer");
@@ -96,13 +98,7 @@ fn undefined_binding_shows_warning_and_route_create_button() {
     assert!(!harness.state().role_settings().open);
     harness.state_mut().open_role_settings();
     assert_eq!(
-        harness
-            .state()
-            .role_settings()
-            .agents
-            .explorer
-            .logical_model
-            .as_deref(),
+        harness.state().role_settings().agents.explorer.head_route(),
         Some("unknown")
     );
 }
@@ -113,17 +109,17 @@ fn resolved_preview_shows_profile_model_per_role() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     let agents = &mut harness.state_mut().role_settings_mut().agents;
-    agents.orchestrator.logical_model = Some("fast".into());
-    agents.explorer.logical_model = Some("fast".into());
-    agents.reviewer.logical_model = Some("fast".into());
-    agents.roles.web_researcher.logical_model = Some("fast".into());
-    agents.roles.planner.logical_model = Some("fast".into());
-    agents.roles.oracle.logical_model = Some("fast".into());
-    agents.roles.multimodal_looker.logical_model = Some("fast".into());
+    agents.orchestrator.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.explorer.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.reviewer.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.roles.web_researcher.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.roles.planner.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.roles.oracle.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.roles.multimodal_looker.models = vec![config::ChainEntryConfig::route("fast")];
     agents.worker.categories.insert(
         "quick".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("fast".into()),
+            models: vec![config::ChainEntryConfig::route("fast")],
             ..Default::default()
         },
     );
@@ -192,7 +188,7 @@ fn route_create_from_role_settings_opens_prefilled_routing_modal() {
         .role_settings_mut()
         .agents
         .explorer
-        .logical_model = Some("legacy".into());
+        .models = vec![config::ChainEntryConfig::route("legacy")];
     harness.run();
     harness.click_label("Explorer");
     harness.run();

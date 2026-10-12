@@ -60,10 +60,12 @@ const MODEL_PRESET_KEYS: &[&str] = &[
     "output_price_per_million_usd",
 ];
 const ENV_KEYS: &[&str] = &["type", "var"];
-const ROUTING_KEYS: &[&str] = &["routes", "cooldown"];
+const ROUTING_KEYS: &[&str] = &["routes", "cooldown", "fallback"];
 const COOLDOWN_KEYS: &[&str] = &["quota_secs", "rate_limit_secs"];
+const FALLBACK_KEYS: &[&str] = &["max_retry_after_wait_secs"];
 const ROLE_PROFILE_KEYS: &[&str] = &["agents", "routing"];
-const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "reasoning_effort"];
+const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "auto"];
+const CHAIN_ENTRY_KEYS: &[&str] = &["route", "reasoning_effort"];
 const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir", "persistence"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
@@ -127,8 +129,8 @@ const SANDBOX_KEYS: &[&str] = &[
     "escalate_to_user_on_deny",
 ];
 const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
-const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
-const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
+const ROLE_BINDING_KEYS: &[&str] = &["models", "preset", "generation", "categories"];
+const CATEGORY_BINDING_KEYS: &[&str] = &["models", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];
 const CREDENTIAL_LIKE_KEYS: &[&str] = &[
     "api_key",
@@ -337,6 +339,17 @@ fn strip_routing(routing: &mut toml::value::Table, path: &str, ignored: &mut Vec
             ignored,
         );
     }
+    if let Some(fallback) = routing
+        .get_mut("fallback")
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            fallback,
+            &format!("{path}.fallback"),
+            FALLBACK_KEYS,
+            ignored,
+        );
+    }
     let Some(routes) = routing
         .get_mut("routes")
         .and_then(toml::Value::as_table_mut)
@@ -381,6 +394,7 @@ fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: 
         return;
     };
     retain_known(binding, path, ROLE_BINDING_KEYS, ignored);
+    strip_chain_entries(binding, path, ignored);
     if let Some(generation) = binding
         .get_mut("generation")
         .and_then(toml::Value::as_table_mut)
@@ -408,6 +422,7 @@ fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: 
             };
             let category_path = format!("{categories_path}.{name}");
             retain_known(category, &category_path, CATEGORY_BINDING_KEYS, ignored);
+            strip_chain_entries(category, &category_path, ignored);
             if let Some(generation) = category
                 .get_mut("generation")
                 .and_then(toml::Value::as_table_mut)
@@ -421,6 +436,37 @@ fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: 
             }
         }
     }
+}
+
+fn strip_chain_entries(binding: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {
+    let Some(models) = binding
+        .get_mut("models")
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (index, entry) in models.iter_mut().enumerate() {
+        if let Some(entry) = entry.as_table_mut() {
+            retain_known(
+                entry,
+                &format!("{path}.models[{index}]"),
+                CHAIN_ENTRY_KEYS,
+                ignored,
+            );
+        }
+    }
+}
+
+fn validate_chain_entries(binding: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
+    let Some(models) = binding.get("models").and_then(toml::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, entry) in models.iter().enumerate() {
+        if let Some(entry) = entry.as_table() {
+            check_keys(entry, &format!("{path}.models[{index}]"), CHAIN_ENTRY_KEYS)?;
+        }
+    }
+    Ok(())
 }
 
 fn retain_known(
@@ -591,6 +637,9 @@ fn validate_routing(routing: &toml::value::Table, path: &str) -> Result<(), Conf
     if let Some(cooldown) = routing.get("cooldown").and_then(toml::Value::as_table) {
         check_keys(cooldown, &format!("{path}.cooldown"), COOLDOWN_KEYS)?;
     }
+    if let Some(fallback) = routing.get("fallback").and_then(toml::Value::as_table) {
+        check_keys(fallback, &format!("{path}.fallback"), FALLBACK_KEYS)?;
+    }
     let Some(routes) = routing.get("routes").and_then(toml::Value::as_table) else {
         return Ok(());
     };
@@ -633,6 +682,7 @@ fn validate_role_bindings(
             continue;
         }
         check_keys(binding, &role_path, ROLE_BINDING_KEYS)?;
+        validate_chain_entries(binding, &role_path)?;
         if let Some(generation) = binding.get("generation").and_then(toml::Value::as_table) {
             check_keys(
                 generation,
@@ -681,6 +731,7 @@ fn validate_role_categories(
             continue;
         };
         check_keys(category_binding, &category_path, CATEGORY_BINDING_KEYS)?;
+        validate_chain_entries(category_binding, &category_path)?;
         if let Some(generation) = category_binding
             .get("generation")
             .and_then(toml::Value::as_table)
@@ -776,7 +827,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_removed_without_exposing_values() {
         let mut merged: toml::Value = toml::from_str(
-            "[agents.roles.librarian]\nlogical_model = 'secret-value'\n[diagnostics]\nunknown = 'secret-value'\n",
+            "[agents.roles.librarian]\nmodels = [{ route = 'secret-value' }]\n[diagnostics]\nunknown = 'secret-value'\n",
         )
         .expect("TOML");
         let ignored =

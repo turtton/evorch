@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use config::types::agents::rename_logical_model_refs;
+use config::types::agents::rename_route_refs;
 use config::{
     AgentsConfig, CategoryBindingConfig, Config, ConfigError, GenerationOverridesConfig,
     LoadOptions, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, save_routing_and_agents,
 };
 
-const UNRELATED_PREFIX: &str = "# keep header\nversion = 2 # keep version\n\n[providers.local]\n# keep provider\ntype = 'openai-compatible'\nbase_url = 'https://example.invalid/v1'\napi_key_env = 'KEY'\nmodels = ['base']\ndefault_model = 'base' # keep default\n";
+const UNRELATED_PREFIX: &str = "# keep header\nversion = 3 # keep version\n\n[providers.local]\n# keep provider\ntype = 'openai-compatible'\nbase_url = 'https://example.invalid/v1'\napi_key_env = 'KEY'\nmodels = ['base']\ndefault_model = 'base' # keep default\n";
 const UNRELATED_SUFFIX: &str = "\n# keep panel\n[panel]\nlayout = 'compact' # keep layout\n";
 const OLD_SECTIONS: &str = r#"
 # original route
@@ -14,10 +14,10 @@ const OLD_SECTIONS: &str = r#"
 profile = "local"
 
 [agents.explorer]
-logical_model = "old"
+models = [{ route = "old" }]
 
 [agents.worker.categories.quick]
-logical_model = "old"
+models = [{ route = "old" }]
 
 [agents.worker.categories.deep]
 preset = "deep-preset"
@@ -51,7 +51,7 @@ fn renamed_sections(config: &Config) -> (RoutingConfig, AgentsConfig) {
     let candidates = routing.routes.remove("old").expect("old route");
     routing.routes.insert("new".into(), candidates);
     let mut agents = config.agents.clone();
-    rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+    rename_route_refs(&mut agents, &[("old".into(), "new".into())].into());
     (routing, agents)
 }
 
@@ -65,6 +65,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
     let mut expected = load(temp.path());
     let routing = RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: [
             (
                 "worker.v2/日本語".into(),
@@ -72,12 +73,12 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
                     RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some("custom-model".into()),
-                        reasoning_effort: None,
+                        auto: false,
                     },
                     RouteCandidateConfig {
                         profile: "local".into(),
                         model: None,
-                        reasoning_effort: None,
+                        auto: false,
                     },
                 ],
             ),
@@ -86,7 +87,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         .into(),
     };
     let binding = RoleBindingConfig {
-        logical_model: Some("worker.v2/日本語".into()),
+        models: vec![config::ChainEntryConfig::route("worker.v2/日本語")],
         preset: Some("role-preset".into()),
         generation: GenerationOverridesConfig {
             temperature: Some(0.2),
@@ -110,7 +111,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
     agents.worker.categories.insert(
         "quick".into(),
         CategoryBindingConfig {
-            logical_model: binding.logical_model.clone(),
+            models: binding.models.clone(),
             preset: Some("category-preset".into()),
             generation: binding.generation.clone(),
         },
@@ -124,7 +125,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         agents.reviewer.categories.insert(
             category.into(),
             CategoryBindingConfig {
-                logical_model: binding.logical_model.clone(),
+                models: binding.models.clone(),
                 preset: Some(format!("{category}-preset")),
                 generation: binding.generation.clone(),
             },
@@ -171,15 +172,13 @@ fn rename_saves_route_and_explicit_refs_together_without_materializing_implicit_
     let loaded = load(temp.path());
     assert!(loaded.routing.routes.contains_key("new"));
     assert!(!loaded.routing.routes.contains_key("old"));
-    assert_eq!(loaded.agents.explorer.logical_model.as_deref(), Some("new"));
+    assert_eq!(loaded.agents.explorer.head_route(), Some("new"));
     assert_eq!(
-        loaded.agents.worker.categories["quick"]
-            .logical_model
-            .as_deref(),
+        loaded.agents.worker.categories["quick"].head_route(),
         Some("new")
     );
-    assert_eq!(loaded.agents.worker.base.logical_model, None);
-    assert_eq!(loaded.agents.worker.categories["deep"].logical_model, None);
+    assert_eq!(loaded.agents.worker.base.head_route(), None);
+    assert_eq!(loaded.agents.worker.categories["deep"].head_route(), None);
     expected.routing = routing;
     expected.agents = agents;
     assert_eq!(loaded, expected);

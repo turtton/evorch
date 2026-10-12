@@ -1,5 +1,5 @@
 use config::{Config, RouteCandidateConfig};
-use gui::model::routing_settings::{RoutingSettingsModel, candidate_effort_choices};
+use gui::model::routing_settings::{RoutingSettingsModel, route_effort_choices};
 
 fn fixture() -> Config {
     let mut config = Config::default();
@@ -10,12 +10,12 @@ fn fixture() -> Config {
             RouteCandidateConfig {
                 profile: "local".into(),
                 model: Some("custom".into()),
-                reasoning_effort: None,
+                auto: false,
             },
             RouteCandidateConfig {
                 profile: "local".into(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             },
         ],
     );
@@ -24,7 +24,7 @@ fn fixture() -> Config {
         vec![RouteCandidateConfig {
             profile: "local".into(),
             model: Some("external".into()),
-            reasoning_effort: None,
+            auto: false,
         }],
     );
     config
@@ -48,7 +48,7 @@ fn seed_profile_models_excludes_disabled_entries() {
 }
 
 #[test]
-fn candidate_effort_choices_follow_override_or_profile_default_model() {
+fn route_effort_choices_follow_override_or_profile_default_model() {
     // Given: the profile default model has restricted levels, the override model has none.
     let mut config = fixture();
     let profile = config.providers.get_mut("local").expect("profile");
@@ -57,24 +57,25 @@ fn candidate_effort_choices_follow_override_or_profile_default_model() {
     let mut base = config::ModelEntryConfig::enabled("base");
     base.effort_levels = Some(vec!["minimal".into(), "high".into()]);
     profile.models = vec![base, config::ModelEntryConfig::enabled("custom")];
-    let model = RoutingSettingsModel::seed_from_config(&config);
-    let choices = |candidate: &RouteCandidateConfig| {
-        candidate_effort_choices(
-            &model.profile_defaults,
-            &model.profile_types,
-            &model.profile_effort_levels,
-            candidate,
-        )
-    };
-    let [overridden, inherited] = model.routes["worker"].as_slice() else {
-        panic!("two worker candidates");
-    };
+    let [overridden, inherited] = config.routing.routes["worker"].clone().try_into().unwrap();
+    config
+        .routing
+        .routes
+        .insert("overridden".into(), vec![overridden]);
+    config
+        .routing
+        .routes
+        .insert("inherited".into(), vec![inherited]);
     // When/Then: the inherited default uses its levels, the override falls back to defaults.
-    assert_eq!(choices(inherited), ["minimal", "high"]);
     assert_eq!(
-        choices(overridden),
+        route_effort_choices(&config, "inherited"),
+        ["minimal", "high"]
+    );
+    assert_eq!(
+        route_effort_choices(&config, "overridden"),
         gui::model::effort::DEFAULT_EFFORT_LEVELS.map(str::to_owned)
     );
+    assert!(route_effort_choices(&config, "missing").is_empty());
 }
 
 #[test]
@@ -98,7 +99,7 @@ fn validation_rejects_invalid_routes() {
             vec![RouteCandidateConfig {
                 profile: "local".into(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             }],
         ),
         ("worker", vec![]),
@@ -107,7 +108,7 @@ fn validation_rejects_invalid_routes() {
             vec![RouteCandidateConfig {
                 profile: "unknown".into(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             }],
         ),
         ("worker", vec![RouteCandidateConfig::default()]),
@@ -247,7 +248,7 @@ fn seed_tracks_implicit_users_only_for_role_name_fallbacks() {
     assert_eq!(model.implicit_route_users["worker"], ["worker"]);
     assert!(model.implicit_route_users["other"].is_empty());
     assert!(model.route_users["worker"].is_empty());
-    config.agents.worker.base.logical_model = Some("worker".into());
+    config.agents.worker.base.models = vec![config::ChainEntryConfig::route("worker")];
     let explicit = RoutingSettingsModel::seed_from_config(&config);
     assert!(explicit.implicit_route_users["worker"].is_empty());
     assert_eq!(explicit.route_users["worker"], ["worker"]);

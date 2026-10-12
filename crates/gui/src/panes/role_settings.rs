@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::model::role_settings::{RoleSettingsModel, categories_for_role};
 mod binding_status;
 use crate::theme::{
@@ -70,12 +72,12 @@ pub fn role_settings_modal(
                         ] {
                             ui.push_id(name, |ui| {
                                 ui.collapsing(badge(name), |ui| {
-                                    model_picker(
+                                    chain_head_editor(
                                         ui,
-                                        &mut binding.logical_model,
-                                        (&model.logical_models, "Role logical model"),
+                                        &mut binding.models,
+                                        (&model.logical_models, &model.route_efforts, "Role route"),
                                     );
-                                    let effective = effective_logical_model(binding.logical_model.as_deref(), None, role_key);
+                                    let effective = effective_route(binding.head_route(), None, role_key);
                                     if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
                                         action = Some(RoleSettingsAction::CreateRoute(logical));
                                     }
@@ -94,17 +96,18 @@ pub fn role_settings_modal(
                                                     .get(category)
                                                     .cloned()
                                                     .unwrap_or_default();
-                                                model_picker(
+                                                chain_head_editor(
                                                     ui,
-                                                    &mut draft.logical_model,
+                                                    &mut draft.models,
                                                     (
                                                         &model.logical_models,
-                                                        &format!("{category} logical model"),
+                                                        &model.route_efforts,
+                                                        &format!("{category} route"),
                                                     ),
                                                 );
-                                                let effective = effective_logical_model(
-                                                    draft.logical_model.as_deref(),
-                                                    binding.logical_model.as_deref(),
+                                                let effective = effective_route(
+                                                    draft.head_route(),
+                                                    binding.head_route(),
                                                     role_key,
                                                 );
                                                 if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
@@ -155,8 +158,8 @@ pub fn role_settings_modal(
     action
 }
 
-/// `AgentsConfig::binding_for` と同じ優先順で、編集中の値を変更せず解決する。
-fn effective_logical_model<'a>(
+/// `AgentsConfig::binding_for` と同じ優先順で、編集中のチェーンの先頭 route を解決する。
+fn effective_route<'a>(
     explicit: Option<&'a str>,
     inherited: Option<&'a str>,
     role_key: &'a str,
@@ -164,19 +167,87 @@ fn effective_logical_model<'a>(
     explicit.or(inherited).unwrap_or(role_key)
 }
 
-fn model_picker(ui: &mut egui::Ui, value: &mut Option<String>, choices: (&[String], &str)) {
-    let label = ui.label(choices.1);
-    egui::ComboBox::from_id_salt(choices.1)
+/// チェーンの先頭要素の route と推論強度を編集する。後続の要素は変更せずに残す。
+///
+/// 2 要素以上のチェーンでは、チェーンごと消してしまわないよう継承 (空のチェーン) を選べない。
+fn chain_head_editor(
+    ui: &mut egui::Ui,
+    models: &mut Vec<config::ChainEntryConfig>,
+    choices: (&[String], &BTreeMap<String, Vec<String>>, &str),
+) {
+    let (routes, efforts, name) = choices;
+    let mut head = models.first().map(|entry| entry.route.clone());
+    let can_inherit = models.len() <= 1;
+    let label = ui.label(name);
+    egui::ComboBox::from_id_salt(name)
         .width(ui.available_width())
-        .selected_text(value.as_deref().unwrap_or("Inherit default"))
+        .selected_text(head.as_deref().unwrap_or("Inherit default"))
         .show_ui(ui, |ui| {
-            ui.selectable_value(value, None, "Inherit default");
-            for name in choices.0 {
-                ui.selectable_value(value, Some(name.clone()), name);
+            if can_inherit {
+                ui.selectable_value(&mut head, None, "Inherit default");
+            }
+            for route in routes {
+                ui.selectable_value(&mut head, Some(route.clone()), route);
             }
         })
         .response
         .labelled_by(label.id);
+    match (head, models.first_mut()) {
+        (None, _) => models.clear(),
+        (Some(route), Some(entry)) => entry.route = route,
+        (Some(route), None) => models.push(config::ChainEntryConfig::route(route)),
+    }
+    if let Some(entry) = models.first_mut() {
+        let choices = efforts.get(&entry.route).map_or(&[][..], Vec::as_slice);
+        if !choices.is_empty() || entry.reasoning_effort.is_some() {
+            let label = ui.label(format!("{name} reasoning effort"));
+            effort_picker(
+                ui,
+                (name, "reasoning-effort"),
+                "(provider default)",
+                &mut entry.reasoning_effort,
+                choices,
+            )
+            .labelled_by(label.id);
+        }
+    }
+    if let [_, rest @ ..] = models.as_slice()
+        && !rest.is_empty()
+    {
+        let rest: Vec<_> = rest.iter().map(|entry| entry.route.as_str()).collect();
+        ui.label(muted(format!("Falls back to {}", rest.join(" → "))));
+    }
+}
+
+/// 推論強度の ComboBox。一覧外の現在値は `(custom)` として保持する。
+fn effort_picker(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    unset: &str,
+    value: &mut Option<String>,
+    choices: &[String],
+) -> egui::Response {
+    let custom = value
+        .as_ref()
+        .filter(|current| !choices.contains(current))
+        .cloned();
+    let selected = match (value.as_deref(), &custom) {
+        (None, _) => unset.to_owned(),
+        (Some(current), Some(_)) => format!("{current} (custom)"),
+        (Some(current), None) => current.to_owned(),
+    };
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, unset);
+            for effort in choices {
+                ui.selectable_value(value, Some(effort.clone()), effort);
+            }
+            if let Some(current) = custom {
+                ui.selectable_value(value, Some(current.clone()), format!("{current} (custom)"));
+            }
+        })
+        .response
 }
 
 fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {

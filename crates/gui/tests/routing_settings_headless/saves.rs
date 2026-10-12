@@ -12,9 +12,9 @@ fn route_rename_updates_reviewer_categories_and_live_runtime() {
         &path,
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-         [agents.reviewer.categories.plan-review]\nlogical_model = 'old'\n\
-         [agents.reviewer.categories.tool-execution]\nlogical_model = 'old'\n\
-         [agents.reviewer.categories.lesson_review]\nlogical_model = 'old'\n"
+         [agents.reviewer.categories.plan-review]\nmodels = [{{ route = 'old' }}]\n\
+         [agents.reviewer.categories.tool-execution]\nmodels = [{{ route = 'old' }}]\n\
+         [agents.reviewer.categories.lesson_review]\nmodels = [{{ route = 'old' }}]\n"
         ),
     )
     .expect("reviewer bindings");
@@ -30,9 +30,7 @@ fn route_rename_updates_reviewer_categories_and_live_runtime() {
     harness.state_mut().open_role_settings();
     for category in ["plan-review", "tool-execution", "lesson_review"] {
         assert_eq!(
-            harness.state().role_settings().agents.reviewer.categories[category]
-                .logical_model
-                .as_deref(),
+            harness.state().role_settings().agents.reviewer.categories[category].head_route(),
             Some("new")
         );
         assert_eq!(
@@ -61,7 +59,7 @@ fn route_rename_saves_agents_and_reseeds_models() {
         &path,
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-             [agents.explorer]\nlogical_model = 'old'\n"
+             [agents.explorer]\nmodels = [{{ route = 'old' }}]\n"
         ),
     )
     .expect("route and binding");
@@ -81,8 +79,8 @@ fn route_rename_saves_agents_and_reseeds_models() {
     let saved = config::Config::load(&super::support::load_options(temp.path())).expect("saved");
     assert!(saved.routing.routes.contains_key("new"));
     assert!(!saved.routing.routes.contains_key("old"));
-    assert_eq!(saved.agents.explorer.logical_model.as_deref(), Some("new"));
-    assert_eq!(saved.agents.worker.logical_model, None);
+    assert_eq!(saved.agents.explorer.head_route(), Some("new"));
+    assert_eq!(saved.agents.worker.head_route(), None);
     assert_eq!(
         harness.state().routing_settings().routes,
         saved.routing.routes
@@ -123,7 +121,7 @@ fn route_rename_loads_fresh_bindings_written_after_opening() {
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
-        format!("{text}\n[agents.explorer]\nlogical_model = 'old'\npreset = 'keep-me'\n"),
+        format!("{text}\n[agents.explorer]\nmodels = [{{ route = 'old' }}]\npreset = 'keep-me'\n"),
     )
     .expect("external binding");
     // When: submitting after the external update.
@@ -134,10 +132,7 @@ fn route_rename_loads_fresh_bindings_written_after_opening() {
     assert_eq!(harness.state().routing_settings().validation_error, None);
     let effective =
         config::Config::load(&super::support::load_options(temp.path())).expect("effective");
-    assert_eq!(
-        effective.agents.explorer.logical_model.as_deref(),
-        Some("new")
-    );
+    assert_eq!(effective.agents.explorer.head_route(), Some("new"));
     assert_eq!(effective.agents.explorer.preset.as_deref(), Some("keep-me"));
     harness.state_mut().open_role_settings();
     assert_eq!(harness.state().role_settings().agents, effective.agents);
@@ -153,7 +148,7 @@ fn route_rename_blocked_by_project_dropin_does_not_write_or_reload_runtime() {
     let text = std::fs::read_to_string(&path).expect("config");
     let original = format!(
         "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-         [agents.worker]\nlogical_model = 'old'\n"
+         [agents.worker]\nmodels = [{{ route = 'old' }}]\n"
     );
     std::fs::write(&path, &original).expect("main");
     let dropins = temp
@@ -161,7 +156,7 @@ fn route_rename_blocked_by_project_dropin_does_not_write_or_reload_runtime() {
         .join(config::PROJECT_CONFIG_DIR)
         .join("config.d");
     std::fs::create_dir_all(&dropins).expect("drop-in directory");
-    let extra = "[agents.worker]\nlogical_model = 'old'\n";
+    let extra = "[agents.worker]\nmodels = [{ route = 'old' }]\n";
     std::fs::write(dropins.join("extra.toml"), extra).expect("drop-in");
     state.open_routing_settings();
     state
@@ -198,7 +193,7 @@ fn route_rename_blocked_by_project_dropin_does_not_write_or_reload_runtime() {
     let disk: config::Config = toml::from_str(&original).expect("disk config");
     assert!(disk.routing.routes.contains_key("old"));
     assert!(!disk.routing.routes.contains_key("new"));
-    assert_eq!(disk.agents.worker.logical_model.as_deref(), Some("old"));
+    assert_eq!(disk.agents.worker.head_route(), Some("old"));
     assert_eq!(runtime.selected_model(Role::Worker, None), selected_before);
     assert_eq!(
         harness.state().routing_settings().route_renames(),
@@ -215,8 +210,8 @@ fn route_rename_blocked_by_env_or_cli_preserves_all_rewritten_bindings() {
             if cli {
                 options.cli_overrides = Some(
                     toml::from_str(
-                        "[agents.roles.planner]\nlogical_model = 'old'\n\
-                     [agents.worker.categories.quick]\nlogical_model = 'old'\n",
+                        "[agents.roles.planner]\nmodels = [{ route = 'old' }]\n\
+                     [agents.worker.categories.quick]\nmodels = [{ route = 'old' }]\n",
                     )
                     .expect("CLI"),
                 );
@@ -225,12 +220,12 @@ fn route_rename_blocked_by_env_or_cli_preserves_all_rewritten_bindings() {
                 options.env = Some(
                     [
                         (
-                            "EVORCH_AGENTS__ROLES__PLANNER__LOGICAL_MODEL".into(),
-                            "old".into(),
+                            "EVORCH_AGENTS__ROLES__PLANNER__MODELS".into(),
+                            "[{ route = 'old' }]".into(),
                         ),
                         (
-                            "EVORCH_AGENTS__WORKER__CATEGORIES__QUICK__LOGICAL_MODEL".into(),
-                            "old".into(),
+                            "EVORCH_AGENTS__WORKER__CATEGORIES__QUICK__MODELS".into(),
+                            "[{ route = 'old' }]".into(),
                         ),
                     ]
                     .into(),
@@ -281,7 +276,7 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
              review-route = [{{profile = 'accelerated'}}]\n\
-             [agents.worker]\nlogical_model = 'old'\n"
+             [agents.worker]\nmodels = [{{ route = 'old' }}]\n"
         ),
     )
     .expect("main");
@@ -290,7 +285,7 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
         .join(config::PROJECT_CONFIG_DIR)
         .join("config.d");
     std::fs::create_dir_all(&dropins).expect("drop-in directory");
-    let extra = "[agents.reviewer]\nlogical_model = 'review-route'\n";
+    let extra = "[agents.reviewer]\nmodels = [{ route = 'review-route' }]\n";
     std::fs::write(dropins.join("extra.toml"), extra).expect("drop-in");
     state.open_routing_settings();
     state
@@ -304,11 +299,8 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
     // Then: the renamed binding works and the unrelated higher-layer value is preserved.
     assert_eq!(harness.state().routing_settings().validation_error, None);
     let saved = config::Config::load(&super::support::load_options(temp.path())).expect("saved");
-    assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("new"));
-    assert_eq!(
-        saved.agents.reviewer.logical_model.as_deref(),
-        Some("review-route")
-    );
+    assert_eq!(saved.agents.worker.head_route(), Some("new"));
+    assert_eq!(saved.agents.reviewer.head_route(), Some("review-route"));
     assert!(saved.routing.routes.contains_key("new"));
     assert!(!saved.routing.routes.contains_key("old"));
     assert_eq!(
@@ -333,9 +325,9 @@ fn route_rename_in_named_profile_leaves_default_profile_untouched() {
         &path,
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-             [agents.worker]\nlogical_model = 'old'\n\
+             [agents.worker]\nmodels = [{{ route = 'old' }}]\n\
              [role_profiles.fast.routing.routes]\nold = [{{profile = 'accelerated'}}]\n\
-             [role_profiles.fast.agents.worker]\nlogical_model = 'old'\n"
+             [role_profiles.fast.agents.worker]\nmodels = [{{ route = 'old' }}]\n"
         ),
     )
     .expect("profiles");
@@ -360,15 +352,9 @@ fn route_rename_in_named_profile_leaves_default_profile_untouched() {
     let fast = &saved.role_profiles["fast"];
     assert!(fast.routing.routes.contains_key("new"));
     assert!(!fast.routing.routes.contains_key("old"));
-    assert_eq!(
-        fast.agents.worker.base.logical_model.as_deref(),
-        Some("new")
-    );
+    assert_eq!(fast.agents.worker.base.head_route(), Some("new"));
     assert!(saved.routing.routes.contains_key("old"));
-    assert_eq!(
-        saved.agents.worker.base.logical_model.as_deref(),
-        Some("old")
-    );
+    assert_eq!(saved.agents.worker.base.head_route(), Some("old"));
     assert_eq!(runtime.selected_model(Role::Worker, None), "local/base");
 }
 
@@ -460,7 +446,7 @@ fn renaming_implicit_worker_route_leaves_an_actionable_missing_route() {
     // Then: even with routes configured, the dangling implicit name is warned.
     assert!(!harness.state().role_settings().routes_empty);
     assert_eq!(
-        harness.state().role_settings().agents.worker.logical_model,
+        harness.state().role_settings().agents.worker.head_route(),
         None
     );
     assert!(harness.has_label("未定義 (route なし)"));
@@ -483,7 +469,7 @@ fn route_rename_does_not_persist_unrelated_cli_agent_override() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = super::support::fixture_with_options(temp.path(), |options| {
         options.cli_overrides = Some(
-            toml::from_str("[agents.reviewer]\nlogical_model = 'temporary'\n")
+            toml::from_str("[agents.reviewer]\nmodels = [{ route = 'temporary' }]\n")
                 .expect("CLI override"),
         );
     });
@@ -493,8 +479,8 @@ fn route_rename_does_not_persist_unrelated_cli_agent_override() {
         &path,
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-             [agents.worker]\nlogical_model = 'old'\n\
-             [agents.reviewer]\nlogical_model = 'stable'\n"
+             [agents.worker]\nmodels = [{{ route = 'old' }}]\n\
+             [agents.reviewer]\nmodels = [{{ route = 'stable' }}]\n"
         ),
     )
     .expect("project settings");
@@ -511,9 +497,6 @@ fn route_rename_does_not_persist_unrelated_cli_agent_override() {
     // Loading without the CLI layer shows exactly what was written to disk.
     let saved =
         config::Config::load(&super::support::load_options(temp.path())).expect("saved config");
-    assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("new"));
-    assert_eq!(
-        saved.agents.reviewer.logical_model.as_deref(),
-        Some("stable")
-    );
+    assert_eq!(saved.agents.worker.head_route(), Some("new"));
+    assert_eq!(saved.agents.reviewer.head_route(), Some("stable"));
 }

@@ -10,7 +10,7 @@ fn capture_role_routing_states() {
         std::fs::write(
             &path,
             format!(
-                "{}\n[agents.worker]\nlogical_model = 'legacy'",
+                "{}\n[agents.worker]\nmodels = [{{ route = 'legacy' }}]",
                 text.split("[routing.routes]").next().expect("profiles")
             ),
         )

@@ -36,6 +36,7 @@ fn invalid_path(result: Result<Config, ConfigError>) -> String {
 fn routing(route: &str, profile: &str) -> RoutingConfig {
     RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: [(
             route.to_owned(),
             vec![RouteCandidateConfig {
@@ -53,11 +54,11 @@ fn routing(route: &str, profile: &str) -> RoutingConfig {
 fn strict_load_validates_profiles_with_full_paths() {
     for (text, path) in [
         (
-            "[role_profiles.default.agents.worker]\nlogical_model = 'x'\n",
+            "[role_profiles.default.agents.worker]\nmodels = [{ route = 'x' }]\n",
             "role_profiles.default",
         ),
         (
-            "[role_profiles.Fast.agents.worker]\nlogical_model = 'x'\n",
+            "[role_profiles.Fast.agents.worker]\nmodels = [{ route = 'x' }]\n",
             "role_profiles.Fast",
         ),
         (
@@ -69,7 +70,7 @@ fn strict_load_validates_profiles_with_full_paths() {
             "role_profiles.fast.agents.worker.logical_modle",
         ),
         (
-            "[role_profiles.fast.agents.explorer.categories.quick]\nlogical_model = 'x'\n",
+            "[role_profiles.fast.agents.explorer.categories.quick]\nmodels = [{ route = 'x' }]\n",
             "role_profiles.fast.agents.explorer.categories",
         ),
         (
@@ -87,17 +88,14 @@ fn strict_load_validates_profiles_with_full_paths() {
 fn tolerant_load_prunes_unknown_profile_fields_and_keeps_bindings() {
     let config = load_user(
         "[role_profiles.fast]\nextra = 1\n\
-         [role_profiles.fast.agents.worker]\nlogical_model = 'fast'\nlogical_modle = 'typo'\n\
-         [role_profiles.fast.agents.worker.categories.quick]\nlogical_model = 'quick'\n",
+         [role_profiles.fast.agents.worker]\nmodels = [{ route = 'fast' }]\nlogical_modle = 'typo'\n\
+         [role_profiles.fast.agents.worker.categories.quick]\nmodels = [{ route = 'quick' }]\n",
         false,
     )
     .expect("typo は無視される");
     let worker = &config.role_profiles["fast"].agents.worker;
-    assert_eq!(worker.base.logical_model.as_deref(), Some("fast"));
-    assert_eq!(
-        worker.categories["quick"].logical_model.as_deref(),
-        Some("quick")
-    );
+    assert_eq!(worker.base.head_route(), Some("fast"));
+    assert_eq!(worker.categories["quick"].head_route(), Some("quick"));
 }
 
 // Given: コメント付きのユーザ設定 / When: プロファイルを作成・更新・削除する
@@ -108,7 +106,7 @@ fn profile_saves_round_trip_and_preserve_unrelated_content() {
     let path = tmp.path().join("config.toml");
     std::fs::write(
         &path,
-        "# keep me\n[agents.worker]\nlogical_model = 'default-model'\n",
+        "# keep me\n[agents.worker]\nmodels = [{ route = 'default-model' }]\n[routing.routes]\ndefault-model = [{ profile = 'local' }]\n",
     )
     .expect("config");
     let base = Config::load_unresolved(&options(tmp.path())).expect("load");
@@ -117,7 +115,7 @@ fn profile_saves_round_trip_and_preserve_unrelated_content() {
 
     save_role_profile(&path, "fast", &copied).expect("create");
     let mut agents = copied.agents.clone();
-    agents.worker.base.logical_model = Some("fast-model".into());
+    agents.worker.base.models = vec![config::ChainEntryConfig::route("fast-model")];
     save_role_profile_bindings(&path, Some("fast"), None, Some(&agents)).expect("update agents");
 
     let saved = Config::load_strict(&options(tmp.path())).expect("strict reload");
@@ -128,10 +126,7 @@ fn profile_saves_round_trip_and_preserve_unrelated_content() {
             routing: routing("fast-model", "local"),
         }
     );
-    assert_eq!(
-        saved.agents.worker.base.logical_model.as_deref(),
-        Some("default-model")
-    );
+    assert_eq!(saved.agents.worker.base.head_route(), Some("default-model"));
     assert!(
         std::fs::read_to_string(&path)
             .expect("text")

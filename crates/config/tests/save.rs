@@ -77,7 +77,7 @@ fn save_legacy_string_models_still_valid() {
     let path = tmp.path().join("evorch.toml");
     std::fs::write(
         &path,
-        "version = 2\n[providers.other]\nmodels = ['legacy']\n",
+        "version = 3\n[providers.other]\nmodels = ['legacy']\n",
     )
     .unwrap();
     // When

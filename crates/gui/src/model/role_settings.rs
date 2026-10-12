@@ -14,6 +14,8 @@ pub struct RoleSettingsModel {
     pub agents: config::AgentsConfig,
     pub logical_models: Vec<String>,
     pub route_names: BTreeSet<String>,
+    /// route ごとに、チェーン要素で選べる推論強度。
+    pub route_efforts: BTreeMap<String, Vec<String>>,
     pub routes_empty: bool,
     pub resolved_previews: BTreeMap<String, Option<String>>,
     pub error: Option<String>,
@@ -37,6 +39,17 @@ impl RoleSettingsModel {
             .collect();
         Self {
             route_names: config.routing.routes.keys().cloned().collect(),
+            route_efforts: config
+                .routing
+                .routes
+                .keys()
+                .map(|route| {
+                    (
+                        route.clone(),
+                        super::routing_settings::route_effort_choices(config, route),
+                    )
+                })
+                .collect(),
             routes_empty: config.routing.routes.is_empty(),
             agents: config.agents.clone(),
             logical_models: names.into_iter().collect(),
@@ -50,10 +63,7 @@ impl RoleSettingsModel {
 
     pub fn validate(&self) -> Result<(), config::ConfigError> {
         for (role, binding) in bindings(&self.agents) {
-            Self::validate_model(
-                &format!("agents.{role}.logical_model"),
-                binding.logical_model.as_deref(),
-            )?;
+            Self::validate_chain(&format!("agents.{role}.models"), &binding.models)?;
             validate_generation(&binding.generation, role)?;
         }
         for (role, categories) in [
@@ -63,9 +73,9 @@ impl RoleSettingsModel {
             for (category, binding) in categories {
                 // 設定側で許可される内部カテゴリも保存時に検証する。
                 self.agents.binding_for(role, Some(category))?;
-                Self::validate_model(
-                    &format!("agents.{role}.categories.{category}.logical_model"),
-                    binding.logical_model.as_deref(),
+                Self::validate_chain(
+                    &format!("agents.{role}.categories.{category}.models"),
+                    &binding.models,
                 )?;
                 validate_generation(
                     &binding.generation,
@@ -76,13 +86,14 @@ impl RoleSettingsModel {
         Ok(())
     }
 
-    fn validate_model(path: &str, value: Option<&str>) -> Result<(), config::ConfigError> {
-        if let Some(value) = value
-            && value.trim().is_empty()
-        {
+    fn validate_chain(
+        path: &str,
+        models: &[config::ChainEntryConfig],
+    ) -> Result<(), config::ConfigError> {
+        if models.iter().any(|entry| entry.route.trim().is_empty()) {
             return Err(config::ConfigError::InvalidField {
                 path: path.into(),
-                message: "Enter a non-blank logical model or inherit the default".into(),
+                message: "Enter a non-blank route or inherit the default".into(),
             });
         }
         Ok(())

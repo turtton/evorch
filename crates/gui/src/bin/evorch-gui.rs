@@ -852,25 +852,29 @@ fn run() -> Result<(), GuiError> {
         .binding_for("worker", Some(CategoryId::Quick.as_str()))
         .ok()
         .and_then(|binding| {
-            composition_config
+            let head = binding.models.into_iter().next()?;
+            let route = composition_config
                 .routing
                 .routes
-                .get(&binding.logical_model)
-        })
-        .and_then(|routes| routes.first());
+                .get(&head.route)?
+                .first()?;
+            Some((route, head.reasoning_effort))
+        });
     // Each run's lessons are partitioned by the project it worked in.
     let runtime = runtime.with_project_slugs(Arc::new(derive_repo_slug));
     let runtime = match quick_route {
-        Some(route) => runtime.with_learning(runtime::memory_queue::LearningSettings {
-            writer: storage.handle(),
-            storage: storage_config.clone(),
-            project: derive_repo_slug(&repo_root),
-            quick: runtime::ModelPreference {
-                profile: route.profile.clone(),
-                model: route.model.clone(),
-                reasoning_effort: route.reasoning_effort.clone(),
-            },
-        }),
+        Some((route, reasoning_effort)) => {
+            runtime.with_learning(runtime::memory_queue::LearningSettings {
+                writer: storage.handle(),
+                storage: storage_config.clone(),
+                project: derive_repo_slug(&repo_root),
+                quick: runtime::ModelPreference {
+                    profile: route.profile.clone(),
+                    model: route.model.clone(),
+                    reasoning_effort,
+                },
+            })
+        }
         None => {
             tracing::warn!("post-run learning unavailable: configure a worker quick model route");
             runtime

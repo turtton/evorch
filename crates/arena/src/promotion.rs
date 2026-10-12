@@ -78,10 +78,14 @@ impl ArenaReport {
             vec![config::RouteCandidateConfig {
                 profile: winner.profile.clone(),
                 model: Some(winner.model_for(winner.attribution).to_owned()),
-                reasoning_effort: None,
+                auto: false,
             }],
         );
-        binding.logical_model = Some(route);
+        // The winner heads the chain; the earlier entries stay as its fallbacks.
+        binding.models.retain(|entry| entry.route != route);
+        binding
+            .models
+            .insert(0, config::ChainEntryConfig::route(route));
         binding.preset = preset;
         Ok(())
     }

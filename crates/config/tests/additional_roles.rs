@@ -6,7 +6,7 @@ fn named_roles_reject_category_overrides_when_loaded() {
         // Given: a named non-worker role with a category override.
         let directory = tempfile::tempdir().expect("temporary config directory");
         let doc = format!(
-            "[agents.roles.{role}]\nlogical_model = 'role-model'\n[agents.roles.{role}.categories.visual]\nlogical_model = 'visual-model'\n"
+            "[agents.roles.{role}]\nmodels = [{{ route = 'role-model' }}]\n[agents.roles.{role}.categories.visual]\nmodels = [{{ route = 'visual-model' }}]\n"
         );
         // When: loading through strict validation.
         let error = Config::load_strict(&config::LoadOptions {
@@ -27,7 +27,9 @@ fn named_roles_reject_category_overrides_when_loaded() {
 
 #[test]
 fn named_roles_reject_unknown_registry_entries() {
-    assert!(toml::from_str::<Config>("[agents.roles.custom]\nlogical_model = 'worker'").is_err());
+    assert!(
+        toml::from_str::<Config>("[agents.roles.custom]\nmodels = [{ route = 'worker' }]").is_err()
+    );
 }
 
 #[test]
@@ -35,9 +37,12 @@ fn layered_loading_validates_closed_role_bindings() {
     // Given: real layered loading with no ambient user configuration.
     let directory = tempfile::tempdir().expect("temporary config directory");
     for (document, expected_path) in [
-        ("[agents.roles.planner]\nlogical_model = 'plan'", None),
         (
-            "[agents.roles.custom]\nlogical_model = 'plan'",
+            "[agents.roles.planner]\nmodels = [{ route = 'plan' }]\n[routing.routes]\nplan = [{ profile = 'p' }]",
+            None,
+        ),
+        (
+            "[agents.roles.custom]\nmodels = [{ route = 'plan' }]",
             Some("agents.roles.custom"),
         ),
         (
@@ -45,7 +50,7 @@ fn layered_loading_validates_closed_role_bindings() {
             Some("agents.roles.oracle.unknown"),
         ),
         (
-            "[agents.roles.multimodal_looker.categories.typo]\nlogical_model = 'vision'",
+            "[agents.roles.multimodal_looker.categories.typo]\nmodels = [{ route = 'vision' }]",
             Some("agents.roles.multimodal_looker.categories"),
         ),
     ] {
@@ -64,7 +69,7 @@ fn layered_loading_validates_closed_role_bindings() {
                     .agents
                     .binding_for("planner", None)
                     .expect("planner")
-                    .logical_model,
+                    .head_route(),
                 "plan"
             ),
             Some(expected) => assert!(

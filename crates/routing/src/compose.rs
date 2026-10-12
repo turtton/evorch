@@ -114,8 +114,7 @@ pub fn compose_providers(
         );
     }
 
-    let router =
-        Router::new(profiles, &config.routing, catalog)?.with_event_bus(deps.event_bus.clone());
+    let router = Router::new(profiles, &config.routing, catalog)?;
 
     Ok(ComposedProviders { router, providers })
 }

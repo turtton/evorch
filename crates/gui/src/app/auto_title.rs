@@ -68,7 +68,7 @@ fn generate(context: ProductionModel, chat: ChatSubmission) -> Result<String, St
     let mut config = config::Config::load(&context.load_options).map_err(|e| e.to_string())?;
     let preference = match select_model(&config.agents, chat.model_preference) {
         TitleSelection::Quick(binding) => {
-            config.agents.worker.base.logical_model = Some(binding.logical_model);
+            config.agents.worker.base.models = binding.models;
             config.agents.worker.base.generation = binding.generation;
             None
         }

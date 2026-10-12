@@ -47,12 +47,13 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
         vec![profile.clone(), alternate.clone()],
         &config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 vec![config::RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("model-a".into()),
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             )]),
         },

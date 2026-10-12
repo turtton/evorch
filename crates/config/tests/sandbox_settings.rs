@@ -3,7 +3,7 @@ use config::{Config, EscalationApproval, LoadOptions, SandboxConfig, save_sandbo
 #[test]
 fn web_tools_default_to_enabled_and_round_trip_disabled() {
     for input in [
-        "version = 2",
+        "version = 3",
         "[sandbox]",
         "[sandbox]\nescalation_approval = \"user\"",
     ] {
@@ -62,7 +62,7 @@ fn removed_network_settings_are_rejected_at_the_strict_boundary() {
 #[test]
 fn escalation_approval_defaults_to_auto_when_section_absent() {
     // Given: a configuration without a sandbox section.
-    let config: Config = toml::from_str("version = 2").expect("config");
+    let config: Config = toml::from_str("version = 3").expect("config");
 
     // When: inspecting the default sandbox settings.
     let sandbox = config.sandbox;
@@ -123,7 +123,7 @@ fn escalate_to_user_on_deny_defaults_to_false_and_round_trips() {
 
     // Then: the explicit value survives and omission remains false by default.
     assert!(reparsed.sandbox.escalate_to_user_on_deny);
-    let defaults: Config = toml::from_str("version = 2").expect("config");
+    let defaults: Config = toml::from_str("version = 3").expect("config");
     assert!(!defaults.sandbox.escalate_to_user_on_deny);
 }
 
@@ -135,7 +135,7 @@ fn save_sandbox_persists_escalation_fields_and_keeps_other_sections() {
     let path = tmp.path().join(".evorch/config.toml");
     std::fs::write(
         &path,
-        "version = 2\n\n[providers.keep]\nprovider_type = \"openai\"\n",
+        "version = 3\n\n[providers.keep]\nprovider_type = \"openai\"\n",
     )
     .expect("write");
     let sandbox = SandboxConfig {

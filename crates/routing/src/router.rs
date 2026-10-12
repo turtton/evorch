@@ -1,14 +1,12 @@
-//! 論理モデルをプロバイダプロファイルと実モデル ID へ解決するルーターです。
+//! ロールのチェーンをプロバイダプロファイルと実モデル ID へ解決するルーターです。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use event_bus::{Event, EventBus, ProviderEvent};
-
-use crate::{FailureKind, ProviderHealth, ProviderProfile, RoutingError, SessionAffinity};
+use crate::{
+    Chain, ChainMember, ProviderHealth, ProviderProfile, RoutePin, RoutingError, SessionAffinity,
+};
 use model::{Capability, CapabilitySupport, LogicalModelId, ModelCatalog};
-
-mod attempts;
 
 /// 解決済みのルート。
 ///
@@ -22,22 +20,16 @@ pub struct ResolvedRoute {
 }
 
 /// ルーティング設定・プロバイダプロファイル・モデルカタログを用いて
-/// 論理モデルを具体ルートへ解決します。
-///
-/// ルートテーブルは [`BTreeMap`] で保持するため、論理モデルをまたぐ反復順序は
-/// 辞書順になります。ただし本実装の解決は 1 つの論理モデルを独立に扱い、
-/// 論理モデル間の順序付け (一括再解決など) は扱いません。
+/// ロールのチェーンを具体ルートへ解決します。
 #[derive(Clone)]
 pub struct Router {
     /// プロファイル名をキーとした検証済みプロバイダプロファイル。
     profiles: BTreeMap<String, ProviderProfile>,
-    /// 論理モデル名から候補リスト (宣言順) へのルートテーブル。
+    /// route 名から候補リスト (宣言順) へのルートテーブル。
     routes: BTreeMap<String, Vec<config::RouteCandidateConfig>>,
     /// 利用可否の判定に使用するモデルカタログ。
     catalog: ModelCatalog,
     required_capabilities: Vec<Capability>,
-    /// フォールバック選択の観測イベント発行先。未接続なら発行しない。
-    event_bus: Option<Arc<EventBus>>,
     /// クールダウン中の候補を外すための共有状態。未接続なら外さない。
     health: Option<Arc<ProviderHealth>>,
 }
@@ -49,7 +41,6 @@ impl std::fmt::Debug for Router {
             .field("routes", &self.routes)
             .field("catalog", &self.catalog)
             .field("required_capabilities", &self.required_capabilities)
-            .field("has_event_bus", &self.event_bus.is_some())
             .field("has_health", &self.health.is_some())
             .finish()
     }
@@ -57,7 +48,7 @@ impl std::fmt::Debug for Router {
 
 impl PartialEq for Router {
     /// 等価性はルーティング設定に関わるフィールドのみで判定する。
-    /// `event_bus` は観測配線、`health` は実行時の状態であり、等価性には含めない。
+    /// `health` は実行時の状態であり、等価性には含めない。
     fn eq(&self, other: &Self) -> bool {
         self.profiles == other.profiles
             && self.routes == other.routes
@@ -80,11 +71,12 @@ impl Router {
         &self.catalog
     }
 
-    /// 候補が利用可能で、クールダウン中でないかを返す。
-    fn is_available_member(&self, profile: &str, model_id: &str) -> bool {
-        self.is_eligible(model_id)
+    /// メンバーが既知のプロファイルにあり、利用可能で、クールダウン中でないかを返す。
+    pub fn is_member_available(&self, target: &ResolvedRoute) -> bool {
+        self.profiles.contains_key(&target.profile)
+            && self.is_eligible(&target.model_id)
             && !self.health.as_ref().is_some_and(|health| {
-                health.is_cooling_down(profile, model_id, std::time::Instant::now())
+                health.is_cooling_down(&target.profile, &target.model_id, std::time::Instant::now())
             })
     }
 
@@ -134,241 +126,146 @@ impl Router {
             routes: routing.routes.clone(),
             catalog,
             required_capabilities: Vec::new(),
-            event_bus: None,
             health: None,
         })
     }
 
-    /// フォールバック選択の観測イベントの発行先を接続する。
-    ///
-    /// 接続した場合、[`Router::next_fallback`] がフォールバック先を選択する
-    /// たびに [`ProviderEvent::FallbackTriggered`] を発行する。候補の選択
-    /// 順序や policy 自体は変化しない (観測の追加のみ)。
-    pub fn with_event_bus(mut self, event_bus: Option<Arc<EventBus>>) -> Self {
-        self.event_bus = event_bus;
-        self
-    }
-
-    /// クールダウン状態を接続する。接続した場合、[`Router::resolve`] と
-    /// [`Router::next_fallback`] はクールダウン中の候補とピンを飛ばす。
+    /// クールダウン状態を接続する。接続した場合、解決とフォールバックは
+    /// クールダウン中のメンバーとピンを飛ばす。
     pub fn with_health(mut self, health: Arc<ProviderHealth>) -> Self {
         self.health = Some(health);
         self
     }
 
-    /// セッションのアフィニティを考慮して論理モデルを具体ルートへ解決します。
+    /// チェーンの要素を route の候補へ展開します。
     ///
-    /// 解決手順:
-    /// 1. セッションが論理モデルをピンしていて、ピン先プロファイルが存在し、
-    ///    ピンした concrete model が利用可能で要求された capability を満たすなら、
-    ///    そのルートを再ピンせずに返します。ピンはモデル上書きも維持します。
-    /// 2. 以外の場合、ルートテーブルの候補を宣言順に評価します。候補の concrete model は
-    ///    `model` 上書き (指定時) またはプロファイルの `default_model` で、
-    ///    カタログ上利用可能で要求された capability を満たす最初の候補を選択します。
-    ///    属性の確定状態による並べ替えは行いません。
-    /// 3. 選ばれた候補は返却前にアフィニティへピンされます。
+    /// 候補の具体モデルは `model` 上書き (指定時) またはプロファイルの `default_model` です。
     ///
     /// # Errors
-    /// - 論理モデルがルートテーブルに存在しない場合、
-    ///   [`RoutingError::UnknownLogicalModel`] を返します。
-    /// - 利用可能な候補が 1 つもない場合、[`RoutingError::NoAvailableCandidate`] を返します。
+    /// 要素が存在しない route を参照する場合、[`RoutingError::UnknownLogicalModel`] を返します。
+    pub fn chain(
+        &self,
+        key: impl Into<String>,
+        entries: &[config::ChainEntryConfig],
+    ) -> Result<Chain, RoutingError> {
+        let mut members = Vec::new();
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let candidates = self
+                .routes
+                .get(&entry.route)
+                .ok_or_else(|| RoutingError::UnknownLogicalModel(entry.route.clone()))?;
+            for candidate in candidates {
+                let Some(profile) = self.profiles.get(&candidate.profile) else {
+                    continue; // new() で検証済みのため通常は到達しない
+                };
+                members.push(ChainMember {
+                    entry: entry_index,
+                    route: entry.route.clone(),
+                    target: ResolvedRoute {
+                        profile: profile.name.clone(),
+                        model_id: candidate
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| profile.default_model.clone()),
+                    },
+                    reasoning_effort: entry.reasoning_effort.clone(),
+                });
+            }
+        }
+        Ok(Chain::new(key.into(), members))
+    }
+
+    /// セッションのアフィニティを考慮してチェーンのメンバーを選び、その位置を返します。
+    ///
+    /// 解決手順:
+    /// 1. ピンがあり、ピンしたメンバー (位置がずれていれば同じプロファイル・具体モデルの
+    ///    メンバー) が利用可能なら、再ピンせずにその位置を返します。
+    /// 2. ピン先が使えない (クールダウン中・設定から削除済みなど) 場合は、フォールバックと
+    ///    同じ順序 ([`Chain`] の走査順) でピンの次から利用可能なメンバーを探します。
+    ///    ピンは元に戻しません。
+    /// 3. ピンがなければ先頭から利用可能な最初のメンバーを選びます。
+    /// 4. 2・3 で選んだメンバーはアフィニティへピンされます。
+    ///
+    /// # Errors
+    /// 利用可能なメンバーが 1 つもない場合、[`RoutingError::NoAvailableCandidate`] を返します。
+    pub fn resolve_chain(
+        &self,
+        affinity: &mut SessionAffinity,
+        session_id: &str,
+        chain: &Chain,
+    ) -> Result<usize, RoutingError> {
+        let members = chain.members();
+        let order: Vec<usize> = match affinity.pinned(session_id, chain.key()) {
+            Some(pin) if !members.is_empty() => {
+                let located = members
+                    .get(pin.position)
+                    .filter(|member| {
+                        member.target.profile == pin.profile && member.target.model_id == pin.model
+                    })
+                    .map(|_| pin.position)
+                    .or_else(|| chain.position_of(&pin.profile, &pin.model));
+                match located {
+                    Some(position) if self.is_member_available(&members[position].target) => {
+                        return Ok(position);
+                    }
+                    Some(position) => chain.scan_order(position),
+                    // 設定から消えたメンバーは、元の位置にいたメンバーから走査する。
+                    None => {
+                        let position = pin.position.min(members.len() - 1);
+                        std::iter::once(position)
+                            .chain(chain.scan_order(position))
+                            .collect()
+                    }
+                }
+            }
+            Some(_) | None => (0..members.len()).collect(),
+        };
+        let position = order
+            .into_iter()
+            .find(|position| self.is_member_available(&members[*position].target))
+            .ok_or_else(|| RoutingError::NoAvailableCandidate(chain.key().to_owned()))?;
+        pin(affinity, session_id, chain, position);
+        Ok(position)
+    }
+
+    /// route 1 つだけのチェーンとして論理モデルを解決します。チェーンのキーは route 名です。
+    ///
+    /// # Errors
+    /// [`Router::chain`] と [`Router::resolve_chain`] のエラーを返します。
     pub fn resolve(
         &self,
         affinity: &mut SessionAffinity,
         session_id: &str,
         logical: &LogicalModelId,
     ) -> Result<ResolvedRoute, RoutingError> {
-        let logical_name = logical.as_str();
-
-        if let Some((pinned_profile, pinned_model)) = affinity.pinned(session_id, logical_name)
-            && self.profiles.contains_key(pinned_profile)
-            && self.is_available_member(pinned_profile, pinned_model)
-        {
-            return Ok(ResolvedRoute {
-                profile: pinned_profile.to_string(),
-                model_id: pinned_model.to_string(),
-            });
-        }
-
-        let candidates = self
-            .routes
-            .get(logical_name)
-            .ok_or_else(|| RoutingError::UnknownLogicalModel(logical_name.to_string()))?;
-
-        for candidate in candidates {
-            let Some(profile) = self.profiles.get(&candidate.profile) else {
-                continue; // new() で検証済みのため通常は到達しない
-            };
-            let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-            if !self.is_available_member(&profile.name, model_id) {
-                continue;
-            }
-            affinity.pin(session_id, logical_name, &profile.name, model_id);
-            return Ok(ResolvedRoute {
-                profile: profile.name.clone(),
-                model_id: model_id.to_string(),
-            });
-        }
-
-        Err(RoutingError::NoAvailableCandidate(logical_name.to_string()))
+        let chain = self.chain(
+            logical.as_str(),
+            &[config::ChainEntryConfig::route(logical.as_str())],
+        )?;
+        let position = self.resolve_chain(affinity, session_id, &chain)?;
+        Ok(chain.member(position).target.clone())
     }
+}
 
-    /// 障害の発生したルートの次のフォールバック先を解決します。
-    ///
-    /// 同一論理モデルの候補内だけで、次の順で候補を走査します。
-    ///
-    /// 1. 同一論理モデル: 失敗ルート `failed` と (プロファイル, concrete model)
-    ///    の組が一致する先頭候補の位置より厳密に後続する候補を宣言順に走査し、
-    ///    最初に利用可能な候補を返します。候補の concrete model は
-    ///    `model` 上書き (指定時) またはプロファイルの `default_model` です。
-    ///    組一致のため、同一プロファイルが複数の実モデルを指す構成でも
-    ///    失敗した実モデルそのものを再選択しません。
-    ///    `failed` の組が候補に存在しない場合は失敗位置を先頭より前とみなし、
-    ///    全候補を走査対象にします。
-    /// 2. 利用可能候補が見つからない場合は `None` を返します。
-    ///
-    /// 利用可否の判定は [`Router::resolve`] と同じく、concrete model
-    /// (= `model` 上書き指定時はその値、それ以外はプロファイルの `default_model`)
-    /// がカタログ上で存在かつ Available であることです。
-    /// 宣言順の尊重・属性の確定度による並べ替えを行わない点も
-    /// [`Router::resolve`] と同じ方針です。
-    ///
-    /// 勝者を見つけた場合は `session_id` と `logical` を勝者プロファイルへ再ピンして
-    /// [`ResolvedRoute`] を返します。
-    /// 見つからなかった場合はアフィニティを変更せず `None` を返します。
-    ///
-    /// `failure` は障害種別の観測と将来の順序付け改善のために受け取りますが、
-    /// v0.1 ではフォールバック順序には影響しません (FallbackTriggered イベントの
-    /// payload として観測に使用します)。
-    ///
-    /// `request_id` は失敗した元 attempt の request ID で、観測イベントの相関に
-    /// のみ使用します。呼び出し側が把握していない場合は `None` を渡してください。
-    ///
-    /// なお、このメソッドは次候補の選択と再ピンのみを行い、usage は一切発行
-    /// しません。usage 発行の所有権は各 provider attempt に留まり、成功した
-    /// 勝者 attempt がちょうど 1 回発行し、敗者 attempt は 1 件も発行しません。
-    /// したがってリトライ / フォールバックを駆動するコーディネータは usage を
-    /// 発行・再発行してはなりません。リトライやフォールバックを経て成功しても、
-    /// 1 つの論理リクエストはちょうど 1 件の
-    /// [`event_bus::UsageEvent`] (勝者 attempt のプロバイダラベルとモデルを
-    /// 載せたもの) に対応します。
-    pub fn next_fallback(
-        &self,
-        affinity: &mut SessionAffinity,
-        session_id: &str,
-        logical: &LogicalModelId,
-        failed: &ResolvedRoute,
-        failure: FailureKind,
-        request_id: Option<&str>,
-    ) -> Option<ResolvedRoute> {
-        // v0.1 では failure は順序付けに使用しない (観測・将来利用のための引数)。
-        let _ = failure;
-        let logical_name = logical.as_str();
-
-        if let Some(candidates) = self.routes.get(logical_name) {
-            let remaining_after_failed = self
-                .candidate_position(candidates, failed)
-                .map_or(candidates.as_slice(), |index| &candidates[index + 1..]);
-            for candidate in remaining_after_failed {
-                if let Some(route) = self.available_route(candidate) {
-                    affinity.pin(session_id, logical_name, &route.profile, &route.model_id);
-                    self.emit_fallback_triggered(
-                        session_id, logical, failed, failure, request_id, &route,
-                    );
-                    return Some(route);
-                }
-            }
-        }
-
-        None
-    }
-
-    /// 解決済みルートに対応する候補の推論強度を返します。
-    ///
-    /// [`Router::resolve`] / [`Router::next_fallback`] が返したルートと
-    /// (プロファイル, concrete model) の組が一致する先頭候補の `reasoning_effort` です。
-    /// 候補が見つからない、または未指定なら `None` (プロバイダ既定) を返します。
-    pub fn candidate_reasoning_effort(
-        &self,
-        logical: &LogicalModelId,
-        route: &ResolvedRoute,
-    ) -> Option<&str> {
-        let candidates = self.routes.get(logical.as_str())?;
-        let index = self.candidate_position(candidates, route)?;
-        candidates[index].reasoning_effort.as_deref()
-    }
-
-    /// ルートと (プロファイル, concrete model) の組が一致する先頭候補の位置を返します。
-    ///
-    /// 候補の concrete model は `model` 上書き (指定時) またはプロファイルの
-    /// `default_model` です。一致する候補がなければ `None` を返します。
-    fn candidate_position(
-        &self,
-        candidates: &[config::RouteCandidateConfig],
-        failed: &ResolvedRoute,
-    ) -> Option<usize> {
-        candidates.iter().position(|candidate| {
-            candidate.profile == failed.profile
-                && self
-                    .profiles
-                    .get(&candidate.profile)
-                    .is_some_and(|profile| {
-                        candidate.model.as_deref().unwrap_or(&profile.default_model)
-                            == failed.model_id
-                    })
-        })
-    }
-
-    /// フォールバック選択を FallbackTriggered イベントとして発行する。
-    ///
-    /// バス未接続なら何もしない。候補の選択結果には影響しない (観測のみ)。
-    fn emit_fallback_triggered(
-        &self,
-        session_id: &str,
-        logical: &LogicalModelId,
-        failed: &ResolvedRoute,
-        failure: FailureKind,
-        request_id: Option<&str>,
-        route: &ResolvedRoute,
-    ) {
-        let Some(bus) = self.event_bus.as_ref() else {
-            return;
-        };
-        bus.emit(Event::new(ProviderEvent::FallbackTriggered {
-            from_provider: failed.profile.clone(),
-            from_model: Some(failed.model_id.clone()),
-            to_provider: route.profile.clone(),
-            to_model: route.model_id.clone(),
-            logical_model: logical.as_str().to_string(),
-            session_id: session_id.to_string(),
-            failure: failure.into(),
-            request_id: request_id.map(str::to_string),
-        }));
-    }
-
-    /// 候補の concrete model がカタログ上利用可能なら [`ResolvedRoute`] を返します。
-    ///
-    /// 利用可否の判定のみを行い、`attributes_confirmed` による優先順位付けは
-    /// 行いません (フォールバックでは可用性のみを見るため)。
-    fn available_route(&self, candidate: &config::RouteCandidateConfig) -> Option<ResolvedRoute> {
-        // new() で検証済みのため、未知のプロファイルは通常発生しない。
-        let profile = self.profiles.get(&candidate.profile)?;
-        let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-        if !self.is_available_member(&profile.name, model_id) {
-            return None;
-        }
-        Some(ResolvedRoute {
-            profile: profile.name.clone(),
-            model_id: model_id.to_string(),
-        })
-    }
+/// チェーンの `position` のメンバーをセッションのピンにする。
+pub fn pin(affinity: &mut SessionAffinity, session_id: &str, chain: &Chain, position: usize) {
+    let target = &chain.member(position).target;
+    affinity.pin(
+        session_id,
+        chain.key(),
+        RoutePin {
+            position,
+            profile: target.profile.clone(),
+            model: target.model_id.clone(),
+        },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ResolvedRoute, Router};
     use crate::profile::ProviderProfile;
-    use crate::{FailureKind, RoutingError, SessionAffinity};
+    use crate::{FailureKind, RoutePin, RoutingError, SessionAffinity};
     use model::{
         Availability, CatalogCapabilities, CatalogEntry, CatalogSource, LogicalModelId,
         ModelCatalog, ProviderType,
@@ -395,7 +292,7 @@ mod tests {
         config::RouteCandidateConfig {
             profile: profile.to_string(),
             model: model.map(str::to_string),
-            reasoning_effort: None,
+            auto: false,
         }
     }
 
@@ -404,6 +301,7 @@ mod tests {
     ) -> config::RoutingConfig {
         config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: routes
                 .iter()
                 .map(|(logical, candidates)| (logical.to_string(), candidates.clone()))
@@ -457,8 +355,8 @@ mod tests {
         catalog
     }
 
-    // Given: ピン済みセッションと、ピン先とは別の候補を宣言したルート
-    // When: ピン先の default_model がカタログ上利用可能なまま解決する
+    // Given: 後ろの候補にピンしたセッション
+    // When: 先頭の候補も利用可能なまま解決する
     // Then: ピン先のルートを再ピンなしで使い、ピンは変化しない
     #[test]
     fn resolve_uses_pinned_profile_when_available() {
@@ -466,7 +364,10 @@ mod tests {
             profile("primary", "model-a"),
             profile("secondary", "model-b"),
         ];
-        let routing = routing_config(&[("summary", vec![candidate("secondary", None)])]);
+        let routing = routing_config(&[(
+            "summary",
+            vec![candidate("secondary", None), candidate("primary", None)],
+        )]);
         let catalog = build_catalog(
             &[
                 ("model-a", Availability::Available),
@@ -477,7 +378,15 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary", "model-a");
+        affinity.pin(
+            "session-1",
+            "summary",
+            RoutePin {
+                position: 1,
+                profile: "primary".into(),
+                model: "model-a".into(),
+            },
+        );
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -491,7 +400,9 @@ mod tests {
             }
         );
         assert_eq!(
-            affinity.pinned("session-1", "summary"),
+            affinity
+                .pinned("session-1", "summary")
+                .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
             Some(("primary", "model-a")),
             "既にピン済みのため再ピンされない"
         );
@@ -517,7 +428,15 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary", "model-pinned");
+        affinity.pin(
+            "session-1",
+            "summary",
+            RoutePin {
+                position: 0,
+                profile: "primary".into(),
+                model: "model-pinned".into(),
+            },
+        );
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -551,7 +470,15 @@ mod tests {
         );
         let router = Router::new(profiles, &routing, catalog).expect("有効な構成");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary", "model-override");
+        affinity.pin(
+            "session-1",
+            "summary",
+            RoutePin {
+                position: 0,
+                profile: "primary".into(),
+                model: "model-override".into(),
+            },
+        );
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -582,7 +509,15 @@ mod tests {
         );
         let router = Router::new(profiles, &routing, catalog).expect("有効な構成");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary", "model-override");
+        affinity.pin(
+            "session-1",
+            "summary",
+            RoutePin {
+                position: 0,
+                profile: "primary".into(),
+                model: "model-override".into(),
+            },
+        );
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -590,7 +525,9 @@ mod tests {
 
         assert_eq!(resolved, failed_route("primary", "model-default"));
         assert_eq!(
-            affinity.pinned("session-1", "summary"),
+            affinity
+                .pinned("session-1", "summary")
+                .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
             Some(("primary", "model-default"))
         );
     }
@@ -788,7 +725,9 @@ mod tests {
 
         assert_eq!(resolved.profile, "primary");
         assert_eq!(
-            affinity.pinned("session-1", "summary"),
+            affinity
+                .pinned("session-1", "summary")
+                .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
             Some(("primary", "model-a")),
             "勝者がピンされる"
         );
@@ -913,206 +852,6 @@ mod tests {
         );
     }
 
-    // Given: 3 候補 [a, b, c] を宣言順に持つ論理モデルのルート
-    // When: 失敗プロファイルとして a を指定してフォールバックする / b を指定してフォールバックする
-    // Then: a の失敗時は b、b の失敗時は c が次の候補として返る
-    #[test]
-    fn fallback_same_logical_next_profile_in_order() {
-        let profiles = vec![
-            profile("a", "model-a"),
-            profile("b", "model-b"),
-            profile("c", "model-c"),
-        ];
-        let routing = routing_config(&[(
-            "summary",
-            vec![
-                candidate("a", None),
-                candidate("b", None),
-                candidate("c", None),
-            ],
-        )]);
-        let catalog = build_catalog(
-            &[
-                ("model-a", Availability::Available),
-                ("model-b", Availability::Available),
-                ("model-c", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-a"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("失敗プロファイルより後続の候補へフォールバックできる");
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "b".to_string(),
-                model_id: "model-b".to_string(),
-            }
-        );
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("b", "model-b"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("失敗プロファイルより後続の候補へフォールバックできる");
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "c".to_string(),
-                model_id: "model-c".to_string(),
-            }
-        );
-    }
-
-    // Given: 失敗プロファイルの直後候補の concrete model がカタログ上利用不可な 3 候補
-    // When: 失敗プロファイルを指定してフォールバックする
-    // Then: 利用不可候補を飛ばし、さらに次の利用可能候補が選ばれる
-    #[test]
-    fn fallback_skips_unavailable_candidates() {
-        let profiles = vec![
-            profile("a", "model-a"),
-            profile("b", "model-b"),
-            profile("c", "model-c"),
-        ];
-        let routing = routing_config(&[(
-            "summary",
-            vec![
-                candidate("a", None),
-                candidate("b", None),
-                candidate("c", None),
-            ],
-        )]);
-        let catalog = build_catalog(
-            &[
-                ("model-a", Availability::Available),
-                ("model-b", Availability::Unavailable),
-                ("model-c", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-a"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("利用可能な後続候補が 1 つ先にある");
-
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "c".to_string(),
-                model_id: "model-c".to_string(),
-            }
-        );
-    }
-
-    // Given: 同一論理モデルの候補を使い切る構成。他論理モデルとして
-    //        "aaa-other" と "zzz-other" を持つ (設定上は zzz を先に宣言)
-    // When: 同一論理モデルの失敗プロファイルでフォールバックする
-    // Then: 他の論理モデルが利用可能でも None を返す
-    #[test]
-    fn fallback_never_crosses_to_other_logical_models() {
-        let profiles = vec![
-            profile("first", "model-first"),
-            profile("aaa-profile", "model-aaa"),
-            profile("zzz-profile", "model-zzz"),
-        ];
-        let routing = routing_config(&[
-            ("summary", vec![candidate("first", None)]),
-            ("zzz-other", vec![candidate("zzz-profile", None)]),
-            ("aaa-other", vec![candidate("aaa-profile", None)]),
-        ]);
-        let catalog = build_catalog(
-            &[
-                ("model-first", Availability::Available),
-                ("model-aaa", Availability::Available),
-                ("model-zzz", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router.next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical("summary"),
-            &failed_route("first", "model-first"),
-            FailureKind::Server,
-            None,
-        );
-
-        assert_eq!(resolved, None);
-    }
-
-    // Given: 同一論理モデルに後続候補がなく、他の論理モデルの候補も利用不可な構成
-    // When: 失敗プロファイルを指定してフォールバックする
-    // Then: None を返し、アフィニティのピンは変化しない
-    #[test]
-    fn fallback_exhausted_returns_none() {
-        let profiles = vec![
-            profile("only", "model-only"),
-            profile("other", "model-other"),
-        ];
-        let routing = routing_config(&[
-            ("summary", vec![candidate("only", None)]),
-            ("other-logical", vec![candidate("other", None)]),
-        ]);
-        let catalog = build_catalog(
-            &[
-                ("model-only", Availability::Available),
-                ("model-other", Availability::Unavailable),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-        let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "only", "model-only");
-
-        let resolved = router.next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical("summary"),
-            &failed_route("only", "model-only"),
-            FailureKind::Server,
-            None,
-        );
-
-        assert!(resolved.is_none(), "利用可能候補がどこにもないなら None");
-        assert_eq!(
-            affinity.pinned("session-1", "summary"),
-            Some(("only", "model-only")),
-            "使い切り時はピンが変化しない"
-        );
-    }
-
     fn cooling_router(health: &std::sync::Arc<crate::ProviderHealth>) -> Router {
         let routing = routing_config(&[(
             "summary",
@@ -1151,7 +890,15 @@ mod tests {
         let health = std::sync::Arc::new(crate::ProviderHealth::default());
         let router = cooling_router(&health);
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary", "model-a");
+        affinity.pin(
+            "session-1",
+            "summary",
+            RoutePin {
+                position: 0,
+                profile: "primary".into(),
+                model: "model-a".into(),
+            },
+        );
         health.record_failure(
             "primary",
             "model-a",
@@ -1166,37 +913,11 @@ mod tests {
 
         assert_eq!(resolved, failed_route("secondary", "model-b"));
         assert_eq!(
-            affinity.pinned("session-1", "summary"),
+            affinity
+                .pinned("session-1", "summary")
+                .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
             Some(("secondary", "model-b"))
         );
-    }
-
-    // Given: 2 番目の候補だけがレート制限でクールダウン中
-    // When: 先頭候補の失敗からフォールバックする
-    // Then: クールダウン中の候補を飛ばして 3 番目を選ぶ
-    #[test]
-    fn next_fallback_skips_cooling_candidate() {
-        let health = std::sync::Arc::new(crate::ProviderHealth::default());
-        let router = cooling_router(&health);
-        let mut affinity = SessionAffinity::default();
-        health.record_failure(
-            "secondary",
-            "model-b",
-            FailureKind::RateLimited,
-            Some(std::time::Duration::from_secs(60)),
-            std::time::Instant::now(),
-        );
-
-        let next = router.next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical("summary"),
-            &failed_route("primary", "model-a"),
-            FailureKind::Server,
-            None,
-        );
-
-        assert_eq!(next, Some(failed_route("tertiary", "model-c")));
     }
 
     // Given: 全候補のプロファイルが認証エラーでクールダウン中 / When: 解決する
@@ -1224,348 +945,5 @@ mod tests {
             result,
             Err(RoutingError::NoAvailableCandidate("summary".into()))
         );
-    }
-
-    // Given: 2 候補を持つルートと、先頭プロファイルへピン済みのセッション
-    // When: ピン先プロファイルを失敗プロファイルとしてフォールバックする
-    // Then: 勝者となった次候補がセッションへ再ピンされる
-    #[test]
-    fn fallback_updates_affinity_pin() {
-        let profiles = vec![profile("a", "model-a"), profile("b", "model-b")];
-        let routing =
-            routing_config(&[("summary", vec![candidate("a", None), candidate("b", None)])]);
-        let catalog = build_catalog(
-            &[
-                ("model-a", Availability::Available),
-                ("model-b", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-        let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "a", "model-a");
-
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-a"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("次候補へフォールバックできる");
-
-        assert_eq!(resolved.profile, "b");
-        assert_eq!(
-            affinity.pinned("session-1", "summary"),
-            Some(("b", "model-b")),
-            "勝者が再ピンされる"
-        );
-    }
-
-    // Given: 失敗ルートの (プロファイル, 実モデル) 組が論理モデルの候補に存在しないルート
-    // When: その組を失敗ルートとしてフォールバックする
-    // Then: 失敗位置を先頭より前とみなし、最初の利用可能候補が選ばれる
-    #[test]
-    fn fallback_failed_profile_not_in_route_is_ignored() {
-        let profiles = vec![profile("a", "model-a"), profile("b", "model-b")];
-        let routing =
-            routing_config(&[("summary", vec![candidate("a", None), candidate("b", None)])]);
-        let catalog = build_catalog(
-            &[
-                ("model-a", Availability::Available),
-                ("model-b", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("ghost", "model-ghost"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("全候補が走査対象になる");
-
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "a".to_string(),
-                model_id: "model-a".to_string(),
-            }
-        );
-    }
-
-    // Given: EventBus を接続した Router と宣言順 2 候補のルート。
-    // When: 失敗プロファイルの次候補が選ばれるフォールバックを request ID 付きで実行する。
-    // Then: FallbackTriggered が from/to profile・model・failure・相関情報を保持して 1 件だけ発行される。
-    #[tokio::test]
-    async fn fallback_emits_triggered_event_with_attempt_correlation() {
-        use event_bus::{EventBus, EventKind, ProviderEvent, ProviderFailureKind};
-        use std::sync::Arc;
-
-        let profiles = vec![profile("a", "model-a"), profile("b", "model-b")];
-        let routing =
-            routing_config(&[("summary", vec![candidate("a", None), candidate("b", None)])]);
-        let catalog = build_catalog(
-            &[
-                ("model-a", Availability::Available),
-                ("model-b", Availability::Available),
-            ],
-            &[],
-        );
-        let bus = Arc::new(EventBus::new(8));
-        let mut rx = bus.subscribe();
-        let router = Router::new(profiles, &routing, catalog)
-            .expect("有効な構成で Router を構築できる")
-            .with_event_bus(Some(bus));
-        let mut affinity = SessionAffinity::default();
-
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-a"),
-                FailureKind::Timeout,
-                Some("req-1700000000000-1"),
-            )
-            .expect("次候補へフォールバックできる");
-
-        assert_eq!(resolved.profile, "b", "候補選択の意味は変わらない");
-        let event = rx.recv().await.expect("イベントを受信できる");
-        let EventKind::Provider(ProviderEvent::FallbackTriggered {
-            from_provider,
-            from_model,
-            to_provider,
-            to_model,
-            logical_model,
-            session_id,
-            failure,
-            request_id,
-        }) = event.kind
-        else {
-            panic!("FallbackTriggered イベントを期待しました: {:?}", event.kind);
-        };
-        assert_eq!(
-            (from_provider, from_model, to_provider, to_model),
-            (
-                "a".to_string(),
-                Some("model-a".to_string()),
-                "b".to_string(),
-                "model-b".to_string()
-            ),
-            "フォールバックイベントは失敗前後のプロファイルと実モデルを保持する"
-        );
-        assert_eq!(logical_model, "summary");
-        assert_eq!(session_id, "session-1");
-        assert_eq!(failure, ProviderFailureKind::Timeout);
-        assert_eq!(request_id, Some("req-1700000000000-1".to_string()));
-
-        let second = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(
-            second.is_err(),
-            "フォールバックイベントは選択 1 回につき 1 件"
-        );
-    }
-
-    // Given: 同一プロファイルに別々の model 上書きを持つ 2 候補のルート。
-    // When: 片方の (プロファイル, 実モデル) 組を失敗ルートとしてフォールバックする /
-    //       もう片方の組を失敗ルートとしてフォールバックする。
-    // Then: 失敗した組の直後にある別モデル候補が選ばれる。失敗した組そのものは
-    //       再選択されず (プロファイル名だけの一致では失敗候補を特定できない)、
-    //       後続がなければ None を返す。
-    #[test]
-    fn next_fallback_matches_failed_candidate_by_profile_and_model_pair() {
-        let profiles = vec![profile("a", "model-x")];
-        let routing = routing_config(&[(
-            "summary",
-            vec![
-                candidate("a", Some("model-x")),
-                candidate("a", Some("model-y")),
-            ],
-        )]);
-        let catalog = build_catalog(
-            &[
-                ("model-x", Availability::Available),
-                ("model-y", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-x"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("失敗した組の直後の候補へフォールバックできる");
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "a".to_string(),
-                model_id: "model-y".to_string(),
-            }
-        );
-
-        let mut affinity = SessionAffinity::default();
-        let resolved = router.next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical("summary"),
-            &failed_route("a", "model-y"),
-            FailureKind::Server,
-            None,
-        );
-        assert!(
-            resolved.is_none(),
-            "失敗した組 (a, model-y) 以降に候補はなく、失敗候補の再選択でも None でもない"
-        );
-    }
-
-    // Given: 候補ごとに異なる推論強度を持つルート (未指定の候補を含む)。
-    // When: 解決結果とフォールバック先、およびルート外の組について推論強度を引く。
-    // Then: 一致した候補の値を返し、未指定・不一致では None になる。
-    #[test]
-    fn candidate_reasoning_effort_follows_matched_candidate() {
-        let profiles = vec![profile("a", "model-default"), profile("b", "model-b")];
-        let mut first = candidate("a", Some("model-override"));
-        first.reasoning_effort = Some("high".to_string());
-        let mut third = candidate("b", None);
-        third.reasoning_effort = Some("low".to_string());
-        let routing = routing_config(&[("summary", vec![first, candidate("a", None), third])]);
-        let catalog = build_catalog(
-            &[
-                ("model-override", Availability::Available),
-                ("model-default", Availability::Available),
-                ("model-b", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-        let summary = logical("summary");
-
-        assert_eq!(
-            router.candidate_reasoning_effort(&summary, &failed_route("a", "model-override")),
-            Some("high")
-        );
-        assert_eq!(
-            router.candidate_reasoning_effort(&summary, &failed_route("a", "model-default")),
-            None,
-            "未指定の候補はプロバイダ既定"
-        );
-        assert_eq!(
-            router.candidate_reasoning_effort(&summary, &failed_route("b", "model-b")),
-            Some("low")
-        );
-        assert_eq!(
-            router.candidate_reasoning_effort(&logical("other"), &failed_route("b", "model-b")),
-            None
-        );
-    }
-
-    // Given: 同一プロファイルの model 上書き候補と既定モデル候補を宣言順に並べたルート。
-    // When: 上書きモデルの組を失敗ルートとしてフォールバックする。
-    // Then: プロファイルを変えずに既定モデル候補へフォールバックする (モデル軸のみの変化)。
-    #[test]
-    fn next_fallback_supports_model_only_fallback_within_same_profile() {
-        let profiles = vec![profile("a", "model-default")];
-        let routing = routing_config(&[(
-            "summary",
-            vec![candidate("a", Some("model-override")), candidate("a", None)],
-        )]);
-        let catalog = build_catalog(
-            &[
-                ("model-override", Availability::Available),
-                ("model-default", Availability::Available),
-            ],
-            &[],
-        );
-        let router =
-            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-        let mut affinity = SessionAffinity::default();
-
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("a", "model-override"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("同一プロファイルの既定モデル候補へフォールバックできる");
-
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "a".to_string(),
-                model_id: "model-default".to_string(),
-            }
-        );
-        assert_eq!(
-            affinity.pinned("session-1", "summary"),
-            Some(("a", "model-default")),
-            "同一プロファイル内のフォールバックでも再ピンされる"
-        );
-    }
-
-    // Given: EventBus を接続した Router だが、利用可能なフォールバック候補がどこにもない構成。
-    // When: フォールバック先を走査して None が返る。
-    // Then: 候補不在ではイベントを発行しない。
-    #[tokio::test]
-    async fn fallback_exhaustion_emits_no_event() {
-        use event_bus::EventBus;
-        use std::sync::Arc;
-
-        let profiles = vec![
-            profile("only", "model-only"),
-            profile("other", "model-other"),
-        ];
-        let routing = routing_config(&[
-            ("summary", vec![candidate("only", None)]),
-            ("other-logical", vec![candidate("other", None)]),
-        ]);
-        let catalog = build_catalog(
-            &[
-                ("model-only", Availability::Available),
-                ("model-other", Availability::Unavailable),
-            ],
-            &[],
-        );
-        let bus = Arc::new(EventBus::new(8));
-        let mut rx = bus.subscribe();
-        let router = Router::new(profiles, &routing, catalog)
-            .expect("有効な構成で Router を構築できる")
-            .with_event_bus(Some(bus));
-        let mut affinity = SessionAffinity::default();
-
-        let resolved = router.next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical("summary"),
-            &failed_route("only", "model-only"),
-            FailureKind::Server,
-            None,
-        );
-
-        assert!(resolved.is_none(), "利用可能候補がどこにもないなら None");
-        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(event.is_err(), "候補不在 (None) ではイベントを発行しない");
     }
 }

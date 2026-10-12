@@ -46,7 +46,7 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
     model.agents.worker.categories.insert(
         "quick".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("worker-quick-lm".into()),
+            models: vec![config::ChainEntryConfig::route("worker-quick-lm")],
             ..Default::default()
         },
     );
@@ -57,13 +57,14 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
         .collect();
     let routing = RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: BTreeMap::from([
             (
                 "worker".into(),
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("gpt-5.5".into()),
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             ),
             (
@@ -71,7 +72,7 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("claude-sonnet-4-5".into()),
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             ),
         ]),

@@ -14,7 +14,7 @@ fn load(directory: &std::path::Path) -> Config {
 }
 
 #[test]
-fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
+fn save_role_binding_roundtrips_models_and_category_overrides() {
     // Given: worker role と quick category に異なる binding を設定する
     let directory = tempfile::tempdir().expect("temporary directory");
     std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
@@ -22,7 +22,7 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
     let agents = AgentsConfig {
         worker: WorkerBindingConfig {
             base: RoleBindingConfig {
-                logical_model: Some("worker-model".into()),
+                models: vec![config::ChainEntryConfig::route("worker-model")],
                 preset: Some("worker-preset".into()),
                 generation: GenerationOverridesConfig {
                     temperature: Some(0.2),
@@ -32,7 +32,7 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
             categories: [(
                 "quick".into(),
                 CategoryBindingConfig {
-                    logical_model: Some("quick-model".into()),
+                    models: vec![config::ChainEntryConfig::route("quick-model")],
                     preset: Some("quick-preset".into()),
                     generation: GenerationOverridesConfig {
                         max_tokens: Some(4096),
@@ -55,7 +55,7 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
         .agents
         .binding_for("worker", None)
         .expect("worker binding");
-    assert_eq!(role.logical_model, "worker-model");
+    assert_eq!(role.head_route(), "worker-model");
     assert_eq!(role.preset.as_deref(), Some("worker-preset"));
     assert_eq!(role.generation.temperature, Some(0.2));
 
@@ -63,7 +63,7 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
         .agents
         .binding_for("worker", Some("quick"))
         .expect("worker quick binding");
-    assert_eq!(quick.logical_model, "quick-model");
+    assert_eq!(quick.head_route(), "quick-model");
     assert_eq!(quick.preset.as_deref(), Some("quick-preset"));
     assert_eq!(quick.generation.temperature, Some(0.2));
     assert_eq!(quick.generation.max_tokens, Some(4096));
@@ -77,13 +77,13 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
     let path = directory.path().join(".evorch/config.toml");
     std::fs::write(
         &path,
-        "version = 2\n\n[providers.other]\ntype = 'openai-compatible'\nbase_url = 'https://example.com/v1'\napi_key_env = 'OTHER_KEY'\nmodels = ['model-a']\ndefault_model = 'model-a'\n",
+        "version = 3\n\n[providers.other]\ntype = 'openai-compatible'\nbase_url = 'https://example.com/v1'\napi_key_env = 'OTHER_KEY'\nmodels = ['model-a']\ndefault_model = 'model-a'\n",
     )
     .expect("write initial config");
     let agents = AgentsConfig {
         worker: WorkerBindingConfig {
             base: RoleBindingConfig {
-                logical_model: Some("worker-model".into()),
+                models: vec![config::ChainEntryConfig::route("worker-model")],
                 ..RoleBindingConfig::default()
             },
             ..WorkerBindingConfig::default()
@@ -102,7 +102,7 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
             .agents
             .binding_for("worker", None)
             .expect("worker")
-            .logical_model,
+            .head_route(),
         "worker-model"
     );
 }
@@ -117,7 +117,7 @@ fn legacy_role_reasoning_effort_is_ignored_and_dropped_on_save() {
     let path = directory.path().join(".evorch/config.toml");
     std::fs::write(
         &path,
-        "version = 2\n[agents.worker.generation]\ntemperature = 0.2\nreasoning_effort = 'xhigh'\n",
+        "version = 3\n[agents.worker.generation]\ntemperature = 0.2\nreasoning_effort = 'xhigh'\n",
     )
     .expect("fixture");
 

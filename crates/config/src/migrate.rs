@@ -4,12 +4,14 @@ use crate::error::ConfigError;
 use crate::merge::deep_merge;
 use crate::types::{CURRENT_VERSION, MetricsConfig};
 
+mod chains;
+
 type MigrationResult = Result<toml::Value, ConfigError>;
 
 /// バージョン間の変換関数列。
 ///
 /// インデックス `i` の関数は v`(i + 1)` から v`(i + 2)` へ変換する。
-const MIGRATIONS: &[fn(toml::Value) -> MigrationResult] = &[migrate_v1_to_v2];
+const MIGRATIONS: &[fn(toml::Value) -> MigrationResult] = &[migrate_v1_to_v2, migrate_v2_to_v3];
 
 /// 読み込んだ 1 ファイル分の設定値を現在のスキーマへマイグレーションする。
 ///
@@ -24,6 +26,9 @@ const MIGRATIONS: &[fn(toml::Value) -> MigrationResult] = &[migrate_v1_to_v2];
 ///
 /// v1 → v2 は `[metrics]` セクションを追加する。既存の `[metrics]` 値は維持し、
 /// 未指定のキーだけを [`MetricsConfig::default`] の値で補完する。
+/// v2 → v3 はロールの `logical_model` と route 候補の `reasoning_effort` を
+/// ロールのチェーン (`models`) へ移す (ADR 0030)。`version` のないファイルも
+/// 旧形式のキーを持ちうるため、この変換は version に関わらず適用する。
 /// 変換列のインデックス `i` は v`(i + 1)` → v`(i + 2)` に対応する。
 ///
 /// # Errors
@@ -68,8 +73,11 @@ pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
     for path in remove_role_reasoning_effort(&mut migrated) {
         tracing::warn!(
             field = %path,
-            "ignoring removed config field; set reasoning_effort on routing.routes candidates"
+            "ignoring removed config field; set reasoning_effort on agents.*.models entries"
         );
+    }
+    for warning in chains::move_to_chains(&mut migrated) {
+        tracing::warn!(%warning, "migrated config to role model chains");
     }
 
     if let Some(table) = migrated.as_table_mut() {
@@ -111,9 +119,18 @@ fn migrate_v1_to_v2(mut value: toml::Value) -> Result<toml::Value, ConfigError> 
     Ok(value)
 }
 
+/// v3 の version を付ける。中身の変換は [`chains::move_to_chains`] が version に関わらず行う。
+#[allow(clippy::unnecessary_wraps)]
+fn migrate_v2_to_v3(mut value: toml::Value) -> Result<toml::Value, ConfigError> {
+    if let Some(table) = value.as_table_mut() {
+        table.insert("version".to_string(), toml::Value::Integer(3));
+    }
+    Ok(value)
+}
+
 /// ロール割り当てから廃止された `generation.reasoning_effort` を取り除き、削除したパスを返す。
 ///
-/// 推論強度は `routing.routes` の候補ごとに指定する。キーの削除だけでスキーマの
+/// 推論強度はロールのチェーンの要素ごとに指定する。キーの削除だけでスキーマの
 /// 意味が変わらないため version は据え置き、version の有無に関わらず適用する。
 fn remove_role_reasoning_effort(value: &mut toml::Value) -> Vec<String> {
     let mut removed = Vec::new();
@@ -177,7 +194,7 @@ mod tests {
 
         assert_eq!(
             migrated.get("version").and_then(toml::Value::as_integer),
-            Some(2)
+            Some(CURRENT_VERSION.into())
         );
         let metrics = migrated
             .get("metrics")
@@ -231,8 +248,13 @@ mod tests {
                 .get("reasoning_effort")
                 .is_none()
         );
-        assert_eq!(
+        assert!(
             migrated["routing"]["routes"]["worker"][0]
+                .get("reasoning_effort")
+                .is_none()
+        );
+        assert_eq!(
+            agents["worker"]["models"][0]
                 .get("reasoning_effort")
                 .and_then(toml::Value::as_str),
             Some("xhigh")

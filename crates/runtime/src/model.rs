@@ -19,6 +19,18 @@ pub struct ModelPreference {
     pub reasoning_effort: Option<String>,
 }
 
+/// The member a run pinned in one role chain, kept in run snapshots (ADR 0030).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutePinRecord {
+    /// Affinity key of the chain (role, or role and category).
+    pub chain: String,
+    /// Position in the expanded chain; re-located by profile and model if it moved.
+    pub position: usize,
+    pub profile: String,
+    pub model: String,
+}
+
 /// 1 回のモデル呼び出し (agent-loop の complete) の相関文脈。
 ///
 /// agent-loop は実行中 run の [`RunId`](crate::RunId) をここへ載せて
@@ -210,6 +222,19 @@ pub trait AgentModel: Send + Sync {
         _category: Option<&str>,
     ) -> Option<config::types::agents::ResolvedAgentBinding> {
         None
+    }
+
+    /// Chain pins the run holds, for its snapshot. Fixed models do not route.
+    fn route_pins(&self, _run_id: &str) -> Vec<RoutePinRecord> {
+        Vec::new()
+    }
+
+    /// Seeds a restored run's chain pins; the next resolution checks them as usual.
+    fn restore_route_pins(&self, _run_id: &str, _pins: &[RoutePinRecord]) {}
+
+    /// Every run's chain pins, carried over when a reconfigured model replaces this one.
+    fn route_pins_by_run(&self) -> std::collections::BTreeMap<String, Vec<RoutePinRecord>> {
+        std::collections::BTreeMap::new()
     }
 }
 

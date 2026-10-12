@@ -9,7 +9,11 @@ use model::{
     Availability, CatalogCapabilities, CatalogEntry, CatalogSource, LogicalModelId, ModelCatalog,
     ProviderType,
 };
-use routing::{FailureKind, ProviderProfile, ResolvedRoute, Router, SessionAffinity};
+use std::time::Duration;
+
+use routing::{
+    FallbackCycle, FallbackStep, ProviderProfile, ResolvedRoute, Router, SessionAffinity,
+};
 
 fn profile(name: &str, default_model: &str) -> ProviderProfile {
     let profile_config = config::ProviderProfileConfig {
@@ -32,13 +36,14 @@ fn candidate(profile: &str, model: Option<&str>) -> config::RouteCandidateConfig
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: model.map(str::to_string),
-        reasoning_effort: None,
+        auto: false,
     }
 }
 
 fn routing_config(routes: &[(&str, Vec<config::RouteCandidateConfig>)]) -> config::RoutingConfig {
     config::RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: routes
             .iter()
             .map(|(logical, candidates)| (logical.to_string(), candidates.clone()))
@@ -81,7 +86,7 @@ fn worker_quick_binding() -> config::AgentsConfig {
             categories: [(
                 "quick".to_string(),
                 config::CategoryBindingConfig {
-                    logical_model: Some("worker-quick".to_string()),
+                    models: vec![config::ChainEntryConfig::route("worker-quick")],
                     ..config::CategoryBindingConfig::default()
                 },
             )]
@@ -110,7 +115,7 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
     let binding = agents
         .binding_for("worker", Some("quick"))
         .expect("quick カテゴリのバインディングを解決できる");
-    assert_eq!(binding.logical_model, "worker-quick");
+    assert_eq!(binding.head_route(), "worker-quick");
     assert_eq!(binding.preset, None, "プリセット未指定は None のまま");
 
     let mut affinity = SessionAffinity::default();
@@ -118,7 +123,7 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
         .resolve(
             &mut affinity,
             "session-1",
-            &LogicalModelId::from(binding.logical_model.as_str()),
+            &LogicalModelId::from(binding.head_route()),
         )
         .expect("バインディングの論理モデルをルートへ解決できる");
 
@@ -130,7 +135,9 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
         }
     );
     assert_eq!(
-        affinity.pinned("session-1", "worker-quick"),
+        affinity
+            .pinned("session-1", "worker-quick")
+            .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
         Some(("profile-a", "model-quick")),
         "解決勝者のプロファイルがピンされる"
     );
@@ -139,7 +146,7 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
 // Given: worker.categories.quick のバインディングから得た論理モデル "worker-quick" を、
 //        同一実モデルを既定に持つ 2 プロファイル (profile-a, profile-b) に宣言順で
 //        振るルーティング構成
-// When: 解決して先頭候補を得た後、それを失敗ルートとしてフォールバックする
+// When: チェーンを解決して先頭候補を得た後、その失敗からフォールバックの一周を始める
 // Then: 次候補 (profile-b, model-shared) が返り実モデルは同一のまま、
 //       セッションのピンは (profile-b, model-shared) へ張り替わる
 #[test]
@@ -159,14 +166,16 @@ fn binding_driven_fallback_keeps_same_model_other_profile_as_next_candidate() {
     let binding = agents
         .binding_for("worker", Some("quick"))
         .expect("quick カテゴリのバインディングを解決できる");
-    let logical = LogicalModelId::from(binding.logical_model);
+    let chain = router
+        .chain("worker/quick", &binding.models)
+        .expect("バインディングのチェーンを展開できる");
     let mut affinity = SessionAffinity::default();
 
-    let resolved = router
-        .resolve(&mut affinity, "session-1", &logical)
+    let origin = router
+        .resolve_chain(&mut affinity, "session-1", &chain)
         .expect("宣言順先頭の候補へ解決できる");
     assert_eq!(
-        resolved,
+        chain.member(origin).target,
         ResolvedRoute {
             profile: "profile-a".to_string(),
             model_id: "model-shared".to_string(),
@@ -174,26 +183,24 @@ fn binding_driven_fallback_keeps_same_model_other_profile_as_next_candidate() {
         "同一実モデルでも宣言順先頭のプロファイルが選ばれる"
     );
 
-    let fallback = router
-        .next_fallback(
-            &mut affinity,
-            "session-1",
-            &logical,
-            &resolved,
-            FailureKind::Server,
-            None,
-        )
-        .expect("同一実モデルの別プロファイル候補へフォールバックできる");
+    let mut cycle = FallbackCycle::new(&chain, origin);
+    cycle.record_failure(origin, true, None);
+    let FallbackStep::Try(next) = cycle.next(&router, &chain, Duration::ZERO) else {
+        panic!("同一実モデルの別プロファイル候補へフォールバックできる");
+    };
     assert_eq!(
-        fallback,
+        chain.member(next).target,
         ResolvedRoute {
             profile: "profile-b".to_string(),
             model_id: "model-shared".to_string(),
         },
         "実モデルを変えずに別プロファイルへフォールバックする"
     );
+    routing::pin(&mut affinity, "session-1", &chain, next);
     assert_eq!(
-        affinity.pinned("session-1", logical.as_str()),
+        affinity
+            .pinned("session-1", "worker/quick")
+            .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
         Some(("profile-b", "model-shared")),
         "フォールバック先プロファイルとモデルが再ピンされる"
     );

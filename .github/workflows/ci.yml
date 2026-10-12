@@ -121,8 +121,8 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
-          cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
-          git diff --exit-code docs/config/evorch-config-v2.schema.json
+          cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v3.schema.json
+          git diff --exit-code docs/config/evorch-config-v3.schema.json
       # 削除省略の閾値を見直せるよう、ビルド後の使用量を残す。
       - name: Report disk usage
         if: always()

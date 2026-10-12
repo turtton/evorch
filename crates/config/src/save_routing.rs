@@ -16,7 +16,7 @@ pub fn save_routing(path: &Path, routing: &RoutingConfig) -> Result<(), ConfigEr
 /// routing セクションと agents セクションを同一ドキュメントで置換し、1回の atomic write で保存する。
 ///
 /// GUI の route rename 保存で使用する。agents 側の参照更新
-/// ([`rename_logical_model_refs`](crate::types::agents::rename_logical_model_refs)) は呼び出し側が適用済みの値を渡すこと。
+/// ([`rename_route_refs`](crate::types::agents::rename_route_refs)) は呼び出し側が適用済みの値を渡すこと。
 /// 対象セクション以外の TOML 表現 (コメントを含む) は保持する。
 pub fn save_routing_and_agents(
     path: &Path,
@@ -42,8 +42,8 @@ pub(crate) fn routing_document_table(routing: &RoutingConfig) -> Table {
             if let Some(model) = &candidate.model {
                 table.insert("model", value(model.as_str()));
             }
-            if let Some(effort) = &candidate.reasoning_effort {
-                table.insert("reasoning_effort", value(effort.as_str()));
+            if candidate.auto {
+                table.insert("auto", value(true));
             }
             tables.push(table);
         }
@@ -66,6 +66,14 @@ pub(crate) fn routing_document_table(routing: &RoutingConfig) -> Table {
             value(saturating_i64(routing.cooldown.rate_limit_secs)),
         );
         table.insert("cooldown", Item::Table(cooldown));
+    }
+    if !routing.fallback.is_default() {
+        let mut fallback = Table::new();
+        fallback.insert(
+            "max_retry_after_wait_secs",
+            value(saturating_i64(routing.fallback.max_retry_after_wait_secs)),
+        );
+        table.insert("fallback", Item::Table(fallback));
     }
     table
 }

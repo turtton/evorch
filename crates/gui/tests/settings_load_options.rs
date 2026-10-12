@@ -155,12 +155,13 @@ fn role_save_and_route_rename_write_the_user_target() {
         let (mut state, options, save_path) = fixture(temp.path(), production);
         let routing = config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: [(
                 "old".into(),
                 vec![config::RouteCandidateConfig {
                     profile: "project".into(),
                     model: None,
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             )]
             .into(),
@@ -168,19 +169,14 @@ fn role_save_and_route_rename_write_the_user_target() {
         config::save_routing(&save_path, &routing).expect("route fixture");
         state.open_role_settings();
         assert_eq!(state.role_settings().error, None);
-        state.role_settings_mut().agents.worker.base.logical_model = Some("old".into());
+        state.role_settings_mut().agents.worker.base.models =
+            vec![config::ChainEntryConfig::route("old")];
         state.submit_role_settings();
         let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
         finish(&mut harness);
         assert_eq!(harness.state().role_settings().error, None);
         assert_eq!(
-            harness
-                .state()
-                .role_settings()
-                .agents
-                .worker
-                .logical_model
-                .as_deref(),
+            harness.state().role_settings().agents.worker.head_route(),
             Some("old")
         );
         harness.state_mut().open_routing_settings();
@@ -207,7 +203,7 @@ fn role_save_and_route_rename_write_the_user_target() {
                 .contains_key("old")
         );
         let saved = config::Config::load(&options).expect("reload");
-        assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("new"));
+        assert_eq!(saved.agents.worker.head_route(), Some("new"));
         assert_user_layer_agents(&saved.agents);
     }
 }
@@ -217,7 +213,7 @@ fn user_route_rename_is_blocked_by_user_dropin_without_writing() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, options, save_path) = fixture(temp.path(), true);
     let original = format!(
-        "{}[routing.routes]\nold = [{{profile = 'project'}}]\n[agents.worker]\nlogical_model = 'old'\n",
+        "{}[routing.routes]\nold = [{{profile = 'project'}}]\n[agents.worker]\nmodels = [{{ route = 'old' }}]\n",
         std::fs::read_to_string(&save_path).expect("user config")
     );
     write_config(&save_path, &original);
@@ -227,7 +223,7 @@ fn user_route_rename_is_blocked_by_user_dropin_without_writing() {
             .as_ref()
             .expect("user")
             .join("config.d/pinned.toml"),
-        "[agents.worker]\nlogical_model = 'old'\n",
+        "[agents.worker]\nmodels = [{ route = 'old' }]\n",
     );
     state.open_routing_settings();
     state

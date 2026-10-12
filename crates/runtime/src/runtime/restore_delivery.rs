@@ -122,6 +122,9 @@ impl AgentRuntime {
             record.restorable = false;
             record.config_json = serde_json::to_string(&descriptor)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+            self.shared
+                .model
+                .restore_route_pins(&recipient.to_string(), &descriptor.route_pins);
             let config = RunConfig {
                 name: descriptor.name,
                 interactive: descriptor.interactive,

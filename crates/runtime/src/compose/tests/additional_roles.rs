@@ -8,7 +8,7 @@ fn web_researcher_binding_resolves_when_profile_preference_is_absent() {
     let binding = agents.binding_for(role_key(Role::WebResearcher), None);
     // Then: model resolution reaches the web_researcher logical model.
     assert_eq!(
-        binding.expect("web_researcher binding").logical_model,
+        binding.expect("web_researcher binding").head_route(),
         "web_researcher"
     );
 }
@@ -17,10 +17,10 @@ fn web_researcher_binding_resolves_when_profile_preference_is_absent() {
 async fn additional_roles_keep_affinity_per_run() {
     // Given: 各 role が default model とは異なる override を使うルート
     let (mut model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
-    model.agents.roles.web_researcher.logical_model = Some("worker".into());
-    model.agents.roles.planner.logical_model = Some("worker".into());
-    model.agents.roles.oracle.logical_model = Some("worker".into());
-    model.agents.roles.multimodal_looker.logical_model = Some("worker".into());
+    model.agents.roles.web_researcher.models = vec![config::ChainEntryConfig::route("worker")];
+    model.agents.roles.planner.models = vec![config::ChainEntryConfig::route("worker")];
+    model.agents.roles.oracle.models = vec![config::ChainEntryConfig::route("worker")];
+    model.agents.roles.multimodal_looker.models = vec![config::ChainEntryConfig::route("worker")];
     // When: 各 role で同じ run を二度、別 run を一度 complete する
     for role in [
         Role::WebResearcher,

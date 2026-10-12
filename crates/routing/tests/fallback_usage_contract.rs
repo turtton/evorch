@@ -1,6 +1,6 @@
 //! provider/routing 境界での usage exactly-once 契約を検証するハーネス。
 //!
-//! `Router::next_fallback` は候補の選択のみを行い usage を一切発行しない。
+//! `FallbackCycle` は候補の選択のみを行い usage を一切発行しない。
 //! usage は勝利した attempt の provider client がちょうど 1 回だけ発行する。
 //! coordinator (リトライ/フォールバックのループ) 自身はイベントバスに触れないため、
 //! バス上に流れる usage / provider イベントは provider client の発行のみで構成される。
@@ -20,7 +20,7 @@ use providers::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ProviderAuth, ProviderClient,
     ProviderError, Role, StreamEvent,
 };
-use routing::{FailureKind, ProviderProfile, Router, SessionAffinity};
+use routing::{FallbackCycle, FallbackStep, ProviderProfile, Router, SessionAffinity};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -79,7 +79,7 @@ fn candidate(profile: &str) -> config::RouteCandidateConfig {
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: None,
-        reasoning_effort: None,
+        auto: false,
     }
 }
 
@@ -112,6 +112,7 @@ fn catalog(model_ids: &[&str]) -> ModelCatalog {
 fn router(profiles: Vec<ProviderProfile>, candidates: Vec<config::RouteCandidateConfig>) -> Router {
     let routing = config::RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: [(LOGICAL.to_string(), candidates)].into_iter().collect(),
     };
     let model_ids: Vec<&str> = profiles.iter().map(|p| p.default_model.as_str()).collect();
@@ -185,27 +186,29 @@ async fn run_send_with_fallback(
     auth: &ProviderAuth,
     logical: &str,
 ) -> Result<ChatResponse, ProviderError> {
-    let logical = LogicalModelId::from(logical);
-    let mut route = router
-        .resolve(affinity, SESSION, &logical)
+    let chain = router
+        .chain(logical, &[config::ChainEntryConfig::route(logical)])
+        .expect("chain");
+    let mut position = router
+        .resolve_chain(affinity, SESSION, &chain)
         .expect("解決できる");
+    let mut cycle: Option<FallbackCycle> = None;
     loop {
+        let route = chain.member(position).target.clone();
         let client = clients
             .get(&route.profile)
             .expect("プロファイルに client がある");
         match client.send(auth, &chat_request(&route.model_id)).await {
             Ok(response) => return Ok(response),
-            Err(error) => match router.next_fallback(
-                affinity,
-                SESSION,
-                &logical,
-                &route,
-                FailureKind::from(&error),
-                None,
-            ) {
-                Some(next) => route = next,
-                None => return Err(error),
-            },
+            Err(error) => {
+                // 契約の対象は usage の発行なので、失敗した位置の再試行はさせない。
+                let cycle = cycle.get_or_insert_with(|| FallbackCycle::new(&chain, position));
+                cycle.record_failure(position, false, None);
+                match cycle.next(router, &chain, Duration::ZERO) {
+                    FallbackStep::Try(next) => position = next,
+                    FallbackStep::Wait(_) | FallbackStep::Exhausted => return Err(error),
+                }
+            }
         }
     }
 }
@@ -221,11 +224,15 @@ async fn run_stream_with_fallback(
     auth: &ProviderAuth,
     logical: &str,
 ) -> Result<Vec<StreamEvent>, ProviderError> {
-    let logical = LogicalModelId::from(logical);
-    let mut route = router
-        .resolve(affinity, SESSION, &logical)
+    let chain = router
+        .chain(logical, &[config::ChainEntryConfig::route(logical)])
+        .expect("chain");
+    let mut position = router
+        .resolve_chain(affinity, SESSION, &chain)
         .expect("解決できる");
+    let mut cycle: Option<FallbackCycle> = None;
     loop {
+        let route = chain.member(position).target.clone();
         let client = clients
             .get(&route.profile)
             .expect("プロファイルに client がある");
@@ -237,17 +244,15 @@ async fn run_stream_with_fallback(
                 }
                 return Ok(events);
             }
-            Err(error) => match router.next_fallback(
-                affinity,
-                SESSION,
-                &logical,
-                &route,
-                FailureKind::from(&error),
-                None,
-            ) {
-                Some(next) => route = next,
-                None => return Err(error),
-            },
+            Err(error) => {
+                // 契約の対象は usage の発行なので、失敗した位置の再試行はさせない。
+                let cycle = cycle.get_or_insert_with(|| FallbackCycle::new(&chain, position));
+                cycle.record_failure(position, false, None);
+                match cycle.next(router, &chain, Duration::ZERO) {
+                    FallbackStep::Try(next) => position = next,
+                    FallbackStep::Wait(_) | FallbackStep::Exhausted => return Err(error),
+                }
+            }
         }
     }
 }

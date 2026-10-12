@@ -14,6 +14,33 @@ pub struct RoutingConfig {
     /// 失敗したプロファイル・モデルを候補から外す期間。
     #[serde(skip_serializing_if = "CooldownConfig::is_default")]
     pub cooldown: CooldownConfig,
+    /// ロールのチェーンをフォールバックするときの待機設定。
+    #[serde(skip_serializing_if = "FallbackConfig::is_default")]
+    pub fallback: FallbackConfig,
+}
+
+/// チェーンのフォールバック設定 (ADR 0030)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FallbackConfig {
+    /// 一時的な失敗でプールが尽きたとき、次のプールへ進む前に Retry-After を待つ上限秒数。
+    /// これより長い Retry-After は待たずに次のプールへ進む。0 なら待たない。
+    pub max_retry_after_wait_secs: u64,
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            max_retry_after_wait_secs: 30,
+        }
+    }
+}
+
+impl FallbackConfig {
+    /// 既定値と等しいか (保存時に省略できるか)。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// 失敗後のクールダウン期間 (ADR 0030)。
@@ -45,7 +72,9 @@ impl CooldownConfig {
     }
 }
 
-/// ルートの候補 1 件分の設定。
+/// ルート (同じモデルへの経路プール) の候補 1 件分の設定。
+///
+/// 推論強度はロールのチェーンの要素 ([`crate::ChainEntryConfig`]) で指定する。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RouteCandidateConfig {
@@ -54,9 +83,9 @@ pub struct RouteCandidateConfig {
     /// モデル ID の上書き指定。省略時はプロファイルの `default_model` を使用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// この候補で送る推論強度。省略時はプロバイダ既定。モデルごとに有効な値が異なるため自由形式の文字列とする。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    /// 同じモデルの自動グルーピングで追加された候補か。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
 }
 
 #[cfg(test)]
@@ -81,16 +110,23 @@ model = "claude-opus-4-1"
         .expect("model 指定の候補を解析できる");
         assert_eq!(with_model.profile, "anthropic-main");
         assert_eq!(with_model.model.as_deref(), Some("claude-opus-4-1"));
-        assert_eq!(with_model.reasoning_effort, None);
+        assert!(!with_model.auto);
 
-        let with_effort: RouteCandidateConfig = toml::from_str(
+        let auto: RouteCandidateConfig = toml::from_str(
             r#"
 profile = "openai-main"
 model = "gpt-5"
-reasoning_effort = "high"
+auto = true
 "#,
         )
-        .expect("reasoning_effort 指定の候補を解析できる");
-        assert_eq!(with_effort.reasoning_effort.as_deref(), Some("high"));
+        .expect("auto 指定の候補を解析できる");
+        assert!(auto.auto);
+        assert!(
+            toml::from_str::<RouteCandidateConfig>(
+                "profile = \"p\"\nreasoning_effort = \"high\"\n"
+            )
+            .is_err(),
+            "推論強度は候補に置けない"
+        );
     }
 }

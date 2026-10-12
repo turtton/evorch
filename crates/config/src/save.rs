@@ -260,7 +260,9 @@ pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
                 .ok_or_else(|| {
                     invalid_field("version", "version must be a non-negative u32 integer")
                 })?;
-            if found != CURRENT_VERSION {
+            if found == CURRENT_VERSION - 1 {
+                upgrade_v2_document(&mut doc)?;
+            } else if found != CURRENT_VERSION {
                 return Err(ConfigError::UnsupportedVersion {
                     found,
                     current: CURRENT_VERSION,
@@ -273,6 +275,69 @@ pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
     }
 
     Ok(doc)
+}
+
+/// v2 の文書をその場で v3 にする (ADR 0030)。
+///
+/// 移行で値が変わる `agents` / `routing` と各ロールプロファイルの同名セクションだけを
+/// 移行後の値から書き直し、それ以外の表現 (コメントを含む) は保持する。
+fn upgrade_v2_document(doc: &mut DocumentMut) -> Result<(), ConfigError> {
+    let original = toml::from_str::<toml::value::Table>(&doc.to_string())
+        .map(toml::Value::Table)
+        .map_err(|error| ConfigError::Migration(format!("failed to parse config: {error}")))?;
+    let migrated = crate::migrate::run(original.clone())?;
+    let config: Config = migrated.clone().try_into().map_err(|error| {
+        ConfigError::Migration(format!("failed to deserialize migrated config: {error}"))
+    })?;
+    if original.get("agents") != migrated.get("agents") {
+        doc.insert(
+            "agents",
+            Item::Table(crate::save_agents::agents_document_table(&config.agents)),
+        );
+    }
+    if original.get("routing") != migrated.get("routing") {
+        doc.insert(
+            "routing",
+            Item::Table(crate::save_routing::routing_document_table(&config.routing)),
+        );
+    }
+    for (name, profile) in &config.role_profiles {
+        let section = |value: &toml::Value, key: &str| {
+            value
+                .get("role_profiles")
+                .and_then(|profiles| profiles.get(name))
+                .and_then(|profile| profile.get(key))
+                .cloned()
+        };
+        let changed_agents = section(&original, "agents") != section(&migrated, "agents");
+        let changed_routing = section(&original, "routing") != section(&migrated, "routing");
+        if !changed_agents && !changed_routing {
+            continue;
+        }
+        let Some(table) = doc
+            .get_mut("role_profiles")
+            .and_then(|profiles| profiles.get_mut(name))
+            .and_then(Item::as_table_like_mut)
+        else {
+            continue;
+        };
+        if changed_agents {
+            table.insert(
+                "agents",
+                Item::Table(crate::save_agents::agents_document_table(&profile.agents)),
+            );
+        }
+        if changed_routing {
+            table.insert(
+                "routing",
+                Item::Table(crate::save_routing::routing_document_table(
+                    &profile.routing,
+                )),
+            );
+        }
+    }
+    doc.insert("version", value(i64::from(CURRENT_VERSION)));
+    Ok(())
 }
 
 pub(crate) fn insert_profile(

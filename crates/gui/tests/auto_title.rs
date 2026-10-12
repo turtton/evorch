@@ -68,13 +68,13 @@ fn quick_category_model_preferred_else_thread_model() {
         reasoning_effort: None,
     });
     let fake = |selection| match selection {
-        TitleSelection::Quick(binding) => binding.logical_model,
+        TitleSelection::Quick(binding) => binding.head_route().to_owned(),
         TitleSelection::Thread(value) => value.unwrap().model.unwrap(),
     };
     agents.worker.categories.insert(
         "quick".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("fast-logical".into()),
+            models: vec![config::ChainEntryConfig::route("fast-logical")],
             ..Default::default()
         },
     );

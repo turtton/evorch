@@ -106,7 +106,7 @@ fn assert_field(result: Result<(), ConfigError>, expected: &str) {
 }
 
 #[test]
-fn save_into_missing_file_creates_v2_sugar_entry() {
+fn save_into_missing_file_creates_current_version_sugar_entry() {
     // Given: 設定ファイルがまだない
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
@@ -116,7 +116,7 @@ fn save_into_missing_file_creates_v2_sugar_entry() {
     // Then: 正規化した sugar が実際のロード経路で正規形になる
     let text = std::fs::read_to_string(path).unwrap();
     for fragment in [
-        "version = 2",
+        "version = 3",
         "[providers.local]",
         "type = \"openai-compatible\"",
         "api_key_env = \"LOCAL_API_KEY\"",
@@ -145,7 +145,7 @@ fn save_preserves_unrelated_tables_and_comments() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
     let path = tmp.path().join(".evorch/config.toml");
-    let original = "version = 2 # comment\n\n[routing]\nroutes = { fast = [{ profile = 'other' }] }\n\n[agents.worker]\nlogical_model = 'fast'\n\n[providers.other]\nprovider_type = 'anthropic'\ncredential = { type = 'env', var = 'OTHER_KEY' } # keep\n\n[providers.third]\nprovider_type = 'openrouter'\n";
+    let original = "version = 3 # comment\n\n[routing]\nroutes = { fast = [{ profile = 'other' }] }\n\n[agents.worker]\nmodels = [{ route = 'fast' }]\n\n[providers.other]\nprovider_type = 'anthropic'\ncredential = { type = 'env', var = 'OTHER_KEY' } # keep\n\n[providers.third]\nprovider_type = 'openrouter'\n";
     std::fs::write(&path, original).unwrap();
     // When: 新しいプロファイルだけを追加する
     save_openai_compatible_provider(&path, &input()).expect("preserving save succeeds");
@@ -160,7 +160,7 @@ fn save_same_name_profile_replaces_entry_and_drops_stale_credential() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
     let path = tmp.path().join(".evorch/config.toml");
-    std::fs::write(&path, "version = 2\n[providers.local]\ncredential = { type = 'keyring', service = 'stale-service', account = 'old' }\n").unwrap();
+    std::fs::write(&path, "version = 3\n[providers.local]\ncredential = { type = 'keyring', service = 'stale-service', account = 'old' }\n").unwrap();
     // When: 同名プロファイルを保存する
     save_openai_compatible_provider(&path, &input()).expect("replacement save succeeds");
     // Then: 古い参照が消え、指定された五つのキーだけになる
@@ -192,7 +192,7 @@ fn save_rejects_plaintext_like_api_key_env_and_leaves_file_untouched() {
         "lowercase_key",
         "1_KEY",
     ] {
-        for original in [None, Some("version = 2\n# untouched\n")] {
+        for original in [None, Some("version = 3\n# untouched\n")] {
             // Given: 不正な環境変数名と、新規または既存ファイル
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("evorch.toml");
@@ -242,8 +242,8 @@ fn save_rejects_invalid_name_base_url_models_default_model() {
 }
 
 #[test]
-fn save_refuses_non_v2_file() {
-    for version in [0, 1, 3] {
+fn save_refuses_unsupported_version_file() {
+    for version in [0, 1, 4] {
         // Given: 現行以外のバージョン
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("evorch.toml");
@@ -253,7 +253,7 @@ fn save_refuses_non_v2_file() {
         let result = save_openai_compatible_provider(&path, &input());
         // Then: 移行せず拒否する
         assert!(
-            matches!(result, Err(ConfigError::UnsupportedVersion { found, current: 2 }) if found == version),
+            matches!(result, Err(ConfigError::UnsupportedVersion { found, current: 3 }) if found == version),
             "expected UnsupportedVersion, got {result:?}"
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
@@ -283,9 +283,9 @@ fn save_rejects_invalid_existing_document_without_writing() {
         "version = '2'\n",
         "version = -1\n",
         "version = 4294967296\n",
-        "version = 2\nproviders = 5\n",
-        "version = 2\n[providers.other]\napi_key = 'secret'\n",
-        "version = 2\n[metrics]\nenabled = 'wrong-type'\n",
+        "version = 3\nproviders = 5\n",
+        "version = 3\n[providers.other]\napi_key = 'secret'\n",
+        "version = 3\n[metrics]\nenabled = 'wrong-type'\n",
     ] {
         // Given: 不正 TOML・バージョン・既存設定
         let tmp = tempfile::tempdir().unwrap();

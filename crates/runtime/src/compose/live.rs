@@ -17,12 +17,16 @@ impl SwitchableModel {
         Self(Arc::new(RwLock::new(model)))
     }
 
+    /// Swaps in a reconfigured model. Chain pins carry over (ADR 0030); cooldowns do not.
     pub fn replace(&self, model: Arc<dyn AgentModel>) {
         let previous = {
             let mut target = self
                 .0
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (run_id, pins) in target.route_pins_by_run() {
+                model.restore_route_pins(&run_id, &pins);
+            }
             std::mem::replace(&mut *target, model)
         };
         drop(previous);
@@ -135,6 +139,18 @@ impl AgentModel for SwitchableModel {
 
     fn available_profiles(&self) -> Vec<super::ProfileSummary> {
         SwitchableModel::available_profiles(self)
+    }
+
+    fn route_pins(&self, run_id: &str) -> Vec<crate::RoutePinRecord> {
+        self.current().route_pins(run_id)
+    }
+
+    fn restore_route_pins(&self, run_id: &str, pins: &[crate::RoutePinRecord]) {
+        self.current().restore_route_pins(run_id, pins);
+    }
+
+    fn route_pins_by_run(&self) -> std::collections::BTreeMap<String, Vec<crate::RoutePinRecord>> {
+        self.current().route_pins_by_run()
     }
 }
 

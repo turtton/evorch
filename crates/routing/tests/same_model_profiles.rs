@@ -9,7 +9,7 @@ use model::{
     Availability, CatalogCapabilities, CatalogEntry, CatalogSource, LogicalModelId, ModelCatalog,
     ProviderType,
 };
-use routing::{FailureKind, ProviderProfile, ResolvedRoute, Router, SessionAffinity};
+use routing::{ProviderProfile, Router, SessionAffinity};
 
 fn profile(name: &str, default_model: &str) -> ProviderProfile {
     let profile_config = config::ProviderProfileConfig {
@@ -32,13 +32,14 @@ fn candidate(profile: &str, model: Option<&str>) -> config::RouteCandidateConfig
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: model.map(str::to_string),
-        reasoning_effort: None,
+        auto: false,
     }
 }
 
 fn routing_config(routes: &[(&str, Vec<config::RouteCandidateConfig>)]) -> config::RoutingConfig {
     config::RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: routes
             .iter()
             .map(|(logical, candidates)| (logical.to_string(), candidates.clone()))
@@ -93,13 +94,23 @@ fn resolve_treats_same_model_different_profiles_as_separate_candidates() {
         "同一実モデルでも宣言順先頭のプロファイルが選ばれる"
     );
     assert_eq!(
-        affinity.pinned("session-1", "summary"),
+        affinity
+            .pinned("session-1", "summary")
+            .map(|pin| (pin.profile.as_str(), pin.model.as_str())),
         Some(("a", "model-shared")),
         "解決勝者のプロファイルがピンされる"
     );
 
     let mut affinity = SessionAffinity::default();
-    affinity.pin("session-2", "summary", "b", "model-shared");
+    affinity.pin(
+        "session-2",
+        "summary",
+        routing::RoutePin {
+            position: 1,
+            profile: "b".into(),
+            model: "model-shared".into(),
+        },
+    );
     let resolved = router
         .resolve(&mut affinity, "session-2", &LogicalModelId::from("summary"))
         .expect("ピン先プロファイルでも同一実モデルで解決できる");
@@ -114,36 +125,28 @@ fn resolve_treats_same_model_different_profiles_as_separate_candidates() {
 // When: 先頭プロファイルを失敗ルートとしてフォールバックする
 // Then: 宣言順どおり次のプロファイルへ進み、実モデルは同一のまま
 #[test]
-fn next_fallback_advances_to_same_model_on_other_profile_in_declared_order() {
+fn fallback_advances_to_same_model_on_other_profile_in_declared_order() {
     let profiles = vec![profile("a", "model-shared"), profile("b", "model-shared")];
     let routing = routing_config(&[("summary", vec![candidate("a", None), candidate("b", None)])]);
     let catalog = catalog(&["model-shared"]);
     let router =
         Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
-    let mut affinity = SessionAffinity::default();
+    let chain = router
+        .chain("summary", &[config::ChainEntryConfig::route("summary")])
+        .expect("chain");
+    let mut cycle = routing::FallbackCycle::new(&chain, 0);
+    cycle.record_failure(0, false, None);
 
-    let fallback = router
-        .next_fallback(
-            &mut affinity,
-            "session-1",
-            &LogicalModelId::from("summary"),
-            &ResolvedRoute {
-                profile: "a".to_string(),
-                model_id: "model-shared".to_string(),
-            },
-            FailureKind::Server,
-            None,
-        )
-        .expect("同一実モデルの別プロファイル候補へフォールバックできる");
+    let routing::FallbackStep::Try(position) =
+        cycle.next(&router, &chain, std::time::Duration::ZERO)
+    else {
+        panic!("同一実モデルの別プロファイル候補へフォールバックできる");
+    };
 
+    let fallback = &chain.member(position).target;
     assert_eq!(
-        (fallback.profile, fallback.model_id),
-        ("b".to_string(), "model-shared".to_string()),
+        (fallback.profile.as_str(), fallback.model_id.as_str()),
+        ("b", "model-shared"),
         "宣言順に次のプロファイルへ進み、実モデルは同一"
-    );
-    assert_eq!(
-        affinity.pinned("session-1", "summary"),
-        Some(("b", "model-shared")),
-        "フォールバック先が再ピンされる"
     );
 }

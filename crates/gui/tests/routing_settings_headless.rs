@@ -1,8 +1,6 @@
 use gui::headless::HeadlessWorkbench;
 use runtime::{AgentModel, Role};
 
-#[path = "routing_settings_headless/effort.rs"]
-mod effort;
 #[path = "routing_settings_headless/saves.rs"]
 mod saves;
 #[path = "routing_settings_headless/support.rs"]
@@ -43,8 +41,8 @@ fn route_row_keeps_users_visible_during_rename() {
         &path,
         format!(
             "{text}\n[routing.routes]\nshared = [{{profile = 'local'}}]\n\
-             [agents.explorer]\nlogical_model = 'shared'\n\
-             [agents.worker.categories.quick]\nlogical_model = 'shared'\n"
+             [agents.explorer]\nmodels = [{{ route = 'shared' }}]\n\
+             [agents.worker.categories.quick]\nmodels = [{{ route = 'shared' }}]\n"
         ),
     )
     .expect("shared bindings");
@@ -110,7 +108,7 @@ fn draft_rename_of_explicit_role_reference_does_not_warn_about_fallback() {
         &path,
         format!(
             "{text}\n[routing.routes]\nworker = [{{profile = 'local'}}]\n\
-             [agents.worker]\nlogical_model = 'worker'\n"
+             [agents.worker]\nmodels = [{{ route = 'worker' }}]\n"
         ),
     )
     .expect("route and explicit binding");
@@ -316,7 +314,7 @@ fn many_candidates_fit_geometry_matrix() {
                     config::RouteCandidateConfig {
                         profile: "local".into(),
                         model: None,
-                        reasoning_effort: None,
+                        auto: false,
                     };
                     20
                 ],
@@ -362,7 +360,7 @@ fn capture_routing_settings_png_evidence() {
         .push(config::RouteCandidateConfig {
             profile: "local".into(),
             model: Some("base".into()),
-            reasoning_effort: None,
+            auto: false,
         });
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
