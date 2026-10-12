@@ -13,8 +13,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
 use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
-use crate::{ToolError, ToolExecutionContext, ToolResult};
+use crate::{ShellJobSummary, ToolError, ToolExecutionContext, ToolResult};
 
+#[cfg(test)]
+mod handle_tests;
 mod output;
 mod process;
 #[cfg(test)]
@@ -50,6 +52,7 @@ pub(super) struct ControlArgs {
 }
 
 pub(super) struct JobLaunch {
+    pub command: String,
     pub wrapped: WrappedCommand,
     pub interactive: bool,
     pub timeout_ms: Option<u64>,
@@ -68,7 +71,11 @@ pub(super) struct EscalatedInput {
 
 #[derive(Default)]
 pub(super) struct JobRegistry {
+    // Writers hold jobs across updates to both indexes. Lock order is jobs →
+    // by_handle → allocator → job state; handle-only readers never lock jobs.
     jobs: Mutex<HashMap<String, Arc<Job>>>,
+    allocator: crate::shell_handles::HandleAllocator,
+    by_handle: Mutex<HashMap<String, Arc<Job>>>,
     events: RwLock<Option<Arc<EventBus>>>,
 }
 
@@ -93,6 +100,8 @@ struct Input {
 
 struct Job {
     id: String,
+    handle: String,
+    command: String,
     owner: String,
     call_id: Option<String>,
     thread: Option<String>,
@@ -124,6 +133,10 @@ struct Completion {
 }
 
 impl JobRegistry {
+    pub(super) fn reserve_handles(&self, next: u64) -> Result<(), ToolError> {
+        self.allocator.reserve(next)
+    }
+
     pub(super) fn set_event_bus(&self, bus: Arc<EventBus>) {
         *self
             .events
@@ -137,6 +150,7 @@ impl JobRegistry {
         launch: JobLaunch,
     ) -> Result<ToolResult, ToolError> {
         let JobLaunch {
+            command,
             wrapped,
             interactive,
             timeout_ms,
@@ -151,28 +165,7 @@ impl JobRegistry {
         let (cancel, cancel_rx) = watch::channel(false);
         let (input, input_rx) = mpsc::channel(4);
         let (changed, _) = watch::channel(0);
-        let job = Arc::new(Job {
-            id: uuid::Uuid::new_v4().to_string(),
-            owner: ctx.run_id.clone(),
-            call_id: ctx.call_id.clone(),
-            thread: ctx.thread_id.clone(),
-            state: Mutex::new(State {
-                output: LiveOutput::default(),
-                completion: None,
-                observed: false,
-                completion_notified: false,
-                artifact: None,
-                artifact_notice: None,
-                guard: None,
-                process_id: None,
-                sandbox: Some(sandbox),
-            }),
-            changed,
-            cancel,
-            input,
-            escalated,
-        });
-        {
+        let job = {
             let mut jobs = self
                 .jobs
                 .lock()
@@ -182,6 +175,10 @@ impl JobRegistry {
                     "shell job capacity reached; stop or finish an existing job before starting another",
                 ));
             }
+            let mut by_handle = self
+                .by_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if jobs.len() >= MAX_RETAINED {
                 let removable = jobs
                     .iter()
@@ -189,15 +186,43 @@ impl JobRegistry {
                     .map(|(id, _)| id.clone())
                     .min();
                 if let Some(id) = removable {
-                    jobs.remove(&id);
+                    if let Some(removed) = jobs.remove(&id) {
+                        by_handle.remove(&removed.handle);
+                    }
                 } else {
                     return Ok(ToolResult::error(
                         "shell result capacity reached; poll a finished job to observe its outcome before starting another",
                     ));
                 }
             }
+            let handle = format!("job-{}", self.allocator.allocate()?);
+            let job = Arc::new(Job {
+                id: uuid::Uuid::new_v4().to_string(),
+                handle,
+                command,
+                owner: ctx.run_id.clone(),
+                call_id: ctx.call_id.clone(),
+                thread: ctx.thread_id.clone(),
+                state: Mutex::new(State {
+                    output: LiveOutput::default(),
+                    completion: None,
+                    observed: false,
+                    completion_notified: false,
+                    artifact: None,
+                    artifact_notice: None,
+                    guard: None,
+                    process_id: None,
+                    sandbox: Some(sandbox),
+                }),
+                changed,
+                cancel,
+                input,
+                escalated,
+            });
             jobs.insert(job.id.clone(), Arc::clone(&job));
-        }
+            by_handle.insert(job.handle.clone(), Arc::clone(&job));
+            job
+        };
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let worker = Arc::clone(&job);
         // The registry owns cancellation; the task owns the process and reaping.
@@ -240,7 +265,7 @@ impl JobRegistry {
     ) -> Result<ToolResult, ToolError> {
         validate_yield(args.yield_ms, &args.action)?;
         let _ = args.cwd; // Existing jobs retain their original wrapped command.
-        let job = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&args.job_id)
+        let job = self.by_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&args.job_id)
             .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
             .ok_or_else(|| invalid("shell job is unavailable for this run (expired, restarted, or a different owner); commands are never automatically replayed"))?;
         match args.action.as_str() {
@@ -322,7 +347,7 @@ impl JobRegistry {
         ctx: &ToolExecutionContext,
         job_id: &str,
     ) -> Result<(), ToolError> {
-        let job = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(job_id)
+        let job = self.by_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(job_id)
             .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
             .ok_or_else(|| invalid("shell job is unavailable for this run (expired, restarted, or a different owner); commands are never automatically replayed"))?;
         // Subscribe before checking completion so finishing during registration
@@ -396,7 +421,18 @@ impl JobRegistry {
                 "cannot release shell handles before process teardown",
             ));
         }
-        jobs.retain(|_, job| job.owner != run_id);
+        let mut by_handle = self
+            .by_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|_, job| {
+            if job.owner == run_id {
+                by_handle.remove(&job.handle);
+                false
+            } else {
+                true
+            }
+        });
         Ok(())
     }
 
@@ -407,6 +443,23 @@ impl JobRegistry {
             .values()
             .any(|job| job.owner == run_id && job.running())
     }
+    pub(super) fn running_shell_job_summary(&self, run_id: &str) -> Option<ShellJobSummary> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|job| job.owner == run_id && job.running())
+            .min_by_key(|job| {
+                job.handle[4..]
+                    .parse::<u64>()
+                    .expect("allocated shell handle")
+            })
+            .map(|job| ShellJobSummary {
+                handle: job.handle.clone(),
+                command_summary: command_summary(&job.command),
+            })
+    }
+
     pub(super) fn unobserved(&self, run_id: &str) -> bool {
         self.jobs
             .lock()
@@ -430,13 +483,15 @@ impl JobRegistry {
                 continue;
             }
             if let Some(done) = &state.completion {
-                let mut notice =
-                    format!("Shell job completed: {}\nstatus: {}\n", job.id, done.status);
+                let mut notice = format!(
+                    "Shell job completed: {}\nstatus: {}\n",
+                    job.handle, done.status
+                );
                 if let Some(code) = done.exit_code {
                     notice.push_str(&format!("exit_code: {code}\n"));
                 }
                 notice.push_str("Use shell action poll with this job_id to retrieve its output before finishing.");
-                notices.push((job.id.clone(), notice));
+                notices.push((job.handle.clone(), notice));
                 state.completion_notified = true;
             }
         }
@@ -472,7 +527,7 @@ impl JobRegistry {
 
     pub(super) fn retain_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
         let job = self
-            .jobs
+            .by_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(job_id)
@@ -488,6 +543,18 @@ impl JobRegistry {
             }
         }
     }
+}
+
+fn command_summary(command: &str) -> String {
+    let mut summary = command.replace(['\r', '\n'], " ");
+    let mut chars = summary.char_indices();
+    if let Some((end, _)) = chars.nth(79)
+        && chars.next().is_some()
+    {
+        summary.truncate(end);
+        summary.push('…');
+    }
+    summary
 }
 
 fn invalid(detail: &str) -> ToolError {
@@ -525,7 +592,8 @@ async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
                 break;
             }
             bus.emit(Event::new(ToolEvent::ShellJobOutput {
-                job_id: job.id.clone(),
+                job_uid: Some(job.id.clone()),
+                job_id: job.handle.clone(),
                 call_id: job.call_id.clone(),
                 run_id: Some(job.owner.clone()),
                 offset,
@@ -727,7 +795,7 @@ impl Job {
         let exit_code = completion.and_then(|done| done.exit_code);
         let mut content = format!(
             "shell job: {}\nstatus: {status}\ncursor: {next_cursor}\n",
-            self.id
+            self.handle
         );
         if cursor < available_from {
             content.push_str(
@@ -746,7 +814,7 @@ impl Job {
             content.push_str(notice);
         }
         let mut result = ToolResult::success(content).with_detail(serde_json::json!({
-            "shell_job": {"job_id": self.id, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": cursor < available_from, "recoverable_after_restart": false},
+            "shell_job": {"job_id": self.handle, "job_uid": self.id, "run_id": self.owner, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": cursor < available_from, "recoverable_after_restart": false},
             "output_artifact": state.artifact.as_ref().and_then(|value| value.get("output_artifact"))
         }));
         result.is_error = matches!(status, "failed" | "timed_out" | "cancelled");

@@ -220,12 +220,16 @@ fn empty_state_body(
 
 /// Index of the last entry about each shell job; only that card previews
 /// the job's live output.
-fn latest_shell_job_entries(entries: &[TranscriptEntry]) -> std::collections::HashMap<&str, usize> {
+fn latest_shell_job_entries(
+    entries: &[TranscriptEntry],
+    jobs: &crate::model::transcript::shell_jobs::ShellJobs,
+) -> std::collections::HashMap<crate::model::transcript::shell_jobs::ShellJobKey, usize> {
     entries
         .iter()
         .enumerate()
         .filter_map(|(index, entry)| {
-            crate::panes::transcript_tool::shell_job_id(entry).map(|job| (job, index))
+            crate::panes::transcript_tool::resolved_shell_job_key(entry, jobs)
+                .map(|job| (job, index))
         })
         .collect()
 }
@@ -264,7 +268,7 @@ fn run_detail_body(
                 branch::start_versions(ui, branch, branch_action);
             }
             let entries = model.visible_entries();
-            let latest_job_entry = latest_shell_job_entries(entries);
+            let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let mut folded_until = 0;
             for (entry_idx, entry) in entries.iter().enumerate() {
                 if entry_idx < folded_until {
@@ -289,17 +293,19 @@ fn run_detail_body(
                     continue;
                 }
                 if matches!(entry, TranscriptEntry::Tool { .. }) {
-                    use crate::panes::transcript_tool::{card_len, shell_job_id, tool_card_group};
-                    folded_until = entry_idx + card_len(&entries[entry_idx..]);
+                    use crate::panes::transcript_tool::{
+                        card_len, resolved_shell_job_key, tool_card_group,
+                    };
+                    folded_until = entry_idx + card_len(&entries[entry_idx..], model.shell_jobs());
                     let group = &entries[entry_idx..folded_until];
                     let latest_for_job = group
                         .last()
-                        .and_then(shell_job_id)
-                        .is_some_and(|job| latest_job_entry.get(job) == Some(&(folded_until - 1)));
+                        .and_then(|entry| resolved_shell_job_key(entry, model.shell_jobs()))
+                        .is_some_and(|job| latest_job_entry.get(&job) == Some(&(folded_until - 1)));
                     tool_card_group(
                         ui,
                         group,
-                        pane_id,
+                        pane_id.with(("tool-entry", entry_id)),
                         crate::panes::transcript_tool::ToolCardContext {
                             repo_root,
                             jobs: model.shell_jobs(),

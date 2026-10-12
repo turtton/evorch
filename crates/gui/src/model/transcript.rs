@@ -64,6 +64,7 @@ pub enum TranscriptEntry {
         run_id: Option<String>,
     },
     Tool {
+        run_id: Option<String>,
         tool_name: String,
         call_id: String,
         input: Option<serde_json::Value>,
@@ -183,6 +184,7 @@ impl TranscriptModel {
         status: ToolStatus,
     ) {
         self.push(TranscriptEntry::Tool {
+            run_id: None,
             tool_name: tool_name.into(),
             call_id: call_id.into(),
             input: None,
@@ -284,6 +286,7 @@ impl TranscriptModel {
                 // closes the preceding response before the next answer streams.
                 self.streaming_messages.remove(run_id);
                 self.push(TranscriptEntry::Tool {
+                    run_id: run_id.clone(),
                     tool_name: tool_name.clone(),
                     call_id: call_id.clone(),
                     input: input.clone(),
@@ -299,10 +302,11 @@ impl TranscriptModel {
                 is_error,
                 output,
                 detail,
-                ..
+                run_id,
             }) => {
-                self.update_tool(
+                self.update_scoped_tool(
                 call_id,
+                run_id.as_deref(),
                 tool_name,
                 if *is_error {
                     ToolStatus::Failed
@@ -312,24 +316,32 @@ impl TranscriptModel {
                 );
                 let mut input = None;
                 if let Some(TranscriptEntry::Tool {
+                    run_id: current_run,
                     input: current_input,
                     output: current_output,
                     detail: current_detail,
                     is_error: current_is_error,
                     ..
-                }) = self.find_tool_mut(call_id) {
+                }) = self.find_scoped_tool_mut(call_id, run_id.as_deref()) {
+                    current_run.clone_from(run_id);
                     current_output.clone_from(output);
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
                     input = current_input.clone();
                 }
                 if matches!(tool_name.as_str(), "shell" | "bash") {
+                    // Legacy details lack ownership; the event envelope still has it.
+                    let mut scoped_detail = detail.clone();
+                    if let Some(state) = scoped_detail.as_mut().and_then(|detail| detail.get_mut("shell_job")) {
+                        state["run_id"] = serde_json::json!(run_id);
+                    }
                     self.shell_jobs
-                        .apply_result(input.as_ref(), output.as_deref(), detail.as_ref());
+                        .apply_result(input.as_ref(), output.as_deref(), scoped_detail.as_ref());
                 }
             }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
                 job_id,
+                job_uid,
                 run_id,
                 offset,
                 chunk,
@@ -337,8 +349,7 @@ impl TranscriptModel {
                 exit_code,
                 ..
             }) => self.shell_jobs.apply_live(
-                job_id,
-                run_id.as_deref(),
+                shell_jobs::ShellJobKey::new(run_id.as_deref(), job_id, job_uid.as_deref()),
                 *offset,
                 chunk,
                 status,
@@ -545,6 +556,42 @@ impl TranscriptModel {
         }
     }
 
+    fn update_scoped_tool(
+        &mut self,
+        call_id: &str,
+        run_id: Option<&str>,
+        tool_name: &str,
+        status: ToolStatus,
+    ) {
+        if let Some(TranscriptEntry::Tool {
+            status: current, ..
+        }) = self.find_scoped_tool_mut(call_id, run_id)
+        {
+            *current = status;
+        } else {
+            self.push(TranscriptEntry::Tool {
+                run_id: run_id.map(str::to_owned),
+                tool_name: tool_name.to_owned(),
+                call_id: call_id.to_owned(),
+                input: None,
+                output: None,
+                detail: None,
+                is_error: false,
+                status,
+            });
+        }
+    }
+
+    fn find_scoped_tool_mut(
+        &mut self,
+        call_id: &str,
+        run: Option<&str>,
+    ) -> Option<&mut TranscriptEntry> {
+        self.entries.iter_mut().rev().find(|entry| matches!(entry,
+            TranscriptEntry::Tool { call_id: id, run_id, .. } if id == call_id && run_id.as_deref() == run
+        ))
+    }
+
     fn find_tool_mut(&mut self, call_id: &str) -> Option<&mut TranscriptEntry> {
         self.entries.iter_mut().find(
             |entry| matches!(entry, TranscriptEntry::Tool { call_id: id, .. } if id == call_id),
@@ -731,6 +778,7 @@ mod tests {
         assert_eq!(
             model.entries()[0],
             TranscriptEntry::Tool {
+                run_id: None,
                 tool_name: "read".into(),
                 call_id: "c1".into(),
                 input: None,

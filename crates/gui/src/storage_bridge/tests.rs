@@ -125,6 +125,7 @@ fn live_shell_output_is_not_persisted() {
     let mut bridge = StorageBridge::new(storage.handle(), "session");
     bridge
         .handle_event(&Event::new(event_bus::ToolEvent::ShellJobOutput {
+            job_uid: None,
             job_id: "job".into(),
             call_id: None,
             run_id: Some("run".into()),

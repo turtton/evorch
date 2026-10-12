@@ -140,6 +140,7 @@ impl AgentRuntime {
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
         let restored = RestoredState::for_conversation(&record)?;
+        self.reserve_restored_shell_handles(run_id, &restored)?;
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
             match (pending.trusted_request.as_deref(), prompt) {
@@ -388,6 +389,9 @@ impl AgentRuntime {
         };
         config.name = Some(name);
         let run_id = self.shared.run_ids.next();
+        if let Some(restored) = &restored {
+            self.reserve_restored_shell_handles(run_id, restored)?;
+        }
         if let (Some(source), Some(restored)) = (restored_source, restored.as_ref()) {
             self.inherit_user_questions(source, run_id, &restored.messages)
                 .map_err(|reason| RuntimeError::RunRestoreFailed {

@@ -16,7 +16,7 @@ use crate::error::ToolError;
 use crate::executor::ToolExecutionContext;
 use crate::output::Capture;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool, ToolExecutionMode};
+use crate::tool::{Permissions, ShellJobSummary, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 use crate::tools::shell_escalation::{
     EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
@@ -267,7 +267,7 @@ impl Tool for Shell {
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
                 "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start with this field to return an async job handle; omit it for synchronous completion. Start/stop: wait for completion or the specified deadline, ignoring intermediate output. Poll/stdin: return early on new output or completion. 0 returns immediately; omitted control yields default to 0. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
-                "job_id": {"type":"string", "minLength":1, "description":"ID returned by this run's asynchronous shell start."},
+                "job_id": {"type":"string", "minLength":1, "description":"Handle returned by this run's asynchronous shell start (for example, job-1)."},
                 "cursor": {"type":"integer", "minimum":0, "default":0, "description":"Returned output cursor, in redacted UTF-8 bytes. Older live output may expire."},
                 "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},
                 "close_stdin": {"type":"boolean", "default":false, "description":"stdin only: close pipe stdin or send PTY EOF after writing."}
@@ -315,6 +315,10 @@ impl Tool for Shell {
             Some(ShellEscalation { gate, unsandboxed });
     }
 
+    fn reserve_shell_job_handles(&self, next: u64) -> Result<(), ToolError> {
+        self.jobs.reserve_handles(next)
+    }
+
     fn cancel_shell_jobs(&self, run_id: &str) {
         self.jobs.cancel(run_id);
     }
@@ -324,6 +328,10 @@ impl Tool for Shell {
     fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.release(run_id)
     }
+    fn running_shell_job_summary(&self, run_id: &str) -> Option<ShellJobSummary> {
+        self.jobs.running_shell_job_summary(run_id)
+    }
+
     fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.jobs.running(run_id)
     }
@@ -412,7 +420,7 @@ impl Tool for Shell {
                 }
             }
         }
-        let shell_args = vec!["-c".to_string(), command];
+        let shell_args = vec!["-c".to_string(), command.clone()];
         for verdict in [
             self.contract.evaluate(&args.command, &args.args),
             self.contract.evaluate("sh", &shell_args),
@@ -517,6 +525,7 @@ impl Tool for Shell {
                 .start(
                     ctx,
                     jobs::JobLaunch {
+                        command,
                         wrapped,
                         interactive: args.interactive,
                         timeout_ms: args.timeout_ms,

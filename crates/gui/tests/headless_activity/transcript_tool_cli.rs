@@ -4,6 +4,7 @@ use gui::model::transcript::{ToolStatus, TranscriptEntry};
 
 fn harness(tool: &str, input: serde_json::Value, output: &str) -> Harness<'static> {
     let entry = TranscriptEntry::Tool {
+        run_id: None,
         tool_name: tool.into(),
         call_id: "cli-test".into(),
         input: Some(input),

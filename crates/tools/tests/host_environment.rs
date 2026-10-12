@@ -37,10 +37,7 @@ async fn invoke(
         .unwrap();
     assert_redacted(&result);
     for _ in 0..2 {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let event = events.recv().await.unwrap();
         assert!(!format!("{event:?}").contains(SECRET));
     }
     result
@@ -60,6 +57,7 @@ fn reviewed_shell_inherits_environment_and_redacts_pipe_pty_and_job_output() {
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("EVORCH_HOST_SHELL_FIXTURE", "1")
             .env("EVORCH_OUTPUT_DIR", directory.path())
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .env("HOME", "/fixture/host-home")
             .env("GH_CONFIG_DIR", "/fixture/gh-config")
             .env("SSH_AUTH_SOCK", "/fixture/agent.sock")

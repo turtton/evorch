@@ -22,13 +22,27 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   1,800,000 ms (30 minutes); other yields remain capped at 60,000 ms.
   A job belongs to its launching run and retains its sandbox and cwd. It is not
   a durable task and cannot survive process restart.
+- Shell control uses short `job-N` handles. Internal UUIDs remain in GUI events
+  and result details; provider messages contain only the short handle. Numbers
+  are allocated durably under the user config directory in `shell-job-handles/`
+  and are shared across executors and processes. Incomplete, corrupt, or unwritable
+  state fails closed: do not delete or roll back this directory to recover it.
+  Restoring a conversation reserves handles from its complete saved history and
+  compaction summaries before making that history live, without rewriting the
+  provider prefix. History may advance the next-number counter only as far as
+  `u32::MAX`; a larger reservation is allowed only when the counter has already
+  reached it. Normal allocation retains its full `u64` range, so arbitrary text
+  cannot reserve its remaining capacity. Rejected history leaves existing state
+  untouched. GUI logs and cards use run, handle, and internal UUID together
+  so historical instances cannot attach to another job's output.
 - At most 8 running jobs / 32 retained handles per executor registry, 64 KiB live output per job, and
   an 8 MiB output artifact bound resource usage. Large output uses the existing
   private `/var/tmp` artifact facility. Truncation and the file path remain visible.
   An async job defaults to a one-hour lifetime unless a timeout is supplied.
 - Process groups are stopped and reaped before releasing the workspace snapshot
   lease. Read tools may run while a job runs; conflicting writes report a useful
-  error instead of waiting on the same run's lease. The model must observe each
+  error with the occupying handle and command summary (at most 80 characters)
+  instead of waiting on the same run's lease. The model must observe each
   terminal result before declaring completion. Run completion is published after
   process drain, final checkpoint and workspace teardown. Only then may the same
   run ID be reused; completed job handles can be released without losing persisted

@@ -50,6 +50,7 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
         (
             Event::new(event),
             TranscriptEntry::Tool {
+                run_id: None,
                 tool_name: tool_name.into(),
                 call_id: call_id.clone(),
                 input: None,

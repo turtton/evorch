@@ -545,6 +545,7 @@ mod tests {
         assert_eq!(
             registry.run("run-1").expect("run transcript").entries(),
             &[TranscriptEntry::Tool {
+                run_id: Some("run-1".into()),
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 input: None,
@@ -647,6 +648,7 @@ mod tests {
             assert_eq!(
                 registry.run(run_id).expect("run transcript").entries(),
                 &[TranscriptEntry::Tool {
+                    run_id: Some(run_id.into()),
                     tool_name: format!("tool-{run_id}"),
                     call_id: format!("call-{run_id}"),
                     input: None,

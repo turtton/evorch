@@ -430,7 +430,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Reveal `job_id` in the shell jobs pane, opening it in the tall side
     /// column so the log keeps the conversation visible.
-    pub fn open_shell_jobs_tab(&mut self, job_id: String) {
+    pub fn open_shell_jobs_tab(
+        &mut self,
+        job_id: crate::model::transcript::shell_jobs::ShellJobKey,
+    ) {
         use workspace_ui::{Panel, PanelId, PanelKind};
         let id = PanelId::new("shell-jobs-main");
         self.panels.entry(id.clone()).or_insert_with(|| Panel {

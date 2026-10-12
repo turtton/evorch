@@ -116,6 +116,7 @@ impl AgentRuntime {
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
             let mut restored = RestoredState::from_record(&record)?;
+            self.reserve_restored_shell_handles(recipient, &restored)?;
             descriptor.restorable = false;
             descriptor.non_restorable_reason = Some("snapshot_consumed".into());
             record.restorable = false;

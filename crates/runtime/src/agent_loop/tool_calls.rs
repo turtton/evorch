@@ -675,7 +675,19 @@ impl LoopState {
                                     .is_some_and(|p| p.fs_write)
                                 && self.shared.executor.has_running_shell_jobs(&ctx.run_id)
                             {
-                                completed.push((index,id,name,input,ReadyCall::Rejected(ToolResult::error("A shell job still owns this workspace. Poll or stop it before another mutation."))));
+                                let message = self.shared.executor
+                                    .running_shell_job_summary(&ctx.run_id)
+                                    .map_or_else(
+                                        || "A shell job still owns this workspace. Poll or stop it before another mutation.".to_owned(),
+                                        |job| format!("A shell job still owns this workspace: {} ({}). Poll or stop it before another mutation.", job.handle, job.command_summary),
+                                    );
+                                completed.push((
+                                    index,
+                                    id,
+                                    name,
+                                    input,
+                                    ReadyCall::Rejected(ToolResult::error(message)),
+                                ));
                                 continue;
                             }
                             let mut cancel = self.channels.cancel_rx.clone();
