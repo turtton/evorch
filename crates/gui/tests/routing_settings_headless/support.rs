@@ -63,8 +63,7 @@ pub(super) fn load_options(root: &std::path::Path) -> config::LoadOptions {
     }
 }
 
-/// Dispatches a queued click first, so a save it starts is waited for. A hung
-/// save is left to nextest's slow-timeout.
+/// Dispatches a queued click first, so a save it starts is waited for.
 pub(super) fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
     harness.step();
     while harness.state().routing_settings().is_saving() {

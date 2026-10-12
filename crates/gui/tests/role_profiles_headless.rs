@@ -81,8 +81,6 @@ fn fixture(
     (HeadlessWorkbench::new(state, [1200.0, 900.0]), model)
 }
 
-/// Steps until every settings job lands. A hung job is left to nextest's
-/// slow-timeout.
 fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
     while harness.state().role_settings().is_saving()
         || harness.state().routing_settings().is_saving()
