@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use gui::model::project_dialog::ProjectDialog;
 use gui::model::role_profiles::RoleProfileAction;
@@ -82,13 +81,13 @@ fn fixture(
     (HeadlessWorkbench::new(state, [1200.0, 900.0]), model)
 }
 
+/// Steps until every settings job lands. A hung job is left to nextest's
+/// slow-timeout.
 fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
-    let deadline = Instant::now() + Duration::from_secs(10);
     while harness.state().role_settings().is_saving()
         || harness.state().routing_settings().is_saving()
         || harness.state().project_role_profile_pending()
     {
-        assert!(Instant::now() < deadline, "settings job timed out");
         harness.step();
         std::thread::yield_now();
     }
