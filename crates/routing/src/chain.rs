@@ -48,6 +48,20 @@ impl Chain {
         &self.members[position]
     }
 
+    /// `keep` を満たすメンバーだけを残したチェーン。プールの境界とキーは保つ。
+    #[must_use]
+    pub fn filtered(&self, keep: impl Fn(&ChainMember) -> bool) -> Self {
+        Self {
+            key: self.key.clone(),
+            members: self
+                .members
+                .iter()
+                .filter(|member| keep(member))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// (プロファイル, 具体モデル) が一致する最初のメンバーの位置。
     pub fn position_of(&self, profile: &str, model: &str) -> Option<usize> {
         self.members

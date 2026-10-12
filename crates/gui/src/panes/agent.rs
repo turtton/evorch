@@ -534,6 +534,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
                 event_bus::CompactionReason::Automatic => "automatic",
                 event_bus::CompactionReason::Manual => "manual",
                 event_bus::CompactionReason::Agent => "agent",
+                event_bus::CompactionReason::ModelSwitch => "model switch",
             };
             format!(
                 "Compaction ({reason}): {estimated_tokens_before} → {estimated_tokens_after} tokens\nrange {compacted_range_start}..{compacted_range_end}; threshold {threshold}; context window {context_window_tokens}\ncheckpoint {checkpoint_id}\n{summary}"

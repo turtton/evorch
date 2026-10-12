@@ -57,6 +57,7 @@ pub(crate) fn agents_document_table(agents: &AgentsConfig) -> Table {
         ("planner", &agents.roles.planner),
         ("oracle", &agents.roles.oracle),
         ("multimodal_looker", &agents.roles.multimodal_looker),
+        ("compactor", &agents.roles.compactor),
     ] {
         insert_binding(&mut roles, name, binding);
     }

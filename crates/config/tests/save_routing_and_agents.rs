@@ -105,6 +105,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         &mut agents.roles.planner,
         &mut agents.roles.oracle,
         &mut agents.roles.multimodal_looker,
+        &mut agents.roles.compactor,
     ] {
         *role = binding.clone();
     }

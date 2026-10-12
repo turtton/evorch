@@ -81,7 +81,13 @@ const SELF_IMPROVEMENT_KEYS: &[&str] = &[
     "collect_lessons",
 ];
 const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer", "roles"];
-const ADDITIONAL_ROLE_KEYS: &[&str] = &["web_researcher", "planner", "oracle", "multimodal_looker"];
+const ADDITIONAL_ROLE_KEYS: &[&str] = &[
+    "web_researcher",
+    "planner",
+    "oracle",
+    "multimodal_looker",
+    "compactor",
+];
 const RULES_KEYS: &[&str] = &[
     "context_window_tokens",
     "response_headroom_tokens",

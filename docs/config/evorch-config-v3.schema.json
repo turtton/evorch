@@ -19,6 +19,9 @@
           "generation": {}
         },
         "roles": {
+          "compactor": {
+            "generation": {}
+          },
           "multimodal_looker": {
             "generation": {}
           },
@@ -218,6 +221,13 @@
     "AdditionalRoleBindings": {
       "type": "object",
       "properties": {
+        "compactor": {
+          "description": "要約 (compaction) にだけ使うチェーン。agent としては起動しない。\n`models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
@@ -274,6 +284,9 @@
         "roles": {
           "$ref": "#/$defs/AdditionalRoleBindings",
           "default": {
+            "compactor": {
+              "generation": {}
+            },
             "multimodal_looker": {
               "generation": {}
             },
@@ -1191,6 +1204,9 @@
               "generation": {}
             },
             "roles": {
+              "compactor": {
+                "generation": {}
+              },
               "multimodal_looker": {
                 "generation": {}
               },

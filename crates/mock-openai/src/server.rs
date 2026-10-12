@@ -119,6 +119,17 @@ impl StreamingMockOpenAi {
         )
     }
 
+    /// Like [`Self::spawn_with_prompt_cache`], listing `models` instead of `mock-model`.
+    ///
+    /// # Panics
+    /// Panics if the OS cannot create the listener or accept thread.
+    pub fn spawn_with_prompt_cache_models(
+        responses: Vec<ScriptedResponse>,
+        models: Vec<String>,
+    ) -> Self {
+        Self::spawn_internal(responses, WriteMode::default(), models, true)
+    }
+
     /// Starts a fixture with the selected SSE write strategy.
     ///
     /// # Panics

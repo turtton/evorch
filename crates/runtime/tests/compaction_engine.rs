@@ -269,7 +269,8 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
 #[tokio::test]
 async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event() {
     // Given: provider replies remain keyed by the original goal while the summarizer's own
-    // first User message selects a failing summary script
+    // first User message selects a failing summary script, and the structural fallback is
+    // truncated to nothing, so no summary can be produced
     let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
         reason: "summary unavailable".to_string(),
     })]));
@@ -285,6 +286,7 @@ async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event
     let settings = CompactionConfig {
         context_window_tokens: 1_000_000,
         keep_recent_tokens: 1,
+        max_summary_bytes: 0,
         summarizer: SummarizerKind::Model,
         ..CompactionConfig::default()
     };

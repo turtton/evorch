@@ -25,6 +25,7 @@ mod official_compaction;
 mod preference;
 mod speed;
 mod structured;
+mod switch;
 
 #[derive(Clone)]
 struct StubClient {

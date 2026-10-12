@@ -33,6 +33,14 @@ pub trait ProviderClient: Send + Sync {
         None
     }
 
+    /// 公式 compaction の結果 ([`crate::ContentBlock::Compaction`]) を履歴として再送できるか。
+    ///
+    /// 既定では自前の [`ProviderClient::compactor`] を持つ wire だけが再送できる。
+    /// それ以外の wire はこのブロックを捨てるかエラーにするため、送る前に要約し直す。
+    fn replays_compaction(&self) -> bool {
+        self.compactor().is_some()
+    }
+
     /// このクライアントが対応する機能フラグを返す。
     fn capabilities(&self) -> ProviderCapabilities;
 

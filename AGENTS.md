@@ -159,6 +159,10 @@ when focused local cache validation is needed.
 - A successful compaction is an explicit one-request history-replacement
   boundary. Its system/tools remain stable, and later turns must preserve the
   new prefix. A checkpoint-looking string alone is not permission to reset.
+- A role-chain model switch is also an explicit boundary: the cache restarts on
+  the new member, the re-summary or compaction prepared for it is that
+  boundary's one history replacement, and later turns must preserve the new
+  member's prefix.
 - Cache-affecting features must extend the end-to-end scenarios for their
   affected paths. Keep the input-derived mock cache and independent wire-prefix
   assertions; fixed high cached-token fixtures alone cannot prove preservation.

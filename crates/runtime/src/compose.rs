@@ -210,6 +210,8 @@ pub struct RoutedModel {
     admission_routes: Vec<routing::ResolvedRoute>,
     /// フォールバックの一周で Retry-After を待つ上限。
     max_retry_after_wait: std::time::Duration,
+    /// 設定で決まる context window。キーは `profile/model` とモデル ID。
+    configured_windows: BTreeMap<String, u64>,
     /// Configured effort choices by profile, then model ID.
     effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     verification:
@@ -251,6 +253,7 @@ impl RoutedModel {
             max_retry_after_wait: std::time::Duration::from_secs(
                 config::FallbackConfig::default().max_retry_after_wait_secs,
             ),
+            configured_windows: BTreeMap::new(),
             effort_levels: BTreeMap::new(),
             verification: tokio::sync::OnceCell::new(),
             codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
@@ -296,6 +299,27 @@ impl RoutedModel {
         category: Option<&str>,
         requires_tools: bool,
     ) -> Result<(config::types::agents::ResolvedAgentBinding, ChainChoice), RuntimeError> {
+        self.resolve_binding_in(
+            &mut self
+                .affinity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            session_id,
+            role,
+            category,
+            requires_tools,
+        )
+    }
+
+    /// [`Self::resolve_binding`] を、指定したアフィニティ上で行う。
+    fn resolve_binding_in(
+        &self,
+        affinity: &mut SessionAffinity,
+        session_id: &str,
+        role: Role,
+        category: Option<&str>,
+        requires_tools: bool,
+    ) -> Result<(config::types::agents::ResolvedAgentBinding, ChainChoice), RuntimeError> {
         let binding = self
             .agents
             .binding_for(role_key(role), category)
@@ -304,18 +328,90 @@ impl RoutedModel {
         let resolved = router
             .chain(chain_key(role, category), &binding.models)
             .and_then(|chain| {
-                let position = router.resolve_chain(
-                    &mut self
-                        .affinity
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                    session_id,
-                    &chain,
-                )?;
+                let position = router.resolve_chain(affinity, session_id, &chain)?;
                 Ok(ChainChoice { chain, position })
             })
             .map_err(|error| route_resolution_error(error, role, category, &binding.models))?;
         Ok((binding, resolved))
+    }
+
+    /// 要約に使うメンバーを選ぶ (ADR 0030)。
+    ///
+    /// `agents.roles.compactor` のチェーンがあればそれを、なければ実行中ロールのチェーンを使い、
+    /// context window が入力より大きいメンバーだけを残す。run のピン先が残っていればそこから
+    /// 始めるが、要約の結果でピンは動かさない。
+    fn resolve_summary_invocation(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<ResolvedInvocation, RuntimeError> {
+        let category = invocation.category.as_deref();
+        let compactor = &self.agents.roles.compactor;
+        let (key, models, generation) = if compactor.models.is_empty() {
+            let binding = self
+                .agents
+                .binding_for(role_key(role), category)
+                .map_err(model_error)?;
+            (
+                chain_key(role, category),
+                binding.models,
+                binding.generation,
+            )
+        } else {
+            (
+                "compactor".to_owned(),
+                compactor.models.clone(),
+                compactor.generation.clone(),
+            )
+        };
+        let needed = crate::compaction::estimator::estimate_tokens(messages)
+            .saturating_add(crate::compaction::estimator::estimate_tool_tokens(tools));
+        let router = self.router_for(!tools.is_empty());
+        let mut scratch = self
+            .affinity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let choice = router
+            .chain(key, &models)
+            .map(|chain| {
+                chain.filtered(|member| {
+                    self.context_window(&member.target)
+                        .is_none_or(|window| window > needed)
+                })
+            })
+            .and_then(|chain| {
+                let position = router.resolve_chain(&mut scratch, &invocation.run_id, &chain)?;
+                Ok(ChainChoice { chain, position })
+            })
+            .map_err(|error| route_resolution_error(error, role, category, &models))?;
+        let member = choice.chain.member(choice.position);
+        Ok(ResolvedInvocation {
+            route: member.target.clone(),
+            reasoning_effort: member.reasoning_effort.clone(),
+            generation,
+            chain: Some(choice),
+            pin_on_success: false,
+            pinned_before: None,
+        })
+    }
+
+    /// 具体モデルの context window。設定を優先し、なければカタログを見る。不明なら `None`。
+    fn context_window(&self, route: &routing::ResolvedRoute) -> Option<u64> {
+        let (base_model_id, _) = config::types::provider::parse_model_speed(&route.model_id);
+        self.configured_windows
+            .get(&format!("{}/{base_model_id}", route.profile))
+            .or_else(|| self.configured_windows.get(base_model_id))
+            .copied()
+            .or_else(|| {
+                self.router
+                    .catalog()
+                    .get(base_model_id)
+                    .map(|entry| entry.context_window)
+            })
+            .filter(|window| *window > 0)
     }
 }
 
@@ -361,9 +457,20 @@ impl RoutedModel {
                     generation: config::GenerationOverridesConfig::default(),
                     reasoning_effort: preference.reasoning_effort.clone(),
                     chain: None,
+                    pin_on_success: false,
+                    pinned_before: None,
                 }
             }
             None => {
+                let pinned_before = self
+                    .affinity
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pinned(
+                        &invocation.run_id,
+                        &chain_key(role, invocation.category.as_deref()),
+                    )
+                    .map(|pin| (pin.profile.clone(), pin.model.clone()));
                 let (binding, choice) = self.resolve_binding(
                     &invocation.run_id,
                     role,
@@ -376,6 +483,8 @@ impl RoutedModel {
                     reasoning_effort: member.reasoning_effort.clone(),
                     generation: binding.generation,
                     chain: Some(choice),
+                    pin_on_success: true,
+                    pinned_before,
                 }
             }
         })
@@ -427,12 +536,24 @@ impl RoutedModel {
         output_schema: Option<&providers::JsonSchema>,
         benchmark: Option<&crate::benchmark::BenchmarkModelSettings>,
     ) -> Result<ChatResponse, RuntimeError> {
+        let summary = invocation.purpose == event_bus::RequestPurpose::Compaction
+            && invocation.model_preference.is_none();
         let ResolvedInvocation {
             mut route,
             generation,
             mut reasoning_effort,
             chain,
-        } = self.resolve_invocation(invocation, role, tools)?;
+            pin_on_success,
+            pinned_before,
+        } = if summary {
+            self.resolve_summary_invocation(invocation, role, messages, tools)?
+        } else {
+            self.resolve_invocation(invocation, role, tools)?
+        };
+        let carries_compaction = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(block, providers::ContentBlock::Compaction { .. }));
         let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
         let mut position = chain.as_ref().map(|choice| choice.position);
         let chain = chain.map(|choice| choice.chain);
@@ -502,6 +623,35 @@ impl RoutedModel {
                     "candidate cannot preserve tool calling",
                 ));
             }
+            if invocation.purpose == event_bus::RequestPurpose::Agent {
+                // A switch is a cache boundary (ADR 0030): the agent loop re-summarizes a
+                // checkpoint the target cannot replay and, knowing every configured window,
+                // compacts for a smaller one before the request is sent again.
+                let resummarize = carries_compaction && !provider.client.replays_compaction();
+                let switching = pinned_before.as_ref().is_some_and(|(profile, model)| {
+                    *profile != route.profile || *model != route.model_id
+                });
+                if resummarize || switching {
+                    if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
+                        routing::pin(
+                            &mut self
+                                .affinity
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &invocation.run_id,
+                            chain,
+                            position,
+                        );
+                    }
+                    tracing::info!(run_id = %invocation.run_id, profile = %route.profile,
+                        model = %route.model_id, resummarize,
+                        "preparing the context before switching models");
+                    return Err(RuntimeError::ModelSwitch {
+                        selected: format!("{}/{}", route.profile, route.model_id),
+                        resummarize,
+                    });
+                }
+            }
             let mut request = ChatRequest {
                 output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
@@ -527,7 +677,9 @@ impl RoutedModel {
             let result = structured::send(provider, &mut request, bus).await;
             let error = match result {
                 Ok(response) => {
-                    if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
+                    if let (true, Some(chain), Some(position)) =
+                        (pin_on_success, chain.as_ref(), position)
+                    {
                         routing::pin(
                             &mut self
                                 .affinity
@@ -778,6 +930,21 @@ impl AgentModel for RoutedModel {
             .unwrap_or_else(|_| format!("unresolved:{}", binding.head_route()))
     }
 
+    fn selected_model_for_run(&self, run_id: &str, role: Role, category: Option<&str>) -> String {
+        let mut scratch = self
+            .affinity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match self.resolve_binding_in(&mut scratch, run_id, role, category, false) {
+            Ok((_, choice)) => {
+                let route = &choice.chain.member(choice.position).target;
+                format!("{}/{}", route.profile, route.model_id)
+            }
+            Err(_) => self.selected_model(role, category),
+        }
+    }
+
     fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
         let (_, choice) = self
             .resolve_binding("runtime-selected-model", role, category, false)
@@ -879,6 +1046,10 @@ struct ResolvedInvocation {
     reasoning_effort: Option<String>,
     /// The role's chain and selected member; `None` for an explicit selection.
     chain: Option<ChainChoice>,
+    /// Whether the member that answers becomes the run's pin; summaries leave it alone.
+    pin_on_success: bool,
+    /// The run's pinned (profile, model) before this request, to detect a switch.
+    pinned_before: Option<(String, String)>,
 }
 
 /// A role's expanded chain and the member chosen for this request.
@@ -963,6 +1134,31 @@ mod structured;
 mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};
 
+/// Windows fixed by configuration: `[compaction.model_overrides]`, then each model's
+/// manual or preset window. The catalog and provider listings fill in the rest.
+fn configured_windows(config: &config::Config) -> BTreeMap<String, u64> {
+    let mut windows = config.compaction.model_overrides.clone();
+    for (name, profile) in &config.providers {
+        for entry in profile.models.iter().filter(|entry| entry.enabled) {
+            let resolved = crate::model_resolve::resolve_model_metadata(
+                entry,
+                &config.model_presets,
+                None,
+                Some(name),
+                Some(profile.provider_type),
+            );
+            if let Some(window) = resolved.context_window {
+                windows
+                    .entry(format!("{name}/{}", entry.id))
+                    .or_insert(window);
+                windows.entry(entry.id.clone()).or_insert(window);
+            }
+        }
+    }
+    windows.retain(|_, window| *window > 0);
+    windows
+}
+
 pub fn compose_routed_model(
     config: &config::Config,
     deps: ComposeDeps,
@@ -998,6 +1194,7 @@ pub fn compose_routed_model(
         .collect();
     model.max_retry_after_wait =
         std::time::Duration::from_secs(config.routing.fallback.max_retry_after_wait_secs);
+    model.configured_windows = configured_windows(config);
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);
     Ok(Arc::new(model))

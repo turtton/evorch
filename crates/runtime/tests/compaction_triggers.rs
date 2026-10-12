@@ -550,7 +550,8 @@ async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
 
 #[tokio::test]
 async fn failed_agent_compaction_consumes_attempt_and_boundary() {
-    // Given: two compact calls share one response, and the first summary attempt fails.
+    // Given: two compact calls share one response, and the first summary attempt fails:
+    // the summary model errors and the structural fallback is truncated to nothing.
     let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
         reason: "summary unavailable".to_string(),
     })]));
@@ -573,6 +574,7 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
     let mut compaction_settings = settings(1_000_000, 1, 100);
     compaction_settings.summarizer = SummarizerKind::Model;
     compaction_settings.max_compactions_per_run = 1;
+    compaction_settings.max_summary_bytes = 0;
     let (runtime, bus) = runtime_with(Arc::clone(&model), compaction_settings);
     let mut receiver = bus.subscribe();
     let mut diagnostics = bus.subscribe();
@@ -599,7 +601,7 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
     assert_eq!(
         tool_result(final_turn, "failed-compact-1"),
         Some((
-            "compaction summary failed: summary model failed: モデル呼び出しに失敗しました: summary unavailable"
+            "compaction summary failed: summary became empty after max_summary_bytes enforcement"
                 .to_string(),
             true,
         ))
@@ -611,7 +613,8 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
             true,
         ))
     );
-    // Only the attempted compaction is diagnosed; the guard rejection is routine.
+    // The model failure and the attempted compaction are diagnosed; the guard rejection is
+    // routine.
     let mut failures = Vec::new();
     while let Ok(Ok(event)) = timeout(Duration::from_millis(100), diagnostics.recv()).await {
         if let EventKind::Diagnostic(diagnostic) = event.kind
@@ -620,20 +623,28 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
             failures.push(diagnostic);
         }
     }
-    assert_eq!(failures.len(), 1);
-    assert_eq!(
-        failures[0].run_id.as_deref(),
-        Some(run_id.to_string().as_str())
-    );
+    assert_eq!(failures.len(), 2);
+    for failure in &failures {
+        assert_eq!(failure.run_id.as_deref(), Some(run_id.to_string().as_str()));
+        assert!(
+            failure.detail.contains("\nreason=Agent summarizer=Model"),
+            "{}",
+            failure.detail
+        );
+    }
     assert!(
-        failures[0]
-            .detail
-            .starts_with("compaction summary failed: summary model failed:")
-            && failures[0]
-                .detail
-                .contains("\nreason=Agent summarizer=Model"),
+        failures[0].detail.starts_with(
+            "summary model failed; using the structural summary: summary model failed:"
+        ),
         "{}",
         failures[0].detail
+    );
+    assert!(
+        failures[1]
+            .detail
+            .starts_with("compaction summary failed: summary became empty"),
+        "{}",
+        failures[1].detail
     );
 }
 
