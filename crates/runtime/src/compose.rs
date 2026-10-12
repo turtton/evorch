@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use event_bus::EventBus;
-use model::{Capability, CapabilitySupport, LogicalModelId, ModelCatalog};
+use model::{Capability, CapabilitySupport, ModelCatalog};
 use providers::{ChatRequest, ChatResponse, Message, ObservationContext, ToolSpec};
 use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
@@ -208,6 +208,8 @@ pub struct RoutedModel {
     health: Arc<routing::ProviderHealth>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
+    /// フォールバックの一周で Retry-After を待つ上限。
+    max_retry_after_wait: std::time::Duration,
     /// Configured effort choices by profile, then model ID.
     effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     verification:
@@ -246,6 +248,9 @@ impl RoutedModel {
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
             admission_routes: Vec::new(),
+            max_retry_after_wait: std::time::Duration::from_secs(
+                config::FallbackConfig::default().max_retry_after_wait_secs,
+            ),
             effort_levels: BTreeMap::new(),
             verification: tokio::sync::OnceCell::new(),
             codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
@@ -275,25 +280,42 @@ impl RoutedModel {
         std::sync::Arc::new(model)
     }
 
-    fn resolve(
-        &self,
-        session_id: &str,
-        logical: &LogicalModelId,
-        requires_tools: bool,
-    ) -> Result<routing::ResolvedRoute, routing::RoutingError> {
-        let router = if requires_tools {
+    fn router_for(&self, requires_tools: bool) -> &routing::Router {
+        if requires_tools {
             &self.tool_router
         } else {
             &self.router
-        };
-        router.resolve(
-            &mut self
-                .affinity
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            session_id,
-            logical,
-        )
+        }
+    }
+
+    /// ロールのバインディングからチェーンを展開し、セッションのピン (なければ先頭) を解決する。
+    fn resolve_binding(
+        &self,
+        session_id: &str,
+        role: Role,
+        category: Option<&str>,
+        requires_tools: bool,
+    ) -> Result<(config::types::agents::ResolvedAgentBinding, ChainChoice), RuntimeError> {
+        let binding = self
+            .agents
+            .binding_for(role_key(role), category)
+            .map_err(model_error)?;
+        let router = self.router_for(requires_tools);
+        let resolved = router
+            .chain(chain_key(role, category), &binding.models)
+            .and_then(|chain| {
+                let position = router.resolve_chain(
+                    &mut self
+                        .affinity
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    session_id,
+                    &chain,
+                )?;
+                Ok(ChainChoice { chain, position })
+            })
+            .map_err(|error| route_resolution_error(error, role, category, &binding.models))?;
+        Ok((binding, resolved))
     }
 }
 
@@ -338,34 +360,25 @@ impl RoutedModel {
                     },
                     generation: config::GenerationOverridesConfig::default(),
                     reasoning_effort: preference.reasoning_effort.clone(),
+                    chain: None,
                 }
             }
             None => {
-                let binding = self
-                    .agents
-                    .binding_for(role_key(role), invocation.category.as_deref())
-                    .map_err(model_error)?;
-                let logical = LogicalModelId::from(binding.logical_model);
-                let route = self
-                    .resolve(&invocation.run_id, &logical, !tools.is_empty())
-                    .map_err(|error| route_resolution_error(error, role, invocation, &logical))?;
+                let (binding, choice) = self.resolve_binding(
+                    &invocation.run_id,
+                    role,
+                    invocation.category.as_deref(),
+                    !tools.is_empty(),
+                )?;
+                let member = choice.chain.member(choice.position);
                 ResolvedInvocation {
-                    reasoning_effort: self.candidate_reasoning_effort(&logical, &route),
-                    route,
+                    route: member.target.clone(),
+                    reasoning_effort: member.reasoning_effort.clone(),
                     generation: binding.generation,
+                    chain: Some(choice),
                 }
             }
         })
-    }
-
-    fn candidate_reasoning_effort(
-        &self,
-        logical: &LogicalModelId,
-        route: &routing::ResolvedRoute,
-    ) -> Option<String> {
-        self.router
-            .candidate_reasoning_effort(logical, route)
-            .map(str::to_owned)
     }
 
     /// 失敗をクールダウンへ記録し、開始・延長したら観測イベントを発行する。
@@ -418,24 +431,13 @@ impl RoutedModel {
             mut route,
             generation,
             mut reasoning_effort,
+            chain,
         } = self.resolve_invocation(invocation, role, tools)?;
         let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
-        let logical = match &invocation.model_preference {
-            Some(_) => None,
-            None => Some(LogicalModelId::from(
-                self.agents
-                    .binding_for(role_key(role), invocation.category.as_deref())
-                    .map_err(model_error)?
-                    .logical_model,
-            )),
-        };
-        let mut fallback_router = if tools.is_empty() {
-            &self.router
-        } else {
-            &self.tool_router
-        }
-        .clone()
-        .with_event_bus(None);
+        let mut position = chain.as_ref().map(|choice| choice.position);
+        let chain = chain.map(|choice| choice.chain);
+        let router = self.router_for(!tools.is_empty());
+        let mut cycle: Option<routing::FallbackCycle> = None;
         let mut failures = Vec::new();
         loop {
             let (base_model_id, speed) =
@@ -524,7 +526,20 @@ impl RoutedModel {
             };
             let result = structured::send(provider, &mut request, bus).await;
             let error = match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
+                        routing::pin(
+                            &mut self
+                                .affinity
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &invocation.run_id,
+                            chain,
+                            position,
+                        );
+                    }
+                    return Ok(response);
+                }
                 Err(error) => error,
             };
             let detail = error.to_string();
@@ -550,51 +565,53 @@ impl RoutedModel {
                 &invocation.run_id,
                 bus,
             );
-            let next = logical
-                .as_ref()
-                .filter(|_| fallback::eligible(&error))
-                .and_then(|logical| {
-                    fallback_router.exclude_attempt(logical, &route);
-                    fallback_router.next_fallback(
-                        &mut self
-                            .affinity
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner),
-                        &invocation.run_id,
-                        logical,
-                        &route,
-                        failure,
-                        None,
-                    )
-                });
-            let Some(next) = next else {
-                return Err(RuntimeError::Model {
-                    reason: failures.join("; fell back to "),
-                });
+            let exhausted = || RuntimeError::Model {
+                reason: failures.join("; fell back to "),
             };
+            let (Some(chain), Some(failed)) = (chain.as_ref(), position) else {
+                return Err(exhausted());
+            };
+            if !fallback::eligible(&error) {
+                return Err(exhausted());
+            }
+            let cycle = cycle.get_or_insert_with(|| routing::FallbackCycle::new(chain, failed));
+            cycle.record_failure(
+                failed,
+                routing::is_transient(&error),
+                routing::retry_after(&error),
+            );
+            let next = loop {
+                match cycle.next(router, chain, self.max_retry_after_wait) {
+                    routing::FallbackStep::Try(next) => break next,
+                    routing::FallbackStep::Wait(wait) => {
+                        tracing::info!(run_id = %invocation.run_id, wait = ?wait,
+                            "waiting for Retry-After before retrying the route pool");
+                        tokio::time::sleep(wait).await;
+                    }
+                    routing::FallbackStep::Exhausted => return Err(exhausted()),
+                }
+            };
+            let member = chain.member(next);
             tracing::warn!(run_id = %invocation.run_id, from_provider = %route.profile,
-            from_model = %route.model_id, to_provider = %next.profile, to_model = %next.model_id,
-            "provider fallback triggered");
-            if let (Some(bus), Some(logical)) =
-                (bus.or(self.event_bus.as_deref()), logical.as_ref())
-            {
+            from_model = %route.model_id, to_provider = %member.target.profile,
+            to_model = %member.target.model_id, "provider fallback triggered");
+            if let Some(bus) = bus.or(self.event_bus.as_deref()) {
                 bus.emit(event_bus::Event::new(
                     event_bus::ProviderEvent::FallbackTriggered {
                         from_provider: route.profile.clone(),
                         from_model: Some(route.model_id.clone()),
-                        to_provider: next.profile.clone(),
-                        to_model: next.model_id.clone(),
-                        logical_model: logical.as_str().to_owned(),
+                        to_provider: member.target.profile.clone(),
+                        to_model: member.target.model_id.clone(),
+                        logical_model: member.route.clone(),
                         session_id: invocation.run_id.clone(),
                         failure: failure.into(),
                         request_id: None,
                     },
                 ));
             }
-            if let Some(logical) = logical.as_ref() {
-                reasoning_effort = self.candidate_reasoning_effort(logical, &next);
-            }
-            route = next;
+            route = member.target.clone();
+            reasoning_effort = member.reasoning_effort.clone();
+            position = Some(next);
         }
     }
 }
@@ -621,6 +638,7 @@ impl AgentModel for RoutedModel {
             route,
             generation,
             reasoning_effort,
+            ..
         } = self.resolve_invocation(invocation, role, tools)?;
         let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
         Ok(crate::benchmark::BenchmarkModelSettings {
@@ -668,6 +686,7 @@ impl AgentModel for RoutedModel {
             route,
             generation,
             reasoning_effort,
+            ..
         } = self.resolve_invocation(invocation, role, tools)?;
         let provider = self
             .providers
@@ -751,24 +770,75 @@ impl AgentModel for RoutedModel {
         let Ok(binding) = self.agents.binding_for(role_key(role), category) else {
             return format!("unresolved:{}", role_key(role));
         };
-        let logical = LogicalModelId::from(binding.logical_model);
-        self.resolve("runtime-selected-model", &logical, false)
-            .map_err(model_error)
-            .map(|route| format!("{}/{}", route.profile, route.model_id))
-            .unwrap_or_else(|_| format!("unresolved:{}", logical.as_str()))
+        self.resolve_binding("runtime-selected-model", role, category, false)
+            .map(|(_, choice)| {
+                let route = &choice.chain.member(choice.position).target;
+                format!("{}/{}", route.profile, route.model_id)
+            })
+            .unwrap_or_else(|_| format!("unresolved:{}", binding.head_route()))
     }
 
     fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
-        let binding = self.agents.binding_for(role_key(role), category).ok()?;
-        let logical = LogicalModelId::from(binding.logical_model);
-        let route = self
-            .resolve("runtime-selected-model", &logical, false)
+        let (_, choice) = self
+            .resolve_binding("runtime-selected-model", role, category, false)
             .ok()?;
-        self.candidate_reasoning_effort(&logical, &route)
+        choice
+            .chain
+            .member(choice.position)
+            .reasoning_effort
+            .clone()
     }
 
     fn available_profiles(&self) -> Vec<ProfileSummary> {
         RoutedModel::available_profiles(self)
+    }
+
+    fn route_pins(&self, run_id: &str) -> Vec<crate::RoutePinRecord> {
+        self.affinity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pins(run_id)
+            .into_iter()
+            .map(|(chain, pin)| crate::RoutePinRecord {
+                chain,
+                position: pin.position,
+                profile: pin.profile,
+                model: pin.model,
+            })
+            .collect()
+    }
+
+    fn route_pins_by_run(&self) -> BTreeMap<String, Vec<crate::RoutePinRecord>> {
+        let sessions = self
+            .affinity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions();
+        sessions
+            .into_iter()
+            .map(|run_id| {
+                let pins = self.route_pins(&run_id);
+                (run_id, pins)
+            })
+            .collect()
+    }
+
+    fn restore_route_pins(&self, run_id: &str, pins: &[crate::RoutePinRecord]) {
+        let mut affinity = self
+            .affinity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for pin in pins {
+            affinity.pin(
+                run_id,
+                &pin.chain,
+                routing::RoutePin {
+                    position: pin.position,
+                    profile: pin.profile.clone(),
+                    model: pin.model.clone(),
+                },
+            );
+        }
     }
 
     fn binding_preview(
@@ -805,35 +875,50 @@ pub struct ProfileSummary {
 struct ResolvedInvocation {
     route: routing::ResolvedRoute,
     generation: config::GenerationOverridesConfig,
-    /// Explicit selection's effort, or the matched routing candidate's.
+    /// Explicit selection's effort, or the chain entry's.
     reasoning_effort: Option<String>,
+    /// The role's chain and selected member; `None` for an explicit selection.
+    chain: Option<ChainChoice>,
+}
+
+/// A role's expanded chain and the member chosen for this request.
+struct ChainChoice {
+    chain: routing::Chain,
+    position: usize,
+}
+
+/// Affinity key of a role's chain: the role, or role and category.
+fn chain_key(role: Role, category: Option<&str>) -> String {
+    match category {
+        Some(category) => format!("{}/{category}", role_key(role)),
+        None => role_key(role).to_owned(),
+    }
 }
 
 fn route_resolution_error(
     error: routing::RoutingError,
     role: Role,
-    invocation: &AgentInvocationContext,
-    logical: &LogicalModelId,
+    category: Option<&str>,
+    chain: &[config::ChainEntryConfig],
 ) -> RuntimeError {
     let role = role_key(role);
-    let category = invocation
-        .category
-        .as_deref()
-        .map_or_else(String::new, |category| format!(", category={category}"));
-    let logical = logical.as_str();
+    let category = category.map_or_else(String::new, |category| format!(", category={category}"));
+    let tables = chain
+        .iter()
+        .map(|entry| format!("[[routing.routes.{}]]", entry.route))
+        .collect::<Vec<_>>()
+        .join(", ");
     let reason = match &error {
-        RoutingError::UnknownLogicalModel(_) => format!(
-            "no route configured for logical model `{logical}` (role={role}{category}); \
-             add a [[routing.routes.{logical}]] entry: {error}"
+        RoutingError::UnknownLogicalModel(route) => format!(
+            "no route configured for `{route}` in the model chain (role={role}{category}); \
+             add a [[routing.routes.{route}]] entry: {error}"
         ),
         RoutingError::NoAvailableCandidate(_) => format!(
-            "route for logical model `{logical}` exists but has no available candidate \
-             (role={role}{category}); check the candidate profiles/models under \
-             [[routing.routes.{logical}]]: {error}"
+            "the model chain exists but has no available candidate (role={role}{category}); \
+             check the candidate profiles/models under {tables}: {error}"
         ),
         _ => format!(
-            "could not resolve route for logical model `{logical}` (role={role}{category}); \
-             check [[routing.routes.{logical}]]: {error}"
+            "could not resolve the model chain (role={role}{category}); check {tables}: {error}"
         ),
     };
     RuntimeError::Model {
@@ -911,6 +996,8 @@ pub fn compose_routed_model(
         .iter()
         .map(|(name, profile)| (name.clone(), profile.effort_levels_by_model()))
         .collect();
+    model.max_retry_after_wait =
+        std::time::Duration::from_secs(config.routing.fallback.max_retry_after_wait_secs);
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);
     Ok(Arc::new(model))

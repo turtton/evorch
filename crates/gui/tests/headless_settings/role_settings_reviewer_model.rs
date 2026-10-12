@@ -36,7 +36,7 @@ fn reviewer_explicit_category_models_are_seeded() {
     config.agents.reviewer.categories.insert(
         "plan-review".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("category-model".into()),
+            models: vec![config::ChainEntryConfig::route("category-model")],
             ..Default::default()
         },
     );
@@ -91,7 +91,7 @@ fn reviewer_category_rejects_blank_models_and_invalid_generation_before_save() {
         editor.agents.reviewer.categories.insert(
             category.into(),
             config::CategoryBindingConfig {
-                logical_model: Some("   ".into()),
+                models: vec![config::ChainEntryConfig::route("   ")],
                 ..Default::default()
             },
         );
@@ -100,12 +100,10 @@ fn reviewer_category_rejects_blank_models_and_invalid_generation_before_save() {
                 .validate()
                 .unwrap_err()
                 .to_string()
-                .contains(&format!(
-                    "agents.reviewer.categories.{category}.logical_model"
-                ))
+                .contains(&format!("agents.reviewer.categories.{category}.models"))
         );
         let binding = editor.agents.reviewer.categories.get_mut(category).unwrap();
-        binding.logical_model = None;
+        binding.models = Vec::new();
         binding.generation.temperature = Some(3.0);
         assert!(
             editor

@@ -27,7 +27,7 @@ Only credential references are written to TOML; OAuth token families are stored
 in the credential store and refreshed automatically.
 
 ```toml
-version = 2
+version = 3
 
 [providers.claude-api]
 type = "anthropic"
@@ -102,3 +102,63 @@ The default periods can be changed under `[routing]`; a role profile's
 quota_secs = 1800      # default: 30 minutes
 rate_limit_secs = 30   # default: 30 seconds
 ```
+
+## Model chains and fallback
+
+A route under `[routing.routes]` is a pool of paths to the same model: each
+candidate names a profile and, optionally, the model ID that profile uses for
+it. A role lists routes in priority order under `models`, and each entry sets
+its own `reasoning_effort`:
+
+```toml
+version = 3
+
+[[routing.routes."moonshotai/kimi-k3"]]
+profile = "kimi"          # subscription
+model = "k3"
+[[routing.routes."moonshotai/kimi-k3"]]
+profile = "neuralwatt"    # pay-as-you-go path to the same model
+model = "kimi-k3"
+
+[[routing.routes.claude]]
+profile = "claude"
+
+[agents.roles.planner]
+models = [
+  { route = "moonshotai/kimi-k3", reasoning_effort = "high" },
+  { route = "claude", reasoning_effort = "medium" },
+]
+```
+
+A role without `models` uses the route named after the role. A worker or
+reviewer category without `models` inherits the role's chain. Strict loading
+rejects a chain entry that names a missing route; a normal load warns and the
+role fails when it is used.
+
+When a request fails at one member of the chain, routing tries every other
+member once: first the rest of the same pool, then the later pools, then the
+earlier ones. Members that are cooling down are skipped, and a pool whose
+members have all failed or are cooling down is left for the next one. The
+member that failed first is retried last, and only when its failure was
+transient (rate limit, timeout, transport, HTTP 408/429/5xx). When the chain is
+exhausted the request fails with every attempt listed.
+
+If a pool runs out on a transient failure whose `Retry-After` is short, the
+request waits once and retries that pool before moving on. The limit is set
+under `[routing]`:
+
+```toml
+[routing.fallback]
+max_retry_after_wait_secs = 30   # default
+```
+
+The member that answers becomes the run's pin, and later requests in the run
+start there instead of the chain head; the pin never moves back on its own.
+Pins are saved with the run's snapshot, survive a restart or a settings reload,
+and restoring a run whose pinned member is unavailable falls through to the
+next member as above. A new run starts from the head of the chain.
+
+Version 2 files are migrated when loaded: `logical_model` becomes a
+single-entry `models` list, and a route candidate's `reasoning_effort` moves to
+the chain entries that use that route. The first saved change rewrites the file
+as version 3.

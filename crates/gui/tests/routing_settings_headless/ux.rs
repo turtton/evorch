@@ -10,7 +10,7 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     let config = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
-        format!("{config}\n[agents.explorer]\nlogical_model = 'legacy'\n"),
+        format!("{config}\n[agents.explorer]\nmodels = [{{ route = 'legacy' }}]\n"),
     )
     .expect("binding");
     state.open_role_settings();
@@ -35,13 +35,7 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     assert!(harness.state().role_settings().open);
     assert!(!harness.state().routing_settings().open);
     assert_eq!(
-        harness
-            .state()
-            .role_settings()
-            .agents
-            .explorer
-            .logical_model
-            .as_deref(),
+        harness.state().role_settings().agents.explorer.head_route(),
         Some("legacy")
     );
     assert!(!harness.has_label("未定義 (route なし)"));

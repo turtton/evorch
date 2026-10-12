@@ -16,6 +16,7 @@ mod additional_roles;
 mod benchmark;
 mod capabilities;
 mod category;
+mod chains;
 mod compaction_window;
 mod fallback;
 mod hosted_search;
@@ -114,12 +115,13 @@ fn routed_model_with_effort(
         vec![profile.clone()],
         &RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "worker".to_string(),
                 vec![RouteCandidateConfig {
                     profile: "local".to_string(),
                     model: route_model.map(ToString::to_string),
-                    reasoning_effort: reasoning_effort.map(ToString::to_string),
+                    auto: false,
                 }],
             )]),
         },
@@ -143,6 +145,9 @@ fn routed_model_with_effort(
         config::AgentsConfig {
             worker: config::WorkerBindingConfig {
                 base: RoleBindingConfig {
+                    models: reasoning_effort
+                        .map(|effort| vec![config::ChainEntryConfig::with_effort("worker", effort)])
+                        .unwrap_or_default(),
                     generation: GenerationOverridesConfig {
                         temperature: Some(0.25),
                         max_tokens: Some(321),
@@ -220,7 +225,7 @@ async fn complete_forwards_reasoning_effort_when_route_candidate_configures_it()
         (Some("xhigh"), Some("xhigh".to_owned())),
         (None, None),
     ] {
-        // Given: worker route の候補に推論強度を指定または省略する。
+        // Given: worker のチェーン要素に推論強度を指定または省略する。
         let (model, requests) =
             routed_model_with_effort(Ok(response()), "local-model", None, configured);
         // When: 既存の composition adapter 経由で完了を要求する。
@@ -289,8 +294,8 @@ fn selected_model_formats_profile_and_model() {
     );
 }
 
-// Given: 推論強度を持つ worker route 候補 / When: 選択中の推論強度を問い合わせる
-// Then: 候補の値を返し、未指定の route では None になる
+// Given: 推論強度を持つ worker のチェーン要素 / When: 選択中の推論強度を問い合わせる
+// Then: 要素の値を返し、未指定の要素では None になる
 #[test]
 fn selected_reasoning_effort_reports_route_candidate() {
     let (model, _) = routed_model_with_effort(Ok(response()), "local-model", None, Some("high"));

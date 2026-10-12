@@ -109,15 +109,13 @@ impl RoutedModel {
                 }
             }
             None => {
-                let binding = self
-                    .agents
-                    .binding_for(super::role_key(role), invocation.category.as_deref())
-                    .map_err(super::model_error)?;
-                let logical = model::LogicalModelId::from(binding.logical_model);
-                self.resolve(&invocation.run_id, &logical, false)
-                    .map_err(|error| {
-                        super::route_resolution_error(error, role, invocation, &logical)
-                    })?
+                let (_, choice) = self.resolve_binding(
+                    &invocation.run_id,
+                    role,
+                    invocation.category.as_deref(),
+                    false,
+                )?;
+                choice.chain.member(choice.position).target.clone()
             }
         };
         self.verify_candidates().await;

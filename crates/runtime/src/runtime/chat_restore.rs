@@ -141,6 +141,9 @@ impl AgentRuntime {
         }
         let restored = RestoredState::for_conversation(&record)?;
         self.reserve_restored_shell_handles(run_id, &restored)?;
+        self.shared
+            .model
+            .restore_route_pins(&run_id.to_string(), &descriptor.route_pins);
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
             match (pending.trusted_request.as_deref(), prompt) {
@@ -338,6 +341,7 @@ impl AgentRuntime {
         }
         let name = format!("chat:{}:{thread_id}", role.name());
         let mut restored_source = None;
+        let mut route_pins = Vec::new();
         let restored = match self.shared.run_store.get() {
             None => None,
             Some(store) => {
@@ -378,6 +382,7 @@ impl AgentRuntime {
                         if let Some(root) = descriptor.project_root {
                             config.project_root = Some(root);
                         }
+                        route_pins = descriptor.route_pins;
                         restored_source =
                             Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
                                 fail(RunRestoreFailure::CorruptContext(reason))
@@ -389,6 +394,10 @@ impl AgentRuntime {
         };
         config.name = Some(name);
         let run_id = self.shared.run_ids.next();
+        // The continuation is a new run, so its chain pins move to the new ID.
+        self.shared
+            .model
+            .restore_route_pins(&run_id.to_string(), &route_pins);
         if let Some(restored) = &restored {
             self.reserve_restored_shell_handles(run_id, restored)?;
         }

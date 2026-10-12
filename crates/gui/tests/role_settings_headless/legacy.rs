@@ -13,7 +13,7 @@ fn role_binding_edit_saves_toml_and_reloads_runtime() {
         .agents
         .worker
         .base
-        .logical_model = Some("fast".into());
+        .models = vec![config::ChainEntryConfig::route("fast")];
     harness.run();
     // When: saving through the actual modal.
     harness.click_label("Save role settings");
@@ -28,7 +28,7 @@ fn role_binding_edit_saves_toml_and_reloads_runtime() {
         ..Default::default()
     })
     .expect("saved config");
-    assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("fast"));
+    assert_eq!(saved.agents.worker.head_route(), Some("fast"));
     assert_eq!(harness.state().role_settings().agents, saved.agents);
     assert_eq!(model.selected_model(Role::Worker, None), "accelerated/fast");
 }
@@ -44,7 +44,7 @@ fn category_override_editable_per_role() {
     harness.click_label("quick");
     harness.run();
     // When: a category-specific model is selected and saved.
-    harness.click_label("quick logical model");
+    harness.click_label("quick route");
     harness.run();
     harness.click_label("fast");
     harness.run();
@@ -53,11 +53,8 @@ fn category_override_editable_per_role() {
     finish(&mut harness);
     // Then: only the worker quick binding changes.
     let agents = &harness.state().role_settings().agents;
-    assert_eq!(
-        agents.worker.categories["quick"].logical_model.as_deref(),
-        Some("fast")
-    );
-    assert_eq!(agents.worker.logical_model, None);
+    assert_eq!(agents.worker.categories["quick"].head_route(), Some("fast"));
+    assert_eq!(agents.worker.head_route(), None);
     assert_eq!(agents.explorer, config::RoleBindingConfig::default());
 }
 
@@ -99,7 +96,7 @@ fn web_researcher_row_saves_when_model_selected() {
     // When: editing the web_researcher row and saving through its controls.
     harness.click_label("WebResearcher");
     harness.run();
-    harness.click_label("Role logical model");
+    harness.click_label("Role route");
     harness.run();
     harness.click_label("fast");
     harness.run();
@@ -115,7 +112,7 @@ fn web_researcher_row_saves_when_model_selected() {
             .agents
             .binding_for("web_researcher", None)
             .expect("saved web_researcher")
-            .logical_model,
+            .head_route(),
         "fast"
     );
     assert_eq!(
@@ -154,7 +151,7 @@ fn blank_binding_blocks_save() {
             .agents
             .worker
             .base
-            .logical_model = Some(name.into());
+            .models = vec![config::ChainEntryConfig::route(name.to_string())];
         harness.run();
         // When: saving is requested.
         harness.click_label("Save role settings");
@@ -201,7 +198,7 @@ fn role_settings_geometry_matrix() {
             harness.click_label("quick");
             harness.run();
             // Then: save stays visible and category controls are scroll reachable.
-            for label in ["Save role settings", "Cancel", "quick logical model"] {
+            for label in ["Save role settings", "Cancel", "quick route"] {
                 harness.scroll_label_into_view(label);
                 harness.run();
                 let rects = harness.label_rects(label);
@@ -228,7 +225,7 @@ fn menu_opens_role_settings_and_cancel_discards_edits() {
         .agents
         .worker
         .base
-        .logical_model = Some("fast".into());
+        .models = vec![config::ChainEntryConfig::route("fast")];
     harness.run();
     harness.click_label("Cancel");
     harness.run();
@@ -240,7 +237,7 @@ fn menu_opens_role_settings_and_cancel_discards_edits() {
     // Then: disk values replace discarded edits.
     assert!(harness.has_label("Agent role settings"));
     assert_eq!(
-        harness.state().role_settings().agents.worker.logical_model,
+        harness.state().role_settings().agents.worker.head_route(),
         None
     );
 }

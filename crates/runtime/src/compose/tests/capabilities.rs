@@ -89,12 +89,13 @@ async fn tool_specs_are_unchanged_when_canonical_support_is_supported() {
         vec![model.providers["local"].profile.clone()],
         &RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: None,
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             )]),
         },

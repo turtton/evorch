@@ -92,14 +92,15 @@ fn project_layer_only_selects_role_profile() {
     write_file(
         &user.join("config.toml"),
         "[permissions]\npreset = \"permissive\"\n\
-         [agents.worker]\nlogical_model = \"default-model\"\n\
-         [role_profiles.fast.agents.worker]\nlogical_model = \"fast-model\"\n\
+         [agents.worker]\nmodels = [{ route = \"default-model\" }]\n\
+         [routing.routes]\ndefault-model = [{ profile = \"local\" }]\n\
+         [role_profiles.fast.agents.worker]\nmodels = [{ route = \"fast-model\" }]\n\
          [role_profiles.fast.routing.routes]\nfast-model = [{ profile = \"local\" }]\n",
     );
     write_file(
         &project.join(".evorch/config.toml"),
         "role_profile = \"slow\"\n[permissions]\npreset = \"strict\"\n\
-         [agents.worker]\nlogical_model = \"project-model\"\n",
+         [agents.worker]\nmodels = [{ route = \"project-model\" }]\n",
     );
     write_file(
         &project.join(".evorch/config.d/20-select.toml"),
@@ -121,17 +122,14 @@ fn project_layer_only_selects_role_profile() {
         assert_eq!(config.role_profile.as_deref(), Some("fast"));
         assert_eq!(config.active_role_profile(), "fast");
         assert_eq!(
-            config.agents.worker.logical_model.as_deref(),
+            config.agents.worker.head_route(),
             Some("fast-model"),
             "選択したプロファイルが実効の agents になる"
         );
         assert!(config.routing.routes.contains_key("fast-model"));
     }
     let unresolved = Config::load_unresolved(&options).expect("選択を反映せず読み込める");
-    assert_eq!(
-        unresolved.agents.worker.logical_model.as_deref(),
-        Some("default-model")
-    );
+    assert_eq!(unresolved.agents.worker.head_route(), Some("default-model"));
     assert_eq!(unresolved.role_profile_names(), ["default", "fast"]);
     assert_eq!(
         config::project_role_profile(&project).expect("プロジェクトの選択"),
@@ -148,7 +146,7 @@ fn unknown_role_profile_falls_back_to_default() {
     let project = tmp.path().join("project");
     write_file(
         &user.join("config.toml"),
-        "[agents.worker]\nlogical_model = \"default-model\"\n",
+        "[agents.worker]\nmodels = [{ route = \"default-model\" }]\n[routing.routes]\ndefault-model = [{ profile = \"local\" }]\n",
     );
     write_file(
         &project.join(".evorch/config.toml"),
@@ -164,10 +162,7 @@ fn unknown_role_profile_falls_back_to_default() {
     .expect("未知のプロファイルでも読み込める");
 
     assert_eq!(config.active_role_profile(), "default");
-    assert_eq!(
-        config.agents.worker.logical_model.as_deref(),
-        Some("default-model")
-    );
+    assert_eq!(config.agents.worker.head_route(), Some("default-model"));
 }
 
 // Given: 設定ファイルと注入環境変数 / When: 環境変数レイヤーを有効にして読み込む
@@ -389,7 +384,7 @@ fn mixed_version_layers_each_migrated_before_merge() {
     );
     write_file(
         &user.join("config.d/10-current.toml"),
-        "version = 2\n\n[metrics]\nretention_days = 7\n",
+        "version = 3\n\n[metrics]\nretention_days = 7\n",
     );
 
     let config = Config::load(&LoadOptions {

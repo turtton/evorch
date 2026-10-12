@@ -306,7 +306,7 @@ fn save_preserves_existing_tables_in_project_config() {
     let path = config::project_main_config_path(temp.path());
     std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
         .expect("config directory");
-    let existing = "version = 2\n# keep this comment\n[routing]\nroutes = {}\n\n[providers.other]\nprovider_type = \"anthropic\"\napi_protocol = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = { type = \"env\", var = \"OTHER_API_KEY\" }\nmodels = [\"claude-sonnet-4-5\"]\ndefault_model = \"claude-sonnet-4-5\"\n";
+    let existing = "version = 3\n# keep this comment\n[routing]\nroutes = {}\n\n[providers.other]\nprovider_type = \"anthropic\"\napi_protocol = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = { type = \"env\", var = \"OTHER_API_KEY\" }\nmodels = [\"claude-sonnet-4-5\"]\ndefault_model = \"claude-sonnet-4-5\"\n";
     std::fs::write(&path, existing).expect("existing config written");
     let before = load_config(temp.path());
     let mut harness = workbench_with_config_path(temp.path());

@@ -45,7 +45,7 @@ fn openai_compatible_sugar_form_full_load() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let config = load_project(
         &tmp,
-        r#"version = 2
+        r#"version = 3
 
 [providers.local]
 type = "openai-compatible"

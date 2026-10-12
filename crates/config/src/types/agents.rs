@@ -23,26 +23,26 @@ pub struct AgentsConfig {
     pub roles: AdditionalRoleBindings,
 }
 
-/// agents 内の明示的な logical_model 参照を旧名→新名で置き換える。
+/// agents 内の明示的な route 参照 (チェーンの要素) を旧名→新名で置き換える。
 ///
 /// 各 role (orchestrator/explorer/worker/reviewer/roles.web_researcher/roles.planner/
 /// roles.oracle/roles.multimodal_looker) と worker.categories / reviewer.categories の全 category が対象。
-/// logical_model が None (暗黙の role 名参照) のものは変更しない。
+/// `models` が空 (暗黙の role 名参照) のものは変更しない。
 /// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
-pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
+pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
     if renames.is_empty() {
         return;
     }
 
-    for logical in [
-        &mut agents.orchestrator.logical_model,
-        &mut agents.explorer.logical_model,
-        &mut agents.worker.base.logical_model,
-        &mut agents.reviewer.base.logical_model,
-        &mut agents.roles.web_researcher.logical_model,
-        &mut agents.roles.planner.logical_model,
-        &mut agents.roles.oracle.logical_model,
-        &mut agents.roles.multimodal_looker.logical_model,
+    for models in [
+        &mut agents.orchestrator.models,
+        &mut agents.explorer.models,
+        &mut agents.worker.base.models,
+        &mut agents.reviewer.base.models,
+        &mut agents.roles.web_researcher.models,
+        &mut agents.roles.planner.models,
+        &mut agents.roles.oracle.models,
+        &mut agents.roles.multimodal_looker.models,
     ]
     .into_iter()
     .chain(
@@ -50,24 +50,24 @@ pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<S
             .worker
             .categories
             .values_mut()
-            .map(|binding| &mut binding.logical_model),
+            .map(|binding| &mut binding.models),
     )
     .chain(
         agents
             .reviewer
             .categories
             .values_mut()
-            .map(|binding| &mut binding.logical_model),
-    )
-    .flatten()
-    {
-        if let Some(new_name) = renames.get(logical) {
-            *logical = new_name.clone();
+            .map(|binding| &mut binding.models),
+    ) {
+        for entry in models {
+            if let Some(new_name) = renames.get(&entry.route) {
+                entry.route.clone_from(new_name);
+            }
         }
     }
 }
 
-/// 指定した論理モデルを明示的に使用するロールと worker/reviewer カテゴリを返す。
+/// 指定した route を明示的に使用するロールと worker/reviewer カテゴリを返す。
 pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
     explicit_refs(agents)
         .into_iter()
@@ -77,40 +77,72 @@ pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
         .collect()
 }
 
-/// 明示的な logical_model 参照を、ロールまたはカテゴリのアドレスと組にして返す。
+/// 明示的な route 参照 (チェーンの各要素) を、ロールまたはカテゴリのアドレスと組にして返す。
 ///
 /// アドレスは [`roles_using`] と同じ表記。暗黙のロール名参照は含めない。
+/// 1 つのアドレスがチェーンの要素数だけ現れる。
 pub fn explicit_refs(agents: &AgentsConfig) -> Vec<(String, String)> {
     let mut refs: Vec<_> = role_bindings(agents)
         .into_iter()
-        .filter_map(|(address, binding)| {
+        .flat_map(|(address, binding)| {
             binding
-                .logical_model
-                .as_ref()
-                .map(|logical| (address.to_string(), logical.clone()))
+                .models
+                .iter()
+                .map(move |entry| (address.to_string(), entry.route.clone()))
         })
         .collect();
-    for (category, binding) in &agents.worker.categories {
-        if let Some(logical) = &binding.logical_model {
-            refs.push((format!("worker.categories.{category}"), logical.clone()));
-        }
-    }
-    for (category, binding) in &agents.reviewer.categories {
-        if let Some(logical) = &binding.logical_model {
-            refs.push((format!("reviewer.categories.{category}"), logical.clone()));
+    for (role, categories) in [
+        ("worker", &agents.worker.categories),
+        ("reviewer", &agents.reviewer.categories),
+    ] {
+        for (category, binding) in categories {
+            for entry in &binding.models {
+                refs.push((format!("{role}.categories.{category}"), entry.route.clone()));
+            }
         }
     }
     refs
 }
 
-/// logical_model 未指定のため、ロール名へのフォールバックで指定論理名を使うロール。
+/// [`explicit_refs`] のアドレスが指すチェーン。未知のアドレスは `None`。
+/// カテゴリが未設定なら空の既定値を作って返す。
+pub fn chain_at_mut<'a>(
+    agents: &'a mut AgentsConfig,
+    address: &str,
+) -> Option<&'a mut Vec<ChainEntryConfig>> {
+    let binding = match address {
+        "orchestrator" => &mut agents.orchestrator,
+        "explorer" => &mut agents.explorer,
+        "worker" => &mut agents.worker.base,
+        "reviewer" => &mut agents.reviewer.base,
+        "roles.web_researcher" => &mut agents.roles.web_researcher,
+        "roles.planner" => &mut agents.roles.planner,
+        "roles.oracle" => &mut agents.roles.oracle,
+        "roles.multimodal_looker" => &mut agents.roles.multimodal_looker,
+        address => {
+            let (categories, category) =
+                if let Some(category) = address.strip_prefix("worker.categories.") {
+                    (&mut agents.worker.categories, category)
+                } else {
+                    (
+                        &mut agents.reviewer.categories,
+                        address.strip_prefix("reviewer.categories.")?,
+                    )
+                };
+            return Some(&mut categories.entry(category.to_owned()).or_default().models);
+        }
+    };
+    Some(&mut binding.models)
+}
+
+/// `models` 未指定のため、ロール名へのフォールバックで指定 route を使うロール。
 ///
 /// アドレスは [`roles_using`] と同じ表記。カテゴリはロールの設定を継承するため含めない。
 pub fn implicit_roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
     role_bindings(agents)
         .into_iter()
         .filter(|(address, binding)| {
-            binding.logical_model.is_none()
+            binding.models.is_empty()
                 && address.strip_prefix("roles.").unwrap_or(address) == logical
         })
         .map(|(address, _)| address.to_string())
@@ -144,8 +176,8 @@ impl AgentsConfig {
     /// ロール名とカテゴリからバインディングを解決する。
     ///
     /// 各フィールドはカテゴリ指定値がロール指定値に優先し、カテゴリが未指定の
-    /// フィールドはロール値で補完する。`logical_model` の最終フォールバックは
-    /// ロール名そのもの (小文字)。プリセットは名前の参照のみで、本文は
+    /// フィールドはロール値で補完する。`models` の最終フォールバックは
+    /// ロール名そのもの (小文字) の route 1 要素。プリセットは名前の参照のみで、本文は
     /// 設定に含まれない。
     ///
     /// # Errors
@@ -197,10 +229,12 @@ impl AgentsConfig {
             "reviewer" => category.and_then(|name| self.reviewer.categories.get(name)),
             _ => None,
         };
-        let logical_model = category_binding
-            .and_then(|found| found.logical_model.clone())
-            .or_else(|| binding.logical_model.clone())
-            .unwrap_or_else(|| role.to_string());
+        let models = category_binding
+            .map(|found| &found.models)
+            .filter(|models| !models.is_empty())
+            .or_else(|| Some(&binding.models).filter(|models| !models.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| vec![ChainEntryConfig::route(role)]);
         let preset = category_binding
             .and_then(|found| found.preset.clone())
             .or_else(|| binding.preset.clone());
@@ -209,7 +243,7 @@ impl AgentsConfig {
             None => binding.generation.clone(),
         };
         Ok(ResolvedAgentBinding {
-            logical_model,
+            models,
             preset,
             generation,
         })
@@ -235,14 +269,21 @@ fn merge_generation(
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RoleBindingConfig {
-    /// 使用する論理モデル名。省略時はロール名 (小文字) を使用する。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logical_model: Option<String>,
+    /// 優先順に並べた route のチェーン。省略時はロール名 (小文字) の route 1 要素。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ChainEntryConfig>,
     /// 使用するプリセット名。本文ではなく参照のみを記述する。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     /// 生成パラメータの上書き。
     pub generation: GenerationOverridesConfig,
+}
+
+impl RoleBindingConfig {
+    /// チェーンの先頭要素の route 名。`models` 未指定なら `None`。
+    pub fn head_route(&self) -> Option<&str> {
+        self.models.first().map(|entry| entry.route.as_str())
+    }
 }
 
 /// カテゴリを持つロールのベース設定とカテゴリ別バインディング。
@@ -279,7 +320,7 @@ pub struct WorkerBindingConfig {
     pub categories: BTreeMap<String, CategoryBindingConfig>,
 }
 
-/// 共通フィールドの読み取りは `worker.logical_model` 等でも可能。変更は `base` 経由。
+/// 共通フィールドの読み取りは `worker.models` 等でも可能。変更は `base` 経由。
 impl std::ops::Deref for WorkerBindingConfig {
     type Target = RoleBindingConfig;
 
@@ -292,14 +333,53 @@ impl std::ops::Deref for WorkerBindingConfig {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CategoryBindingConfig {
-    /// 使用する論理モデル名。省略時はロール側の指定に従う。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logical_model: Option<String>,
+    /// 優先順に並べた route のチェーン。省略時はロール側の指定に従う。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ChainEntryConfig>,
     /// 使用するプリセット名。省略時はロール側の指定に従う。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     /// 生成パラメータの上書き。
     pub generation: GenerationOverridesConfig,
+}
+
+impl CategoryBindingConfig {
+    /// チェーンの先頭要素の route 名。`models` 未指定 (ロール側に従う) なら `None`。
+    pub fn head_route(&self) -> Option<&str> {
+        self.models.first().map(|entry| entry.route.as_str())
+    }
+}
+
+/// ロールのチェーンの要素 1 件 (ADR 0030)。
+///
+/// route (同じモデルへの経路プール) を名前で参照し、その route のメンバーへ送る
+/// 推論強度を指定する。チェーンがチェーンを参照することはない。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChainEntryConfig {
+    /// 参照する `routing.routes` の名前。
+    pub route: String,
+    /// この要素で送る推論強度。省略時はプロバイダ既定。モデルごとに有効な値が異なるため自由形式の文字列とする。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl ChainEntryConfig {
+    /// 推論強度を指定しない要素を作る。
+    pub fn route(route: impl Into<String>) -> Self {
+        Self {
+            route: route.into(),
+            reasoning_effort: None,
+        }
+    }
+
+    /// 推論強度を指定した要素を作る。
+    pub fn with_effort(route: impl Into<String>, reasoning_effort: impl Into<String>) -> Self {
+        Self {
+            route: route.into(),
+            reasoning_effort: Some(reasoning_effort.into()),
+        }
+    }
 }
 
 /// 生成パラメータの上書き指定。指定したフィールドのみ反映する。
@@ -320,12 +400,19 @@ pub struct GenerationOverridesConfig {
 /// [`AgentsConfig::binding_for`] の解決結果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolvedAgentBinding {
-    /// 実際に使用する論理モデル名。
-    pub logical_model: String,
+    /// 実際に使用するチェーン。常に 1 要素以上。
+    pub models: Vec<ChainEntryConfig>,
     /// 実際に使用するプリセット名 (未指定なら None)。
     pub preset: Option<String>,
     /// マージ済みの生成パラメータ上書き。
     pub generation: GenerationOverridesConfig,
+}
+
+impl ResolvedAgentBinding {
+    /// チェーンの先頭要素の route 名。
+    pub fn head_route(&self) -> &str {
+        self.models.first().map_or("", |entry| entry.route.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -356,7 +443,7 @@ mod tests {
         .collect::<Vec<_>>();
         let document = addresses
             .iter()
-            .map(|address| format!("[agents.{address}]\nlogical_model = 'shared'\n"))
+            .map(|address| format!("[agents.{address}]\nmodels = [{{ route = 'shared' }}]\n"))
             .collect::<String>();
         let agents = toml::from_str::<Config>(&document).expect("agents").agents;
         // When: enumerating explicit references.
@@ -385,11 +472,11 @@ mod tests {
             .worker
             .categories
             .insert("quick".into(), Default::default());
-        agents.explorer.logical_model = Some("explore".into());
+        agents.explorer.models = vec![ChainEntryConfig::route("explore")];
         agents.worker.categories.insert(
             "deep".into(),
             CategoryBindingConfig {
-                logical_model: Some("reason".into()),
+                models: vec![ChainEntryConfig::route("reason")],
                 ..Default::default()
             },
         );
@@ -432,60 +519,61 @@ mod tests {
             assert!(implicit_roles_using(logical, &agents).is_empty());
         }
         // Given: an explicit reference equal to the fallback is still not implicit.
-        agents.worker.base.logical_model = Some("worker".into());
-        agents.roles.web_researcher.logical_model = Some("web_researcher".into());
+        agents.worker.base.models = vec![ChainEntryConfig::route("worker")];
+        agents.roles.web_researcher.models = vec![ChainEntryConfig::route("web_researcher")];
         // When/Then: explicit references suppress fallback warnings.
         assert!(implicit_roles_using("worker", &agents).is_empty());
         assert!(implicit_roles_using("web_researcher", &agents).is_empty());
     }
 
     #[test]
-    fn rename_logical_model_refs_updates_all_explicit_roles() {
+    fn rename_route_refs_updates_all_explicit_roles() {
         // Given: 全 8 ロールが同じ論理モデルを明示的に指定する。
         let doc = r#"
 [agents.orchestrator]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.explorer]
-logical_model = "old"
+models = [{ route = "old" }]
 preset = "old"
 [agents.worker]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.worker.generation]
 max_tokens = 1
 [agents.reviewer]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.roles.web_researcher]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.roles.planner]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.roles.oracle]
-logical_model = "old"
+models = [{ route = "old" }]
 [agents.roles.multimodal_looker]
-logical_model = "old"
+models = [{ route = "old" }]
 "#;
         let mut agents = toml::from_str::<Config>(doc)
             .expect("agents fixture")
             .agents;
-        let expected = toml::from_str::<Config>(
-            &doc.replace("logical_model = \"old\"", "logical_model = \"new\""),
-        )
+        let expected = toml::from_str::<Config>(&doc.replace(
+            "models = [{ route = \"old\" }]",
+            "models = [{ route = \"new\" }]",
+        ))
         .expect("expected agents")
         .agents;
 
-        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+        rename_route_refs(&mut agents, &[("old".into(), "new".into())].into());
 
-        // Then: logical_model のみ変更し、preset や generation は保持する。
+        // Then: route 参照のみ変更し、preset や generation は保持する。
         assert_eq!(agents, expected);
     }
 
     #[test]
-    fn rename_logical_model_refs_updates_all_categories() {
+    fn rename_route_refs_updates_all_categories() {
         let mut agents = AgentsConfig::default();
         for category in categories_for_role("worker") {
             agents.worker.categories.insert(
                 category.id.as_str().into(),
                 CategoryBindingConfig {
-                    logical_model: Some("old".into()),
+                    models: vec![ChainEntryConfig::route("old")],
                     preset: Some("old".into()),
                     ..Default::default()
                 },
@@ -493,17 +581,17 @@ logical_model = "old"
         }
         let mut expected = agents.clone();
         for binding in expected.worker.categories.values_mut() {
-            binding.logical_model = Some("new".into());
+            binding.models = vec![ChainEntryConfig::route("new")];
         }
 
-        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+        rename_route_refs(&mut agents, &[("old".into(), "new".into())].into());
 
         assert_eq!(agents, expected);
     }
 
     #[test]
-    fn rename_logical_model_refs_leaves_implicit_refs_untouched() {
-        // Given: 全ロールとカテゴリで logical_model が未指定。
+    fn rename_route_refs_leaves_implicit_refs_untouched() {
+        // Given: 全ロールとカテゴリで models が未指定。
         let mut agents = AgentsConfig::default();
         agents.worker.categories.insert(
             "quick".into(),
@@ -528,15 +616,15 @@ logical_model = "old"
         .map(|name| (name.into(), "renamed".into()))
         .collect();
 
-        rename_logical_model_refs(&mut agents, &renames);
+        rename_route_refs(&mut agents, &renames);
 
         assert_eq!(agents, original);
 
         // 明示的な worker 参照が変わっても、それを継承するカテゴリは未指定のまま。
-        agents.worker.base.logical_model = Some("worker".into());
+        agents.worker.base.models = vec![ChainEntryConfig::route("worker")];
         let mut expected = agents.clone();
-        expected.worker.base.logical_model = Some("renamed".into());
-        rename_logical_model_refs(&mut agents, &renames);
+        expected.worker.base.models = vec![ChainEntryConfig::route("renamed")];
+        rename_route_refs(&mut agents, &renames);
         assert_eq!(agents, expected);
     }
 
@@ -544,13 +632,13 @@ logical_model = "old"
         toml::from_str::<Config>(
             r#"
 [agents.explorer]
-logical_model = "A"
+models = [{ route = "A" }]
 [agents.reviewer]
-logical_model = "B"
+models = [{ route = "B" }]
 [agents.worker.categories.quick]
-logical_model = "A"
+models = [{ route = "A" }]
 [agents.worker.categories.deep]
-logical_model = "B"
+models = [{ route = "B" }]
 "#,
         )
         .expect("agents fixture")
@@ -558,25 +646,17 @@ logical_model = "B"
     }
 
     #[test]
-    fn rename_logical_model_refs_maps_chain_once() {
+    fn rename_route_refs_maps_chain_once() {
         let mut agents = agents_with_a_and_b_refs();
         let mut expected = agents.clone();
-        expected.explorer.logical_model = Some("B".into());
-        expected.reviewer.logical_model = Some("C".into());
-        expected
-            .worker
-            .categories
-            .get_mut("quick")
-            .unwrap()
-            .logical_model = Some("B".into());
-        expected
-            .worker
-            .categories
-            .get_mut("deep")
-            .unwrap()
-            .logical_model = Some("C".into());
+        expected.explorer.models = vec![ChainEntryConfig::route("B")];
+        expected.reviewer.models = vec![ChainEntryConfig::route("C")];
+        expected.worker.categories.get_mut("quick").unwrap().models =
+            vec![ChainEntryConfig::route("B")];
+        expected.worker.categories.get_mut("deep").unwrap().models =
+            vec![ChainEntryConfig::route("C")];
 
-        rename_logical_model_refs(
+        rename_route_refs(
             &mut agents,
             &[("A".into(), "B".into()), ("B".into(), "C".into())].into(),
         );
@@ -585,25 +665,17 @@ logical_model = "B"
     }
 
     #[test]
-    fn rename_logical_model_refs_swaps_original_refs() {
+    fn rename_route_refs_swaps_original_refs() {
         let mut agents = agents_with_a_and_b_refs();
         let mut expected = agents.clone();
-        expected.explorer.logical_model = Some("B".into());
-        expected.reviewer.logical_model = Some("A".into());
-        expected
-            .worker
-            .categories
-            .get_mut("quick")
-            .unwrap()
-            .logical_model = Some("B".into());
-        expected
-            .worker
-            .categories
-            .get_mut("deep")
-            .unwrap()
-            .logical_model = Some("A".into());
+        expected.explorer.models = vec![ChainEntryConfig::route("B")];
+        expected.reviewer.models = vec![ChainEntryConfig::route("A")];
+        expected.worker.categories.get_mut("quick").unwrap().models =
+            vec![ChainEntryConfig::route("B")];
+        expected.worker.categories.get_mut("deep").unwrap().models =
+            vec![ChainEntryConfig::route("A")];
 
-        rename_logical_model_refs(
+        rename_route_refs(
             &mut agents,
             &[("A".into(), "B".into()), ("B".into(), "A".into())].into(),
         );
@@ -612,21 +684,21 @@ logical_model = "B"
     }
 
     #[test]
-    fn rename_logical_model_refs_empty_map_is_noop() {
+    fn rename_route_refs_empty_map_is_noop() {
         let mut agents = agents_with_a_and_b_refs();
         let original = agents.clone();
 
-        rename_logical_model_refs(&mut agents, &BTreeMap::new());
+        rename_route_refs(&mut agents, &BTreeMap::new());
 
         assert_eq!(agents, original);
     }
 
     #[test]
-    fn rename_logical_model_refs_leaves_unmapped_refs_untouched() {
+    fn rename_route_refs_leaves_unmapped_refs_untouched() {
         let mut agents = agents_with_a_and_b_refs();
         let original = agents.clone();
 
-        rename_logical_model_refs(&mut agents, &[("other".into(), "new".into())].into());
+        rename_route_refs(&mut agents, &[("other".into(), "new".into())].into());
 
         assert_eq!(agents, original);
     }
@@ -654,14 +726,14 @@ logical_model = "B"
             agents
                 .binding_for("worker", Some("lesson"))
                 .unwrap()
-                .logical_model,
+                .head_route(),
             "worker"
         );
         assert_eq!(
             agents
                 .binding_for("reviewer", Some("lesson_review"))
                 .unwrap()
-                .logical_model,
+                .head_route(),
             "reviewer"
         );
         assert!(matches!(
@@ -677,7 +749,7 @@ logical_model = "B"
     #[test]
     fn agents_binding_rejects_categories_when_role_is_not_categorized() {
         // Given: explorer にカテゴリを設定した TOML。
-        let doc = "[agents.explorer.categories.quick]\nlogical_model = \"fast\"\n";
+        let doc = "[agents.explorer.categories.quick]\nmodels = [{ route = \"fast\" }]\n";
         // When: 設定をパースする。
         let result = toml::from_str::<Config>(doc);
         // Then: categories は未知フィールドとして拒否される。
@@ -685,14 +757,14 @@ logical_model = "B"
         assert!(error.to_string().contains("unknown field `categories`"));
     }
 
-    // Given: ロール直下と categories.quick の両方に logical_model / preset を含む設定 TOML
+    // Given: ロール直下と categories.quick の両方に models / preset を含む設定 TOML
     // When: Config にパースする
     // Then: 各値が意図どおり読み取れる
     #[test]
-    fn agents_binding_parses_role_category_logical_model_and_preset() {
+    fn agents_binding_parses_role_category_models_and_preset() {
         let doc = r#"
 [agents.worker]
-logical_model = "worker"
+models = [{ route = "worker" }]
 preset = "worker-appendix"
 
 [agents.worker.generation]
@@ -701,14 +773,14 @@ top_p = 1.0
 max_tokens = 4096
 
 [agents.worker.categories.quick]
-logical_model = "worker-quick"
+models = [{ route = "worker-quick" }]
 preset = "quick-appendix"
 "#;
 
         let config: Config = toml::from_str(doc).expect("agents 設定をパースできる");
         let agents = &config.agents;
 
-        assert_eq!(agents.worker.logical_model.as_deref(), Some("worker"));
+        assert_eq!(agents.worker.head_route(), Some("worker"));
         assert_eq!(agents.worker.preset.as_deref(), Some("worker-appendix"));
         assert_eq!(agents.worker.generation.temperature, Some(0.7));
         assert_eq!(agents.worker.generation.top_p, Some(1.0));
@@ -718,7 +790,7 @@ preset = "quick-appendix"
             .categories
             .get("quick")
             .expect("quick カテゴリが存在する");
-        assert_eq!(quick.logical_model.as_deref(), Some("worker-quick"));
+        assert_eq!(quick.head_route(), Some("worker-quick"));
         assert_eq!(quick.preset.as_deref(), Some("quick-appendix"));
     }
 
@@ -785,7 +857,7 @@ max_tokens = 8192
     fn binding_for_prefers_category_over_role_per_field() {
         let doc = r#"
 [agents.worker]
-logical_model = "worker"
+models = [{ route = "worker" }]
 preset = "worker-appendix"
 
 [agents.worker.generation]
@@ -793,7 +865,7 @@ temperature = 0.2
 max_tokens = 4096
 
 [agents.worker.categories.quick]
-logical_model = "worker-quick"
+models = [{ route = "worker-quick" }]
 
 [agents.worker.categories.quick.generation]
 temperature = 0.9
@@ -805,7 +877,7 @@ temperature = 0.9
             .binding_for("worker", Some("quick"))
             .expect("カテゴリバインディングを解決できる");
 
-        assert_eq!(resolved.logical_model, "worker-quick");
+        assert_eq!(resolved.head_route(), "worker-quick");
         assert_eq!(resolved.preset.as_deref(), Some("worker-appendix"));
         assert_eq!(resolved.generation.temperature, Some(0.9));
         assert_eq!(resolved.generation.max_tokens, Some(4096));
@@ -817,14 +889,14 @@ temperature = 0.9
         let config: Config = toml::from_str(
             r#"
 [agents.reviewer]
-logical_model = "review-base"
+models = [{ route = "review-base" }]
 preset = "base-appendix"
 [agents.reviewer.generation]
 temperature = 0.2
 top_p = 0.8
 max_tokens = 4096
 [agents.reviewer.categories.plan-review]
-logical_model = "plan-model"
+models = [{ route = "plan-model" }]
 [agents.reviewer.categories.plan-review.generation]
 temperature = 0.6
 [agents.reviewer.categories.tool-execution]
@@ -837,7 +909,7 @@ max_tokens = 2048
         .unwrap();
         let agents = config.agents;
         let plan = agents.binding_for("reviewer", Some("plan-review")).unwrap();
-        assert_eq!(plan.logical_model, "plan-model");
+        assert_eq!(plan.head_route(), "plan-model");
         assert_eq!(plan.preset.as_deref(), Some("base-appendix"));
         assert_eq!(plan.generation.temperature, Some(0.6));
         assert_eq!(plan.generation.top_p, Some(0.8));
@@ -845,7 +917,7 @@ max_tokens = 2048
         let tool = agents
             .binding_for("reviewer", Some("tool-execution"))
             .unwrap();
-        assert_eq!(tool.logical_model, "review-base");
+        assert_eq!(tool.head_route(), "review-base");
         assert_eq!(tool.preset.as_deref(), Some("tool-appendix"));
         assert_eq!(tool.generation.temperature, Some(0.2));
         assert_eq!(tool.generation.top_p, Some(0.9));
@@ -894,7 +966,7 @@ max_tokens = 2048
             agents.reviewer.categories.insert(
                 category.into(),
                 CategoryBindingConfig {
-                    logical_model: Some("old".into()),
+                    models: vec![ChainEntryConfig::route("old")],
                     preset: Some("old".into()),
                     ..Default::default()
                 },
@@ -907,10 +979,10 @@ max_tokens = 2048
         ];
         assert_eq!(roles_using("old", &agents), expected_addresses);
         assert_eq!(explicit_refs(&agents).len(), 3);
-        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+        rename_route_refs(&mut agents, &[("old".into(), "new".into())].into());
         assert!(roles_using("old", &agents).is_empty());
         assert_eq!(roles_using("new", &agents), expected_addresses);
-        assert!(agents.reviewer.logical_model.is_none());
+        assert!(agents.reviewer.models.is_empty());
         for binding in agents.reviewer.categories.values() {
             assert_eq!(binding.preset.as_deref(), Some("old"));
         }
@@ -945,16 +1017,16 @@ max_tokens = 2048
     }
 
     // Given: 何も設定していない既定の AgentsConfig / When: binding_for("worker", None) を呼ぶ
-    // Then: logical_model はロール名 "worker" になり、preset は None
+    // Then: チェーンはロール名 "worker" の 1 要素になり、preset は None
     #[test]
-    fn binding_for_defaults_logical_model_to_role_name() {
+    fn binding_for_defaults_chain_to_role_name() {
         let agents = AgentsConfig::default();
 
         let resolved = agents
             .binding_for("worker", None)
             .expect("既定バインディングを解決できる");
 
-        assert_eq!(resolved.logical_model, "worker");
+        assert_eq!(resolved.head_route(), "worker");
         assert_eq!(resolved.preset, None);
         assert_eq!(resolved.generation, GenerationOverridesConfig::default());
     }
@@ -978,23 +1050,23 @@ max_tokens = 2048
         // Given: 複数の固定ロールと worker カテゴリが同じ論理モデルを明示的に指定する。
         let doc = r#"
 [agents.orchestrator]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.explorer]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.worker]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.worker.categories.quick]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.reviewer]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.roles.web_researcher]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.roles.planner]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.roles.oracle]
-logical_model = "shared"
+models = [{ route = "shared" }]
 [agents.roles.multimodal_looker]
-logical_model = "shared"
+models = [{ route = "shared" }]
 "#;
         let config: Config = toml::from_str(doc).expect("agents 設定をパースできる");
 

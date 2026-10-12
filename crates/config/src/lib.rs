@@ -52,11 +52,12 @@ pub use types::BudgetConfig;
 pub use types::OwnershipConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategorizedRoleBindingConfig,
-    CategoryBindingConfig, CommentCheckerConfig, CompactionConfig, Config, CooldownConfig,
-    CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig, EscalationApproval,
-    GenerationOverridesConfig, MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig,
-    PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
-    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
-    SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
+    CategoryBindingConfig, ChainEntryConfig, CommentCheckerConfig, CompactionConfig, Config,
+    CooldownConfig, CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig,
+    EscalationApproval, FallbackConfig, GenerationOverridesConfig, MetadataSource, MetricsConfig,
+    ModelEntryConfig, ModelPresetConfig, PanelConfig, PermissionConfig, ProviderProfileConfig,
+    ProviderTypeConfig, ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig,
+    RoutingConfig, RulesConfig, SandboxConfig, SelfImprovementConfig, SummarizerKind,
+    WorkerBindingConfig,
 };
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};

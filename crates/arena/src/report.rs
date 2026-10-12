@@ -86,7 +86,7 @@ impl ArenaReport {
         Ok(config::RouteCandidateConfig {
             profile: config.profile,
             model: Some(config.model),
-            reasoning_effort: None,
+            auto: false,
         })
     }
 

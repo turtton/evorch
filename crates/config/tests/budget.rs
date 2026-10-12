@@ -3,7 +3,7 @@ use config::Config;
 #[test]
 fn defaults_when_budget_is_missing() {
     // Given: a config without a budget table.
-    let document = "version = 2";
+    let document = "version = 3";
     // When: parsed and serialized through the public configuration type.
     let config: Config = toml::from_str(document).unwrap();
     let value = serde_json::to_value(config).unwrap();
@@ -70,7 +70,7 @@ fn loads_budget_from_config_file() {
     std::fs::create_dir_all(project.path().join(".evorch")).unwrap();
     std::fs::write(
         project.path().join(".evorch/config.toml"),
-        "version = 2\n[budget]\nmax_tool_calls = 37\nmax_identical_tool_call_repeats = 2",
+        "version = 3\n[budget]\nmax_tool_calls = 37\nmax_identical_tool_call_repeats = 2",
     )
     .unwrap();
     // When: the real layered loader applies strict validation and defaults.
@@ -96,7 +96,7 @@ fn loads_explicit_cumulative_token_and_elapsed_limits() {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".evorch")).unwrap();
     std::fs::write(project.path().join(".evorch/config.toml"),
-        "version = 2\n[budget]\nmax_tokens = 7654321\nmax_elapsed_secs = 1234\n[compaction]\nsummary_idle_timeout_secs = 45\nsummary_timeout_secs = 180\nfailure_cooldown_turns = 6").unwrap();
+        "version = 3\n[budget]\nmax_tokens = 7654321\nmax_elapsed_secs = 1234\n[compaction]\nsummary_idle_timeout_secs = 45\nsummary_timeout_secs = 180\nfailure_cooldown_turns = 6").unwrap();
     let config = Config::load(&config::LoadOptions {
         user_config_dir: Some(project.path().join(".evorch")),
         read_env: false,

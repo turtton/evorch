@@ -53,13 +53,13 @@ fn reviewer_category_edit_saves_reloads_and_previews_each_route() {
             .role_settings_mut()
             .agents
             .reviewer
-            .logical_model = Some("worker".into());
+            .models = vec![config::ChainEntryConfig::route("worker")];
         harness.run();
         harness.click_label("Reviewer");
         harness.run();
         harness.click_label(category);
         harness.run();
-        harness.click_label(&format!("{category} logical model"));
+        harness.click_label(&format!("{category} route"));
         harness.run();
         harness.click_label("fast");
         harness.run();
@@ -75,9 +75,7 @@ fn reviewer_category_edit_saves_reloads_and_previews_each_route() {
         })
         .expect("saved config");
         assert_eq!(
-            saved.agents.reviewer.categories[category]
-                .logical_model
-                .as_deref(),
+            saved.agents.reviewer.categories[category].head_route(),
             Some("fast")
         );
         assert!(saved.agents.worker.categories.is_empty());
@@ -98,6 +96,9 @@ fn reviewer_category_edit_saves_reloads_and_previews_each_route() {
             Some("local/base")
         );
         assert!(harness.has_label("→ accelerated/fast"));
+        // The head entry's effort row can push the button below the scrolled viewport.
+        harness.scroll_label_into_view("Reset category");
+        harness.run();
         harness.click_label("Reset category");
         harness.run();
         harness.click_label("Save role settings");
@@ -129,7 +130,7 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
         .role_settings_mut()
         .agents
         .reviewer
-        .logical_model = Some("fast".into());
+        .models = vec![config::ChainEntryConfig::route("fast")];
     harness.run();
     harness.click_label("Reviewer");
     harness.run();
@@ -154,7 +155,7 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
         .insert(
             "plan-review".into(),
             config::CategoryBindingConfig {
-                logical_model: Some("missing-category".into()),
+                models: vec![config::ChainEntryConfig::route("missing-category")],
                 ..Default::default()
             },
         );
@@ -177,7 +178,7 @@ fn internal_bindings_survive_saving_public_reviewer_categories() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     let internal = config::CategoryBindingConfig {
-        logical_model: Some("fast".into()),
+        models: vec![config::ChainEntryConfig::route("fast")],
         generation: config::GenerationOverridesConfig {
             max_tokens: Some(123),
             ..Default::default()

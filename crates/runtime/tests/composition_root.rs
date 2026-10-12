@@ -69,6 +69,7 @@ fn configured() -> Config {
         )]),
         routing: config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: ["orchestrator", "explorer", "worker", "reviewer"]
                 .into_iter()
                 .map(|logical| {
@@ -77,7 +78,7 @@ fn configured() -> Config {
                         vec![config::RouteCandidateConfig {
                             profile: PROFILE.to_string(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         }],
                     )
                 })

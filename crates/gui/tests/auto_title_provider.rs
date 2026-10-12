@@ -66,7 +66,7 @@ fn production_title_uses_quick_route_or_explicit_thread_model() {
             }
         });
         let category = if quick {
-            "[agents.worker.categories.quick]\nlogical_model = \"title-route\"\n"
+            "[agents.worker.categories.quick]\nmodels = [{ route = \"title-route\" }]\n"
         } else {
             ""
         };

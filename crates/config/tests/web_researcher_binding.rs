@@ -9,7 +9,7 @@ fn web_researcher_defaults_when_binding_is_absent() {
         .binding_for("web_researcher", None)
         .expect("web_researcher");
     // Then: the role-name fallback applies.
-    assert_eq!(binding.logical_model, "web_researcher");
+    assert_eq!(binding.head_route(), "web_researcher");
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn config_defaults_when_web_researcher_is_absent() {
 fn web_researcher_explicit_binding_resolves_when_configured() {
     // Given: an explicit web_researcher model.
     let config: Config =
-        toml::from_str("[agents.roles.web_researcher]\nlogical_model = 'research-model'")
+        toml::from_str("[agents.roles.web_researcher]\nmodels = [{ route = 'research-model' }]")
             .expect("web_researcher schema");
     // When: resolving the role.
     let binding = config
@@ -34,7 +34,7 @@ fn web_researcher_explicit_binding_resolves_when_configured() {
         .binding_for("web_researcher", None)
         .expect("binding");
     // Then: the explicit assignment wins over the role-name fallback.
-    assert_eq!(binding.logical_model, "research-model");
+    assert_eq!(binding.head_route(), "research-model");
 }
 
 #[test]
@@ -43,14 +43,14 @@ fn web_researcher_rejects_category_when_loaded() {
     let overrides = toml::from_str(
         r#"
 [agents.roles.web_researcher]
-logical_model = "research-model"
+models = [{ route = "research-model" }]
 preset = "research-preset"
 [agents.roles.web_researcher.generation]
 temperature = 0.25
 top_p = 0.8
 max_tokens = 1024
 [agents.roles.web_researcher.categories.research]
-logical_model = "deep-model"
+models = [{ route = "deep-model" }]
 preset = "deep-preset"
 [agents.roles.web_researcher.categories.research.generation]
 max_tokens = 4096

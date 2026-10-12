@@ -80,13 +80,14 @@ fn harness_with_model(
         providers: BTreeMap::from([("local".into(), profile)]),
         routing: config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),
                     vec![config::RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some(MODEL.into()),
-                        reasoning_effort: None,
+                        auto: false,
                     }],
                 ),
                 (
@@ -94,7 +95,7 @@ fn harness_with_model(
                     vec![config::RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some(review_model.into()),
-                        reasoning_effort: None,
+                        auto: false,
                     }],
                 ),
             ]),
@@ -109,7 +110,7 @@ fn harness_with_model(
     config.agents.reviewer.categories.insert(
         "tool-execution".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("reviewer-audit".into()),
+            models: vec![config::ChainEntryConfig::route("reviewer-audit")],
             generation: config::GenerationOverridesConfig {
                 temperature: Some(0.25),
                 max_tokens: Some(321),
@@ -181,6 +182,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
             .collect(),
         routing: config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),
@@ -189,7 +191,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                         .map(|(name, _)| config::RouteCandidateConfig {
                             profile: (*name).into(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         })
                         .collect(),
                 ),
@@ -200,7 +202,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                         .map(|(name, _)| config::RouteCandidateConfig {
                             profile: (*name).into(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         })
                         .collect(),
                 ),
@@ -215,7 +217,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
     config.agents.reviewer.categories.insert(
         "tool-execution".into(),
         config::CategoryBindingConfig {
-            logical_model: Some("reviewer-audit".into()),
+            models: vec![config::ChainEntryConfig::route("reviewer-audit")],
             generation: config::GenerationOverridesConfig {
                 temperature: Some(0.25),
                 max_tokens: Some(321),

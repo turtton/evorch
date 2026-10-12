@@ -335,7 +335,7 @@ fn valid_keyring_profile_loads() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let config = load_project(
         &tmp,
-        r#"version = 2
+        r#"version = 3
 
 [providers.anthropic-main]
 provider_type = "anthropic"
@@ -514,7 +514,11 @@ fn worker_category_config_accepts_public_and_internal_categories() {
         .collect();
     let document = names
         .iter()
-        .map(|name| format!("[agents.worker.categories.{name}]\nlogical_model = '{name}-model'\n"))
+        .map(|name| {
+            format!(
+                "[agents.worker.categories.{name}]\nmodels = [{{ route = '{name}-model' }}]\n[[routing.routes.{name}-model]]\nprofile = 'p'\n"
+            )
+        })
         .collect::<String>();
 
     let config = load_project(&tmp, &document).expect("all worker category bindings are valid");
@@ -526,12 +530,13 @@ fn worker_category_config_accepts_public_and_internal_categories() {
                 .agents
                 .binding_for("worker", Some(name))
                 .unwrap()
-                .logical_model,
+                .head_route(),
             format!("{name}-model")
         );
     }
     for name in ["lesson_review", "plan-review", "tool-execution", "unknown"] {
-        let document = format!("[agents.worker.categories.{name}]\nlogical_model = 'invalid'\n");
+        let document =
+            format!("[agents.worker.categories.{name}]\nmodels = [{{ route = 'invalid' }}]\n");
         let error = load_project(&tmp, &document).expect_err("not a worker category");
         assert!(matches!(error, ConfigError::InvalidField { path, .. }
             if path == format!("agents.worker.categories.{name}")));
@@ -574,15 +579,16 @@ fn oracle_categories_are_rejected_with_uncategorized_role_path() {
 fn reviewer_categories_accept_own_names_and_reject_worker_names() {
     let tmp = tempfile::tempdir().unwrap();
     for name in ["plan-review", "tool-execution", "lesson_review"] {
-        let document =
-            format!("[agents.reviewer.categories.{name}]\nlogical_model = '{name}-model'\n");
+        let document = format!(
+            "[agents.reviewer.categories.{name}]\nmodels = [{{ route = '{name}-model' }}]\n[[routing.routes.{name}-model]]\nprofile = 'p'\n"
+        );
         let config = load_project(&tmp, &document).expect("reviewer category");
         assert_eq!(
             config
                 .agents
                 .binding_for("reviewer", Some(name))
                 .unwrap()
-                .logical_model,
+                .head_route(),
             format!("{name}-model")
         );
     }
@@ -615,7 +621,7 @@ fn openai_compatible_sugar_form_accepted() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let config = load_project(
         &tmp,
-        r#"version = 2
+        r#"version = 3
 
 [providers.local]
 type = "openai-compatible"

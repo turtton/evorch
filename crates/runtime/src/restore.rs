@@ -148,6 +148,9 @@ pub struct RunRestoreDescriptor {
     /// Raw history boundary of a normal final response; Length/ContentFilter are unfinished.
     #[serde(default)]
     pub completed_turn_end: Option<usize>,
+    /// Role chain pins at the last snapshot; restore seeds them back (ADR 0030).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_pins: Vec<crate::RoutePinRecord>,
 }
 
 impl RunRestoreDescriptor {
@@ -409,6 +412,10 @@ fn write_snapshot(
         completed_turn_end: state
             .completed_turn_end
             .filter(|completed| *completed == end),
+        route_pins: state
+            .shared
+            .model
+            .route_pins(&state.caller_run_id().to_string()),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),

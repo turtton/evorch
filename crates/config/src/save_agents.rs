@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use toml_edit::{Item, Table, value};
+use toml_edit::{Array, InlineTable, Item, Table, value};
 
 use crate::ConfigError;
 use crate::types::agents::{
-    AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, RoleBindingConfig,
+    AgentsConfig, CategoryBindingConfig, ChainEntryConfig, GenerationOverridesConfig,
+    RoleBindingConfig,
 };
 
 /// agents セクションを置き換え、ロールとカテゴリのバインディングを保存する。
@@ -74,9 +75,7 @@ fn insert_binding(table: &mut Table, name: &str, binding: &RoleBindingConfig) {
 
 fn binding_table(binding: &RoleBindingConfig) -> Table {
     let mut table = Table::new();
-    if let Some(logical_model) = &binding.logical_model {
-        table.insert("logical_model", value(logical_model.as_str()));
-    }
+    insert_models(&mut table, &binding.models);
     if let Some(preset) = &binding.preset {
         table.insert("preset", value(preset.as_str()));
     }
@@ -86,14 +85,29 @@ fn binding_table(binding: &RoleBindingConfig) -> Table {
 
 fn category_table(binding: &CategoryBindingConfig) -> Table {
     let mut table = Table::new();
-    if let Some(logical_model) = &binding.logical_model {
-        table.insert("logical_model", value(logical_model.as_str()));
-    }
+    insert_models(&mut table, &binding.models);
     if let Some(preset) = &binding.preset {
         table.insert("preset", value(preset.as_str()));
     }
     insert_generation(&mut table, &binding.generation);
     table
+}
+
+/// チェーンを `models = [{ route = "...", reasoning_effort = "..." }]` の形で書く。空なら省略する。
+fn insert_models(table: &mut Table, models: &[ChainEntryConfig]) {
+    if models.is_empty() {
+        return;
+    }
+    let mut entries = Array::new();
+    for entry in models {
+        let mut inline = InlineTable::new();
+        inline.insert("route", entry.route.as_str().into());
+        if let Some(effort) = &entry.reasoning_effort {
+            inline.insert("reasoning_effort", effort.as_str().into());
+        }
+        entries.push(inline);
+    }
+    table.insert("models", value(entries));
 }
 
 fn insert_generation(table: &mut Table, generation: &GenerationOverridesConfig) {

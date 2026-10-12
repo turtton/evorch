@@ -11,6 +11,8 @@ pub struct RoutingSettingsModel {
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
     /// 保存時に `[routing]` を置き換えても失わないよう、読み込んだ値を保持する。
     pub cooldown: config::CooldownConfig,
+    /// `cooldown` と同じく、保存で失わないよう読み込んだ値を保持する。
+    pub fallback: config::FallbackConfig,
     pub route_users: BTreeMap<String, Vec<String>>,
     pub implicit_route_users: BTreeMap<String, Vec<String>>,
     pub routes_empty: bool,
@@ -18,11 +20,7 @@ pub struct RoutingSettingsModel {
     pub origin_role_settings: bool,
     pub expanded: BTreeSet<String>,
     pub profile_names: Vec<String>,
-    pub profile_defaults: BTreeMap<String, String>,
-    pub profile_types: BTreeMap<String, config::ProviderTypeConfig>,
     pub profile_models: BTreeMap<String, Vec<String>>,
-    /// Configured effort levels by profile, then model ID.
-    pub profile_effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     pub new_route_name: String,
     pub route_name_edits: BTreeMap<String, String>,
     pub validation_error: Option<String>,
@@ -31,32 +29,33 @@ pub struct RoutingSettingsModel {
     pub(crate) save_rx: Option<Receiver<Result<Config, String>>>,
 }
 
-/// 候補の実モデル (上書き、なければ profile 既定) で選べる推論強度。
-pub fn candidate_effort_choices(
-    profile_defaults: &BTreeMap<String, String>,
-    profile_types: &BTreeMap<String, config::ProviderTypeConfig>,
-    profile_effort_levels: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
-    candidate: &RouteCandidateConfig,
-) -> Vec<String> {
-    if profile_types.get(&candidate.profile).is_some_and(|kind| {
-        matches!(
-            kind,
+/// route の候補の実モデル (上書き、なければ profile 既定) で選べる推論強度の和集合。
+///
+/// 推論強度はロールのチェーン要素で指定する (ADR 0030)。汎用の推論強度を受け付けない
+/// provider の候補は寄与しない。
+pub fn route_effort_choices(config: &Config, route: &str) -> Vec<String> {
+    let mut choices = Vec::new();
+    for candidate in config.routing.routes.get(route).into_iter().flatten() {
+        let Some(profile) = config.providers.get(&candidate.profile) else {
+            continue;
+        };
+        if matches!(
+            profile.provider_type,
             config::ProviderTypeConfig::Anthropic
                 | config::ProviderTypeConfig::AnthropicSubscription
                 | config::ProviderTypeConfig::Cursor
-        )
-    }) {
-        return Vec::new();
+        ) {
+            continue;
+        }
+        let model = candidate.model.as_ref().unwrap_or(&profile.default_model);
+        let levels = profile.effort_levels_by_model();
+        for effort in super::effort::effort_choices(levels.get(model).map(Vec::as_slice)) {
+            if !choices.contains(&effort) {
+                choices.push(effort);
+            }
+        }
     }
-    let model = candidate
-        .model
-        .as_ref()
-        .or_else(|| profile_defaults.get(&candidate.profile));
-    super::effort::effort_choices(
-        model
-            .and_then(|model| profile_effort_levels.get(&candidate.profile)?.get(model))
-            .map(Vec::as_slice),
-    )
+    choices
 }
 
 impl RoutingSettingsModel {
@@ -80,6 +79,7 @@ impl RoutingSettingsModel {
         Self {
             routes: config.routing.routes.clone(),
             cooldown: config.routing.cooldown.clone(),
+            fallback: config.routing.fallback.clone(),
             route_users: config
                 .routing
                 .routes
@@ -104,25 +104,10 @@ impl RoutingSettingsModel {
                 .collect(),
             routes_empty: config.routing.routes.is_empty(),
             profile_names: profiles.into_iter().map(|(name, _)| name.clone()).collect(),
-            profile_defaults: config
-                .providers
-                .iter()
-                .map(|(name, profile)| (name.clone(), profile.default_model.clone()))
-                .collect(),
-            profile_types: config
-                .providers
-                .iter()
-                .map(|(name, profile)| (name.clone(), profile.provider_type))
-                .collect(),
             profile_models: config
                 .providers
                 .iter()
                 .map(|(name, profile)| (name.clone(), profile.enabled_model_ids()))
-                .collect(),
-            profile_effort_levels: config
-                .providers
-                .iter()
-                .map(|(name, profile)| (name.clone(), profile.effort_levels_by_model()))
                 .collect(),
             ..Self::default()
         }
@@ -159,7 +144,7 @@ impl RoutingSettingsModel {
             vec![RouteCandidateConfig {
                 profile: self.profile_names.first().cloned().unwrap_or_default(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             }],
         );
         self.expanded.insert(name.into());
@@ -218,20 +203,6 @@ impl RoutingSettingsModel {
                         message: "Select an existing provider profile".into(),
                     });
                 }
-                if self
-                    .profile_types
-                    .get(&candidate.profile)
-                    .is_some_and(|kind| {
-                        matches!(
-                            kind,
-                            config::ProviderTypeConfig::Anthropic
-                                | config::ProviderTypeConfig::AnthropicSubscription
-                                | config::ProviderTypeConfig::Cursor
-                        )
-                    })
-                {
-                    candidate.reasoning_effort = None;
-                }
                 if candidate
                     .model
                     .as_ref()
@@ -254,6 +225,7 @@ impl RoutingSettingsModel {
         Ok(RoutingConfig {
             routes: renamed,
             cooldown: self.cooldown.clone(),
+            fallback: self.fallback.clone(),
         })
     }
 }
@@ -301,7 +273,7 @@ mod tests {
         config
             .providers
             .insert("first".into(), config::ProviderProfileConfig::default());
-        config.agents.explorer.logical_model = Some("role-model".into());
+        config.agents.explorer.models = vec![config::ChainEntryConfig::route("role-model")];
         // When: 新しい論理名で設定を初期化する。
         let model = RoutingSettingsModel::seed_from_config_prefill(&config, "role-model");
         // Then: 既定モデルに委譲する候補が1件だけ追加される。
@@ -310,7 +282,7 @@ mod tests {
             vec![RouteCandidateConfig {
                 profile: "first".into(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             }]
         );
         assert_eq!(model.pending_new_route.as_deref(), Some("role-model"));
@@ -329,7 +301,7 @@ mod tests {
             .routing
             .routes
             .insert("shared".into(), vec![RouteCandidateConfig::default()]);
-        config.agents.explorer.logical_model = Some("shared".into());
+        config.agents.explorer.models = vec![config::ChainEntryConfig::route("shared")];
         // When: 設定を初期化する。
         let model = RoutingSettingsModel::seed_from_config(&config);
         // Then: 使用ロールと明示ルートの存在が反映される。
@@ -346,7 +318,7 @@ mod tests {
             vec![RouteCandidateConfig {
                 profile: "original".into(),
                 model: Some("custom".into()),
-                reasoning_effort: None,
+                auto: false,
             }],
         );
         // When: 重複名または空白名をプリフィルする。

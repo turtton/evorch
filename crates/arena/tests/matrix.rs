@@ -98,7 +98,7 @@ fn activation_changes_the_consumed_route_only_after_confirmation() {
         .expect("activate");
     let binding = active.agents.binding_for("worker", None).expect("binding");
     assert_eq!(
-        active.routing.routes[&binding.logical_model][0]
+        active.routing.routes[binding.head_route()][0]
             .model
             .as_deref(),
         Some("a")

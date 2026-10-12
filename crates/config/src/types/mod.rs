@@ -22,8 +22,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{
-    AgentsConfig, CategorizedRoleBindingConfig, CategoryBindingConfig, GenerationOverridesConfig,
-    ResolvedAgentBinding, RoleBindingConfig, WorkerBindingConfig,
+    AgentsConfig, CategorizedRoleBindingConfig, CategoryBindingConfig, ChainEntryConfig,
+    GenerationOverridesConfig, ResolvedAgentBinding, RoleBindingConfig, WorkerBindingConfig,
 };
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
@@ -41,13 +41,13 @@ pub use provider::{
     ProviderProfileConfig, ProviderTypeConfig,
 };
 pub use role_profile::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
-pub use routing::{CooldownConfig, RouteCandidateConfig, RoutingConfig};
+pub use routing::{CooldownConfig, FallbackConfig, RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use team::TeamConfig;
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 /// 設定ファイルのルート構造。
 ///

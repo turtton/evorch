@@ -52,7 +52,7 @@ fn strict_load_accepts_exclusions_when_present_in_project_config() {
     std::fs::create_dir_all(tmp.path().join(".evorch")).unwrap();
     std::fs::write(
         tmp.path().join(".evorch/config.toml"),
-        "version = 2\n[providers.local]\nexcluded_models = ['m1', 'm2']\n",
+        "version = 3\n[providers.local]\nexcluded_models = ['m1', 'm2']\n",
     )
     .unwrap();
     // When: マージと strict validation を含むロードを実行する

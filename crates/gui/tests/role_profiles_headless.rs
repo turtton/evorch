@@ -154,7 +154,7 @@ fn new_profile_copies_selection_and_saves_and_deletes_only_that_profile() {
         .agents
         .worker
         .base
-        .logical_model = Some("fast".into());
+        .models = vec![config::ChainEntryConfig::route("fast")];
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);
@@ -162,15 +162,10 @@ fn new_profile_copies_selection_and_saves_and_deletes_only_that_profile() {
     assert_eq!(harness.state().role_settings().error, None);
     let saved = config::Config::load_unresolved(&user_options(temp.path())).expect("saved");
     assert_eq!(
-        saved.role_profiles["cheap"]
-            .agents
-            .worker
-            .base
-            .logical_model
-            .as_deref(),
+        saved.role_profiles["cheap"].agents.worker.base.head_route(),
         Some("fast")
     );
-    assert_eq!(saved.agents.worker.base.logical_model, None);
+    assert_eq!(saved.agents.worker.base.head_route(), None);
     assert_eq!(runtime.selected_model(Role::Worker, None), "local/base");
     // When: deleting `cheap` from the reopened modal.
     harness

@@ -237,7 +237,7 @@ fn save_renamed_routes(
 ) -> Result<(), String> {
     let loaded = profile_view(current, profile);
     let mut renamed_agents = loaded.agents.clone();
-    config::types::agents::rename_logical_model_refs(&mut renamed_agents, renames);
+    config::types::agents::rename_route_refs(&mut renamed_agents, renames);
 
     // 保存先だけを仮置換し、上位レイヤー適用後も参照更新が有効か確認する。
     let mut candidate = match std::fs::read_to_string(path) {
@@ -257,10 +257,17 @@ fn save_renamed_routes(
         .transpose()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
-    config::types::agents::rename_logical_model_refs(&mut file_agents, renames);
+    config::types::agents::rename_route_refs(&mut file_agents, renames);
+    // A chain referencing a renamed route is written to the save target in full, so the
+    // rename also applies when the chain came from a lower layer.
     for (address, old_name) in config::types::agents::explicit_refs(&loaded.agents) {
-        if let Some(new_name) = renames.get(&old_name) {
-            set_project_agent_ref(&mut file_agents, &address, new_name)?;
+        if renames.contains_key(&old_name) {
+            let mut source = renamed_agents.clone();
+            let chain = config::types::agents::chain_at_mut(&mut source, &address)
+                .ok_or_else(|| format!("Unknown agent binding address: {address}"))?
+                .clone();
+            *config::types::agents::chain_at_mut(&mut file_agents, &address)
+                .ok_or_else(|| format!("Unknown agent binding address: {address}"))? = chain;
         }
     }
     target.insert(
@@ -278,25 +285,24 @@ fn save_renamed_routes(
         &config::Config::load_unresolved(&candidate_options).map_err(|error| error.to_string())?,
         profile,
     );
-    let before: std::collections::BTreeMap<_, _> =
+    let before: std::collections::BTreeSet<_> =
         config::types::agents::explicit_refs(&loaded.agents)
             .into_iter()
             .collect();
-    let candidate_refs: std::collections::BTreeMap<_, _> =
+    let candidate_refs: std::collections::BTreeSet<_> =
         config::types::agents::explicit_refs(&effective.agents)
             .into_iter()
             .collect();
-    let blocked: Vec<_> = config::types::agents::explicit_refs(&renamed_agents)
-        .into_iter()
-        .filter(|(address, new_name)| {
-            before.get(address) != Some(new_name) && candidate_refs.get(address) != Some(new_name)
-        })
-        .map(|(address, new_name)| format!("{address} -> {new_name}"))
-        .collect();
+    let blocked: std::collections::BTreeSet<_> =
+        config::types::agents::explicit_refs(&renamed_agents)
+            .into_iter()
+            .filter(|reference| !before.contains(reference) && !candidate_refs.contains(reference))
+            .map(|(address, new_name)| format!("{address} -> {new_name}"))
+            .collect();
     if !blocked.is_empty() {
         return Err(format!(
             "Route rename blocked: higher-priority config (config.d drop-in, EVORCH_* env, or CLI override) still pins agents binding(s) {} to the old route name. Remove that override or edit that layer directly. No changes were saved.",
-            blocked.join(", ")
+            blocked.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
     config::save_role_profile_bindings(path, Some(profile), Some(routing), Some(&file_agents))
@@ -319,37 +325,4 @@ fn profile_table<'a>(
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
         .as_table_mut()
         .ok_or_else(|| format!("role_profiles.{profile} must be a table"))
-}
-
-fn set_project_agent_ref(
-    agents: &mut config::AgentsConfig,
-    address: &str,
-    logical_model: &str,
-) -> Result<(), String> {
-    let binding = match address {
-        "orchestrator" => &mut agents.orchestrator.logical_model,
-        "explorer" => &mut agents.explorer.logical_model,
-        "worker" => &mut agents.worker.base.logical_model,
-        "reviewer" => &mut agents.reviewer.logical_model,
-        "roles.web_researcher" => &mut agents.roles.web_researcher.logical_model,
-        "roles.planner" => &mut agents.roles.planner.logical_model,
-        "roles.oracle" => &mut agents.roles.oracle.logical_model,
-        "roles.multimodal_looker" => &mut agents.roles.multimodal_looker.logical_model,
-        address => {
-            let (categories, category) =
-                if let Some(category) = address.strip_prefix("worker.categories.") {
-                    (&mut agents.worker.categories, category)
-                } else if let Some(category) = address.strip_prefix("reviewer.categories.") {
-                    (&mut agents.reviewer.categories, category)
-                } else {
-                    return Err(format!("Unknown agent binding address: {address}"));
-                };
-            &mut categories
-                .entry(category.to_owned())
-                .or_default()
-                .logical_model
-        }
-    };
-    *binding = Some(logical_model.to_owned());
-    Ok(())
 }

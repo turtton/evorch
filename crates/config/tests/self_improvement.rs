@@ -28,7 +28,7 @@ fn defaults_are_disabled_with_documented_limits_and_collectors() {
     expected.validate().expect("valid defaults");
 
     // Given: the section or its fields are omitted / When: deserializing / Then: default-off.
-    for document in ["version = 2\n", "[self_improvement]\n"] {
+    for document in ["version = 3\n", "[self_improvement]\n"] {
         let config: Config = toml::from_str(document).expect("defaults");
         assert_eq!(config.self_improvement, expected);
     }

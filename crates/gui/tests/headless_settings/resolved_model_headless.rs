@@ -26,9 +26,9 @@ api_key_env = "TEST_KEY"
 models = ["planner-model"]
 default_model = "planner-model"
 [agents.worker]
-logical_model = "implementation"
+models = [{ route = "implementation" }]
 [agents.orchestrator]
-logical_model = "planning"
+models = [{ route = "planning" }]
 [routing.routes]
 implementation = [{ profile = "local", model = "worker-model" }]
 planning = [{ profile = "planner", model = "planner-model" }]
@@ -53,7 +53,7 @@ planning = [{ profile = "planner", model = "planner-model" }]
     };
     let mut config = config::Config::load(&context.load_options).expect("load config");
     if !resolved {
-        config.agents.worker.base.logical_model = Some("missing-route".into());
+        config.agents.worker.base.models = vec![config::ChainEntryConfig::route("missing-route")];
     }
     let model = compose_production_model(&config, &context).expect("production model");
     let mut sidebar = SidebarState::default();

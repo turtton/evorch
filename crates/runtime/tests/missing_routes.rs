@@ -28,7 +28,7 @@ fn configured(mock: &StreamingMockOpenAi) -> Config {
         )]),
         ..Config::default()
     };
-    config.agents.worker.base.logical_model = Some("coding".into());
+    config.agents.worker.base.models = vec![config::ChainEntryConfig::route("coding")];
     config
         .agents
         .worker
@@ -52,7 +52,7 @@ fn assert_missing_route(error: RuntimeError, category: Option<&str>) {
         panic!("expected a model error: {error:?}");
     };
     assert!(
-        reason.contains("no route configured for logical model `coding`"),
+        reason.contains("no route configured for `coding` in the model chain"),
         "{reason}"
     );
     assert!(reason.contains("role=worker"), "{reason}");
@@ -81,7 +81,7 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: None,
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             );
         }
@@ -154,7 +154,7 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
         vec![RouteCandidateConfig {
             profile: "local".into(),
             model: Some("ghost-model".into()),
-            reasoning_effort: None,
+            auto: false,
         }],
     );
     let model = compose_routed_model(&config, deps(&directory)).unwrap();
@@ -180,10 +180,6 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
             panic!("expected a model error: {error:?}");
         };
         assert!(!reason.contains("no route configured"), "{reason}");
-        assert!(
-            reason.contains("route for logical model `coding`"),
-            "{reason}"
-        );
         assert!(reason.contains("no available candidate"), "{reason}");
         assert!(reason.contains("role=worker"), "{reason}");
         assert!(

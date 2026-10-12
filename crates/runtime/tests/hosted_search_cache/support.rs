@@ -49,14 +49,28 @@ pub(super) async fn model(
         )]),
         routing: config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "web_researcher".into(),
                 vec![config::RouteCandidateConfig {
                     profile: "codex".into(),
                     model: Some(MODEL.into()),
-                    reasoning_effort: Some("low".into()),
+                    auto: false,
                 }],
             )]),
+        },
+        agents: config::AgentsConfig {
+            roles: config::types::agents::AdditionalRoleBindings {
+                web_researcher: config::RoleBindingConfig {
+                    models: vec![config::ChainEntryConfig::with_effort(
+                        "web_researcher",
+                        "low",
+                    )],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
         },
         ..Default::default()
     };

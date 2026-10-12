@@ -5,7 +5,7 @@ mod streaming;
 
 type Requests = Arc<Mutex<Vec<ChatRequest>>>;
 
-fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
+pub(super) fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
     fixture_with_efforts(errors, &[])
 }
 
@@ -29,7 +29,7 @@ pub(super) fn fixture_with_efforts(
         candidates.push(RouteCandidateConfig {
             profile: name.clone(),
             model: None,
-            reasoning_effort: efforts.get(index).copied().flatten().map(str::to_owned),
+            auto: false,
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         model.providers.insert(
@@ -45,11 +45,29 @@ pub(super) fn fixture_with_efforts(
         );
         recordings.push(requests);
     }
+    // Without efforts every profile shares the `worker` pool; with them each profile is
+    // its own chain entry carrying that entry's effort.
+    let routes = if efforts.is_empty() {
+        BTreeMap::from([("worker".into(), candidates)])
+    } else {
+        model.agents.worker.base.models = (0..candidates.len())
+            .map(|index| config::ChainEntryConfig {
+                route: format!("route-{index}"),
+                reasoning_effort: efforts.get(index).copied().flatten().map(str::to_owned),
+            })
+            .collect();
+        candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| (format!("route-{index}"), vec![candidate]))
+            .collect()
+    };
     model.router = Router::new(
         profiles,
         &RoutingConfig {
             cooldown: Default::default(),
-            routes: BTreeMap::from([("worker".into(), candidates)]),
+            fallback: Default::default(),
+            routes,
         },
         catalog,
     )
@@ -78,7 +96,7 @@ async fn fallback_uses_each_candidates_reasoning_effort() {
     );
     // When
     assert_eq!(complete(&model, "session").await, Ok(response()));
-    // Then: the fallback request uses its own candidate's effort.
+    // Then: the fallback request uses its own chain entry's effort.
     assert_eq!(
         requests[0].lock().unwrap()[0].reasoning_effort.as_deref(),
         Some("xhigh")
@@ -143,11 +161,11 @@ async fn fallback_repins_affinity_and_preserves_request_when_primary_fails() {
     // When
     assert_eq!(complete(&model, "session").await, Ok(response()));
     // Then
+    let (_, choice) = model
+        .resolve_binding("session", Role::Worker, None, false)
+        .unwrap();
     assert_eq!(
-        model
-            .resolve("session", &LogicalModelId::from("worker"), false)
-            .unwrap()
-            .profile,
+        choice.chain.member(choice.position).target.profile,
         "profile-1"
     );
     let mut first = requests[0].lock().unwrap()[0].clone();
@@ -161,14 +179,13 @@ async fn fallback_repins_affinity_and_preserves_request_when_primary_fails() {
 #[tokio::test]
 async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
     for streaming in [false, true] {
-        // Given: a router bus and a runtime bus must not duplicate the event.
+        // Given: the runtime bus receives each fallback exactly once.
         let (mut model, _) = fixture(vec![
             Some(ProviderError::RateLimited { retry_after: None }),
             None,
         ]);
         let bus = Arc::new(EventBus::new(32));
         let mut rx = bus.subscribe();
-        model.router = model.router.with_event_bus(Some(bus.clone()));
         model.event_bus = Some(bus.clone());
         let invocation = AgentInvocationContext {
             run_id: "session".into(),
@@ -265,13 +282,16 @@ async fn exhaustion_lists_every_attempt_with_redacted_errors() {
     ]);
     // When
     let error = complete(&model, "session").await.unwrap_err().to_string();
-    // Then
+    // Then: each member is tried once, and the origin's transient timeout is retried last.
     for (index, requests) in requests.iter().enumerate() {
         assert!(
             error.contains(&format!("profile=profile-{index} model=model-{index}:")),
             "{error}"
         );
-        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            if index == 0 { 2 } else { 1 }
+        );
     }
     assert!(error.contains("timed out") && error.contains("bad ***") && error.contains("503"));
     assert!(!error.contains("secret-1"));
@@ -339,13 +359,14 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
             .collect(),
         &RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),
                     vec![RouteCandidateConfig {
                         profile: "profile-0".into(),
                         model: None,
-                        reasoning_effort: None,
+                        auto: false,
                     }],
                 ),
                 (
@@ -354,12 +375,12 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
                         RouteCandidateConfig {
                             profile: "profile-1".into(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         },
                         RouteCandidateConfig {
                             profile: "profile-2".into(),
                             model: None,
-                            reasoning_effort: None,
+                            auto: false,
                         },
                     ],
                 ),
@@ -375,7 +396,8 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
         error.contains("profile=profile-0 model=model-0:"),
         "{error}"
     );
-    assert_eq!(requests[0].lock().unwrap().len(), 1);
+    // The transient origin is retried once at the end of the cycle; other routes never run.
+    assert_eq!(requests[0].lock().unwrap().len(), 2);
     for index in [1, 2] {
         assert!(requests[index].lock().unwrap().is_empty());
         assert!(!error.contains(&format!("profile-{index}")), "{error}");

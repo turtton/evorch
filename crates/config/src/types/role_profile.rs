@@ -56,6 +56,36 @@ impl Config {
         }
     }
 
+    /// ロールのチェーンが同じスコープ (トップレベルかロールプロファイル) の route だけを
+    /// 参照しているか検証する。暗黙のロール名参照は実行時に解決するため対象外。
+    ///
+    /// # Errors
+    /// 存在しない route を参照する要素があれば [`crate::ConfigError::InvalidField`] を返す。
+    pub fn validate_chain_routes(&self) -> Result<(), crate::ConfigError> {
+        let scopes = std::iter::once((String::new(), &self.agents, &self.routing)).chain(
+            self.role_profiles.iter().map(|(name, profile)| {
+                (
+                    format!("role_profiles.{name}."),
+                    &profile.agents,
+                    &profile.routing,
+                )
+            }),
+        );
+        for (prefix, agents, routing) in scopes {
+            for (address, route) in super::agents::explicit_refs(agents) {
+                if !routing.routes.contains_key(&route) {
+                    return Err(crate::ConfigError::InvalidField {
+                        path: format!("{prefix}agents.{address}.models"),
+                        message: format!(
+                            "unknown route `{route}`; define [[{prefix}routing.routes.{route}]]"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `role_profile` の選択を実効の `agents` / `routing` に反映する。
     ///
     /// 未知の名前は警告してトップレベル (`default`) のまま扱う。

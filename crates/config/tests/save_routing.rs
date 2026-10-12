@@ -17,6 +17,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
     let path = temp.path().join(".evorch/config.toml");
     let routing = RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: [
             (
                 "worker.v2/日本語".into(),
@@ -24,12 +25,12 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
                     RouteCandidateConfig {
                         profile: "second".into(),
                         model: Some("custom-model".into()),
-                        reasoning_effort: Some("xhigh".into()),
+                        auto: true,
                     },
                     RouteCandidateConfig {
                         profile: "first".into(),
                         model: None,
-                        reasoning_effort: None,
+                        auto: false,
                     },
                 ],
             ),
@@ -38,7 +39,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
                 vec![RouteCandidateConfig {
                     profile: "first".into(),
                     model: None,
-                    reasoning_effort: None,
+                    auto: false,
                 }],
             ),
         ]
@@ -50,7 +51,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
     assert_eq!(load(temp.path()).routing, routing);
     let text = std::fs::read_to_string(path).expect("text");
     assert_eq!(text.matches("model =").count(), 1);
-    assert_eq!(text.matches("reasoning_effort = \"xhigh\"").count(), 1);
+    assert_eq!(text.matches("auto = true").count(), 1);
     assert_eq!(text.matches("[[routing.routes.").count(), 3);
 }
 
@@ -60,7 +61,7 @@ fn empty_routing_replaces_old_routes_and_preserves_other_sections() {
     let temp = tempfile::tempdir().expect("temp");
     std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
     let path = temp.path().join(".evorch/config.toml");
-    let unrelated = "# keep header\nversion = 2 # keep version\n\n[agents.worker]\n# keep binding\nlogical_model = 'worker'\n\n[providers.local]\ntype = 'openai-compatible'\nbase_url = 'https://example.invalid/v1'\napi_key_env = 'KEY'\nmodels = ['base']\ndefault_model = 'base' # keep default\n";
+    let unrelated = "# keep header\nversion = 3 # keep version\n\n[agents.worker]\n# keep binding\ngeneration = { temperature = 0.2 }\n\n[providers.local]\ntype = 'openai-compatible'\nbase_url = 'https://example.invalid/v1'\napi_key_env = 'KEY'\nmodels = ['base']\ndefault_model = 'base' # keep default\n";
     std::fs::write(
         &path,
         format!("{unrelated}\n[routing.routes]\nworker = [{{ profile = 'local' }}]\n"),

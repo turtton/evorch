@@ -100,7 +100,7 @@ fn compose_builds_clients_and_router_with_discovered_models() {
     let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
     config.agents.worker = config::WorkerBindingConfig {
         base: RoleBindingConfig {
-            logical_model: Some("coding".to_string()),
+            models: vec![config::ChainEntryConfig::route("coding")],
             ..RoleBindingConfig::default()
         },
         ..config::WorkerBindingConfig::default()
@@ -110,7 +110,7 @@ fn compose_builds_clients_and_router_with_discovered_models() {
         vec![RouteCandidateConfig {
             profile: PROFILE.to_string(),
             model: None,
-            reasoning_effort: None,
+            auto: false,
         }],
     );
     let composed = compose_providers(&config, deps(populated_env())).expect("composeに成功する");
@@ -154,7 +154,7 @@ fn compose_does_not_synthesize_default_role_routes() {
 #[test]
 fn compose_with_empty_routes_rejects_role_and_arbitrary_names() {
     let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
-    config.agents.worker.base.logical_model = Some("coding".to_string());
+    config.agents.worker.base.models = vec![config::ChainEntryConfig::route("coding")];
     let composed = compose_providers(&config, deps(populated_env()))
         .expect("agent bindingにrouteがなくてもcomposeに成功する");
 
@@ -192,12 +192,13 @@ fn compose_respects_explicit_routes() {
     let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
     config.routing = RoutingConfig {
         cooldown: Default::default(),
+        fallback: Default::default(),
         routes: BTreeMap::from([(
             "custom".to_string(),
             vec![RouteCandidateConfig {
                 profile: PROFILE.to_string(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             }],
         )]),
     };

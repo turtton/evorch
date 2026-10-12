@@ -1,0 +1,1443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "設定ファイルのルート構造。\n\n各セクションは [`serde(default)`] により省略可能です。\n通常の [`Config::load`] は未知キーを警告して無視し、[`Config::load_strict`] は\nドット区切りの設定パス付きで拒否します。直接の serde パースも\n`deny_unknown_fields` により拒否します。",
+  "type": "object",
+  "properties": {
+    "agents": {
+      "description": "ロール別エージェントバインディング。",
+      "$ref": "#/$defs/AgentsConfig",
+      "default": {
+        "explorer": {
+          "generation": {}
+        },
+        "orchestrator": {
+          "generation": {}
+        },
+        "reviewer": {
+          "categories": {},
+          "generation": {}
+        },
+        "roles": {
+          "multimodal_looker": {
+            "generation": {}
+          },
+          "oracle": {
+            "generation": {}
+          },
+          "planner": {
+            "generation": {}
+          },
+          "web_researcher": {
+            "generation": {}
+          }
+        },
+        "worker": {
+          "categories": {},
+          "generation": {}
+        }
+      }
+    },
+    "budget": {
+      "description": "run ごとのツール実行予算。",
+      "$ref": "#/$defs/BudgetConfig",
+      "default": {
+        "max_elapsed_secs": 7200,
+        "max_file_rereads": 20,
+        "max_identical_tool_call_repeats": 10,
+        "max_no_progress_rounds": 100,
+        "max_tool_calls": 400
+      }
+    },
+    "comment_checker": {
+      "description": "Write/Edit 成功後の外部コメント検査。",
+      "$ref": "#/$defs/CommentCheckerConfig",
+      "default": {
+        "binary": "comment-checker",
+        "enabled": true,
+        "prompt": null,
+        "timeout_ms": 15000
+      }
+    },
+    "compaction": {
+      "description": "コンテキスト圧縮設定。",
+      "$ref": "#/$defs/CompactionConfig",
+      "default": {
+        "context_window_tokens": 200000,
+        "cooldown_turns": 1,
+        "enabled": true,
+        "failure_cooldown_turns": 4,
+        "keep_recent_tokens": 20000,
+        "max_compactions_per_run": 32,
+        "max_summary_bytes": 16384,
+        "model_overrides": {},
+        "summarizer": "model",
+        "summary_idle_timeout_secs": 90,
+        "summary_timeout_secs": 300,
+        "threshold": 0.75
+      }
+    },
+    "diagnostics": {
+      "description": "診断 (ログ) 設定。",
+      "$ref": "#/$defs/DiagnosticsConfig",
+      "default": {
+        "log_level": "info",
+        "persistence": "warnings"
+      }
+    },
+    "metrics": {
+      "description": "メトリクス設定。",
+      "$ref": "#/$defs/MetricsConfig",
+      "default": {
+        "enabled": true,
+        "retention_days": 90
+      }
+    },
+    "model_presets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelPresetConfig"
+      },
+      "default": {}
+    },
+    "orchestration": {
+      "description": "オーケストレーションループ設定。",
+      "$ref": "#/$defs/OrchestrationConfig",
+      "default": {
+        "ci_poll_secs": 30,
+        "ci_timeout_secs": 3600,
+        "in_flight_tool_multiplier": 3,
+        "max_continuations": 8,
+        "max_nudges": 2,
+        "max_review_rounds": 3,
+        "repeated_error_threshold": 5,
+        "stale_ttl_secs": 1800,
+        "stall_after_secs": 600,
+        "stall_check_secs": 30
+      }
+    },
+    "ownership": {
+      "$ref": "#/$defs/OwnershipConfig",
+      "default": {
+        "grace_ms": 10000,
+        "heartbeat_ms": 1000,
+        "lease_ms": 5000
+      }
+    },
+    "panel": {
+      "description": "パネル UI 設定。",
+      "$ref": "#/$defs/PanelConfig",
+      "default": {
+        "keybinds": {},
+        "layout": "default"
+      }
+    },
+    "permissions": {
+      "description": "権限設定。",
+      "$ref": "#/$defs/PermissionConfig",
+      "default": {
+        "preset": "default"
+      }
+    },
+    "providers": {
+      "description": "プロバイダプロファイル (マップキーがプロファイル名)。",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderProfileConfig"
+      },
+      "default": {}
+    },
+    "role_profile": {
+      "description": "選択中のロール構成プロファイル名。`None` と `\"default\"` はトップレベルの\n`agents` / `routing` を使う。プロジェクト層が設定できる唯一のキー。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role_profiles": {
+      "description": "名前付きのロール構成プロファイル (マップキーがプロファイル名)。",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RoleProfileConfig"
+      }
+    },
+    "routing": {
+      "description": "ルーティング設定。",
+      "$ref": "#/$defs/RoutingConfig",
+      "default": {
+        "routes": {}
+      }
+    },
+    "rules": {
+      "description": "プロジェクトルール注入設定。",
+      "$ref": "#/$defs/RulesConfig",
+      "default": {
+        "context_window_tokens": 200000,
+        "max_injection_bytes": 65536,
+        "response_headroom_tokens": 16384
+      }
+    },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxConfig",
+      "default": {
+        "escalate_to_user_on_deny": false,
+        "escalation_approval": "auto",
+        "web_tools_enabled": true
+      }
+    },
+    "self_improvement": {
+      "description": "自己改善ドラフト設定 (既定で無効。Phase A は候補とローカル下書きのみ)。",
+      "$ref": "#/$defs/SelfImprovementConfig",
+      "default": {
+        "collect_diagnostics": true,
+        "collect_lessons": true,
+        "daily_limit": 20,
+        "duplicate_cooldown_secs": 86400,
+        "enabled": false,
+        "evidence_max_bytes": 2048,
+        "max_candidates": 200
+      }
+    },
+    "team": {
+      "$ref": "#/$defs/TeamConfig",
+      "default": {
+        "enabled": false,
+        "max_workers": 3
+      }
+    },
+    "version": {
+      "description": "設定スキーマのバージョン。",
+      "type": "integer",
+      "format": "uint32",
+      "default": 3,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "AdditionalRoleBindings": {
+      "type": "object",
+      "properties": {
+        "multimodal_looker": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "oracle": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "planner": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "web_researcher": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentsConfig": {
+      "description": "ロール別のエージェントバインディング設定。",
+      "type": "object",
+      "properties": {
+        "explorer": {
+          "description": "explorer ロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "orchestrator": {
+          "description": "オーケストレータロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "reviewer": {
+          "description": "reviewer ロールのバインディング。",
+          "$ref": "#/$defs/CategorizedRoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "roles": {
+          "$ref": "#/$defs/AdditionalRoleBindings",
+          "default": {
+            "multimodal_looker": {
+              "generation": {}
+            },
+            "oracle": {
+              "generation": {}
+            },
+            "planner": {
+              "generation": {}
+            },
+            "web_researcher": {
+              "generation": {}
+            }
+          }
+        },
+        "worker": {
+          "description": "worker ロールのバインディング。",
+          "$ref": "#/$defs/WorkerBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApiProtocolConfig": {
+      "description": "モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-messages`) です。\n`OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子\n(`openai-responses`・`openai-completions`・`openai-codex-responses`) として直列化します (ADR 0004)。",
+      "oneOf": [
+        {
+          "description": "Anthropic Messages API。",
+          "type": "string",
+          "const": "anthropic-messages"
+        },
+        {
+          "description": "OpenAI Responses API。",
+          "type": "string",
+          "const": "openai-responses"
+        },
+        {
+          "description": "OpenAI Chat Completions API。",
+          "type": "string",
+          "const": "openai-completions"
+        },
+        {
+          "description": "OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。",
+          "type": "string",
+          "const": "openai-codex-responses"
+        },
+        {
+          "description": "Cursor Connect agent protocol.",
+          "type": "string",
+          "const": "cursor-agent"
+        }
+      ]
+    },
+    "BudgetConfig": {
+      "description": "ツール実行と停滞検出の上限。",
+      "type": "object",
+      "properties": {
+        "max_elapsed_secs": {
+          "description": "Maximum elapsed run time in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 7200,
+          "minimum": 0
+        },
+        "max_file_rereads": {
+          "description": "同じファイルの初回以降の再読込の許容回数 (既定: 20)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "max_identical_tool_call_repeats": {
+          "description": "同一の名前・引数の連続呼び出しがこの回数に達すると停止 (既定: 10)。\nID は比較対象外。0 でも最初の呼び出しで停止する。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 10,
+          "minimum": 0
+        },
+        "max_no_progress_rounds": {
+          "description": "成功した非メタツール結果のないラウンドの許容回数 (既定: 100)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 100,
+          "minimum": 0
+        },
+        "max_tokens": {
+          "description": "Optional cumulative usage guard for operators who explicitly want a run-level cap.\nThis is not a context-window limit and is disabled by default.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "description": "1 run あたりのツール実行回数の上限 (既定: 400)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 400,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CategorizedRoleBindingConfig": {
+      "description": "カテゴリを持つロールのベース設定とカテゴリ別バインディング。",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "ロールに属するカテゴリ別のバインディング。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CategoryBindingConfig"
+          },
+          "default": {}
+        },
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "models": {
+          "description": "優先順に並べた route のチェーン。省略時はロール名 (小文字) の route 1 要素。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChainEntryConfig"
+          }
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CategoryBindingConfig": {
+      "description": "カテゴリ 1 件分のバインディング設定。",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "models": {
+          "description": "優先順に並べた route のチェーン。省略時はロール側の指定に従う。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChainEntryConfig"
+          }
+        },
+        "preset": {
+          "description": "使用するプリセット名。省略時はロール側の指定に従う。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChainEntryConfig": {
+      "description": "ロールのチェーンの要素 1 件 (ADR 0030)。\n\nroute (同じモデルへの経路プール) を名前で参照し、その route のメンバーへ送る\n推論強度を指定する。チェーンがチェーンを参照することはない。",
+      "type": "object",
+      "properties": {
+        "reasoning_effort": {
+          "description": "この要素で送る推論強度。省略時はプロバイダ既定。モデルごとに有効な値が異なるため自由形式の文字列とする。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "description": "参照する `routing.routes` の名前。",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommentCheckerConfig": {
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "裸名はホストの PATH から探索し、`/` を含む場合は明示パスとして扱う。",
+          "type": "string",
+          "default": "comment-checker"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 15000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompactionConfig": {
+      "description": "コンテキスト圧縮の設定。",
+      "type": "object",
+      "properties": {
+        "context_window_tokens": {
+          "description": "既定のコンテキストウィンドウ上限トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 200000,
+          "minimum": 0
+        },
+        "cooldown_turns": {
+          "description": "圧縮後に再圧縮を抑制するターン数。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "コンテキスト圧縮の有効フラグ。",
+          "type": "boolean",
+          "default": true
+        },
+        "failure_cooldown_turns": {
+          "description": "Base turn cooldown after summary failures; doubles after each failure.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 4,
+          "minimum": 0
+        },
+        "keep_recent_tokens": {
+          "description": "圧縮せずに保持する直近トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20000,
+          "minimum": 0
+        },
+        "max_compactions_per_run": {
+          "description": "1 run あたりの圧縮回数の上限 (DoS/暴走防止)。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 32,
+          "minimum": 0
+        },
+        "max_summary_bytes": {
+          "description": "要約本文の最大バイト数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 16384,
+          "minimum": 0
+        },
+        "model_overrides": {
+          "description": "モデル ID ごとのコンテキストウィンドウ上限トークン数。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "summarizer": {
+          "description": "要約に使用する方式。",
+          "$ref": "#/$defs/SummarizerKind",
+          "default": "model"
+        },
+        "summary_idle_timeout_secs": {
+          "description": "Maximum silence between summary text/reasoning updates.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 90,
+          "minimum": 0
+        },
+        "summary_timeout_secs": {
+          "description": "Overall deadline for one summary attempt (including provider retries).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "threshold": {
+          "description": "圧縮を開始するコンテキスト使用率の閾値。",
+          "type": "number",
+          "format": "double",
+          "default": 0.75
+        }
+      },
+      "additionalProperties": false
+    },
+    "CooldownConfig": {
+      "description": "失敗後のクールダウン期間 (ADR 0030)。\n\nRetry-After などプロバイダが期間を示した場合はそちらを優先する。認証エラーは\n期間を持たず、runtime の再構成 (設定の再読み込み) まで続く。",
+      "type": "object",
+      "properties": {
+        "quota_secs": {
+          "description": "支払い・利用上限による失敗でプロファイル全体を止める秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
+        "rate_limit_secs": {
+          "description": "レート制限による失敗で (プロファイル, モデル) を止める秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CredentialRefConfig": {
+      "description": "認証情報の参照方法。\n\n秘密情報そのものは一切保持せず、取得先 (キーリングのサービス名・アカウント名、\nまたは環境変数名) のみを表現します。この型が秘密素材を含まないことは\nこのクレートのハードな契約です。",
+      "oneOf": [
+        {
+          "description": "OS のキーリングから取得する。",
+          "type": "object",
+          "properties": {
+            "account": {
+              "description": "キーリングのアカウント名。",
+              "type": "string"
+            },
+            "service": {
+              "description": "キーリングのサービス名。",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "keyring"
+            }
+          },
+          "required": [
+            "type",
+            "service",
+            "account"
+          ]
+        },
+        {
+          "description": "環境変数から取得する。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "env"
+            },
+            "var": {
+              "description": "環境変数名。",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "var"
+          ]
+        }
+      ]
+    },
+    "DiagnosticPersistence": {
+      "description": "任意の診断イベントを永続化するレベル。会話や監査イベントには適用しません。",
+      "type": "string",
+      "enum": [
+        "off",
+        "warnings",
+        "all"
+      ]
+    },
+    "DiagnosticsConfig": {
+      "description": "診断 (ログ出力) の設定。",
+      "type": "object",
+      "properties": {
+        "log_dir": {
+          "description": "ログ出力ディレクトリ。未指定の場合は既定の位置を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_level": {
+          "description": "ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。",
+          "type": "string",
+          "default": "info"
+        },
+        "persistence": {
+          "description": "診断のDB保存。既定はwarning/errorのみ。stderrのログレベルとは独立。",
+          "$ref": "#/$defs/DiagnosticPersistence",
+          "default": "warnings"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EscalationApproval": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "user",
+            "off"
+          ]
+        },
+        {
+          "description": "`quick` is a load-time migration alias only; the generated schema intentionally\nlists only `auto`, `user`, and `off`. Runtime compatibility is not schema compatibility.",
+          "type": "string",
+          "const": "auto"
+        }
+      ]
+    },
+    "FallbackConfig": {
+      "description": "チェーンのフォールバック設定 (ADR 0030)。",
+      "type": "object",
+      "properties": {
+        "max_retry_after_wait_secs": {
+          "description": "一時的な失敗でプールが尽きたとき、次のプールへ進む前に Retry-After を待つ上限秒数。\nこれより長い Retry-After は待たずに次のプールへ進む。0 なら待たない。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GenerationOverridesConfig": {
+      "description": "生成パラメータの上書き指定。指定したフィールドのみ反映する。",
+      "type": "object",
+      "properties": {
+        "max_tokens": {
+          "description": "最大出力トークン数。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "temperature": {
+          "description": "サンプリング温度。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "top_p": {
+          "description": "nucleus サンプリングの確率質量。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetadataSource": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "models-dev",
+        "provider-default"
+      ]
+    },
+    "MetricsConfig": {
+      "description": "メトリクス収集の設定。",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "メトリクス収集の有効フラグ。",
+          "type": "boolean",
+          "default": true
+        },
+        "retention_days": {
+          "description": "リクエスト単位の usage を保持する日数。過ぎた分は日次集計へ畳み込む。\n0 は畳み込みを無効化する。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 90,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelEntryConfig": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        {
+          "description": "モデル ID と利用可否の設定。",
+          "type": "object",
+          "properties": {
+            "cache_read_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "cache_write_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "context_window": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "effort_levels": {
+              "description": "このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "enabled": {
+              "description": "利用可能かどうか。省略時は有効。",
+              "type": "boolean",
+              "default": true
+            },
+            "id": {
+              "description": "モデル ID。",
+              "type": "string"
+            },
+            "input_price": {
+              "description": "USD per million tokens; omitted prices may be supplied by the catalog.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "metadata_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metadata_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MetadataSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id"
+          ]
+        }
+      ]
+    },
+    "ModelPresetConfig": {
+      "type": "object",
+      "properties": {
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_price_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_price_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OrchestrationConfig": {
+      "description": "オーケストレーションループの境界設定。\n\nすべての上限は正の値でなければならず、既定値は issue #73 の\nbounded 契約 (AC5) で固定される。",
+      "type": "object",
+      "properties": {
+        "ci_poll_secs": {
+          "description": "CI 状態のポーリング間隔秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "ci_timeout_secs": {
+          "description": "CI 完了待機のタイムアウト秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "in_flight_tool_multiplier": {
+          "description": "ツール in-flight 中に stall 窓へ掛ける倍率。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "max_continuations": {
+          "description": "idle 継続ディスパッチ回数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 8,
+          "minimum": 0
+        },
+        "max_nudges": {
+          "description": "stall した run への連続 nudge 回数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "max_review_rounds": {
+          "description": "レビュー (request-update → repair) ラウンド数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "repeated_error_threshold": {
+          "description": "stall と判定する連続ツールエラー回数のしきい値。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "stale_ttl_secs": {
+          "description": "Durable worker heartbeat の有効期間 (秒)。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
+        "stall_after_secs": {
+          "description": "進捗なしと判定するまでの無活動秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "stall_check_secs": {
+          "description": "stall 観測サンプラの実行間隔秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "OwnershipConfig": {
+      "type": "object",
+      "properties": {
+        "grace_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10000,
+          "minimum": 1
+        },
+        "heartbeat_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000,
+          "minimum": 1
+        },
+        "lease_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "PanelConfig": {
+      "description": "パネル UI の設定。",
+      "type": "object",
+      "properties": {
+        "keybinds": {
+          "description": "キーバインド (アクション名からキーへのマップ)。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "layout": {
+          "description": "レイアウト名。",
+          "type": "string",
+          "default": "default"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PermissionConfig": {
+      "description": "権限プリセットの設定。",
+      "type": "object",
+      "properties": {
+        "preset": {
+          "description": "権限プリセット名。",
+          "type": "string",
+          "default": "default"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderProfileConfig": {
+      "description": "プロバイダプロファイル 1 件分の設定。\n\n[`super::Config`] の `providers` マップのキーがプロファイル名になります。",
+      "type": "object",
+      "properties": {
+        "api_key_env": {
+          "description": "`credential = { type = \"env\", var = \"...\" }` の糖衣構文。`credential` とは併用できない。",
+          "type": "string",
+          "minLength": 1
+        },
+        "api_protocol": {
+          "description": "通信に用いる API プロトコル。",
+          "$ref": "#/$defs/ApiProtocolConfig",
+          "default": "anthropic-messages"
+        },
+        "base_url": {
+          "description": "API のベース URL。",
+          "type": "string",
+          "default": "https://api.anthropic.com"
+        },
+        "credential": {
+          "description": "認証情報の参照。",
+          "$ref": "#/$defs/CredentialRefConfig",
+          "default": {
+            "type": "env",
+            "var": "ANTHROPIC_API_KEY"
+          }
+        },
+        "default_model": {
+          "description": "既定で使用するモデル ID。",
+          "type": "string",
+          "default": "claude-sonnet-4-5"
+        },
+        "excluded_models": {
+          "description": "除外するモデル ID の一覧。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "description": "モデル ID と利用可否の一覧。",
+          "type": "array",
+          "default": [
+            {
+              "enabled": true,
+              "id": "claude-sonnet-4-5"
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/ModelEntryConfig"
+          }
+        },
+        "provider_type": {
+          "description": "プロバイダの種別。",
+          "$ref": "#/$defs/ProviderTypeConfig",
+          "default": "anthropic"
+        },
+        "type": {
+          "description": "`provider_type` のエイリアス。",
+          "$ref": "#/$defs/ProviderTypeConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderTypeConfig": {
+      "description": "プロバイダの種別 (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-subscription`) です。\n`OpenAi` 系は語を分割しない識別子 (`openai`・`openai-codex`・\n`openai-compatible`) として直列化するため個別に rename します (ADR 0004)。",
+      "oneOf": [
+        {
+          "description": "Anthropic API (従量課金)。",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Anthropic サブスクリプション (Claude Pro / Max)。",
+          "type": "string",
+          "const": "anthropic-subscription"
+        },
+        {
+          "description": "OpenAI API。",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "OpenAI Codex (ChatGPT サブスクリプション連携)。",
+          "type": "string",
+          "const": "openai-codex"
+        },
+        {
+          "description": "GitHub Copilot。",
+          "type": "string",
+          "const": "github-copilot"
+        },
+        {
+          "description": "OpenRouter。",
+          "type": "string",
+          "const": "openrouter"
+        },
+        {
+          "description": "OpenAI 互換 API (汎用プレースホルダ)。",
+          "type": "string",
+          "const": "openai-compatible"
+        },
+        {
+          "description": "Kimi サブスクリプション (Kimi For Coding)。",
+          "type": "string",
+          "const": "kimi-subscription"
+        },
+        {
+          "description": "Cursor subscription through the native agent protocol.",
+          "type": "string",
+          "const": "cursor"
+        }
+      ]
+    },
+    "RoleBindingConfig": {
+      "description": "ロール 1 件分のバインディング設定。",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "models": {
+          "description": "優先順に並べた route のチェーン。省略時はロール名 (小文字) の route 1 要素。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChainEntryConfig"
+          }
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoleProfileConfig": {
+      "description": "名前付きのロール構成プロファイル。\n\nトップレベルの `[agents]` / `[routing]` と同じ形で、プロジェクトは\n`role_profile = \"<name>\"` によっていずれかを選択する。",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "ロール別エージェントバインディング。",
+          "$ref": "#/$defs/AgentsConfig",
+          "default": {
+            "explorer": {
+              "generation": {}
+            },
+            "orchestrator": {
+              "generation": {}
+            },
+            "reviewer": {
+              "categories": {},
+              "generation": {}
+            },
+            "roles": {
+              "multimodal_looker": {
+                "generation": {}
+              },
+              "oracle": {
+                "generation": {}
+              },
+              "planner": {
+                "generation": {}
+              },
+              "web_researcher": {
+                "generation": {}
+              }
+            },
+            "worker": {
+              "categories": {},
+              "generation": {}
+            }
+          }
+        },
+        "routing": {
+          "description": "ルーティング設定。",
+          "$ref": "#/$defs/RoutingConfig",
+          "default": {
+            "routes": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteCandidateConfig": {
+      "description": "ルート (同じモデルへの経路プール) の候補 1 件分の設定。\n\n推論強度はロールのチェーンの要素 ([`crate::ChainEntryConfig`]) で指定する。",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "description": "同じモデルの自動グルーピングで追加された候補か。",
+          "type": "boolean"
+        },
+        "model": {
+          "description": "モデル ID の上書き指定。省略時はプロファイルの `default_model` を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "description": "使用するプロバイダプロファイル名。",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoutingConfig": {
+      "description": "ルーティング設定。",
+      "type": "object",
+      "properties": {
+        "cooldown": {
+          "description": "失敗したプロファイル・モデルを候補から外す期間。",
+          "$ref": "#/$defs/CooldownConfig"
+        },
+        "fallback": {
+          "description": "ロールのチェーンをフォールバックするときの待機設定。",
+          "$ref": "#/$defs/FallbackConfig"
+        },
+        "routes": {
+          "description": "ルート名から候補リスト (フォールバック順) へのマップ。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RouteCandidateConfig"
+            }
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "RulesConfig": {
+      "description": "プロジェクトルール注入の設定。",
+      "type": "object",
+      "properties": {
+        "context_window_tokens": {
+          "description": "モデルのコンテキストウィンドウ上限トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 200000,
+          "minimum": 0
+        },
+        "max_injection_bytes": {
+          "description": "1 回に注入するルール本文の最大バイト数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 65536,
+          "minimum": 0
+        },
+        "response_headroom_tokens": {
+          "description": "応答生成用に予約するトークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 16384,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "escalate_to_user_on_deny": {
+          "type": "boolean",
+          "default": false
+        },
+        "escalation_approval": {
+          "$ref": "#/$defs/EscalationApproval",
+          "default": "auto"
+        },
+        "web_tools_enabled": {
+          "description": "Enables Web tools exposed by a role; each call still follows its tool policy.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "SelfImprovementConfig": {
+      "description": "自己改善ドラフト生成の設定 (Phase A: 候補と下書きのみ。既定で無効)。\n\n`enabled = false` の場合は候補収集・ドラフト生成を含め完全に停止する。\nPhase A はローカルの下書きのみを生成し、GitHub issue の自動作成・公開は行わない。",
+      "type": "object",
+      "properties": {
+        "collect_diagnostics": {
+          "description": "Diagnostic イベントからの候補収集。既定 true (enabled=false なら何もしない)。",
+          "type": "boolean",
+          "default": true
+        },
+        "collect_lessons": {
+          "description": "承認済み lesson からの候補収集。既定 true (enabled=false なら何もしない)。",
+          "type": "boolean",
+          "default": true
+        },
+        "daily_limit": {
+          "description": "1 日あたりの新規候補作成上限 (UTC 日替わり)。1..=1_000、既定 20。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "draft_dir": {
+          "description": "ドラフト出力ディレクトリ。None の場合は runtime 側で既定位置 (storage dir 配下) に解決する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duplicate_cooldown_secs": {
+          "description": "同一 dedup_key の再作成クールダウン秒数。60..=31_536_000、既定 86_400。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 86400,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "自己改善ドラフト生成を有効化する。既定 false (無効)。",
+          "type": "boolean",
+          "default": false
+        },
+        "evidence_max_bytes": {
+          "description": "候補 1 件あたりの evidence 最大バイト数。256..=65_536、既定 2048。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2048,
+          "minimum": 0
+        },
+        "max_candidates": {
+          "description": "プロジェクトあたりの候補保持上限。1..=10_000、既定 200。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 200,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SummarizerKind": {
+      "description": "コンテキスト要約の方式。",
+      "oneOf": [
+        {
+          "description": "モデルで要約する。",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "構造情報から要約する。",
+          "type": "string",
+          "const": "structural"
+        }
+      ]
+    },
+    "TeamConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_workers": {
+          "type": "integer",
+          "format": "uint8",
+          "default": 3,
+          "maximum": 3,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkerBindingConfig": {
+      "description": "worker 専用のロール設定とカテゴリ別バインディング。",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "カテゴリ別のバインディング (キーは固定 6 カテゴリ名)。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CategoryBindingConfig"
+          },
+          "default": {}
+        },
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "models": {
+          "description": "優先順に並べた route のチェーン。省略時はロール名 (小文字) の route 1 要素。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChainEntryConfig"
+          }
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

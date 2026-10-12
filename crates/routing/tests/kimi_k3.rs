@@ -26,6 +26,7 @@ fn tool_router(catalog: ModelCatalog, models: [&str; 2]) -> Router {
         profiles.into(),
         &config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "kimi-k3".into(),
                 ["kimi", "neuralwatt"]
@@ -34,7 +35,7 @@ fn tool_router(catalog: ModelCatalog, models: [&str; 2]) -> Router {
                     .map(|(profile, model)| config::RouteCandidateConfig {
                         profile: profile.into(),
                         model: Some(model.into()),
-                        reasoning_effort: None,
+                        auto: false,
                     })
                     .collect(),
             )]),

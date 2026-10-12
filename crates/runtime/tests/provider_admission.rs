@@ -60,7 +60,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
             .map(|(name, _)| RouteCandidateConfig {
                 profile: (*name).into(),
                 model: None,
-                reasoning_effort: None,
+                auto: false,
             })
             .collect(),
     );

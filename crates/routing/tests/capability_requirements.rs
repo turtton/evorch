@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
 
 use model::{ApiProtocol, Capability, LogicalModelId, ModelCatalog, ProviderType};
-use routing::{
-    CredentialRef, FailureKind, ProviderProfile, ResolvedRoute, Router, RoutingError,
-    SessionAffinity,
-};
+use routing::{CredentialRef, ProviderProfile, Router, RoutingError, SessionAffinity};
 
 fn router(models: &[&str]) -> Router {
     let mut catalog = ModelCatalog::new();
@@ -39,6 +36,7 @@ fn router(models: &[&str]) -> Router {
         profiles,
         &config::RoutingConfig {
             cooldown: Default::default(),
+            fallback: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 models
@@ -46,7 +44,7 @@ fn router(models: &[&str]) -> Router {
                     .map(|id| config::RouteCandidateConfig {
                         profile: (*id).into(),
                         model: None,
-                        reasoning_effort: None,
+                        auto: false,
                     })
                     .collect(),
             )]),
@@ -92,7 +90,15 @@ fn pin_is_preserved_when_tool_support_is_unknown() {
     // Given: a text-only flow previously pinned an unknown model.
     let router = router(&["unknown", "gpt-4o"]).requiring_capability(Capability::ToolCalling);
     let mut affinity = SessionAffinity::default();
-    affinity.pin("run", "worker", "unknown", "unknown");
+    affinity.pin(
+        "run",
+        "worker",
+        routing::RoutePin {
+            position: 0,
+            profile: "unknown".into(),
+            model: "unknown".into(),
+        },
+    );
     // When: resolving a tool-calling flow with that pin.
     let route = router
         .resolve(&mut affinity, "run", &LogicalModelId::from("worker"))
@@ -107,19 +113,9 @@ fn fallback_skips_explicitly_unsupported_models_but_accepts_unknown() {
     let router = router(&["gpt-4o", "unsupported", "unknown", "gpt-4o-mini"])
         .requiring_capability(Capability::ToolCalling);
     // When: the first model fails.
-    let route = router.next_fallback(
-        &mut SessionAffinity::default(),
-        "run",
-        &LogicalModelId::from("worker"),
-        &ResolvedRoute {
-            profile: "gpt-4o".into(),
-            model_id: "gpt-4o".into(),
-        },
-        FailureKind::Server,
-        None,
-    );
+    let route = next_after_failure(&router, "worker", 0);
     // Then: the unsupported candidate is skipped and the unknown one is selected.
-    assert_eq!(route.map(|route| route.model_id), Some("unknown".into()));
+    assert_eq!(route.as_deref(), Some("unknown"));
 }
 
 #[test]
@@ -127,17 +123,22 @@ fn fallback_accepts_when_only_unknown_models_remain() {
     // Given: a supported model followed by an unknown model.
     let router = router(&["gpt-4o", "unknown"]).requiring_capability(Capability::ToolCalling);
     // When: the supported model fails.
-    let route = router.next_fallback(
-        &mut SessionAffinity::default(),
-        "run",
-        &LogicalModelId::from("worker"),
-        &ResolvedRoute {
-            profile: "gpt-4o".into(),
-            model_id: "gpt-4o".into(),
-        },
-        FailureKind::Server,
-        None,
-    );
+    let route = next_after_failure(&router, "worker", 0);
     // Then: the unknown fallback remains eligible.
-    assert_eq!(route.map(|route| route.model_id), Some("unknown".into()));
+    assert_eq!(route.as_deref(), Some("unknown"));
+}
+
+/// route 1 つのチェーンで `failed` 番目が失敗したとき、次に送るモデル ID。
+fn next_after_failure(router: &Router, route: &str, failed: usize) -> Option<String> {
+    let chain = router
+        .chain(route, &[config::ChainEntryConfig::route(route)])
+        .expect("chain");
+    let mut cycle = routing::FallbackCycle::new(&chain, failed);
+    cycle.record_failure(failed, false, None);
+    match cycle.next(router, &chain, std::time::Duration::ZERO) {
+        routing::FallbackStep::Try(position) => {
+            Some(chain.member(position).target.model_id.clone())
+        }
+        routing::FallbackStep::Wait(_) | routing::FallbackStep::Exhausted => None,
+    }
 }
