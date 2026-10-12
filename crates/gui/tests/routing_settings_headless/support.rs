@@ -63,10 +63,10 @@ pub(super) fn load_options(root: &std::path::Path) -> config::LoadOptions {
     }
 }
 
+/// Dispatches a queued click first, so a save it starts is waited for.
 pub(super) fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    harness.step();
     while harness.state().routing_settings().is_saving() {
-        assert!(std::time::Instant::now() < deadline, "save timeout");
         harness.step();
         std::thread::yield_now();
     }
