@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "ADR 0030 ③: compaction のチェーン化と、モデル切り替え時の元履歴からの要約し直し"
+  issue_kind: feature
+  source_execution_unit: v13-c-chain-compaction
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/runtime/ crates/routing/ crates/providers/ docs/ intents/"
+  target_part: "ADR 0030 の compaction。要約のモデルを実行中ロールのチェーン（context window が入力より大きいメンバー）→ 構造的要約の順で選び、compactor ロールで上書きできるようにする。フォールバックや復元でプロバイダが変わるとき、切り替え先が解釈できない checkpoint（Codex の compaction blob）を元のメッセージから要約し直し、切り替え先の context window を超える履歴は送信前に compaction する"
+  dependencies:
+    - v13-b-role-model-chains
+  technical_baseline:
+    - "ADR 0030（intents/evorch/decisions/0030-role-model-chains.md）で方針合意済み"
+    - "crates/runtime/src/compaction/mod.rs は公式 compaction（compact_context）→ ModelSummarizer（実行中の run と同じモデル）または StructuralSummarizer の順で要約する"
+    - "公式 compaction の結果は ContentBlock::Compaction { encrypted_content } として checkpoint の summary に入る。Anthropic / OpenAI 互換の wire は警告して捨て、Cursor はエラーにする"
+    - "RunContext.apply_checkpoint は元の messages を残したまま checkpoint を重ねる。visible_messages が最新の checkpoint で投影する。run スナップショットは messages と checkpoints を別々に保存する"
+    - "フォールバックは RoutedModel の送信ループ（compose.rs）の中で起き、ループは run の状態（checkpoint）を持たない"
+    - "AGENTS.md の cache 契約: compaction の成功は明示的な履歴置き換えの境界であり、切り替え時の要約し直しも同じ境界として扱い、テストで固定する"
+  intent_references:
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - intents/evorch/features/context-engine/overview.md
+  acceptance_criteria:
+    - "要約のモデルは公式 compaction → 実行中ロールのチェーンのうち使える状態で context window が入力より大きいメンバー → 構造的要約の順で選ばれる"
+    - "agents.roles.compactor の models を設定した場合だけ、チェーンの部分がそれに置き換わる"
+    - "フォールバックで切り替え先が checkpoint のブロックを解釈できない場合、送信前に、その checkpoint が覆う元のメッセージを入力として要約し直したテキストの checkpoint に置き換わる。blob は切り替え先に送られない"
+    - "切り替え後の推定トークン数が切り替え先の context window × 閾値を超える場合は、送信前に compaction が行われる"
+    - "再起動後の復元でピン先が使えず別プロバイダへ切り替わる場合も、同じ手順が適用される"
+    - "要約し直しに使えるモデルがない場合は構造的要約で完了し、切り替えが止まらない"
+    - "切り替え時の要約し直しは cache 契約上の明示的な境界として扱われ、その後のターンで新しい prefix が保たれることをテストで確認する"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0030-role-model-chains.md
+  supporting_intents:
+    - intents/evorch/features/context-engine/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0030 の「compaction はチェーンで行い、切り替え時は元の履歴から要約し直す」節の実装"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/context-engine/overview.md
+    summary: "要約モデルの選び方と、切り替え時の要約し直しを要件に追記する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/providers.md
+    summary: "compactor ロール、要約モデルの選び方、切り替え時の挙動を記載する"
+closeout_learning:
+  expected: "Codex で compaction したセッションが他プロバイダへ移っても文脈が失われず、小さい context window のモデルへ移っても溢れない"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

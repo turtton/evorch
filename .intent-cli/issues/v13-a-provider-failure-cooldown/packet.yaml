@@ -1,0 +1,61 @@
+implementation_issue_packet:
+  issue_title: "ADR 0030 ①: プロバイダ失敗の詳細保存・種別ごとの分類・プロファイルのクールダウン"
+  issue_kind: feature
+  source_execution_unit: v13-a-provider-failure-cooldown
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/event-bus/ crates/providers/ crates/routing/ crates/runtime/ crates/config/ crates/storage/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0030 の基盤。RequestFailed に秘匿情報を伏せたエラー詳細を載せ、プロバイダ種別ごとの失敗分類（Kimi サブスクリプションの利用上限 403 を Quota）を入れ、プロファイル / (プロファイル, モデル) 単位のクールダウンでフォールバック時に止まっているメンバーへリクエストを送らないようにする"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0030（intents/evorch/decisions/0030-role-model-chains.md）で方針合意済み"
+    - "ProviderEvent::RequestFailed は crates/providers/src/observe.rs の emit_failed_kind で発行され、ProviderFailureKind だけを持つ。ProviderError::Http { status, body } の body はイベントに載らない"
+    - "フォールバックは crates/runtime/src/compose.rs の RoutedModel の送信ループが駆動する。fallback::eligible（compose/fallback.rs）で対象を判定し、request-local な Router clone に exclude_attempt してから next_fallback を呼ぶ"
+    - "routing::FailureKind（crates/routing/src/failure.rs）は 402 だけを Quota、401/403 を Auth に分類する。thread-124 のエスカレーション先で Kimi の quota 切れが 403 として観測された"
+    - "session affinity は RoutedModel の Mutex<SessionAffinity> でメモリ上にあり、run_id を session として使う"
+    - "secret-guard の SecretRedactor が storage 保存時の秘匿化に使われている（crates/storage/src/repo/run_context.rs）"
+    - "AGENTS.md の Compatibility policy により、イベントの保存形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "RequestFailed がエラー詳細（HTTP ボディ等）を最大 1 KiB の文字列で持ち、secret-guard で秘匿化され、credential の値を含まない"
+    - "失敗の分類がプロバイダ種別の規則を持ち、kimi-subscription の 403 でボディが利用上限を示す場合は Quota、それ以外の 403 は Auth になる"
+    - "Quota はプロファイル全体、RateLimited は (プロファイル, モデル)、Auth はプロファイル全体を、決められた期間クールダウンする。Retry-After があればそれを優先する"
+    - "クールダウン中のメンバーは resolve / next_fallback で飛ばされ、プロバイダへのリクエストが発生しない。全メンバーがクールダウン中なら、従来どおり候補なしのエラーになる"
+    - "クールダウンの既定期間は設定（routing.cooldown）で変更でき、Auth のクールダウンは設定の再読み込み（runtime の再構成）で解除される"
+    - "クールダウンへの出入りが観測イベントとして発行され、GUI の通知・テレメトリが新しいフィールドで壊れない"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0030-role-model-chains.md
+  supporting_intents:
+    - intents/evorch/features/provider-routing/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0030 の「プロファイルの状態とエラーの分類」節の実装。後続のチェーン（v13-b）の前提になる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0030 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/providers.md
+    summary: "失敗の分類規則、クールダウンの単位と既定期間、routing.cooldown の設定を記載する"
+closeout_learning:
+  expected: "quota 切れのプロファイルに新しい run が毎回リクエストを送らなくなり、失敗の原因がイベントから読めるようになる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

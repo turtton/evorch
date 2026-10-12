@@ -1,0 +1,65 @@
+implementation_issue_packet:
+  issue_title: "ADR 0030 ④: models.dev の canonical id による同一モデルの自動グルーピングと、GUI のチェーン編集"
+  issue_kind: feature
+  source_execution_unit: v13-d-model-auto-grouping
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/catalog/ crates/config/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0030 の自動グルーピングと GUI。プロバイダの追加・モデルの有効化の時点で models.dev の canonical_model_id を引き、同じ canonical id と速度区分の route に最低優先度で auto = true の候補を書き込む。同じプロファイル内の衝突は利用者に選ばせ、エイリアスの変化は警告だけ出す。GUI でロールのチェーンを並べ替え・追加・削除できるようにする"
+  dependencies:
+    - v13-b-role-model-chains
+  technical_baseline:
+    - "ADR 0030（intents/evorch/decisions/0030-role-model-chains.md）で方針合意済み"
+    - "models.dev のキャッシュ（~/.cache/evorch/models-dev.json）の各モデルは canonical_model_id を持つことがある（2026-10-12 時点で全 8465 件中 5514 件）。family は粒度が粗い"
+    - "crates/catalog/src/metadata.rs の WireModel は canonical_model_id を読んでいない"
+    - "ProviderTypeConfig::models_dev_provider_candidates（crates/config/src/types/provider.rs）がプロバイダ種別から models.dev のプロバイダ slug を返す。対応表がない場合はプロファイル名・一意一致で推定する"
+    - "parse_model_speed が evorch 独自の +fast 接尾辞を分離する"
+    - "プロバイダの保存は crates/config/src/save.rs 系と GUI の provider 設定から行われる"
+    - "v13-b の route 候補の auto フィールドと、ロールの models を前提にする"
+  intent_references:
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0013-model-catalog.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "catalog が canonical_model_id を読み、（プロバイダ slug, モデル ID）から canonical id を引ける。+fast などの evorch の速度区分は照合前に外し、グループのキーに含める"
+    - "プロバイダの追加・モデルの有効化を保存すると、同じ canonical id と速度区分の route があれば、最低優先度に auto = true の候補が追加される。ロールが参照していない route は作らない"
+    - "同じプロファイル内で有効なモデルのうち複数が同じ canonical id に当たる場合は自動で追加せず、GUI で利用者に 1 つ選ばせる"
+    - "canonical id がないモデルは自動で追加しない"
+    - "models.dev の更新で既存の auto 候補の canonical id が変わった場合は、設定を書き換えず警告を表示する"
+    - "GUI のロール設定で、チェーンの要素の追加・削除・並べ替えと、要素ごとの reasoning_effort の編集ができ、保存と再読み込みで保たれる"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / git diff --check が pass し、GUI の headless 検証で画面の証跡を残す"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0030-role-model-chains.md
+  supporting_intents:
+    - intents/evorch/decisions/0013-model-catalog.md
+    - intents/evorch/features/gui-workbench/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0030 の「同一モデルの自動グルーピング」節と、チェーンを編集する GUI の実装"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0030 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/providers.md
+      - docs/gui-verification.md
+    summary: "自動グルーピングの規則と、チェーン編集の GUI 検証の証跡を記載する"
+closeout_learning:
+  expected: "プロバイダを追加すると同じモデルの route に自動で冗長経路が加わり、ロールのフォールバック先を GUI から組める"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

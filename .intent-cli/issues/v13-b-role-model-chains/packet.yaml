@@ -1,0 +1,68 @@
+implementation_issue_packet:
+  issue_title: "ADR 0030 ②: 設定 v3 のロールのモデルチェーン・一周するフォールバック・ピンの永続化"
+  issue_kind: feature
+  source_execution_unit: v13-b-role-model-chains
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/routing/ crates/runtime/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0030 の 2 層構造。routing.routes から reasoning_effort を外し、ロールに models（route と reasoning_effort の優先順リスト）を追加する設定 v3 と移行、チェーンを展開して一周するフォールバック、Retry-After の短い待機、ピンの run スナップショットへの保存と復元を実装する。GUI は単一要素のチェーンを編集できる最小限の追従にとどめる"
+  dependencies:
+    - v13-a-provider-failure-cooldown
+  technical_baseline:
+    - "ADR 0030（intents/evorch/decisions/0030-role-model-chains.md）で方針合意済み"
+    - "RoleBindingConfig.logical_model（crates/config/src/types/agents.rs）が route 名を指し、binding_for がロール・カテゴリから解決する。未指定時はロール名"
+    - "RouteCandidateConfig.reasoning_effort を Router::candidate_reasoning_effort が引く（crates/routing/src/router.rs）"
+    - "設定の移行は crates/config/src/migrate.rs の MIGRATIONS 列で、ファイル単位・マージ前に通す"
+    - "RoutedModel（crates/runtime/src/compose.rs）が送信ループと Mutex<SessionAffinity> を持つ。affinity の session は run_id"
+    - "run スナップショットは restore.rs の書き出しで RunRestoreDescriptor を config_json に保存する。selected_model は表示用で復元には使われない"
+    - "GUI は role_settings / routing_settings で logical_model と route 候補の reasoning_effort を編集する"
+    - "v13-a のクールダウンレジストリを前提にする"
+  intent_references:
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "設定 v3 で route 候補は profile / model（と auto）だけを持ち、ロールとカテゴリは models = [{ route, reasoning_effort? }] を持つ。存在しない route の参照はロード時にエラーになる"
+    - "v2 の設定は v3 に移行され、logical_model と route 候補の reasoning_effort がロール側の models に書き換わる。候補間で effort が異なる場合と参照先 route が同じファイルにない場合は警告する"
+    - "チェーンは展開され、位置 i の失敗後は i+1 から末尾、先頭から i-1 の順に一周だけ試す。元の位置は一時的な失敗だった場合だけ最後に再試行する"
+    - "プールの全メンバーがこの一周で失敗済みかクールダウン中になったら、失敗の種類に関係なく次のプールへ進む"
+    - "Retry-After が既定 30 秒以下の一時的な失敗でプールが尽きた場合は、プールを越える前に一度だけ待って再試行する。待機の上限は設定できる"
+    - "成功したメンバーにピンが移り、同じ run の次のリクエストもそのメンバーを使う。要素ごとの reasoning_effort がリクエストに反映される"
+    - "ピンが run スナップショットに保存され、再起動後の復元で同じメンバーから再開する。ピン先が使えない場合は通常のフォールバックと同じ手順で次へ進む"
+    - "GUI のロール設定で route と reasoning_effort を編集でき、route の設定から effort の入力欄がなくなる。2 要素以上のチェーンは壊さずに保存できる"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0030-role-model-chains.md
+  supporting_intents:
+    - intents/evorch/features/provider-routing/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0030 の「2 層に固定する」「フォールバックは一周だけ回る」「ピンを永続化する」節の実装"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0030 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/providers.md
+      - docs/config/evorch-config-v3.schema.json
+    summary: "route と models の書き方、移行の挙動、フォールバックの順番、ピンの扱いを記載し、スキーマを再生成する"
+closeout_learning:
+  expected: "route の名前とロールのチェーンが分かれ、ロールごとに推論強度とフォールバック先を指定でき、再起動しても使っていたモデルが変わらない"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
