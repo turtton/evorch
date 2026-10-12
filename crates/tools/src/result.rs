@@ -18,6 +18,18 @@ pub struct ToolResult {
     pub detail: Option<serde_json::Value>,
     /// 出力の由来。コンストラクタでは fail-closed の [`ContentOrigin::WebUntrusted`]。
     pub origin: ContentOrigin,
+    /// 反復呼び出しの停滞判定に使う runtime 専用の観測。本文・detail・イベントには
+    /// 出さない。進捗を報告しない呼び出しでは `None`。
+    pub progress: Option<Progress>,
+}
+
+/// [`Tool::reports_progress`](crate::Tool::reports_progress) が真の呼び出しの観測結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// 前回の観測から新しい出力・状態変化があったか、呼び出し中に実際に待機した。
+    Advanced,
+    /// 前回と同じ結果を即座に返した。
+    Stalled,
 }
 
 impl ToolResult {
@@ -28,6 +40,7 @@ impl ToolResult {
             is_error: false,
             detail: None,
             origin: ContentOrigin::WebUntrusted,
+            progress: None,
         }
     }
 
@@ -38,6 +51,7 @@ impl ToolResult {
             is_error: true,
             detail: None,
             origin: ContentOrigin::WebUntrusted,
+            progress: None,
         }
     }
 
@@ -63,6 +77,7 @@ mod tests {
                 is_error: false,
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
+                progress: None,
             }
         );
 
@@ -79,6 +94,7 @@ mod tests {
                 is_error: true,
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
+                progress: None,
             }
         );
     }

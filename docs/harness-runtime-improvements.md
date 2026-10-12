@@ -8,8 +8,8 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
 
 - Runtime meta tools expose concrete JSON schemas. Schema acceptance and argument
   deserialization are checked together, including roles and structured failures.
-- `shell` without `yield_ms` retains synchronous execution. `yield_ms: 0..60000`
-  starts a bounded background job; `action: poll | stdin | stop` uses its `job_id`
+- `shell` without `yield_ms` retains synchronous execution. `yield_ms: 0..1800000`
+  (30 minutes) starts a bounded background job; `action: poll | stdin | stop` uses its `job_id`
   and output cursor. For start and stop, a positive `yield_ms` waits until
   completion or the specified deadline; intermediate output neither returns
   control nor extends the deadline. Start with `yield_ms: 1000` for commands the
@@ -18,8 +18,19 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   group and wait up to one second for teardown. If it is still running, poll
   for its terminal result. Stop does not roll back prior filesystem effects.
   Zero returns immediately; omitted control yields default to zero. Poll and
-  stdin still return early on new output or completion. A poll can wait up to
-  1,800,000 ms (30 minutes); other yields remain capped at 60,000 ms.
+  stdin still return early on new output or completion. A poll can also wait up
+  to 1,800,000 ms; stdin and stop yields remain capped at 60,000 ms. An omitted
+  control cursor continues after the highest cursor already returned for the
+  job, so a repeated poll neither resends old output nor returns early on it;
+  an explicit cursor, including 0, re-reads from that point.
+- The identical-call guard stops a run after
+  `max_identical_tool_call_repeats` consecutive identical calls. Ordinary calls
+  are checked by input before the batch runs. Calls whose tool reports progress
+  (currently only an explicit shell `poll`) run and are judged by their result:
+  new output, a status change, or at least 100 ms of real waiting resets the
+  count, while an immediate unchanged or failed result counts toward it. The
+  call that reaches the limit has already run; its wave is recorded before the
+  run stops. Each kind of call ends the other kind's streak.
   A job belongs to its launching run and retains its sandbox and cwd. It is not
   a durable task and cannot survive process restart.
 - Shell control uses short `job-N` handles. Internal UUIDs remain in GUI events

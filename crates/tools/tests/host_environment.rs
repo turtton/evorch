@@ -136,7 +136,7 @@ async fn run_shell_cases() {
                         &executor,
                         &context,
                         &mut events,
-                        json!({"action":"poll", "job_id":id}),
+                        json!({"action":"poll", "job_id":id, "cursor":0}),
                     )
                     .await;
                 }

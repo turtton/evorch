@@ -525,6 +525,7 @@ impl LoopState {
                 }
                 let mut wave = vec![first];
                 if wave[0].awaited_delegate() {
+                    self.identical_calls.end_stalled();
                     while calls.front().is_some_and(BatchCall::awaited_delegate) {
                         if let Some(call) = calls.pop_front() {
                             wave.push(call);
@@ -809,7 +810,14 @@ impl LoopState {
                     }
                 }
                 completed.sort_by_key(|(index, ..)| *index);
+                // The first call that stalls too often stops the run once the
+                // wave's results are recorded.
+                let mut stalled = None;
                 for (_, id, name, input, ready) in completed {
+                    let reports_progress = self.shared.executor.reports_progress(&name, &input);
+                    if !reports_progress {
+                        self.identical_calls.end_stalled();
+                    }
                     if matches!(&ready, ReadyCall::Local)
                         && let Some(permit) = &self.task.config.ownership
                         && let Err(error) = permit.validate_mutation()
@@ -882,6 +890,19 @@ impl LoopState {
                             ToolResult::error("invalid prepared local call")
                         };
                     self.ledger_tool_completed(&name, &id, &result);
+                    if reports_progress {
+                        let limit = self.task.config.budget.max_identical_tool_call_repeats;
+                        // Failed, denied or cancelled calls never count as progress.
+                        let advanced =
+                            !result.is_error && result.progress == Some(tools::Progress::Advanced);
+                        if self
+                            .identical_calls
+                            .observe_result(&name, &input, advanced, limit)
+                            && stalled.is_none()
+                        {
+                            stalled = Some((id.clone(), name.clone(), input.clone()));
+                        }
+                    }
                     let rule_target = matches!(name.as_str(), "read" | "write" | "edit" | "grep")
                         .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                         .flatten();
@@ -939,6 +960,10 @@ impl LoopState {
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
+                }
+                if let Some((id, name, input)) = stalled {
+                    self.stop_identical_calls(&id, &name, &input, true);
+                    return false;
                 }
                 // A completed parallel wave belongs to one assistant tool batch.
                 // Preserve all its results before a token budget can stop the run.

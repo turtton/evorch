@@ -188,7 +188,7 @@ async fn pty_job_accepts_input_and_finishes() {
     let all = invoke(
         &shell,
         "owner",
-        json!({"action":"poll", "job_id":id(&start)}),
+        json!({"action":"poll", "job_id":id(&start), "cursor":0}),
     )
     .await;
     assert!(all.content.contains("received:hello"));
@@ -258,8 +258,8 @@ fn job_schema_distinguishes_start_and_control() {
     let validator = jsonschema::validator_for(&shell().schema()).unwrap();
     for input in [
         json!({"command":"true", "yield_ms":0}),
-        json!({"command":"true", "yield_ms":60000}),
-        json!({"action":"start", "command":"true", "yield_ms":60000}),
+        json!({"command":"true", "yield_ms":1800000}),
+        json!({"action":"start", "command":"true", "yield_ms":1800000}),
         json!({"action":"poll", "job_id":"x", "cursor":3}),
         json!({"action":"poll", "job_id":"x", "yield_ms":1800000}),
         json!({"action":"stdin", "job_id":"x", "input":"a"}),
@@ -273,8 +273,8 @@ fn job_schema_distinguishes_start_and_control() {
         json!({"action":"poll"}),
         json!({"action":"poll", "job_id":"x", "command":"pwd"}),
         json!({"action":"poll", "job_id":"x", "yield_ms":1800001}),
-        json!({"command":"true", "yield_ms":60001}),
-        json!({"action":"start", "command":"true", "yield_ms":60001}),
+        json!({"command":"true", "yield_ms":1800001}),
+        json!({"action":"start", "command":"true", "yield_ms":1800001}),
         json!({"action":"stdin", "job_id":"x", "input":"a", "yield_ms":60001}),
         json!({"action":"stop", "job_id":"x", "yield_ms":60001}),
         json!({"command":"true", "input":"a"}),
@@ -287,10 +287,10 @@ fn job_schema_distinguishes_start_and_control() {
 async fn yield_limits_are_enforced_without_schema_validation() {
     let shell = shell();
     for (input, limit) in [
-        (json!({"command":"true", "yield_ms":60001}), "60000"),
+        (json!({"command":"true", "yield_ms":1800001}), "1800000"),
         (
-            json!({"action":"start", "command":"true", "yield_ms":60001}),
-            "60000",
+            json!({"action":"start", "command":"true", "yield_ms":1800001}),
+            "1800000",
         ),
         (
             json!({"action":"poll", "job_id":"unused", "yield_ms":1800001}),
@@ -621,4 +621,18 @@ async fn live_output_events_stream_redacted_output_without_consuming_polls() {
     assert!(shell.has_unobserved_shell_jobs("owner"));
     let poll = invoke(&shell, "owner", json!({"action":"poll", "job_id":job_id})).await;
     assert!(poll.content.contains("one\n"));
+}
+
+#[test]
+fn only_explicit_polls_report_progress() {
+    let shell = shell();
+    assert!(shell.reports_progress(&json!({"action":"poll", "job_id":"x"})));
+    for input in [
+        json!({"command":"true"}),
+        json!({"action":"start", "command":"true", "yield_ms":0}),
+        json!({"action":"stdin", "job_id":"x", "input":"a"}),
+        json!({"action":"stop", "job_id":"x"}),
+    ] {
+        assert!(!shell.reports_progress(&input), "{input}");
+    }
 }

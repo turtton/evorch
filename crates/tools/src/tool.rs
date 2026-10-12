@@ -98,6 +98,12 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// true なら、この呼び出しは結果に [`ToolResult::progress`] を添える。runtime は
+    /// 同一入力の反復を実行前ではなく結果の進捗で判定する。待機を伴う状態確認向け。
+    fn reports_progress(&self, _args: &serde_json::Value) -> bool {
+        false
+    }
+
     /// 引数の JSON Schema。
     fn schema(&self) -> serde_json::Value;
 
