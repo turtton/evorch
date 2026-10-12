@@ -26,6 +26,8 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
             guard: None,
             process_id: None,
             sandbox: None,
+            delivered_cursor: 0,
+            last_seen: None,
         }),
         changed,
         cancel,
@@ -80,7 +82,7 @@ async fn ready<F: Future>(mut future: Pin<&mut F>) -> F::Output {
 
 #[tokio::test(start_paused = true)]
 async fn start_wait_ignores_output_and_keeps_its_original_deadline() {
-    for yield_ms in [1000, 10_000] {
+    for yield_ms in [1000, MAX_WAIT_YIELD_MS] {
         let (_registry, job, _input) = fixture();
         job.push(0, b"ready\n");
         let mut waiting = std::pin::pin!(job.wait_for_completion(yield_ms));
@@ -91,7 +93,7 @@ async fn start_wait_ignores_output_and_keeps_its_original_deadline() {
         tokio::time::advance(Duration::from_millis(1)).await;
         ready(waiting.as_mut()).await;
         assert!(job.running());
-        assert!(job.snapshot(0).content.contains("ready\nmore\n"));
+        assert!(job.snapshot(0).0.content.contains("ready\nmore\n"));
     }
 }
 
@@ -112,7 +114,7 @@ async fn every_terminal_status_ends_start_wait_early() {
         let mut already_finished = std::pin::pin!(job.wait_for_completion(60_000));
         ready(already_finished.as_mut()).await;
         assert_eq!(
-            job.snapshot(0).detail.unwrap()["shell_job"]["status"],
+            job.snapshot(0).0.detail.unwrap()["shell_job"]["status"],
             status
         );
     }
@@ -184,4 +186,125 @@ async fn poll_and_stdin_still_return_early_on_output() {
         assert_eq!(result.detail.unwrap()["shell_job"]["status"], "running");
         assert!(result.content.contains("new output\n"));
     }
+}
+
+async fn control(registry: &JobRegistry, value: serde_json::Value) -> ToolResult {
+    let owner = owner();
+    let mut call = std::pin::pin!(registry.control(&owner, serde_json::from_value(value).unwrap()));
+    ready(call.as_mut()).await.unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn omitted_cursor_continues_after_returned_output_and_explicit_cursor_rereads() {
+    let (registry, job, _input) = fixture();
+    job.push(0, b"first\n");
+    // The start response already returned the first line.
+    assert!(job.snapshot(0).0.content.contains("first\n"));
+    job.push(0, b"second\n");
+    let poll = serde_json::json!({"action": "poll", "job_id": "job-0"});
+    let next = control(&registry, poll.clone()).await;
+    assert!(next.content.contains("second\n"));
+    assert!(!next.content.contains("first\n"));
+    let reread = control(
+        &registry,
+        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0}),
+    )
+    .await;
+    assert!(reread.content.contains("first\nsecond\n"));
+    // A re-read does not move the continuation point backwards.
+    let empty = control(&registry, poll).await;
+    assert!(!empty.content.contains("first\n") && !empty.content.contains("second\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn omitted_cursor_poll_waits_for_output_after_the_returned_cursor() {
+    let (registry, job, _input) = fixture();
+    job.push(0, b"old\n");
+    let _ = job.snapshot(0);
+    let owner = owner();
+    let mut waiting = std::pin::pin!(registry.control(&owner, args("poll", 60_000)));
+    // Output already returned does not end the wait.
+    pending(waiting.as_mut()).await;
+    job.push(0, b"new\n");
+    let result = ready(waiting.as_mut()).await.unwrap();
+    assert!(result.content.contains("new\n") && !result.content.contains("old\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn poll_reports_progress_only_for_changes_or_real_waits() {
+    let (registry, job, _input) = fixture();
+    let owner = owner();
+    let poll = |yield_ms: u64| serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms": yield_ms});
+    job.push(0, b"line\n");
+    assert_eq!(
+        control(&registry, poll(0)).await.progress,
+        Some(Progress::Advanced)
+    );
+    // An immediate identical result, even when re-read explicitly, is a stall.
+    assert_eq!(
+        control(&registry, poll(0)).await.progress,
+        Some(Progress::Stalled)
+    );
+    let reread = serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0});
+    assert_eq!(
+        control(&registry, reread).await.progress,
+        Some(Progress::Stalled)
+    );
+    // Waiting for a quiet job is progress from the threshold on.
+    for (yield_ms, expected) in [(99, Progress::Stalled), (100, Progress::Advanced)] {
+        let mut waiting = std::pin::pin!(
+            registry.control(&owner, serde_json::from_value(poll(yield_ms)).unwrap())
+        );
+        pending(waiting.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(yield_ms)).await;
+        assert_eq!(
+            ready(waiting.as_mut()).await.unwrap().progress,
+            Some(expected)
+        );
+    }
+    job.complete(Completion {
+        status: "completed",
+        exit_code: Some(0),
+        error: None,
+    });
+    // A long poll of a finished job returns at once: progress once, then a stall.
+    assert_eq!(
+        control(&registry, poll(60_000)).await.progress,
+        Some(Progress::Advanced)
+    );
+    assert_eq!(
+        control(&registry, poll(60_000)).await.progress,
+        Some(Progress::Stalled)
+    );
+    let stop = serde_json::json!({"action": "stop", "job_id": "job-0"});
+    assert_eq!(control(&registry, stop).await.progress, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn paging_through_retained_output_is_progress() {
+    let (registry, job, _input) = fixture();
+    let lines: String = (0..450).map(|line| format!("line {line}\n")).collect();
+    job.push(0, lines.as_bytes());
+    job.complete(Completion {
+        status: "completed",
+        exit_code: Some(0),
+        error: None,
+    });
+    let poll = serde_json::json!({"action": "poll", "job_id": "job-0"});
+    let mut pages = Vec::new();
+    loop {
+        let result = control(&registry, poll.clone()).await;
+        let more = result.detail.as_ref().unwrap()["shell_job"]["has_more"] == true;
+        pages.push(result.progress);
+        if !more {
+            break;
+        }
+    }
+    // Every page of the finished job is new; only re-polling the end stalls.
+    assert!(pages.len() > 2, "{pages:?}");
+    assert!(pages.iter().all(|page| *page == Some(Progress::Advanced)));
+    assert_eq!(
+        control(&registry, poll).await.progress,
+        Some(Progress::Stalled)
+    );
 }

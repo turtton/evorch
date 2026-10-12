@@ -472,6 +472,13 @@ impl ToolExecutor {
             .is_some_and(|registered| registered.tool.requires_scope_gate())
     }
 
+    /// 登録済みツールがこの呼び出しの進捗を結果に添えるかを返す。未登録なら false。
+    pub fn reports_progress(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(|registered| registered.tool.reports_progress(args))
+    }
+
     /// 登録済みツールの並行実行モードを返す。未登録なら排他実行とする。
     pub fn tool_execution_mode(&self, tool_name: &str) -> ToolExecutionMode {
         self.tools
@@ -679,6 +686,7 @@ impl ToolExecutor {
                     is_error: result.is_error,
                     detail,
                     origin: result.origin,
+                    progress: result.progress,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
                 Ok(result)
@@ -944,6 +952,7 @@ mod tests {
                 is_error: false,
                 detail: None,
                 origin: ContentOrigin::ToolTrusted,
+                progress: None,
             })
         }
     }

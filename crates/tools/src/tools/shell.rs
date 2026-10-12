@@ -266,9 +266,9 @@ impl Tool for Shell {
                 "justification": {"type":"string", "description":"Why this command needs network or unsandboxed access. Required and nonempty for either mode."},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
-                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start with this field to return an async job handle; omit it for synchronous completion. Start/stop: wait for completion or the specified deadline, ignoring intermediate output. Poll/stdin: return early on new output or completion. 0 returns immediately; omitted control yields default to 0. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
+                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_WAIT_YIELD_MS, "description":"Start with this field to return an async job handle; omit it for synchronous completion. Start/stop: wait for completion or the specified deadline, ignoring intermediate output. Poll/stdin: return early on new output or completion. 0 returns immediately; omitted control yields default to 0. Start/poll: 0..1800000 (30 minutes); stdin/stop: 0..60000."},
                 "job_id": {"type":"string", "minLength":1, "description":"Handle returned by this run's asynchronous shell start (for example, job-1)."},
-                "cursor": {"type":"integer", "minimum":0, "default":0, "description":"Returned output cursor, in redacted UTF-8 bytes. Older live output may expire."},
+                "cursor": {"type":"integer", "minimum":0, "description":"Output cursor, in redacted UTF-8 bytes. Omit it to continue after the output already returned; pass a returned cursor (or 0) to re-read from there. Older live output may expire."},
                 "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},
                 "close_stdin": {"type":"boolean", "default":false, "description":"stdin only: close pipe stdin or send PTY EOF after writing."}
             },
@@ -278,8 +278,8 @@ impl Tool for Shell {
                 "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["sandbox_access"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
                 "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
             }, {
-                "if": {"properties":{"action":{"enum":["start", "stdin", "stop"]}}},
-                "then": {"properties":{"yield_ms":{"maximum":jobs::MAX_YIELD_MS}}}
+                "if": {"properties":{"action":{"enum":["stdin", "stop"]}}, "required":["action"]},
+                "then": {"properties":{"yield_ms":{"maximum":jobs::MAX_CONTROL_YIELD_MS}}}
             }]
         })
     }
@@ -290,6 +290,10 @@ impl Tool for Shell {
 
     fn execution_mode(&self) -> ToolExecutionMode {
         ToolExecutionMode::Exclusive
+    }
+
+    fn reports_progress(&self, args: &serde_json::Value) -> bool {
+        args.get("action").and_then(serde_json::Value::as_str) == Some("poll")
     }
 
     fn set_default_cwd(&self, cwd: PathBuf) {
@@ -392,8 +396,10 @@ impl Tool for Shell {
                 detail: "start requires a nonempty command".into(),
             });
         }
-        if args.yield_ms.is_some_and(|ms| ms > jobs::MAX_YIELD_MS)
-            || args.timeout_ms == Some(0)
+        if let Some(ms) = args.yield_ms {
+            jobs::validate_yield(ms, "start")?;
+        }
+        if args.timeout_ms == Some(0)
             || args.timeout_ms.is_some_and(|ms| {
                 tokio::time::Instant::now()
                     .checked_add(Duration::from_millis(ms))
@@ -401,8 +407,7 @@ impl Tool for Shell {
             })
         {
             return Err(ToolError::InvalidArgs {
-                detail: "yield_ms must be 0..60000 for start and timeout_ms must be positive"
-                    .into(),
+                detail: "timeout_ms must be positive".into(),
             });
         }
         // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを

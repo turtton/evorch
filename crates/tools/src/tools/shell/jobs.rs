@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
 use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
-use crate::{ShellJobSummary, ToolError, ToolExecutionContext, ToolResult};
+use crate::{Progress, ShellJobSummary, ToolError, ToolExecutionContext, ToolResult};
 
 #[cfg(test)]
 mod handle_tests;
@@ -27,9 +27,13 @@ use process::{run_pipe, run_pty};
 const MAX_RUNNING: usize = 8;
 const MAX_RETAINED: usize = 32;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
-pub(super) const MAX_YIELD_MS: u64 = 60_000;
-pub(super) const MAX_POLL_YIELD_MS: u64 = 30 * 60 * 1000;
+/// Start and poll may wait long; stdin and stop stay short.
+pub(super) const MAX_WAIT_YIELD_MS: u64 = 30 * 60 * 1000;
+pub(super) const MAX_CONTROL_YIELD_MS: u64 = 60_000;
 const DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+// A poll that blocked at least this long waited for the job rather than
+// immediately re-reading an unchanged result.
+const MEANINGFUL_WAIT: Duration = Duration::from_millis(100);
 // Live output events are display-only, so batching keeps the bus quiet
 // without affecting what polls observe.
 const OUTPUT_EVENT_INTERVAL: Duration = Duration::from_millis(250);
@@ -40,8 +44,8 @@ const OUTPUT_EVENT_BYTES: usize = 32 * 1024;
 pub(super) struct ControlArgs {
     pub action: String,
     pub job_id: String,
-    #[serde(default)]
-    pub cursor: u64,
+    // Omitted continues after the output already returned; explicit re-reads.
+    pub cursor: Option<u64>,
     #[serde(default)]
     pub yield_ms: u64,
     pub input: Option<String>,
@@ -123,6 +127,11 @@ struct State {
     guard: Option<Box<dyn Send + Sync>>,
     process_id: Option<rustix::process::Pid>,
     sandbox: Option<Arc<dyn Sandbox>>,
+    // Highest cursor any response returned; omitted control cursors resume here.
+    delivered_cursor: u64,
+    // Output end and status of the last response, to tell a changed job from
+    // an identical re-read.
+    last_seen: Option<(u64, &'static str)>,
 }
 
 #[derive(Clone)]
@@ -213,6 +222,8 @@ impl JobRegistry {
                     guard: None,
                     process_id: None,
                     sandbox: Some(sandbox),
+                    delivered_cursor: 0,
+                    last_seen: None,
                 }),
                 changed,
                 cancel,
@@ -253,7 +264,7 @@ impl JobRegistry {
             delivered: false,
         };
         job.wait_for_completion(yield_ms).await;
-        let result = job.snapshot(0);
+        let (result, _) = job.snapshot(0);
         launch.delivered = true;
         Ok(result)
     }
@@ -334,12 +345,21 @@ impl JobRegistry {
             }
             _ => return Err(invalid("shell action must be start, poll, stdin, or stop")),
         }
-        if args.action == "stop" {
-            job.wait_for_completion(args.yield_ms).await;
+        let cursor = args.cursor.unwrap_or_else(|| job.delivered_cursor());
+        let waited = if args.action == "stop" {
+            job.wait_for_completion(args.yield_ms).await
         } else {
-            job.wait_for_change(args.cursor, args.yield_ms).await;
+            job.wait_for_change(cursor, args.yield_ms).await
+        };
+        let (mut result, changed) = job.snapshot(cursor);
+        if args.action == "poll" {
+            result.progress = Some(if changed || waited >= MEANINGFUL_WAIT {
+                Progress::Advanced
+            } else {
+                Progress::Stalled
+            });
         }
-        Ok(job.snapshot(args.cursor))
+        Ok(result)
     }
 
     pub(super) async fn wait(
@@ -562,11 +582,11 @@ fn invalid(detail: &str) -> ToolError {
         detail: detail.into(),
     }
 }
-fn validate_yield(ms: u64, action: &str) -> Result<(), ToolError> {
-    let max_ms = if action == "poll" {
-        MAX_POLL_YIELD_MS
+pub(super) fn validate_yield(ms: u64, action: &str) -> Result<(), ToolError> {
+    let max_ms = if matches!(action, "start" | "poll") {
+        MAX_WAIT_YIELD_MS
     } else {
-        MAX_YIELD_MS
+        MAX_CONTROL_YIELD_MS
     };
     if ms > max_ms {
         Err(invalid(&format!(
@@ -691,19 +711,26 @@ impl Job {
         self.changed
             .send_modify(|version| *version = version.wrapping_add(1));
     }
-    async fn wait_for_change(&self, cursor: u64, ms: u64) {
-        self.wait(ms, Some(cursor)).await;
+    async fn wait_for_change(&self, cursor: u64, ms: u64) -> Duration {
+        self.wait(ms, Some(cursor)).await
     }
-    async fn wait_for_completion(&self, ms: u64) {
-        self.wait(ms, None).await;
+    async fn wait_for_completion(&self, ms: u64) -> Duration {
+        self.wait(ms, None).await
+    }
+    fn delivered_cursor(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .delivered_cursor
     }
     // Subscribe before inspecting state, and keep one deadline across output
     // notifications. Start/stop wait only for teardown; poll/stdin may yield on
-    // retained output beyond their cursor.
-    async fn wait(&self, ms: u64, output_cursor: Option<u64>) {
+    // retained output beyond their cursor. Returns how long the call blocked.
+    async fn wait(&self, ms: u64, output_cursor: Option<u64>) -> Duration {
         if ms == 0 {
-            return;
+            return Duration::ZERO;
         }
+        let started = tokio::time::Instant::now();
         let mut changed = self.changed.subscribe();
         let _ = tokio::time::timeout(Duration::from_millis(ms), async {
             loop {
@@ -726,6 +753,7 @@ impl Job {
             }
         })
         .await;
+        started.elapsed()
     }
     /// Retained output from `cursor` (or the oldest retained byte), bounded to
     /// one event, with the completion observed under the same lock.
@@ -763,7 +791,9 @@ impl Job {
         state.output.offset + state.output.text.len() as u64
     }
 
-    fn snapshot(&self, cursor: u64) -> ToolResult {
+    /// Output from `cursor` and the job status, plus whether this response
+    /// shows output or a status not shown by previous responses for this job.
+    fn snapshot(&self, cursor: u64) -> (ToolResult, bool) {
         let mut state = self
             .state
             .lock()
@@ -818,6 +848,11 @@ impl Job {
             "output_artifact": state.artifact.as_ref().and_then(|value| value.get("output_artifact"))
         }));
         result.is_error = matches!(status, "failed" | "timed_out" | "cancelled");
-        result
+        let seen = Some((total, status));
+        // Paging through retained output also delivers something new.
+        let changed = state.last_seen != seen || next_cursor > state.delivered_cursor;
+        state.last_seen = seen;
+        state.delivered_cursor = state.delivered_cursor.max(next_cursor);
+        (result, changed)
     }
 }

@@ -31,7 +31,7 @@ pub use network_guard::{
     NetworkGuardError,
 };
 pub use origin::{ContentOrigin, derive_content_origin};
-pub use result::ToolResult;
+pub use result::{Progress, ToolResult};
 pub use sanitize::escape_control_markers;
 pub use search::{
     ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport,
