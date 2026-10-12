@@ -292,7 +292,8 @@ impl ProviderClient for AnthropicClient {
             false,
             request.observation.clone(),
         )
-        .with_cache_observation(&wire_request);
+        .with_cache_observation(&wire_request)
+        .with_known_secret(&auth.api_key);
         let request_builder = self
             .authenticated_request(auth)
             .json(&wire_request)
@@ -350,7 +351,8 @@ impl ProviderClient for AnthropicClient {
             true,
             request.observation.clone(),
         )
-        .with_cache_observation(&wire_request);
+        .with_cache_observation(&wire_request)
+        .with_known_secret(&auth.api_key);
         let http_request = self
             .authenticated_request(auth)
             .json(&wire_request)

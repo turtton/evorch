@@ -46,6 +46,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
     let router = Router::new(
         vec![profile.clone(), alternate.clone()],
         &config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 vec![config::RouteCandidateConfig {

@@ -191,6 +191,7 @@ fn compose_with_empty_routes_rejects_role_and_arbitrary_names() {
 fn compose_respects_explicit_routes() {
     let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
     config.routing = RoutingConfig {
+        cooldown: Default::default(),
         routes: BTreeMap::from([(
             "custom".to_string(),
             vec![RouteCandidateConfig {

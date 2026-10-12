@@ -849,6 +849,9 @@ impl RequestPurpose {
 /// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
 pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
 
+/// [`ProviderEvent::RequestFailed`] の `detail` に載せる最大バイト数。
+pub const REQUEST_FAILED_DETAIL_MAX_BYTES: usize = 1024;
+
 /// 完了した attempt を直近の比較対象 attempt と照合した結果。
 ///
 /// 比較対象は同じ run / provider / profile / protocol / model の直近完了
@@ -1033,8 +1036,9 @@ pub enum ProviderEvent {
     },
     /// リクエスト attempt が失敗して終了した。
     ///
-    /// 失敗の詳細は型付き分類のみを保持し、エラーレスポンス本文・
-    /// 詳細メッセージ・credential は**含めない**。
+    /// 失敗の種類は型付き分類で表す。エラーレスポンス本文などの詳細は
+    /// `detail` に秘匿化・切り詰め済みの文字列としてのみ載せ、credential は
+    /// **含めない** (ADR 0030)。
     RequestFailed {
         /// attempt 相関用の request ID。
         request_id: String,
@@ -1062,8 +1066,27 @@ pub enum ProviderEvent {
         /// ペイロードでは `None`。
         #[serde(default)]
         purpose: Option<RequestPurpose>,
+        /// 秘匿化済みで [`REQUEST_FAILED_DETAIL_MAX_BYTES`] 以下に切り詰めた
+        /// 失敗の詳細 (HTTP エラー本文など)。詳細を持たない失敗と旧形式
+        /// ペイロードでは `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
-    /// routing の fallback 選択境界でフォールバック先が選択された。
+    /// 失敗によりプロバイダプロファイル (またはその 1 モデル) が一定期間
+    /// routing の候補から外された。
+    CooldownStarted {
+        /// 止めたプロバイダプロファイル名。
+        profile: String,
+        /// 止めた実モデル ID。プロファイル全体を止めた場合は `None`。
+        model: Option<String>,
+        /// クールダウンの原因となった失敗分類。
+        failure: ProviderFailureKind,
+        /// クールダウンの長さ (ミリ秒)。runtime の再構成まで続く場合は `None`。
+        cooldown_ms: Option<u64>,
+        /// 失敗が起きた実行 ID (把握している場合のみ)。
+        run_id: Option<String>,
+    },
+    /// routing の fallback 選択境界)でフォールバック先が選択された。
     ///
     /// 候補順序や retry/fallback policy 自体は変化させず、選択の観測のみを
     /// 行う。失敗した元 attempt との相関は `request_id` (attempt の request
@@ -2080,6 +2103,7 @@ mod tests {
             (
                 "RequestFailed",
                 ProviderEvent::RequestFailed {
+                    detail: None,
                     request_id: "req-1700000000000-4".into(),
                     provider: "anthropic".into(),
                     profile: None,
@@ -2103,6 +2127,32 @@ mod tests {
                     session_id: "session-1".into(),
                     failure: ProviderFailureKind::Timeout,
                     request_id: Some("req-1700000000000-5".into()),
+                },
+            ),
+            (
+                "RequestFailed",
+                ProviderEvent::RequestFailed {
+                    detail: Some("http error (status 403): usage limit reached".into()),
+                    request_id: "req-1700000000000-6".into(),
+                    provider: "kimi-subscription".into(),
+                    profile: Some("kimi".into()),
+                    protocol: "openai-chat-completions".into(),
+                    model: "k3".into(),
+                    streaming: true,
+                    duration_ms: 80,
+                    failure: ProviderFailureKind::Http { status: 403 },
+                    run_id: Some("run-1".into()),
+                    purpose: None,
+                },
+            ),
+            (
+                "CooldownStarted",
+                ProviderEvent::CooldownStarted {
+                    profile: "kimi".into(),
+                    model: None,
+                    failure: ProviderFailureKind::Quota,
+                    cooldown_ms: Some(1_800_000),
+                    run_id: Some("run-1".into()),
                 },
             ),
         ];
@@ -2544,6 +2594,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Provider(ProviderEvent::RequestFailed {
+                detail: None,
                 request_id: "req-1700000000000-4".into(),
                 provider: "anthropic".into(),
                 profile: None,

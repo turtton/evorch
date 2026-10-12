@@ -20,6 +20,7 @@ fn routed_model_with_catalog_window(
     model.router = Router::new(
         vec![model.providers["local"].profile.clone()],
         &RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 vec![RouteCandidateConfig {

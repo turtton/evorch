@@ -557,6 +557,27 @@
       },
       "additionalProperties": false
     },
+    "CooldownConfig": {
+      "description": "失敗後のクールダウン期間 (ADR 0030)。\n\nRetry-After などプロバイダが期間を示した場合はそちらを優先する。認証エラーは\n期間を持たず、runtime の再構成 (設定の再読み込み) まで続く。",
+      "type": "object",
+      "properties": {
+        "quota_secs": {
+          "description": "支払い・利用上限による失敗でプロファイル全体を止める秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
+        "rate_limit_secs": {
+          "description": "レート制限による失敗で (プロファイル, モデル) を止める秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "CredentialRefConfig": {
       "description": "認証情報の参照方法。\n\n秘密情報そのものは一切保持せず、取得先 (キーリングのサービス名・アカウント名、\nまたは環境変数名) のみを表現します。この型が秘密素材を含まないことは\nこのクレートのハードな契約です。",
       "oneOf": [
@@ -1196,6 +1217,10 @@
       "description": "ルーティング設定。",
       "type": "object",
       "properties": {
+        "cooldown": {
+          "description": "失敗したプロファイル・モデルを候補から外す期間。",
+          "$ref": "#/$defs/CooldownConfig"
+        },
         "routes": {
           "description": "ルート名から候補リスト (フォールバック順) へのマップ。",
           "type": "object",

@@ -7,6 +7,7 @@ pub mod env;
 mod error;
 pub mod factory;
 mod failure;
+mod health;
 mod profile;
 mod router;
 
@@ -15,6 +16,7 @@ pub use compose::{ComposeDeps, ComposedProvider, ComposedProviders, compose_prov
 pub use credential::CredentialRef;
 pub use env::{EnvLookup, MapEnv, ProcessEnv};
 pub use error::RoutingError;
-pub use failure::FailureKind;
+pub use failure::{FailureKind, retry_after};
+pub use health::{Cooldown, ProviderHealth};
 pub use profile::ProviderProfile;
 pub use router::{ResolvedRoute, Router};

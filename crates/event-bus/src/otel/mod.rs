@@ -356,7 +356,8 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
             ProviderEvent::RequestStarted { .. }
             | ProviderEvent::CacheReuseObserved { .. }
             | ProviderEvent::ProviderFallback { .. }
-            | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
+            | ProviderEvent::FallbackTriggered { .. }
+            | ProviderEvent::CooldownStarted { .. } => Vec::new(),
         },
         EventKind::Lifecycle(_)
         | EventKind::Ledger(_)
@@ -639,6 +640,7 @@ mod tests {
         failure: ProviderFailureKind,
     ) -> Event {
         Event::new(ProviderEvent::RequestFailed {
+            detail: None,
             request_id: "req-1".to_owned(),
             provider: provider.to_owned(),
             profile: profile.map(str::to_owned),

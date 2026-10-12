@@ -220,6 +220,7 @@ fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
 
     // When: 終端ではなく試行単位のTransport失敗を受信する。
     registry.apply(&Event::new(event_bus::ProviderEvent::RequestFailed {
+        detail: None,
         request_id: "request-1".into(),
         provider: "openai".into(),
         profile: None,

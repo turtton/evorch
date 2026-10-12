@@ -36,6 +36,53 @@ impl From<&providers::ProviderError> for FailureKind {
     }
 }
 
+/// Kimi サブスクリプションが利用上限を 403 で返すときの本文に現れる語句 (小文字で照合)。
+const KIMI_USAGE_LIMIT_MARKERS: &[&str] = &[
+    "usage limit",
+    "quota",
+    "exceeded",
+    "limit reached",
+    "insufficient",
+    "额度",
+    "上限",
+];
+
+impl FailureKind {
+    /// プロバイダ種別ごとの規則を加えて障害を分類します。
+    ///
+    /// 規則に当てはまらない障害は [`From<&providers::ProviderError>`] と同じ分類になります。
+    pub fn classify(error: &providers::ProviderError, provider_type: model::ProviderType) -> Self {
+        match error {
+            providers::ProviderError::RetriesExhausted { last, .. } => {
+                Self::classify(last, provider_type)
+            }
+            providers::ProviderError::Http { status: 403, body }
+                if provider_type == model::ProviderType::KimiSubscription
+                    && is_kimi_usage_limit(body) =>
+            {
+                Self::Quota
+            }
+            other => Self::from(other),
+        }
+    }
+}
+
+fn is_kimi_usage_limit(body: &str) -> bool {
+    let body = body.to_lowercase();
+    KIMI_USAGE_LIMIT_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
+}
+
+/// 障害が示す待機時間 (Retry-After) を返します。
+pub fn retry_after(error: &providers::ProviderError) -> Option<std::time::Duration> {
+    match error {
+        providers::ProviderError::RateLimited { retry_after } => *retry_after,
+        providers::ProviderError::RetriesExhausted { last, .. } => retry_after(last),
+        _ => None,
+    }
+}
+
 impl From<FailureKind> for event_bus::ProviderFailureKind {
     fn from(value: FailureKind) -> Self {
         match value {
@@ -129,6 +176,63 @@ mod tests {
             };
             assert_eq!(FailureKind::from(&error), expected, "status {status}");
         }
+    }
+
+    // Given: 利用上限を示す本文と示さない本文の 403、他種別の 403、retry 済みの 403
+    // When: プロバイダ種別を加えて分類する
+    // Then: Kimi サブスクリプションの利用上限だけが Quota になり、他は Auth のまま
+    #[test]
+    fn classify_treats_kimi_usage_limit_403_as_quota() {
+        use model::ProviderType;
+        let forbidden = |body: &str| providers::ProviderError::Http {
+            status: 403,
+            body: body.to_string(),
+        };
+        let limit = forbidden(r#"{"error":{"message":"You have exceeded the Usage Limit"}}"#);
+
+        assert_eq!(
+            FailureKind::classify(&limit, ProviderType::KimiSubscription),
+            FailureKind::Quota
+        );
+        assert_eq!(
+            FailureKind::classify(&forbidden("当前额度已用完"), ProviderType::KimiSubscription),
+            FailureKind::Quota
+        );
+        assert_eq!(
+            FailureKind::classify(
+                &forbidden("invalid api key"),
+                ProviderType::KimiSubscription
+            ),
+            FailureKind::Auth
+        );
+        assert_eq!(
+            FailureKind::classify(&limit, ProviderType::OpenAiCompatible),
+            FailureKind::Auth
+        );
+        let retried = providers::ProviderError::RetriesExhausted {
+            attempts: 2,
+            last: Box::new(limit),
+        };
+        assert_eq!(
+            FailureKind::classify(&retried, ProviderType::KimiSubscription),
+            FailureKind::Quota
+        );
+    }
+
+    // Given: Retry-After 付きの 429、retry 済みの 429、他の障害 / When: 待機時間を取り出す
+    // Then: 429 の Retry-After だけが返る
+    #[test]
+    fn retry_after_reads_rate_limit_hint() {
+        let limited = providers::ProviderError::RateLimited {
+            retry_after: Some(Duration::from_secs(7)),
+        };
+        assert_eq!(super::retry_after(&limited), Some(Duration::from_secs(7)));
+        let retried = providers::ProviderError::RetriesExhausted {
+            attempts: 3,
+            last: Box::new(limited),
+        };
+        assert_eq!(super::retry_after(&retried), Some(Duration::from_secs(7)));
+        assert_eq!(super::retry_after(&providers::ProviderError::Timeout), None);
     }
 
     // Given: FailureKind の全 6 variant。

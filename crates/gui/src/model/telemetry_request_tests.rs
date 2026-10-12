@@ -325,6 +325,7 @@ fn streaming_estimates_and_failed_requests_do_not_change_average_throughput() {
         Some(20.0)
     );
     telemetry.apply_event(&Event::new(ProviderEvent::RequestFailed {
+        detail: None,
         request_id: "failed".into(),
         provider: "provider".into(),
         profile: None,

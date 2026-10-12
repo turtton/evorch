@@ -68,6 +68,7 @@ fn configured() -> Config {
             },
         )]),
         routing: config::RoutingConfig {
+            cooldown: Default::default(),
             routes: ["orchestrator", "explorer", "worker", "reviewer"]
                 .into_iter()
                 .map(|logical| {

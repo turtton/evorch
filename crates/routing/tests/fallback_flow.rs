@@ -67,6 +67,7 @@ fn fallback_after_pin_resolve_roundtrip() {
         profile("secondary", "model-b"),
     ];
     let routing = config::RoutingConfig {
+        cooldown: Default::default(),
         routes: [(
             "summary".to_string(),
             vec![candidate("primary"), candidate("secondary")],

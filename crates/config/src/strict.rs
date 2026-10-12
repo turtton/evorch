@@ -60,7 +60,8 @@ const MODEL_PRESET_KEYS: &[&str] = &[
     "output_price_per_million_usd",
 ];
 const ENV_KEYS: &[&str] = &["type", "var"];
-const ROUTING_KEYS: &[&str] = &["routes"];
+const ROUTING_KEYS: &[&str] = &["routes", "cooldown"];
+const COOLDOWN_KEYS: &[&str] = &["quota_secs", "rate_limit_secs"];
 const ROLE_PROFILE_KEYS: &[&str] = &["agents", "routing"];
 const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "reasoning_effort"];
 const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
@@ -325,6 +326,17 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
 
 fn strip_routing(routing: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {
     retain_known(routing, path, ROUTING_KEYS, ignored);
+    if let Some(cooldown) = routing
+        .get_mut("cooldown")
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            cooldown,
+            &format!("{path}.cooldown"),
+            COOLDOWN_KEYS,
+            ignored,
+        );
+    }
     let Some(routes) = routing
         .get_mut("routes")
         .and_then(toml::Value::as_table_mut)
@@ -576,6 +588,9 @@ fn validate_role_profiles(root: &toml::value::Table) -> Result<(), ConfigError> 
 
 fn validate_routing(routing: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
     check_keys(routing, path, ROUTING_KEYS)?;
+    if let Some(cooldown) = routing.get("cooldown").and_then(toml::Value::as_table) {
+        check_keys(cooldown, &format!("{path}.cooldown"), COOLDOWN_KEYS)?;
+    }
     let Some(routes) = routing.get("routes").and_then(toml::Value::as_table) else {
         return Ok(());
     };
@@ -783,5 +798,20 @@ mod tests {
 
         // Then: route 名と候補 index を含む完全な path になる
         assert!(error.to_string().contains("routing.routes.fast[0].weight"));
+    }
+
+    #[test]
+    fn routing_cooldown_accepts_known_keys_and_rejects_unknown() {
+        // Given: 既知のキーだけの cooldown と、未知キーを含む cooldown
+        let known: toml::Value =
+            toml::from_str("[routing.cooldown]\nquota_secs = 60\nrate_limit_secs = 5\n")
+                .expect("TOML");
+        let unknown: toml::Value =
+            toml::from_str("[routing.cooldown]\nauth_secs = 60\n").expect("TOML");
+
+        // When / Then: 既知キーは通り、未知キーは完全な path で拒否される
+        validate_strict(&known).expect("既知キーは有効");
+        let error = validate_strict(&unknown).expect_err("未知キーは拒否される");
+        assert!(error.to_string().contains("routing.cooldown.auth_secs"));
     }
 }

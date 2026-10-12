@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use event_bus::{Event, EventBus, ProviderEvent, ProviderFailureKind};
+use event_bus::{
+    Event, EventBus, ProviderEvent, ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES,
+};
 
 use crate::error::ProviderError;
 use crate::message::{FinishReason, ObservationContext, Usage};
@@ -45,6 +47,8 @@ pub(crate) struct AttemptObserver {
     first_token_emitted: bool,
     terminal_emitted: bool,
     cache: Option<cache::CacheObservation>,
+    /// 失敗詳細から伏せる、この attempt の credential。
+    known_secret: Option<String>,
 }
 
 impl AttemptObserver {
@@ -72,7 +76,14 @@ impl AttemptObserver {
             first_token_emitted: false,
             terminal_emitted: false,
             cache: None,
+            known_secret: None,
         }
+    }
+
+    /// 失敗詳細から伏せる credential を登録する。空文字列は無視する。
+    pub(crate) fn with_known_secret(mut self, secret: &str) -> Self {
+        self.known_secret = (!secret.is_empty()).then(|| secret.to_owned());
+        self
     }
 
     pub(crate) fn with_cache_observation(mut self, wire_request: &impl serde::Serialize) -> Self {
@@ -162,10 +173,11 @@ impl AttemptObserver {
         if self.terminal_emitted {
             return;
         }
-        self.emit_failed_kind(failure_kind(error));
+        let detail = failure_detail(error, self.known_secret.as_deref());
+        self.emit_failed_kind(failure_kind(error), detail);
     }
 
-    fn emit_failed_kind(&mut self, failure: ProviderFailureKind) {
+    fn emit_failed_kind(&mut self, failure: ProviderFailureKind, detail: Option<String>) {
         self.emit(ProviderEvent::RequestFailed {
             request_id: self.request_id.clone(),
             provider: self.provider.clone(),
@@ -177,6 +189,7 @@ impl AttemptObserver {
             failure,
             run_id: self.observation_run_id(),
             purpose: self.observation_purpose(),
+            detail,
         });
         self.terminal_emitted = true;
     }
@@ -212,6 +225,21 @@ impl AttemptObserver {
     }
 }
 
+/// 失敗の表示文字列を、credential を伏せて [`REQUEST_FAILED_DETAIL_MAX_BYTES`] 以下に切り詰める。
+fn failure_detail(error: &ProviderError, known_secret: Option<&str>) -> Option<String> {
+    let mut text = error.to_string();
+    if let Some(secret) = known_secret {
+        text = text.replace(secret, "***");
+    }
+    let text = secret_guard::SecretRedactor::from_env().redact(&text).text;
+    let mut end = text.len().min(REQUEST_FAILED_DETAIL_MAX_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let detail = text[..end].trim();
+    (!detail.is_empty()).then(|| detail.to_owned())
+}
+
 /// プロバイダエラーを観測イベント用の障害種別へ分類する。
 fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
     match error {
@@ -231,7 +259,7 @@ fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
 impl Drop for AttemptObserver {
     fn drop(&mut self) {
         if self.started_emitted && !self.terminal_emitted && self.bus.is_some() {
-            self.emit_failed_kind(ProviderFailureKind::Other);
+            self.emit_failed_kind(ProviderFailureKind::Other, None);
         }
     }
 }
@@ -370,6 +398,31 @@ mod tests {
                 ProviderEvent::RequestFailed { failure, .. } if failure == expected
             ));
         }
+    }
+
+    // Given: credential を含む長い多バイトの HTTP エラー本文 / When: attempt 失敗を発行 / Then: detail は credential を伏せ、UTF-8 境界で上限以下に切り詰められる
+    #[tokio::test]
+    async fn failure_detail_hides_credential_and_fits_limit() {
+        let secret = "profile-secret-value-1234";
+        let body = format!("quota exceeded for key {secret}; {}", "上限".repeat(600));
+        let bus = Arc::new(EventBus::new(4));
+        let mut rx = bus.subscribe();
+        let mut observer = observer(Some(bus), false).with_known_secret(secret);
+        observer.emit_started();
+        let _ = next_provider_event(&mut rx).await;
+
+        observer.emit_failed(&ProviderError::Http { status: 403, body });
+
+        let ProviderEvent::RequestFailed {
+            detail: Some(detail),
+            ..
+        } = next_provider_event(&mut rx).await
+        else {
+            panic!("RequestFailed に detail が載る");
+        };
+        assert!(detail.starts_with("http error (status 403): quota exceeded for key ***"));
+        assert!(!detail.contains(secret));
+        assert!(detail.len() <= REQUEST_FAILED_DETAIL_MAX_BYTES);
     }
 
     // Given: paused time 上の streaming attempt / When: reasoning・空 text・有効 text を時間を進めながら記録 / Then: 有効 text 到達時だけ累積時間で TTFT を発行する

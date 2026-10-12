@@ -7,6 +7,7 @@ use gui::model::transcript_registry::{TranscriptKey, TranscriptRegistry};
 
 fn failed(failure: ProviderFailureKind, run_id: Option<&str>) -> Event {
     Event::new(ProviderEvent::RequestFailed {
+        detail: None,
         request_id: "request-1".into(),
         provider: "provider-a".into(),
         profile: None,

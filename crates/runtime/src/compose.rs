@@ -204,6 +204,8 @@ pub struct RoutedModel {
     tool_router: routing::Router,
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
+    /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
+    health: Arc<routing::ProviderHealth>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
     /// Configured effort choices by profile, then model ID.
@@ -231,12 +233,15 @@ impl RoutedModel {
     }
 
     pub fn new(composed: ComposedProviders, agents: config::AgentsConfig) -> Self {
+        let health = Arc::new(routing::ProviderHealth::default());
         Self {
             tool_router: composed
                 .router
                 .clone()
-                .requiring_capability(Capability::ToolCalling),
-            router: composed.router,
+                .requiring_capability(Capability::ToolCalling)
+                .with_health(Arc::clone(&health)),
+            router: composed.router.with_health(Arc::clone(&health)),
+            health,
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
@@ -247,6 +252,15 @@ impl RoutedModel {
             event_bus: None,
             credential_store: None,
         }
+    }
+
+    /// クールダウンの既定期間を設定し、空の状態から始める。
+    #[must_use]
+    pub fn with_cooldown(mut self, policy: config::CooldownConfig) -> Self {
+        self.health = Arc::new(routing::ProviderHealth::new(policy));
+        self.router = self.router.with_health(Arc::clone(&self.health));
+        self.tool_router = self.tool_router.with_health(Arc::clone(&self.health));
+        self
     }
 
     /// Codex カタログ検証に使う client バージョン解決を差し替える (offline tests)。
@@ -352,6 +366,41 @@ impl RoutedModel {
         self.router
             .candidate_reasoning_effort(logical, route)
             .map(str::to_owned)
+    }
+
+    /// 失敗をクールダウンへ記録し、開始・延長したら観測イベントを発行する。
+    fn record_cooldown(
+        &self,
+        route: &routing::ResolvedRoute,
+        failure: routing::FailureKind,
+        retry_after: Option<std::time::Duration>,
+        run_id: &str,
+        bus: Option<&EventBus>,
+    ) {
+        let Some(cooldown) = self.health.record_failure(
+            &route.profile,
+            &route.model_id,
+            failure,
+            retry_after,
+            std::time::Instant::now(),
+        ) else {
+            return;
+        };
+        tracing::warn!(profile = %cooldown.profile, model = ?cooldown.model,
+            duration = ?cooldown.duration, ?failure, "provider cooldown started");
+        if let Some(bus) = bus.or(self.event_bus.as_deref()) {
+            bus.emit(event_bus::Event::new(
+                event_bus::ProviderEvent::CooldownStarted {
+                    profile: cooldown.profile,
+                    model: cooldown.model,
+                    failure: failure.into(),
+                    cooldown_ms: cooldown
+                        .duration
+                        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+                    run_id: Some(run_id.to_owned()),
+                },
+            ));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -493,6 +542,14 @@ impl RoutedModel {
             failures.push(format!(
                 "profile={profile_name} model={model_id}: {provider_error}"
             ));
+            let failure = routing::FailureKind::classify(&error, provider.profile.provider_type);
+            self.record_cooldown(
+                &route,
+                failure,
+                routing::retry_after(&error),
+                &invocation.run_id,
+                bus,
+            );
             let next = logical
                 .as_ref()
                 .filter(|_| fallback::eligible(&error))
@@ -506,7 +563,7 @@ impl RoutedModel {
                         &invocation.run_id,
                         logical,
                         &route,
-                        routing::FailureKind::from(&error),
+                        failure,
                         None,
                     )
                 });
@@ -529,7 +586,7 @@ impl RoutedModel {
                         to_model: next.model_id.clone(),
                         logical_model: logical.as_str().to_owned(),
                         session_id: invocation.run_id.clone(),
-                        failure: routing::FailureKind::from(&error).into(),
+                        failure: failure.into(),
                         request_id: None,
                     },
                 ));
@@ -831,7 +888,8 @@ pub fn compose_routed_model(
         RoutingError::NoProviders => CompositionError::NoProvidersConfigured,
         other => CompositionError::Routing(other),
     })?;
-    let mut model = RoutedModel::new(composed, config.agents.clone());
+    let mut model = RoutedModel::new(composed, config.agents.clone())
+        .with_cooldown(config.routing.cooldown.clone());
     model.admission_routes = config
         .routing
         .routes

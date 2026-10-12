@@ -32,8 +32,8 @@ thread-124 のエスカレーション先で、Kimi サブスクリプション�
 - プロバイダ種別ごとの失敗分類。kimi-subscription の 403 で、ボディが利用上限を示すものを `Quota` にする。
 - プロファイルの健全性レジストリ。`Quota` / `Auth` はプロファイル単位、`RateLimited` は（プロファイル, モデル）単位。Retry-After を優先する。
 - resolve / next_fallback でクールダウン中のメンバーを飛ばす。
-- `routing.cooldown`（quota・rate limit・auth の既定期間）。
-- クールダウンの開始・終了の観測イベント。GUI 側の網羅 match の追従。
+- `routing.cooldown`（quota・rate limit の既定期間。Auth は期限なし）。
+- クールダウン開始の観測イベント（`CooldownStarted`。終了イベントは出さない）。GUI 側の網羅 match の追従。
 - `docs/providers.md` への記載。
 
 ## Out Of Scope
@@ -46,8 +46,8 @@ thread-124 のエスカレーション先で、Kimi サブスクリプション�
 2. kimi-subscription の 403 で、ボディが利用上限を示すものは `Quota`、それ以外の 403 は `Auth` になる。
 3. `Quota` / `Auth` はプロファイル全体、`RateLimited` は（プロファイル, モデル）を決められた期間止める。Retry-After があればそれを優先する。
 4. クールダウン中のメンバーは resolve / next_fallback で飛ばされ、リクエストが発生しない。全員がクールダウン中なら候補なしのエラーになる。
-5. 既定期間は `routing.cooldown` で変更できる。`Auth` のクールダウンは runtime の再構成で解除される。
-6. クールダウンの出入りが観測イベントとして発行され、GUI が壊れない。
+5. 既定期間は `routing.cooldown` で変更できる。runtime の再構成（設定の再読み込み）で `Auth` を含む全クールダウンが解除される。
+6. クールダウンの開始が観測イベントとして発行され、GUI が壊れない。
 7. `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、変更範囲の `cargo nextest run`、`scripts/check-cache-contracts.sh`、`git diff --check` が pass する。
 
 ## Verification

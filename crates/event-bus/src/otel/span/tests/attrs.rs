@@ -227,6 +227,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
         request_started("req-2", "run-1", 7),
         event(
             ProviderEvent::RequestFailed {
+                detail: None,
                 request_id: "req-2".to_owned(),
                 provider: "anthropic".to_owned(),
                 profile: None,

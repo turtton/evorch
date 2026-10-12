@@ -27,9 +27,9 @@ pub use event::{
     CompactionEvent, CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent,
     DiagnosticSeverity, EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta,
     FallbackAxis, FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent,
-    ProviderFailureKind, RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION,
-    SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent, UserQuestion, WindowSource,
-    WorkspaceLockHolder, WorkspaceWait,
+    ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES, RequestPurpose, RoutingSource,
+    RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
+    UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

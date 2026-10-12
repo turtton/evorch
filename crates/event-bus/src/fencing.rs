@@ -372,6 +372,9 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
         EventKind::Provider(ProviderEvent::FallbackTriggered { session_id, .. }) => {
             accepts(session_id)
         }
+        EventKind::Provider(ProviderEvent::CooldownStarted { run_id, .. }) => {
+            run_id.as_deref().is_none_or(accepts)
+        }
         EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
             accepts(&message.sender_run_id) && accepts(&message.recipient_run_id)
         }

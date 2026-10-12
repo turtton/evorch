@@ -48,11 +48,13 @@ pub(super) fn fixture_with_efforts(
     model.router = Router::new(
         profiles,
         &RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([("worker".into(), candidates)]),
         },
         catalog,
     )
-    .unwrap();
+    .unwrap()
+    .with_health(Arc::clone(&model.health));
     model.tool_router = model
         .router
         .clone()
@@ -84,6 +86,53 @@ async fn fallback_uses_each_candidates_reasoning_effort() {
     assert_eq!(
         requests[1].lock().unwrap()[0].reasoning_effort.as_deref(),
         Some("low")
+    );
+}
+
+#[tokio::test]
+async fn quota_failure_keeps_new_runs_off_the_profile() {
+    // Given: the primary reports a payment/quota failure and its fallback succeeds.
+    let (mut model, requests) = fixture(vec![
+        Some(ProviderError::Http {
+            status: 402,
+            body: "quota exceeded".into(),
+        }),
+        None,
+    ]);
+    let bus = Arc::new(EventBus::new(32));
+    let mut rx = bus.subscribe();
+    model.event_bus = Some(bus);
+    // When: one run falls back, then an unrelated run starts.
+    assert_eq!(complete(&model, "run-1").await, Ok(response()));
+    assert_eq!(complete(&model, "run-2").await, Ok(response()));
+    // Then: the second run never contacts the cooling profile.
+    assert_eq!(requests[0].lock().unwrap().len(), 1);
+    assert_eq!(requests[1].lock().unwrap().len(), 2);
+    let mut cooldowns = Vec::new();
+    // Events are emitted before `complete` returns; the timeout only ends the drain.
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await
+    {
+        if let EventKind::Provider(ProviderEvent::CooldownStarted {
+            profile,
+            model,
+            failure,
+            cooldown_ms,
+            run_id,
+        }) = event.kind
+        {
+            cooldowns.push((profile, model, failure, cooldown_ms, run_id));
+        }
+    }
+    assert_eq!(
+        cooldowns,
+        [(
+            "profile-0".to_owned(),
+            None,
+            event_bus::ProviderFailureKind::Quota,
+            Some(1_800_000),
+            Some("run-1".to_owned()),
+        )]
     );
 }
 
@@ -141,6 +190,15 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
             .await;
         // Then
         assert_eq!(result, Ok(response()));
+        let cooldown = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cooldown event")
+            .unwrap();
+        assert!(
+            matches!(cooldown.kind, EventKind::Provider(ProviderEvent::CooldownStarted {
+            profile, model, ..
+        }) if profile == "profile-0" && model.as_deref() == Some("model-0"))
+        );
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
             .expect("fallback event")
@@ -280,6 +338,7 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
             .map(|p| p.profile.clone())
             .collect(),
         &RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),

@@ -133,12 +133,13 @@ impl TranscriptRegistry {
             EventKind::Provider(event_bus::ProviderEvent::FallbackTriggered {
                 session_id, ..
             }) => self.route_run(session_id),
-            EventKind::Provider(event_bus::ProviderEvent::RequestFailed { run_id, .. }) => {
-                match run_id {
-                    Some(run_id) => self.route_run(run_id),
-                    None => vec![TranscriptKey::Thread],
-                }
-            }
+            EventKind::Provider(
+                event_bus::ProviderEvent::RequestFailed { run_id, .. }
+                | event_bus::ProviderEvent::CooldownStarted { run_id, .. },
+            ) => match run_id {
+                Some(run_id) => self.route_run(run_id),
+                None => vec![TranscriptKey::Thread],
+            },
             EventKind::Message(
                 MessageEvent::FinalResultPublished { run_id, .. }
                 | MessageEvent::MessageCompleted { run_id, .. },

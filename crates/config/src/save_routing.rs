@@ -55,5 +55,21 @@ pub(crate) fn routing_document_table(routing: &RoutingConfig) -> Table {
     }
     let mut table = Table::new();
     table.insert("routes", Item::Table(routes));
+    if !routing.cooldown.is_default() {
+        let mut cooldown = Table::new();
+        cooldown.insert(
+            "quota_secs",
+            value(saturating_i64(routing.cooldown.quota_secs)),
+        );
+        cooldown.insert(
+            "rate_limit_secs",
+            value(saturating_i64(routing.cooldown.rate_limit_secs)),
+        );
+        table.insert("cooldown", Item::Table(cooldown));
+    }
     table
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }

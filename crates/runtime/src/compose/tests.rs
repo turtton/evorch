@@ -113,6 +113,7 @@ fn routed_model_with_effort(
     let router = Router::new(
         vec![profile.clone()],
         &RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "worker".to_string(),
                 vec![RouteCandidateConfig {

@@ -382,6 +382,7 @@ mod tests {
                 reasoning_tokens: None,
             },
             ProviderEvent::RequestFailed {
+                detail: None,
                 request_id: "request-2".into(),
                 provider: "demo".into(),
                 profile: None,

@@ -154,6 +154,7 @@ fn role_save_and_route_rename_write_the_user_target() {
         let temp = tempfile::tempdir().expect("temp");
         let (mut state, options, save_path) = fixture(temp.path(), production);
         let routing = config::RoutingConfig {
+            cooldown: Default::default(),
             routes: [(
                 "old".into(),
                 vec![config::RouteCandidateConfig {

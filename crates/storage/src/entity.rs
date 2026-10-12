@@ -324,6 +324,11 @@ impl SecretGuard {
                 // （providers::observe::emit_completed）。
                 self.check_text("event", "RequestCompleted.finish_reason", finish_reason)
             }
+            // 失敗詳細は provider のエラー本文を含み得る (providers::observe で秘匿化済み)。
+            EventKind::Provider(ProviderEvent::RequestFailed {
+                detail: Some(detail),
+                ..
+            }) => self.check_text("event", "RequestFailed.detail", detail),
             // AgentMessage の本文は MessageDelta と同様の自由文字列であり、
             // bus / storage へ流れるため fail-closed で走査する。
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
@@ -595,6 +600,41 @@ mod tests {
             assert_eq!(entity, "event");
             assert_eq!(actual, field);
         }
+    }
+
+    #[test]
+    fn request_failed_detail_is_secret_guarded() {
+        // Given: 既知値を注入した guard と、detail に既知 credential 値を含む RequestFailed
+        let guard = SecretGuard::with_known_values([KNOWN_VALUE.to_owned()]);
+        let failed = |detail: Option<String>| {
+            EventKind::Provider(ProviderEvent::RequestFailed {
+                request_id: "req-1".into(),
+                provider: "kimi-subscription".into(),
+                profile: Some("kimi".into()),
+                protocol: "openai-chat-completions".into(),
+                model: "k3".into(),
+                streaming: true,
+                duration_ms: 1,
+                failure: event_bus::ProviderFailureKind::Http { status: 403 },
+                run_id: None,
+                purpose: None,
+                detail,
+            })
+        };
+
+        // When / Then: credential を含む detail だけが field 名付きで拒否される
+        let Err(StorageError::SecretDetected { field, .. }) =
+            guard.check_event_kind(&failed(Some(format!("echo {KNOWN_VALUE}"))))
+        else {
+            panic!("credential を含む detail は拒否される");
+        };
+        assert_eq!(field, "RequestFailed.detail");
+        assert!(
+            guard
+                .check_event_kind(&failed(Some("usage limit".into())))
+                .is_ok()
+        );
+        assert!(guard.check_event_kind(&failed(None)).is_ok());
     }
 
     #[test]

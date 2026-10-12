@@ -35,6 +35,7 @@ fn invalid_path(result: Result<Config, ConfigError>) -> String {
 
 fn routing(route: &str, profile: &str) -> RoutingConfig {
     RoutingConfig {
+        cooldown: Default::default(),
         routes: [(
             route.to_owned(),
             vec![RouteCandidateConfig {

@@ -106,6 +106,7 @@ fn unpriced_and_failed_attempts_are_recorded_without_cost() {
     bridge.handle_event(&completed("req-1", "unknown")).unwrap();
     bridge
         .handle_event(&Event::new(ProviderEvent::RequestFailed {
+            detail: None,
             request_id: "req-2".into(),
             provider: "openai".into(),
             profile: Some("main".into()),

@@ -70,3 +70,35 @@ The protocol implementation was informed by
 including its OAuth, native Cursor transport, and quota parsers. Offline mock
 tests verify authentication, token rotation, tool continuations, and prompt
 prefix preservation. Live account acceptance requires an actual account.
+
+## Failures and cooldowns
+
+Each failed request records its failure kind and a short error detail in the
+`RequestFailed` event. The detail is redacted (the profile's credential and
+any secret-shaped text become `***`) and limited to 1 KiB, so a quota message
+remains visible in the transcript and diagnostics after the run ends.
+
+Failures are classified for routing as follows:
+
+| Failure | Kind | Cooldown scope | Duration |
+| --- | --- | --- | --- |
+| HTTP 402 | quota | whole profile | `Retry-After`, else `quota_secs` |
+| Kimi subscription HTTP 403 whose body reports a usage limit | quota | whole profile | `Retry-After`, else `quota_secs` |
+| Other HTTP 401 / 403 | auth | whole profile | until settings are reloaded |
+| HTTP 429 / rate-limit response | rate limited | that profile and model | `Retry-After`, else `rate_limit_secs` |
+| HTTP 5xx, timeout, other | — | none | — |
+
+While a profile or model is cooling down, routing skips it for every run, not
+only the run that saw the failure. A `CooldownStarted` event records the
+target, cause, and duration; there is no matching end event. A cooldown is
+never shortened by a later, shorter failure. Reloading settings recomposes the
+routed model and clears every cooldown.
+
+The default periods can be changed under `[routing]`; a role profile's
+`routing` table accepts the same keys:
+
+```toml
+[routing.cooldown]
+quota_secs = 1800      # default: 30 minutes
+rate_limit_secs = 30   # default: 30 seconds
+```
