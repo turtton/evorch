@@ -131,7 +131,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let original_name = editor.original_name.clone();
                 let original_credential = editor.original_credential.clone();
                 let secret = sandbox::Secret::from(editor.api_key_input.clone());
-                self.provider_operation(move || {
+                self.provider_operation(Some(input.name.clone()), move || {
                     let mut migrated_account = None;
                     match &input.credential {
                         config::ProviderCredentialInput::Env { .. } => {}
@@ -183,7 +183,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Some(ProfileEditor::Subscription(editor)) => {
                 let original_name = editor.models.original_name.clone();
                 let input = editor.to_input();
-                self.provider_operation(move || {
+                self.provider_operation(Some(input.name.clone()), move || {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|_| "Could not create config directory".to_owned())?;
@@ -211,7 +211,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .collect(),
                     default_model: editor.default_model.clone(),
                 };
-                self.provider_operation(move || {
+                self.provider_operation(Some(input.name.clone()), move || {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
@@ -239,7 +239,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => false,
         };
         let store = self.credential_store.clone();
-        self.provider_operation(move || {
+        self.provider_operation(None, move || {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
@@ -270,17 +270,43 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
     }
 
-    fn provider_operation(
+    /// Runs a provider save; a saved `profile` then joins the pools of its models.
+    pub(super) fn provider_operation(
         &mut self,
+        profile: Option<String>,
         operation: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) {
+        let path = self.provider_settings_path.clone();
+        let options = self.routing_load_options();
+        let catalog = self.provider_settings.catalog.catalog.clone();
+        self.provider_job(move || {
+            operation()?;
+            let (Some(profile), Some(path), Some(catalog)) = (profile, path, catalog) else {
+                return Ok(super::auto_grouping::AutoGroupOutcome::default());
+            };
+            // The provider is already saved; grouping is best effort on top of it.
+            Ok(
+                super::auto_grouping::group_saved_provider(&path, &options, &profile, &catalog)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "automatic route grouping skipped");
+                        super::auto_grouping::AutoGroupOutcome::default()
+                    }),
+            )
+        });
+    }
+
+    pub(super) fn provider_job(
+        &mut self,
+        job: impl FnOnce() -> Result<super::auto_grouping::AutoGroupOutcome, String> + Send + 'static,
     ) {
         let production = self.production_model.clone();
         let projects = self.project_models.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.provider_save_rx = Some(rx);
         std::thread::spawn(move || {
-            let result = operation().and_then(|()| {
+            let result = job().and_then(|outcome| {
                 crate::model::production::reload_models(production.as_ref(), projects.as_ref())
+                    .map(|()| outcome)
             });
             if let Err(error) = &result {
                 tracing::error!(%error, "provider update or recomposition failed");
@@ -305,10 +331,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         match rx.recv_timeout(timeout) {
             Ok(result) => {
-                if let Err(error) = result {
-                    self.provider_settings.error = Some(error);
-                    return;
-                }
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.provider_settings.error = Some(error);
+                        return;
+                    }
+                };
                 if self.provider_settings_path.is_some() {
                     let options = self.routing_load_options();
                     match config::Config::load(&options) {
@@ -328,6 +357,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                 }
                 self.push_notice("Provider settings updated");
+                self.apply_auto_group_outcome(outcome);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => self.provider_save_rx = Some(rx),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

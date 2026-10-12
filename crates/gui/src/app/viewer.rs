@@ -371,6 +371,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .start_models_fetch_with_store(self.credential_store.clone()),
             }
         }
+        // Drawn last so the prompt stays above the settings modal that triggered it.
+        self.render_auto_group_conflicts(ui.ctx());
     }
 }
 

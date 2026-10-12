@@ -57,6 +57,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.poll_self_improvement_save();
         self.poll_storage_settings();
         if self.provider_settings.catalog.poll() {
+            self.warn_stale_auto_candidates();
             ctx.request_repaint();
         }
         if let Some(result) = self.folder_picker.poll() {

@@ -189,3 +189,46 @@ Version 2 files are migrated when loaded: `logical_model` becomes a
 single-entry `models` list, and a route candidate's `reasoning_effort` moves to
 the chain entries that use that route. The first saved change rewrites the file
 as version 3.
+
+### Editing chains in the GUI
+
+Agent role settings edit the whole chain of a role or category. The first
+picker sets the head route; each fallback entry below it picks one of the
+defined routes and its own reasoning effort, and can be moved up, moved down
+or removed. "Add … fallback" appends the first defined route the chain does
+not use yet.
+
+### Automatic pools
+
+Saving a provider in the GUI adds its models to the pools that serve the same
+model. A model's identity is its models.dev `canonical_model_id` together with
+its tier: `+fast`, or a `fast`, `highspeed`, `flex`, `eco` or `free` segment of
+the provider's model ID. Pools never mix tiers. The catalog entry is found
+through the model's `metadata_ref`, then the provider type's models.dev
+providers, then the profile name, then a unique match across the catalog.
+Models whose metadata is `manual` or `provider-default` are never grouped.
+
+A pool's identity comes from its configured candidates, which must all resolve
+to the same identity. Only pools that some role or category uses, including
+the route named after a role without `models`, are considered, and a pool that
+already has a candidate from the saved profile is left alone. When one enabled
+model of the profile matches, it is appended at the lowest priority with
+`auto = true`:
+
+```toml
+[[routing.routes."moonshotai/kimi-k3"]]
+profile = "neuralwatt"
+model = "kimi-k3"
+auto = true
+```
+
+When several enabled models match, the GUI asks which one to add; a skipped
+choice is not asked again in the session. Only a pool defined in the file
+being saved is changed. When the pool comes from another layer (`config.d`,
+`EVORCH_*`, the command line), the GUI reports that the model was not added
+and leaves the file alone. Routing settings mark these candidates `auto`, and
+they can be moved or removed like any other.
+
+The addition is written once and is not recomputed on load. When models.dev
+later lists an `auto` candidate under another identity than its pool, the GUI
+warns once per session and leaves the configuration unchanged.
