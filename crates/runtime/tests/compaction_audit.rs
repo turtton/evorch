@@ -432,7 +432,8 @@ async fn compaction_is_auditable_in_storage() {
 
 #[tokio::test]
 async fn summarizer_failure_is_atomic_end_to_end() {
-    // Given: persisted rows and a model summarizer that fails before a blocked provider continuation
+    // Given: persisted rows and a model summarizer that fails before a blocked provider
+    // continuation, with the structural fallback truncated to nothing
     let temp = TempDir::new().expect("temporary directory");
     let config = storage_config(&temp);
     let storage = Storage::open(config.clone()).expect("storage opens");
@@ -453,6 +454,7 @@ async fn summarizer_failure_is_atomic_end_to_end() {
         CompactionConfig {
             context_window_tokens: 1_000_000,
             keep_recent_tokens: 1,
+            max_summary_bytes: 0,
             summarizer: SummarizerKind::Model,
             ..CompactionConfig::default()
         },

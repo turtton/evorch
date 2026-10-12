@@ -71,10 +71,11 @@ pub(crate) fn selected_model(state: &LoopState) -> String {
             return format!("{}/{model}", preference.profile);
         }
     }
-    state
-        .shared
-        .model
-        .selected_model(state.run_role(), state.task.config.category.as_deref())
+    state.shared.model.selected_model_for_run(
+        &state.caller_run_id().to_string(),
+        state.run_role(),
+        state.task.config.category.as_deref(),
+    )
 }
 
 pub(crate) async fn compact_now(
@@ -88,9 +89,10 @@ pub(crate) async fn compact_now(
     let (window, window_source) = state.resolved_context_window();
     let at_limit = estimated_before >= window;
     if let Some(decision) = guard_decision(&state.compaction, &settings) {
-        // At the hard window boundary, cooldown and same-turn suppression are
-        // secondary to making the next request fit. The attempt budget remains.
-        if !(at_limit
+        // At the hard window boundary, or when a model switch is already a cache
+        // boundary, cooldown and same-turn suppression are secondary to making the
+        // next request fit. The attempt budget remains.
+        if !((at_limit || reason == CompactionReason::ModelSwitch)
             && matches!(
                 decision,
                 GuardDecision::Cooldown | GuardDecision::AlreadyThisBoundary
@@ -163,29 +165,13 @@ pub(crate) async fn compact_now(
             Some(result.usage),
         )
     } else {
-        match settings.summarizer {
-            SummarizerKindSel::Model => {
-                ModelSummarizer {
-                    model: state.shared.model.clone(),
-                    role: state.run_role(),
-                    run_id: state.caller_run_id().to_string(),
-                    category: state.task.config.category.clone(),
-                    model_preference,
-                    idle_timeout: std::time::Duration::from_secs(
-                        settings.summary_idle_timeout_secs,
-                    ),
-                    timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
-                }
-                .summarize_with_usage(&SummaryInput { goal, compacted })
-                .await
-            }
-            SummarizerKindSel::Structural => (
-                StructuralSummarizer
-                    .summarize(&SummaryInput { goal, compacted })
-                    .await,
-                None,
-            ),
-        }
+        summarize_range(
+            state,
+            reason,
+            model_preference,
+            &SummaryInput { goal, compacted },
+        )
+        .await
     };
     if let Some(usage) = summary_usage {
         state.budget.usage(usage);
@@ -282,6 +268,154 @@ pub(crate) async fn compact_now(
         }));
 
     Ok(outcome)
+}
+
+/// Summarizes `input` with the role's chain, falling back to the structural summary.
+///
+/// The structural summary uses no model, so the result is an error only when the
+/// structural summary itself fails (ADR 0030: official → chain → structural).
+async fn summarize_range(
+    state: &LoopState,
+    reason: CompactionReason,
+    model_preference: Option<crate::ModelPreference>,
+    input: &SummaryInput<'_>,
+) -> (
+    Result<String, summary::SummarizeError>,
+    Option<providers::Usage>,
+) {
+    let settings = &state.shared.compaction;
+    if settings.summarizer == SummarizerKindSel::Structural {
+        return (StructuralSummarizer.summarize(input).await, None);
+    }
+    let (result, usage) = ModelSummarizer {
+        model: state.shared.model.clone(),
+        role: state.run_role(),
+        run_id: state.caller_run_id().to_string(),
+        category: state.task.config.category.clone(),
+        model_preference,
+        idle_timeout: std::time::Duration::from_secs(settings.summary_idle_timeout_secs),
+        timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
+    }
+    .summarize_with_usage(input)
+    .await;
+    match result {
+        Ok(summary) => (Ok(summary), usage),
+        Err(error) => {
+            failure_diagnostic(
+                state,
+                reason,
+                &format!("summary model failed; using the structural summary: {error}"),
+            );
+            (StructuralSummarizer.summarize(input).await, usage)
+        }
+    }
+}
+
+/// Prepares the context before the run's requests move to `selected` (ADR 0030).
+///
+/// A checkpoint the target cannot replay is re-summarized from the raw messages it
+/// covers, and a history above the target's window × threshold is compacted. Both
+/// replace history at an explicit boundary; the switch already discards the cache.
+pub(crate) async fn prepare_model_switch(state: &mut LoopState, selected: &str, resummarize: bool) {
+    if resummarize {
+        resummarize_latest_checkpoint(state).await;
+    }
+    let settings = state.shared.compaction.clone();
+    let (window, _) = policy::resolve_window(
+        &settings,
+        selected,
+        state.shared.model.catalog_context_window(selected),
+    );
+    let visible = state.context.visible_messages();
+    let estimated = state.estimated_context_tokens(&visible);
+    if estimated as f64 >= window as f64 * settings.threshold
+        && let Err(error) = compact_now(state, CompactionReason::ModelSwitch).await
+    {
+        tracing::warn!(%error, selected, "compaction before the model switch could not proceed");
+    }
+}
+
+/// Replaces the latest checkpoint's compaction block with a text summary of the raw
+/// messages it covers. The block itself is never read or forwarded.
+async fn resummarize_latest_checkpoint(state: &mut LoopState) {
+    let Some(latest) = state.context.latest_checkpoint() else {
+        return;
+    };
+    if !latest
+        .summary
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Compaction { .. }))
+    {
+        return;
+    }
+    let (start, end) = latest.range;
+    state.activity(event_bus::RunActivity::Compaction);
+    let settings = state.shared.compaction.clone();
+    let estimated_before = state.estimated_context_tokens(&state.context.visible_messages());
+    let (window, window_source) = state.resolved_context_window();
+    state.compaction.in_flight = true;
+    state.channels.compaction_busy.store(true, Ordering::SeqCst);
+    let compacted = &state.context.messages[start..end];
+    let goal = first_user_text(&state.context.messages);
+    let model_preference = state.channels.model_preference_rx.borrow().clone();
+    let (result, usage) = summarize_range(
+        state,
+        CompactionReason::ModelSwitch,
+        model_preference,
+        &SummaryInput { goal, compacted },
+    )
+    .await;
+    state.compaction.in_flight = false;
+    state
+        .channels
+        .compaction_busy
+        .store(false, Ordering::SeqCst);
+    if let Some(usage) = usage {
+        state.budget.usage(usage);
+    }
+    let summary = enforce_max_bytes(&result.unwrap_or_default(), settings.max_summary_bytes);
+    let checkpoint_id = format!(
+        "ckpt-{}-{}",
+        state.caller_run_id(),
+        state.compaction.checkpoint_seq
+    );
+    let checkpoint = CompactionCheckpoint {
+        id: checkpoint_id.clone(),
+        summary: Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("[COMPACTION CHECKPOINT {checkpoint_id}]\n{summary}"),
+            }],
+        },
+        range: (start, end),
+    };
+    let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))
+        .saturating_add(state.estimated_tool_tokens());
+    state.context.apply_checkpoint(checkpoint);
+    state.todo_context_pending = true;
+    state.todo_context_deferred = false;
+    // Provider usage describes the replaced history and cannot be reused.
+    state.last_usage = None;
+    state.compaction.last_usage_estimated_tokens = None;
+    state.compaction.checkpoint_seq = state.compaction.checkpoint_seq.saturating_add(1);
+    state.compaction.last_estimated_tokens = estimated_after;
+    state
+        .shared
+        .bus
+        .emit(Event::new(CompactionEvent::Compacted {
+            run_id: state.caller_run_id().to_string(),
+            reason: CompactionReason::ModelSwitch,
+            threshold: settings.threshold,
+            context_window_tokens: window,
+            window_source,
+            estimated_tokens_before: estimated_before,
+            estimated_tokens_after: estimated_after,
+            compacted_range_start: start,
+            compacted_range_end: end,
+            checkpoint_id,
+            summary,
+        }));
 }
 
 /// Guard skips (cooldown, below threshold, ...) are routine and not reported; only an

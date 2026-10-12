@@ -199,6 +199,11 @@ pub trait AgentModel: Send + Sync {
     /// (lib.rs の「ルーティングの委譲」契約と一貫)。
     fn selected_model(&self, role: Role, category: Option<&str>) -> String;
 
+    /// Identity the run's next request goes to, following its chain pin when it has one.
+    fn selected_model_for_run(&self, _run_id: &str, role: Role, category: Option<&str>) -> String {
+        self.selected_model(role, category)
+    }
+
     /// Catalog window for an identity returned by `selected_model`, if known.
     fn catalog_context_window(&self, _selected_model: &str) -> Option<u64> {
         None

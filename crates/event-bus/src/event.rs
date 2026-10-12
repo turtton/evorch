@@ -1261,6 +1261,8 @@ pub enum CompactionReason {
     Manual,
     /// エージェント判断による発火です。
     Agent,
+    /// 別のモデルへの切り替えに合わせた要約し直しまたは圧縮です (ADR 0030)。
+    ModelSwitch,
 }
 
 /// Provenance of the context window used for compaction.
@@ -2780,7 +2782,7 @@ mod tests {
         );
     }
 
-    // Given: CompactionReason の全 3 バリアント。
+    // Given: CompactionReason の全 4 バリアント。
     // When: それぞれ JSON 文字列へシリアライズして復元する。
     // Then: いずれも snake_case タグで往復前後で等しい。
     #[test]
@@ -2789,6 +2791,7 @@ mod tests {
             (CompactionReason::Automatic, "automatic"),
             (CompactionReason::Manual, "manual"),
             (CompactionReason::Agent, "agent"),
+            (CompactionReason::ModelSwitch, "model_switch"),
         ];
 
         for (reason, tag) in cases {

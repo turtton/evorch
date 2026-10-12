@@ -13,6 +13,7 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 - **Cache metrics**: 各 request で実測 input tokens / cache read tokens / cache hit ratio (`cache_read / input`) を記録する。比較可能な直近要求の wire prefix がそのまま残る場合、以前の実測 cache read/write に対する再利用量が急落したときに CacheRegression として DiagnosticBus に流す。概算の本文量を実測率の分母にしない。GUI は比較対象の実測 cache に対する retention を主表示とし、`cache_read / input` はツールチップに置く ([2026-10-03 補足](../../clarifications/cache-policy-2026-10-03.md))。cache は billing metric ではなく runtime health metric
 - **Cache-aware wait**: 長時間 command 実行中に prompt cache TTL が切れないよう、JobHandle で待機し cache lease 期限切れが近づいたら agent turn に戻る。tool call 自体を cache TTL より長く block させない（Senpi の cache-aware wait を runtime primitive にする）
 - **Compaction**: Agent が自分で判断して呼べる control-flow primitive（compact_context）。context checkpoint を更新して agent resume。provider 固有 compaction は `trait Compactor` で抽象化し、OpenAI / GPT 系は公式 Responses API の compaction を優先
+- **モデル切り替え**: チェーンのフォールバックや復元で run のモデルが変わる時点を明示的な compaction 境界として扱う。切り替え先が公式 compaction の blob を再生できなければ、checkpoint が覆う元のメッセージから要約し直す。切り替え先の context window × 閾値を超える履歴は送信前に compaction する。要約は公式 compaction → チェーン (`agents.roles.compactor` があればそれ) → 構造的要約の順で選ぶ ([ADR 0030](../../decisions/0030-role-model-chains.md))
 - **Memory**: task / session 終了時に quick agent が「将来も有用な知識」を抽出して persistent memory へ保存。session 途中で stable prefix に挿入せず、次の task boundary から利用（Relevant Memory Retrieval → Memory Snapshot → Stable Prefix）
 
 ## 受け入れ基準
@@ -20,6 +21,7 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 - Stable Prefix がターン間で不変であり、cache hit ratio が計測・記録されること
 - 直近の不変 wire prefix で以前の実測 cache 量に対する再利用割合が閾値を下回る場合に CacheRegression が発行され、新規 suffix 増加・入力変更・古い基準だけでは誤警告しないこと
 - compact_context が control-flow primitive として動作し、checkpoint から resume できること
+- モデル切り替え後の最初の要求に、切り替え先が解釈できない compaction blob が含まれず、その後のターンで新しい prefix が保たれること
 
 ## Related decisions
 
@@ -28,6 +30,7 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 - [2026-09-17 cache 方針補足: 指標・診断・snapshot の実装語彙と未解決範囲](../../clarifications/cache-policy-2026-09-17.md)
 
 - [2026-09-23 cache 方針補足: ツール返却時の制限と実測率・回帰判定](../../clarifications/cache-policy-2026-09-23.md)
+- [ADR 0030: ロール単位のモデルチェーンと同一モデルの経路プール](../../decisions/0030-role-model-chains.md)
 
 ## Open questions
 

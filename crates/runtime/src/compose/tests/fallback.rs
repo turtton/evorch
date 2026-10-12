@@ -13,6 +13,16 @@ pub(super) fn fixture_with_efforts(
     errors: Vec<Option<ProviderError>>,
     efforts: &[Option<&str>],
 ) -> (RoutedModel, Vec<Requests>) {
+    fixture_with(errors, efforts, &[])
+}
+
+/// Like [`fixture_with_efforts`], also giving `profile-{i}`'s model the catalog window
+/// `windows[i]` (with tool calling) when present.
+pub(super) fn fixture_with(
+    errors: Vec<Option<ProviderError>>,
+    efforts: &[Option<&str>],
+    windows: &[u64],
+) -> (RoutedModel, Vec<Requests>) {
     let (mut model, _) = routed_model(Ok(response()), "model-a", None);
     let mut catalog = ModelCatalog::new();
     let mut profiles = Vec::new();
@@ -25,6 +35,12 @@ pub(super) fn fixture_with_efforts(
         let mut profile = profile(&model_id, &[&model_id]);
         profile.name = name.clone();
         catalog.merge_discovered(profile.models.clone());
+        if let Some(window) = windows.get(index) {
+            let mut entry = catalog.get(&model_id).unwrap().clone();
+            entry.context_window = *window;
+            entry.capabilities.tool_calling = true;
+            catalog.merge_models_dev(vec![entry]);
+        }
         profiles.push(profile.clone());
         candidates.push(RouteCandidateConfig {
             profile: name.clone(),

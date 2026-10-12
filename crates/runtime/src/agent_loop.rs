@@ -104,6 +104,10 @@ pub(crate) struct LoopShared {
     pub(crate) runtime: Weak<Shared>,
 }
 
+/// Model switches the loop prepares before a response arrives (ADR 0030). Each one
+/// moves the pin along the chain, so more than this means availability keeps flapping.
+const MAX_MODEL_SWITCHES: u32 = 16;
+
 pub(crate) struct LoopState {
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
     benchmark_checked: bool,
@@ -125,6 +129,8 @@ pub(crate) struct LoopState {
     pub(crate) goal_wake_pending: bool,
     pub(crate) todo_context_pending: bool,
     pub(crate) todo_context_deferred: bool,
+    /// Model switches prepared since the last response; bounds a switch that never settles.
+    model_switches: u32,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -276,6 +282,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         goal_wake_pending: false,
         todo_context_pending: true,
         todo_context_deferred,
+        model_switches: 0,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -1039,7 +1046,19 @@ impl LoopState {
             };
             self.activity(event_bus::RunActivity::Idle);
             let response = match completion {
-                Ok(response) => response,
+                Ok(response) => {
+                    self.model_switches = 0;
+                    response
+                }
+                Err(crate::RuntimeError::ModelSwitch {
+                    selected,
+                    resummarize,
+                }) if self.model_switches < MAX_MODEL_SWITCHES => {
+                    // The router already moved the pin; prepare the history and send again.
+                    self.model_switches += 1;
+                    compaction::prepare_model_switch(self, &selected, resummarize).await;
+                    continue;
+                }
                 Err(error) => {
                     let reason = error.to_string();
                     tracing::error!(run_id = ?self.task.run_id, reason = %reason, "agent run failed");

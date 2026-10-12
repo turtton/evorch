@@ -50,6 +50,18 @@ pub enum RuntimeError {
         run_id: String,
     },
 
+    /// チェーンの別のメンバーへ切り替わるため、送信せずに agent loop へ戻った (ADR 0030)。
+    ///
+    /// ルーティングは切り替え先へピンを移してから返す。agent loop は必要なら履歴を
+    /// 要約し直し、切り替え先の context window に合わせて compaction してから送り直す。
+    #[error("モデル {selected} へ切り替える前に履歴を整えます")]
+    ModelSwitch {
+        /// 切り替え先 (`profile/model`)。
+        selected: String,
+        /// 切り替え先が checkpoint の compaction ブロックを再送できず、要約し直しが必要か。
+        resummarize: bool,
+    },
+
     /// モデル呼び出し (境界の実装側) の失敗。
     #[error("モデル呼び出しに失敗しました: {reason}")]
     Model {

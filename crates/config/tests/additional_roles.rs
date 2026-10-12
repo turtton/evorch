@@ -2,7 +2,7 @@ use config::Config;
 
 #[test]
 fn named_roles_reject_category_overrides_when_loaded() {
-    for role in ["planner", "oracle", "multimodal_looker"] {
+    for role in ["planner", "oracle", "multimodal_looker", "compactor"] {
         // Given: a named non-worker role with a category override.
         let directory = tempfile::tempdir().expect("temporary config directory");
         let doc = format!(
@@ -77,4 +77,37 @@ fn layered_loading_validates_closed_role_bindings() {
             ),
         }
     }
+}
+
+#[test]
+fn compactor_chain_loads_without_replacing_any_role() {
+    // Given: a compactor chain next to an ordinary worker route.
+    let directory = tempfile::tempdir().expect("temporary config directory");
+    let document = "[agents.roles.compactor]\nmodels = [{ route = 'summary' }, { route = 'worker' }]\n[routing.routes]\nsummary = [{ profile = 'p' }]\nworker = [{ profile = 'p' }]";
+    // When
+    let config = Config::load_strict(&config::LoadOptions {
+        user_config_dir: Some(directory.path().to_path_buf()),
+        read_env: false,
+        cli_overrides: Some(toml::from_str(document).expect("TOML")),
+        ..Default::default()
+    })
+    .expect("valid compactor chain");
+    // Then: the chain is kept in order and the worker still uses its own route.
+    let routes = config
+        .agents
+        .roles
+        .compactor
+        .models
+        .iter()
+        .map(|entry| entry.route.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(routes, ["summary", "worker"]);
+    assert_eq!(
+        config
+            .agents
+            .binding_for("worker", None)
+            .expect("worker")
+            .head_route(),
+        "worker"
+    );
 }

@@ -20,6 +20,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=tool_output_history)
       | binary(=system_prompt_seam)
       | binary(=compaction_triggers)
+      | binary(=model_switch_cache)
       | binary(=builtin_git_skill)
       | binary(=skill_hot_reload_cache)))
   | (package(=tools) & binary(=bounded_output))

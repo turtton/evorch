@@ -43,6 +43,7 @@ pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, S
         &mut agents.roles.planner.models,
         &mut agents.roles.oracle.models,
         &mut agents.roles.multimodal_looker.models,
+        &mut agents.roles.compactor.models,
     ]
     .into_iter()
     .chain(
@@ -119,6 +120,7 @@ pub fn chain_at_mut<'a>(
         "roles.planner" => &mut agents.roles.planner,
         "roles.oracle" => &mut agents.roles.oracle,
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker,
+        "roles.compactor" => &mut agents.roles.compactor,
         address => {
             let (categories, category) =
                 if let Some(category) = address.strip_prefix("worker.categories.") {
@@ -142,15 +144,17 @@ pub fn implicit_roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String>
     role_bindings(agents)
         .into_iter()
         .filter(|(address, binding)| {
+            // The compactor has no implicit route: without a chain it uses the run's own.
             binding.models.is_empty()
+                && *address != "roles.compactor"
                 && address.strip_prefix("roles.").unwrap_or(address) == logical
         })
         .map(|(address, _)| address.to_string())
         .collect()
 }
 
-/// 設定上のアドレスと全8ロールのバインディングを列挙する。
-fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 8] {
+/// 設定上のアドレスと全8ロール、および compactor のバインディングを列挙する。
+fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 9] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
@@ -160,6 +164,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 8] {
         ("roles.planner", &agents.roles.planner),
         ("roles.oracle", &agents.roles.oracle),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
+        ("roles.compactor", &agents.roles.compactor),
     ]
 }
 
@@ -170,6 +175,9 @@ pub struct AdditionalRoleBindings {
     pub planner: RoleBindingConfig,
     pub oracle: RoleBindingConfig,
     pub multimodal_looker: RoleBindingConfig,
+    /// 要約 (compaction) にだけ使うチェーン。agent としては起動しない。
+    /// `models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。
+    pub compactor: RoleBindingConfig,
 }
 
 impl AgentsConfig {
@@ -515,7 +523,13 @@ mod tests {
             // Then: only the role address is reported (not its inheriting categories).
             assert_eq!(implicit_roles_using(logical, &agents), [address]);
         }
-        for logical in ["quick", "roles.web_researcher", "unknown", "Worker"] {
+        for logical in [
+            "quick",
+            "roles.web_researcher",
+            "unknown",
+            "Worker",
+            "compactor",
+        ] {
             assert!(implicit_roles_using(logical, &agents).is_empty());
         }
         // Given: an explicit reference equal to the fallback is still not implicit.
@@ -528,7 +542,7 @@ mod tests {
 
     #[test]
     fn rename_route_refs_updates_all_explicit_roles() {
-        // Given: 全 8 ロールが同じ論理モデルを明示的に指定する。
+        // Given: 全 8 ロールと compactor が同じ論理モデルを明示的に指定する。
         let doc = r#"
 [agents.orchestrator]
 models = [{ route = "old" }]
@@ -548,6 +562,8 @@ models = [{ route = "old" }]
 [agents.roles.oracle]
 models = [{ route = "old" }]
 [agents.roles.multimodal_looker]
+models = [{ route = "old" }]
+[agents.roles.compactor]
 models = [{ route = "old" }]
 "#;
         let mut agents = toml::from_str::<Config>(doc)

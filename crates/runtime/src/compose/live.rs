@@ -129,6 +129,11 @@ impl AgentModel for SwitchableModel {
         self.current().selected_model(role, category)
     }
 
+    fn selected_model_for_run(&self, run_id: &str, role: Role, category: Option<&str>) -> String {
+        self.current()
+            .selected_model_for_run(run_id, role, category)
+    }
+
     fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
         self.current().selected_reasoning_effort(role, category)
     }

@@ -158,6 +158,33 @@ Pins are saved with the run's snapshot, survive a restart or a settings reload,
 and restoring a run whose pinned member is unavailable falls through to the
 next member as above. A new run starts from the head of the chain.
 
+### Compaction across a switch
+
+Moving a run to another member discards the provider's prompt cache, so the
+switch is also where the history is prepared for the new member. Before the
+first request is sent there:
+
+- A checkpoint made by official compaction (an opaque Codex blob) is
+  re-summarized from the raw messages it covers when the new member cannot
+  replay it. The blob itself is never read or forwarded.
+- The history is compacted when it is above the new member's context window
+  × `[compaction].threshold`.
+
+Both happen once per switch, then the request is sent again; a restored run
+whose pinned member is unavailable goes through the same steps.
+
+Summaries use official compaction when the run's member supports it, then the
+chain, then the structural summary, which needs no model and always completes.
+A summary skips members whose window cannot hold its input and never moves
+the run's pin. To summarize with a different chain, set
+`agents.roles.compactor`; it is never started as an agent, and without
+`models` the running role's chain is used:
+
+```toml
+[agents.roles.compactor]
+models = [{ route = "claude" }, { route = "moonshotai/kimi-k3" }]
+```
+
 Version 2 files are migrated when loaded: `logical_model` becomes a
 single-entry `models` list, and a route candidate's `reasoning_effort` moves to
 the chain entries that use that route. The first saved change rewrites the file

@@ -177,6 +177,11 @@ async fn search_uses_the_chat_fallback_pin_and_its_reasoning_effort() {
             .unwrap()
             .is_none()
     );
+    // The fallback is a model switch; the agent loop prepares the context and resends.
+    assert!(matches!(
+        model.complete(&invocation, Role::Worker, &[], &specs).await,
+        Err(RuntimeError::ModelSwitch { .. })
+    ));
     model
         .complete(&invocation, Role::Worker, &[], &specs)
         .await
