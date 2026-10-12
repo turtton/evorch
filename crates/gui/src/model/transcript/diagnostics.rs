@@ -55,31 +55,57 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
             model,
             duration_ms,
             failure,
+            detail,
             ..
         }) => {
             // RequestFailed is per-attempt and carries no retry decision. This is
             // a transient-kind heuristic, not a guarantee that another attempt follows.
-            let (label, transient) = match failure {
-                ProviderFailureKind::RateLimited => ("rate limited".into(), true),
-                ProviderFailureKind::Server => ("server error".into(), true),
-                ProviderFailureKind::Transport => ("transport error".into(), true),
-                ProviderFailureKind::Http { status } => {
-                    (format!("HTTP {status}"), (500..600).contains(status))
-                }
-                ProviderFailureKind::Auth => ("authentication failed".into(), false),
-                ProviderFailureKind::Timeout => ("timed out".into(), false),
-                ProviderFailureKind::InvalidResponse => ("invalid response".into(), false),
-                ProviderFailureKind::Quota => ("quota exceeded".into(), false),
-                ProviderFailureKind::Other => ("unknown error".into(), false),
+            let transient = match failure {
+                ProviderFailureKind::RateLimited
+                | ProviderFailureKind::Server
+                | ProviderFailureKind::Transport => true,
+                ProviderFailureKind::Http { status } => (500..600).contains(status),
+                ProviderFailureKind::Auth
+                | ProviderFailureKind::Timeout
+                | ProviderFailureKind::InvalidResponse
+                | ProviderFailureKind::Quota
+                | ProviderFailureKind::Other => false,
             };
             let suffix = if transient { ", retrying" } else { "" };
-            let text = format!(
-                "Provider request failed: {provider}/{model} — {label} ({duration_ms} ms{suffix})"
+            let mut text = format!(
+                "Provider request failed: {provider}/{model} — {} ({duration_ms} ms{suffix})",
+                failure_label(failure)
             );
+            if let Some(detail) = detail {
+                text.push_str(": ");
+                text.push_str(detail);
+            }
             Some(if transient {
                 TranscriptEntry::Notice { text }
             } else {
                 TranscriptEntry::Error { text }
+            })
+        }
+        EventKind::Provider(ProviderEvent::CooldownStarted {
+            profile,
+            model,
+            failure,
+            cooldown_ms,
+            ..
+        }) => {
+            let target = match model {
+                Some(model) => format!("{profile}/{model}"),
+                None => profile.clone(),
+            };
+            let period = match cooldown_ms {
+                Some(ms) => format!("for {}s", ms.div_ceil(1000)),
+                None => "until settings are reloaded".into(),
+            };
+            Some(TranscriptEntry::Notice {
+                text: format!(
+                    "Cooldown: {target} skipped {period} ({})",
+                    failure_label(failure)
+                ),
             })
         }
         EventKind::Fault(FaultEvent::SkillDiagnostic {
@@ -112,9 +138,82 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     }
 }
 
+fn failure_label(failure: &ProviderFailureKind) -> String {
+    match failure {
+        ProviderFailureKind::RateLimited => "rate limited".into(),
+        ProviderFailureKind::Server => "server error".into(),
+        ProviderFailureKind::Transport => "transport error".into(),
+        ProviderFailureKind::Http { status } => format!("HTTP {status}"),
+        ProviderFailureKind::Auth => "authentication failed".into(),
+        ProviderFailureKind::Timeout => "timed out".into(),
+        ProviderFailureKind::InvalidResponse => "invalid response".into(),
+        ProviderFailureKind::Quota => "quota exceeded".into(),
+        ProviderFailureKind::Other => "unknown error".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Given: 期間付きのプロファイル全体のクールダウンと、期間なしのモデル単位のクールダウン
+    // When: transcript の項目にする
+    // Then: 対象・期間・原因を示す Notice になる
+    #[test]
+    fn cooldown_renders_target_period_and_cause() {
+        let quota = EventKind::Provider(ProviderEvent::CooldownStarted {
+            profile: "kimi".into(),
+            model: None,
+            failure: ProviderFailureKind::Quota,
+            cooldown_ms: Some(1_800_000),
+            run_id: Some("run-1".into()),
+        });
+        let auth = EventKind::Provider(ProviderEvent::CooldownStarted {
+            profile: "codex-work".into(),
+            model: Some("gpt-6.1-sol".into()),
+            failure: ProviderFailureKind::Auth,
+            cooldown_ms: None,
+            run_id: None,
+        });
+
+        assert_eq!(
+            entry(&quota),
+            Some(TranscriptEntry::Notice {
+                text: "Cooldown: kimi skipped for 1800s (quota exceeded)".into(),
+            })
+        );
+        assert_eq!(
+            entry(&auth),
+            Some(TranscriptEntry::Notice {
+                text: "Cooldown: codex-work/gpt-6.1-sol skipped until settings are reloaded (authentication failed)".into(),
+            })
+        );
+    }
+
+    // Given: 詳細付きの失敗 / When: transcript の項目にする / Then: 末尾に詳細が付く
+    #[test]
+    fn request_failure_appends_detail() {
+        let event = EventKind::Provider(ProviderEvent::RequestFailed {
+            request_id: "req-1".into(),
+            provider: "kimi-subscription".into(),
+            profile: Some("kimi".into()),
+            protocol: "openai-chat-completions".into(),
+            model: "k3".into(),
+            streaming: true,
+            duration_ms: 12,
+            failure: ProviderFailureKind::Http { status: 403 },
+            run_id: None,
+            purpose: None,
+            detail: Some("http error (status 403): usage limit reached".into()),
+        });
+
+        assert_eq!(
+            entry(&event),
+            Some(TranscriptEntry::Error {
+                text: "Provider request failed: kimi-subscription/k3 — HTTP 403 (12 ms): http error (status 403): usage limit reached".into(),
+            })
+        );
+    }
 
     #[test]
     fn fallback_renders_selected_provider_as_notice() {

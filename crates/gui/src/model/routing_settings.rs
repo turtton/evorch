@@ -9,6 +9,8 @@ use config::{Config, ConfigError, RouteCandidateConfig, RoutingConfig};
 pub struct RoutingSettingsModel {
     pub open: bool,
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
+    /// 保存時に `[routing]` を置き換えても失わないよう、読み込んだ値を保持する。
+    pub cooldown: config::CooldownConfig,
     pub route_users: BTreeMap<String, Vec<String>>,
     pub implicit_route_users: BTreeMap<String, Vec<String>>,
     pub routes_empty: bool,
@@ -77,6 +79,7 @@ impl RoutingSettingsModel {
         });
         Self {
             routes: config.routing.routes.clone(),
+            cooldown: config.routing.cooldown.clone(),
             route_users: config
                 .routing
                 .routes
@@ -248,7 +251,10 @@ impl RoutingSettingsModel {
                 });
             }
         }
-        Ok(RoutingConfig { routes: renamed })
+        Ok(RoutingConfig {
+            routes: renamed,
+            cooldown: self.cooldown.clone(),
+        })
     }
 }
 

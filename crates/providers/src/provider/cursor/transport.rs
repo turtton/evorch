@@ -97,7 +97,8 @@ pub(super) async fn start(
         &request.model,
         true,
         request.observation.clone(),
-    );
+    )
+    .with_known_secret(&token);
     let request_id = uuid::Uuid::new_v4().to_string();
     let run_request = rpc(
         &http,

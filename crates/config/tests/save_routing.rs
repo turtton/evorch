@@ -16,6 +16,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
     std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
     let path = temp.path().join(".evorch/config.toml");
     let routing = RoutingConfig {
+        cooldown: Default::default(),
         routes: [
             (
                 "worker.v2/日本語".into(),
@@ -78,4 +79,29 @@ fn empty_routing_replaces_old_routes_and_preserves_other_sections() {
             .expect("text")
             .starts_with(unrelated)
     );
+}
+
+#[test]
+fn roundtrip_preserves_non_default_cooldown_and_omits_default() {
+    // Given: 既定値と異なるクールダウンを持つ routing。
+    let temp = tempfile::tempdir().expect("temp");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
+    let mut routing = RoutingConfig {
+        cooldown: config::CooldownConfig {
+            quota_secs: 7_200,
+            rate_limit_secs: 5,
+        },
+        ..Default::default()
+    };
+    // When: 保存して読み直す。
+    config::save_routing(&path, &routing).expect("save");
+    // Then: クールダウンが残る。
+    assert_eq!(load(temp.path()).routing, routing);
+    // When: 既定値に戻して保存する。
+    routing.cooldown = config::CooldownConfig::default();
+    config::save_routing(&path, &routing).expect("save");
+    // Then: 既定値のクールダウンは書き出されない。
+    let text = std::fs::read_to_string(path).expect("text");
+    assert!(!text.contains("cooldown"), "{text}");
 }

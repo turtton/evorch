@@ -24,8 +24,8 @@ implementation_issue_packet:
     - "失敗の分類がプロバイダ種別の規則を持ち、kimi-subscription の 403 でボディが利用上限を示す場合は Quota、それ以外の 403 は Auth になる"
     - "Quota はプロファイル全体、RateLimited は (プロファイル, モデル)、Auth はプロファイル全体を、決められた期間クールダウンする。Retry-After があればそれを優先する"
     - "クールダウン中のメンバーは resolve / next_fallback で飛ばされ、プロバイダへのリクエストが発生しない。全メンバーがクールダウン中なら、従来どおり候補なしのエラーになる"
-    - "クールダウンの既定期間は設定（routing.cooldown）で変更でき、Auth のクールダウンは設定の再読み込み（runtime の再構成）で解除される"
-    - "クールダウンへの出入りが観測イベントとして発行され、GUI の通知・テレメトリが新しいフィールドで壊れない"
+    - "クールダウンの既定期間（quota・rate limit）は設定（routing.cooldown）で変更できる。Auth は期限なしで、設定の再読み込み（runtime の再構成）で全クールダウンとともに解除される"
+    - "クールダウンの開始が観測イベント（CooldownStarted。終了イベントは出さない）として発行され、GUI の通知・テレメトリが新しいフィールドで壊れない"
     - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
 
 intent_placement:

@@ -38,6 +38,7 @@ fn router(models: &[&str]) -> Router {
     Router::new(
         profiles,
         &config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "worker".into(),
                 models

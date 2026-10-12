@@ -179,7 +179,8 @@ impl ChatCompletionsClient {
             false,
             request.observation.clone(),
         )
-        .with_cache_observation(&wire_request);
+        .with_cache_observation(&wire_request)
+        .with_known_secret(&auth.api_key);
         let request = self
             .http
             .post(&self.endpoint)
@@ -253,7 +254,8 @@ impl ChatCompletionsClient {
             true,
             request.observation.clone(),
         )
-        .with_cache_observation(&wire_request);
+        .with_cache_observation(&wire_request)
+        .with_known_secret(&auth.api_key);
         let request = self
             .http
             .post(&self.endpoint)

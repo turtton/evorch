@@ -48,6 +48,7 @@ pub(super) async fn model(
             },
         )]),
         routing: config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "web_researcher".into(),
                 vec![config::RouteCandidateConfig {

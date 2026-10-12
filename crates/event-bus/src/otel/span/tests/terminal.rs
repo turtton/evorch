@@ -79,6 +79,7 @@ fn request_failure_uses_stable_classification_without_raw_data() {
     // When: an HTTP request failure includes a status-bearing classification.
     let actions = mapper.ingest(&event(
         ProviderEvent::RequestFailed {
+            detail: None,
             request_id: "request-1".to_owned(),
             provider: "openai".to_owned(),
             profile: None,

@@ -25,6 +25,7 @@ fn tool_router(catalog: ModelCatalog, models: [&str; 2]) -> Router {
     Router::new(
         profiles.into(),
         &config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([(
                 "kimi-k3".into(),
                 ["kimi", "neuralwatt"]

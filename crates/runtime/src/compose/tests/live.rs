@@ -78,6 +78,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
             },
         )]),
         routing: RoutingConfig {
+            cooldown: Default::default(),
             routes: ["worker", "orchestrator"]
                 .into_iter()
                 .map(|logical| {

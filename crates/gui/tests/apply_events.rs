@@ -32,6 +32,7 @@ fn apply_events_surfaces_provider_failures_in_chat() {
     // When: transient and definite failures reach the real event fold.
     state.apply_events(failures.map(|failure| {
         Event::new(event_bus::ProviderEvent::RequestFailed {
+            detail: None,
             request_id: format!("request-{failure:?}"),
             provider: "provider-a".into(),
             profile: None,

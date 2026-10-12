@@ -11,6 +11,38 @@ use serde::{Deserialize, Serialize};
 pub struct RoutingConfig {
     /// ルート名から候補リスト (フォールバック順) へのマップ。
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
+    /// 失敗したプロファイル・モデルを候補から外す期間。
+    #[serde(skip_serializing_if = "CooldownConfig::is_default")]
+    pub cooldown: CooldownConfig,
+}
+
+/// 失敗後のクールダウン期間 (ADR 0030)。
+///
+/// Retry-After などプロバイダが期間を示した場合はそちらを優先する。認証エラーは
+/// 期間を持たず、runtime の再構成 (設定の再読み込み) まで続く。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CooldownConfig {
+    /// 支払い・利用上限による失敗でプロファイル全体を止める秒数。
+    pub quota_secs: u64,
+    /// レート制限による失敗で (プロファイル, モデル) を止める秒数。
+    pub rate_limit_secs: u64,
+}
+
+impl Default for CooldownConfig {
+    fn default() -> Self {
+        Self {
+            quota_secs: 1_800,
+            rate_limit_secs: 30,
+        }
+    }
+}
+
+impl CooldownConfig {
+    /// 既定値と等しいか (保存時に省略できるか)。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// ルートの候補 1 件分の設定。

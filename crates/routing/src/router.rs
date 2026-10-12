@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use event_bus::{Event, EventBus, ProviderEvent};
 
-use crate::{FailureKind, ProviderProfile, RoutingError, SessionAffinity};
+use crate::{FailureKind, ProviderHealth, ProviderProfile, RoutingError, SessionAffinity};
 use model::{Capability, CapabilitySupport, LogicalModelId, ModelCatalog};
 
 mod attempts;
@@ -38,6 +38,8 @@ pub struct Router {
     required_capabilities: Vec<Capability>,
     /// フォールバック選択の観測イベント発行先。未接続なら発行しない。
     event_bus: Option<Arc<EventBus>>,
+    /// クールダウン中の候補を外すための共有状態。未接続なら外さない。
+    health: Option<Arc<ProviderHealth>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -48,13 +50,14 @@ impl std::fmt::Debug for Router {
             .field("catalog", &self.catalog)
             .field("required_capabilities", &self.required_capabilities)
             .field("has_event_bus", &self.event_bus.is_some())
+            .field("has_health", &self.health.is_some())
             .finish()
     }
 }
 
 impl PartialEq for Router {
-    /// 等価性はルーティング結果に関わるフィールドのみで判定する。
-    /// `event_bus` は観測配線の差し替え経路であり、等価性には含めない。
+    /// 等価性はルーティング設定に関わるフィールドのみで判定する。
+    /// `event_bus` は観測配線、`health` は実行時の状態であり、等価性には含めない。
     fn eq(&self, other: &Self) -> bool {
         self.profiles == other.profiles
             && self.routes == other.routes
@@ -75,6 +78,14 @@ impl Router {
     /// Shares the routing catalog with provider request assembly.
     pub fn catalog(&self) -> &ModelCatalog {
         &self.catalog
+    }
+
+    /// 候補が利用可能で、クールダウン中でないかを返す。
+    fn is_available_member(&self, profile: &str, model_id: &str) -> bool {
+        self.is_eligible(model_id)
+            && !self.health.as_ref().is_some_and(|health| {
+                health.is_cooling_down(profile, model_id, std::time::Instant::now())
+            })
     }
 
     fn is_eligible(&self, model_id: &str) -> bool {
@@ -124,6 +135,7 @@ impl Router {
             catalog,
             required_capabilities: Vec::new(),
             event_bus: None,
+            health: None,
         })
     }
 
@@ -134,6 +146,13 @@ impl Router {
     /// 順序や policy 自体は変化しない (観測の追加のみ)。
     pub fn with_event_bus(mut self, event_bus: Option<Arc<EventBus>>) -> Self {
         self.event_bus = event_bus;
+        self
+    }
+
+    /// クールダウン状態を接続する。接続した場合、[`Router::resolve`] と
+    /// [`Router::next_fallback`] はクールダウン中の候補とピンを飛ばす。
+    pub fn with_health(mut self, health: Arc<ProviderHealth>) -> Self {
+        self.health = Some(health);
         self
     }
 
@@ -163,7 +182,7 @@ impl Router {
 
         if let Some((pinned_profile, pinned_model)) = affinity.pinned(session_id, logical_name)
             && self.profiles.contains_key(pinned_profile)
-            && self.is_eligible(pinned_model)
+            && self.is_available_member(pinned_profile, pinned_model)
         {
             return Ok(ResolvedRoute {
                 profile: pinned_profile.to_string(),
@@ -181,7 +200,7 @@ impl Router {
                 continue; // new() で検証済みのため通常は到達しない
             };
             let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-            if !self.is_eligible(model_id) {
+            if !self.is_available_member(&profile.name, model_id) {
                 continue;
             }
             affinity.pin(session_id, logical_name, &profile.name, model_id);
@@ -335,7 +354,7 @@ impl Router {
         // new() で検証済みのため、未知のプロファイルは通常発生しない。
         let profile = self.profiles.get(&candidate.profile)?;
         let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-        if !self.is_eligible(model_id) {
+        if !self.is_available_member(&profile.name, model_id) {
             return None;
         }
         Some(ResolvedRoute {
@@ -384,6 +403,7 @@ mod tests {
         routes: &[(&str, Vec<config::RouteCandidateConfig>)],
     ) -> config::RoutingConfig {
         config::RoutingConfig {
+            cooldown: Default::default(),
             routes: routes
                 .iter()
                 .map(|(logical, candidates)| (logical.to_string(), candidates.clone()))
@@ -1090,6 +1110,119 @@ mod tests {
             affinity.pinned("session-1", "summary"),
             Some(("only", "model-only")),
             "使い切り時はピンが変化しない"
+        );
+    }
+
+    fn cooling_router(health: &std::sync::Arc<crate::ProviderHealth>) -> Router {
+        let routing = routing_config(&[(
+            "summary",
+            vec![
+                candidate("primary", None),
+                candidate("secondary", None),
+                candidate("tertiary", None),
+            ],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-a", Availability::Available),
+                ("model-b", Availability::Available),
+                ("model-c", Availability::Available),
+            ],
+            &[],
+        );
+        Router::new(
+            vec![
+                profile("primary", "model-a"),
+                profile("secondary", "model-b"),
+                profile("tertiary", "model-c"),
+            ],
+            &routing,
+            catalog,
+        )
+        .expect("有効な構成で Router を構築できる")
+        .with_health(std::sync::Arc::clone(health))
+    }
+
+    // Given: 先頭候補へピン済みのセッションと、先頭プロファイルの quota クールダウン
+    // When: 解決する
+    // Then: ピンとクールダウン中の候補を飛ばし、次の候補へピンし直す
+    #[test]
+    fn resolve_skips_cooling_pin_and_candidates() {
+        let health = std::sync::Arc::new(crate::ProviderHealth::default());
+        let router = cooling_router(&health);
+        let mut affinity = SessionAffinity::default();
+        affinity.pin("session-1", "summary", "primary", "model-a");
+        health.record_failure(
+            "primary",
+            "model-a",
+            FailureKind::Quota,
+            None,
+            std::time::Instant::now(),
+        );
+
+        let resolved = router
+            .resolve(&mut affinity, "session-1", &logical("summary"))
+            .expect("クールダウン外の候補へ解決できる");
+
+        assert_eq!(resolved, failed_route("secondary", "model-b"));
+        assert_eq!(
+            affinity.pinned("session-1", "summary"),
+            Some(("secondary", "model-b"))
+        );
+    }
+
+    // Given: 2 番目の候補だけがレート制限でクールダウン中
+    // When: 先頭候補の失敗からフォールバックする
+    // Then: クールダウン中の候補を飛ばして 3 番目を選ぶ
+    #[test]
+    fn next_fallback_skips_cooling_candidate() {
+        let health = std::sync::Arc::new(crate::ProviderHealth::default());
+        let router = cooling_router(&health);
+        let mut affinity = SessionAffinity::default();
+        health.record_failure(
+            "secondary",
+            "model-b",
+            FailureKind::RateLimited,
+            Some(std::time::Duration::from_secs(60)),
+            std::time::Instant::now(),
+        );
+
+        let next = router.next_fallback(
+            &mut affinity,
+            "session-1",
+            &logical("summary"),
+            &failed_route("primary", "model-a"),
+            FailureKind::Server,
+            None,
+        );
+
+        assert_eq!(next, Some(failed_route("tertiary", "model-c")));
+    }
+
+    // Given: 全候補のプロファイルが認証エラーでクールダウン中 / When: 解決する
+    // Then: 候補なしのエラーになる
+    #[test]
+    fn resolve_fails_when_every_candidate_is_cooling() {
+        let health = std::sync::Arc::new(crate::ProviderHealth::default());
+        let router = cooling_router(&health);
+        let now = std::time::Instant::now();
+        for (profile, model) in [
+            ("primary", "model-a"),
+            ("secondary", "model-b"),
+            ("tertiary", "model-c"),
+        ] {
+            health.record_failure(profile, model, FailureKind::Auth, None, now);
+        }
+
+        let result = router.resolve(
+            &mut SessionAffinity::default(),
+            "session-1",
+            &logical("summary"),
+        );
+
+        assert_eq!(
+            result,
+            Err(RoutingError::NoAvailableCandidate("summary".into()))
         );
     }
 

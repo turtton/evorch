@@ -111,6 +111,7 @@ fn catalog(model_ids: &[&str]) -> ModelCatalog {
 
 fn router(profiles: Vec<ProviderProfile>, candidates: Vec<config::RouteCandidateConfig>) -> Router {
     let routing = config::RoutingConfig {
+        cooldown: Default::default(),
         routes: [(LOGICAL.to_string(), candidates)].into_iter().collect(),
     };
     let model_ids: Vec<&str> = profiles.iter().map(|p| p.default_model.as_str()).collect();

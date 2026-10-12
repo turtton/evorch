@@ -79,6 +79,7 @@ fn harness_with_model(
     let mut config = Config {
         providers: BTreeMap::from([("local".into(), profile)]),
         routing: config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),
@@ -179,6 +180,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
             })
             .collect(),
         routing: config::RoutingConfig {
+            cooldown: Default::default(),
             routes: BTreeMap::from([
                 (
                     "worker".into(),

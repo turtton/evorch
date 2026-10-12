@@ -910,9 +910,9 @@ impl SupervisorActor {
             | ProviderEvent::RequestCompleted { run_id, .. }
             | ProviderEvent::CacheReuseObserved { run_id, .. }
             | ProviderEvent::RequestFailed { run_id, .. } => run_id,
-            ProviderEvent::ProviderFallback { .. } | ProviderEvent::FallbackTriggered { .. } => {
-                None
-            }
+            ProviderEvent::ProviderFallback { .. }
+            | ProviderEvent::FallbackTriggered { .. }
+            | ProviderEvent::CooldownStarted { .. } => None,
         };
         if let Some(run_id) = run_id {
             self.mark_progress(&run_id);

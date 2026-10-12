@@ -64,6 +64,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
     write_fixture(&path);
     let mut expected = load(temp.path());
     let routing = RoutingConfig {
+        cooldown: Default::default(),
         routes: [
             (
                 "worker.v2/日本語".into(),

@@ -41,7 +41,7 @@ pub use provider::{
     ProviderProfileConfig, ProviderTypeConfig,
 };
 pub use role_profile::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
-pub use routing::{RouteCandidateConfig, RoutingConfig};
+pub use routing::{CooldownConfig, RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use team::TeamConfig;

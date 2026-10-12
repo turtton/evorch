@@ -13,8 +13,8 @@ quota 切れや障害の起きたプロファイルに新しい run が毎回リ
 - **Event:** `ProviderEvent::RequestFailed` に `detail: Option<String>` を追加する。`observe.rs` の `emit_failed` でエラーから詳細を作り、secret-guard で秘匿化して 1 KiB に切り詰める。
 - **分類:** プロバイダ種別ごとの分類規則を routing に置く。kimi-subscription の 403 は、ボディが利用上限（usage limit、quota、exceeded など）を示すとき `Quota`。
 - **健全性レジストリ:** `RoutedModel` が持つ共有状態として、プロファイル単位と（プロファイル, モデル）単位の「いつまで止めるか」を保持する。失敗時に記録し、resolve / next_fallback がこれを参照して該当メンバーを飛ばす。
-- **期間:** Retry-After があれば優先する。なければ `routing.cooldown` の既定値（quota・rate limit・auth）。`Auth` は runtime の再構成まで。
-- **観測:** クールダウンの開始と終了を `ProviderEvent` として発行する。GUI の通知・テレメトリ・storage projection の網羅 match に追加する。
+- **期間:** Retry-After があれば優先する。なければ `routing.cooldown` の既定値（quota・rate limit）。`Auth` は期限なし。runtime の再構成でレジストリごと作り直すため、全クールダウンが解除される。
+- **観測:** クールダウンの開始を `ProviderEvent::CooldownStarted` として発行する（期限切れは参照時に判定するため終了イベントは出さない）。GUI の通知・テレメトリ・storage projection の網羅 match に追加する。
 - **Docs:** `docs/providers.md`。
 
 ### 採用・却下案と理由

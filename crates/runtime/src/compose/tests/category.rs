@@ -56,6 +56,7 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
         .map(|p| p.profile.clone())
         .collect();
     let routing = RoutingConfig {
+        cooldown: Default::default(),
         routes: BTreeMap::from([
             (
                 "worker".into(),

@@ -128,6 +128,7 @@ fn v14_backfills_requests_from_persisted_provider_events() {
             event(completed("req-a", Some("run-2")), 3),
             event(
                 ProviderEvent::RequestFailed {
+                    detail: None,
                     request_id: "req-b".into(),
                     provider: "openai".into(),
                     profile: None,

@@ -55,7 +55,8 @@ impl SpanMapper {
             ProviderEvent::FirstTokenObserved { .. }
             | ProviderEvent::CacheReuseObserved { .. }
             | ProviderEvent::ProviderFallback { .. }
-            | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
+            | ProviderEvent::FallbackTriggered { .. }
+            | ProviderEvent::CooldownStarted { .. } => Vec::new(),
         }
     }
 

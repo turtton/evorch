@@ -38,6 +38,7 @@ fn candidate(profile: &str, model: Option<&str>) -> config::RouteCandidateConfig
 
 fn routing_config(routes: &[(&str, Vec<config::RouteCandidateConfig>)]) -> config::RoutingConfig {
     config::RoutingConfig {
+        cooldown: Default::default(),
         routes: routes
             .iter()
             .map(|(logical, candidates)| (logical.to_string(), candidates.clone()))
