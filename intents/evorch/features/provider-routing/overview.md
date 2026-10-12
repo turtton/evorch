@@ -15,6 +15,7 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 - **fallback**: 単純 round-robin ではなく、current provider profile → same model / another profile → alternative logical model の順
 - **Session affinity**: prompt cache のため同一 task / session で profile に留まる。429 / 5xx / timeout / quota / auth で cooldown 管理。Retry-After を優先
 - **provider health / cooldown 管理**（v0.4 で拡張）
+- **ロール単位のモデルチェーン**（[ADR 0030](../../decisions/0030-role-model-chains.md)）: `routing.routes` は同じモデルへの経路プール（Tier 1）に限り、ロールは `models` で Tier 1 を優先順に並べる（Tier 2）。`reasoning_effort` はチェーンの要素ごとに指定する。フォールバックは一周だけ回り、プールの全メンバーが失敗済みかクールダウン中なら次のプールへ進む。ピンは run スナップショットに永続化する
 
 ## v0.1 provider 3 種の実装確定（2026-08-29）
 
@@ -83,12 +84,14 @@ codex サブスクリプション provider（provider_type `openai-codex` / api_
 - 全 provider client の request attempt が request ID 相関の開始/終端観測イベントとして bus に流れること、streaming は TTFT（上記契約通り）も高々 1 回流れること（PR #32）
 - fallback 選択が FallbackTriggered として観測でき、失敗分類が型付き（ProviderFailureKind）であること（PR #32）
 - 1 論理リクエストで UsageEvent がちょうど 1 件発行され、失敗 attempt では 0 件、retry/fallback 経路でも勝者 attempt の label/model のみが記録されること（PR #40）
+- ロールのチェーンが Tier 1 だけを参照し、一周のフォールバック・クールダウン中のメンバーの読み飛ばし・再起動後のピン維持が行われること（ADR 0030）
 
 ## Related decisions
 
 - [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
 - [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
 - [ADR 0020: canonical message 正規化と OpenAI / Anthropic / OpenAI-compatible 変換](../../decisions/0020-canonical-message-normalization.md)
+- [ADR 0030: ロール単位のモデルチェーンと同一モデルの経路プール](../../decisions/0030-role-model-chains.md)
 
 ## Open questions
 
