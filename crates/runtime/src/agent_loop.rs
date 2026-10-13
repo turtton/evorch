@@ -14,7 +14,6 @@ mod messages;
 mod observability;
 mod questions;
 mod retracted_delegates;
-mod snapshots;
 mod team;
 mod tool_calls;
 

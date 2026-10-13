@@ -622,28 +622,28 @@ mod tests {
 
     #[test]
     fn tab_cycles_completions_forward_and_shift_tab_backward() {
-        let mut h = harness("/r");
+        let mut h = harness("/");
         h.get_by_label("Message or /command").focus();
         h.run();
+        let last = crate::model::composer::SLASH_COMMANDS.len() - 1;
         // Tab moves forward and wraps; the draft stays as typed while cycling.
-        h.state_mut().model.tab_presses = vec![false];
-        h.run();
-        assert_eq!(h.state().model.completion_selected, 1);
-        h.state_mut().model.tab_presses = vec![false];
-        h.run();
-        assert_eq!(h.state().model.completion_selected, 0);
+        for expected in (1..=last).chain([0]) {
+            h.state_mut().model.tab_presses = vec![false];
+            h.run();
+            assert_eq!(h.state().model.completion_selected, expected);
+        }
         assert_eq!(h.state().action, None);
-        assert_eq!(h.state().model.input, "/r");
+        assert_eq!(h.state().model.input, "/");
         // Shift+Tab moves backward and wraps to the last candidate.
         h.state_mut().model.tab_presses = vec![true];
         h.run();
-        assert_eq!(h.state().model.completion_selected, 1);
+        assert_eq!(h.state().model.completion_selected, last);
         assert_eq!(h.state().action, None);
         h.key_press(egui::Key::Enter);
         h.run();
         accept(&mut h);
         assert_eq!(h.state().model.input, "/run ");
-        assert!(h.query_by_label("/redo").is_none());
+        assert!(h.query_by_label("/team").is_none());
         // Without candidates Tab is a no-op that keeps the draft.
         h.state_mut().model.tab_presses = vec![false];
         h.run();
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn tab_accepts_a_sole_completion() {
-        let mut h = harness("/re");
+        let mut h = harness("/ru");
         h.get_by_label("Message or /command").focus();
         h.run();
         h.state_mut().model.tab_presses = vec![true];
@@ -662,7 +662,7 @@ mod tests {
         h.state_mut().model.tab_presses = vec![false];
         h.run();
         accept(&mut h);
-        assert_eq!(h.state().model.input, "/redo ");
+        assert_eq!(h.state().model.input, "/run ");
     }
 
     #[test]

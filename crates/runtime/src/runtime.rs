@@ -85,7 +85,6 @@ pub(crate) struct Shared {
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Mutex<Arc<ToolExecutor>>,
-    pub(crate) snapshots: OnceLock<Arc<crate::snapshot::SnapshotService>>,
     pub(crate) artifacts: OnceLock<Arc<crate::artifacts::ArtifactStore>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
@@ -285,54 +284,6 @@ impl AgentRuntime {
             .collect()
     }
 
-    pub fn with_snapshots(self, service: Arc<crate::snapshot::SnapshotService>) -> Self {
-        let _ = self.shared.snapshots.set(service);
-        self
-    }
-
-    pub async fn restore_snapshot(
-        &self,
-        run_id: RunId,
-        redo: bool,
-    ) -> Result<Option<String>, String> {
-        self.validate_run_mutation(run_id)
-            .map_err(|error| error.to_string())?;
-        let (owner, phase) = {
-            let entry = self.entry(run_id).map_err(|error| error.to_string())?;
-            (
-                entry
-                    .config
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| run_id.to_string()),
-                *entry.phase_rx.borrow(),
-            )
-        };
-        if phase == AgentRunPhase::Running || phase == AgentRunPhase::Pending {
-            return Err("Wait for the run to become idle before restoring files".into());
-        }
-        let service = self
-            .shared
-            .snapshots
-            .get()
-            .ok_or("Snapshots are not configured")?;
-        let root = self
-            .shared
-            .workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run_id)
-            .and_then(WorkspaceInspection::snapshot_root);
-        let mut workspace = service
-            .lock(root.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
-        tokio::task::spawn_blocking(move || workspace.restore(&owner, redo))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
-    }
-
     pub(crate) fn from_weak(shared: &Weak<Shared>) -> Option<Self> {
         shared.upgrade().map(|shared| Self { shared })
     }
@@ -361,7 +312,6 @@ impl AgentRuntime {
                 learning_runs: Mutex::new(HashMap::new()),
                 bus,
                 executor: Mutex::new(executor),
-                snapshots: OnceLock::new(),
                 artifacts: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
@@ -663,7 +613,6 @@ impl AgentRuntime {
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
-                snapshots: OnceLock::new(),
                 artifacts: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),

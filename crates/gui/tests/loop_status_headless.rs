@@ -145,8 +145,7 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             | WorkbenchCommand::DecideMerge(_)
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => {}
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => {}
         }
     }
     (pauses, resumes, cancels)
@@ -260,8 +259,7 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");

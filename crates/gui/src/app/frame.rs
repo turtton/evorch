@@ -292,8 +292,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {}
+            | EventKind::Ownership(_) => {}
             // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
             EventKind::Orchestrator(ev) => {
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);

@@ -1,6 +1,5 @@
 //! Bounded, owner-scoped shell jobs. Handles never survive process restart and
-//! never replay a command. The runtime transfers its workspace mutation lease
-//! to a running job, then releases it only after the child has been reaped.
+//! never replay a command.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -123,8 +122,6 @@ struct State {
     completion_notified: bool,
     artifact: Option<serde_json::Value>,
     artifact_notice: Option<String>,
-    // Dropped on terminal completion, not when the starting tool returns.
-    guard: Option<Box<dyn Send + Sync>>,
     process_id: Option<rustix::process::Pid>,
     sandbox: Option<Arc<dyn Sandbox>>,
     // Highest cursor any response returned; omitted control cursors resume here.
@@ -219,7 +216,6 @@ impl JobRegistry {
                     completion_notified: false,
                     artifact: None,
                     artifact_notice: None,
-                    guard: None,
                     process_id: None,
                     sandbox: Some(sandbox),
                     delivered_cursor: 0,
@@ -424,7 +420,7 @@ impl JobRegistry {
             }
         }
         Err(io_failed(
-            "shell jobs did not terminate after process-group kill; workspace mutation leases are still held; do not clean up the workspace",
+            "shell jobs did not terminate after process-group kill; do not clean up the workspace",
         ))
     }
 
@@ -517,51 +513,6 @@ impl JobRegistry {
         }
         notices.sort_by(|a, b| a.0.cmp(&b.0));
         notices.into_iter().map(|(_, notice)| notice).collect()
-    }
-
-    pub(super) fn retain_call_guard(
-        &self,
-        run_id: &str,
-        call_id: &str,
-        guard: Box<dyn Send + Sync>,
-    ) {
-        let job = self
-            .jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .find(|job| {
-                job.owner == run_id && job.call_id.as_deref() == Some(call_id) && job.running()
-            })
-            .cloned();
-        if let Some(job) = job {
-            let mut state = job
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.completion.is_none() {
-                state.guard = Some(guard);
-            }
-        }
-    }
-
-    pub(super) fn retain_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
-        let job = self
-            .by_handle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(job_id)
-            .filter(|job| job.owner == run_id)
-            .cloned();
-        if let Some(job) = job {
-            let mut state = job
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.completion.is_none() {
-                state.guard = Some(guard);
-            }
-        }
     }
 }
 
@@ -706,7 +657,6 @@ impl Job {
         state.completion = Some(completion);
         state.process_id = None;
         state.sandbox = None;
-        state.guard = None;
         drop(state);
         self.changed
             .send_modify(|version| *version = version.wrapping_add(1));

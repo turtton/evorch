@@ -347,14 +347,6 @@ impl Tool for Shell {
         self.jobs.take_notifications(run_id)
     }
 
-    fn retain_shell_call_guard(&self, run_id: &str, call_id: &str, guard: Box<dyn Send + Sync>) {
-        self.jobs.retain_call_guard(run_id, call_id, guard);
-    }
-
-    fn retain_shell_job_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
-        self.jobs.retain_guard(run_id, job_id, guard);
-    }
-
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         self.execute_with_context(
             &ToolExecutionContext {

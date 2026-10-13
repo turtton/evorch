@@ -123,7 +123,6 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
-            | EventKind::Snapshot(_)
             | EventKind::Ledger(_) => {}
         }
     }

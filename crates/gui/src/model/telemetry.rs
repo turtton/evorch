@@ -28,10 +28,6 @@ mod context_pressure;
 mod thread_metrics;
 pub use thread_metrics::latency_label;
 
-#[path = "workspace_wait.rs"]
-mod workspace_wait;
-pub use workspace_wait::WorkspaceWaitEntry;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u64,
@@ -140,7 +136,6 @@ pub struct TelemetryOverlay {
     active_running_start: BTreeMap<String, Instant>,
     accumulated_running: BTreeMap<String, Duration>,
     context_order: u64,
-    workspace_waits: BTreeMap<(String, String), WorkspaceWaitEntry>,
 }
 
 /// Thread totals plus the conversation roots' latest and average request measurements.
@@ -179,11 +174,6 @@ impl TelemetryOverlay {
 
     pub fn apply_event_at(&mut self, event: &Event, now: Instant) {
         match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::WorkspaceWaitChanged {
-                run_id,
-                call_id,
-                waiting,
-            }) => self.update_workspace_wait(run_id, call_id, waiting.as_ref(), now),
             EventKind::Lifecycle(LifecycleEvent::RunProgress {
                 run_id,
                 activity,
@@ -386,7 +376,6 @@ impl TelemetryOverlay {
                 agent_name,
                 ..
             }) => {
-                self.clear_workspace_waits(run_id);
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.ttft_ms = None;
                 row.parent_run_id.clone_from(parent_run_id);
@@ -413,12 +402,6 @@ impl TelemetryOverlay {
                     .conversation_root = true;
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
-                if matches!(
-                    to,
-                    AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
-                ) {
-                    self.clear_workspace_waits(run_id);
-                }
                 match to {
                     AgentRunPhase::Running => {
                         self.active_running_start
@@ -448,14 +431,12 @@ impl TelemetryOverlay {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {}
+            | EventKind::Ownership(_) => {}
         }
     }
 
     /// Persisted progress is history, never evidence of a live request after restart.
     pub fn finish_history(&mut self) {
-        self.workspace_waits.clear();
         self.active_running_start.clear();
         for row in self.rows.values_mut() {
             row.activity = None;

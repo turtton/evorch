@@ -72,7 +72,7 @@ pub(super) async fn run_pipe(
                 status = child.wait(), if exit.is_none() => {
                     exit = Some(status.map_err(io_failed)?.code().unwrap_or(-1));
                     // A shell exiting must not leave detached descendants holding the
-                    // output pipes or mutating the workspace past its lease.
+                    // output pipes or mutating the workspace after completion.
                     group.kill();
                     stdin = None;
                 }
@@ -207,7 +207,7 @@ pub(super) async fn run_pty(
     group.kill();
     let _ = killer.0.kill();
     drop(pair.master);
-    // The group is dead before releasing any workspace guard, even when a
+    // The group is dead before the job reports completion, even when a
     // portable-pty reader/waiter takes a moment to observe EOF.
     if !reaped {
         let _ = waiting.await;

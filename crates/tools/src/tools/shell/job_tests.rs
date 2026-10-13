@@ -137,36 +137,6 @@ async fn timeout_and_stop_terminate_job_without_replay() {
 }
 
 #[tokio::test]
-async fn snapshot_guard_outlives_yield_and_releases_after_stop() {
-    struct Guard(Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    let shell = shell();
-    let start = invoke(
-        &shell,
-        "owner",
-        json!({"command":"read value", "yield_ms":0}),
-    )
-    .await;
-    assert!(
-        id(&start)
-            .strip_prefix("job-")
-            .unwrap()
-            .parse::<u64>()
-            .is_ok()
-    );
-    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    shell.retain_shell_job_guard("owner", &id(&start), Box::new(Guard(Arc::clone(&released))));
-    assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
-    shell.cancel_shell_jobs("owner");
-    finish(&shell, "owner", &id(&start), 0).await;
-    assert!(released.load(std::sync::atomic::Ordering::SeqCst));
-}
-
-#[tokio::test]
 async fn pty_job_accepts_input_and_finishes() {
     let shell = shell();
     let start = invoke(&shell, "owner", json!({"command":"printf 'ready\\n'; IFS= read -r value; printf 'received:%s\\n' \"$value\"", "interactive":true, "yield_ms":1000})).await;
@@ -348,18 +318,13 @@ async fn thirty_minute_poll_returns_early_when_job_finishes() {
 }
 
 #[tokio::test]
-async fn drop_and_drain_reap_pipe_and_pty_before_releasing_guard() {
-    struct Guard(Option<tokio::sync::oneshot::Sender<()>>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
-                let _ = sender.send(());
-            }
-        }
-    }
+async fn drop_and_drain_reap_pipe_and_pty_before_reporting_completion() {
     for interactive in [false, true] {
         for drain in [false, true] {
             let shell = shell();
+            let bus = Arc::new(event_bus::EventBus::new(256));
+            let mut events = bus.subscribe();
+            shell.set_event_bus(Arc::clone(&bus));
             let start = invoke(&shell, "owner", json!({"command":"printf 'pid:%s\\n' \"$$\"; read value", "interactive":interactive, "yield_ms":1000})).await;
             let pid: i32 = start
                 .content
@@ -369,13 +334,24 @@ async fn drop_and_drain_reap_pipe_and_pty_before_releasing_guard() {
                 .trim()
                 .parse()
                 .unwrap();
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            shell.retain_shell_job_guard("owner", &id(&start), Box::new(Guard(Some(sender))));
+            let job_id = id(&start);
             if drain {
                 shell.drain_shell_jobs("owner").await.unwrap();
             }
             drop(shell);
-            receiver.await.unwrap();
+            // The terminal output event follows completion, which follows reaping.
+            loop {
+                if let event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+                    job_id: event_job,
+                    status,
+                    ..
+                }) = events.recv().await.expect("bus event").kind
+                    && event_job == job_id
+                    && status != "running"
+                {
+                    break;
+                }
+            }
             assert!(
                 rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap())
                     .is_err()

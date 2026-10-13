@@ -1,9 +1,7 @@
-//! Runtime regression tests using the real shell, snapshot locks, and storage.
+//! Runtime regression tests using the real shell and storage.
 #[path = "shell_jobs_integration/finalization.rs"]
 mod finalization;
 mod support;
-#[path = "shell_jobs_integration/workspace_wait.rs"]
-mod workspace_wait;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +10,6 @@ use async_trait::async_trait;
 use event_bus::{AgentRunPhase, EventBus};
 use futures_util::FutureExt;
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec};
-use runtime::snapshot::SnapshotService;
 use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
     AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RunStore,
@@ -110,9 +107,6 @@ fn executor(bus: &Arc<EventBus>, root: &Path) -> Arc<ToolExecutor> {
         Some(root.into()),
     ))
 }
-fn snapshots(root: &Path, base: &Path) -> Arc<SnapshotService> {
-    Arc::new(SnapshotService::new(root, &base.join("snapshots")).unwrap())
-}
 async fn wait(runtime: &AgentRuntime, run: RunId) -> AgentRunPhase {
     timeout(DEADLINE, runtime.wait(run))
         .await
@@ -122,18 +116,17 @@ async fn wait(runtime: &AgentRuntime, run: RunId) -> AgentRunPhase {
 fn assert_pid_reaped(pid: &str) {
     assert!(
         !PathBuf::from(format!("/proc/{pid}")).exists(),
-        "process {pid} must be reaped before releasing its workspace"
+        "process {pid} must be reaped after cancellation"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after_observation() {
-    let (temp, root) = init_git_repo();
+async fn yielded_job_allows_reads_and_rejects_same_run_mutation_until_observed() {
+    let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
-    let snapshots = snapshots(&root, temp.path());
     let (model, mut calls) = model();
-    let runtime = AgentRuntime::new(bus, executor.clone(), model).with_snapshots(snapshots.clone());
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
     let run =
         runtime.delegate_background(Role::Worker, "exercise shell".into(), RunConfig::default());
     next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"printf 'ready\\n'; IFS= read -r reply; printf '%s' \"$reply\" > result.txt; printf 'done\\n'", "yield_ms":1000})));
@@ -141,10 +134,6 @@ async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after
     let job = call.job("start");
     assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
     assert!(executor.has_running_shell_jobs(&run.to_string()));
-    assert!(
-        snapshots.lock(None).now_or_never().is_none(),
-        "running process owns snapshot lock"
-    );
     call.respond(tool_response("read", "read", json!({"path":"README.md"})));
     let call = next(&mut calls).await;
     assert!(!call.result("read").1);
@@ -196,12 +185,6 @@ async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after
         std::fs::read_to_string(root.join("result.txt")).unwrap(),
         "answer"
     );
-    drop(
-        timeout(DEADLINE, snapshots.lock(None))
-            .await
-            .unwrap()
-            .unwrap(),
-    );
     call.respond(tool_response(
         "write-after",
         "write",
@@ -222,13 +205,59 @@ async fn yielded_job_allows_reads_rejects_mutation_then_releases_workspace_after
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
-    let (temp, root) = init_git_repo();
+async fn running_job_does_not_block_mutations_of_another_run_in_the_same_workspace() {
+    let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
     let (model, mut calls) = model();
-    let runtime = AgentRuntime::new(bus, executor.clone(), model)
-        .with_snapshots(snapshots(&root, temp.path()));
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let owner = runtime.delegate_background(Role::Worker, "owner".into(), RunConfig::default());
+    calls.recv().await.unwrap().respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value", "yield_ms":0}),
+    ));
+    let owner_call = calls.recv().await.unwrap();
+    assert!(!owner_call.result("start").1);
+    assert!(executor.has_running_shell_jobs(&owner.to_string()));
+
+    let other = runtime.delegate_background(Role::Worker, "other".into(), RunConfig::default());
+    calls.recv().await.unwrap().respond(tool_response(
+        "write",
+        "write",
+        json!({"path":"other.txt", "content":"written"}),
+    ));
+    let call = calls.recv().await.unwrap();
+    assert!(!call.result("write").1);
+    assert_eq!(
+        std::fs::read_to_string(root.join("other.txt")).unwrap(),
+        "written"
+    );
+    call.respond(tool_response(
+        "shell",
+        "shell",
+        json!({"command":"cat other.txt"}),
+    ));
+    let call = calls.recv().await.unwrap();
+    let (output, error) = call.result("shell");
+    assert!(!error && output.contains("written"), "{output}");
+    call.respond(text_response("done", FinishReason::Stop));
+    assert_eq!(runtime.wait(other).await.unwrap(), AgentRunPhase::Done);
+    // The owner's job was live throughout, so neither call waited for it.
+    assert!(executor.has_running_shell_jobs(&owner.to_string()));
+
+    runtime.cancel(owner).unwrap();
+    assert_eq!(runtime.wait(owner).await.unwrap(), AgentRunPhase::Error);
+    drop(owner_call);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
     let run =
         runtime.delegate_background(Role::Worker, "completion gate".into(), RunConfig::default());
     next(&mut calls).await.respond(tool_response(
@@ -270,11 +299,10 @@ async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in_storage() {
+async fn cancellation_reaps_job_and_preserves_uncertain_effects_in_storage() {
     let (temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
-    let snapshots = snapshots(&root, temp.path());
     let config = StorageConfig {
         db_path: temp.path().join("history.sqlite3"),
         ..StorageConfig::default()
@@ -282,7 +310,6 @@ async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in
     let storage = Storage::open(config.clone()).unwrap();
     let (model, mut calls) = model();
     let runtime = AgentRuntime::new(bus, executor.clone(), model)
-        .with_snapshots(snapshots.clone())
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run = runtime.delegate_background(
         Role::Worker,
@@ -299,15 +326,8 @@ async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in
         std::fs::read_to_string(root.join("partial.txt")).unwrap(),
         "partial"
     );
-    assert!(snapshots.lock(None).now_or_never().is_none());
     runtime.cancel(run).unwrap();
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
-    drop(
-        timeout(DEADLINE, snapshots.lock(None))
-            .await
-            .unwrap()
-            .unwrap(),
-    );
     assert_pid_reaped(&pid);
     assert_eq!(runtime.run_result(run).unwrap(), None);
     assert!(
@@ -351,15 +371,13 @@ async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_cleanup_happens_after_cancelled_job_is_reaped() {
-    let (temp, root) = init_git_repo();
+    let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
-    let snapshots = snapshots(&root, temp.path());
     let (model, mut calls) = model();
     let manager = WorktreeManager::new(Project::new(root.clone()).unwrap());
     let (factory, _) = recording_factory();
-    let runtime = AgentRuntime::with_workspace_context(bus, executor, model, manager, factory)
-        .with_snapshots(snapshots.clone());
+    let runtime = AgentRuntime::with_workspace_context(bus, executor, model, manager, factory);
     let run = runtime.delegate_background(
         Role::Worker,
         "isolated cancellation".into(),
@@ -379,15 +397,8 @@ async fn isolated_cleanup_happens_after_cancelled_job_is_reaped() {
         .worktree_path
         .unwrap();
     assert!(path.join("partial.txt").exists());
-    assert!(snapshots.lock(Some(&path)).now_or_never().is_none());
     runtime.cancel(run).unwrap();
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
-    drop(
-        timeout(DEADLINE, snapshots.lock(Some(&path)))
-            .await
-            .unwrap()
-            .unwrap(),
-    );
     assert_pid_reaped(&pid);
     // Cleanup exposes inspection state but no watch. Yield to the cleanup task;
     // no guessed sleep is used as proof of completion.
@@ -411,13 +422,12 @@ async fn isolated_cleanup_happens_after_cancelled_job_is_reaped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelling_start_before_job_id_delivery_keeps_lease_until_real_process_teardown() {
-    let (temp, root) = init_git_repo();
+async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
+    let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
-    let snapshots = snapshots(&root, temp.path());
     let (model, mut calls) = model();
-    let runtime = AgentRuntime::new(bus, executor.clone(), model).with_snapshots(snapshots.clone());
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
     let run = runtime.delegate_background(
         Role::Worker,
         "cancel pending start".into(),
@@ -440,15 +450,8 @@ async fn cancelling_start_before_job_id_delivery_keeps_lease_until_real_process_
     .await
     .expect("real child started and wrote partial effects");
     assert!(executor.has_running_shell_jobs(&run.to_string()));
-    assert!(snapshots.lock(None).now_or_never().is_none());
     runtime.cancel(run).unwrap();
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
-    drop(
-        timeout(DEADLINE, snapshots.lock(None))
-            .await
-            .unwrap()
-            .unwrap(),
-    );
     assert_pid_reaped(&pid);
     assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
     assert_eq!(runtime.run_result(run).unwrap(), None);

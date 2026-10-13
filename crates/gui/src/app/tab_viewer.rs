@@ -310,7 +310,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     ui,
                     self.sidebar,
                     self.phases,
-                    self.telemetry,
                     &question_threads,
                     self.unread_threads,
                 ) {

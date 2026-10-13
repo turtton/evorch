@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{
     ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
 };
 
-use crate::model::telemetry::{TelemetryOverlay, WorkspaceWaitEntry};
 use crate::theme::icons;
 use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{compact_row, ghost, icon_text, row_title};
@@ -85,7 +83,6 @@ pub(super) fn render(
 
 pub(super) struct ThreadIndicators<'a> {
     pub phases: &'a BTreeMap<String, ThreadRunPhase>,
-    pub telemetry: &'a TelemetryOverlay,
     pub question_threads: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads whose finished work has not been opened since it finished.
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
@@ -163,14 +160,7 @@ fn render_tree(
                 let display_root =
                     workspace_ui::display_parent(&sidebar.threads, &thread.id).is_none();
                 if archived {
-                    archived_row(
-                        ui,
-                        thread,
-                        display_root,
-                        sidebar,
-                        indicators.telemetry,
-                        action,
-                    );
+                    archived_row(ui, thread, display_root, action);
                 } else {
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
@@ -188,7 +178,6 @@ fn render_tree(
                             indicators.unread_threads.contains(&thread.id),
                         ),
                         family_running,
-                        (sidebar, indicators.telemetry),
                         action,
                     );
                 }
@@ -228,15 +217,12 @@ fn active_row(
     state: ThreadState,
     (has_question, unread): (bool, bool),
     family_running: bool,
-    wait_context: (&SidebarState, &TelemetryOverlay),
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // Runtime/question indicators stay at the trailing edge; workspace
-        // contention is an additional independent signal beside them.
+        // Runtime/question indicators stay at the trailing edge.
         ui.spacing_mut().item_spacing.x = SP_1;
         thread_status_icon(ui, state, has_question, unread);
-        workspace_wait_icon(ui, thread, wait_context.0, wait_context.1);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
         if display_root {
@@ -288,103 +274,14 @@ fn active_row(
     });
 }
 
-fn workspace_wait_icon(
-    ui: &mut Ui,
-    thread: &ThreadRecord,
-    sidebar: &SidebarState,
-    telemetry: &TelemetryOverlay,
-) {
-    if telemetry.workspace_waits(&thread.run_ids).next().is_none() {
-        return;
-    }
-    let response = ui.add(
-        egui::Label::new(
-            egui::RichText::new(icons::HOURGLASS_MEDIUM)
-                .size(FONT_SMALL + 2.0)
-                .color(palette().WARNING_FG),
-        )
-        .sense(Sense::hover()),
-    );
-    let label = format!("作業領域の使用待ち: {}", thread.id);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    response.on_hover_ui(|ui| {
-        ui.set_max_width(420.0);
-        let now = Instant::now();
-        for (index, (run_id, call_id, entry)) in
-            telemetry.workspace_waits(&thread.run_ids).enumerate()
-        {
-            if index > 0 {
-                ui.separator();
-            }
-            ui.label(workspace_wait_tooltip(sidebar, run_id, call_id, entry, now));
-        }
-        // Only a visible tooltip needs the elapsed-time timer.
-        ui.ctx().request_repaint_after(Duration::from_secs(1));
-    });
-}
-
-fn workspace_wait_tooltip(
-    sidebar: &SidebarState,
-    run_id: &str,
-    call_id: &str,
-    entry: &WorkspaceWaitEntry,
-    now: Instant,
-) -> String {
-    let seconds = entry.elapsed_at(now).as_secs();
-    let elapsed = if seconds >= 3600 {
-        format!(
-            "{}時間{}分{}秒",
-            seconds / 3600,
-            seconds % 3600 / 60,
-            seconds % 60
-        )
-    } else if seconds >= 60 {
-        format!("{}分{}秒", seconds / 60, seconds % 60)
-    } else {
-        format!("{seconds}秒")
-    };
-    let wait = &entry.waiting;
-    let mut text = format!(
-        "作業領域の使用待ち · {elapsed}\n待機中: {} ({run_id} / {call_id})",
-        wait.tool_name,
-    );
-    if let Some(command) = &wait.command {
-        text.push_str(&format!("\nコマンド: {command}"));
-    }
-    if let Some(holder) = &wait.holder {
-        // Lookup includes other projects and archived threads. Only the runtime's
-        // holder identity is authoritative; activity cannot identify a blocker.
-        let title = sidebar
-            .threads
-            .iter()
-            .find(|thread| thread.run_ids.contains(&holder.run_id))
-            .map(|thread| format!("「{}」 ({})", thread.title, holder.run_id))
-            .unwrap_or_else(|| holder.run_id.clone());
-        text.push_str(&format!(
-            "\n使用中: {title}\n処理: {} ({})",
-            holder.tool_name, holder.call_id
-        ));
-        if let Some(command) = &holder.command {
-            text.push_str(&format!("\nコマンド: {command}"));
-        }
-    } else {
-        text.push_str("\n使用中: 不明");
-    }
-    text.push_str(&format!("\n対象: {}", wait.workspace_root.display()));
-    text
-}
-
 fn archived_row(
     ui: &mut Ui,
     thread: &ThreadRecord,
     display_root: bool,
-    sidebar: &SidebarState,
-    telemetry: &TelemetryOverlay,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
-        workspace_wait_icon(ui, thread, sidebar, telemetry);
         if display_root && restore_button(ui).clicked() {
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
@@ -518,10 +415,6 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool, unrea
 }
 
 #[cfg(test)]
-#[path = "threads_wait_tests.rs"]
-mod wait_tests;
-
-#[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -537,8 +430,6 @@ mod tests {
             // Given: a thread row rendered at the requested width.
             let thread =
                 ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("demo"), "Thread");
-            let sidebar = workspace_ui::SidebarState::default();
-            let telemetry = crate::model::telemetry::TelemetryOverlay::new();
             let mut harness = Harness::builder()
                 .with_size(egui::vec2(width, 100.0))
                 .build_ui_state(
@@ -551,7 +442,6 @@ mod tests {
                                 ThreadState::Running,
                                 (false, false),
                                 true,
-                                (&sidebar, &telemetry),
                                 action,
                             );
                         });

@@ -56,8 +56,7 @@ async fn run_emits_pending_running_done_in_order() {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => None,
+            | EventKind::Ownership(_) => None,
         })
         .collect();
     assert!(matches!(

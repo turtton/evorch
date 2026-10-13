@@ -50,10 +50,11 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   an 8 MiB output artifact bound resource usage. Large output uses the existing
   private `/var/tmp` artifact facility. Truncation and the file path remain visible.
   An async job defaults to a one-hour lifetime unless a timeout is supplied.
-- Process groups are stopped and reaped before releasing the workspace snapshot
-  lease. Read tools may run while a job runs; conflicting writes report a useful
-  error with the occupying handle and command summary (at most 80 characters)
-  instead of waiting on the same run's lease. The model must observe each
+- Process groups are stopped and reaped before a job reports completion. There is
+  no workspace lock: `write` / `edit` / `shell` in another run never wait for a
+  running job. In the run that owns the job, read tools may run; mutating calls
+  report a useful error with the occupying handle and command summary (at most 80
+  characters). The model must observe each
   terminal result before declaring completion. Run completion is published after
   process drain, final checkpoint and workspace teardown. Only then may the same
   run ID be reused; completed job handles can be released without losing persisted

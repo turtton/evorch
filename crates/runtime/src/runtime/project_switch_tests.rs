@@ -53,7 +53,7 @@ fn runtime_on(
 // Regression: the startup project leaked into the workspace note, so the model
 // passed a `cwd` the switched sandbox never mounted (bwrap: "Can't chdir").
 #[tokio::test]
-async fn project_switch_rebinds_shared_workspace_rules_skills_and_snapshots() {
+async fn project_switch_rebinds_shared_workspace_rules_and_skills() {
     let (_startup_temp, startup) = canonical_repo();
     let (_switched_temp, switched) = canonical_repo();
     write_skill(&startup, "startup-skill");
@@ -68,18 +68,15 @@ async fn project_switch_rebinds_shared_workspace_rules_skills_and_snapshots() {
         Ok(text_response("done", providers::FinishReason::Stop)),
     ]));
     let (factory, mounts) = support::recording_factory();
-    let snapshot_store = tempfile::tempdir().unwrap();
-    let runtime = runtime_on(&bus, Arc::clone(&model), &startup, factory)
-        .with_skill_source(Arc::new(SkillCatalogSource::new(
+    let runtime = runtime_on(&bus, Arc::clone(&model), &startup, factory).with_skill_source(
+        Arc::new(SkillCatalogSource::new(
             config::Config::default(),
             None,
             Vec::new(),
             crate::skill::repo_skill_dirs(&startup).into(),
             Arc::clone(&bus),
-        )))
-        .with_snapshots(Arc::new(
-            crate::snapshot::SnapshotService::new(&startup, snapshot_store.path()).unwrap(),
-        ));
+        )),
+    );
 
     runtime.set_project_root(switched.clone()).unwrap();
     let run = runtime.delegate_background(Role::Worker, "edit".into(), RunConfig::default());
@@ -129,17 +126,6 @@ async fn project_switch_rebinds_shared_workspace_rules_skills_and_snapshots() {
         .collect();
     assert!(skills.contains(&"switched-skill".to_owned()), "{skills:?}");
     assert!(!skills.contains(&"startup-skill".to_owned()), "{skills:?}");
-
-    // The pre-write checkpoint belongs to the switched project, so undo removes
-    // the file there instead of restoring the startup project.
-    assert!(
-        runtime
-            .restore_snapshot(run, false)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(!switched.join("source.rs").exists());
 }
 
 #[tokio::test]

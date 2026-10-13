@@ -85,16 +85,6 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Submit a team goal with explicit delegation value",
         argument_hint: Some("<delegation value> | <goal>"),
     },
-    SlashCommandSpec {
-        name: "undo",
-        description: "Restore the previous workspace snapshot",
-        argument_hint: None,
-    },
-    SlashCommandSpec {
-        name: "redo",
-        description: "Restore the next workspace snapshot",
-        argument_hint: None,
-    },
     GOAL_COMMAND,
     SlashCommandSpec {
         name: "help",
@@ -446,13 +436,8 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            (
-                "/",
-                &[
-                    "team", "undo", "redo", "goal", "help", "new", "continue", "run",
-                ],
-            ),
-            ("/r", &["redo", "run"]),
+            ("/", &["team", "goal", "help", "new", "continue", "run"]),
+            ("/r", &["run"]),
             ("/con", &["continue"]),
             ("/continue ", &[]),
             ("/run ", &[]),

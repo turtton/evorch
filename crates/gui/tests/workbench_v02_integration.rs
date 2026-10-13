@@ -588,8 +588,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");
@@ -639,8 +638,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");

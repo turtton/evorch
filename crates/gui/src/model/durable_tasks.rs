@@ -50,8 +50,7 @@ impl DurableTasksModel {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {}
+            | EventKind::Ownership(_) => {}
         }
     }
 

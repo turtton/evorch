@@ -242,59 +242,6 @@ async fn meta_op_finish_short_circuits_remaining() {
 }
 
 #[tokio::test]
-async fn snapshot_taken_before_each_write_tool_in_wave() {
-    // Given: real writes interleaved with a shared wave and real snapshot storage.
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = temp.path().join("project");
-    std::fs::create_dir(&root).expect("root");
-    let file = root.join("file");
-    std::fs::write(&file, "before").expect("file");
-    let bus = Arc::new(EventBus::new(256));
-    let mut events = bus.subscribe();
-    let (mut executor, trace, _receiver) = executor(bus.clone());
-    executor.register(Arc::new(tools::Write)).expect("edit");
-    let edit = |id: &str, text: &str| ContentBlock::ToolUse {
-        id: id.into(),
-        name: "write".into(),
-        input: json!({"path":file,"content":text}),
-    };
-    let service = Arc::new(
-        runtime::snapshot::SnapshotService::new(&root, &temp.path().join("snapshots"))
-            .expect("service"),
-    );
-    let runtime = AgentRuntime::new(
-        bus,
-        Arc::new(executor),
-        model(vec![
-            edit("w1", "one"),
-            call("a", "read", 100),
-            call("b", "grep", 0),
-            edit("w2", "two"),
-        ]),
-    )
-    .with_snapshots(service);
-    // When: run all calls and restore the last checkpoint.
-    let run = runtime.delegate_background(Role::Worker, "batch".into(), RunConfig::default());
-    runtime.wait(run).await.expect("wait");
-    let mut checkpoints = Vec::new();
-    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(10), events.recv()).await {
-        match event.kind {
-            EventKind::Snapshot(snapshot) => checkpoints.push(snapshot.call_id),
-            EventKind::Tool(ToolEvent::ToolStarted {
-                tool_name, call_id, ..
-            }) if tool_name == "edit" => assert_eq!(checkpoints.last(), Some(&call_id)),
-            _ => {}
-        }
-    }
-    runtime.restore_snapshot(run, false).await.expect("restore");
-    // Then: each write has its own immediate predecessor snapshot.
-    assert_eq!(checkpoints, ["w1", "w2"]);
-    assert_eq!(std::fs::read_to_string(file).expect("file"), "one");
-    let trace = trace.lock().expect("trace");
-    assert!(trace.iter().position(|s| s == "end:b") < trace.iter().position(|s| s == "end:a"));
-}
-
-#[tokio::test]
 async fn cancel_during_wave_finishes_cancelled() {
     // Given: two long-running calls and an exclusive tail.
     let bus = Arc::new(EventBus::new(256));

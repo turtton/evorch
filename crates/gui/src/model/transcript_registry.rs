@@ -92,7 +92,6 @@ impl TranscriptRegistry {
             }
             EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => self.route_run(run_id),
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
-            EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
                 vec![TranscriptKey::Run(run_id.clone())]
             }
@@ -217,8 +216,7 @@ impl TranscriptRegistry {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {}
+            | EventKind::Ownership(_) => {}
         }
 
         if let EventKind::Tool(ToolEvent::ToolStarted {
@@ -269,8 +267,7 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_)
-            | EventKind::Snapshot(_) => None,
+            | EventKind::Orchestrator(_) => None,
         };
         let owner = explicit_thread
             .or_else(|| {

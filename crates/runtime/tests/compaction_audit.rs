@@ -590,8 +590,7 @@ async fn raw_transcript_reconstructs_in_order() {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => None,
+            | EventKind::Ownership(_) => None,
         })
         .collect::<Vec<_>>();
 
