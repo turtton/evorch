@@ -299,42 +299,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn refresh_active_thread_workspace(&mut self) {
         let mut changed = false;
         // Reconcile every thread, including inactive ones. Do not cache run IDs/phases:
-        // the same RunId may reattach a retained workspace after Stopped.
+        // the same RunId may start again after Stopped.
         for thread in &mut self.sidebar.threads {
-            let mut isolated = None;
-            let mut shared = None;
-            for raw_id in &thread.run_ids {
-                let Some(run_id) = parse_run_id(raw_id) else {
-                    continue;
-                };
-                let Some(workspace) = self.tasks.inspect(run_id).and_then(|run| run.workspace)
-                else {
-                    continue;
-                };
-                match workspace.mode {
-                    runtime::WorkspaceMode::Isolated if workspace.worktree_path.is_some() => {
-                        isolated.get_or_insert(workspace);
-                    }
-                    runtime::WorkspaceMode::Shared if workspace.active_root.is_some() => {
-                        shared.get_or_insert(workspace);
-                    }
-                    _ => {}
-                }
-            }
-            let (branch, worktree_path, active_root) =
-                isolated.or(shared).map_or((None, None, None), |workspace| {
-                    (
-                        workspace.branch,
-                        workspace.worktree_path,
-                        workspace.active_root,
-                    )
-                });
-            if thread.branch != branch
-                || thread.worktree_path != worktree_path
-                || thread.active_root != active_root
-            {
-                thread.branch = branch;
-                thread.worktree_path = worktree_path;
+            let active_root = thread.run_ids.iter().find_map(|raw_id| {
+                let run_id = parse_run_id(raw_id)?;
+                self.tasks.inspect(run_id)?.workspace?.active_root
+            });
+            if thread.active_root != active_root {
                 thread.active_root = active_root;
                 changed = true;
             }

@@ -29,13 +29,15 @@ fn shared(run_id: u64, root: &Path) -> AgentInspection {
         phase: AgentRunPhase::Running,
         message_count: 0,
         workspace: Some(WorkspaceInspection {
-            mode: WorkspaceMode::Shared,
-            branch: None,
-            worktree_path: None,
             active_root: Some(root.into()),
-            merge_mode: MergeMode::Branch,
         }),
     }
+}
+
+fn rootless(run_id: u64) -> AgentInspection {
+    let mut run = shared(run_id, Path::new("/unused"));
+    run.workspace.as_mut().unwrap().active_root = None;
+    run
 }
 
 fn thread(sidebar: &mut SidebarState, id: &str, runs: &[&str]) {
@@ -54,35 +56,30 @@ fn changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
 }
 
 #[test]
-fn first_reconciliation_covers_inactive_threads_and_prefers_isolated_in_any_order() {
+fn first_reconciliation_covers_inactive_threads_and_takes_the_first_inspected_root() {
     let temp = tempfile::tempdir().unwrap();
     let mut sidebar = sidebar_with_project(temp.path());
     thread(&mut sidebar, "active", &["run-1"]);
     thread(
         &mut sidebar,
         "inactive",
-        &["run-1", "bad-id", "run-99", "run-2", "run-3"],
+        &["bad-id", "run-99", "run-2", "run-3", "run-1"],
     );
-    thread(&mut sidebar, "reverse", &["run-3", "run-2", "run-1"]);
+    thread(&mut sidebar, "reverse", &["run-3", "run-1"]);
     sidebar.switch_thread(&ThreadId::new("active")).unwrap();
     let source = LiveSource::default();
-    let shared_root = temp.path().join("shared");
-    let worktree = temp.path().join("worktree");
-    source.set(shared(1, &shared_root));
-    let mut detached = inspection(2, "detached", temp.path().join("detached"));
-    detached.workspace.as_mut().unwrap().worktree_path = None;
-    // Even stale isolated active_root is never treated as shared.
-    source.set(detached);
-    source.set(inspection(3, "isolated", worktree.clone()));
+    let first_root = temp.path().join("first");
+    let third_root = temp.path().join("third");
+    source.set(shared(1, &first_root));
+    source.set(rootless(2));
+    source.set(shared(3, &third_root));
     let state = WorkbenchState::new(source, &UiSettings::default())
         .unwrap()
         .with_sidebar(sidebar);
     // No lifecycle event or frame is needed for the initial reconciliation.
-    assert_eq!(state.sidebar().threads[0].active_root, Some(shared_root));
+    assert_eq!(state.sidebar().threads[0].active_root, Some(first_root));
     for thread in &state.sidebar().threads[1..] {
-        assert_eq!(thread.branch.as_deref(), Some("isolated"));
-        assert_eq!(thread.worktree_path.as_ref(), Some(&worktree));
-        assert_eq!(thread.active_root.as_ref(), Some(&worktree));
+        assert_eq!(thread.active_root.as_ref(), Some(&third_root));
     }
 }
 
@@ -108,11 +105,11 @@ fn shared_label_is_visible_only_when_root_differs_from_project() {
 }
 
 #[test]
-fn cleanup_handoff_and_same_id_restart_refresh_and_persist_all_fields() {
+fn stop_and_same_id_restart_refresh_and_persist_the_active_root() {
     let temp = tempfile::tempdir().unwrap();
     let source = LiveSource::default();
-    let worktree = temp.path().join("worktree");
-    source.set(inspection(1, "branch", worktree.clone()));
+    let first = temp.path().join("first");
+    source.set(shared(1, &first));
     let mut sidebar = sidebar_with_project(temp.path());
     thread(&mut sidebar, "thread-1", &["run-1"]);
     let path = temp.path().join("sidebar.json");
@@ -122,7 +119,7 @@ fn cleanup_handoff_and_same_id_restart_refresh_and_persist_all_fields() {
         .with_sidebar(sidebar);
     assert_eq!(
         workspace_ui::load_sidebar(&path).unwrap().threads[0].active_root,
-        Some(worktree.clone())
+        Some(first.clone())
     );
 
     // Stopped retains the assignment, and an identical RunId can later be inspected again.
@@ -131,12 +128,9 @@ fn cleanup_handoff_and_same_id_restart_refresh_and_persist_all_fields() {
         AgentRunPhase::Running,
         AgentRunPhase::Stopped,
     )]);
-    assert_eq!(
-        state.sidebar().threads[0].active_root,
-        Some(worktree.clone())
-    );
-    let next = temp.path().join("reattached");
-    source.set(inspection(1, "resumed", next.clone()));
+    assert_eq!(state.sidebar().threads[0].active_root, Some(first));
+    let next = temp.path().join("restarted");
+    source.set(shared(1, &next));
     state.apply_events([Event::new(LifecycleEvent::AgentRunStarted {
         run_id: "run-1".into(),
         parent_run_id: None,
@@ -145,28 +139,9 @@ fn cleanup_handoff_and_same_id_restart_refresh_and_persist_all_fields() {
     })]);
     assert_eq!(state.sidebar().threads[0].active_root, Some(next));
 
-    // A new adopter wins even though the earlier source has a stale active_root.
-    let mut detached = inspection(1, "resumed", worktree.clone());
-    detached.workspace.as_mut().unwrap().worktree_path = None;
-    source.set(detached);
-    source.set(inspection(2, "adopted", worktree.clone()));
-    state.apply_events([Event::new(LifecycleEvent::AgentRunStarted {
-        run_id: "run-2".into(),
-        parent_run_id: None,
-        agent_name: "chat:Worker:thread-1".into(),
-        role: "worker".into(),
-    })]);
-    assert_eq!(
-        state.sidebar().threads[0].branch.as_deref(),
-        Some("adopted")
-    );
-    let mut cleaned = inspection(2, "adopted", worktree);
-    let workspace = cleaned.workspace.as_mut().unwrap();
-    workspace.worktree_path = None;
-    workspace.active_root = None;
-    source.set(cleaned);
+    source.set(rootless(1));
     state.apply_events([changed(
-        "run-2",
+        "run-1",
         AgentRunPhase::Running,
         AgentRunPhase::Done,
     )]);
@@ -174,10 +149,7 @@ fn cleanup_handoff_and_same_id_restart_refresh_and_persist_all_fields() {
         state.sidebar().clone(),
         workspace_ui::load_sidebar(&path).unwrap(),
     ] {
-        let thread = &sidebar.threads[0];
-        assert_eq!(thread.branch, None);
-        assert_eq!(thread.worktree_path, None);
-        assert_eq!(thread.active_root, None);
+        assert_eq!(sidebar.threads[0].active_root, None);
     }
 }
 
@@ -209,6 +181,4 @@ fn restore_history_reconciles_and_fork_does_not_inherit_root() {
         .find(|thread| thread.id == fork)
         .unwrap();
     assert_eq!(fork.active_root, None);
-    assert_eq!(fork.worktree_path, None);
-    assert_eq!(fork.branch, None);
 }

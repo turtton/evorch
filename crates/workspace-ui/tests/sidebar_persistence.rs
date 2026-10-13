@@ -107,16 +107,14 @@ fn load_rejects_noncanonical_allowed_directory() {
 
 #[test]
 fn load_rejects_allowed_directory_inside_project_root() {
-    // Given: persisted state that stores a runtime worktree as an explicit allowed directory.
+    // Given: persisted state that stores a project-root descendant as an explicit allowed directory.
     let mut sidebar = valid_sidebar();
-    let worktree = sidebar.projects[0]
-        .repo_root
-        .join(".evorch/worktrees/run-1");
-    std::fs::create_dir_all(&worktree).expect("runtime worktree must be created");
+    let nested = sidebar.projects[0].repo_root.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested directory must be created");
     sidebar.projects[0]
         .allowed_directories
         .push(AllowedDirectory {
-            path: worktree,
+            path: nested,
             trust: TrustState::Approved,
         });
     let json = serde_json::to_string(&sidebar).expect("fixture must serialize");
@@ -124,7 +122,7 @@ fn load_rejects_allowed_directory_inside_project_root() {
     // When: tampered JSON crosses the public load boundary.
     let result = sidebar_from_json(&json);
 
-    // Then: project-root descendants remain auto-allowed only through membership resolution.
+    // Then: project-root descendants are never stored as separate allowed directories.
     assert_eq!(
         result,
         Err(SidebarError::Project(ProjectError::NestedInProjectRoot))

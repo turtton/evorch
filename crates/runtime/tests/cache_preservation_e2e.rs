@@ -2410,7 +2410,7 @@ impl runtime::SandboxFactory for DirectFactory {
     fn build(
         &self,
         _: &runtime::ExecutionPolicy,
-        _: &runtime::IsolatedMounts,
+        _: &runtime::WorkspaceMounts,
     ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
         Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
     }
@@ -2498,7 +2498,7 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
         ..Default::default()
     };
     let storage = storage::Storage::open(storage_config.clone()).unwrap();
-    harness.runtime = AgentRuntime::with_workspace_context(
+    harness.runtime = AgentRuntime::with_sandbox_factory(
         bus.clone(),
         Arc::new(
             ToolExecutor::with_standard_tools(
@@ -2509,9 +2509,6 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
             .unwrap(),
         ),
         model,
-        runtime::workspace::WorktreeManager::new(
-            runtime::workspace::Project::new(repo.clone()).unwrap(),
-        ),
         Arc::new(DirectFactory),
     )
     .with_sequential_run_ids()

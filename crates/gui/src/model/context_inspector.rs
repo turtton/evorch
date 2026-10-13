@@ -29,7 +29,6 @@ pub struct PreviewSpec {
     pub category: Option<CategoryId>,
     pub conversation: bool,
     pub child: bool,
-    pub isolated: bool,
 }
 
 impl PreviewSpec {
@@ -39,7 +38,6 @@ impl PreviewSpec {
             category: None,
             conversation: false,
             child: role != Role::Orchestrator,
-            isolated: false,
         }
     }
 
@@ -48,11 +46,6 @@ impl PreviewSpec {
             category: self.category.map(|category| category.to_string()),
             conversation: self.conversation,
             child: self.child,
-            workspace_mode: if self.isolated {
-                runtime::WorkspaceMode::Isolated
-            } else {
-                runtime::WorkspaceMode::Shared
-            },
             ..BaseContextRequest::new(self.role)
         }
     }

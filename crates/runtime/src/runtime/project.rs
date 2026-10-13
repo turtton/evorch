@@ -19,21 +19,10 @@ pub type ProjectSlugResolver = Arc<dyn Fn(&std::path::Path) -> String + Send + S
 pub(crate) struct ProjectContext {
     pub(crate) root: PathBuf,
     pub(crate) rules: Option<Arc<RulesSource>>,
-    /// `None` while the project is not a git repository root (isolated runs fail closed).
-    worktrees: Option<WorktreeManager>,
     pub(crate) model: Arc<dyn AgentModel>,
     /// Whether `<root>/.evorch/skills` may reach this project's runs.
     pub(crate) repo_skills: bool,
     slug: OnceLock<String>,
-}
-
-impl ProjectContext {
-    pub(crate) fn isolated(&self, workspace: &WorkspaceContext) -> Option<IsolatedWorkspace> {
-        Some(IsolatedWorkspace {
-            manager: self.worktrees.clone()?,
-            factory: Arc::clone(&workspace.factory),
-        })
-    }
 }
 
 impl Shared {
@@ -53,18 +42,6 @@ impl Shared {
         if let Some(project) = projects.get(root) {
             return Arc::clone(project);
         }
-        let worktrees = self.workspace.as_ref().and_then(|_| {
-            crate::workspace::Project::new(root.to_path_buf())
-                .map(WorktreeManager::new)
-                .inspect_err(|error| {
-                    tracing::warn!(
-                        %error,
-                        root = %root.display(),
-                        "isolated workspaces are unavailable for this project"
-                    );
-                })
-                .ok()
-        });
         let model = self
             .project_models
             .get()
@@ -80,7 +57,6 @@ impl Shared {
                     None => rules,
                 })
             }),
-            worktrees,
             model,
             repo_skills: declared.is_none_or(|trust| trust == ProjectTrust::Approved),
             slug: OnceLock::new(),

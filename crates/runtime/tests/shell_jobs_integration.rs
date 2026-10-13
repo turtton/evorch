@@ -10,14 +10,13 @@ use async_trait::async_trait;
 use event_bus::{AgentRunPhase, EventBus};
 use futures_util::FutureExt;
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec};
-use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
     AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RunStore,
-    RuntimeError, WorkspaceMode,
+    RuntimeError,
 };
 use serde_json::json;
 use storage::{Storage, StorageConfig};
-use support::{init_git_repo, recording_factory, text_response, tool_response};
+use support::{init_git_repo, text_response, tool_response};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
@@ -366,58 +365,6 @@ async fn cancellation_reaps_job_and_preserves_uncertain_effects_in_storage() {
         FinishReason::Stop,
     ));
     assert_eq!(wait(&runtime, restored).await, AgentRunPhase::Done);
-    drop(call);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn isolated_cleanup_happens_after_cancelled_job_is_reaped() {
-    let (_temp, root) = init_git_repo();
-    let bus = Arc::new(EventBus::new(256));
-    let executor = executor(&bus, &root);
-    let (model, mut calls) = model();
-    let manager = WorktreeManager::new(Project::new(root.clone()).unwrap());
-    let (factory, _) = recording_factory();
-    let runtime = AgentRuntime::with_workspace_context(bus, executor, model, manager, factory);
-    let run = runtime.delegate_background(
-        Role::Worker,
-        "isolated cancellation".into(),
-        RunConfig {
-            workspace_mode: WorkspaceMode::Isolated,
-            ..RunConfig::default()
-        },
-    );
-    next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"printf partial > partial.txt; printf 'pid:%s\\n' \"$$\"; read value", "yield_ms":1000})));
-    let call = next(&mut calls).await;
-    let pid = field(&call.result("start").0, "pid:").to_owned();
-    let path = runtime
-        .inspect_agent(run)
-        .unwrap()
-        .workspace
-        .unwrap()
-        .worktree_path
-        .unwrap();
-    assert!(path.join("partial.txt").exists());
-    runtime.cancel(run).unwrap();
-    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
-    assert_pid_reaped(&pid);
-    // Cleanup exposes inspection state but no watch. Yield to the cleanup task;
-    // no guessed sleep is used as proof of completion.
-    timeout(DEADLINE, async {
-        while runtime
-            .inspect_agent(run)
-            .unwrap()
-            .workspace
-            .unwrap()
-            .worktree_path
-            .is_some()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("isolated workspace cleanup");
-    assert!(!path.exists());
-    assert_pid_reaped(&pid);
     drop(call);
 }
 

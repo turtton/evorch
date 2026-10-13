@@ -150,15 +150,6 @@ impl BwrapSandbox {
         args.extend(["--bind".to_owned(), scratch.clone(), scratch]);
         let boundary = &self.config.boundary;
         for path in &boundary.read_only {
-            if let Some(parent) = path.parent()
-                && parent != Path::new("/")
-                && boundary.workspace_root.starts_with(parent)
-            {
-                let parent = parent.to_string_lossy().into_owned();
-                args.extend(["--ro-bind-try".to_owned(), parent.clone(), parent]);
-            }
-        }
-        for path in &boundary.read_only {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
         }
@@ -543,6 +534,38 @@ mod tests {
                     .iter()
                     .any(|region| region.path == Path::new(source)),
                 "{source} is mounted but not in the boundary"
+            );
+        }
+    }
+
+    // Given: a read-only region whose parent also contains the project root /
+    // When: building bwrap argv / Then: the shared parent is not mounted, so the
+    // shell sees only the boundary regions that file tools also check
+    #[test]
+    fn read_only_sibling_does_not_mount_the_shared_parent() {
+        let config =
+            BwrapConfig::new(PathBuf::from("/srv/repos/project")).ro_bind("/srv/repos/other");
+        let regions = config.boundary().regions();
+        let argv = sandbox(config).build_argv(&spec(None));
+
+        assert!(
+            !argv.iter().any(|arg| arg == "/srv/repos"),
+            "parent of a read-only region was mounted: {argv:?}"
+        );
+        assert!(
+            argv.windows(3)
+                .any(|args| args == ["--ro-bind-try", "/srv/repos/other", "/srv/repos/other"])
+        );
+        for args in argv
+            .windows(3)
+            .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--ro-bind-try"))
+        {
+            assert!(
+                regions
+                    .iter()
+                    .any(|region| region.path == Path::new(&args[1])),
+                "{} is mounted but not in the boundary",
+                args[1]
             );
         }
     }

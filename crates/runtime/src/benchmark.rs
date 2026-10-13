@@ -123,7 +123,6 @@ pub(crate) fn validate_config(config: &crate::RunConfig, role: Role) -> Result<(
         || config.team.is_some()
         || config.ownership.is_some()
         || config.topology != crate::CoordinationTopology::Single
-        || config.workspace_mode != crate::WorkspaceMode::Shared
         || config.learning_internal
         || config.initial_thread_goal.is_some()
         || config.conversation

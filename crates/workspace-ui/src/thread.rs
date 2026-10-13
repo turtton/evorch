@@ -80,9 +80,7 @@ pub struct ThreadRecord {
     /// Current conversation root; historical roots and children remain in `run_ids`.
     #[serde(default)]
     pub root_run_id: Option<String>,
-    pub branch: Option<String>,
-    pub worktree_path: Option<PathBuf>,
-    /// Inspected active root; without a worktree path this is populated only for Shared runs.
+    /// Inspected active root of the thread's runs.
     #[serde(default)]
     pub active_root: Option<PathBuf>,
     #[serde(default)]
@@ -141,8 +139,6 @@ impl ThreadRecord {
             updated_at: 0,
             run_ids: Vec::new(),
             root_run_id: None,
-            branch: None,
-            worktree_path: None,
             active_root: None,
             model_preference: None,
             chat_role: None,

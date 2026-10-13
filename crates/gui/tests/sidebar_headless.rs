@@ -14,9 +14,7 @@ use gui::headless::HeadlessWorkbench;
 use gui::model::project_bridge::run_membership;
 use gui::model::tasks::AgentRunSource;
 use gui::theme::tokens::ROW_DENSE;
-use runtime::{
-    AgentInspection, AgentSummary, MergeMode, RunId, WorkspaceInspection, WorkspaceMode,
-};
+use runtime::{AgentInspection, AgentSummary, RunId, WorkspaceInspection};
 use workspace_ui::{Membership, ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 #[derive(Clone, Default)]
@@ -53,18 +51,14 @@ fn sidebar_with_project(root: &std::path::Path) -> SidebarState {
     sidebar
 }
 
-fn inspection(run_id: u64, branch: &str, worktree_path: std::path::PathBuf) -> AgentInspection {
+fn inspection(run_id: u64, active_root: std::path::PathBuf) -> AgentInspection {
     AgentInspection {
         run_id: RunId::new(run_id),
         role_name: "Worker".into(),
         phase: AgentRunPhase::Running,
         message_count: 0,
         workspace: Some(WorkspaceInspection {
-            mode: WorkspaceMode::Isolated,
-            branch: Some(branch.into()),
-            active_root: Some(worktree_path.clone()),
-            worktree_path: Some(worktree_path),
-            merge_mode: MergeMode::Branch,
+            active_root: Some(active_root),
         }),
     }
 }
@@ -141,23 +135,20 @@ fn settings_modal_trust_click_approves_allowed_directory_and_persists_sidebar() 
 }
 
 #[test]
-fn run_cwd_under_runtime_worktree_is_auto_allowed() {
-    // Given: a registered project and an inspected run under its runtime worktree root
+fn run_at_project_root_is_a_project_member() {
+    // Given: a registered project and an inspected run working in its root
     let temp = tempfile::tempdir().expect("temp dir");
     let root = temp.path().join("demo");
-    let worktree = root.join(".evorch/worktrees/run-2");
-    std::fs::create_dir_all(&worktree).expect("worktree directory");
+    std::fs::create_dir(&root).expect("project directory");
     let sidebar = sidebar_with_project(&root);
-    let run = inspection(2, "evorch/task/run-2", worktree.clone());
+    let root = sidebar.projects[0].repo_root.clone();
+    let run = inspection(2, root);
 
     // When: run membership is resolved
     let membership = run_membership(&sidebar, &run);
 
-    // Then: the runtime-owned worktree is allowed without explicit trust
-    assert_eq!(
-        membership,
-        Membership::RuntimeWorktree { run_dir: worktree }
-    );
+    // Then: the run belongs to the project root
+    assert_eq!(membership, Membership::ProjectRoot);
 }
 
 #[test]
@@ -169,7 +160,7 @@ fn external_path_is_outside_without_explicit_trust() {
     std::fs::create_dir(&root).expect("project directory");
     std::fs::create_dir(&external).expect("external directory");
     let sidebar = sidebar_with_project(&root);
-    let run = inspection(3, "external", external);
+    let run = inspection(3, external);
 
     // When: run membership is resolved
     let membership = run_membership(&sidebar, &run);
@@ -320,42 +311,6 @@ fn thread_state_follows_lifecycle_events() {
     assert!(!harness.has_label("Pause"));
     assert!(!harness.has_label("Resume"));
     assert!(harness.has_label("Thread status: Error"));
-}
-
-#[test]
-fn thread_shows_branch_and_worktree_indicator() {
-    // Given: an active thread whose run inspection has branch and worktree metadata
-    let temp = tempfile::tempdir().expect("temp dir");
-    let root = temp.path().join("demo");
-    let worktree = root.join(".evorch/worktrees/run-2");
-    std::fs::create_dir_all(&worktree).expect("worktree directory");
-    let mut sidebar = sidebar_with_project(&root);
-    sidebar
-        .create_thread(
-            workspace_ui::ThreadId::new("thread-1"),
-            ProjectId::new("demo"),
-            "thread-1",
-        )
-        .expect("thread can be created");
-    sidebar
-        .switch_thread(&workspace_ui::ThreadId::new("thread-1"))
-        .expect("thread can be selected");
-    sidebar.threads[0].run_ids.push("run-2".into());
-    let source = MockSource {
-        summaries: Vec::new(),
-        inspections: HashMap::from([(
-            RunId::new(2),
-            inspection(2, "evorch/task/run-2", worktree.clone()),
-        )]),
-    };
-    let mut harness = HeadlessWorkbench::new(state(source, sidebar), [800.0, 600.0]);
-
-    // When: the workbench renders and refreshes inspection metadata
-    harness.run();
-
-    // Then: the branch and worktree are shown together
-    let indicator = format!("evorch/task/run-2 @ {}", worktree.display());
-    assert!(harness.has_label(&indicator));
 }
 
 #[test]

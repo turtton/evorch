@@ -4,7 +4,6 @@ use super::comment_checker_support::{
 };
 use super::*;
 use crate::rules::{ProjectTrust, RulesSettings};
-use crate::workspace::Project;
 use sandbox::DirectSandbox;
 
 fn canonical_repo() -> (tempfile::TempDir, PathBuf) {
@@ -33,21 +32,15 @@ fn runtime_on(
         Arc::clone(bus),
         Arc::new(DirectSandbox::new_unchecked()),
     );
-    AgentRuntime::with_workspace_context(
-        Arc::clone(bus),
-        Arc::new(executor),
-        model,
-        WorktreeManager::new(Project::new(root.to_path_buf()).unwrap()),
-        factory,
-    )
-    .with_project_rules(Arc::new(RulesSource::new(
-        ProjectTrust::Unapproved,
-        RulesSettings::from(&config::RulesConfig::default()),
-        None,
-        Some(root.to_path_buf()),
-        None,
-    )))
-    .with_sandbox_root(root.to_path_buf())
+    AgentRuntime::with_sandbox_factory(Arc::clone(bus), Arc::new(executor), model, factory)
+        .with_project_rules(Arc::new(RulesSource::new(
+            ProjectTrust::Unapproved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(root.to_path_buf()),
+            None,
+        )))
+        .with_sandbox_root(root.to_path_buf())
 }
 
 // Regression: the startup project leaked into the workspace note, so the model
@@ -128,42 +121,42 @@ async fn project_switch_rebinds_shared_workspace_rules_and_skills() {
     assert!(!skills.contains(&"startup-skill".to_owned()), "{skills:?}");
 }
 
+// The runtime no longer needs a git repository: a plain directory is a
+// project root like any other (ADR 0031).
 #[tokio::test]
-async fn project_switch_moves_isolated_worktrees_and_fails_closed_outside_git() {
+async fn project_switch_to_a_non_git_directory_runs_there() {
     let (_startup_temp, startup) = canonical_repo();
-    let (_switched_temp, switched) = canonical_repo();
     let plain = tempfile::tempdir().unwrap();
     let plain = plain.path().canonicalize().unwrap();
     let bus = Arc::new(EventBus::new(256));
-    let model = Arc::new(ScriptedModel::new([Ok(text_response(
-        "done",
-        providers::FinishReason::Stop,
-    ))]));
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "write",
+            "write",
+            serde_json::json!({"path": "plain.rs", "content": "fn main() {}"}),
+        )),
+        Ok(text_response("done", providers::FinishReason::Stop)),
+    ]));
     let (factory, mounts) = support::recording_factory();
     let runtime = runtime_on(&bus, model, &startup, factory);
-    let isolated = || RunConfig {
-        workspace_mode: crate::WorkspaceMode::Isolated,
-        ..RunConfig::default()
-    };
 
-    runtime.set_project_root(switched.clone()).unwrap();
-    let run = runtime.delegate_background(Role::Worker, "isolated".into(), isolated());
-    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
-    let worktree = mounts.lock().unwrap()[0].workspace_root.clone();
-    assert!(
-        worktree.starts_with(switched.join(".evorch/worktrees")),
-        "{}",
-        worktree.display()
-    );
-
-    // A non-repository project has no worktree manager; isolated runs must not
-    // fall back to the previous repository.
     runtime.set_project_root(plain.clone()).unwrap();
-    let run = runtime.delegate_background(Role::Worker, "isolated".into(), isolated());
-    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
-    assert_eq!(mounts.lock().unwrap().len(), 1);
+    let run = runtime.delegate_background(Role::Worker, "edit".into(), RunConfig::default());
+
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(mounts.lock().unwrap()[0].workspace_root, plain);
+    assert!(plain.join("plain.rs").exists());
     assert!(!plain.join(".evorch").exists());
-    assert!(!startup.join(".evorch").exists());
+    assert!(!startup.join("plain.rs").exists());
+    assert_eq!(
+        runtime
+            .inspect_agent(run)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .active_root,
+        Some(plain),
+    );
 }
 
 fn delegate_script() -> [Result<providers::ChatResponse, RuntimeError>; 2] {

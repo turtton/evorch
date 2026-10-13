@@ -60,7 +60,7 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
     contract::<meta::delegation::DelegateArgs>(
         "delegate",
         json!({"target": {"role": "worker", "category": "deep"},
-            "prompt":"Implement x; own x.rs; verify cargo test; report outcome, changes, checks and blockers.", "background":true, "interactive":true, "name":"implementation", "workspace_mode":"isolated", "workspace_branch":"topic", "load_skills":["rust"],
+            "prompt":"Implement x; own x.rs; verify cargo test; report outcome, changes, checks and blockers.", "background":true, "interactive":true, "name":"implementation", "load_skills":["rust"],
             "task":{"id":"task-1","paths":["src/x.rs"]}
         }),
     );

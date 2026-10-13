@@ -156,8 +156,7 @@ pub fn tool_header(
     }
 }
 
-/// Repo-relative display path. Paths inside a run worktree drop the
-/// `.evorch/worktrees/<run>` prefix; paths elsewhere under `$HOME` use `~`.
+/// Repo-relative display path; paths elsewhere under `$HOME` use `~`.
 pub fn display_path(path: &str, repo_root: Option<&Path>) -> String {
     let display = relative_path(Path::new(path), repo_root, home_dir().as_deref());
     let display = display.to_string_lossy();
@@ -169,9 +168,6 @@ pub fn display_path(path: &str, repo_root: Option<&Path>) -> String {
 }
 
 fn relative_path(path: &Path, repo_root: Option<&Path>, home: Option<&Path>) -> PathBuf {
-    if let Some(inner) = worktree_relative(path) {
-        return inner;
-    }
     if let Some(relative) = repo_root.and_then(|root| path.strip_prefix(root).ok()) {
         return relative.to_path_buf();
     }
@@ -181,14 +177,6 @@ fn relative_path(path: &Path, repo_root: Option<&Path>, home: Option<&Path>) -> 
     path.components()
         .skip_while(|component| matches!(component, Component::CurDir))
         .collect()
-}
-
-fn worktree_relative(path: &Path) -> Option<PathBuf> {
-    let components: Vec<_> = path.components().collect();
-    let start = components.windows(3).position(|window| {
-        window[0].as_os_str() == ".evorch" && window[1].as_os_str() == "worktrees"
-    })?;
-    Some(components[start + 3..].iter().collect())
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -338,16 +326,16 @@ mod tests {
     }
 
     #[test]
-    fn read_keeps_file_name_as_subject_and_strips_run_worktree() {
-        // Given: an absolute path inside a run worktree.
-        let path = "/repo/.evorch/worktrees/run-7/crates/gui/src/lib.rs";
+    fn read_keeps_file_name_as_subject_and_strips_repo_root() {
+        // Given: an absolute path inside the repository.
+        let path = "/repo/crates/gui/src/lib.rs";
         // When
         let header = header(
             "read",
             json!({"path": path, "offset": 10, "limit": 50}),
             Some(&"line\n".repeat(50)),
         );
-        // Then: the worktree prefix is gone and the file name leads.
+        // Then: the repository prefix is gone and the file name leads.
         assert_eq!(header.text(), "Read lib.rs crates/gui/src · L10–59");
     }
 
@@ -378,11 +366,10 @@ mod tests {
     }
 
     #[test]
-    fn display_path_prefers_worktree_then_repo_then_home() {
+    fn display_path_prefers_repo_then_home() {
         let home = Some(Path::new("/home/me"));
         let root = Some(Path::new("/home/me/repo"));
         for (path, expected) in [
-            ("/elsewhere/.evorch/worktrees/run-1/src/a.rs", "src/a.rs"),
             ("/home/me/repo/src/a.rs", "src/a.rs"),
             ("/home/me/notes.md", "~/notes.md"),
             ("./src/a.rs", "src/a.rs"),

@@ -256,8 +256,8 @@ fn tool_card_capture_states_when_evidence_directory_is_set() {
 
 #[test]
 fn read_tool_card_keeps_file_name_visible_in_narrow_pane() {
-    // Given: a read of a deep worktree path rendered in a narrow pane.
-    let path = "/repo/.evorch/worktrees/run-12/crates/gui/src/panes/agent/thinking_block.rs";
+    // Given: a read of a deep repository path rendered in a narrow pane.
+    let path = "/repo/crates/gui/src/panes/agent/thinking_block.rs";
     let mut model = TranscriptModel::new();
     model.apply(&Event::new(ToolEvent::ToolStarted {
         tool_name: "read".into(),

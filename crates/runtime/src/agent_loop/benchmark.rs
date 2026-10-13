@@ -53,14 +53,11 @@ impl LoopState {
                 }
             } else if tool.name == "delegate" {
                 if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
-                    for name in ["background", "interactive", "workspace_branch", "task"] {
+                    for name in ["background", "interactive", "task"] {
                         properties.remove(name);
                     }
-                    if let Some(workspace) = properties.get_mut("workspace_mode") {
-                        workspace["enum"] = serde_json::json!(["shared"]);
-                    }
                 }
-                tool.description = "Delegate a self-contained task to one child using target.role and optional target.category. Use this as the only tool call in its batch and wait for completion. Include purpose, scope, constraints, expected output and validation in the prompt. Children share the benchmark workspace; background, interactive, team and isolated-workspace delegation are unavailable.".into();
+                tool.description = "Delegate a self-contained task to one child using target.role and optional target.category. Use this as the only tool call in its batch and wait for completion. Include purpose, scope, constraints, expected output and validation in the prompt. Children share the benchmark workspace; background, interactive and team delegation are unavailable.".into();
             }
         }
     }

@@ -65,7 +65,7 @@ ADR 0018（SQLite event sourcing）上に置くため、oh-my-pi の cap 100 非
 
 ### RunConfig.workspace_mode と git worktree backend（`crates/runtime/src/run.rs`）
 
-> 2026-10-13: `workspace_mode` と runtime 所有の worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決めた。以下は当時の計画として残す。
+> 2026-10-13: `workspace_mode` と runtime 所有の worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決め、2026-10-14 に削除した。以下は当時の計画として残す。
 
 - `workspace_mode = shared`: 親と同じ cwd で動作（現行相当）
 - `workspace_mode = isolated`: runtime が委譲時に git worktree を作成し run の cwd として绑定。bwrap fs sandbox（ADR 0021/0009、Linux-first）と組み合わせ、worktree を rw、それ以外を policy 通りに mount する
@@ -96,6 +96,8 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - `RunConfig.category: Option<String>`、delegate args の category は固定 6 種で検証（`parse_category`、未知は model call 前に拒否）。委譲 meta op は単一 `delegate` tool に統合済みで、`role` は optional（既定 worker）、`background: bool`（既定 false は完了を待つ同期実行、true は run_id を即返す背景起動）、`interactive: true` は `background: true` を必須とする。
 
 ## v0.2 workspace 隔離の実装確定（issue #51、PR #52、2026-09-02）
+
+> 2026-10-14: この節の isolated mode、`MergeMode`、worktree manager、worktree 用の mount policy は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) ③ で削除した。すべての run はプロジェクトルートで動く。`SandboxFactory` と mount の構造体（`WorkspaceMounts` に改名）は run ごとの sandbox の組み立てに残る。以下は当時の記録として残す。
 
 - `RunConfig.workspace_mode` は typed enum（`Shared` 既定で既存呼出し互換 / `Isolated`）。`MergeMode::Branch` 既定（branch が deliverable）で serde 未知値は fail-closed。
 - isolated run は runtime 所有の worktree manager（`crates/runtime/src/workspace.rs`）が `<repo>/.evorch/worktrees/<run-id>` に worktree + branch `evorch/task/<run-id>` を作成。branch・worktree path の pre-existing 衝突は fail-closed で拒否、作成途中失敗は自前作成物のみ stages rollback し、user の既存 branch / worktree は決して触らない。

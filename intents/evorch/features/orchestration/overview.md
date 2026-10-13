@@ -46,7 +46,7 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 
 ### isolated workspace の正式運用（[ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止）
 
-> 2026-10-13: runtime が worktree を作る isolated mode と旧 PR delivery supervisor は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決めた。worktree での作業はエージェントが skill の手順で行う。以下は当時の計画として残す。
+> 2026-10-13: runtime が worktree を作る isolated mode と旧 PR delivery supervisor は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決め、2026-10-14 までに削除した。worktree での作業はエージェントが skill の手順で行う。以下は当時の計画として残す。
 
 委譲時に `RunConfig.workspace_mode` を指定し、worker ごとに独立した git worktree checkout で実行する運用を正式化する。worktree の作成・破棄・merge は harness が所有し、merge mode は branch（`evorch/task/<run-id>`）が既定。これにより現行運用の痛み（worktree 配置制約、sandbox 下 `.git` read-only に伴う bundle 運用、`/tmp` 非共有）を解消する。runtime 機構の詳細は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) v0.2 計画を参照。
 
@@ -88,7 +88,7 @@ omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲�
 - **model-family 判定（`ModelFamily::classify`）**: claude 含有→Claude / o1,o3,o4 prefix→OpenAiReasoning / gpt-5 prefix→Gpt5 / gemini 含有→Gemini / kimi 含有→Kimi / 他 Unknown→family-generic（fail-safe）。
 - **preset**: bundled（`crates/config/assets/presets/{role,family,category}-*.md` 16 件、`include_str!`）+ user override（`<user_config_dir>/presets/`）の 2 層。resolver read-only、name=`[a-z0-9-]{1,64}`、≤64KiB、UTF-8。category スコープ appendix（`categories.<name>.preset`）はロールレベル appendix に勝つ。
 
-workspace 隔離が実装確定（PR #52）: isolated mode は runtime 所有 worktree（`<repo>/.evorch/worktrees/<run-id>`、branch `evorch/task/<run-id>`）で、worktree rw は runtime 確保、worker は承認済み tool call 内で直接 git add / commit できる（bundle / runtime 代理 commit push は不採用）。cleanup は runtime が worktree のみ決定的に削除し、branch は merge deliverable として保持する。
+workspace 隔離が実装確定（PR #52）: isolated mode は runtime 所有 worktree（`<repo>/.evorch/worktrees/<run-id>`、branch `evorch/task/<run-id>`）で、worktree rw は runtime 確保、worker は承認済み tool call 内で直接 git add / commit できる（bundle / runtime 代理 commit push は不採用）。cleanup は runtime が worktree のみ決定的に削除し、branch は merge deliverable として保持する。（2026-10-14 に [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) ③ で isolated mode ごと削除した）
 
 ## v0.2 pre-routing / escalation の確定（2026-09-03）
 

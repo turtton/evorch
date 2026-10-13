@@ -3,8 +3,8 @@ mod support;
 #[path = "meta_ops/delegate_contract.rs"]
 mod delegate_contract;
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use agents::Role;
 use config::{CompactionConfig, SummarizerKind};
@@ -12,16 +12,13 @@ use event_bus::{
     AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind, LifecycleEvent,
 };
 use providers::{ContentBlock, FinishReason, ToolResultContent};
-use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, EscalationMemo, IsolatedMounts, RunConfig, WorkspaceMode};
+use runtime::{AgentRuntime, EscalationMemo, RunConfig};
 use sandbox::DirectSandbox;
 use serde_json::json;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
-use support::{
-    ScriptedModel, drain_events, init_git_repo, recording_factory, text_response, tool_response,
-};
+use support::{ScriptedModel, drain_events, text_response, tool_response};
 
 fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(128));
@@ -30,25 +27,6 @@ fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     AgentRuntime::new(bus, executor, model).with_sequential_run_ids()
-}
-
-fn runtime_with_workspace(
-    repo: &Path,
-    model: Arc<ScriptedModel>,
-) -> (AgentRuntime, Arc<Mutex<Vec<IsolatedMounts>>>) {
-    let bus = Arc::new(EventBus::new(128));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(
-        Arc::clone(&bus),
-        Arc::new(DirectSandbox::new_unchecked()),
-    ));
-    let manager =
-        WorktreeManager::new(Project::new(repo.to_path_buf()).expect("git リポジトリを検証できる"));
-    let (factory, mounts) = recording_factory();
-    (
-        AgentRuntime::with_workspace_context(bus, executor, model, manager, factory)
-            .with_sequential_run_ids(),
-        mounts,
-    )
 }
 
 fn tool_result(messages: &[providers::Message], call_id: &str) -> Option<(String, bool)> {
@@ -173,8 +151,7 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
     assert!(!inspect_error);
     let inspection: serde_json::Value = serde_json::from_str(&inspection).expect("inspection JSON");
     assert_eq!(inspection["run_id"], json!("run-3"));
-    assert_eq!(inspection["workspace"]["mode"], json!("shared"));
-    assert_eq!(inspection["workspace"]["merge_mode"], json!("branch"));
+    assert_eq!(inspection["workspace"], json!({}));
     assert_eq!(
         tool_result(final_turn, "cancel"),
         Some(("cancelled".to_string(), false))
@@ -296,75 +273,13 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
 }
 
 #[tokio::test]
-async fn delegate_background_accepts_isolated_workspace_mode() {
-    // Given: isolated workspace を要求する非同期 delegate を返す Orchestrator
-    let (_temp, repo) = init_git_repo();
-    let model = Arc::new(ScriptedModel::new([]));
-    model
-        .add_keyed(
-            "META",
-            [
-                Ok(tool_response(
-                    "delegate-isolated",
-                    "delegate",
-                    json!({"target": {"role": "worker"},
-                        "background": true,
-                        "prompt": "ISOLATED",
-                        "interactive": true,
-                        "workspace_mode": "isolated"
-                    }),
-                )),
-                Ok(tool_response(
-                    "finish",
-                    "finish",
-                    json!({ "result": "done" }),
-                )),
-            ],
-        )
-        .await;
-    let (runtime, mounts) = runtime_with_workspace(&repo, Arc::clone(&model));
-
-    // When: meta op を経由して child を生成する
-    let parent =
-        runtime.delegate_background(Role::Orchestrator, "META".to_string(), RunConfig::default());
-    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
-    let child = runtime.list_agents()[1].run_id;
-    timeout(Duration::from_secs(5), async {
-        while mounts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
-        {
-            sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("isolated child workspace setup が期限内に完了する");
-
-    // Then: child inspection が isolated mode を報告する
-    assert_eq!(
-        runtime
-            .inspect_agent(child)
-            .expect("child を inspection できる")
-            .workspace
-            .expect("workspace inspection が常にある")
-            .mode,
-        WorkspaceMode::Isolated
-    );
-    runtime
-        .cancel(child)
-        .expect("interactive child を cancel できる");
-    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Error));
-}
-
-#[tokio::test]
-async fn async_delegate_rejects_unknown_workspace_mode() {
-    // Given: 未知の workspace_mode を返す Orchestrator
+async fn async_delegate_rejects_removed_workspace_mode_argument() {
+    // Given: 廃止した workspace_mode 引数を付けて委譲する Orchestrator (ADR 0031)
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "invalid-workspace",
             "delegate",
-            json!({"target": {"role": "worker"}, "background": true, "prompt": "unused", "workspace_mode": "hybrid" }),
+            json!({"target": {"role": "worker"}, "background": true, "prompt": "unused", "workspace_mode": "isolated" }),
         )),
         Ok(tool_response(
             "finish",
