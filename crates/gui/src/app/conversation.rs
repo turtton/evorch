@@ -37,9 +37,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 (Some(thread), Some(role)) => self.bind_thread_role(thread, role),
                 _ => false,
             },
-            EventKind::Orchestrator(OrchestratorEvent::GoalCreated { thread_id, .. }) => {
-                self.bind_thread_role(thread_id, ThreadChatRole::Orchestrator)
-            }
             _ => false,
         };
         let changed = match &event.kind {
@@ -68,18 +65,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
                 self.bind_conversation_run(&snapshot.thread_id, &snapshot.root_run_id, true)
             }
-            EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                thread_id,
-                root_run_id,
-                ..
-            }) => self.bind_conversation_run(thread_id, root_run_id, true),
-            EventKind::Orchestrator(OrchestratorEvent::ContinuationDispatched {
-                trigger_run_id,
-                new_run_id,
-                ..
-            }) => self
-                .thread_for_run(trigger_run_id)
-                .is_some_and(|thread| self.bind_conversation_run(&thread, new_run_id, true)),
             _ => false,
         };
         match &event.kind {

@@ -17,20 +17,16 @@ use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::model::telemetry::pricing::SharedUsagePricing;
 use gui::pty::ShellSpawner;
-use gui::runtime_sink::{
-    RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
-};
+use gui::runtime_sink::{RuntimeCommandSink, STORAGE_SESSION_ID, derive_repo_slug};
 use gui::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
-use runtime::orchestration::delivery::DeliveryPort;
 use runtime::{
-    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
-    FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, ModelSource, OrchestrationSettings, Role,
-    RunConfig, RuntimeComposition, ShellDeliveryAdapter, SupervisorHandle, WorkspaceSeam,
-    compose_runtime, production_executor_with_config,
+    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy, ModelSource,
+    Role, RunConfig, RuntimeComposition, WorkspaceSeam, compose_runtime,
+    production_executor_with_config,
 };
-use sandbox::{BwrapConfig, CredentialError, CredentialStore, Sandbox, Secret, production_sandbox};
+use sandbox::{CredentialError, CredentialStore, Secret};
 use storage::{Database, Storage, StorageConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
@@ -68,10 +64,6 @@ enum GuiError {
     Storage(#[from] storage::StorageError),
     #[error("demo repository initialization failed: {0}")]
     DemoRepo(String),
-    #[error("delivery sandbox initialization failed: {0}")]
-    Sandbox(String),
-    #[error("supervisor startup failed: {0}")]
-    Supervisor(String),
     #[error("ownership initialization failed: {0}")]
     Ownership(#[from] runtime::ownership::RegistryError),
 }
@@ -128,24 +120,18 @@ fn print_help() {
 Demo mode (--demo) runs a deterministic scripted session; no external AI
 provider is used or required.
 
-Non-demo mode starts a real AgentRuntime. Goal submission goes through the
-entry router and launches a pre-routed background run: an explicit "direct"
-keyword starts a Worker run directly; otherwise an Orchestrator run is
-started. Delivery (git push / gh pr / intent-cli worker closeout) runs through
-ShellDeliveryAdapter, so `gh auth status` must succeed or goals block at the
-delivery stage. Only the final merge requires operator approval; the request
-appears as a conversation notice, with no approval button in this UI yet.
-Every other step (implement, push, PR, CI watch, review, repair,
-re-review, closeout) is automatic.
+Non-demo mode starts a real AgentRuntime. Messages and `/goal <objective>`
+both continue the thread's persistent conversation; `/goal` also records a
+thread goal that the runtime checks before the work is reported as done.
 既知の制限: エージェント応答の描画は demo スクリプトモデルのままであり、provider composition root 導入まで実 provider の応答は表示されない。
 
 Sidebar state is loaded from and saved to --state PATH. Without --state, the
 default is <user-config-dir>/sidebar.json; if no user config dir is derivable,
 sidebar persistence is skipped.
 
-Goal events are persisted to <user-config-dir>/evorch-events.db (demo mode
-uses a temporary directory) and Active goals from previous sessions are
-adopted as paused on startup.
+Events are persisted to <user-config-dir>/evorch-events.db (demo mode uses a
+temporary directory); thread goals and procedures are restored from them on
+startup.
 
 Start:
 
@@ -160,13 +146,10 @@ Demo mode manual verification:
 4. Open default panes: 3 transcripts; run-2 contains incoming "implement the goal"
    and outgoing "worker done" only.
 5. Diff: Working tree shows 2 fixture files; Branch vs main shows 1.
-6. Goal loop: send `/goal DEMO-GOAL implement fixture unit` in the conversation
-   composer and confirm "accepted: goal-1". The deterministic runtime loop
-   implements, reviews, repairs, and then requests merge approval.
-7. Merge approval currently appears as a conversation notice only. The runtime
-   approval port remains available; a Diff-view approval surface is a follow-up.
-   There is no approval button in this UI.
-8. Ctrl+S saves layout; Ctrl+Shift+R resets it. `bwrap` must be on PATH.
+6. Goal: send `/goal DEMO-GOAL implement fixture unit` in the conversation
+   composer and confirm the "accepted:" notice. The scripted model reports
+   every goal check as met.
+7. Ctrl+S saves layout; Ctrl+Shift+R resets it. `bwrap` must be on PATH.
 
 Requirements:
 
@@ -351,36 +334,6 @@ fn storage_db_path(
     }
 }
 
-/// delivery 用の production bwrap sandbox を組立てる (計画 Clarification A)。
-///
-/// ネットワークを許可し、`gh` / `git` が参照する認証素材
-/// (`~/.config/gh`, `~/.gitconfig`) をホストパスのまま読み取り bind する。
-/// 存在しない認証素材は bind 元として無効なため除外する。
-/// sandbox 内の HOME は /tmp/home に固定されるため、`GH_CONFIG_DIR` /
-/// `GIT_CONFIG_GLOBAL` をホストパスでエクスポートしている場合のみ
-/// delivery adapter 経由で参照される (credential_env は親環境の転送のみ)。
-fn production_delivery_sandbox(repo_root: PathBuf) -> Result<Arc<dyn Sandbox>, GuiError> {
-    let mut sandbox_config = BwrapConfig::new(repo_root).allow_network(true);
-    for path in credential_ro_binds() {
-        sandbox_config = sandbox_config.ro_bind(path);
-    }
-    production_sandbox(sandbox_config).map_err(|error| GuiError::Sandbox(error.to_string()))
-}
-
-/// ホスト側の gh / git 認証素材のうち存在するものを列挙する。
-fn credential_ro_binds() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        tracing::warn!(
-            "HOME is unset; gh/git credentials are not mounted into the delivery sandbox"
-        );
-        return Vec::new();
-    };
-    [home.join(".config").join("gh"), home.join(".gitconfig")]
-        .into_iter()
-        .filter(|path| path.exists())
-        .collect()
-}
-
 /// 通常イベントと分単位の usage 集計を保存する bridge を専用 runtime で起動する。
 fn spawn_storage_bridge(
     bus: Arc<EventBus>,
@@ -484,82 +437,6 @@ fn restore_thread_todos(
     }
 }
 
-/// 前セッションの PR goal 状態を永続化イベントから復元し、supervisor へ移管する。
-///
-/// `Database::events_all_ordered()` → `GoalLedger::replay_partial` で goal ごとの
-/// snapshot を再構築し、transcript を `agent_messages_by_session` で付与して
-/// `adopt` する。永続データは外部入力なので解決不能なイベントは警告して読み飛
-/// ばす。Active goal は supervisor 側で Paused
-/// (`recovered-after-restart`) として採用される (計画 Clarification B)。
-fn restore_goals(storage_config: &StorageConfig, supervisor: &SupervisorHandle) {
-    let database = match Database::open(storage_config) {
-        Ok(database) => database,
-        Err(error) => {
-            tracing::warn!(%error, "failed to open events database for goal restore");
-            return;
-        }
-    };
-    let events = match database.events_all_ordered() {
-        Ok(events) => events,
-        Err(error) => {
-            tracing::warn!(%error, "failed to read persisted events for goal restore");
-            return;
-        }
-    };
-    let orchestrator_events = events.iter().filter_map(|stored| match &stored.event.kind {
-        EventKind::Orchestrator(event) => Some(event),
-        _ => None,
-    });
-    let (goals_map, replay_errors) = GoalLedger::replay_partial(orchestrator_events);
-    if !replay_errors.is_empty() {
-        tracing::warn!(
-            count = replay_errors.len(),
-            "goal replay skipped unresolvable durable events"
-        );
-    }
-    let goals = goals_map
-        .into_values()
-        .map(|ledger| {
-            let snapshot = ledger.snapshot().clone();
-            let transcript = match database.agent_messages_by_session(&snapshot.session_id) {
-                Ok(messages) => messages.into_iter().map(|stored| stored.message).collect(),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        goal_id = %snapshot.goal_id,
-                        "failed to restore agent transcript"
-                    );
-                    Vec::new()
-                }
-            };
-            (snapshot, transcript)
-        })
-        .collect::<Vec<_>>();
-    if goals.is_empty() {
-        return;
-    }
-    if let Err(error) = supervisor.adopt(goals) {
-        tracing::warn!(%error, "failed to adopt persisted goals");
-    }
-}
-
-/// 設定読み込みを best-effort で行い、orchestration 設定のみ抽出する
-/// (計画 Clarification C)。
-///
-/// GUI binary は config::Config を必須としないため、読み込み失敗時は
-/// 既定値へ fallback して警告を出す。
-fn orchestration_settings_or_default(
-    loaded: &Result<config::Config, config::ConfigError>,
-) -> OrchestrationSettings {
-    match loaded {
-        Ok(config) => OrchestrationSettings::from(&config.orchestration),
-        Err(error) => {
-            tracing::warn!(%error, "config load failed; using default orchestration settings");
-            OrchestrationSettings::default()
-        }
-    }
-}
-
 fn detected_provider_status(
     loaded: &Result<config::Config, config::ConfigError>,
 ) -> ProviderStatus {
@@ -582,9 +459,8 @@ fn spawn_event_bridge(
     std::thread::Builder::new()
         .name(String::from("evorch-event-pump"))
         .spawn(move || {
-            // supervisor の stall tick (tokio::time::interval) と demo model の
-            // gate (tokio::time::sleep/timeout) がこの runtime 上で動くため、
-            // time driver が必要。
+            // runtime の timer (tokio::time::sleep/timeout) がこの runtime 上で
+            // 動くため、time driver が必要。
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -745,8 +621,7 @@ fn run() -> Result<(), GuiError> {
                 seam.repo_root().to_path_buf(),
                 &composition_config,
             )?;
-            let demo_model: Arc<dyn AgentModel> =
-                Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo));
+            let demo_model: Arc<dyn AgentModel> = Arc::new(DemoScriptModel::new(Arc::clone(&bus)));
             let ComposedRuntime {
                 runtime,
                 model_identity,
@@ -929,11 +804,9 @@ fn run() -> Result<(), GuiError> {
         runtime
     };
 
-    // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる
-    // (計画 Clarification C)。
-    let (orchestration, mut provider_status, provider_settings) = match loaded_config.as_ref() {
+    // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる。
+    let (mut provider_status, provider_settings) = match loaded_config.as_ref() {
         Some(loaded) => (
-            orchestration_settings_or_default(loaded),
             detected_provider_status(loaded),
             match loaded {
                 Ok(config) => {
@@ -947,7 +820,6 @@ fn run() -> Result<(), GuiError> {
             },
         ),
         None => (
-            OrchestrationSettings::default(),
             ProviderStatus::NotConfigured {
                 guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
             },
@@ -989,35 +861,6 @@ fn run() -> Result<(), GuiError> {
         ..Default::default()
     };
 
-    let delivery: Arc<dyn DeliveryPort> = match demo_directory.as_ref() {
-        Some(_) => Arc::new(FixtureDeliveryAdapter::scripted_happy_path()),
-        None => {
-            let sandbox = production_delivery_sandbox(repo_root.clone())?;
-            Arc::new(ShellDeliveryAdapter::new(
-                Arc::clone(&bus),
-                sandbox,
-                repo_root.clone(),
-                derive_repo_slug(&repo_root),
-                derive_base_ref(&repo_root),
-            ))
-        }
-    };
-
-    // supervisor actor は pump runtime 上で動くため、runtime context 内で
-    // 生成して handle を返してもらう。
-    let (supervisor_tx, supervisor_rx) = std::sync::mpsc::channel();
-    {
-        let runtime = runtime.clone();
-        let bus = Arc::clone(&bus);
-        handle.spawn(async move {
-            let supervisor = GoalSupervisor::spawn(runtime, bus, delivery, orchestration);
-            let _ = supervisor_tx.send(supervisor);
-        });
-    }
-    let supervisor = supervisor_rx
-        .recv()
-        .map_err(|error| GuiError::Supervisor(format!("supervisor task ended: {error}")))?;
-
     // From this point onward every early-return path joins the bridge before
     // closing SQLite, even while runtime owners still hold the event bus.
     // Seeded from static profile prices; the GUI adds the model catalog once loaded.
@@ -1039,7 +882,6 @@ fn run() -> Result<(), GuiError> {
             .as_ref()
             .map(|drafts| drafts.join("crash-spool")),
     )?;
-    restore_goals(&storage_config, &supervisor);
     restore_thread_goals(&storage_config, &runtime);
     restore_thread_todos(&storage_config, &runtime, &sidebar);
 
@@ -1071,8 +913,7 @@ fn run() -> Result<(), GuiError> {
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
     };
-    // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
-    // production 経路で接続する CommandSink (demo も同様)。
+    // 会話と goal の投入を production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
         .with_artifact_opener(Arc::new(gui::model::artifact_opener::PortalArtifactOpener))
@@ -1089,7 +930,7 @@ fn run() -> Result<(), GuiError> {
         .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(
-            RuntimeCommandSink::new(runtime.clone(), handle.clone(), supervisor)
+            RuntimeCommandSink::new(runtime.clone(), handle.clone())
                 .with_web_tools_enabled(composition_config.sandbox.web_tools_enabled)
                 .with_event_bus(Arc::clone(&bus))
                 .with_ownership(ownership)
@@ -1250,10 +1091,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::orchestration_settings_or_default;
-    use config::ConfigError;
-    use runtime::OrchestrationSettings;
-
     #[test]
     fn restoring_goals_keeps_latest_thread_objective_and_one_handoff_owner() {
         let update = |goal: &str, thread: &str, run: &str| {
@@ -1473,7 +1310,7 @@ mod tests {
     #[test]
     fn detected_provider_status_fails_closed_on_config_error() {
         // Given: config loading failed
-        let loaded = Err(ConfigError::Migration("test".to_owned()));
+        let loaded = Err(config::ConfigError::Migration("test".to_owned()));
         // When: provider availability is detected
         let status = super::detected_provider_status(&loaded);
         // Then: submission remains disabled with the existing guidance
@@ -1510,17 +1347,6 @@ mod tests {
             super::ProviderStatus::NotConfigured {
                 guidance: super::PROVIDER_MISSING_GUIDANCE.to_owned(),
             }
-        );
-    }
-
-    // Given: config 読み込みが失敗したとき
-    // When: orchestration 設定を解決する
-    // Then: 既定値へ fallback する
-    #[test]
-    fn orchestration_settings_fall_back_to_default_on_config_error() {
-        assert_eq!(
-            orchestration_settings_or_default(&Err(ConfigError::Migration("test".to_owned()))),
-            OrchestrationSettings::default()
         );
     }
 }

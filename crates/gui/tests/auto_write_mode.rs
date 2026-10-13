@@ -157,20 +157,8 @@ fn runtime_sink(
         Arc::new(tools::ToolExecutor::new(bus.clone())),
         Arc::new(HeldModel),
     );
-    let supervisor = rt.block_on(async {
-        runtime::GoalSupervisor::spawn(
-            runtime.clone(),
-            bus,
-            Arc::new(runtime::FixtureDeliveryAdapter::default()),
-            Default::default(),
-        )
-    });
-    let sink = gui::runtime_sink::RuntimeCommandSink::new(
-        runtime.clone(),
-        rt.handle().clone(),
-        supervisor,
-    )
-    .with_ownership(host);
+    let sink = gui::runtime_sink::RuntimeCommandSink::new(runtime.clone(), rt.handle().clone())
+        .with_ownership(host);
     (rt, sink, runtime)
 }
 

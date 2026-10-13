@@ -56,10 +56,7 @@ use gui::model::composer::ProviderStatus;
 use gui::model::transcript::TranscriptEntry;
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 use tools::ToolExecutor;
 use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -94,15 +91,7 @@ fn workbench(root: &std::path::Path) -> (HeadlessWorkbench<AgentRuntime>, tokio:
         Arc::new(PendingModel),
     )
     .with_sequential_run_ids();
-    let supervisor = rt.block_on(async {
-        GoalSupervisor::spawn(
-            runtime.clone(),
-            bus,
-            Arc::new(FixtureDeliveryAdapter::default()),
-            OrchestrationSettings::default(),
-        )
-    });
-    let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+    let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("demo");
     sidebar

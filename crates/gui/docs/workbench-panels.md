@@ -3,17 +3,14 @@
 The right-hand workbench contains **Agents**, **Diff**, and **Terminal**.
 Dedicated Goal and Merge panes have been removed.
 
-## Goals and merge approval
+## Goals
 
-Send `/goal <text>` from the conversation composer. In demo mode, send
-`/goal DEMO-GOAL implement fixture unit` and look for `accepted: goal-1`.
-Sending `/goal` without arguments shows usage without changing the selected tab.
-
-Goal submission, pause/resume/cancel, and merge decisions remain available through
-the existing state APIs. The runtime `DeliveryPort` is unchanged. A pending merge
-request produces a conversation notice containing its PR number. This version
-does not provide an approval button; the Diff-view approval surface is follow-up
-work, not an automatic approval policy.
+Send `/goal <text>` from the conversation composer to set the thread goal for
+the active conversation. The goal is tracked in the same conversation and its
+completion checks run there; there is no separate PR delivery or merge approval
+flow. In demo mode, send `/goal DEMO-GOAL implement fixture unit` and look for
+`accepted: goal-1`. Sending `/goal` without arguments shows usage without
+changing the selected tab.
 
 ## Continuing a conversation
 

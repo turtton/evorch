@@ -37,7 +37,6 @@ use crate::compaction::policy::CompactionSettings;
 use crate::entry_routing::EntryRouter;
 use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::mailbox::{PushError, RunMailbox};
-use crate::orchestration::GoalGate;
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
@@ -74,7 +73,6 @@ pub(crate) struct Shared {
     pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
-    pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
@@ -104,9 +102,6 @@ pub(crate) struct Shared {
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
     pub(crate) review_runs: Mutex<HashMap<RunId, crate::escalation_review::ReviewRunContext>>,
-    /// goal gate (finish 判定 seam、issue #73 T1.3)。未設定なら finish は
-    /// legacy の即時受理のまま残る (T3.1 が `meta::finish` から参照する)。
-    pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     pub(crate) run_ids: crate::run_ids::RunIds,
@@ -316,7 +311,6 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
-                reviewer_results: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -346,7 +340,6 @@ impl AgentRuntime {
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
                 review_runs: Mutex::new(HashMap::new()),
-                goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
@@ -619,8 +612,6 @@ impl AgentRuntime {
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
                 review_runs: Mutex::new(HashMap::new()),
-                goals: OnceLock::new(),
-                reviewer_results: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 workspace: Some(WorkspaceContext {
                     manager: Mutex::new(Some(manager)),
@@ -642,27 +633,6 @@ impl AgentRuntime {
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
             }),
-        }
-    }
-
-    /// goal gate (finish 判定 seam) を設定したランタイムを返すビルダーメソッド。
-    ///
-    /// 設定済みの場合は 2 回目以降の呼び出しは無視される (先勝ち、compaction
-    /// 設定と同一規約)。gate 未設定の finish は legacy の即時受理のまま残り、
-    /// gate 経由の判定への差し替えは T3.1 が `meta::finish` で行う。
-    pub fn with_goal_gate(self, gate: Arc<dyn GoalGate>) -> Self {
-        let _ = self.shared.goals.set(gate);
-        self
-    }
-
-    /// 接続済みの goal gate を返す (未設定なら `None`)。
-    pub(crate) fn goal_gate(&self) -> Option<Arc<dyn GoalGate>> {
-        self.shared.goals.get().cloned()
-    }
-
-    pub(crate) fn attach_goal_child(&self, parent: RunId, child: RunId, role: Role) {
-        if let Some(gate) = self.goal_gate() {
-            gate.attach_child(parent, child, role);
         }
     }
 
@@ -715,8 +685,8 @@ impl AgentRuntime {
 
     /// 親 run の存在を検証したうえで、次の run ID を事前採番する。
     ///
-    /// supervisor が child 起動前に `RunAttached` / `ContinuationDispatched` を
-    /// emit するための happens-before を組む用途 (issue #83)。採番後は
+    /// child 起動前に run ID を確定させ、イベント発行との happens-before を
+    /// 組む用途 (issue #83)。採番後は
     /// [`AgentRuntime::spawn_reserved_child`] で必ず起動すること (採番だけして
     /// 起動しないと run ID に欠番が生じる)。
     ///
@@ -1587,8 +1557,7 @@ impl AgentRuntime {
     /// run の最終 assistant テキストを返す (未確定なら `None`)。
     ///
     /// 正常終了 (モデルの自然 Stop または finish meta-op) でのみ記録され、
-    /// Error / cancel 終端の run は `None` のままである。reviewer 判定の解析
-    /// のように run 出力を観測する supervisor 経路 (issue #73 §7) のための API である。
+    /// Error / cancel 終端の run は `None` のままである。
     ///
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
@@ -2479,7 +2448,7 @@ mod stop_cancel_tests {
         let grandchild = spawn(&runtime, Some(child));
         let unrelated = spawn(&runtime, None);
         let reserved = runtime.reserve_run_id();
-        runtime.track_goal_run(reserved, &grandchild.to_string());
+        runtime.seed_spawn_intent(reserved, &grandchild.to_string());
         // Registered parent links must also be traversed, even without an intent.
         runtime.shared.spawn_intents.lock().unwrap().remove(&child);
         runtime.cancel_subtree(root).unwrap();
@@ -2532,7 +2501,7 @@ mod stop_cancel_tests {
         let root = spawn(&runtime, None);
         let child = spawn(&runtime, Some(root));
         let reserved = runtime.reserve_run_id();
-        runtime.track_goal_run(reserved, &root.to_string());
+        runtime.seed_spawn_intent(reserved, &root.to_string());
         tokio::task::yield_now().await;
         runtime.cancel_subtree(root).unwrap();
         for run in [root, child] {
@@ -2606,6 +2575,26 @@ mod stop_cancel_tests {
         runtime.wait_admission(fresh).await.unwrap();
         runtime.cancel_subtree(fresh).unwrap();
         assert_eq!(runtime.wait(fresh).await.unwrap(), AgentRunPhase::Error);
+    }
+
+    #[tokio::test]
+    async fn agent_summaries_expose_parent_run_ids() {
+        let (runtime, _) = fixture(false);
+        let root = spawn(&runtime, None);
+        let child = spawn(&runtime, Some(root));
+        let parent_of = |run| {
+            runtime
+                .list_agents()
+                .into_iter()
+                .find(|summary| summary.run_id == run)
+                .and_then(|summary| summary.parent_run_id)
+        };
+        assert_eq!(parent_of(root), None);
+        assert_eq!(parent_of(child), Some(root));
+        runtime.cancel_subtree(root).unwrap();
+        for run in [root, child] {
+            assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+        }
     }
 }
 

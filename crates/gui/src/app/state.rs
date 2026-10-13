@@ -12,10 +12,7 @@ use crate::dock::to_dock_state;
 use crate::events::EventPump;
 use crate::keymap::Keymap;
 use crate::model::codex_auth::CodexAuthModel;
-use crate::model::commands::{
-    CiStatus, CommandSink, FixtureLoopAdapter, GoalFormModel, LoopStatusView, MergeApprovalModel,
-    MergeApprovalView, ReviewerStatus, WorkbenchCommand,
-};
+use crate::model::commands::{CommandSink, FixtureLoopAdapter, GoalFormModel, WorkbenchCommand};
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::notifications::NotificationsModel;
 use crate::model::pending_approvals::PendingApprovalsModel;
@@ -117,8 +114,6 @@ pub struct WorkbenchState<S> {
     )>,
     /// Models of projects other than the startup one, shared with the runtime.
     pub(super) project_models: Option<crate::model::production::ProjectModels>,
-    pub(super) merge: MergeApprovalModel,
-    pub(super) loop_status: LoopStatusView,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     pub(super) thread_todos: BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
@@ -230,19 +225,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             project_profile_rx: None,
             production_model: None,
             project_models: None,
-            merge: MergeApprovalModel {
-                view: MergeApprovalView {
-                    pr: None,
-                    ci: CiStatus::Unknown,
-                    reviewer: ReviewerStatus::Unknown,
-                    diff_summary: None,
-                    resolution: None,
-                    binding: None,
-                    gate: Vec::new(),
-                    blocked: None,
-                },
-            },
-            loop_status: LoopStatusView::default(),
             thread_goals: BTreeMap::new(),
             thread_todos: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
@@ -530,12 +512,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub fn provider_settings_path(&self) -> Option<&Path> {
         self.provider_settings_path.as_deref()
-    }
-    pub const fn merge(&self) -> &MergeApprovalModel {
-        &self.merge
-    }
-    pub const fn loop_status(&self) -> &LoopStatusView {
-        &self.loop_status
     }
     pub const fn thread_phases(&self) -> &BTreeMap<String, workspace_ui::ThreadRunPhase> {
         &self.phases

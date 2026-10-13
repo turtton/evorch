@@ -12,7 +12,6 @@ pub struct DurableTaskRow {
     pub run_id: Option<String>,
     /// Every execution associated with this task, including earlier attempts.
     pub run_ids: Vec<String>,
-    pub goal_id: Option<String>,
     pub status: TaskStatus,
     pub attempt: u32,
     pub last_artifact: Option<String>,
@@ -22,7 +21,6 @@ pub struct DurableTaskRow {
 #[derive(Default)]
 pub struct DurableTasksModel {
     rows: BTreeMap<String, DurableTaskRow>,
-    run_goals: BTreeMap<String, String>,
 }
 
 impl DurableTasksModel {
@@ -62,7 +60,6 @@ impl DurableTasksModel {
                 title: id.into(),
                 run_id: None,
                 run_ids: Vec::new(),
-                goal_id: None,
                 status: TaskStatus::Queued,
                 attempt: 0,
                 last_artifact: None,
@@ -78,12 +75,8 @@ impl DurableTasksModel {
         {
             return None;
         }
-        let goal = self.run_goals.get(run).cloned();
         let row = self.row(id);
         row.attach_run(run);
-        if goal.is_some() {
-            row.goal_id = goal;
-        }
         Some(row)
     }
 }

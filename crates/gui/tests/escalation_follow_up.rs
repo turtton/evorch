@@ -8,10 +8,7 @@ use gui::{
     runtime_sink::RuntimeCommandSink,
 };
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunStore, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunStore, RuntimeError};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 type Requests = Arc<Mutex<Vec<(Role, Vec<Message>)>>>;
@@ -101,17 +98,6 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
         Arc::new(EscalatingModel(requests.clone())),
     )
     .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    let supervisor = rt.block_on(async {
-        GoalSupervisor::spawn(
-            runtime.clone(),
-            bus,
-            Arc::new(FixtureDeliveryAdapter::default()),
-            OrchestrationSettings {
-                max_continuations: 0,
-                ..Default::default()
-            },
-        )
-    });
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
     sidebar
@@ -128,8 +114,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
         .with_ownership(owner.clone())
         .with_provider_status(ProviderStatus::Configured)
         .with_command_sink(Box::new(
-            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor)
-                .with_ownership(owner),
+            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone()).with_ownership(owner),
         ));
     state.composer_mut().input = "Implement feature".into();
     state.submit_composer();

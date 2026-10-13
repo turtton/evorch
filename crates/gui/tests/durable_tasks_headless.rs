@@ -8,7 +8,7 @@ use gui::{
 use workspace_ui::{PanelId, UiSettings};
 
 #[test]
-fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artifact()
+fn durable_tasks_panel_lists_queued_then_running_then_completed_with_last_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given: the real workbench subscribed through EventPump, not a direct model fold.
     let runtime = tokio::runtime::Runtime::new()?;
@@ -32,7 +32,7 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
         .set_active_tab(path)
         .map_err(|_| "activate Tasks")?;
     let mut workbench = HeadlessWorkbench::new(state, [1600.0, 900.0]);
-    // When: a durable task is queued, retried, and completed through the event bus.
+    // When: a durable task is queued, started, and completed through the event bus.
     let events = [
         (
             Event::new(OrchestratorEvent::TaskProgressed {
@@ -44,20 +44,19 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
             "queued",
         ),
         (
-            Event::new(OrchestratorEvent::TaskRetryScheduled {
-                goal_id: "goal-1".into(),
+            Event::new(OrchestratorEvent::TaskProgressed {
                 task_id: "task-1".into(),
-                attempt: 2,
-                reason: "provider unavailable".into(),
-                new_run_id: "run-2".into(),
+                run_id: "run-1".into(),
+                progress: serde_json::json!({"status":"running"}),
+                reason: "worker started".into(),
             }),
-            "retrying",
+            "running",
         ),
         (
             Event::new(OrchestratorEvent::TaskProgressed {
                 task_id: "task-1".into(),
-                run_id: "run-2".into(),
-                progress: serde_json::json!({"status":"completed", "attempts":2}),
+                run_id: "run-1".into(),
+                progress: serde_json::json!({"status":"completed"}),
                 reason: "task completed".into(),
             }),
             "completed",
@@ -70,9 +69,6 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
         // Then: the actual panel exposes each state and preserves the last valid artifact.
         assert!(workbench.has_label(status), "missing {status}");
         assert!(workbench.has_label("artifacts/valid.txt"));
-        if status != "queued" {
-            assert!(workbench.has_label("retry 2"));
-        }
         if let Some(output) = std::env::var_os("EVORCH_DURABLE_TASKS_EVIDENCE") {
             let output = std::path::PathBuf::from(output);
             std::fs::create_dir_all(&output)?;

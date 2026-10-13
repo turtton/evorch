@@ -12,10 +12,7 @@ use gui::{
     runtime_sink::RuntimeCommandSink,
 };
 use providers::{ChatResponse, Message, ToolSpec};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunConfig, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 struct HeldModel;
@@ -39,7 +36,7 @@ impl AgentModel for HeldModel {
 
 #[test]
 fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
-    // Given: real runtime/supervisor/sink, two threads, A active.
+    // Given: real runtime/sink, two threads, A active.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let bus = Arc::new(EventBus::new(256));
     let mut receiver = bus.subscribe();
@@ -48,15 +45,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         Arc::new(tools::ToolExecutor::new(bus.clone())),
         Arc::new(HeldModel),
     );
-    let supervisor = rt.block_on(async {
-        GoalSupervisor::spawn(
-            runtime.clone(),
-            bus.clone(),
-            Arc::new(FixtureDeliveryAdapter::default()),
-            OrchestrationSettings::default(),
-        )
-    });
-    let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+    let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
     let dir = tempfile::tempdir().unwrap();
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");

@@ -326,7 +326,7 @@ mod tests {
         let intermediate = fixture.runtime.reserve_run_id();
         fixture
             .runtime
-            .track_goal_run(intermediate, &fixture.root.to_string());
+            .seed_spawn_intent(intermediate, &fixture.root.to_string());
         fixture.spawn(Some(intermediate));
         assert!(!lock_runs(&fixture.runtime.shared.runs).contains_key(&intermediate));
         fixture.validate().unwrap();

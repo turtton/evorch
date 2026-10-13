@@ -9,10 +9,7 @@ use gui::runtime_sink::RuntimeCommandSink;
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunId, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunId, RuntimeError};
 use tools::ToolExecutor;
 
 #[derive(Debug)]
@@ -128,15 +125,7 @@ impl Fixture {
         );
         let runtime = runtime
             .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
-        let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+        let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         Self {
             invocations,
             model,
@@ -171,15 +160,7 @@ impl Fixture {
             self.model.clone(),
         )
         .with_run_store(runtime::RunStore::open(&storage_config, self._storage.handle()).unwrap());
-        let supervisor = self.rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
-        self.sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone(), supervisor);
+        self.sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone());
         self.runtime = runtime;
     }
 

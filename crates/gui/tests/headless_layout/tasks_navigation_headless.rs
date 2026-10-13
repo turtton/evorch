@@ -63,16 +63,6 @@ fn progress() -> Event {
     })
 }
 
-fn retry() -> Event {
-    Event::new(OrchestratorEvent::TaskRetryScheduled {
-        goal_id: "goal-ui".into(),
-        task_id: "ship-ui".into(),
-        attempt: 1,
-        reason: "Retry after provider failure".into(),
-        new_run_id: "run-2".into(),
-    })
-}
-
 fn activate<S: gui::model::tasks::AgentRunSource>(state: &mut WorkbenchState<S>, id: &str) {
     let path = state.dock().find_tab(&PanelId::new(id)).expect("panel");
     state.dock_mut().set_active_tab(path).expect("activate");
@@ -94,24 +84,18 @@ fn capture<S: gui::model::tasks::AgentRunSource + 'static>(
 }
 
 #[test]
-fn agents_open_related_task_and_task_opens_each_retry_run() {
-    // A task keeps its identity across two attempts; only the current worker is listed.
+fn agents_open_related_task_and_task_opens_its_run() {
     let mut state = WorkbenchState::new(
-        DemoSource(vec![summary(2, "current-worker")]),
+        DemoSource(vec![summary(1, "current-worker")]),
         &UiSettings::default(),
     )
     .expect("workbench");
-    state = bind_runs(state, &["run-1", "run-2"]);
+    state = bind_runs(state, &["run-1"]);
     state.apply_events([
         progress(),
-        retry(),
         Event::new(MessageEvent::MessageDelta {
-            delta: "First attempt output".into(),
+            delta: "Task output".into(),
             run_id: Some("run-1".into()),
-        }),
-        Event::new(MessageEvent::MessageDelta {
-            delta: "Retry attempt output".into(),
-            run_id: Some("run-2".into()),
         }),
     ]);
     let mut workbench = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
@@ -122,8 +106,6 @@ fn agents_open_related_task_and_task_opens_each_retry_run() {
 
     workbench.click_label("Task: ship-ui");
     workbench.run();
-    assert!(workbench.has_label("retrying"));
-    assert!(workbench.has_label("retry 1"));
     assert!(workbench.has_label("artifacts/layout.png"));
     assert!(workbench.has_label("current-worker"));
     let task_tab = workbench
@@ -149,41 +131,16 @@ fn agents_open_related_task_and_task_opens_each_retry_run() {
     );
     capture(&mut workbench, "tasks");
 
-    // Both the previous attempt and the current attempt have separate logs.
-    for (run, output, other_output) in [
-        ("run-1", "First attempt output", "Retry attempt output"),
-        ("run-2", "Retry attempt output", "First attempt output"),
-    ] {
-        click_task_run(&mut workbench, run);
-        workbench.run();
-        assert!(
-            workbench
-                .state()
-                .dock()
-                .find_tab(&PanelId::new(format!("agent-{run}")))
-                .is_some()
-        );
-        assert!(workbench.has_label(output));
-        assert!(!workbench.has_label(other_output));
-    }
-}
-
-#[test]
-fn agents_keep_task_links_for_previous_attempts() {
-    let mut state = WorkbenchState::new(
-        DemoSource(vec![summary(1, "previous-worker")]),
-        &UiSettings::default(),
-    )
-    .expect("workbench");
-    state = bind_runs(state, &["run-1", "run-2"]);
-    state.apply_events([progress(), retry()]);
-    let mut workbench = HeadlessWorkbench::new(state, [1280.0, 900.0]);
+    click_task_run(&mut workbench, "run-1");
     workbench.run();
-    workbench.click_label("Task: ship-ui");
-    workbench.run();
-    assert!(workbench.has_label("retrying"));
-    assert!(workbench.has_label("retry 1"));
-    assert!(workbench.has_label("run-2"));
+    assert!(
+        workbench
+            .state()
+            .dock()
+            .find_tab(&PanelId::new("agent-run-1"))
+            .is_some()
+    );
+    assert!(workbench.has_label("Task output"));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, OrchestratorEvent, ToolEvent};
+use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, ToolEvent};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::model::composer::ProviderStatus;
@@ -210,124 +210,6 @@ fn past_subagents_remain_browsable_after_restart() {
     assert!(gui.has_label("agent one"));
     assert!(gui.has_label("run-2"));
     assert!(!gui.has_label("agent two"));
-}
-
-#[test]
-fn goal_children_and_continuation_replay_in_their_owning_conversation() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = StorageConfig {
-        db_path: dir.path().join("events.db"),
-        ..Default::default()
-    };
-    let storage = Storage::open(config.clone()).unwrap();
-    let mut original = state(dir.path(), &["one", "two"]);
-    original.switch_thread(ThreadId::new("two")).unwrap();
-    persist_and_apply(
-        &storage,
-        &mut original,
-        vec![
-            Event::new(OrchestratorEvent::GoalCreated {
-                goal_id: "goal".into(),
-                session_id: "gui".into(),
-                project_id: "project".into(),
-                thread_id: "one".into(),
-                root_run_id: "root".into(),
-                goal: "fix history".into(),
-                references: Vec::new(),
-                constraints: Vec::new(),
-                repo: "owner/repo".into(),
-                base_ref: "main".into(),
-            }),
-            started("root", None, "goal/orchestrator"),
-            delta("root", "initial reply"),
-            started("child", Some("root"), "investigator"),
-            delta("child", "child details"),
-            Event::new(LifecycleEvent::AgentRunStateChanged {
-                run_id: "child".into(),
-                from: AgentRunPhase::Running,
-                to: AgentRunPhase::Done,
-                reason: None,
-            }),
-            Event::new(LifecycleEvent::AgentRunStateChanged {
-                run_id: "root".into(),
-                from: AgentRunPhase::Running,
-                to: AgentRunPhase::Error,
-                reason: Some("provider failure".into()),
-            }),
-            Event::new(OrchestratorEvent::ContinuationDispatched {
-                goal_id: "goal".into(),
-                epoch: 1,
-                trigger_run_id: "root".into(),
-                new_run_id: "continuation".into(),
-                unmet: Vec::new(),
-            }),
-            started("continuation", Some("root"), "goal/c1"),
-            delta("continuation", "continued reply"),
-            started("follow-up", Some("continuation"), "chat:Orchestrator:one"),
-            delta("follow-up", "follow-up reply"),
-            delta("root", "late root reply"),
-            delta("continuation", "late continuation reply"),
-        ],
-    );
-    storage.close();
-    assert!(original.transcript().entries().is_empty());
-    original.switch_thread(ThreadId::new("one")).unwrap();
-    let expected = original.transcript().entries().to_vec();
-    let messages: Vec<_> = expected
-        .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::Message { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        messages,
-        ["initial reply", "continued reply", "follow-up reply"]
-    );
-    assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Notice { text } if text == "subagent investigator (child) completed")));
-    assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Error { text } if text == "Run failed: provider failure")));
-    assert!(
-        original
-            .dock()
-            .find_tab(&PanelId::new("agent-continuation"))
-            .is_none()
-    );
-
-    let path = dir.path().join("sidebar.json");
-    let saved_sidebar = workspace_ui::load_sidebar(&path).unwrap();
-    for has_run_index in [true, false] {
-        let mut sidebar = saved_sidebar.clone();
-        if !has_run_index {
-            for thread in &mut sidebar.threads {
-                thread.run_ids.clear();
-            }
-        }
-        let mut reopened = state(dir.path(), &["one", "two"]).with_sidebar(sidebar);
-        reopened
-            .restore_history(&Database::open(&config).unwrap())
-            .unwrap();
-        assert_eq!(
-            reopened.transcript().entries(),
-            expected,
-            "saved index={has_run_index}"
-        );
-        for run in ["root", "child", "continuation", "follow-up"] {
-            assert_eq!(
-                reopened.transcripts().run(run).unwrap().entries(),
-                original.transcripts().run(run).unwrap().entries(),
-                "run {run}"
-            );
-            assert!(
-                reopened
-                    .dock()
-                    .find_tab(&PanelId::new(format!("agent-{run}")))
-                    .is_none(),
-                "replay must not reopen panes"
-            );
-        }
-        reopened.switch_thread(ThreadId::new("two")).unwrap();
-        assert!(reopened.transcript().entries().is_empty());
-    }
 }
 
 #[test]
@@ -563,4 +445,47 @@ fn presented_artifacts_replay_as_the_same_card_after_restart() {
         .restore_history(&Database::open(&config).unwrap())
         .unwrap();
     assert_eq!(reopened.transcript().entries(), expected);
+}
+
+#[test]
+fn history_with_removed_supervisor_events_still_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut original = state(dir.path(), &["one"]);
+    persist_and_apply(
+        &storage,
+        &mut original,
+        vec![started("root", None, "chat:Orchestrator:one")],
+    );
+    rusqlite::Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "INSERT INTO events \
+             (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+             VALUES ('gui', ?1, 0, 0, 'Orchestrator', ?2)",
+            rusqlite::params![
+                event_bus::SCHEMA_VERSION,
+                r#"{"kind":"Orchestrator","payload":{"kind":"MergeStateChanged","payload":{"goal_id":"goal"}}}"#
+            ],
+        )
+        .unwrap();
+    persist_and_apply(&storage, &mut original, vec![delta("root", "kept reply")]);
+    storage.close();
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path(), &["one"]).with_sidebar(sidebar);
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    assert_eq!(
+        reopened.transcript().entries(),
+        original.transcript().entries()
+    );
+    assert!(reopened.transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Message { text, .. } if text == "kept reply"
+    )));
 }

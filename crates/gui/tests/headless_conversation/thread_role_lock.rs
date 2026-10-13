@@ -1,5 +1,5 @@
 use egui::{Key, Modifiers};
-use event_bus::{Event, LifecycleEvent, OrchestratorEvent};
+use event_bus::{Event, LifecycleEvent};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
@@ -149,31 +149,6 @@ fn root_chat_events_lock_original_role_without_overwriting_it() {
             assert_eq!(state.sidebar().threads[0].chat_role, Some(role));
         }
     }
-}
-
-#[test]
-fn goal_root_locks_only_its_thread_to_orchestrator() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut state = state(dir.path(), &UiSettings::default());
-    state.apply_events([Event::new(OrchestratorEvent::GoalCreated {
-        goal_id: "goal-1".into(),
-        session_id: "session".into(),
-        project_id: "role-lock".into(),
-        thread_id: "second".into(),
-        goal: "coordinate work".into(),
-        references: Vec::new(),
-        constraints: Vec::new(),
-        repo: "owner/repo".into(),
-        base_ref: "main".into(),
-        root_run_id: "run-1".into(),
-    })]);
-    assert!(!state.composer().role_locked);
-    state.switch_thread(ThreadId::new("second")).unwrap();
-    assert!(state.composer().role_locked);
-    state.composer_mut().toggle_role();
-    assert_eq!(state.composer().role, ComposerRole::Orchestrator);
-    state.switch_thread(ThreadId::new("first")).unwrap();
-    assert!(!state.composer().role_locked);
 }
 
 #[test]

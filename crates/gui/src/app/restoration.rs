@@ -60,37 +60,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .bind_thread_goal(snapshot, &thread.project_id.to_string());
             }
         }
-        if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-            thread_id,
-            project_id,
-            root_run_id,
-            goal_id,
-            ..
-        }) = &event.kind
-        {
-            // Persisted events identify a goal; only the current sidebar may
-            // authorize its project/thread binding. A deleted or moved thread
-            // must not recreate authority to the previous project's team store.
-            let Some(thread) = self.sidebar.threads.iter().find(|thread| {
-                thread.id.to_string() == *thread_id && thread.project_id.to_string() == *project_id
-            }) else {
-                return;
-            };
-            if !self
-                .sidebar
-                .projects
-                .iter()
-                .any(|project| project.id == thread.project_id)
-            {
-                return;
-            }
-            self.sink.bind_goal_context(
-                &thread.id.to_string(),
-                &thread.project_id.to_string(),
-                root_run_id,
-            );
-            self.sink.bind_goal_id(thread_id, goal_id);
-        }
     }
     pub(super) fn invalidate_restore_diagnostics(&mut self, event: &Event) {
         let run = match &event.kind {

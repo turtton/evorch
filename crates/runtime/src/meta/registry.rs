@@ -98,7 +98,7 @@ define_meta_ops! {
         compaction::compact(state, input).await
     },
     Finish => "finish" => specs::finish => |state, runtime, input| {
-        finish(state, runtime, input).await
+        finish(state, runtime, input)
     },
     Send => "send" => specs::send => |state, runtime, input| {
         messaging::send(state, runtime, input)
@@ -117,15 +117,6 @@ define_meta_ops! {
     },
     LedgerRead => "ledger_read" => specs::ledger_read => |state, runtime, input| {
         ledger::read(state, runtime, input)
-    },
-    SubmitReview => "submit_review" => specs::submit_review => |state, runtime, input| {
-        match parse(input) {
-            Ok(result) => {
-                runtime.submit_review(state.caller_run_id(), result);
-                success("review submitted")
-            }
-            Err(message) => error(message),
-        }
     },
     AskUser => "ask_user" => specs::ask_user => |state, runtime, input| {
         questions::ask_user(state, runtime, input)

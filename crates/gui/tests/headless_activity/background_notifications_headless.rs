@@ -11,8 +11,7 @@ use gui::model::{
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, AgentSummary, FixtureDeliveryAdapter,
-    GoalSupervisor, OrchestrationSettings, Role, RunId, RuntimeError,
+    AgentInvocationContext, AgentModel, AgentRuntime, AgentSummary, Role, RunId, RuntimeError,
 };
 use tools::ToolExecutor;
 use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
@@ -219,15 +218,7 @@ fn background_run_then_completion_notification_end_to_end() {
         Arc::new(ToolExecutor::new(bus.clone())),
         Arc::new(PendingModel),
     );
-    let supervisor = rt.block_on(async {
-        GoalSupervisor::spawn(
-            runtime.clone(),
-            bus,
-            Arc::new(FixtureDeliveryAdapter::default()),
-            OrchestrationSettings::default(),
-        )
-    });
-    let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+    let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("demo");
     let thread = ThreadId::new("thread-1");

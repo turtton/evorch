@@ -1,10 +1,23 @@
 use super::*;
 use crate::AgentRuntime;
-use crate::orchestration::{GoalGate, gate::GateVerdict};
-use std::future::Future;
-use std::pin::Pin;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct BlockedModel;
+#[derive(Default)]
+struct BlockedModel {
+    // Spawn admission is the synchronous seam between two delegate spawns of a wave.
+    interrupt_after_first_child: Mutex<Option<(watch::Sender<RunInterrupt>, RunInterrupt)>>,
+    spawns: AtomicUsize,
+}
+
+impl BlockedModel {
+    fn interrupting(sender: watch::Sender<RunInterrupt>, interrupt: RunInterrupt) -> Self {
+        Self {
+            interrupt_after_first_child: Mutex::new(Some((sender, interrupt))),
+            spawns: AtomicUsize::new(0),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl AgentModel for BlockedModel {
@@ -21,29 +34,35 @@ impl AgentModel for BlockedModel {
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "blocked".into()
     }
-}
 
-struct InterruptOnAttach(watch::Sender<RunInterrupt>, RunInterrupt);
-
-impl GoalGate for InterruptOnAttach {
-    fn attach_child(&self, _: RunId, _: RunId, _: Role) {
-        self.0.send_replace(self.1);
-    }
-
-    fn evaluate_finish<'a>(
-        &'a self,
-        _: RunId,
-    ) -> Pin<Box<dyn Future<Output = Option<GateVerdict>> + Send + 'a>> {
-        Box::pin(async { None })
+    fn requires_admission(&self) -> bool {
+        // The fixture parent is the first spawn; the first delegated child is the second.
+        if self.spawns.fetch_add(1, Ordering::SeqCst) == 1
+            && let Some((sender, interrupt)) = self
+                .interrupt_after_first_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        {
+            sender.send_replace(interrupt);
+        }
+        false
     }
 }
 
 fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState) {
+    fixture_with_model(cancel_rx, BlockedModel::default())
+}
+
+fn fixture_with_model(
+    cancel_rx: watch::Receiver<RunInterrupt>,
+    model: BlockedModel,
+) -> (AgentRuntime, LoopState) {
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
-        Arc::new(BlockedModel),
+        Arc::new(model),
     );
     let parent =
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
@@ -105,14 +124,16 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
 
 #[tokio::test]
 async fn cancellation_between_delegate_spawns_drains_first_child() {
-    // Given: the synchronous attach callback cancels after the first spawn, before the second check.
+    // Given: spawn admission cancels after the first child spawn, before the second check.
     let (cancel, cancel_rx) = watch::channel(RunInterrupt::None);
-    let (runtime, mut state) = fixture(cancel_rx);
-    let runtime = runtime.with_goal_gate(Arc::new(InterruptOnAttach(cancel, RunInterrupt::Cancel)));
+    let (runtime, mut state) = fixture_with_model(
+        cancel_rx,
+        BlockedModel::interrupting(cancel, RunInterrupt::Cancel),
+    );
     state
         .transition(AgentRunPhase::Running, None)
         .expect("running");
-    // When: execute a two-delegate wave without yielding at the attach seam.
+    // When: execute a two-delegate wave without yielding between the spawns.
     assert!(
         !state
             .execute_tools(
@@ -129,7 +150,7 @@ async fn cancellation_between_delegate_spawns_drains_first_child() {
                     ),
                 ],
                 &crate::AgentInvocationContext::default(),
-                &BlockedModel
+                &BlockedModel::default()
             )
             .await
     );
@@ -208,9 +229,10 @@ async fn rejected_waiting_transition_drains_all_spawned_children() {
 #[tokio::test]
 async fn stop_between_delegate_spawns_preserves_first_child_and_defers_terminal_publication() {
     let (interrupt, interrupt_rx) = watch::channel(RunInterrupt::None);
-    let (runtime, mut state) = fixture(interrupt_rx);
-    let runtime =
-        runtime.with_goal_gate(Arc::new(InterruptOnAttach(interrupt, RunInterrupt::Stop)));
+    let (runtime, mut state) = fixture_with_model(
+        interrupt_rx,
+        BlockedModel::interrupting(interrupt, RunInterrupt::Stop),
+    );
     state.transition(AgentRunPhase::Running, None).unwrap();
     assert!(
         !state
@@ -228,7 +250,7 @@ async fn stop_between_delegate_spawns_preserves_first_child_and_defers_terminal_
                     ),
                 ],
                 &crate::AgentInvocationContext::default(),
-                &BlockedModel
+                &BlockedModel::default()
             )
             .await
     );

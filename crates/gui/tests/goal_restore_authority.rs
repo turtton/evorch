@@ -1,14 +1,12 @@
-use event_bus::{
-    AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent, OrchestratorEvent,
-};
+use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
 use gui::{
     model::commands::{ChatSubmission, CommandSink, GoalSubmission, LoopEvent, WorkbenchCommand},
     runtime_sink::RuntimeCommandSink,
 };
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
 use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunConfig, RunId, RunStore, RuntimeError,
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RunStore,
+    RuntimeError,
 };
 use std::sync::{Arc, Mutex};
 
@@ -52,11 +50,10 @@ struct Fixture {
     rt: tokio::runtime::Runtime,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
 }
-#[path = "support/legacy_goal.rs"]
-mod legacy_goal;
+#[path = "support/bound_root.rs"]
+mod bound_root;
 
 struct World {
-    supervisor: runtime::SupervisorHandle,
     runtime: AgentRuntime,
     sink: RuntimeCommandSink,
     events: EventReceiver,
@@ -91,26 +88,10 @@ impl Fixture {
         )
         .with_sequential_run_ids()
         .with_run_store(RunStore::open(&self.config, self.storage.handle()).unwrap());
-        let supervisor = self.rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings {
-                    max_continuations: 0,
-                    ..Default::default()
-                },
-            )
-        });
-        let sink = RuntimeCommandSink::new(
-            runtime.clone(),
-            self.rt.handle().clone(),
-            supervisor.clone(),
-        )
-        .with_memory_storage(self.config.clone())
-        .with_team_writer(self.storage.handle());
+        let sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone())
+            .with_memory_storage(self.config.clone())
+            .with_team_writer(self.storage.handle());
         World {
-            supervisor,
             runtime,
             sink,
             events,
@@ -132,9 +113,8 @@ impl Fixture {
         config.memory =
             Some(runtime::memory::MemoryBoundary::capture(&self.config, "project").unwrap());
         let _guard = self.rt.enter();
-        legacy_goal::start(
+        let root = bound_root::start(
             &world.runtime,
-            &world.supervisor,
             &mut world.sink,
             GoalSubmission {
                 project_root: None,
@@ -153,22 +133,15 @@ impl Fixture {
             config,
         );
         self.rt.block_on(async {
-            {
-                let mut root = None;
-                loop {
-                    let event = world.events.recv().await.unwrap();
-                    match event.kind {
-                        EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                            root_run_id,
-                            ..
-                        }) => root = Some(root_run_id),
-                        EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                            run_id,
-                            to: AgentRunPhase::Done,
-                            ..
-                        }) if root.as_ref() == Some(&run_id) => return parse(&run_id),
-                        _ => {}
-                    }
+            loop {
+                if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id,
+                    to: AgentRunPhase::Done,
+                    ..
+                }) = world.events.recv().await.unwrap().kind
+                    && run_id == root.to_string()
+                {
+                    return root;
                 }
             }
         })

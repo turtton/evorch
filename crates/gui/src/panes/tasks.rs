@@ -178,7 +178,6 @@ fn stored_row(task: TaskRecord) -> DurableTaskRow {
         // parent_run_id identifies the parent, not the assigned execution.
         run_id: None,
         run_ids: Vec::new(),
-        goal_id: None,
         status: task.status,
         attempt: task.attempts,
         last_artifact: task.last_artifact,

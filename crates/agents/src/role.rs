@@ -137,9 +137,7 @@ impl Role {
                 ],
                 false,
             ),
-            Role::Reviewer => {
-                RoleCapabilities::new(["read", "grep", "git_diff", "submit_review"], false)
-            }
+            Role::Reviewer => RoleCapabilities::new(["read", "grep", "git_diff"], false),
             Role::WebResearcher => {
                 RoleCapabilities::new(["read", "grep", "web_search", "web_fetch"], false)
             }

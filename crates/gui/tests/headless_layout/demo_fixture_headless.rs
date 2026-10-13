@@ -16,21 +16,11 @@ fn demo_fixture_populates_sidebar_conversation_and_agents() {
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
 
-    // Then: every project's threads, the thread transcript, and merge state render.
+    // Then: every project's threads, the thread transcript render.
     assert!(workbench.has_label("Thread: Refine GUI design system"));
     assert!(workbench.has_label("Queue seed CLI"));
     assert!(
         workbench.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
-    );
-    assert_eq!(
-        workbench
-            .state()
-            .merge()
-            .view
-            .pr
-            .as_ref()
-            .map(|pr| pr.number),
-        Some(81)
     );
     assert_eq!(
         workbench.state().thread_phases().get("run-1"),

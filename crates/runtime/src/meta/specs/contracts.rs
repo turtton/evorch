@@ -107,17 +107,6 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         }),
     );
     contract::<meta::ledger::AppendArgs>("ledger_append", json!({"body":"checkpoint"}));
-    contract::<crate::orchestration::review::ReviewResult>(
-        "submit_review",
-        json!({
-            "verdict":"request-update", "findings":["missing test"], "criteria":[{
-                "id":"AC1", "status":"unmet", "note":"test fails", "evidence":{
-                    "command":"cargo test", "exit_status":1, "target_sha":"abc", "diff_ref":null,
-                    "artifact_path":"/var/tmp/test.log", "red_evidence":"failure output"
-                }
-            }]
-        }),
-    );
     for name in [
         "list_agents",
         "inbox",
@@ -130,19 +119,8 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
 }
 
 #[test]
-fn reply_requires_correlation_and_review_evidence_is_typed() {
+fn reply_requires_correlation() {
     let send = jsonschema::validator_for(&tool_spec("send").input_schema).unwrap();
     assert!(send.is_valid(&json!({"run_id":"run-2", "message":"hello"})));
     assert!(!send.is_valid(&json!({"run_id":"run-2", "message":"answer", "kind":"reply"})));
-    let review = jsonschema::validator_for(&tool_spec("submit_review").input_schema).unwrap();
-    for evidence in [
-        json!({"command":"test", "exit_status":"0", "target_sha":"abc"}),
-        json!({"command":"test", "exit_status":0}),
-    ] {
-        let input = json!({"verdict":"approve", "criteria":[{"id":"AC1","status":"met","note":"ok","evidence":evidence}]});
-        assert!(!review.is_valid(&input));
-        assert!(
-            serde_json::from_value::<crate::orchestration::review::ReviewResult>(input).is_err()
-        );
-    }
 }

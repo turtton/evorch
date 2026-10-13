@@ -243,7 +243,7 @@ async fn stop_cancels_pending_admission_for_self_and_subtree() {
         let root =
             runtime.delegate_background(Role::Orchestrator, "root".into(), RunConfig::default());
         let pending = runtime.reserve_child_run_id(root).unwrap();
-        runtime.track_goal_run(pending, &root.to_string());
+        runtime.seed_spawn_intent(pending, &root.to_string());
         runtime.admit_run(
             pending,
             Some(root),
