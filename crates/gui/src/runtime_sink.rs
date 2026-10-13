@@ -264,6 +264,11 @@ impl CommandSink for RuntimeCommandSink {
         );
     }
 
+    fn set_project_allowed_directories(&mut self, root: PathBuf, directories: Vec<PathBuf>) {
+        self.runtime
+            .set_project_allowed_directories(root, directories);
+    }
+
     fn start_background_run(&self, text: String) -> Option<RunId> {
         Some(RuntimeCommandSink::start_background_run(self, text))
     }

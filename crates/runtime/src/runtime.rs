@@ -111,6 +111,8 @@ pub(crate) struct Shared {
     pub(crate) project_slugs: OnceLock<project::ProjectSlugResolver>,
     /// Trust the host declared per project root; undeclared roots keep the shared rules' trust.
     pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
+    /// Allowed directories per canonical project root; runs hold the same live list.
+    pub(crate) allowed_directories: Mutex<HashMap<PathBuf, sandbox::LivePaths>>,
     next_message_id: AtomicU64,
     next_reference_token: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
@@ -137,6 +139,8 @@ pub struct WorkspaceMounts {
     pub rw_binds: Vec<PathBuf>,
     /// shell の `TMPDIR`。`None` なら sandbox ごとの一時領域を使う。
     pub scratch: Option<PathBuf>,
+    /// The project's allowed directories, read again on every command, with this run's access.
+    pub allowed: Option<sandbox::AllowedRegions>,
 }
 
 impl WorkspaceMounts {
@@ -147,6 +151,7 @@ impl WorkspaceMounts {
             ro_binds: Vec::new(),
             rw_binds: Vec::new(),
             scratch: None,
+            allowed: None,
         }
     }
 }
@@ -473,6 +478,7 @@ impl AgentRuntime {
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 project_trust: Mutex::new(HashMap::new()),
+                allowed_directories: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
@@ -753,6 +759,7 @@ impl AgentRuntime {
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 project_trust: Mutex::new(HashMap::new()),
+                allowed_directories: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),

@@ -38,31 +38,23 @@ fn sidebar_json_roundtrip() {
 }
 
 #[test]
-fn load_rejects_unknown_project_ref_duplicate_thread_and_invalid_trust_path() {
+fn load_rejects_unknown_project_ref_duplicate_thread_and_relative_trust_path() {
     // Given: independently malformed sidebar states.
     let valid = valid_sidebar();
     let mut unknown = valid.clone();
     unknown.threads[0].project_id = ProjectId::new("missing");
     let mut duplicate = valid.clone();
     duplicate.threads.push(duplicate.threads[0].clone());
-    let mut relative = valid.clone();
+    let mut relative = valid;
     relative.projects[0]
         .allowed_directories
         .push(AllowedDirectory {
             path: "relative".into(),
             trust: TrustState::Approved,
         });
-    let mut missing = valid;
-    let missing_path = missing.projects[0].repo_root.join("missing");
-    missing.projects[0]
-        .allowed_directories
-        .push(AllowedDirectory {
-            path: missing_path,
-            trust: TrustState::Unapproved,
-        });
 
     // When: malformed JSON crosses the public load boundary.
-    let results = [unknown, duplicate, relative, missing].map(|state| {
+    let results = [unknown, duplicate, relative].map(|state| {
         let json = serde_json::to_string(&state).expect("fixture must serialize");
         sidebar_from_json(&json)
     });
@@ -74,10 +66,45 @@ fn load_rejects_unknown_project_ref_duplicate_thread_and_invalid_trust_path() {
         results[2],
         Err(SidebarError::Project(ProjectError::NotAbsolute))
     );
-    assert!(matches!(
-        &results[3],
-        Err(SidebarError::Project(ProjectError::Canonicalize(_)))
-    ));
+}
+
+#[test]
+fn load_keeps_allowed_directories_that_no_longer_exist() {
+    // Given: a saved approved directory that was deleted, and one stored inside the project.
+    let mut sidebar = valid_sidebar();
+    let directory = tempdir().expect("temporary directory must be created");
+    let gone = directory
+        .path()
+        .canonicalize()
+        .expect("temporary directory canonicalizes")
+        .join("deleted-checkout");
+    sidebar.projects[0]
+        .allowed_directories
+        .push(AllowedDirectory {
+            path: gone.clone(),
+            trust: TrustState::Approved,
+        });
+    let json = serde_json::to_string(&sidebar).expect("fixture must serialize");
+    let mut inside = sidebar.clone();
+    inside.projects[0].allowed_directories[0].path = inside.projects[0].repo_root.join("gone");
+    let inside = serde_json::to_string(&inside).expect("fixture must serialize");
+
+    // When: both cross the public load boundary.
+    let loaded = sidebar_from_json(&json).expect("a missing directory must not block loading");
+    let nested = sidebar_from_json(&inside);
+
+    // Then: the record and its trust are kept, and placement rules still hold lexically.
+    assert_eq!(
+        loaded.projects[0].allowed_directories,
+        [AllowedDirectory {
+            path: gone,
+            trust: TrustState::Approved,
+        }]
+    );
+    assert_eq!(
+        nested,
+        Err(SidebarError::Project(ProjectError::NestedInProjectRoot))
+    );
 }
 
 #[test]

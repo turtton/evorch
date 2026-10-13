@@ -8,7 +8,10 @@ use std::{
     process::{Command, Output},
 };
 
-use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, Sandbox, WrappedCommand};
+use sandbox::{
+    BwrapConfig, BwrapSandbox, CommandSpec, LivePaths, PathAccess, Sandbox, SandboxBoundary,
+    WrappedCommand,
+};
 use tempfile::{TempDir, tempdir, tempdir_in};
 
 fn workspace() -> TempDir {
@@ -331,4 +334,77 @@ fn cargo_builds_cached_dependency_offline_inside_sandbox() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"offline build ok\n");
+}
+
+fn sh(sandbox: &BwrapSandbox, script: &str) -> Output {
+    run(sandbox
+        .wrap(CommandSpec {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            cwd: None,
+            extra_env: Vec::new(),
+        })
+        .expect("コマンドを包めるはずです"))
+}
+
+// Given: allowed directories under the host's /tmp, declared to one read-only and one
+// read-write sandbox / When: commands run before and after the declaration changes /
+// Then: read-only allows reads but not writes, read-write allows both, and a removed
+// directory or one that no longer exists is not visible and does not fail the command
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn allowed_directories_follow_access_and_the_current_declaration() {
+    let workspace = workspace();
+    let allowed_dir = tempdir().unwrap();
+    let allowed = allowed_dir.path().canonicalize().unwrap();
+    fs::write(allowed.join("reference.txt"), "allowed-reference").unwrap();
+    let missing = allowed.join("deleted-later");
+    fs::create_dir(&missing).unwrap();
+    let paths = LivePaths::new(vec![allowed.clone(), missing.clone()]);
+    fs::remove_dir(&missing).unwrap();
+    let sandbox = |access| {
+        BwrapSandbox::detect(BwrapConfig::from_boundary(
+            SandboxBoundary::new(workspace.path().to_path_buf())
+                .with_allowed(paths.clone(), access),
+        ))
+        .expect("bwrap 実行環境が必要です")
+    };
+    let read_only = sandbox(PathAccess::ReadOnly);
+    let read_write = sandbox(PathAccess::ReadWrite);
+    let reference = allowed.join("reference.txt");
+
+    let read = sh(&read_only, &format!("cat '{}'", reference.display()));
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&read.stdout), "allowed-reference");
+    let denied = sh(
+        &read_only,
+        &format!("printf ro > '{}'", allowed.join("ro.txt").display()),
+    );
+    assert!(!denied.status.success());
+    assert!(!allowed.join("ro.txt").exists());
+    let written = sh(
+        &read_write,
+        &format!("printf rw > '{}'", allowed.join("rw.txt").display()),
+    );
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    assert_eq!(fs::read_to_string(allowed.join("rw.txt")).unwrap(), "rw");
+
+    paths.set(Vec::new());
+
+    for sandbox in [&read_only, &read_write] {
+        let hidden = sh(sandbox, &format!("test ! -e '{}'", reference.display()));
+        assert!(
+            hidden.status.success(),
+            "{}",
+            String::from_utf8_lossy(&hidden.stderr)
+        );
+    }
 }

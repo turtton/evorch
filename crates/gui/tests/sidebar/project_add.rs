@@ -403,3 +403,114 @@ fn capture_project_review() {
         .save_png(std::path::Path::new("/tmp/opencode/project-review.png"))
         .expect("save");
 }
+
+type Declarations = Arc<std::sync::Mutex<Vec<(PathBuf, Vec<PathBuf>)>>>;
+
+#[derive(Clone, Default)]
+struct AllowedSink(Declarations);
+
+impl gui::model::commands::CommandSink for AllowedSink {
+    fn set_project_allowed_directories(&mut self, root: PathBuf, directories: Vec<PathBuf>) {
+        self.0
+            .lock()
+            .expect("declared directories")
+            .push((root, directories));
+    }
+
+    fn submit(
+        &mut self,
+        _: gui::model::commands::WorkbenchCommand,
+    ) -> Vec<gui::model::commands::LoopEvent> {
+        Vec::new()
+    }
+}
+
+fn nth_button(
+    harness: &mut Harness<'static, WorkbenchState<MockSource>>,
+    label: &str,
+    index: usize,
+) {
+    harness
+        .get_all_by_label(label)
+        .nth(index)
+        .unwrap_or_else(|| panic!("button {label} #{index}"))
+        .click();
+    harness.run_steps(4);
+}
+
+#[test]
+fn allowed_directory_changes_declare_only_trusted_directories_that_exist() {
+    // Given: a project with a trusted, an untrusted and a trusted-but-deleted directory.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo = temp.path().join("repo");
+    let [shared, pending, gone, extra] =
+        ["shared", "pending", "gone", "extra"].map(|name| temp.path().join(name));
+    for path in [&repo, &shared, &pending, &gone, &extra] {
+        std::fs::create_dir_all(path).expect("directory");
+    }
+    let mut sidebar = sidebar_with_project(&repo);
+    let id = ProjectId::new("demo");
+    for (path, trust) in [
+        (&shared, TrustState::Approved),
+        (&pending, TrustState::Unapproved),
+        (&gone, TrustState::Approved),
+    ] {
+        sidebar
+            .add_allowed_directory(&id, path, trust)
+            .expect("allowed directory");
+    }
+    let canonical = |path: &PathBuf| path.canonicalize().expect("canonical");
+    let (root, shared, pending, gone, extra) = (
+        canonical(&repo),
+        canonical(&shared),
+        canonical(&pending),
+        canonical(&gone),
+        canonical(&extra),
+    );
+    std::fs::remove_dir(&gone).expect("remove");
+    let save = temp.path().join("sidebar.json");
+    let sink = AllowedSink::default();
+    let workbench = state(MockSource::default(), sidebar)
+        .with_sidebar_path(save.clone())
+        .with_command_sink(Box::new(sink.clone()));
+    let mut harness = typing_harness(workbench);
+    harness.run_steps(4);
+
+    // When: a directory is added, the untrusted one trusted, the first untrusted and the
+    //       second removed from the project settings.
+    click(&mut harness, "Project settings");
+    type_into(&mut harness, DIRECTORY_LABEL, &extra.display().to_string());
+    click(&mut harness, "Add directory");
+    click(&mut harness, "Trust");
+    nth_button(&mut harness, "Untrust", 0);
+    nth_button(&mut harness, "Remove", 1);
+
+    // Then: each change re-declares the trusted directories that exist, and nothing else.
+    assert_eq!(
+        *sink.0.lock().expect("declared directories"),
+        [
+            (root.clone(), vec![shared.clone(), extra.clone()]),
+            (
+                root.clone(),
+                vec![shared.clone(), pending.clone(), extra.clone()]
+            ),
+            (root.clone(), vec![pending, extra.clone()]),
+            (root, vec![extra.clone()]),
+        ]
+    );
+
+    // Then: the deleted directory keeps its record, so the saved sidebar still loads.
+    let saved = workspace_ui::load_sidebar(&save).expect("saved sidebar");
+    assert_eq!(
+        saved.projects[0]
+            .allowed_directories
+            .iter()
+            .map(|directory| (directory.path.clone(), directory.trust))
+            .collect::<Vec<_>>(),
+        [
+            (shared, TrustState::Unapproved),
+            (gone, TrustState::Approved),
+            (extra, TrustState::Approved),
+        ]
+    );
+}

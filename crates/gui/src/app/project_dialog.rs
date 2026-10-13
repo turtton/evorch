@@ -123,6 +123,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             } => self
                 .set_allowed_trust(&project, path, trust)
                 .map_err(error_text),
+            ProjectDialogAction::RemoveDirectory { project, path } => self
+                .remove_allowed_directory(&project, path)
+                .map_err(error_text),
             ProjectDialogAction::Close => {
                 self.project_dialog = ProjectDialog::Closed;
                 Ok(())

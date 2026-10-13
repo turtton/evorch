@@ -25,6 +25,34 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .insert(project.repo_root.clone(), project.trust);
             }
         }
+        self.sync_project_allowed_directories();
+    }
+
+    /// Declares each project's approved allowed directories that still exist.
+    /// Missing ones keep their saved record and are left out until they return.
+    pub(super) fn sync_project_allowed_directories(&mut self) {
+        for project in &self.sidebar.projects {
+            let (present, missing): (Vec<_>, Vec<_>) = project
+                .allowed_directories
+                .iter()
+                .filter(|directory| directory.trust == TrustState::Approved)
+                .map(|directory| directory.path.clone())
+                .partition(|path| path.is_dir());
+            if self.declared_allowed.get(&project.repo_root) == Some(&present) {
+                continue;
+            }
+            for path in &missing {
+                tracing::warn!(
+                    project = %project.repo_root.display(),
+                    directory = %path.display(),
+                    "allowed directory no longer exists; not declared"
+                );
+            }
+            self.sink
+                .set_project_allowed_directories(project.repo_root.clone(), present.clone());
+            self.declared_allowed
+                .insert(project.repo_root.clone(), present);
+        }
     }
 
     pub fn set_project_trust(
@@ -88,6 +116,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.sidebar
             .add_allowed_directory(project_id, &path, TrustState::Approved)?;
         self.save_sidebar();
+        self.sync_project_allowed_directories();
         Ok(())
     }
 
@@ -110,6 +139,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.sidebar
             .set_allowed_trust(project_id, path.as_ref(), trust)?;
         self.save_sidebar();
+        self.sync_project_allowed_directories();
+        Ok(())
+    }
+
+    pub fn remove_allowed_directory(
+        &mut self,
+        project_id: &ProjectId,
+        path: impl AsRef<Path>,
+    ) -> Result<(), WorkbenchError> {
+        self.sidebar
+            .remove_allowed_directory(project_id, path.as_ref())?;
+        self.save_sidebar();
+        self.sync_project_allowed_directories();
         Ok(())
     }
 

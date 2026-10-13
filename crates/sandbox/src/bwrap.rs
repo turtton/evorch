@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    boundary::SandboxBoundary,
+    boundary::{PathAccess, SandboxBoundary},
     error::SandboxError,
     exec::{CommandSpec, Sandbox, WrappedCommand, merge_environment},
 };
@@ -143,12 +143,30 @@ impl BwrapSandbox {
         if self.config.isolate_processes {
             args.push("--unshare-pid".to_owned());
         }
-        // The same directory at its host path lets file tools and unsandboxed
-        // shells resolve `$TMPDIR` paths; `/tmp` serves programs that hardcode it.
+        // Same order as `SandboxBoundary::regions`: a later mount wins.
+        let boundary = &self.config.boundary;
+        for path in &boundary.system {
+            let path = path.to_string_lossy().into_owned();
+            args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
+        }
+        // `/tmp` serves programs that hardcode it. It is not a host path, so it
+        // goes before allowed directories that may live under the host's `/tmp`.
         let scratch = self.scratch.to_string_lossy().into_owned();
         args.extend(["--bind".to_owned(), scratch.clone(), "/tmp".to_owned()]);
+        if let Some(allowed) = boundary.allowed() {
+            // `-try` keeps a directory removed after its declaration from failing the command.
+            let flag = match allowed.access {
+                PathAccess::ReadOnly => "--ro-bind-try",
+                PathAccess::ReadWrite => "--bind-try",
+            };
+            for path in allowed.paths.get().iter() {
+                let path = path.to_string_lossy().into_owned();
+                args.extend([flag.to_owned(), path.clone(), path]);
+            }
+        }
+        // The same directory at its host path lets file tools and unsandboxed
+        // shells resolve `$TMPDIR` paths.
         args.extend(["--bind".to_owned(), scratch.clone(), scratch]);
-        let boundary = &self.config.boundary;
         for path in &boundary.read_only {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
@@ -279,7 +297,7 @@ fn locate_bwrap() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boundary::DEFAULT_RO_BINDS;
+    use crate::boundary::{DEFAULT_RO_BINDS, LivePaths};
 
     fn sandbox(config: BwrapConfig) -> BwrapSandbox {
         let owned = Arc::new(crate::scratch::Scratch::new().unwrap());
@@ -289,6 +307,13 @@ mod tests {
             scratch: owned.path().to_path_buf(),
             _owned_scratch: Some(owned),
         }
+    }
+
+    fn is_mount(flag: &str) -> bool {
+        matches!(
+            flag,
+            "--bind" | "--bind-try" | "--ro-bind" | "--ro-bind-try"
+        )
     }
 
     fn spec(cwd: Option<PathBuf>) -> CommandSpec {
@@ -513,7 +538,7 @@ mod tests {
         let argv = sandbox.build_argv(&spec(None));
         let mounts = argv
             .windows(3)
-            .filter(|args| matches!(args[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try"))
+            .filter(|args| is_mount(&args[0]))
             .map(|args| (args[0].clone(), args[1].clone(), args[2].clone()))
             .collect::<Vec<_>>();
         for region in &regions {
@@ -521,8 +546,8 @@ mod tests {
             let mounted = mounts.iter().any(|(flag, source, _)| {
                 *source == host
                     && match region.access {
-                        crate::PathAccess::ReadWrite => flag == "--bind",
-                        crate::PathAccess::ReadOnly => flag != "--bind",
+                        crate::PathAccess::ReadWrite => flag.starts_with("--bind"),
+                        crate::PathAccess::ReadOnly => flag.starts_with("--ro-bind"),
                     }
             });
             let missing_cache = !region.path.exists() && region.path.starts_with(cache.path());
@@ -638,5 +663,112 @@ mod tests {
                 .env
                 .contains(&("HOME".to_owned(), "/tmp/home".to_owned()))
         );
+    }
+
+    // Given: a sandbox whose allowed directories are declared after it was built
+    // When: the declaration changes between two commands
+    // Then: each command mounts the list current at that moment, with the run's access
+    #[test]
+    fn allowed_directories_follow_the_live_list_between_commands() {
+        let allowed = LivePaths::new(vec![PathBuf::from("/srv/first")]);
+        let read_only = sandbox(BwrapConfig::from_boundary(
+            SandboxBoundary::new(PathBuf::from("/workspace"))
+                .with_allowed(allowed.clone(), PathAccess::ReadOnly),
+        ));
+        let writable = sandbox(BwrapConfig::from_boundary(
+            SandboxBoundary::new(PathBuf::from("/workspace"))
+                .with_allowed(allowed.clone(), PathAccess::ReadWrite),
+        ));
+        let mounted = |sandbox: &BwrapSandbox, flag: &str, path: &str| {
+            sandbox
+                .build_argv(&spec(None))
+                .windows(3)
+                .any(|args| args == [flag, path, path])
+        };
+        assert!(mounted(&read_only, "--ro-bind-try", "/srv/first"));
+        assert!(mounted(&writable, "--bind-try", "/srv/first"));
+
+        allowed.set(vec![PathBuf::from("/srv/second")]);
+
+        for (sandbox, flag) in [(&read_only, "--ro-bind-try"), (&writable, "--bind-try")] {
+            assert!(mounted(sandbox, flag, "/srv/second"));
+            assert!(
+                !sandbox
+                    .build_argv(&spec(None))
+                    .iter()
+                    .any(|arg| arg == "/srv/first")
+            );
+        }
+        let networked = read_only
+            .with_network_access()
+            .unwrap()
+            .wrap(spec(None))
+            .unwrap();
+        assert!(
+            networked
+                .args
+                .windows(3)
+                .any(|args| args == ["--ro-bind-try", "/srv/second", "/srv/second"])
+        );
+    }
+
+    // Given: a boundary with every region kind, including an allowed parent directory
+    // When: building bwrap argv
+    // Then: host-path mounts follow `regions()` order, the `/tmp` alias precedes allowed
+    // directories, and the scratch, output, caches and project root come after them
+    #[test]
+    fn argv_mounts_host_paths_in_region_order() {
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cache.path().join("registry/src")).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut boundary = SandboxBoundary::new(PathBuf::from("/var/project"))
+            .with_allowed(
+                LivePaths::new(vec![PathBuf::from("/var"), PathBuf::from("/tmp/notes")]),
+                PathAccess::ReadOnly,
+            )
+            .cargo_cache(cache.path())
+            .read_only("/var/tmp/out")
+            .read_write("/opt/writable")
+            .with_scratch(scratch.path());
+        boundary.rustup_home = None;
+        let regions = boundary
+            .regions()
+            .into_iter()
+            .filter(|region| region.path.exists() || !region.path.starts_with(cache.path()))
+            .map(|region| region.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let sandbox = BwrapSandbox {
+            program: PathBuf::from("bwrap"),
+            scratch: scratch.path().to_path_buf(),
+            _owned_scratch: None,
+            config: BwrapConfig::from_boundary(boundary),
+        };
+        let argv = sandbox.build_argv(&spec(None));
+        let mounts = argv
+            .windows(3)
+            .filter(|args| is_mount(&args[0]))
+            .collect::<Vec<_>>();
+        let host_paths = mounts
+            .iter()
+            .filter(|args| args[2] != "/tmp")
+            .map(|args| args[1].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(host_paths, regions);
+        let position = |destination: &str| {
+            mounts
+                .iter()
+                .position(|args| args[2] == destination)
+                .unwrap_or_else(|| panic!("{destination} is not mounted: {argv:?}"))
+        };
+        let scratch = scratch.path().to_string_lossy().into_owned();
+        assert!(position("/tmp") < position("/tmp/notes"));
+        for later in [
+            scratch.as_str(),
+            "/var/tmp/out",
+            "/opt/writable",
+            "/var/project",
+        ] {
+            assert!(position("/var") < position(later), "{later}");
+        }
     }
 }

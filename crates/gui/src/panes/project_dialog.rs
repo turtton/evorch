@@ -51,6 +51,10 @@ pub enum ProjectDialogAction {
         path: PathBuf,
         trust: TrustState,
     },
+    RemoveDirectory {
+        project: ProjectId,
+        path: PathBuf,
+    },
     Close,
 }
 
@@ -316,18 +320,28 @@ fn project_settings(
         ui.push_id(&directory.path, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Remove").clicked() {
+                        *action = Some(ProjectDialogAction::RemoveDirectory {
+                            project: project.id.clone(),
+                            path: directory.path.clone(),
+                        });
+                    }
+                    let (toggle, trust) = match directory.trust {
+                        TrustState::Approved => ("Untrust", TrustState::Unapproved),
+                        TrustState::Unapproved => ("Trust", TrustState::Approved),
+                    };
+                    if ui.button(toggle).clicked() {
+                        *action = Some(ProjectDialogAction::SetTrust {
+                            project: project.id.clone(),
+                            path: directory.path.clone(),
+                            trust,
+                        });
+                    }
                     match directory.trust {
                         TrustState::Approved => {
                             badge(ui, "trusted", palette().TEXT_MUTED, palette().SURFACE);
                         }
                         TrustState::Unapproved => {
-                            if ui.button("Trust").clicked() {
-                                *action = Some(ProjectDialogAction::SetTrust {
-                                    project: project.id.clone(),
-                                    path: directory.path.clone(),
-                                    trust: TrustState::Approved,
-                                });
-                            }
                             badge(ui, "untrusted", palette().WARNING, palette().SURFACE);
                         }
                     }
