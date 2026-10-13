@@ -13,6 +13,9 @@ Tool は統一 interface（name / schema / permissions / execute）とし、Role
 - **Shell / PTY 分離**: 通常 command（cargo test / git diff / rg foo）は `tokio::process::Command`、interactive（ssh / REPL / interactive installer）は PTY（portable-pty 利用候補）
 - **Code Intelligence**: LSP と Tree-sitter を独立機能として扱う。Tree-sitter（syntax-aware search / symbol extraction / AST navigation）、LSP（diagnostics / definition / references / hover / rename）
 - **Sandbox**: agent ごとの能力に応じた sandbox policy（Codex 的）。Explorer = workspace read-only / network optional、Librarian = read-only / network allowed、Worker = workspace read-write / outside denied / network denied by default、Orchestrator = mutation tools unavailable。プラットフォーム候補: macOS Seatbelt / Linux Landlock・seccomp・namespaces(bwrap) / Windows restricted token・job object
+- **許可ディレクトリ**（[ADR 0032](../../decisions/0032-project-allowed-directories.md)）: プロジェクトの trust 済み許可ディレクトリを bwrap にマウントする。アクセス権は role に従う
+- **worktree**（[ADR 0031](../../decisions/0031-remove-isolated-workspaces.md)）: runtime は worktree を作らない。エージェントが skill の手順で、sandbox が読み書き可でマウントしている場所（プロジェクトルートの中や読み書き可の許可ディレクトリの中）に worktree を作る。書き込み系ツールの前に撮っていたワークスペース snapshot とロックは廃止する
+- **ファイルツールの境界**（[ADR 0033](../../decisions/0033-file-tool-path-boundary.md)）: `read` / `grep` / `write` / `edit` が昇格なしで触れる範囲を、shell の sandbox から見える範囲（ホスト側のパス）にそろえる。境界の外は `sandbox_access: "unsandboxed"` と `justification` を付け、shell と同じ審査の gate を通す。`sandbox_access` の `"isolated"` は sandbox の中で実行するという意味で、廃止する isolated workspace とは別物。一時領域（`$TMPDIR`）は thread 単位で共有し、shell とファイルツールで同じホストのパスを使う。中身はその thread の owner プロセスが持っている間だけ残す
 - **MCP**: rmcp を利用
 
 ## 脅威モデル（ADR 0008、2026-08-29 確定）
@@ -98,6 +101,9 @@ production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ�
 - [ADR 0002: Role は capability boundary とし、prompt discipline ではなく権限で分離する](../../decisions/0002-role-capability-boundaries.md)
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
 - [ADR 0021: Linux v0.1 sandbox 第一実装に bwrap を採用](../../decisions/0021-bwrap-linux-sandbox.md)
+- [ADR 0031: isolated workspace とワークスペース snapshot を廃止する](../../decisions/0031-remove-isolated-workspaces.md)
+- [ADR 0032: プロジェクトの許可ディレクトリを runtime とエージェントに届ける](../../decisions/0032-project-allowed-directories.md)
+- [ADR 0033: 直接のファイルツールに shell と同じ境界と昇格の経路を持たせる](../../decisions/0033-file-tool-path-boundary.md)
 
 ## Open questions
 

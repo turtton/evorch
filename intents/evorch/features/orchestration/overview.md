@@ -44,7 +44,9 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 - subagent 間 messaging は親子限定ツリー addressing に従う（[ADR 0022](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md)）。sibling 間の連携は orchestrator が中継する
 - `can_delegate` を Role capability として Worker 等にも開放し、ネスト委譲（worker がさらに subagent を呼ぶ）を正式に許可する。depth cap・自己 spawn 禁止・構想書 §5.1 の乱用防止は ADR 0022 の条件に従う。現行運用で「worker からの再委譲は未検証」とされていた制約を構造的に解消する
 
-### isolated workspace の正式運用
+### isolated workspace の正式運用（[ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止）
+
+> 2026-10-13: runtime が worktree を作る isolated mode と旧 PR delivery supervisor は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決めた。worktree での作業はエージェントが skill の手順で行う。以下は当時の計画として残す。
 
 委譲時に `RunConfig.workspace_mode` を指定し、worker ごとに独立した git worktree checkout で実行する運用を正式化する。worktree の作成・破棄・merge は harness が所有し、merge mode は branch（`evorch/task/<run-id>`）が既定。これにより現行運用の痛み（worktree 配置制約、sandbox 下 `.git` read-only に伴う bundle 運用、`/tmp` 非共有）を解消する。runtime 機構の詳細は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) v0.2 計画を参照。
 
@@ -120,6 +122,7 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 - [ADR 0001: 固定 workflow を採用しない](../../decisions/0001-no-fixed-workflow.md)
 - [ADR 0002: Role は capability boundary とし、prompt discipline ではなく権限で分離する](../../decisions/0002-role-capability-boundaries.md)
 - [ADR 0022: 親子限定ツリー addressing と can_delegate の Role capability 開放](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md)
+- [ADR 0031: isolated workspace とワークスペース snapshot を廃止する](../../decisions/0031-remove-isolated-workspaces.md)
 
 ## Open questions
 

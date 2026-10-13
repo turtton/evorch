@@ -62,7 +62,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 ## v0.2 GUI workbench 3領域再構成の実装確定（issue #65、PR #66、2026-09-05）
 
 - workspace schema v2 + `migrate.rs` による v1 自動移行。PanelKind に Sidebar / Agents / AgentTranscript（target=run_id 必須）/ Diff / Goal / Merge を追加し、load は fail-closed（不正 panel 参照・duplicate・invalid trust path を拒否）
-- project/thread/trust モデルは workspace-ui 所有（config 不変）。allowed-directory は mutation/load で同一 validator を通し、runtime 所有 worktree（`<root>/.evorch/worktrees/`）は membership 自動許可、任意外部 path は明示 trust なしに許可しない
+- project/thread/trust モデルは workspace-ui 所有（config 不変）。allowed-directory は mutation/load で同一 validator を通し、runtime 所有 worktree（`<root>/.evorch/worktrees/`）は membership 自動許可（runtime 所有 worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止）、任意外部 path は明示 trust なしに許可しない。trust 済みの許可ディレクトリを runtime へ渡し、エージェントに届ける方法は [ADR 0032](../../decisions/0032-project-allowed-directories.md) で定める
 - TranscriptRegistry が run-addressed event（tool は run_id、approval は call_id index、AgentMessage は sender/recipient）を決定配送。MessageDelta は run_id を持たないため thread + 単一 Running run のみ mirror（follow-up 候補: event-bus の MessageDelta/ReasoningDelta へ run_id 付与）
 - Telemetry は ProviderEvent の run_id Some のみ集約、UsageEvent は推測せず無視
 - Diff は working tree / main 固定 branch のみ（turn 別・split・whitespace・file tree・base 任意選択は v0.3 scope 据置）、256KiB cap、空/Error は明示状態
@@ -200,7 +200,7 @@ v0.8 の実稼働検証で判明した shell tool 実行不能、tool 入出力�
 
 ### Bundle A: コア GUI UX（v0.6）
 
-- Git snapshot undo/redo（working state を破壊せず巻き戻し・再適用する UI）
+- Git snapshot undo/redo（working state を破壊せず巻き戻し・再適用する UI）。2026-10-13 に [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止し、巻き戻しは git に任せる
 - 画像添付 UI（composer への画像ペースト/添付・thumbnail preview・削除・送信。`v05-image-attachment-ui` の内容を統合）
 - Session tree / fork UI（thread 間の親子・分岐を可視化し切替可能にする）
 - Keymap / theme の user-facing 設定（runtime reload 可能、既存 config 層へ接続）
@@ -233,6 +233,8 @@ GUI 複数起動時の連携は ADR 0024 に従う。GUI は thread へ attach �
 - [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
 - [ADR 0007: GUI 第一候補を egui + egui_dock に](../../decisions/0007-gui-framework-egui-first.md)
+- [ADR 0031: isolated workspace とワークスペース snapshot を廃止する](../../decisions/0031-remove-isolated-workspaces.md)
+- [ADR 0032: プロジェクトの許可ディレクトリを runtime とエージェントに届ける](../../decisions/0032-project-allowed-directories.md)
 
 ## Open questions
 

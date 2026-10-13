@@ -65,6 +65,8 @@ ADR 0018（SQLite event sourcing）上に置くため、oh-my-pi の cap 100 非
 
 ### RunConfig.workspace_mode と git worktree backend（`crates/runtime/src/run.rs`）
 
+> 2026-10-13: `workspace_mode` と runtime 所有の worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止を決めた。以下は当時の計画として残す。
+
 - `workspace_mode = shared`: 親と同じ cwd で動作（現行相当）
 - `workspace_mode = isolated`: runtime が委譲時に git worktree を作成し run の cwd として绑定。bwrap fs sandbox（ADR 0021/0009、Linux-first）と組み合わせ、worktree を rw、それ以外を policy 通りに mount する
 - worktree の作成・破棄・merge は harness（evorch runtime）が所有する
@@ -171,6 +173,7 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
 - [ADR 0022: 親子限定ツリー addressing と can_delegate の Role capability 開放](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md)
+- [ADR 0031: isolated workspace とワークスペース snapshot を廃止する](../../decisions/0031-remove-isolated-workspaces.md)
 
 ## Open questions
 
