@@ -514,3 +514,78 @@ fn capture_goal_procedure_composer() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[test]
+fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
+    use gui::model::commands::{CommandSink, LoopEvent};
+    use std::sync::{Arc, Mutex};
+    #[derive(Default)]
+    struct Observed {
+        goals: Vec<String>,
+        todos: Vec<event_bus::ThreadTodoSnapshot>,
+    }
+    struct Sink(Arc<Mutex<Observed>>);
+    impl CommandSink for Sink {
+        fn bind_thread_goal(&mut self, snapshot: &ThreadGoalSnapshot, _: &str) {
+            self.0.lock().unwrap().goals.push(snapshot.goal_id.clone());
+        }
+        fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
+            self.0.lock().unwrap().todos.push(snapshot.clone());
+        }
+        fn submit(&mut self, _: WorkbenchCommand) -> Vec<LoopEvent> {
+            panic!("restoration cannot dispatch work")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("removed-variants.sqlite"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let mut snapshot = goal("A");
+    snapshot.checks_paused = true;
+    storage
+        .handle()
+        .append_event(None, &event(snapshot))
+        .unwrap();
+    // Rows of variants removed in #223, in the format they were stored with.
+    let connection = rusqlite::Connection::open(&config.db_path).unwrap();
+    for (kind, payload) in [
+        (
+            "Snapshot",
+            r#"{"kind":"Snapshot","payload":{"run_id":"run-1","call_id":"call-1","snapshot_id":"0123456789abcdef0123456789abcdef01234567","workspace_root":"/workspace"}}"#,
+        ),
+        (
+            "Lifecycle",
+            r#"{"kind":"Lifecycle","payload":{"kind":"WorkspaceWaitChanged","payload":{"run_id":"run-1","call_id":"call-1","waiting":null}}}"#,
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO events \
+                 (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+                 VALUES (NULL, ?1, 0, 0, ?2, ?3)",
+                rusqlite::params![event_bus::SCHEMA_VERSION, kind, payload],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    storage
+        .handle()
+        .append_event(None, &todo_event(todo("A", 1)))
+        .unwrap();
+    storage.close();
+    let observed = Arc::new(Mutex::new(Observed::default()));
+    let mut state = bare_state(dir.path()).with_command_sink(Box::new(Sink(observed.clone())));
+    state
+        .restore_history(&storage::Database::open(&config).unwrap())
+        .unwrap();
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.goals, ["goal-A"]);
+    assert_eq!(observed.todos, [todo("A", 1)]);
+    drop(observed);
+    let mut workbench = HeadlessWorkbench::new(state, [1000.0, 800.0]);
+    workbench.run();
+    assert!(workbench.has_label("Resume goal checks"));
+    assert!(workbench.has_label("Show procedure details"));
+}
