@@ -12,6 +12,21 @@ fn fixture_frames(contents: &str) -> Vec<SseFrame> {
     frames
 }
 
+fn canonical_response(contents: &str) -> Result<crate::message::ChatResponse, ProviderError> {
+    let mut interpreter = CodexStreamInterpreter::new();
+    let mut accumulator = StreamAccumulator::default();
+    for frame in fixture_frames(contents) {
+        let interpreted = interpreter.interpret(frame)?;
+        for event in &interpreted.events {
+            accumulator.feed(event);
+        }
+        if let Some((usage, reason)) = interpreted.completion {
+            return Ok(accumulator.finish(usage, reason));
+        }
+    }
+    panic!("fixture must contain a completion")
+}
+
 // Given: successful Responses SSE fixture / When: interpreted / Then: text deltas and usage completion are emitted once
 #[test]
 fn interpreter_emits_text_deltas_and_completion() {
@@ -83,6 +98,167 @@ fn interpreter_emits_tool_call_events() {
             input: serde_json::json!({"path":"Cargo.toml"}),
         }]
     );
+}
+
+// Given: parallel read calls with missing/partial deltas and reversed done events
+// When: accumulated / Then: each call retains its own final arguments without duplication
+#[test]
+fn interpreter_recovers_parallel_final_arguments() {
+    let frames = fixture_frames(include_str!(
+        "../../../../tests/fixtures/codex/responses_parallel_tool_calls.sse"
+    ));
+    let mut interpreter = CodexStreamInterpreter::new();
+    let mut accumulator = StreamAccumulator::default();
+    let mut completion = None;
+    for frame in frames {
+        let interpreted = interpreter.interpret(frame).unwrap();
+        for event in &interpreted.events {
+            accumulator.feed(event);
+        }
+        completion = completion.or(interpreted.completion);
+    }
+    assert!(accumulator.malformed_tool_calls().is_empty());
+    let (usage, reason) = completion.unwrap();
+    let response = accumulator.finish(usage, reason);
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    assert_eq!(
+        response.message.content,
+        vec![
+            ContentBlock::ToolUse {
+                id: "call-read-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path":"Cargo.toml","limit":10}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-read-2".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path":"crates/providers/Cargo.toml","offset":2}),
+            },
+        ]
+    );
+}
+
+// Given: only one kind of final event survives / When: accumulated
+// Then: arguments.done and output_item.done independently recover both calls
+#[test]
+fn either_final_event_recovers_missing_arguments() {
+    let fixture =
+        include_str!("../../../../tests/fixtures/codex/responses_parallel_tool_calls.sse");
+    for omitted in [
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.output_item.added",
+    ] {
+        let contents = fixture
+            .split("\n\n")
+            .filter(|frame| !frame.starts_with(&format!("event: {omitted}\n")))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let response = canonical_response(&contents).unwrap();
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
+        assert_eq!(
+            response.message.content,
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call-read-1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path":"Cargo.toml","limit":10}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-read-2".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path":"crates/providers/Cargo.toml","offset":2}),
+                },
+            ],
+            "omitted {omitted}"
+        );
+    }
+}
+
+// Given: added items already contain full arguments / When: no deltas arrive
+// Then: the initial snapshot is preserved and final snapshots are not duplicated
+#[test]
+fn added_item_arguments_are_preserved() {
+    let fixture = include_str!("../../../../tests/fixtures/codex/responses_tool_call.sse");
+    let contents = fixture
+        .split("\n\n")
+        .filter(|frame| !frame.starts_with("event: response.function_call_arguments.delta\n"))
+        .map(|frame| {
+            if frame.starts_with("event: response.output_item.added\n") {
+                frame.replace(
+                    r#""arguments":"""#,
+                    r#""arguments":"{\"path\":\"Cargo.toml\"}""#,
+                )
+            } else {
+                frame.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let response = canonical_response(&contents).unwrap();
+    assert_eq!(
+        response.message.content,
+        vec![ContentBlock::ToolUse {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path":"Cargo.toml"}),
+        }]
+    );
+}
+
+// Given: final snapshots disagree with received deltas / When: interpreted
+// Then: fail closed without leaking either argument body in the diagnostic
+#[test]
+fn conflicting_final_arguments_are_rejected() {
+    let fixture = include_str!("../../../../tests/fixtures/codex/responses_tool_call.sse");
+    for final_event in [
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+    ] {
+        let contents = fixture
+            .split("\n\n")
+            .filter(|frame| {
+                final_event != "response.output_item.done"
+                    || !frame.starts_with("event: response.function_call_arguments.done\n")
+            })
+            .map(|frame| {
+                if frame.starts_with(&format!("event: {final_event}\n")) {
+                    frame.replace("Cargo.toml", "private-final-path")
+                } else {
+                    frame.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let error = canonical_response(&contents).unwrap_err();
+        assert!(matches!(error, ProviderError::InvalidSse { .. }));
+        assert!(!error.to_string().contains("Cargo.toml"));
+        assert!(!error.to_string().contains("private-final-path"));
+    }
+}
+
+// Given: hosted or future output item types / When: added or done
+// Then: they remain ignored rather than breaking otherwise valid responses
+#[test]
+fn non_function_output_items_are_ignored() {
+    for event_type in ["response.output_item.added", "response.output_item.done"] {
+        for item_type in ["message", "reasoning", "web_search_call", "future_item"] {
+            let mut interpreter = CodexStreamInterpreter::new();
+            let result = interpreter
+                .interpret(SseFrame {
+                    event: Some(event_type.into()),
+                    data: serde_json::json!({
+                        "type": event_type,
+                        "output_index": 0,
+                        "item": {"type": item_type},
+                    })
+                    .to_string(),
+                })
+                .unwrap();
+            assert!(result.events.is_empty());
+            assert!(result.completion.is_none());
+        }
+    }
 }
 
 // Given: response.failed fixture / When: interpreted / Then: provider HTTP error preserves wire details

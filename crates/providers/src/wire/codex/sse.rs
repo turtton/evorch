@@ -12,6 +12,7 @@ use crate::stream::StreamEvent;
 #[derive(Debug, Clone, Default)]
 pub struct CodexStreamInterpreter {
     tool_indices: BTreeMap<String, usize>,
+    tool_arguments: BTreeMap<usize, String>,
     saw_tool_call: bool,
     done: bool,
 }
@@ -21,6 +22,26 @@ impl CodexStreamInterpreter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn final_arguments_delta(
+        &mut self,
+        index: usize,
+        arguments: &str,
+    ) -> Result<String, ProviderError> {
+        let accumulated = self.tool_arguments.entry(index).or_default();
+        // done イベントは差分でなく全文を含む。同じ全文を二重連結せず、
+        // 未受信の末尾だけを補う。矛盾する全文から呼び出しを実行しない。
+        let suffix = arguments
+            .strip_prefix(accumulated.as_str())
+            .ok_or_else(|| ProviderError::InvalidSse {
+                detail: format!(
+                    "Codex tool arguments の確定値が受信済み差分と一致しません (output_index={index})"
+                ),
+            })?
+            .to_owned();
+        accumulated.push_str(&suffix);
+        Ok(suffix)
     }
 }
 
@@ -46,12 +67,10 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
         match event_type {
             "response.created"
             | "response.output_text.done"
-            | "response.output_item.done"
             | "response.content_part.added"
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary_text.done"
-            | "response.function_call_arguments.done" => Ok(FrameInterpretation::default()),
+            | "response.reasoning_summary_text.done" => Ok(FrameInterpretation::default()),
             "response.reasoning_summary_text.delta" => {
                 let event: TextDelta = parse(value)?;
                 if event.delta.is_empty() {
@@ -72,25 +91,29 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
                     completion: None,
                 })
             }
-            "response.output_item.added" => {
-                let event: OutputItemAdded = parse(value)?;
+            "response.output_item.added" | "response.output_item.done" => {
+                let event: OutputItemEvent = parse(value)?;
                 match event.item {
-                    OutputItem::FunctionCall { id, call_id, name } => {
+                    OutputItem::FunctionCall {
+                        id,
+                        call_id,
+                        name,
+                        arguments,
+                    } => {
                         self.saw_tool_call = true;
-                        self.tool_indices.insert(id, event.output_index);
+                        let index = *self.tool_indices.entry(id).or_insert(event.output_index);
+                        let arguments_delta = self.final_arguments_delta(index, &arguments)?;
                         Ok(FrameInterpretation {
                             events: vec![StreamEvent::ToolCallDelta {
-                                index: event.output_index,
+                                index,
                                 id: Some(call_id),
                                 name: Some(name),
-                                arguments_delta: String::new(),
+                                arguments_delta,
                             }],
                             completion: None,
                         })
                     }
-                    OutputItem::Message | OutputItem::Reasoning => {
-                        Ok(FrameInterpretation::default())
-                    }
+                    OutputItem::Other => Ok(FrameInterpretation::default()),
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -100,12 +123,34 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
                     .get(&event.item_id)
                     .copied()
                     .unwrap_or(event.output_index);
+                self.tool_arguments
+                    .entry(index)
+                    .or_default()
+                    .push_str(&event.delta);
                 Ok(FrameInterpretation {
                     events: vec![StreamEvent::ToolCallDelta {
                         index,
                         id: None,
                         name: None,
                         arguments_delta: event.delta,
+                    }],
+                    completion: None,
+                })
+            }
+            "response.function_call_arguments.done" => {
+                let event: FunctionArgumentsDone = parse(value)?;
+                let index = self
+                    .tool_indices
+                    .get(&event.item_id)
+                    .copied()
+                    .unwrap_or(event.output_index);
+                let arguments_delta = self.final_arguments_delta(index, &event.arguments)?;
+                Ok(FrameInterpretation {
+                    events: vec![StreamEvent::ToolCallDelta {
+                        index,
+                        id: None,
+                        name: None,
+                        arguments_delta,
                     }],
                     completion: None,
                 })
@@ -158,7 +203,7 @@ struct TextDelta {
 }
 
 #[derive(Deserialize)]
-struct OutputItemAdded {
+struct OutputItemEvent {
     output_index: usize,
     item: OutputItem,
 }
@@ -170,9 +215,11 @@ enum OutputItem {
         id: String,
         call_id: String,
         name: String,
+        #[serde(default)]
+        arguments: String,
     },
-    Message,
-    Reasoning,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +227,13 @@ struct FunctionArgumentsDelta {
     item_id: String,
     output_index: usize,
     delta: String,
+}
+
+#[derive(Deserialize)]
+struct FunctionArgumentsDone {
+    item_id: String,
+    output_index: usize,
+    arguments: String,
 }
 
 #[derive(Deserialize)]

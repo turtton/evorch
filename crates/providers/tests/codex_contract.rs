@@ -273,6 +273,67 @@ async fn stream_tool_call_flow() {
     assert_eq!(response.finish_reason, FinishReason::ToolUse);
 }
 
+// Given: interleaved read calls without complete argument deltas / When: streamed over HTTP
+// Then: the final provider response recovers each path without malformed-argument diagnostics
+#[tokio::test]
+async fn stream_parallel_tool_calls_recover_final_arguments() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("codex", "responses_parallel_tool_calls.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(64));
+    let mut diagnostics = bus.subscribe();
+    let client = CodexClient::with_config(
+        CodexConfig {
+            base_url: server.uri(),
+            auth_base_url: server.uri(),
+            event_bus: Some(bus),
+            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
+                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                warning: None,
+            }),
+            ..CodexConfig::default()
+        },
+        seeded_store(),
+    )
+    .expect("Codex client can be built");
+    let events = client
+        .stream(&ProviderAuth::new(""), &request())
+        .await
+        .expect("stream starts")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    let StreamEvent::Completed { response } = events.last().unwrap().as_ref().unwrap() else {
+        panic!("final event must be Completed")
+    };
+    assert_eq!(
+        response.message.content,
+        vec![
+            ContentBlock::ToolUse {
+                id: "call-read-1".into(),
+                name: "read".into(),
+                input: json!({"path":"Cargo.toml","limit":10}),
+            },
+            ContentBlock::ToolUse {
+                id: "call-read-2".into(),
+                name: "read".into(),
+                input: json!({"path":"crates/providers/Cargo.toml","offset":2}),
+            },
+        ]
+    );
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    while let Ok(event) = tokio::time::timeout(Duration::from_millis(10), diagnostics.recv()).await
+    {
+        assert!(!matches!(
+            event.expect("event receiver must not lag").kind,
+            event_bus::EventKind::Diagnostic(_)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn send_maps_http_429_with_retry_after() {
     let server = MockServer::start().await;
