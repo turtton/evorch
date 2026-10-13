@@ -35,7 +35,7 @@ use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
-use crate::runtime::{IsolatedWorkspace, Shared, loop_shared};
+use crate::runtime::{IsolatedWorkspace, SandboxFactory, Shared, loop_shared};
 use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
@@ -137,6 +137,7 @@ pub(crate) struct LoopState {
     retracted_delegates: retracted_delegates::RetractedDelegates,
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
+    pub(crate) scratch: Option<crate::scratch::RunScratch>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -289,6 +290,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,
+        scratch: None,
     };
     let mut owned_worktree = None;
     // Every setup/execute return flows through one finalization boundary.
@@ -316,6 +318,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             );
             return;
         }
+        // Runs that get their own sandbox share their thread's scratch (ADR 0033).
+        let own_sandbox = match state.task.config.workspace_mode {
+            WorkspaceMode::Shared => sandbox_root.is_some(),
+            WorkspaceMode::Isolated => true,
+        };
+        if own_sandbox && !benchmark_mode {
+            match state.prepare_scratch(is_restored) {
+                Ok(scratch) => state.scratch = scratch,
+                Err(error) => {
+                    state.finish_error(format!("scratch setup failed: {error}"));
+                    return;
+                }
+            }
+        }
         if state.task.config.workspace_mode == WorkspaceMode::Shared
             && let Some(root) = sandbox_root.clone()
         {
@@ -330,21 +346,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     .unwrap_or_default();
                 // Reuse the existing explicit workspace sandbox seam for shared runs too.
                 // Production's factory has the same fail-closed base config as build_sandbox.
+                let mounts = crate::IsolatedMounts {
+                    workspace_root: root.clone(),
+                    ro_binds: Vec::new(),
+                    rw_binds: Vec::new(),
+                    scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
+                };
                 let sandbox = match state.shared.runtime.upgrade().and_then(|runtime| {
                     runtime
                         .workspace
                         .as_ref()
                         .map(|workspace| Arc::clone(&workspace.factory))
                 }) {
-                    Some(factory) => factory.build(
-                        &state.policy,
-                        &crate::IsolatedMounts {
-                            workspace_root: root.clone(),
-                            ro_binds: Vec::new(),
-                            rw_binds: Vec::new(),
-                        },
-                    ),
-                    None => crate::network::build_sandbox(&state.policy, root.clone()),
+                    Some(factory) => factory.build(&state.policy, &mounts),
+                    None => crate::network::BwrapFactory.build(&state.policy, &mounts),
                 };
                 sandbox
                     .map_err(|error| crate::RuntimeError::Sandbox {
@@ -364,7 +379,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             match executor {
                 Ok(executor) => {
                     if let Some(runtime) = state.runtime() {
-                        runtime.configure_shell_escalation(&executor);
+                        runtime.configure_shell_escalation(&executor, state.scratch_dir());
                     }
                     state.shared.executor = executor;
                 }
@@ -539,6 +554,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             && !history_only
         {
             update_workspace_system_message(&mut state.context, root);
+        }
+        if let Some(scratch) = state.scratch.as_mut() {
+            scratch.attach(&mut state.context, is_restored);
         }
         if let Some(runtime) = shared.upgrade()
             && benchmark_mode
@@ -747,7 +765,8 @@ async fn attach_worktree_executor(
         .await
         .map_err(|error| format!("workspace setup failed: {error}"))?
         .map_err(|error| format!("workspace setup failed: {error}"))?;
-    let mounts = isolated_mounts(owned, &git_common_dir);
+    let mut mounts = isolated_mounts(owned, &git_common_dir);
+    mounts.scratch = state.scratch_dir().map(std::path::Path::to_path_buf);
     let sandbox = workspace
         .factory
         .build(&state.policy, &mounts)
@@ -773,7 +792,7 @@ async fn attach_worktree_executor(
     crate::AgentRuntime {
         shared: runtime_shared.clone(),
     }
-    .configure_shell_escalation(&executor);
+    .configure_shell_escalation(&executor, state.scratch_dir());
     Ok(executor)
 }
 
@@ -972,6 +991,7 @@ impl LoopState {
             }
             let (window, _) = self.resolved_context_window();
             self.append_todo_context();
+            self.append_scratch_context();
             let mut visible_messages = self.context.visible_messages();
             let mut estimated = self.estimated_context_tokens(&visible_messages);
             // A cooldown or the post-compaction latch must not terminate a run

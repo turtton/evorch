@@ -915,3 +915,149 @@ fn quiescing_runs_can_recover_and_drain_without_reviving_released_owners() {
     );
     assert_eq!(registry.attach(&original.thread_id).unwrap(), released);
 }
+
+/// Removes a test's fixed scratch parent under /var/tmp after its hosts drop.
+#[cfg(unix)]
+struct ScratchParent(std::path::PathBuf);
+
+#[cfg(unix)]
+impl ScratchParent {
+    fn of(root: &std::path::Path) -> Self {
+        Self(
+            crate::scratch::ThreadScratch::for_ownership_root(root)
+                .expect("scratch")
+                .parent()
+                .to_path_buf(),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScratchParent {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn scratch_file(host: &OwnerHost, thread: &str, name: &str) -> std::path::PathBuf {
+    let dir = host
+        .thread_scratch()
+        .prepare(&crate::scratch::ScratchKey::Thread(thread.into()))
+        .expect("prepare scratch");
+    std::fs::write(dir.join(name), name).expect("scratch file");
+    dir.join(name)
+}
+
+// Given: two hosts on one ownership root / When: the thread is started, released, claimed
+// and handed off / Then: every acquisition starts empty and every release deletes the files
+#[cfg(unix)]
+#[test]
+fn ownership_transitions_empty_and_delete_the_thread_scratch() {
+    let directory = tempfile::tempdir().expect("directory");
+    let _parent = ScratchParent::of(directory.path());
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
+    let open = || {
+        OwnerHost::open(
+            directory.path(),
+            config::OwnershipConfig::default(),
+            bus.clone(),
+        )
+        .expect("host")
+    };
+    let first = open();
+    let stale = scratch_file(&first, "thread", "stale");
+    first.start("thread").expect("start");
+    assert!(!stale.exists(), "a new owner never inherits old files");
+    let owned = scratch_file(&first, "thread", "owned");
+    let second = open();
+    assert_eq!(
+        second.thread_scratch().thread_dir("thread"),
+        first.thread_scratch().thread_dir("thread"),
+        "processes on one ownership root share the fixed path"
+    );
+    assert!(owned.exists(), "startup sweep keeps a live owner's files");
+    assert!(!first.quiesce().expect("release"));
+    assert!(!owned.exists(), "release deletes the thread scratch");
+    let leftover = scratch_file(&second, "thread", "leftover");
+    let permit = second
+        .claim(&second.attach("thread").expect("released"))
+        .expect("claim");
+    assert!(!leftover.exists(), "a claim empties the scratch before use");
+    let handed = scratch_file(&second, "thread", "handed");
+    let third = open();
+    second.handoff(&permit, &third).expect("handoff");
+    assert!(
+        !handed.exists(),
+        "handing the thread off deletes the scratch"
+    );
+}
+
+// Given: scratch directories of a crashed owner, an unregistered thread, a live owner and an
+// unbound run / When: another host opens / Then: only directories a live owner may use remain
+#[cfg(unix)]
+#[test]
+fn startup_sweep_deletes_scratch_of_threads_without_a_live_owner() {
+    let directory = tempfile::tempdir().expect("directory");
+    let _parent = ScratchParent::of(directory.path());
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
+    let open = || {
+        OwnerHost::open(
+            directory.path(),
+            config::OwnershipConfig::default(),
+            bus.clone(),
+        )
+        .expect("host")
+    };
+    let live = open();
+    live.start("live").expect("start");
+    let kept = scratch_file(&live, "live", "kept");
+    Registry::open(&directory.path().join("owners.db"))
+        .expect("registry")
+        .start(&ThreadOwner::new(
+            "crashed".into(),
+            Lease {
+                owner_id: "ab".repeat(16),
+                generation: 1,
+                expires_at: 0,
+            },
+        ))
+        .expect("crashed owner");
+    let crashed = scratch_file(&live, "crashed", "lost");
+    let orphan = scratch_file(&live, "orphan", "lost");
+    let run = live
+        .thread_scratch()
+        .prepare(&crate::scratch::ScratchKey::Run(crate::RunId::new(1)))
+        .expect("run scratch");
+    let _next = open();
+    assert!(kept.exists());
+    assert!(run.exists(), "another live process may own unbound runs");
+    assert!(!crashed.exists() && !orphan.exists());
+}
+
+// Given: an owner serving its socket / When: another process asks it to quiesce an idle
+// thread / Then: the owner deletes the scratch before the requester sees the release
+#[cfg(unix)]
+#[test]
+fn ipc_release_deletes_the_scratch_before_responding() {
+    let directory = tempfile::tempdir().expect("directory");
+    let _parent = ScratchParent::of(directory.path());
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
+    let host =
+        OwnerHost::open(directory.path(), config::OwnershipConfig::default(), bus).expect("host");
+    let permit = host.start("thread").expect("start");
+    let file = scratch_file(&host, "thread", "owned");
+    let socket = host::socket_path(directory.path(), &permit.lease.owner_id).expect("socket");
+    let response = ipc::request(
+        &socket,
+        &ipc::Request::Quiesce {
+            thread_id: "thread".into(),
+            token: permit.lease.clone(),
+        },
+    )
+    .expect("quiesce");
+    assert!(
+        matches!(response, ipc::Response::Status(owner) if owner.state == OwnerState::Released)
+    );
+    assert!(!file.exists());
+}

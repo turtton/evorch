@@ -99,6 +99,7 @@ pub(crate) struct Shared {
     pub(crate) web_tools_enabled: AtomicBool,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
+    pub(crate) thread_scratch: Mutex<Option<Arc<crate::scratch::ThreadScratch>>>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
@@ -139,6 +140,8 @@ pub struct IsolatedMounts {
     pub ro_binds: Vec<PathBuf>,
     /// 読み書き可能で公開する path。
     pub rw_binds: Vec<PathBuf>,
+    /// shell の `TMPDIR`。`None` なら sandbox ごとの一時領域を使う。
+    pub scratch: Option<PathBuf>,
 }
 
 /// run ごとの sandbox 構築境界。
@@ -326,6 +329,7 @@ impl AgentRuntime {
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
+                thread_scratch: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
@@ -598,6 +602,7 @@ impl AgentRuntime {
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
+                thread_scratch: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),

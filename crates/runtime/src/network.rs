@@ -48,6 +48,7 @@ pub(crate) fn isolated_mounts(worktree: &OwnedWorktree, git_common_dir: &Path) -
             git_common_dir.join("refs/heads"),
             git_common_dir.join("logs"),
         ],
+        scratch: None,
     }
 }
 
@@ -65,6 +66,9 @@ impl SandboxFactory for BwrapFactory {
         }
         for path in &mounts.rw_binds {
             config = config.rw_bind(path.clone());
+        }
+        if let Some(path) = &mounts.scratch {
+            config = config.scratch_dir(path.clone());
         }
         BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
     }

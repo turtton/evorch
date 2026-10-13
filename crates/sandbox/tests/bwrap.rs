@@ -234,6 +234,51 @@ fn scratch_survives_calls_and_relative_cwd_is_workspace_based() {
     );
 }
 
+// Given: two sandboxes configured with one scratch directory / When: one writes through
+// $TMPDIR and the other reads it through the host path and /tmp / Then: all see one file,
+// which the host also sees at the same path
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn configured_scratch_is_shared_at_its_host_path_and_tmp() {
+    let workspace = workspace();
+    let root = sandbox::ScratchRoot::ephemeral().unwrap();
+    let scratch = root.prepare("t-thread").unwrap();
+    let detect = || {
+        BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()).scratch_dir(&scratch))
+            .unwrap()
+    };
+    let command = |script: String| CommandSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: None,
+        extra_env: Vec::new(),
+    };
+    let first = run(detect()
+        .wrap(command(format!(
+            "test \"$TMPDIR\" = '{}' && test -d \"$HOME/.cargo\" && printf shared > \"$TMPDIR/note\"",
+            scratch.display()
+        )))
+        .unwrap());
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fs::read_to_string(scratch.join("note")).unwrap(), "shared");
+    let second = run(detect()
+        .wrap(command(format!(
+            "cat '{}/note' /tmp/note",
+            scratch.display()
+        )))
+        .unwrap());
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(second.stdout, b"sharedshared");
+}
+
 #[ignore = "bwrap 実行環境が必要"]
 #[test]
 fn cargo_cache_is_readable_without_credentials_and_cannot_be_modified() {

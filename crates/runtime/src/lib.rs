@@ -48,6 +48,7 @@ pub mod run_store;
 pub mod runtime;
 mod sandbox_settings;
 pub mod scope;
+pub mod scratch;
 pub mod self_improvement;
 pub mod skill;
 pub mod skill_source;

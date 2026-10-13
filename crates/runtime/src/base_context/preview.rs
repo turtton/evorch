@@ -35,6 +35,8 @@ pub struct BaseContextRequest {
     pub memory: Option<MemoryBoundary>,
     /// Project the previewed run would work in; `None` uses the active project.
     pub project_root: Option<std::path::PathBuf>,
+    /// Thread whose scratch the run would use; `None` shows a placeholder directory.
+    pub thread_id: Option<String>,
 }
 
 impl BaseContextRequest {
@@ -49,6 +51,7 @@ impl BaseContextRequest {
             workspace_mode: WorkspaceMode::Shared,
             memory: None,
             project_root: None,
+            thread_id: None,
         }
     }
 }
@@ -142,6 +145,10 @@ impl AgentRuntime {
                     .as_ref()
                     .map_or(root, |project| project.root.clone())
             });
+        let own_sandbox = match request.workspace_mode {
+            WorkspaceMode::Shared => sandbox_root.is_some(),
+            WorkspaceMode::Isolated => true,
+        };
         let active_root = match request.workspace_mode {
             WorkspaceMode::Shared => shared_active_root(shared.rules.as_deref(), sandbox_root),
             WorkspaceMode::Isolated => None,
@@ -171,6 +178,17 @@ impl AgentRuntime {
                 ContextSectionKind::Workspace,
                 ContextSource::Generated,
                 workspace_note(root),
+            ));
+        }
+        if own_sandbox && let Ok(scratch) = self.thread_scratch() {
+            let dir = request.thread_id.as_deref().map_or_else(
+                || scratch.parent().join("<thread>"),
+                |thread| scratch.thread_dir(thread),
+            );
+            sections.push(ContextSection::new(
+                ContextSectionKind::TemporaryFiles,
+                ContextSource::Generated,
+                crate::scratch::scratch_note(&dir),
             ));
         }
         if let Some(memory) = request

@@ -1061,6 +1061,8 @@ fn run() -> Result<(), GuiError> {
         ownership_settings,
         Arc::clone(&bus),
     )?);
+    // Thread scratch lives as long as this process owns the thread (ADR 0033).
+    runtime.set_thread_scratch(ownership.thread_scratch());
     // Install the retained host before any later fallible startup work. State
     // and command-sink locals may drop first, but cannot release this generation.
     let storage = GuiStorageResources {

@@ -16,10 +16,17 @@ impl AgentRuntime {
             (approval, escalate_to_user_on_deny);
     }
 
-    pub(crate) fn configure_shell_escalation(&self, executor: &tools::ToolExecutor) {
+    /// Escalated shells keep the run's `TMPDIR` when it has a thread scratch.
+    pub(crate) fn configure_shell_escalation(
+        &self,
+        executor: &tools::ToolExecutor,
+        scratch: Option<&std::path::Path>,
+    ) {
         executor.set_shell_escalation(
             self.shell_escalation_gate(),
-            sandbox::composition::unsandboxed(),
+            scratch.map_or_else(sandbox::composition::unsandboxed, |dir| {
+                sandbox::composition::unsandboxed_with_tmpdir(dir.to_path_buf())
+            }),
         );
     }
 

@@ -160,6 +160,32 @@ summarizer = "structural"
     if checker.is_some() {
         executor = executor.with_post_edit_hook(checker);
     }
+    let runtime = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(directory.path().join("empty-user-config")),
+        config: &config,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(
+            FileCredentialStore::open(directory.path().join("credentials")).unwrap(),
+        ),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_sequential_run_ids()
+    .with_system_prompts(contract_prompts())
+    .with_compaction(config.compaction.clone());
+    Harness {
+        _directory: directory,
+        runtime,
+        receiver,
+        mock,
+    }
+}
+
+fn contract_prompts() -> Arc<SystemPromptCatalog> {
     let mut prompts = SystemPromptCatalog::builder().category_overlay(
         "conversation",
         include_str!("../../config/assets/presets/category-conversation.md"),
@@ -183,29 +209,7 @@ summarizer = "structural"
     ] {
         prompts = prompts.family_section(family, "Use tools and preserve context");
     }
-    let runtime = compose_runtime(RuntimeComposition {
-        user_config_dir: Some(directory.path().join("empty-user-config")),
-        config: &config,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(
-            FileCredentialStore::open(directory.path().join("credentials")).unwrap(),
-        ),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
-    .unwrap()
-    .runtime
-    .with_sequential_run_ids()
-    .with_system_prompts(Arc::new(prompts.build().unwrap()))
-    .with_compaction(config.compaction.clone());
-    Harness {
-        _directory: directory,
-        runtime,
-        receiver,
-        mock,
-    }
+    Arc::new(prompts.build().unwrap())
 }
 
 fn read_response(index: usize) -> ScriptedResponse {
@@ -2399,4 +2403,213 @@ async fn paused_goal_restore_and_idle_checks_resume_preserve_the_wire_cache() {
         .stop(root, runtime::StopScope::SelfOnly)
         .unwrap();
     harness.runtime.wait(root).await.unwrap();
+}
+
+struct DirectFactory;
+impl runtime::SandboxFactory for DirectFactory {
+    fn build(
+        &self,
+        _: &runtime::ExecutionPolicy,
+        _: &runtime::IsolatedMounts,
+    ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
+        Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
+    }
+}
+
+fn wire_texts(request: &Value, role: &str) -> Vec<String> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == role)
+        .map(|message| message["content"].to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn scratch_guidance_and_emptied_notice_append_after_restore_and_preserve_wire_prefix() {
+    for legacy in [true, false] {
+        scratch_restore_preserves_wire_prefix(legacy).await;
+    }
+}
+
+/// `legacy` threads were saved before their system message carried the scratch note.
+async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
+    let mut harness = harness(
+        vec![
+            text_response("Initial work"),
+            text_response("Continued after restore"),
+            text_response("Followed up"),
+        ],
+        1_000_000,
+    );
+    let root = harness._directory.path();
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("scratch-history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = AgentRuntime::with_workspace_context(
+        bus.clone(),
+        Arc::new(
+            ToolExecutor::with_standard_tools(
+                bus,
+                Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            )
+            .with_web_tools()
+            .unwrap(),
+        ),
+        model,
+        runtime::workspace::WorktreeManager::new(
+            runtime::workspace::Project::new(repo.clone()).unwrap(),
+        ),
+        Arc::new(DirectFactory),
+    )
+    .with_sequential_run_ids()
+    .with_system_prompts(contract_prompts())
+    .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let scratch = Arc::new(runtime::scratch::ThreadScratch::at(root.join("scratch")));
+    let enable_scratch = |runtime: &AgentRuntime| {
+        let runtime = runtime.clone().with_sandbox_root(repo.clone());
+        runtime.set_thread_scratch(Arc::clone(&scratch));
+        runtime
+    };
+    if !legacy {
+        harness.runtime = enable_scratch(&harness.runtime);
+    }
+    let run = harness.runtime.reserve_run_id();
+    harness.runtime.bind_thread_root("thread", run).unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Start work",
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    if legacy {
+        harness.runtime = enable_scratch(&harness.runtime);
+    }
+    // The ownership host empties the directory when this process claims the thread.
+    scratch.reset_thread("thread");
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "After restore".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "Followup".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    let dir = scratch.thread_dir("thread");
+    let note = format!("Temporary files (evorch): $TMPDIR is {}.", dir.display());
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(
+            wire_texts(request, "system"),
+            systems,
+            "restoring never rewrites the system message"
+        );
+    }
+    assert_eq!(systems.iter().any(|text| text.contains(&note)), !legacy);
+    let emptied = format!("{} was emptied", dir.display());
+    for request in &requests[1..] {
+        let users = wire_texts(request, "user");
+        let count = |needle: &str| users.iter().filter(|text| text.contains(needle)).count();
+        assert_eq!(count(&emptied), 1, "the emptied notice is appended once");
+        assert_eq!(
+            count(&note),
+            usize::from(legacy),
+            "missing guidance is appended once"
+        );
+        let notice = users
+            .iter()
+            .position(|text| text.contains(&emptied))
+            .unwrap();
+        let restored = users
+            .iter()
+            .position(|text| text.contains("After restore"))
+            .unwrap();
+        assert_eq!(
+            notice,
+            restored + 1,
+            "notices follow the restored turn's input"
+        );
+    }
 }

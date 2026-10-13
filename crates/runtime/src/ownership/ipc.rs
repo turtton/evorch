@@ -163,7 +163,7 @@ pub fn serve_connection(
     registry: &mut Registry,
     now_ms: u64,
 ) -> Result<(), IpcError> {
-    serve_connection_inner(stream, registry, now_ms, None)
+    serve_connection_inner(stream, registry, now_ms, None, &|_, _| {})
 }
 
 pub fn serve_connection_with_bus(
@@ -172,7 +172,20 @@ pub fn serve_connection_with_bus(
     now_ms: u64,
     bus: &EventBus,
 ) -> Result<(), IpcError> {
-    serve_connection_inner(stream, registry, now_ms, Some(bus))
+    serve_connection_inner(stream, registry, now_ms, Some(bus), &|_, _| {})
+}
+
+/// Like [`serve_connection_with_bus`], calling `released(thread, previous owner)`
+/// when a request releases or hands off a thread, before the requester can
+/// observe the transition.
+pub(super) fn serve_connection_releasing(
+    stream: &mut UnixStream,
+    registry: &mut Registry,
+    now_ms: u64,
+    bus: &EventBus,
+    released: &dyn Fn(&str, &str),
+) -> Result<(), IpcError> {
+    serve_connection_inner(stream, registry, now_ms, Some(bus), released)
 }
 
 fn serve_connection_inner(
@@ -180,9 +193,16 @@ fn serve_connection_inner(
     registry: &mut Registry,
     now_ms: u64,
     bus: Option<&EventBus>,
+    released: &dyn Fn(&str, &str),
 ) -> Result<(), IpcError> {
     timeouts(stream)?;
     let request: Request = read_frame(stream)?;
+    let previous_owner = match &request {
+        Request::Quiesce { token, .. } | Request::Handoff { token, .. } => {
+            Some(token.owner_id.clone())
+        }
+        Request::Attach { .. } | Request::Heartbeat { .. } => None,
+    };
     let action = match &request {
         Request::Quiesce { .. } => Some(OwnershipAction::Quiescing),
         Request::Heartbeat { .. } => Some(OwnershipAction::Heartbeat),
@@ -215,6 +235,12 @@ fn serve_connection_inner(
     };
     let response = match result {
         Ok(owner) => {
+            if let Some(previous) = &previous_owner
+                && (owner.state == super::OwnerState::Released
+                    || matches!(action, Some(OwnershipAction::Handoff)))
+            {
+                released(&owner.thread_id, previous);
+            }
             if let (Some(bus), Some(action)) = (bus, action) {
                 let action = if owner.state == super::OwnerState::Released {
                     OwnershipAction::Released

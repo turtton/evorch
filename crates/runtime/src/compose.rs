@@ -176,6 +176,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             .executor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
+        None,
     );
     Ok(ComposedRuntime {
         runtime,
