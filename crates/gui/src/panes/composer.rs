@@ -81,7 +81,9 @@ pub fn composer_strip(
             let ime_composing = ime_composing(ui, ime_id);
             let items = model.completion_items();
             model.completion_selected = model.completion_selected.min(items.len().saturating_sub(1));
-            if let Some(item) = completion_keys(ui, model, &items, ime_composing) {
+            // The workbench clears `model.focused` before rendering; egui keeps the real focus.
+            let focused = ui.memory(|memory| memory.has_focus(input_id));
+            if let Some(item) = completion_keys(ui, model, &items, ime_composing, focused) {
                 action = Some(ComposerAction::Complete(item));
             }
             if let Some(item) = completion_list(ui, &items, model.completion_selected) {
@@ -217,13 +219,15 @@ fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
     composing
 }
 
-/// Tab accepts, Shift+Tab / arrows move the highlight, and Enter accepts only
-/// when that changes the draft, so a fully typed `/new` still sends.
+/// Tab / Shift+Tab and arrows cycle the highlight, Tab accepts a sole
+/// candidate, and Enter accepts only when that changes the draft, so a fully
+/// typed `/new` still sends.
 fn completion_keys(
     ui: &mut egui::Ui,
     model: &mut ComposerModel,
     items: &[CompletionItem],
     ime_composing: bool,
+    focused: bool,
 ) -> Option<CompletionItem> {
     let tabs = std::mem::take(&mut model.tab_presses);
     if items.is_empty() || ime_composing {
@@ -231,16 +235,17 @@ fn completion_keys(
     }
     let len = items.len();
     let mut selected = model.completion_selected;
-    let mut accept = false;
-    for shift in tabs {
-        if shift {
-            selected = (selected + len - 1) % len;
-        } else {
-            accept = true;
-            break;
+    let mut accept = len == 1 && tabs.iter().any(|shift| !shift);
+    if len > 1 {
+        for shift in tabs {
+            selected = if shift {
+                (selected + len - 1) % len
+            } else {
+                (selected + 1) % len
+            };
         }
     }
-    if model.focused && !accept {
+    if focused && !accept {
         ui.input_mut(|input| {
             if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                 selected = (selected + 1) % len;
@@ -616,12 +621,25 @@ mod tests {
     }
 
     #[test]
-    fn tab_accepts_highlighted_completion_and_shift_tab_moves_back() {
+    fn tab_cycles_completions_forward_and_shift_tab_backward() {
         let mut h = harness("/r");
         h.get_by_label("Message or /command").focus();
         h.run();
-        // Shift+Tab wraps to the last candidate; Tab accepts it.
-        h.state_mut().model.tab_presses = vec![true, false];
+        // Tab moves forward and wraps; the draft stays as typed while cycling.
+        h.state_mut().model.tab_presses = vec![false];
+        h.run();
+        assert_eq!(h.state().model.completion_selected, 1);
+        h.state_mut().model.tab_presses = vec![false];
+        h.run();
+        assert_eq!(h.state().model.completion_selected, 0);
+        assert_eq!(h.state().action, None);
+        assert_eq!(h.state().model.input, "/r");
+        // Shift+Tab moves backward and wraps to the last candidate.
+        h.state_mut().model.tab_presses = vec![true];
+        h.run();
+        assert_eq!(h.state().model.completion_selected, 1);
+        assert_eq!(h.state().action, None);
+        h.key_press(egui::Key::Enter);
         h.run();
         accept(&mut h);
         assert_eq!(h.state().model.input, "/run ");
@@ -631,6 +649,20 @@ mod tests {
         h.run();
         assert_eq!(h.state().action, None);
         assert_eq!(h.state().model.input, "/run ");
+    }
+
+    #[test]
+    fn tab_accepts_a_sole_completion() {
+        let mut h = harness("/re");
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.state_mut().model.tab_presses = vec![true];
+        h.run();
+        assert_eq!(h.state().action, None);
+        h.state_mut().model.tab_presses = vec![false];
+        h.run();
+        accept(&mut h);
+        assert_eq!(h.state().model.input, "/redo ");
     }
 
     #[test]
