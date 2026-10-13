@@ -197,8 +197,17 @@ fn list_events<P: rusqlite::Params>(
     let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query(params)?;
     let mut events = Vec::new();
+    let mut skipped = 0_usize;
     while let Some(row) = rows.next()? {
-        events.push(row_to_event(row)?);
+        match row_to_event(row) {
+            Ok(event) => events.push(event),
+            // 削除済みの variant など、現行の型で復元できない保存イベントは読み飛ばします。
+            Err(StorageError::Serialization(_)) => skipped += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(skipped, "skipped stored events that no longer decode");
     }
     Ok(events)
 }
