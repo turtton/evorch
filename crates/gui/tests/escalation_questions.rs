@@ -10,8 +10,7 @@ use gui::{
 };
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
 use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunId, RunStore, RuntimeError,
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunId, RunStore, RuntimeError,
 };
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -102,17 +101,6 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     )
     .with_sequential_run_ids()
     .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    let supervisor = rt.block_on(async {
-        GoalSupervisor::spawn(
-            runtime.clone(),
-            bus,
-            Arc::new(FixtureDeliveryAdapter::default()),
-            OrchestrationSettings {
-                max_continuations: 0,
-                ..Default::default()
-            },
-        )
-    });
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
     sidebar
@@ -131,8 +119,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
         .with_ownership(owner.clone())
         .with_provider_status(ProviderStatus::Configured)
         .with_command_sink(Box::new(
-            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor)
-                .with_ownership(owner),
+            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone()).with_ownership(owner),
         ));
     state.composer_mut().input = "Implement feature".into();
     state.submit_composer();

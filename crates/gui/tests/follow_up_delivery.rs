@@ -11,10 +11,7 @@ use gui::model::composer::ProviderStatus;
 use gui::runtime_sink::RuntimeCommandSink;
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunConfig, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
 use tokio::sync::Notify;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -87,15 +84,7 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
             model.clone(),
         )
         .with_sequential_run_ids();
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
-        let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+        let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         let run = rt.block_on(async {
             if goal {
                 runtime.delegate_background(

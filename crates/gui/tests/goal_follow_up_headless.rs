@@ -1,9 +1,7 @@
 // allow: SIZE_OK — Shared real-runtime contract fixture; task scope forbids extracting another file.
 use std::sync::{Arc, Mutex};
 
-use event_bus::{
-    AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent, OrchestratorEvent,
-};
+use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::model::commands::{CommandSink, LoopEvent, WorkbenchCommand};
@@ -11,7 +9,7 @@ use gui::model::composer::ProviderStatus;
 use gui::model::transcript::{ToolStatus, TranscriptEntry};
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::Message;
-use runtime::{AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor, OrchestrationSettings, RunId};
+use runtime::{AgentRuntime, RunId};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[path = "support/goal_capture_model.rs"]
@@ -77,11 +75,10 @@ impl runtime::AgentModel for ToolThenAnswer {
 #[path = "support/goal_restore_contract.rs"]
 mod goal_restore_contract;
 
-#[path = "support/legacy_goal.rs"]
-mod legacy_goal;
+#[path = "support/bound_root.rs"]
+mod bound_root;
 
 struct Fixture {
-    supervisor: runtime::SupervisorHandle,
     state: WorkbenchState<DemoSource>,
     sink: RuntimeCommandSink,
     runtime: AgentRuntime,
@@ -152,19 +149,7 @@ impl Fixture {
             }),
         )
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings {
-                    max_continuations: 0,
-                    ..OrchestrationSettings::default()
-                },
-            )
-        });
-        let sink =
-            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
+        let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         let mut sidebar = SidebarState::default();
         let project = ProjectId::new("test");
         let thread = ThreadId::new("thread-1");
@@ -181,7 +166,6 @@ impl Fixture {
             .with_sidebar(sidebar)
             .with_provider_status(ProviderStatus::Configured);
         Self {
-            supervisor,
             state,
             sink,
             runtime,
@@ -198,21 +182,21 @@ impl Fixture {
         self.state.composer_mut().input = input.into();
         self.state.submit_composer();
         let command = self.state.issued().last().unwrap().clone();
-        // These tests protect saved legacy PR-root authority, independently of
-        // the generic /goal UI covered by thread_goals_headless.
+        // These tests cover follow-ups to a bound goal root, independently of
+        // the thread goal /goal UI covered by thread_goals_headless.
         let events = if let WorkbenchCommand::SubmitGoal(submission) = command {
             let _guard = self.rt.enter();
-            legacy_goal::start(
+            bound_root::start(
                 &self.runtime,
-                &self.supervisor,
                 &mut self.sink,
                 submission,
                 runtime::Role::Orchestrator,
                 runtime::RunConfig::default(),
             );
+            self.created += 1;
             vec![LoopEvent::GoalAccepted {
                 thread_id: "thread-1".into(),
-                goal_id: format!("goal-{}", self.created + 1),
+                goal_id: format!("goal-{}", self.created),
             }]
         } else {
             self.sink.submit(command)
@@ -233,9 +217,6 @@ impl Fixture {
                 let event = self.events.recv().await.unwrap();
                 self.state.apply_events([event.clone()]);
                 match event.kind {
-                    EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. }) => {
-                        self.created += 1
-                    }
                     EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                         run_id,
                         to,
@@ -334,7 +315,7 @@ fn plain_chat_never_increments_accepted_goals() {
         ));
         fixture.terminal();
     }
-    // Then: no supervisor goal exists and the first explicit goal remains goal-1.
+    // Then: no goal is created and the first explicit goal remains goal-1.
     assert_eq!(fixture.created, 0);
     assert!(
         fixture

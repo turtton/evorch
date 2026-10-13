@@ -43,7 +43,6 @@ pub fn notifications_pane(
                 }
                 NotificationKind::RunFailed { .. } => ("failed", palette().ERROR),
                 NotificationKind::ApprovalPending { .. } => ("approval", palette().INFO),
-                NotificationKind::MergeApprovalPending { .. } => ("merge approval", palette().INFO),
             };
             let row = ui
                 .push_id(notification.id, |ui| {

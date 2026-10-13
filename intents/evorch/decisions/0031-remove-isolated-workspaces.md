@@ -42,7 +42,8 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 ### 旧 PR delivery supervisor を削除する
 
 - goal から PR、Reviewer、merge 承認、closeout までを進める旧 supervisor（`crates/runtime/src/orchestration/`、isolated の Reviewer を起動する経路を含む）を削除する。汎用 goal は [ADR 0028](0028-thread-goals-and-completion-checks.md) の thread goals が担っている。
-- `crates/runtime/src/orchestration/supervisor/` の中には、team task の durable な状態（`TaskProgressed` / `TaskCheckpoint`、stale の検出、予算の診断、task の受け付け）も入っている。これらは supervisor とは別の機能なので残し、supervisor の外へ移す。
+- `crates/runtime/src/orchestration/supervisor/` の中にあった durable task の処理（stale の検出、task の受け付け（admission）と retry、goal 単位の予算診断の集約）は、実装時に依存を洗うと goal ledger を走査するだけで、goal ledger を作るのは supervisor だけだった。そのため外へ移さず、supervisor と一緒に削除する。
+- team task の durable な状態のうち、`TaskProgressed` / `TaskCheckpoint` と run 単位の予算診断は、supervisor に依存しない経路（`crates/runtime/src/agent_loop/durable.rs`、`crates/runtime/src/budget_tracker.rs`、storage の durable projection、GUI の Durable Tasks）に残す。置き場所は [ADR 0026](0026-durable-execution-substrate.md) の Addendum に記録した。
 - Reviewer の `submit_review` / `ReviewResult` は旧 supervisor だけが使っているので、Reviewer の権限ごと削除する（thread goals は `submit_goal_review` を使う）。`max_review_rounds` は thread goals も使うので残す。
 - そのほか、ほかから参照されている部分は、実装時に依存を洗って、残すか thread goals 側へ移すかを決める。[ADR 0026](0026-durable-execution-substrate.md) の durable execution の語彙のうち、storage や GUI が共有しているものも同様に扱う。
 
@@ -52,6 +53,7 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 - 同じ checkout に並列で書き込む run どうしの衝突を、runtime は防がない。防ぐのは worktree を分ける運用である。
 - evorch の中から、未 commit の編集を 1 手ずつ戻すことはできなくなる。
 - runtime と gui から、isolated、snapshot、旧 supervisor の分のコードとテストが減る。restore の契約（[ADR 0027](0027-restore-contract.md)）からも worktree の扱いが消える。
+- durable task の resume / retry / cancel と stale の検出はなくなる。team task の進捗と checkpoint の記録・表示は残る。削除したイベントの variant を含む既存の DB は、storage が復元できない行を警告付きで読み飛ばすことで、移行層なしで開ける。
 - 許可ディレクトリ（[ADR 0032](0032-project-allowed-directories.md)）は、isolated の特例なしで、role の権限どおりに扱える。ほかのリポジトリで作業する場合も、エージェントがその許可ディレクトリの中に worktree を作ればよい。
 - 実装は 3 段に分ける。①ワークスペース snapshot、ロック、`/undo` / `/redo` の削除、②旧 PR delivery supervisor の削除、③isolated workspace の削除。①は単独で入れられ、効果がいちばん大きい。旧 supervisor は Reviewer を isolated で起動しているので、②を③より先に入れる。
 

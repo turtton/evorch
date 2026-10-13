@@ -72,3 +72,27 @@ goal・論理 task・attempt・run generation・cursor・artifact・failure・re
 - ADR 0025 が挙げた session 再開・台帳・provider 連敗対応の負債を公式機能として解消。
 - process 外 provider の革命再起動・HIPAA 等の厳密な jurisdiction 担保は本 ADR 範囲外
   （"まだ" 実施しない）で、後続 unit の論点として残す。
+
+## Addendum（2026-10-14、ADR 0031 ② 旧 PR delivery supervisor の削除）
+
+[ADR 0031](0031-remove-isolated-workspaces.md) に従い、`crates/runtime/src/orchestration/`
+を丸ごと削除した。依存を洗った結果、supervisor の中にあった durable 関連の処理
+（`ledger/durable.rs`、`supervisor/tasks.rs` の resume/retry/cancel、`stale.rs` の
+heartbeat 検知、`task_admission.rs`、`budget.rs` の goal 単位の診断集約）はどれも
+goal ledger を走査するだけで、goal ledger を作るのは supervisor だけだったため、
+外へ移さず supervisor と一緒に削除した。Decision の 3（`submit_review` と review
+loop）と 5（`TaskRetryScheduled` と admission の generation 管理）も同様に削除した。
+
+残る durable task の経路は次のとおりで、supervisor に依存しない。
+
+- 発行: durable task の識別子（`RunConfig.task_id` か `team_task`）を持つ run について、`TaskProgressed` を
+  `crates/runtime/src/agent_loop/durable.rs` が、`TaskCheckpoint` と予算診断を
+  `crates/runtime/src/budget_tracker.rs` が出す（Decision の 2 は変更なし）。
+- 保存と復元: `crates/storage/src/projection/durable.rs` が generation fence と
+  terminal fence を含めて projection する。`parent_run_id` は supervisor の
+  `RunAttached` が無くなったため常に空になる。
+- 表示: GUI の `crates/gui/src/model/durable_tasks.rs` と
+  `durable_tasks/orchestrator.rs` が `TaskProgressed` / `TaskCheckpoint` だけを扱う。
+
+削除した variant を含む既存 DB は、storage のイベント読み出しが復元できない行を
+警告付きで読み飛ばすことで、移行層なしで開ける。

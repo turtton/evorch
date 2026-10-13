@@ -9,18 +9,14 @@ use std::time::{Duration, Instant};
 use egui::{Key, Modifiers};
 use egui_dock::SurfaceIndex;
 use event_bus::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CiState, DeliveryDisposition,
-    Event, EventBus, GateSnapshot, LifecycleEvent, MergeBinding, MessageEvent, ProviderEvent,
-    ToolEvent,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
+    EventBus, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
 };
 use gui::app::{ConversationFocus, WorkbenchError, WorkbenchState};
 use gui::diff::{DiffMode, DiffState, FixtureDiffSource};
 use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
-use gui::model::commands::{
-    CiStatus, GateItemView, GoalSubmission, LoopEvent, MergeApprovalView, MergeCommand,
-    MergeDecision, PrRef, ReviewerStatus, WorkbenchCommand,
-};
+use gui::model::commands::{GoalSubmission, WorkbenchCommand};
 use gui::model::tasks::AgentRunSource;
 use gui::model::transcript::TranscriptEntry;
 use runtime::{AgentSummary, RunId};
@@ -186,49 +182,6 @@ fn delivered(sender: &str, recipient: &str, content: &str) -> Event {
         },
         disposition: DeliveryDisposition::Aside,
     })
-}
-
-fn pending_merge_view() -> MergeApprovalView {
-    MergeApprovalView {
-        pr: Some(PrRef {
-            number: 65,
-            title: "Workbench restructure".into(),
-            url: "https://github.com/turtton/evorch/pull/65".into(),
-        }),
-        ci: CiStatus::Pending,
-        reviewer: ReviewerStatus::Pending,
-        diff_summary: Some("model-only change".into()),
-        resolution: None,
-        binding: Some(MergeBinding {
-            token_id: "token-65".into(),
-            repo: "turtton/evorch".into(),
-            pr_number: 65,
-            head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
-            snapshot: GateSnapshot {
-                repo: "turtton/evorch".into(),
-                pr_number: 65,
-                base_ref: "main".into(),
-                head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
-                ci: CiState::Green,
-                criteria_round: 1,
-                review_round: 1,
-                reviewer_run_id: "run-review-1".into(),
-            },
-        }),
-        gate: vec![
-            GateItemView {
-                label: "pull_request".into(),
-                ok: true,
-                detail: "#65 (turtton/evorch)".into(),
-            },
-            GateItemView {
-                label: "ci".into(),
-                ok: true,
-                detail: "green".into(),
-            },
-        ],
-        blocked: None,
-    }
 }
 
 fn leaf_panels(node: &LayoutNode, leaves: &mut Vec<Vec<PanelId>>) {
@@ -574,8 +527,7 @@ fn v02_end_to_end_chained_scenario() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
-            WorkbenchCommand::DecideMerge(_)
-            | WorkbenchCommand::SetGoalReview { .. }
+            WorkbenchCommand::SetGoalReview { .. }
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
@@ -583,9 +535,6 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
-            | WorkbenchCommand::PauseGoal { .. }
-            | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
@@ -604,52 +553,6 @@ fn v02_end_to_end_chained_scenario() {
             .as_deref(),
         Some("goal-1")
     );
-    assert!(fixture.workbench.state().merge().view.pr.is_none());
-
-    // When: the loop publishes a pending merge view and the operator approves.
-    fixture
-        .workbench
-        .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
-    fixture
-        .workbench
-        .state_mut()
-        .decide_merge(MergeDecision::Approve);
-
-    // Then: exactly one DecideMerge command carries the active thread.
-    let decisions: Vec<&MergeCommand> = fixture
-        .workbench
-        .state()
-        .issued()
-        .iter()
-        .filter_map(|command| match command {
-            WorkbenchCommand::DecideMerge(merge) => Some(merge),
-            WorkbenchCommand::SubmitGoal(_)
-            | WorkbenchCommand::SetGoalReview { .. }
-            | WorkbenchCommand::SetGoalChecksPaused { .. }
-            | WorkbenchCommand::SendChat(_)
-            | WorkbenchCommand::ContinueChat(_)
-            | WorkbenchCommand::StopChat { .. }
-            | WorkbenchCommand::StopRun { .. }
-            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
-            | WorkbenchCommand::CancelChat { .. }
-            | WorkbenchCommand::PauseGoal { .. }
-            | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. }
-            | WorkbenchCommand::DecideToolApproval { .. }
-            | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
-        })
-        .collect();
-    assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");
-    assert_eq!(decisions[0].thread_id, "thread-1");
-    assert_eq!(decisions[0].decision, MergeDecision::Approve);
-    assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
-    assert_eq!(
-        fixture.workbench.state().merge().view.resolution,
-        Some(MergeDecision::Approve)
-    );
-
     // When: layout and sidebar are persisted and a fresh state is built from
     // the saved files.
     fixture.workbench.key_press(Modifiers::COMMAND, Key::S);
@@ -842,7 +745,6 @@ fn operator_error_paths_stay_explicit() {
     assert!(workbench.state().sidebar().selected_project.is_none());
     assert!(workbench.has_label("Projects"));
 
-    // When: an active thread with a pending merge view rejects without a reason.
     let project_root = temp_dir.path().join("demo");
     std::fs::create_dir(&project_root).expect("project directory");
     {
@@ -851,16 +753,7 @@ fn operator_error_paths_stay_explicit() {
         state
             .create_thread("error path thread")
             .expect("thread created");
-        state.apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     }
-    workbench.state_mut().decide_merge(MergeDecision::Reject {
-        reason: String::new(),
-    });
-    workbench.run();
-
-    // Then: no command is issued and the merge view stays unresolved.
-    assert!(workbench.state().issued().is_empty());
-    assert!(workbench.state().merge().view.resolution.is_none());
 
     // Given: a workbench whose diff source always fails.
     let error_state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())

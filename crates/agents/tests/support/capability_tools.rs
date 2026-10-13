@@ -55,7 +55,6 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "read",
     "grep",
     "git_diff",
-    "submit_review",
     "ledger_append",
     "ledger_read",
     "ask_user",

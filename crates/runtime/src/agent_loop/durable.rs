@@ -10,8 +10,7 @@ impl LoopState {
             return;
         }
         // chat や headless の単発実行のような durable task 識別子 (task_id /
-        // team_task) を持たない run は goal ledger の所有物にならず、境界イベントを
-        // 永続化すると起動時の goal replay が未解決イベントで失敗するため emit しない。
+        // team_task) を持たない run は durable task ではないため emit しない。
         // chat 履歴復元は run_contexts スナップショット経由で、この経路には依存しない。
         if self.task.config.task_id.is_none() && self.task.config.team_task.is_none() {
             return;

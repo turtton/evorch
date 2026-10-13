@@ -7,8 +7,6 @@ mod compaction_ledger;
 mod composer_mention;
 #[path = "headless_conversation/composer_tab.rs"]
 mod composer_tab;
-#[path = "headless_conversation/continuation_transcript_headless.rs"]
-mod continuation_transcript_headless;
 #[path = "headless_conversation/conversation_replay.rs"]
 mod conversation_replay;
 #[path = "headless_conversation/escalation_threads.rs"]

@@ -75,17 +75,13 @@ fn preview_and_cleanup_preserve_audits_conversation_goal_and_restore_context() {
         ..old.clone()
     };
     let goal = Event {
-        kind: event_bus::OrchestratorEvent::GoalCreated {
-            goal_id: "goal".into(),
-            session_id: "session".into(),
-            project_id: "project".into(),
-            thread_id: "thread".into(),
-            goal: "preserve goal".into(),
-            references: vec![],
-            constraints: vec![],
-            repo: "owner/repo".into(),
-            base_ref: "main".into(),
-            root_run_id: "run".into(),
+        kind: event_bus::OrchestratorEvent::TaskCheckpoint {
+            task_id: "task".into(),
+            run_id: "run".into(),
+            tool_call_count: 1,
+            cumulative_input_tokens: 2,
+            cumulative_output_tokens: 3,
+            elapsed_ms: 4,
         }
         .into(),
         ..old.clone()

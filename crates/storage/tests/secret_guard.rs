@@ -5,8 +5,8 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{
-    Event, EventKind, EventMeta, GoalState, LifecycleEvent, MessageEvent, OrchestratorEvent,
-    ProviderEvent, ToolEvent,
+    Event, EventKind, EventMeta, LifecycleEvent, MessageEvent, OrchestratorEvent, ProviderEvent,
+    ToolEvent,
 };
 use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
@@ -239,7 +239,7 @@ fn rejected_event_preserves_events_rows_and_session_bytes() {
 
 #[test]
 fn orchestrator_event_payload_is_secret_checked() {
-    // Given: goal 本文に secret 形状値を含む Orchestrator::GoalCreated イベント
+    // Given: progress の理由に secret 形状値を含む Orchestrator::TaskProgressed イベント
     let temp = TempDir::new().expect("temporary directory must be created");
     let storage = Storage::open(config(&temp)).expect("storage must open");
     let handle = storage.handle();
@@ -249,17 +249,11 @@ fn orchestrator_event_payload_is_secret_checked() {
     let result = handle.append_event(
         Some("s"),
         &event(
-            OrchestratorEvent::GoalCreated {
-                goal_id: "goal-1".into(),
-                session_id: "s".into(),
-                project_id: "evorch".into(),
-                thread_id: "t".into(),
-                goal: format!("implement {secret}"),
-                references: Vec::new(),
-                constraints: Vec::new(),
-                repo: "turtton/evorch".into(),
-                base_ref: "main".into(),
-                root_run_id: "run-1".into(),
+            OrchestratorEvent::TaskProgressed {
+                task_id: "task-1".into(),
+                run_id: "run-1".into(),
+                progress: serde_json::json!({"remaining": 1}),
+                reason: format!("implement {secret}"),
             }
             .into(),
         ),
@@ -295,11 +289,13 @@ fn orchestrator_event_payload_is_secret_checked() {
         .append_event(
             Some("s"),
             &event(
-                OrchestratorEvent::GoalStateChanged {
-                    goal_id: "goal-1".into(),
-                    from: GoalState::Active,
-                    to: GoalState::Paused,
-                    reason: "operator pause".into(),
+                OrchestratorEvent::TaskCheckpoint {
+                    task_id: "task-1".into(),
+                    run_id: "run-1".into(),
+                    tool_call_count: 1,
+                    cumulative_input_tokens: 2,
+                    cumulative_output_tokens: 3,
+                    elapsed_ms: 4,
                 }
                 .into(),
             ),

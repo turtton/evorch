@@ -150,14 +150,7 @@ fn learning_tools_require_internal_purpose_and_correct_role() {
             .collect::<Vec<_>>(),
         ["inspect_learning_source", "stack_lesson_candidate"]
     );
-    for forbidden in [
-        "write",
-        "shell",
-        "delegate",
-        "read",
-        "submit_review",
-        "submit_lesson_review",
-    ] {
+    for forbidden in ["write", "shell", "delegate", "read", "submit_lesson_review"] {
         assert!(policy.authorize(forbidden).is_err());
     }
     assert!(

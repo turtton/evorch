@@ -7,15 +7,12 @@ mod sidebar;
 
 use std::sync::Arc;
 
-use event_bus::{AgentRunPhase, CiState, GateSnapshot, MergeBinding};
+use event_bus::AgentRunPhase;
 use runtime::{AgentSummary, RunId};
 use workspace_ui::SidebarState;
 
 use crate::app::WorkbenchState;
 use crate::diff::{DiffMode, FixtureDiffSource};
-use crate::model::commands::{
-    CiStatus, GateItemView, LoopEvent, MergeApprovalView, PrRef, ReviewerStatus,
-};
 use crate::model::tasks::AgentRunSource;
 
 pub use codex_auth::ScriptedCodexAuthBackend;
@@ -89,53 +86,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
     ]
 }
 
-/// issue #81 の PR 状態を模した merge approval view。
-pub fn demo_merge_view() -> MergeApprovalView {
-    MergeApprovalView {
-        pr: Some(PrRef {
-            number: 81,
-            title: "v0.3 GUI design system refinement".into(),
-            url: "https://github.com/turtton/evorch/pull/81".into(),
-        }),
-        ci: CiStatus::Pending,
-        reviewer: ReviewerStatus::Pending,
-        diff_summary: Some("theme tokens and pane restyle".into()),
-        resolution: None,
-        binding: Some(MergeBinding {
-            token_id: "token-81".into(),
-            repo: "turtton/evorch".into(),
-            pr_number: 81,
-            head_sha: DEMO_HEAD_SHA.into(),
-            snapshot: GateSnapshot {
-                repo: "turtton/evorch".into(),
-                pr_number: 81,
-                base_ref: "main".into(),
-                head_sha: DEMO_HEAD_SHA.into(),
-                ci: CiState::Green,
-                criteria_round: 1,
-                review_round: 1,
-                reviewer_run_id: "run-3".into(),
-            },
-        }),
-        gate: vec![
-            GateItemView {
-                label: "pull_request".into(),
-                ok: true,
-                detail: "#81 (turtton/evorch)".into(),
-            },
-            GateItemView {
-                label: "ci".into(),
-                ok: false,
-                detail: "pending".into(),
-            },
-        ],
-        blocked: None,
-    }
-}
-
-const DEMO_HEAD_SHA: &str = "81b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9";
-
-/// sidebar / diff / transcript / merge を demo 状態へ一括投入する。
+/// sidebar / diff / transcript を demo 状態へ一括投入する。
 pub fn populate<S: AgentRunSource>(
     state: WorkbenchState<S>,
     sidebar: SidebarState,
@@ -144,7 +95,6 @@ pub fn populate<S: AgentRunSource>(
         .with_sidebar(sidebar)
         .with_diff_source(Arc::new(FixtureDiffSource::demo()));
     state.apply_events(demo_events());
-    state.apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(demo_merge_view())));
     state.request_diff(DiffMode::WorkingTree);
     state
 }

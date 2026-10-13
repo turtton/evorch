@@ -7,7 +7,10 @@ pub(super) struct SpawnIntent {
 }
 
 impl AgentRuntime {
-    pub(crate) fn track_goal_run(&self, run: RunId, owner: &str) {
+    /// Records a pre-registration spawn intent so tests can exercise subtree
+    /// fencing for runs that are not registered yet.
+    #[cfg(test)]
+    pub(crate) fn seed_spawn_intent(&self, run: RunId, owner: &str) {
         let Ok(parent) = owner.parse::<RunId>() else {
             return;
         };
@@ -33,53 +36,5 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&run)
             .is_some_and(|intent| intent.cancelled)
-    }
-
-    pub(crate) fn workspace_configuration_failed(&self, run: RunId) -> bool {
-        let project = self.shared.project_of(run);
-        self.shared
-            .workspace
-            .as_ref()
-            .and_then(|workspace| match &project {
-                Some(project) => project.isolated(workspace),
-                None => workspace.isolated(),
-            })
-            .is_none()
-            && lock_runs(&self.shared.runs)
-                .get(&run)
-                .is_some_and(|entry| entry.config.workspace_mode == WorkspaceMode::Isolated)
-    }
-
-    pub(crate) fn cancel_goal_runs(&self, snapshot: &crate::orchestration::ledger::GoalSnapshot) {
-        let mut intents = self
-            .shared
-            .spawn_intents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut runs: std::collections::HashSet<RunId> = snapshot
-            .attached_runs
-            .iter()
-            .filter_map(|run| run.run_id.parse::<RunId>().ok())
-            .collect();
-        loop {
-            let descendants: Vec<_> = intents
-                .iter()
-                .filter_map(|(run, intent)| {
-                    intent
-                        .parent
-                        .filter(|parent| runs.contains(parent))
-                        .map(|_| *run)
-                })
-                .collect();
-            let before = runs.len();
-            runs.extend(descendants);
-            if runs.len() == before {
-                break;
-            }
-        }
-        for run in runs {
-            intents.entry(run).or_default().cancelled = true;
-            let _ = self.cancel(run);
-        }
     }
 }

@@ -81,26 +81,19 @@ fn orchestrator_events_round_trip_through_sqlite() {
     };
     let storage = Storage::open(config.clone()).expect("storage must open");
     let handle = storage.handle();
-    let created = event_bus::Event::new(event_bus::OrchestratorEvent::GoalCreated {
-        goal_id: "goal-1".into(),
-        session_id: "session-1".into(),
-        project_id: "project-1".into(),
-        thread_id: "thread-1".into(),
-        goal: "implement storage durability".into(),
-        references: vec![event_bus::GoalReference {
-            kind: "issue".into(),
-            value: "73".into(),
-        }],
-        constraints: vec!["storage-only".into()],
-        repo: "turtton/evorch".into(),
-        base_ref: "main".into(),
-        root_run_id: "run-1".into(),
+    let created = event_bus::Event::new(event_bus::OrchestratorEvent::TaskProgressed {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        progress: serde_json::json!({"completed": ["ac1"]}),
+        reason: "criterion completed".into(),
     });
-    let changed = event_bus::Event::new(event_bus::OrchestratorEvent::GoalStateChanged {
-        goal_id: "goal-1".into(),
-        from: event_bus::GoalState::Active,
-        to: event_bus::GoalState::Paused,
-        reason: "test".into(),
+    let changed = event_bus::Event::new(event_bus::OrchestratorEvent::TaskCheckpoint {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        tool_call_count: 1,
+        cumulative_input_tokens: 2,
+        cumulative_output_tokens: 3,
+        elapsed_ms: 4,
     });
 
     // When: append through the public writer handle and reopen the database
@@ -109,7 +102,7 @@ fn orchestrator_events_round_trip_through_sqlite() {
         .expect("created event must append");
     handle
         .append_event(Some("session-1"), &changed)
-        .expect("state change event must append");
+        .expect("checkpoint event must append");
     drop(storage);
     let database = Database::open(&config).expect("database must reopen");
 

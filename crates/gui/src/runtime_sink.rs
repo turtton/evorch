@@ -1,4 +1,4 @@
-//! Conversation commands and generic thread goals, with legacy PR supervisor controls.
+//! Conversation commands and generic thread goals.
 
 // allow: SIZE_OK - RuntimeCommandSink 本体に、pinned された 9 件の振る舞いテスト
 // (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
@@ -9,23 +9,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use event_bus::{ApprovalDecision, Event, EventBus};
-use runtime::orchestration::supervisor::SupervisorError;
-use runtime::{AgentRuntime, Role, RunConfig, RunId, SupervisorHandle};
+use event_bus::{Event, EventBus};
+use runtime::{AgentRuntime, Role, RunConfig, RunId};
 
 use crate::model::commands::{
-    CommandSink, GoalSubmission, LoopEvent, MergeDecision, ReferenceKind, WorkbenchCommand,
+    CommandSink, GoalSubmission, LoopEvent, ReferenceKind, WorkbenchCommand,
 };
 
-/// storage bridge と [`runtime::GoalSpec::session_id`] で共有する永続化セッション ID。
+/// storage bridge が使う永続化セッション ID。
 ///
 /// 固定値にすることで、再起動後の `Database::agent_messages_by_session` が
 /// 前セッションの transcript を引き続き復元できる。
 pub const STORAGE_SESSION_ID: &str = "evorch-gui";
-
-/// token なし DecideMerge を拒否する理由。
-const MISSING_TOKEN_REASON: &str =
-    "merge decision requires an approval token issued by MergeApprovalRequested";
 
 pub fn finish_chat_start(
     host: &runtime::ownership::OwnerHost,
@@ -41,7 +36,6 @@ pub fn finish_chat_start(
 /// Persistent conversations and generic objectives share this production command sink.
 ///
 /// SubmitGoal joins the normal persistent conversation and creates a generic objective.
-/// DecideMerge / PauseGoal / ResumeGoal / CancelGoal は supervisor へ転送する。
 pub struct RuntimeCommandSink {
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
@@ -49,10 +43,8 @@ pub struct RuntimeCommandSink {
     runtime: AgentRuntime,
     shell_cwd: Option<PathBuf>,
     handle: tokio::runtime::Handle,
-    supervisor: SupervisorHandle,
     chat_runs: BTreeMap<String, RunId>,
     goal_runs: BTreeMap<String, RunId>,
-    goal_ids: BTreeMap<String, String>,
     running_children: BTreeMap<String, usize>,
     // A second press must escalate before the async root phase changes.
     stop_marked: BTreeSet<String>,
@@ -86,12 +78,8 @@ impl RuntimeCommandSink {
         )
     }
 
-    /// runtime, tokio ハンドル, supervisor handle から sink を生成する。
-    pub fn new(
-        runtime: AgentRuntime,
-        handle: tokio::runtime::Handle,
-        supervisor: SupervisorHandle,
-    ) -> Self {
+    /// runtime と tokio ハンドルから sink を生成する。
+    pub fn new(runtime: AgentRuntime, handle: tokio::runtime::Handle) -> Self {
         Self {
             event_bus: None,
             team_writer: None,
@@ -99,10 +87,8 @@ impl RuntimeCommandSink {
             runtime,
             shell_cwd: None,
             handle,
-            supervisor,
             chat_runs: BTreeMap::new(),
             goal_runs: BTreeMap::new(),
-            goal_ids: BTreeMap::new(),
             running_children: BTreeMap::new(),
             stop_marked: BTreeSet::new(),
             stopped_by_us: BTreeSet::new(),
@@ -152,18 +138,6 @@ impl RuntimeCommandSink {
                 }
             )
     }
-
-    fn route_goal_command(
-        &mut self,
-        route: impl FnOnce(&SupervisorHandle) -> Result<(), SupervisorError>,
-    ) -> Vec<LoopEvent> {
-        match route(&self.supervisor) {
-            Ok(()) => Vec::new(),
-            Err(error) => vec![LoopEvent::CommandRejected {
-                reason: error.to_string(),
-            }],
-        }
-    }
 }
 
 impl CommandSink for RuntimeCommandSink {
@@ -174,10 +148,6 @@ impl CommandSink for RuntimeCommandSink {
             .or_else(|| self.goal_runs.get(thread))?;
         self.runtime.follow_up_status(*run).ok()
     }
-    fn bind_goal_id(&mut self, thread: &str, goal: &str) {
-        self.goal_ids.insert(thread.into(), goal.into());
-    }
-
     fn running_children(&mut self, thread: &str) -> Option<usize> {
         let run = *self
             .chat_runs
@@ -342,12 +312,8 @@ impl CommandSink for RuntimeCommandSink {
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
-                WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::PauseGoal { .. }
-                | WorkbenchCommand::DecideToolApproval { .. }
-                | WorkbenchCommand::SetWebToolsEnabled { .. }
-                | WorkbenchCommand::ResumeGoal { .. }
-                | WorkbenchCommand::CancelGoal { .. } => None,
+                WorkbenchCommand::DecideToolApproval { .. }
+                | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
             };
             match thread.map(|thread| host.owned_permit(thread)).transpose() {
                 Ok(permit) => permit,
@@ -598,17 +564,6 @@ impl RuntimeCommandSink {
                         }
                     }
                 };
-                let mut events = Vec::new();
-                // Fence supervisor dispatch before a stopped root/child can complete.
-                if matches!(scope, runtime::StopScope::SelfOnly)
-                    && let Some(goal_id) = self.goal_ids.get(&thread_id)
-                    && let Err(error) = self.supervisor.pause(goal_id)
-                {
-                    events.push(LoopEvent::ChatNotice {
-                        thread_id: thread_id.clone(),
-                        text: format!("Run stopped; goal pause failed: {error}"),
-                    });
-                }
                 if let Err(error) = self.runtime.stop(run_id, scope) {
                     return vec![LoopEvent::ChatRejected {
                         thread_id,
@@ -625,12 +580,11 @@ impl RuntimeCommandSink {
                 }
                 self.stopped_by_us.insert(thread_id.clone());
                 let running_children = self.running_children(&thread_id).unwrap_or(0);
-                events.push(LoopEvent::ChatStopped {
+                vec![LoopEvent::ChatStopped {
                     thread_id,
                     run_id: run_id.to_string(),
                     running_children,
-                });
-                events
+                }]
             }
             WorkbenchCommand::CancelChat { thread_id } => {
                 let Some(&run_id) = self
@@ -739,32 +693,6 @@ impl RuntimeCommandSink {
             } => self.goal_control(&thread_id, permit, |runtime| {
                 runtime.set_goal_checks_paused(&thread_id, &goal_id, paused)
             }),
-            WorkbenchCommand::DecideMerge(command) => {
-                let Some(token_id) = command.token_id.clone() else {
-                    return vec![LoopEvent::CommandRejected {
-                        reason: MISSING_TOKEN_REASON.to_owned(),
-                    }];
-                };
-                let decision = supervisor_decision(command.decision.clone());
-                match self.supervisor.decide_merge(token_id, decision) {
-                    Ok(()) => vec![LoopEvent::MergeResolved {
-                        thread_id: command.thread_id,
-                        decision: command.decision,
-                    }],
-                    Err(error) => vec![LoopEvent::CommandRejected {
-                        reason: error.to_string(),
-                    }],
-                }
-            }
-            WorkbenchCommand::PauseGoal { goal_id } => {
-                self.route_goal_command(|supervisor| supervisor.pause(&goal_id))
-            }
-            WorkbenchCommand::ResumeGoal { goal_id } => {
-                self.route_goal_command(|supervisor| supervisor.resume(&goal_id))
-            }
-            WorkbenchCommand::CancelGoal { goal_id } => {
-                self.route_goal_command(|supervisor| supervisor.cancel(&goal_id))
-            }
             WorkbenchCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
             WorkbenchCommand::ContinueChat(continuation) => self.submit_chat(
                 crate::model::commands::ChatSubmission {
@@ -993,25 +921,10 @@ impl RuntimeCommandSink {
                     self.chat_runs.insert(thread_id.clone(), run_id);
                     self.stop_marked.remove(&thread_id);
                     self.stopped_by_us.remove(&thread_id);
-                    let mut events = vec![LoopEvent::ChatAccepted {
-                        thread_id: thread_id.clone(),
+                    return vec![LoopEvent::ChatAccepted {
+                        thread_id,
                         run_id: run_id.to_string(),
                     }];
-                    // continue_goal re-registers the root before the supervisor
-                    // can dispatch another continuation.
-                    if let Some(goal_id) = self.goal_ids.get(&thread_id)
-                        && self.supervisor.snapshot(goal_id).is_some_and(|goal| {
-                            // Detached Resume would recover a second root after continue_goal.
-                            !goal.detached && goal.state == event_bus::GoalState::Paused
-                        })
-                        && let Err(error) = self.supervisor.resume(goal_id)
-                    {
-                        events.push(LoopEvent::ChatNotice {
-                            thread_id,
-                            text: format!("Run resumed; goal resume failed: {error}"),
-                        });
-                    }
-                    return events;
                 }
                 Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
                     self.stop_marked.remove(&thread_id);
@@ -1141,14 +1054,6 @@ impl RuntimeCommandSink {
     }
 }
 
-/// GUI 側の merge 判断を supervisor の承認判断へ写像する。
-fn supervisor_decision(decision: MergeDecision) -> ApprovalDecision {
-    match decision {
-        MergeDecision::Approve => ApprovalDecision::Approved,
-        MergeDecision::Reject { reason } => ApprovalDecision::Rejected { reason },
-    }
-}
-
 /// GoalSubmission を background run へ渡す entry prompt として整形する。
 ///
 /// goal 本文を先頭に置き、references / constraints は空でない場合のみ
@@ -1197,18 +1102,6 @@ pub fn derive_repo_slug(repo_root: &Path) -> String {
         .unwrap_or_else(|| fallback_slug(repo_root))
 }
 
-/// `git symbolic-ref --short refs/remotes/origin/HEAD` からマージ先ブランチを
-/// 解決する。取得に失敗した場合は `main` へ fallback する。
-pub fn derive_base_ref(repo_root: &Path) -> String {
-    git_output(
-        repo_root,
-        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .as_deref()
-    .and_then(|output| output.trim().strip_prefix("origin/").map(str::to_owned))
-    .unwrap_or_else(|| String::from("main"))
-}
-
 fn git_output(repo_root: &Path, args: [&str; 3]) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -1255,25 +1148,20 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use event_bus::{EventBus, EventKind, GoalReference, GoalState, OrchestratorEvent};
+    use event_bus::{EventBus, EventKind, OrchestratorEvent};
     use providers::{ChatResponse, Message, ToolSpec};
     use runtime::{
-        AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSpec,
-        GoalSupervisor, OrchestrationSettings, Role, RunConfig, RuntimeError, SupervisorHandle,
+        AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError,
     };
     use storage::{Database, Storage, StorageConfig, StorageHandle};
     use tools::ToolExecutor;
 
     use super::{RuntimeCommandSink, STORAGE_SESSION_ID, render_entry_prompt};
     use crate::model::commands::{
-        CommandSink, GoalSubmission, LoopEvent, MergeCommand, MergeDecision, PacketReference,
-        ReferenceKind, WorkbenchCommand,
+        CommandSink, GoalSubmission, LoopEvent, PacketReference, ReferenceKind, WorkbenchCommand,
     };
 
     /// どんなプロンプトにも応答せず run を走らせ続けるテスト用 stub モデル。
-    ///
-    /// supervisor を接続すると run の terminal 遷移が continuation / delivery
-    /// 起動に繋がるため、行アサーションとの競合を避べるよう run を終端させない。
     #[derive(Default)]
     struct HeldModel {
         started: tokio::sync::Notify,
@@ -1313,29 +1201,12 @@ mod tests {
         }
     }
 
-    fn spec() -> GoalSpec {
-        GoalSpec {
-            session_id: STORAGE_SESSION_ID.into(),
-            project_id: "evorch".into(),
-            thread_id: "thread-1".into(),
-            goal: "implement issue 73".into(),
-            references: vec![GoalReference {
-                kind: "issue".into(),
-                value: "73".into(),
-            }],
-            constraints: Vec::new(),
-            repo: "turtton/evorch".into(),
-            base_ref: "main".into(),
-        }
-    }
-
-    /// マルチスレッド tokio runtime 上に実 AgentRuntime + supervisor を接続した
-    /// sink を組み立てる。
+    /// マルチスレッド tokio runtime 上に実 AgentRuntime を接続した sink を組み立てる。
     fn build_sink() -> (
         tokio::runtime::Runtime,
         RuntimeCommandSink,
         AgentRuntime,
-        SupervisorHandle,
+        Arc<EventBus>,
     ) {
         let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
         build_sink_on(rt, Arc::new(HeldModel::default()))
@@ -1348,7 +1219,7 @@ mod tests {
         tokio::runtime::Runtime,
         RuntimeCommandSink,
         AgentRuntime,
-        SupervisorHandle,
+        Arc<EventBus>,
     ) {
         build_sink_with(rt, model, |runtime| runtime)
     }
@@ -1361,22 +1232,13 @@ mod tests {
         tokio::runtime::Runtime,
         RuntimeCommandSink,
         AgentRuntime,
-        SupervisorHandle,
+        Arc<EventBus>,
     ) {
         let bus = Arc::new(EventBus::new(64));
         let executor = Arc::new(ToolExecutor::new(bus.clone()));
         let runtime = configure(AgentRuntime::new(Arc::clone(&bus), executor, model));
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus,
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
-        let sink =
-            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
-        (rt, sink, runtime, supervisor)
+        let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
+        (rt, sink, runtime, bus)
     }
 
     #[test]
@@ -1763,7 +1625,7 @@ mod tests {
                     started: tokio::sync::Notify::new(),
                     requests: Default::default(),
                 });
-                let (rt, mut sink, runtime, supervisor) =
+                let (rt, mut sink, runtime, _) =
                     build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
                 let dir = tempfile::tempdir().unwrap();
                 let config = StorageConfig {
@@ -1798,8 +1660,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 if restart {
-                    sink =
-                        RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+                    sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
                 }
                 let events = sink.submit(continue_command("resume"));
                 assert!(
@@ -2418,7 +2279,7 @@ mod tests {
     #[test]
     fn explicit_goal_joins_waiting_or_stopped_chat_with_the_current_request() {
         for stopped in [false, true] {
-            let (rt, mut sink, runtime, supervisor) = build_sink_on(
+            let (rt, mut sink, runtime, bus) = build_sink_on(
                 tokio::runtime::Runtime::new().unwrap(),
                 Arc::new(TextThenHold(false.into())),
             );
@@ -2430,7 +2291,7 @@ mod tests {
             let storage = Storage::open(config.clone()).unwrap();
             let runtime =
                 runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-            let mut events = supervisor.subscribe();
+            let mut events = bus.subscribe();
             sink.submit(chat_command("thread-1"));
             let root = sink.chat_runs["thread-1"];
             rt.block_on(async {
@@ -2567,7 +2428,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (rt, mut sink, runtime, supervisor) = build_sink_on(rt, Arc::new(HeldModel::default()));
+        let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel::default()));
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("early-stop.sqlite3"),
@@ -2580,9 +2441,7 @@ mod tests {
             let _guard = rt.enter();
             runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default())
         };
-        let goal_id = supervisor.create_goal(spec(), root);
         sink.bind_goal_context("thread-1", "evorch", &root.to_string());
-        sink.bind_goal_id("thread-1", &goal_id);
         assert_eq!(
             runtime.inspect_agent(root).unwrap().phase,
             event_bus::AgentRunPhase::Pending
@@ -2598,7 +2457,6 @@ mod tests {
             rt.block_on(runtime.wait(root)).unwrap(),
             event_bus::AgentRunPhase::Stopped
         );
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
         let events = sink.submit(chat_command("thread-1"));
         assert!(matches!(
             events.as_slice(),
@@ -2787,25 +2645,6 @@ mod tests {
         (task, completed)
     }
 
-    fn wait_for_goal_state(
-        rt: &tokio::runtime::Runtime,
-        supervisor: &SupervisorHandle,
-        goal_id: &str,
-        expected: GoalState,
-    ) {
-        let mut events = supervisor.subscribe();
-        rt.block_on(async {
-            loop {
-                if let Some(snapshot) = supervisor.snapshot(goal_id)
-                    && snapshot.state == expected
-                {
-                    return;
-                }
-                events.recv().await.expect("goal state event");
-            }
-        });
-    }
-
     // Given: references も constraints も空の GoalSubmission
     // When: render_entry_prompt する
     // Then: goal 本文そのものが返る
@@ -2905,16 +2744,7 @@ mod tests {
             Arc::new(ToolExecutor::new(bus.clone())),
             Arc::new(HeldModel::default()),
         );
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                bus.clone(),
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
-        let mut sink =
-            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
+        let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         let temp = tempfile::tempdir().unwrap();
         let storage_config = StorageConfig {
             db_path: temp.path().join("events.db"),
@@ -2931,7 +2761,6 @@ mod tests {
         let snapshot = runtime.thread_goal("thread-1").unwrap();
         assert_eq!(snapshot.goal_id, goal_id);
         assert_eq!(snapshot.root_run_id, root_run_id);
-        assert!(supervisor.snapshot(&goal_id).is_none());
         let stored = Database::open(&storage_config)
             .unwrap()
             .events_all_ordered()
@@ -2943,64 +2772,5 @@ mod tests {
         rt.block_on(runtime.wait(sink.chat_runs["thread-1"]))
             .unwrap();
         storage.close();
-    }
-
-    // Given: 実 runtime を接続した sink
-    // When: token なし DecideMerge を submit する
-    // Then: CommandRejected{reason} が返り、run も 1 つも起動されない
-    #[test]
-    fn decide_merge_without_token_is_rejected_without_starting_a_run() {
-        let (rt, mut sink, runtime, supervisor) = build_sink();
-
-        let events = sink.submit(WorkbenchCommand::DecideMerge(MergeCommand {
-            thread_id: "thread-1".into(),
-            pr: None,
-            token_id: None,
-            decision: MergeDecision::Approve,
-        }));
-
-        assert!(
-            matches!(&events[..], [LoopEvent::CommandRejected { reason }] if !reason.is_empty()),
-            "unexpected events: {events:?}"
-        );
-        rt.block_on(supervisor.synchronize()).unwrap();
-        assert!(runtime.list_agents().is_empty());
-    }
-
-    // Given: HeldModel で root run を走らせたままの goal
-    // When: PauseGoal / ResumeGoal / CancelGoal を sink 経由で送る
-    // Then: いずれも LoopEvent を返さず、goal 状態が順に Paused → Active → Cancelled へ遷移する
-    #[test]
-    fn pause_resume_cancel_route_to_supervisor() {
-        let (rt, mut sink, runtime, supervisor) = build_sink();
-        let root = rt.block_on(async {
-            runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default())
-        });
-        let goal_id = supervisor.create_goal(spec(), root);
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
-
-        assert!(
-            sink.submit(WorkbenchCommand::PauseGoal {
-                goal_id: goal_id.clone(),
-            })
-            .is_empty()
-        );
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
-
-        assert!(
-            sink.submit(WorkbenchCommand::ResumeGoal {
-                goal_id: goal_id.clone(),
-            })
-            .is_empty()
-        );
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
-
-        assert!(
-            sink.submit(WorkbenchCommand::CancelGoal {
-                goal_id: goal_id.clone(),
-            })
-            .is_empty()
-        );
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Cancelled);
     }
 }

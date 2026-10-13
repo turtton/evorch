@@ -252,32 +252,6 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
 }
 
 #[test]
-fn continuation_is_a_conversation_root_even_when_it_has_an_owned_parent() {
-    let mut telemetry = TelemetryOverlay::new();
-    telemetry.apply_event(&started("root", None));
-    for event in observed("root", 1_000, 500, 40, 200) {
-        telemetry.apply_event(&event);
-    }
-    // The root-binding event may arrive before the new run's lifecycle event.
-    telemetry.apply_event(&Event::new(
-        event_bus::OrchestratorEvent::ContinuationDispatched {
-            goal_id: "goal".into(),
-            epoch: 1,
-            trigger_run_id: "root".into(),
-            new_run_id: "continuation".into(),
-            unmet: Vec::new(),
-        },
-    ));
-    telemetry.apply_event(&started("continuation", Some("root")));
-    for event in observed("continuation", 2_000, 1_000, 100, 600) {
-        telemetry.apply_event(&event);
-    }
-    let metrics = telemetry.thread_metrics(&["root".into(), "continuation".into()]);
-    assert_eq!(metrics.ttft, Some(Duration::from_millis(600)));
-    assert_eq!(metrics.tok_s, Some(50.0));
-}
-
-#[test]
 fn performance_averages_weight_requests_and_duration_across_root_runs() {
     let mut telemetry = TelemetryOverlay::new();
     for (run, output, ttft, duration) in [

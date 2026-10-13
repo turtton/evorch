@@ -384,15 +384,7 @@ impl TelemetryOverlay {
                 row.ttft_count = 0;
                 self.accumulated_running.entry(run_id.clone()).or_default();
             }
-            EventKind::Orchestrator(event_bus::OrchestratorEvent::GoalCreated {
-                root_run_id: run_id,
-                ..
-            })
-            | EventKind::Orchestrator(event_bus::OrchestratorEvent::ContinuationDispatched {
-                new_run_id: run_id,
-                ..
-            })
-            | EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 new_run_id: run_id,
                 ..
             }) => {

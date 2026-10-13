@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, OrchestratorEvent, ToolEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, ToolEvent};
 use workspace_ui::{ThreadId, ThreadRunPhase};
 
 use crate::app::{AttentionAck, DisplayRevision};
@@ -21,9 +21,6 @@ pub enum NotificationKind {
     ApprovalPending {
         tool_name: String,
         call_id: String,
-    },
-    MergeApprovalPending {
-        goal_id: String,
     },
 }
 
@@ -106,15 +103,6 @@ impl NotificationsModel {
                 resolve_run(call_id),
                 format!("Approval requested: {tool_name}"),
             ),
-            EventKind::Orchestrator(OrchestratorEvent::MergeApprovalRequested {
-                goal_id, ..
-            }) => (
-                NotificationKind::MergeApprovalPending {
-                    goal_id: goal_id.clone(),
-                },
-                None,
-                format!("Merge approval requested: {goal_id}"),
-            ),
             EventKind::Lifecycle(_)
             | EventKind::Tool(_)
             | EventKind::Orchestrator(_)
@@ -132,9 +120,9 @@ impl NotificationsModel {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
             NotificationKind::RunStopped => ThreadRunPhase::Stopped,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
-            NotificationKind::QuestionPending { .. }
-            | NotificationKind::ApprovalPending { .. }
-            | NotificationKind::MergeApprovalPending { .. } => ThreadRunPhase::Waiting,
+            NotificationKind::QuestionPending { .. } | NotificationKind::ApprovalPending { .. } => {
+                ThreadRunPhase::Waiting
+            }
         };
         // Never reuse an id while a renderer may still hold its revision.
         let Some(next_id) = self.next_id.checked_add(1) else {
@@ -432,47 +420,6 @@ mod tests {
         // Then: the notification has no guessed target.
         let item = model.items().next().unwrap();
         assert_eq!(item.run_id, None);
-        assert!(model.is_unread(item.id));
-    }
-    #[test]
-    fn merge_approval_requested_pushes_unread_without_run_target() {
-        use event_bus::{CiState, GateSnapshot, MergeBinding, OrchestratorEvent};
-        // Given: a merge approval binding.
-        let binding = MergeBinding {
-            token_id: "token-1".into(),
-            repo: "owner/repo".into(),
-            pr_number: 1,
-            head_sha: "sha".into(),
-            snapshot: GateSnapshot {
-                repo: "owner/repo".into(),
-                pr_number: 1,
-                base_ref: "main".into(),
-                head_sha: "sha".into(),
-                ci: CiState::Green,
-                criteria_round: 1,
-                review_round: 1,
-                reviewer_run_id: "run-3".into(),
-            },
-        };
-        let mut model = NotificationsModel::default();
-        // When: merge approval is requested with an available run resolver.
-        model.apply_event(
-            &Event::new(OrchestratorEvent::MergeApprovalRequested {
-                goal_id: "goal-1".into(),
-                binding,
-            }),
-            |_| Some("run-3".into()),
-        );
-        // Then: the goal notification is unread but never targets a run.
-        let item = model.items().next().unwrap();
-        assert_eq!(
-            item.kind,
-            NotificationKind::MergeApprovalPending {
-                goal_id: "goal-1".into()
-            }
-        );
-        assert_eq!(item.run_id, None);
-        assert_eq!(item.summary, "Merge approval requested: goal-1");
         assert!(model.is_unread(item.id));
     }
     #[test]

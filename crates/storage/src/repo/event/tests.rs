@@ -371,11 +371,13 @@ fn kind_name_maps_agent_message_events() {
 fn kind_name_for_orchestrator_is_pascal_case() {
     // Given: a migrated database and an orchestrator event
     let connection = fixture();
-    let event = Event::new(OrchestratorEvent::GoalStateChanged {
-        goal_id: "goal-1".into(),
-        from: event_bus::GoalState::Active,
-        to: event_bus::GoalState::Paused,
-        reason: "test".into(),
+    let event = Event::new(OrchestratorEvent::TaskCheckpoint {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        tool_call_count: 1,
+        cumulative_input_tokens: 2,
+        cumulative_output_tokens: 3,
+        elapsed_ms: 4,
     });
     let mut accounting = EventAccounting::default();
 

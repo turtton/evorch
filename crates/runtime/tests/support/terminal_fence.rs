@@ -1,29 +1,33 @@
-use super::{Fixture, persist};
+use super::{Ending, Fixture, persist};
 use event_bus::{Event, OrchestratorEvent};
 use providers::FinishReason;
 use storage::{StorageConfig, entity::TaskStatus};
 
 async fn terminal_fence(cancel: bool, heartbeat: bool) {
-    // Given: a real worker reaches a terminal task state.
+    // Given: a real worker reaches a terminal task state that is already persisted.
     let mut fixture = Fixture::new(if cancel {
-        FinishReason::Length
+        Ending::Cancel
     } else {
-        FinishReason::Stop
+        Ending::Finish(FinishReason::Stop)
     })
     .await;
-    fixture.finished().await;
-    if cancel {
-        fixture.handle.cancel_task("task").expect("cancel");
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-    }
-    let before = fixture.handle.snapshot(&fixture.goal).expect("snapshot");
-    let terminal = before.task_progress["task"].clone();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig {
+        db_path: temp.path().join("terminal.db"),
+        ..StorageConfig::default()
+    };
+    let record = persist(&mut fixture, &config)
+        .await
+        .task("task")
+        .expect("query")
+        .expect("task");
+    let terminal: serde_json::Value =
+        serde_json::from_str(record.progress.as_deref().expect("progress")).expect("JSON");
     let mut late = terminal.clone();
     late["status"] = serde_json::json!("running");
     late["heartbeat_at_ns"] = serde_json::json!(42);
     late["last_artifact"] = serde_json::json!("late invalid artifact");
+
     // When: same-generation progress or heartbeat arrives after termination.
     fixture
         .bus
@@ -38,43 +42,13 @@ async fn terminal_fence(cancel: bool, heartbeat: bool) {
             }
             .into(),
         }));
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
-    let temp = tempfile::tempdir().expect("tempdir");
-    let db = persist(
-        &mut fixture,
-        &StorageConfig {
-            db_path: temp.path().join("terminal.db"),
-            ..StorageConfig::default()
-        },
-    )
-    .await;
-    // Then: neither live ledger nor reopened SQLite loses the terminal state.
-    assert_eq!(
-        fixture
-            .handle
-            .snapshot(&fixture.goal)
-            .expect("snapshot")
-            .task_progress["task"],
-        terminal
-    );
+    let db = persist(&mut fixture, &config).await;
+
+    // Then: the reopened SQLite projection does not lose the terminal state.
     let record = db.task("task").expect("query").expect("task");
     let persisted: serde_json::Value =
         serde_json::from_str(record.progress.as_deref().expect("progress")).expect("JSON");
     assert_eq!(persisted, terminal);
-    let events = db.events_all_ordered().expect("ordered events");
-    let replay = runtime::orchestration::ledger::GoalLedger::replay_checked(
-        events.iter().filter_map(|event| match &event.event.kind {
-            event_bus::EventKind::Orchestrator(event) => Some(event),
-            _ => None,
-        }),
-    )
-    .expect("replay terminal fence");
-    assert_eq!(
-        replay[&fixture.goal].snapshot().task_progress["task"],
-        terminal
-    );
     assert_eq!(
         record.status,
         if cancel {
@@ -83,13 +57,18 @@ async fn terminal_fence(cancel: bool, heartbeat: bool) {
             TaskStatus::Completed
         }
     );
-    assert_eq!(record.last_artifact.as_deref(), Some("validated patch"));
     if cancel {
-        assert_eq!(
-            record.failure_reason.as_deref(),
-            Some("cancelled by operator")
-        );
+        assert_eq!(record.failure_reason.as_deref(), Some("cancelled"));
+    } else {
+        assert_eq!(record.last_artifact.as_deref(), Some("validated patch"));
     }
+    assert!(
+        fixture
+            .runtime
+            .list_agents()
+            .iter()
+            .all(|agent| agent.run_id == fixture.worker)
+    );
 }
 
 #[tokio::test]

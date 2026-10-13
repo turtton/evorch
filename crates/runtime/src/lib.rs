@@ -35,7 +35,6 @@ pub mod model;
 pub mod model_grouping;
 pub mod model_resolve;
 pub mod network;
-pub mod orchestration;
 pub mod ownership;
 pub mod panic_capture;
 pub mod policy;
@@ -80,14 +79,7 @@ pub use restore::ChatForkSeed;
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
 pub use model::{AgentInvocationContext, AgentModel, ModelPreference, RoutePinRecord};
-// オーケストレーション契約型は後続ウェーブ (T1.2–T3.1) がこの経路で参照する。
 pub use network::{NetworkAccessDecision, build_sandbox, judge_web_network_access};
-pub use orchestration::{
-    ApprovedMerge, DeliveryError, DeliveryPort, FixtureDeliveryAdapter, GateRejection,
-    GateSnapshot, GoalLedger, GoalSnapshot, GoalSpec, GoalStage, GoalState, GoalSupervisor,
-    MergeApprovals, MergeBinding, OrchestrationSettings, OrchestratorEvent, ShellDeliveryAdapter,
-    SupervisorHandle,
-};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 /// GPT-family delegate tool descriptions append this instruction for spawned subagents.
 pub const SUBAGENT_CONTEXT_NOTE: &str = " Subagents receive no shared memory or context from the caller: the task prompt you pass is their entire world. Include the goal, context, constraints, and expected output.";

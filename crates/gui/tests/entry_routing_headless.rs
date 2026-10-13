@@ -10,10 +10,7 @@ use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RunId, RuntimeError, SupervisorHandle,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunId, RuntimeError};
 use tools::ToolExecutor;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -79,7 +76,6 @@ struct Fixture {
     _temp_dir: tempfile::TempDir,
     bus: Arc<EventBus>,
     agent_runtime: AgentRuntime,
-    supervisor: SupervisorHandle,
     repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
 }
@@ -92,14 +88,6 @@ impl Fixture {
         let model = Arc::new(HeldModel);
         let runtime =
             AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
-        let supervisor = rt.block_on(async {
-            GoalSupervisor::spawn(
-                runtime.clone(),
-                Arc::clone(&bus),
-                Arc::new(FixtureDeliveryAdapter::default()),
-                OrchestrationSettings::default(),
-            )
-        });
         let (repaint_tx, repaint_rx) = mpsc::channel();
         let pump = EventPump::spawn(
             rt.handle(),
@@ -117,7 +105,6 @@ impl Fixture {
             .with_command_sink(Box::new(RuntimeCommandSink::new(
                 runtime.clone(),
                 rt.handle().clone(),
-                supervisor.clone(),
             )));
         let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
         harness.run();
@@ -126,7 +113,6 @@ impl Fixture {
             _temp_dir: temp_dir,
             bus,
             agent_runtime: runtime,
-            supervisor,
             repaint_rx,
             harness,
         }
@@ -141,7 +127,6 @@ impl Fixture {
             self.harness
                 .has_label(&format!("accepted: {}", goal.goal_id))
         );
-        assert!(self.supervisor.snapshot(&goal.goal_id).is_none());
         assert_no_row_with_role(self, "Worker");
         assert_no_row_with_role(self, "Orchestrator");
     }
@@ -167,7 +152,7 @@ fn submit_goal(fixture: &mut Fixture, goal: &str) {
 }
 
 /// The goal registration is the completion signal for the UI's submission.
-/// Legacy PR goals and keyword routing must not intercept this generic entry.
+/// Keyword routing must not intercept this generic entry.
 fn wait_for_goal(rt: &tokio::runtime::Runtime, rx: &mut EventReceiver) -> ThreadGoalSnapshot {
     loop {
         let event = rt.block_on(rx.recv()).expect("event bus remains open");
@@ -175,9 +160,8 @@ fn wait_for_goal(rt: &tokio::runtime::Runtime, rx: &mut EventReceiver) -> Thread
             EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
                 return snapshot;
             }
-            EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. })
-            | EventKind::Lifecycle(LifecycleEvent::RoutingDecision { .. }) => {
-                panic!("generic goal submission entered legacy PR routing");
+            EventKind::Lifecycle(LifecycleEvent::RoutingDecision { .. }) => {
+                panic!("generic goal submission entered keyword routing");
             }
             _ => {}
         }

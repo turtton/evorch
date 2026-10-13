@@ -9,7 +9,7 @@ use workspace_ui::{
 
 use super::{ConversationFocus, WorkbenchError, WorkbenchState};
 use crate::diff::{DiffMode, DiffRequest};
-use crate::model::commands::{LoopEvent, MergeDecision, WorkbenchCommand};
+use crate::model::commands::{LoopEvent, WorkbenchCommand};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -342,19 +342,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.submit_command(command);
     }
 
-    pub fn decide_merge(&mut self, decision: MergeDecision) {
-        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
-            return;
-        };
-        let Some(mut command) = self.merge.decide(decision) else {
-            return;
-        };
-        if let WorkbenchCommand::DecideMerge(merge) = &mut command {
-            merge.thread_id = thread_id.to_string();
-        }
-        self.submit_command(command);
-    }
-
     pub(super) fn decide_tool_approval(&mut self, call_id: String, approved: bool) {
         self.submit_command(WorkbenchCommand::DecideToolApproval { call_id, approved });
     }
@@ -366,25 +353,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Err(error) = self.write_history_sidebar(path) {
             tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
         }
-    }
-
-    pub fn pause_goal(&mut self) {
-        self.submit_goal_control(|goal_id| WorkbenchCommand::PauseGoal { goal_id });
-    }
-
-    pub fn resume_goal(&mut self) {
-        self.submit_goal_control(|goal_id| WorkbenchCommand::ResumeGoal { goal_id });
-    }
-
-    pub fn cancel_goal(&mut self) {
-        self.submit_goal_control(|goal_id| WorkbenchCommand::CancelGoal { goal_id });
-    }
-
-    fn submit_goal_control(&mut self, build: impl FnOnce(String) -> WorkbenchCommand) {
-        let Some(goal_id) = self.loop_status.goal_id.clone() else {
-            return;
-        };
-        self.submit_command(build(goal_id));
     }
 
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
@@ -446,21 +414,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 self.goal_form.last_accepted = Some(goal_id);
             }
-            LoopEvent::MergeStateUpdated(view) => {
-                if let Some(pr) = &view.pr
-                    && view.resolution.is_none()
-                {
-                    self.push_notice(format!(
-                        "Merge approval requested for PR #{} (approval UI is moving to the Diff view)",
-                        pr.number
-                    ));
-                }
-                self.merge.view = *view;
-            }
-            LoopEvent::MergeResolved { decision, .. } => {
-                self.merge.view.resolution = Some(decision)
-            }
-            LoopEvent::LoopStatusUpdated(status) => self.loop_status = status,
             LoopEvent::CommandRejected { reason } => {
                 tracing::warn!(%reason, "goal loop command rejected");
                 self.push_notice(reason);

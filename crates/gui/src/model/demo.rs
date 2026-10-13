@@ -1,8 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use event_bus::{
@@ -16,32 +14,18 @@ use runtime::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use tokio::sync::Notify;
 
 const DEMO_GOAL_KEY: &str = "DEMO-GOAL";
-const DEMO_IMPL_KEY: &str = "DEMO-IMPL";
-const REVIEW_KEY: &str = "[evorch review";
-const REPAIR_KEY: &str = "[evorch repair";
-const CONTINUATION_KEY: &str = "[evorch continuation";
-const WORKTREE_PLACEHOLDER: &str = "{worktree}";
-
-/// bus イベント待ちゲート (worker 初回応答・root 最終ターン) の上限。
-const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct DemoScriptModel {
     bus: Arc<EventBus>,
     scripts: Mutex<HashMap<String, VecDeque<ChatResponse>>>,
-    workspace_root: Option<PathBuf>,
-    gated_workers: Mutex<HashSet<String>>,
     worker_message_sent: Notify,
     reviewer_message_sent: Notify,
     worker_reply_sent: Notify,
     reviewer_reply_sent: Notify,
     children_joined: AtomicBool,
-    // issue #83: イベント待ちゲートの取り逃し防止。構築時に subscribe して
-    // おき、最初のゲート待ちで drain task を起動して全イベントを inbox に
-    // 蓄積する。待機は inbox の replay から始めるため、対象イベントが
-    // subscribe より前に発行済みでも miss しない (旧実装は生 receiver を
-    // その場で subscribe するため、発行済みイベントを取り逃して GATE_TIMEOUT
-    // まで待ち、timeout 後はゲートなしで続行 → イベント順が非決定化する
-    // flake の一因だった)。
+    // 構築時に subscribe しておき、最初の待機で drain task を起動して全イベントを
+    // inbox に蓄積する。待機は inbox の replay から始めるため、対象イベントが
+    // 待機より前に発行済みでも取り逃さない。
     inbox: Arc<Mutex<Vec<Event>>>,
     receiver: Mutex<Option<EventReceiver>>,
     inbox_notify: Arc<Notify>,
@@ -122,88 +106,7 @@ impl DemoScriptModel {
                         text_response("review done"),
                     ]),
                 ),
-                // goal loop demo (issue #73 T3.2): supervisor の prompts.rs が
-                // 生成する header 行へ部分一致で key 解決される script 群。
-                (
-                    DEMO_GOAL_KEY.to_string(),
-                    VecDeque::from([
-                        tool_response(
-                            "demo-goal-delegate",
-                            "delegate",
-                            serde_json::json!({"target": {"role": "worker"},
-                                "background": true,
-                                "prompt": "DEMO-IMPL implement the fixture unit",
-                                "workspace_mode": "isolated"
-                            }),
-                        ),
-                        // 配信前の早期 finish: gate が no_pull_request で拒否する
-                        // 様子を見せる。run は finish せず終端へ進む。
-                        tool_response(
-                            "demo-goal-early-finish",
-                            "finish",
-                            serde_json::json!({"result": "demo goal delivered"}),
-                        ),
-                        text_response("root run ends without finish; the pipeline continues"),
-                    ]),
-                ),
-                (
-                    DEMO_IMPL_KEY.to_string(),
-                    VecDeque::from([
-                        tool_response(
-                            "demo-impl-commit",
-                            "shell",
-                            serde_json::json!({
-                                "command": "git",
-                                "args": ["-C", WORKTREE_PLACEHOLDER, "commit", "--allow-empty", "-m", "demo"]
-                            }),
-                        ),
-                        text_response("implemented the fixture unit"),
-                    ]),
-                ),
-                (
-                    REVIEW_KEY.to_string(),
-                    VecDeque::from([
-                        text_response(
-                            "```json\n{\"verdict\":\"request-update\",\"findings\":[\"demo finding: apply the fixture commit\"],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"unmet\",\"note\":\"commit missing\"}]}\n```",
-                        ),
-                        text_response(
-                            &"```json\n{\"verdict\":\"approve\",\"findings\":[],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"met\",\"note\":\"ok\",\"evidence\":{\"command\":\"cargo test --workspace --locked\",\"exit_status\":0,\"target_sha\":\"__DEMO_HEAD_SHA__\",\"diff_ref\":\"main...evorch/task/run-2\",\"artifact_path\":\"artifacts/demo-review-green.log\",\"red_evidence\":\"artifacts/demo-review-red.log\"}}]}\n```".replace("__DEMO_HEAD_SHA__", &"a2".repeat(20)),
-                        ),
-                    ]),
-                ),
-                (
-                    REPAIR_KEY.to_string(),
-                    VecDeque::from([
-                        tool_response(
-                            "demo-repair-commit",
-                            "shell",
-                            serde_json::json!({
-                                "command": "git",
-                                "args": ["-C", WORKTREE_PLACEHOLDER, "commit", "--allow-empty", "-m", "demo repair"]
-                            }),
-                        ),
-                        text_response("repaired the fixture unit"),
-                    ]),
-                ),
-                (
-                    CONTINUATION_KEY.to_string(),
-                    VecDeque::from([
-                        tool_response(
-                            "demo-continuation-finish",
-                            "finish",
-                            serde_json::json!({"result": "demo goal delivered"}),
-                        ),
-                        // merge 却下後の再 continuation 用 (happy path では未使用)。
-                        tool_response(
-                            "demo-continuation-finish-again",
-                            "finish",
-                            serde_json::json!({"result": "demo goal delivered after rejection"}),
-                        ),
-                    ]),
-                ),
             ])),
-            workspace_root: None,
-            gated_workers: Mutex::new(HashSet::new()),
             worker_message_sent: Notify::new(),
             reviewer_message_sent: Notify::new(),
             worker_reply_sent: Notify::new(),
@@ -214,13 +117,6 @@ impl DemoScriptModel {
             inbox_notify: Arc::new(Notify::new()),
             drain_started: AtomicBool::new(false),
         }
-    }
-
-    /// worker 系 script の `{worktree}` placeholder 展開に使う demo project の
-    /// repo root を設定する (`<root>/.evorch/worktrees/<run_id>` を導出する)。
-    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.workspace_root = Some(root.into());
-        self
     }
 
     fn scripted_response(&self, marker: &str) -> Result<(u64, ChatResponse), RuntimeError> {
@@ -237,23 +133,6 @@ impl DemoScriptModel {
             reason: format!("demo script exhausted for {marker}"),
         })?;
         Ok((script.len() as u64, response))
-    }
-
-    /// この run の初回呼び出しなら true を返し、以後の呼び出しでは false。
-    fn mark_worker_gate(&self, run_id: &str) -> bool {
-        self.gated_workers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(run_id.to_string())
-    }
-
-    /// 指定 script の残り応答数を返す。
-    fn remaining_turns(&self, marker: &str) -> usize {
-        self.scripts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(marker)
-            .map_or(0, VecDeque::len)
     }
 
     /// 構築時に確保した receiver を drain する task を一度だけ起動する。
@@ -290,38 +169,8 @@ impl DemoScriptModel {
         });
     }
 
-    /// predicate を満たすイベントが inbox に現れるまで GATE_TIMEOUT まで待つ。
-    ///
-    /// 構築時からの全イベントを replay してから待つため取り逃しは起きない。
-    /// timeout 超過は待機条件の破綻 (イベント列が非決定化する状態) を意味する
-    /// ため、ゲートなしで続行せず明示的に失敗させる (issue #83)。
-    async fn wait_for_event(&self, predicate: fn(&Event) -> bool) {
-        self.ensure_drain();
-        let result = tokio::time::timeout(GATE_TIMEOUT, async {
-            loop {
-                let notified = self.inbox_notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self
-                    .inbox
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .any(predicate)
-                {
-                    return;
-                }
-                notified.await;
-            }
-        })
-        .await;
-        assert!(
-            result.is_ok(),
-            "demo script gate timed out after {GATE_TIMEOUT:?}"
-        );
-    }
-
-    async fn thread_goal_for_run(&self, run: &str) -> Option<event_bus::ThreadGoalSnapshot> {
+    /// root run に結び付いた thread goal が inbox に現れるまで待つ。
+    async fn thread_goal_for_run(&self, run: &str) -> event_bus::ThreadGoalSnapshot {
         self.ensure_drain();
         loop {
             let notified = self.inbox_notify.notified();
@@ -333,15 +182,12 @@ impl DemoScriptModel {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for event in inbox.iter().rev() {
-                    match &event.kind {
-                        EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated {
-                            snapshot,
-                        }) if snapshot.root_run_id == run => return Some(snapshot.clone()),
-                        EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                            root_run_id,
-                            ..
-                        }) if root_run_id == run => return None,
-                        _ => {}
+                    if let EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated {
+                        snapshot,
+                    }) = &event.kind
+                        && snapshot.root_run_id == run
+                    {
+                        return snapshot.clone();
                     }
                 }
             }
@@ -397,47 +243,6 @@ impl DemoScriptModel {
             )
         }
     }
-
-    /// worker 系 script の `{worktree}` placeholder を run の isolated worktree
-    /// path (`<root>/.evorch/worktrees/<run_id>`) で置き換える。
-    ///
-    /// shell tool は cwd を注入しないため、placeholder 未設定のまま `git commit`
-    /// を実行すると呼び出しプロセスの cwd 配下のリポジトリを汚染しうる。
-    /// workspace root 未設定で worker script に到達した場合は fail-closed で
-    /// エラーにする。
-    fn rewrite_worktree(
-        &self,
-        marker: &str,
-        run_id: &str,
-        mut response: ChatResponse,
-    ) -> Result<ChatResponse, RuntimeError> {
-        if !matches!(marker, DEMO_IMPL_KEY | REPAIR_KEY) {
-            return Ok(response);
-        }
-        let uses_placeholder = response.message.content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolUse { input, .. } if input.to_string().contains(WORKTREE_PLACEHOLDER))
-        });
-        if !uses_placeholder {
-            return Ok(response);
-        }
-        let Some(root) = &self.workspace_root else {
-            return Err(RuntimeError::Model {
-                reason: "demo worker shell script requires with_workspace_root".to_string(),
-            });
-        };
-        let worktree = root
-            .join(".evorch")
-            .join("worktrees")
-            .join(run_id)
-            .to_string_lossy()
-            .into_owned();
-        for block in &mut response.message.content {
-            if let ContentBlock::ToolUse { input, .. } = block {
-                *input = substitute_placeholder(std::mem::take(input), &worktree);
-            }
-        }
-        Ok(response)
-    }
 }
 
 #[async_trait]
@@ -463,7 +268,7 @@ impl AgentModel for DemoScriptModel {
         let generic = if let Some(snapshot) = review_snapshot {
             Some(snapshot)
         } else if marker == DEMO_GOAL_KEY {
-            self.thread_goal_for_run(&invocation.run_id).await
+            Some(self.thread_goal_for_run(&invocation.run_id).await)
         } else {
             None
         };
@@ -473,23 +278,6 @@ impl AgentModel for DemoScriptModel {
                 Self::generic_goal_response(&snapshot, messages, role == Role::Reviewer),
             )
         } else {
-            if marker == DEMO_GOAL_KEY && self.remaining_turns(marker) == 1 {
-                // 最終ターン (finish せず終わる応答) は ReadyToFinish まで待つ。
-                // issue #83: 以前は ReviewRoundStarted 待ち + 固定 sleep だったが、
-                // round 不問の待機は subscribe 後のイベントしか捕捉できず、root
-                // 終端と pipeline drain の相対順で supervisor の
-                // ContinuationSuppressed の有無・位置が変わる flake の根因だった。
-                // ReadyToFinish は必ず全 Implement/Review/Repair run の終端後に
-                // 発行され、この待機は turn-2 (早期 finish 拒否) より後に張るため
-                // 取り逃しも起きない。root 終端時に pipeline は必ず空になり、
-                // continuation dispatch は suppress を経ない単一経路に決定される。
-                self.wait_for_event(is_ready_to_finish).await;
-            }
-            if marker == DEMO_IMPL_KEY && self.mark_worker_gate(&invocation.run_id) {
-                // 初回応答は root の早期 finish 拒否 (FinishRejected) まで遅らせ、
-                // branch 束縛が拒否イベントへ後追いする bus 順序を固定する。
-                self.wait_for_event(is_finish_rejected).await;
-            }
             if marker == "DEMO-ORCH"
                 && messages.iter().any(is_demo_review_result)
                 && !self.children_joined.swap(true, Ordering::AcqRel)
@@ -499,7 +287,6 @@ impl AgentModel for DemoScriptModel {
             }
             self.scripted_response(marker)?
         };
-        let response = self.rewrite_worktree(marker, &invocation.run_id, response)?;
         let turn = match marker {
             "DEMO-ORCH" => 5 - remaining_turns,
             "DEMO-W1" | "DEMO-R1" => 2 - remaining_turns,
@@ -603,64 +390,18 @@ fn initial_marker(messages: &[Message]) -> Result<&str, RuntimeError> {
 
 /// 最初の user プロンプトを script key へ解決する。
 ///
-/// 従来の 3 script は全文一致、goal loop 用の script は先頭行の部分一致で
-/// 解決する (supervisor 生成プロンプトは goal_id 等の動的要素を含むため)。
-/// 未知のプロンプトは全文をそのまま返し、従来どおり unknown marker エラーに
-/// なる。
+/// 3 つの会話 script は全文一致、thread goal 用の key は先頭行の部分一致で
+/// 解決する (`/goal` の entry prompt は利用者の本文を含むため)。
+/// 未知のプロンプトは全文をそのまま返し、unknown marker エラーになる。
 fn script_key(prompt: &str) -> &str {
     if matches!(prompt, "DEMO-ORCH" | "DEMO-W1" | "DEMO-R1") {
         return prompt;
     }
     let first_line = prompt.lines().next().unwrap_or(prompt);
-    for key in [
-        CONTINUATION_KEY,
-        REVIEW_KEY,
-        REPAIR_KEY,
-        DEMO_IMPL_KEY,
-        DEMO_GOAL_KEY,
-    ] {
-        if first_line.contains(key) {
-            return key;
-        }
+    if first_line.contains(DEMO_GOAL_KEY) {
+        return DEMO_GOAL_KEY;
     }
     prompt
-}
-
-fn is_ready_to_finish(event: &Event) -> bool {
-    matches!(
-        &event.kind,
-        EventKind::Orchestrator(OrchestratorEvent::GoalStageChanged {
-            to: event_bus::GoalStage::ReadyToFinish,
-            ..
-        })
-    )
-}
-
-fn is_finish_rejected(event: &Event) -> bool {
-    matches!(
-        &event.kind,
-        EventKind::Orchestrator(OrchestratorEvent::FinishRejected { .. })
-    )
-}
-
-fn substitute_placeholder(value: serde_json::Value, worktree: &str) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(text) => {
-            serde_json::Value::String(text.replace(WORKTREE_PLACEHOLDER, worktree))
-        }
-        serde_json::Value::Array(items) => serde_json::Value::Array(
-            items
-                .into_iter()
-                .map(|item| substitute_placeholder(item, worktree))
-                .collect(),
-        ),
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(key, item)| (key, substitute_placeholder(item, worktree)))
-                .collect(),
-        ),
-        other => other,
-    }
 }
 
 fn text_response(text: &str) -> ChatResponse {

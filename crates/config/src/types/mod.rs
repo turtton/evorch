@@ -91,7 +91,7 @@ pub struct Config {
     pub compaction: CompactionConfig,
     /// run ごとのツール実行予算。
     pub budget: BudgetConfig,
-    /// オーケストレーションループ設定。
+    /// オーケストレーション設定。
     pub orchestration: OrchestrationConfig,
     pub ownership: OwnershipConfig,
     pub team: TeamConfig,

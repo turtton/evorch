@@ -65,22 +65,6 @@ fn right_panes_expose_landmarks_without_headings() {
 }
 
 #[test]
-fn merge_state_without_pr_stays_empty_without_a_pane() {
-    let state = gui::app::WorkbenchState::new(MockSource(Vec::new()), &UiSettings::default())
-        .expect("default state builds");
-    let mut harness = build_harness(state);
-    harness.run_steps(4);
-    assert!(harness.state().merge().view.pr.is_none());
-    assert!(
-        harness
-            .state()
-            .dock()
-            .find_tab(&PanelId::new("merge-main"))
-            .is_none()
-    );
-}
-
-#[test]
 fn workbench_tabs_exclude_goal_and_merge() {
     // Given: default settings.
     // When: constructing the real workbench.

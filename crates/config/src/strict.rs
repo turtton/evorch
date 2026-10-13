@@ -107,18 +107,7 @@ const COMPACTION_KEYS: &[&str] = &[
     "max_summary_bytes",
     "summarizer",
 ];
-const ORCHESTRATION_KEYS: &[&str] = &[
-    "max_review_rounds",
-    "max_nudges",
-    "stall_after_secs",
-    "stall_check_secs",
-    "stale_ttl_secs",
-    "in_flight_tool_multiplier",
-    "repeated_error_threshold",
-    "max_continuations",
-    "ci_poll_secs",
-    "ci_timeout_secs",
-];
+const ORCHESTRATION_KEYS: &[&str] = &["max_review_rounds"];
 const BUDGET_KEYS: &[&str] = &[
     "max_tool_calls",
     "max_tokens",

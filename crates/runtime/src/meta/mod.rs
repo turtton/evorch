@@ -70,7 +70,7 @@ pub(crate) async fn dispatch(
     op.handle(state, &runtime, input).await
 }
 
-async fn finish(
+fn finish(
     state: &LoopState,
     runtime: &crate::AgentRuntime,
     input: serde_json::Value,
@@ -105,30 +105,9 @@ async fn finish(
         Ok(_) => {}
         Err(reason) => return error(reason),
     }
-    let gate = runtime
-        .goal_gate()
-        .filter(|_| runtime.goal_for_root(state.caller_run_id()).is_none());
-    let Some(gate) = gate else {
-        return DispatchResult {
-            result: ToolResult::success(&args.result),
-            terminal: Terminal::Finish(args.result),
-        };
-    };
-    match gate.evaluate_finish(state.caller_run_id()).await {
-        None | Some(crate::orchestration::gate::GateVerdict::Accept(_)) => DispatchResult {
-            result: ToolResult::success(&args.result),
-            terminal: Terminal::Finish(args.result),
-        },
-        Some(crate::orchestration::gate::GateVerdict::Reject(rejected)) => DispatchResult {
-            result: ToolResult::error(
-                serde_json::json!({
-                    "rejected": rejected,
-                    "next_action": "satisfy the reported gate conditions, then call finish again"
-                })
-                .to_string(),
-            ),
-            terminal: Terminal::Continue,
-        },
+    DispatchResult {
+        result: ToolResult::success(&args.result),
+        terminal: Terminal::Finish(args.result),
     }
 }
 

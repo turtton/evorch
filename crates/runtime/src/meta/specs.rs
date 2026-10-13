@@ -255,29 +255,6 @@ pub(super) fn submit_lesson_review(name: &str) -> ToolSpec {
     )
 }
 
-pub(super) fn submit_review(name: &str) -> ToolSpec {
-    object_spec(
-        name,
-        "Submit a typed reviewer verdict and acceptance-criterion evidence. Returns review submitted. verdict is approve or request-update; include actionable findings for requested changes. Each criterion includes id, status and note; evidence binds its command/exit_status to target_sha and optional artifacts. Malformed or unknown fields fail; this submission alone does not complete the run or satisfy a goal gate.",
-        json!({
-            "verdict":{"type":"string","enum":["approve","request-update"]},
-            "findings":strings(),
-            "criteria":{"type":"array","items":{
-                "type":"object", "additionalProperties":false,
-                "properties":{
-                    "id":{"type":"string"},"status":{"type":"string","enum":["met","unmet","unknown"]},"note":{"type":"string"},
-                    "evidence":{"type":["object","null"],"properties":{
-                        "command":{"type":"string"},"exit_status":{"type":"integer","minimum":i32::MIN,"maximum":i32::MAX},"target_sha":{"type":"string"},
-                        "diff_ref":{"type":["string","null"]},"artifact_path":{"type":["string","null"]},"red_evidence":{"type":["string","null"]}
-                    },"required":["command","exit_status","target_sha"]}
-                },"required":["id","status","note"]
-            }}
-        }),
-        &["verdict"],
-        true,
-    )
-}
-
 pub(super) fn ask_user(name: &str) -> ToolSpec {
     object_spec(
         name,
