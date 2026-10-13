@@ -144,6 +144,18 @@ pub struct IsolatedMounts {
     pub scratch: Option<PathBuf>,
 }
 
+impl IsolatedMounts {
+    /// A shared-workspace run: the project root without extra mounts.
+    pub fn shared(workspace_root: PathBuf) -> Self {
+        Self {
+            workspace_root,
+            ro_binds: Vec::new(),
+            rw_binds: Vec::new(),
+            scratch: None,
+        }
+    }
+}
+
 /// run ごとの sandbox 構築境界。
 pub trait SandboxFactory: Send + Sync {
     /// policy と mount set から sandbox を構築する。
@@ -2098,16 +2110,18 @@ pub fn production_executor_with_config(
     workspace_root: PathBuf,
     config: &config::Config,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    let sandbox_error = |error: sandbox::SandboxError| RuntimeError::Sandbox {
+        detail: error.to_string(),
+    };
     let sandbox =
-        crate::network::build_sandbox(policy, workspace_root.clone()).map_err(|error| {
-            RuntimeError::Sandbox {
-                detail: error.to_string(),
-            }
-        })?;
+        crate::network::build_sandbox(policy, workspace_root.clone()).map_err(sandbox_error)?;
+    let boundary =
+        crate::network::sandbox_boundary(&IsolatedMounts::shared(workspace_root.clone()))
+            .map_err(sandbox_error)?;
     configured_executor(
         bus,
         sandbox,
-        workspace_root.clone(),
+        &boundary,
         &config.comment_checker,
         &[workspace_root],
         sandbox::ApprovalPolicy::allow_all(),
@@ -2115,10 +2129,11 @@ pub fn production_executor_with_config(
 }
 
 /// Shared production composition, also used after isolated sandbox creation.
+/// File tools are confined to `boundary`, the list the sandbox was built from.
 pub(crate) fn configured_executor(
     bus: Arc<EventBus>,
     sandbox: Arc<dyn sandbox::Sandbox>,
-    workspace_root: PathBuf,
+    boundary: &sandbox::SandboxBoundary,
     checker_config: &config::CommentCheckerConfig,
     forbidden_roots: &[PathBuf],
     approval_policy: sandbox::ApprovalPolicy,
@@ -2129,14 +2144,19 @@ pub(crate) fn configured_executor(
         forbidden_roots,
     )
     .map(|checker| Arc::new(checker) as Arc<dyn tools::post_edit::PostEditHook>);
-    ToolExecutor::with_standard_tools_in(bus, sandbox, Some(workspace_root))
-        .with_post_edit_hook(hook)
-        .with_policy(approval_policy)
-        .with_web_tools()
-        .map(Arc::new)
-        .map_err(|error| RuntimeError::NetworkGuard {
-            detail: error.to_string(),
-        })
+    let executor = ToolExecutor::with_standard_tools_in(
+        bus,
+        sandbox,
+        Some(boundary.workspace_root().to_path_buf()),
+    )
+    .with_post_edit_hook(hook)
+    .with_policy(approval_policy)
+    .with_web_tools()
+    .map_err(|error| RuntimeError::NetworkGuard {
+        detail: error.to_string(),
+    })?;
+    executor.set_file_boundary(boundary);
+    Ok(Arc::new(executor))
 }
 
 struct RunEntryView<'a> {

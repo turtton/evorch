@@ -362,14 +362,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     None => crate::network::BwrapFactory.build(&state.policy, &mounts),
                 };
                 sandbox
+                    .and_then(|sandbox| {
+                        crate::network::sandbox_boundary(&mounts)
+                            .map(|boundary| (sandbox, boundary))
+                    })
                     .map_err(|error| crate::RuntimeError::Sandbox {
                         detail: error.to_string(),
                     })
-                    .and_then(|sandbox| {
+                    .and_then(|(sandbox, boundary)| {
                         crate::runtime::configured_executor(
                             Arc::clone(&state.shared.bus),
                             sandbox,
-                            root.clone(),
+                            &boundary,
                             &checker_config,
                             &[root],
                             state.shared.executor.approval_policy(),
@@ -771,6 +775,8 @@ async fn attach_worktree_executor(
         .factory
         .build(&state.policy, &mounts)
         .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
+    let boundary = crate::network::sandbox_boundary(&mounts)
+        .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
     let checker_config = runtime_shared
         .comment_checker
         .get()
@@ -783,7 +789,7 @@ async fn attach_worktree_executor(
     let executor = crate::runtime::configured_executor(
         Arc::clone(&runtime_shared.bus),
         sandbox,
-        owned.path.clone(),
+        &boundary,
         &checker_config,
         &forbidden_roots,
         state.shared.executor.approval_policy(),

@@ -1,6 +1,7 @@
 //! コマンドを隔離された環境で実行し、承認方針と資格情報を安全に扱う層です。
 
 pub mod approval;
+pub mod boundary;
 pub mod bwrap;
 pub mod composition;
 pub mod credential;
@@ -15,6 +16,7 @@ pub mod session;
 
 pub use approval::{ApprovalGate, ApprovalOutcome};
 
+pub use boundary::{BoundaryRegion, PathAccess, SandboxBoundary};
 pub use bwrap::{BwrapConfig, BwrapSandbox};
 pub use composition::production_sandbox;
 pub use credential::{CredentialStore, FileCredentialStore, Secret, open_default};

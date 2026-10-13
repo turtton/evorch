@@ -10,6 +10,58 @@
 - Relative file paths and shell `cwd` (including `.`) resolve from the run's
   workspace. File tools do not change the application's process directory.
 
+## File-tool path boundary
+
+`read`, `grep`, `write` and `edit` run in the evorch process, but without
+escalation they reach only what the run's sandboxed shell sees (ADR 0033). One
+list, `sandbox::SandboxBoundary`, is assembled per run in
+`runtime::network::sandbox_boundary` and drives both the bwrap mounts
+(`BwrapConfig::from_boundary`) and the file-tool check
+(`ToolExecutor::set_file_boundary`), so a region added to one is never missing
+from the other. All regions are host paths:
+
+- read-write: the project root and this thread's `$TMPDIR` scratch;
+- read-only: `/usr` `/bin` `/lib` `/lib64` `/etc` `/nix`, the tool output store,
+  and the Cargo (`registry/{index,cache,src}`, `git/{db,checkouts}`, `bin`) and
+  rustup (`toolchains`, `settings.toml`) caches under the host `CARGO_HOME` /
+  `RUSTUP_HOME` (not the `/tmp/home` paths the shell sees them at). Cargo
+  credentials and config stay outside.
+
+Allowed directories (ADR 0032) join the same list as further read-only or
+read-write regions. When regions overlap, the last mounted one decides, as in
+bwrap. `read` and `grep` may use every region; `write` and `edit` need a
+read-write one. Paths are checked after relative ones are resolved against the
+workspace: a path with `..`, a dangling link, or an ancestor that cannot be
+resolved is outside; otherwise the deepest existing ancestor is canonicalized,
+so a link inside the project that points out is outside, and a link outside
+that resolves into the project counts as inside. Sockets, FIFOs and devices are
+refused even inside. `grep` runs `rg` without `--follow`, so a search started
+inside never returns content through links that leave the boundary. As with the
+benchmark guard, the check assumes no concurrent untrusted process swaps links
+between the check and the open.
+
+A call outside the boundary is denied before the tool runs, so no file content
+reaches the result or events. The denial suggests both remedies: retry once with
+`sandbox_access: "unsandboxed"` and a `justification`, or ask the user to
+register the location as an allowed directory. `sandbox_access` defaults to
+`"isolated"`, meaning "inside the sandbox boundary"; it is unrelated to the
+isolated workspaces removed by ADR 0031. File tools have no `"network"` value.
+
+`"unsandboxed"` requires a nonempty justification and is reviewed on every call
+by the same gate as shell escalation, under `sandbox.escalation_approval` and
+`escalate_to_user_on_deny`: `off` denies every outside access, `user` asks the
+user (approval input `kind: "file_access"` with the tool, canonical `path`,
+`access`, justification and change), and `auto` asks the escalation reviewer,
+falling back to the user on a decline when configured. The reviewer and user
+see the tool, the canonicalized target paths and the justification, plus for
+`write` the first 4000 bytes of the content and for `edit` the old/new
+strings (2000 bytes each); existing outside files are not read for the review.
+Approval covers that one call and lifts only the path boundary: role
+capabilities still decide which tools a run can call, so a read-only role
+cannot write through escalation.
+Benchmark runs keep their fixed workspace guard, drop `sandbox_access` and
+`justification` from the file-tool schemas, and refuse `"unsandboxed"`.
+
 ## Temporary output
 
 Shell pipes and PTYs are drained into bounded buffers (8 MiB per stream).

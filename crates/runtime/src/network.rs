@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxError};
+use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxBoundary, SandboxError};
 
 use crate::policy::ExecutionPolicy;
 use crate::runtime::{IsolatedMounts, SandboxFactory};
@@ -17,17 +17,32 @@ pub fn build_sandbox(
     _policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-    let config = base_config(workspace_root)?;
-    BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+    let boundary = sandbox_boundary(&IsolatedMounts::shared(workspace_root))?;
+    detect(boundary)
 }
 
-fn base_config(workspace_root: PathBuf) -> Result<BwrapConfig, SandboxError> {
+/// The one place a run's boundary is assembled. Production bwrap mounts and
+/// the direct file-tool check are both built from its result (ADR 0033).
+pub(crate) fn sandbox_boundary(mounts: &IsolatedMounts) -> Result<SandboxBoundary, SandboxError> {
     let outputs = tools::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
         detail: format!("一時ツール出力ディレクトリを作成できません: {error}"),
     })?;
-    Ok(BwrapConfig::new(workspace_root)
-        .allow_network(false)
-        .ro_bind(outputs))
+    let mut boundary = SandboxBoundary::new(mounts.workspace_root.clone()).read_only(outputs);
+    for path in &mounts.ro_binds {
+        boundary = boundary.read_only(path.clone());
+    }
+    for path in &mounts.rw_binds {
+        boundary = boundary.read_write(path.clone());
+    }
+    if let Some(path) = &mounts.scratch {
+        boundary = boundary.with_scratch(path.clone());
+    }
+    Ok(boundary)
+}
+
+fn detect(boundary: SandboxBoundary) -> Result<Arc<dyn Sandbox>, SandboxError> {
+    BwrapSandbox::detect(BwrapConfig::from_boundary(boundary).allow_network(false))
+        .map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
 }
 
 /// isolated worktree が git 操作に必要とする最小 mount set を構築する。
@@ -60,17 +75,7 @@ impl SandboxFactory for BwrapFactory {
         _policy: &ExecutionPolicy,
         mounts: &IsolatedMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-        let mut config = base_config(mounts.workspace_root.clone())?;
-        for path in &mounts.ro_binds {
-            config = config.ro_bind(path.clone());
-        }
-        for path in &mounts.rw_binds {
-            config = config.rw_bind(path.clone());
-        }
-        if let Some(path) = &mounts.scratch {
-            config = config.scratch_dir(path.clone());
-        }
-        BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+        detect(sandbox_boundary(mounts)?)
     }
 }
 
@@ -122,6 +127,47 @@ mod tests {
     use super::*;
     use agents::Role;
     use sandbox::PolicyDecision;
+
+    // Given: a run's mounts / When: assembling its boundary / Then: the output store,
+    // extra binds, scratch and project root are all listed for bwrap and file tools
+    #[test]
+    fn run_boundary_lists_every_mount_with_its_access() {
+        let mounts = IsolatedMounts {
+            workspace_root: PathBuf::from("/project"),
+            ro_binds: vec![PathBuf::from("/repo/.git")],
+            rw_binds: vec![PathBuf::from("/repo/.git/objects")],
+            scratch: Some(PathBuf::from("/var/tmp/evorch-scratch-test/t-1")),
+        };
+        let boundary = sandbox_boundary(&mounts).unwrap();
+        let regions = boundary.regions();
+        let outputs = tools::output::output_root().unwrap();
+        for (path, access) in [
+            (outputs.as_path(), sandbox::PathAccess::ReadOnly),
+            (Path::new("/repo/.git"), sandbox::PathAccess::ReadOnly),
+            (Path::new("/usr"), sandbox::PathAccess::ReadOnly),
+            (
+                Path::new("/repo/.git/objects"),
+                sandbox::PathAccess::ReadWrite,
+            ),
+            (
+                Path::new("/var/tmp/evorch-scratch-test/t-1"),
+                sandbox::PathAccess::ReadWrite,
+            ),
+            (Path::new("/project"), sandbox::PathAccess::ReadWrite),
+        ] {
+            assert!(
+                regions
+                    .iter()
+                    .any(|region| region.path == path && region.access == access),
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            BwrapConfig::from_boundary(boundary).boundary().regions(),
+            regions
+        );
+    }
 
     #[test]
     fn web_search_can_run_but_fetch_requires_call_review() {

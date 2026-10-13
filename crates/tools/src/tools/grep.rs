@@ -34,7 +34,7 @@ impl Tool for Grep {
     }
 
     fn schema(&self) -> serde_json::Value {
-        serde_json::json!({
+        super::file_access::with_access_arguments(serde_json::json!({
             "type": "object",
             "properties": {
                 "pattern": { "type": "string" },
@@ -42,7 +42,7 @@ impl Tool for Grep {
             },
             "required": ["pattern", "path"],
             "additionalProperties": false
-        })
+        }))
     }
 
     fn permissions(&self) -> Permissions {

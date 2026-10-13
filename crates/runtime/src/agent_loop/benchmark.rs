@@ -40,6 +40,17 @@ impl LoopState {
                     "required": ["command"], "additionalProperties": false,
                 });
                 tool.description = "Run one synchronous, noninteractive POSIX shell command in the isolated benchmark workspace. Wait for its completion. Use this as the only tool call in its batch. Network access, host access, background jobs and interactive sessions are unavailable.".into();
+            } else if matches!(tool.name.as_str(), "read" | "grep" | "write" | "edit") {
+                // The fixed benchmark workspace has no escalation path (ADR 0033).
+                if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
+                    properties.retain(|name, _| {
+                        !matches!(
+                            name.as_str(),
+                            tools::tools::file_access::SANDBOX_ACCESS
+                                | tools::tools::file_access::JUSTIFICATION
+                        )
+                    });
+                }
             } else if tool.name == "delegate" {
                 if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
                     for name in ["background", "interactive", "workspace_branch", "task"] {

@@ -105,6 +105,45 @@ fn displays_arguments_when_approval_arrives_before_tool_started() {
 }
 
 #[test]
+fn displays_file_access_path_tool_and_justification() {
+    // Given: ファイルツールの境界外アクセスに対する承認要求。
+    let mut state =
+        WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
+    state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+        tool_name: "write".into(),
+        call_id: "run-2:call-9".into(),
+        input: Some(json!({
+            "kind": "file_access",
+            "tool": "write",
+            "path": "/home/user/notes/todo.md",
+            "access": "write",
+            "justification": "user asked to update the notes",
+            "change": "- [ ] ship",
+        })),
+    })]);
+    let mut harness = Harness::builder().build_ui_state(
+        |ui, state| {
+            gui::theme::install(ui.ctx());
+            for item in state.pending_approvals().items() {
+                gui::panes::approvals::approval_card(ui, item);
+            }
+        },
+        state,
+    );
+    // When: 承認待ちの pane を描画する。
+    harness.run_steps(3);
+    // Then: 対象パスを独立して示し、ツール名と理由も表示する。
+    assert!(harness.query_by_label("/home/user/notes/todo.md").is_some());
+    assert!(harness.query_by_label("write").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("user asked to update the notes")
+            .is_some()
+    );
+    assert_eq!(harness.query_all_by_label("Approve").count(), 1);
+}
+
+#[test]
 fn displays_correlations_and_arguments_when_requests_are_pending() {
     // Given: 同じ元 call ID を共有する別 run の要求と、A だけの引数。
     let (mut harness, _) = harness();

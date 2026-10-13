@@ -113,6 +113,8 @@ pub struct ToolExecutor {
     default_cwd: RwLock<Option<std::path::PathBuf>>,
     post_edit_hook: Option<Arc<dyn PostEditHook>>,
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
+    file_boundary: RwLock<Option<Vec<sandbox::BoundaryRegion>>>,
+    file_escalation: RwLock<Option<Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>>>,
 }
 
 impl ToolExecutor {
@@ -126,6 +128,8 @@ impl ToolExecutor {
             default_cwd: RwLock::new(None),
             post_edit_hook: None,
             workspace_boundary: RwLock::new(None),
+            file_boundary: RwLock::new(None),
+            file_escalation: RwLock::new(None),
         }
     }
 
@@ -359,11 +363,16 @@ impl ToolExecutor {
     }
 
     /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。
+    /// File tools leaving their boundary are reviewed by the same gate.
     pub fn set_shell_escalation(
         &self,
         gate: Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>,
         unsandboxed: Arc<dyn Sandbox>,
     ) {
+        *self
+            .file_escalation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
         if let Some(registered) = self.tools.get("shell") {
             registered.tool.set_shell_escalation(gate, unsandboxed);
         }
@@ -414,11 +423,15 @@ impl ToolExecutor {
             crate::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
                 detail: format!("temporary output directory: {error}"),
             })?;
-        Ok(Self::with_standard_tools_in(
+        let config = config.ro_bind(output_root);
+        let boundary = config.boundary().clone();
+        let executor = Self::with_standard_tools_in(
             event_bus,
-            sandbox::production_sandbox(config.ro_bind(output_root))?,
+            sandbox::production_sandbox(config)?,
             Some(root),
-        ))
+        );
+        executor.set_file_boundary(&boundary);
+        Ok(executor)
     }
 
     /// 実行判定に使う承認方針を設定する。
@@ -568,6 +581,11 @@ impl ToolExecutor {
                 self.policy.mode(),
             )
         });
+        if action != Action::Deny
+            && let Err(reason) = self.enforce_file_boundary(ctx, tool_name, &args).await
+        {
+            return self.deny(ctx, tool_name, call_id, &reason);
+        }
         let outcome = match action {
             Action::Proceed => {
                 registered

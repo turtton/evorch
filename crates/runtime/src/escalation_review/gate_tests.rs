@@ -259,3 +259,142 @@ async fn network_only_human_approval_identifies_its_scope() {
     responder.await.expect("responder");
     assert!(model.observed().await.is_empty());
 }
+
+fn file_request() -> tools::tools::shell_escalation::FileAccessRequest {
+    tools::tools::shell_escalation::FileAccessRequest {
+        tool: "write".into(),
+        paths: vec![std::path::PathBuf::from("/home/user/notes/todo.md")],
+        write: true,
+        justification: "user asked to update the notes".into(),
+        change: Some("- [ ] ship".into()),
+    }
+}
+
+const LOW_RISK_APPROVAL: &str =
+    r#"{"approve":true,"reason":"requested","risk_level":"low","authorization_level":"low"}"#;
+
+// Given: Off / When: a file access is requested / Then: it is denied without review.
+#[tokio::test]
+async fn file_access_off_denies_without_calling_reviewer() {
+    let (gate, model) = fixture(EscalationApproval::Off, true, Some(LOW_RISK_APPROVAL));
+    let decision = gate.decide_file_access(&context(), &file_request()).await;
+    assert!(
+        matches!(decision, EscalationDecision::Deny { reason } if reason == "file access escalation is disabled")
+    );
+    assert!(model.observed().await.is_empty());
+}
+
+// Given: auto mode / When: reviewing / Then: the reviewer sees tool, path, reason and change.
+#[tokio::test]
+async fn file_access_auto_review_receives_request_and_applies_verdict() {
+    for (verdict, approved) in [
+        (LOW_RISK_APPROVAL, true),
+        (
+            r#"{"approve":true,"reason":"credentials","risk_level":"critical","authorization_level":"high"}"#,
+            false,
+        ),
+        (
+            r#"{"approve":true,"reason":"broad","risk_level":"high","authorization_level":"low"}"#,
+            false,
+        ),
+        (r#"{"approve":true}"#, false),
+    ] {
+        let (gate, model) = fixture(EscalationApproval::Auto, false, Some(verdict));
+        let decision = gate.decide_file_access(&context(), &file_request()).await;
+        assert_eq!(
+            matches!(decision, EscalationDecision::Approve),
+            approved,
+            "{verdict}"
+        );
+        let observed = model.observed().await;
+        let providers::ContentBlock::Text { text } = &observed[0][1].content[0] else {
+            panic!("review payload")
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["tool"], "write");
+        assert_eq!(payload["access"], "write");
+        assert_eq!(
+            payload["paths"],
+            serde_json::json!(["/home/user/notes/todo.md"])
+        );
+        assert_eq!(payload["justification"], "user asked to update the notes");
+        assert_eq!(payload["change"], "- [ ] ship");
+    }
+}
+
+async fn respond_file_access(
+    gate: &SandboxEscalationGate,
+    approved: bool,
+) -> tokio::task::JoinHandle<()> {
+    let bus = gate.bus.clone();
+    let mut rx = bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            if let EventKind::Tool(ToolEvent::ApprovalRequested {
+                tool_name,
+                call_id,
+                input,
+            }) = rx.recv().await.expect("event").kind
+            {
+                assert_eq!(tool_name, "write");
+                assert_eq!(call_id, "run-review:call-review");
+                assert_eq!(
+                    input,
+                    Some(serde_json::json!({
+                        "kind":"file_access", "tool":"write", "path":"/home/user/notes/todo.md",
+                        "access":"write", "justification":"user asked to update the notes",
+                        "change":"- [ ] ship",
+                    }))
+                );
+                bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                    call_id,
+                    approved,
+                }));
+                break;
+            }
+        }
+    })
+}
+
+// Given: user mode, or auto with a decline and fallback / When: the user answers /
+// Then: the user's answer decides, and user mode never calls the reviewer.
+#[tokio::test]
+async fn file_access_user_and_fallback_follow_the_user_answer() {
+    for approved in [false, true] {
+        let (gate, model) = fixture(EscalationApproval::User, false, None);
+        let responder = respond_file_access(&gate, approved).await;
+        let decision = gate.decide_file_access(&context(), &file_request()).await;
+        assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
+        responder.await.expect("responder");
+        assert!(model.observed().await.is_empty());
+
+        let (gate, model) = fixture(
+            EscalationApproval::Auto,
+            true,
+            Some(
+                r#"{"approve":false,"reason":"ask","risk_level":"medium","authorization_level":"none"}"#,
+            ),
+        );
+        let responder = respond_file_access(&gate, approved).await;
+        let decision = gate.decide_file_access(&context(), &file_request()).await;
+        assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
+        responder.await.expect("responder");
+        assert_eq!(model.observed().await.len(), 1);
+    }
+}
+
+// Given: auto decline without fallback / When: deciding / Then: the reviewer's reason is final.
+#[tokio::test]
+async fn file_access_auto_decline_without_fallback_keeps_reason() {
+    let (gate, _) = fixture(
+        EscalationApproval::Auto,
+        false,
+        Some(
+            r#"{"approve":false,"reason":"unrelated to the task","risk_level":"medium","authorization_level":"none"}"#,
+        ),
+    );
+    assert!(matches!(
+        gate.decide_file_access(&context(), &file_request()).await,
+        EscalationDecision::Deny { reason } if reason == "unrelated to the task"
+    ));
+}

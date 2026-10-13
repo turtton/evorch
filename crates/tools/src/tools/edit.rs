@@ -56,7 +56,7 @@ impl Tool for Edit {
     }
 
     fn schema(&self) -> serde_json::Value {
-        serde_json::json!({
+        super::file_access::with_access_arguments(serde_json::json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
@@ -65,7 +65,7 @@ impl Tool for Edit {
             },
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
-        })
+        }))
     }
 
     /// 編集の承認分類は不変。追加検査のプロセス起動は executor が別途承認する。
