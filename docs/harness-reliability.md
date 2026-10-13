@@ -40,12 +40,43 @@ worker checks one slot per minute for files older than seven days; there is no
 startup scan or bulk deletion on the UI thread. Expired files are optional
 history aids, never a requirement for conversation restoration.
 
-Sandbox `/tmp` is a private disk directory under `/var/tmp`, shared across
-commands using the same sandbox. Cleanup uses a bounded background queue and
-throttled directory traversal; crash leftovers are left to OS temporary-file
-cleanup. Cargo registry/git caches and installed tool binaries are mounted
-read-only into an isolated HOME; host Cargo credentials/config are excluded.
-Network isolation remains controlled by the existing policy.
+Shell temporary files live in one scratch directory per thread (ADR 0033):
+`/var/tmp/evorch-scratch-<uid>-<digest of the ownership root>/<thread>/`. The
+key is the thread bound by `bind_thread_root`, or the root run ID for a root
+run with no thread, so a thread's root run and all its child runs share the
+directory and its path survives restores and root rebinding. The parent is
+created lazily with mode 0700 and must be owned by the current user; a
+mismatched owner, mode or a symlink fails the run's sandbox setup.
+
+Inside bwrap the directory is mounted read-write at its own host path and at
+`/tmp`, and `TMPDIR` is the host path. Shells escalated to `unsandboxed` get
+the same `TMPDIR`, and the file tools already resolve that host path, so
+`$TMPDIR/<file>` names one file everywhere. `/tmp` and `~` still differ
+between the shell and the file tools. HOME stays at `/tmp/home` inside the
+scratch: Cargo registry/git caches and installed tool binaries are mounted
+read-only there, and host Cargo credentials/config are excluded. Network
+isolation remains controlled by the existing policy. A sandbox built without
+a scratch directory (benchmarks, and executors shared by runs of a runtime
+without a sandbox root) falls back to a private directory of its own and
+adds no system-message block.
+
+Contents last only while this process owns the thread (ADR 0024). Starting or
+claiming a thread empties its directory before use; releasing it or handing
+it off deletes the directory. Opening an ownership host deletes discarded
+trees, directories of threads without a live owner (unknown liveness keeps
+them), and unbound-run directories when no other owner process may be live.
+Runtimes without an ownership host use a private parent removed with the
+runtime. Removal renames the tree aside immediately, then a bounded background
+queue deletes it with throttled, symlink-safe traversal; nothing scans or
+deletes on the UI thread.
+
+New runs carry a `Temporary files (evorch): $TMPDIR is <path>.` block in their
+system message, separate from the workspace note and never rewritten on
+restore. A restored run whose system message lacks that block, or names
+another path, gets the same text appended once before its next model request
+instead; a restored run whose directory was emptied by a claim gets a one-time
+"was emptied" notice. Both are appended after the already-sent prefix and wait
+for an interrupted request to replay its exact saved input first.
 
 ## Token accounting and compaction
 

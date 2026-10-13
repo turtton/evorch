@@ -23,6 +23,7 @@ pub struct BwrapConfig {
     rw_binds: Vec<PathBuf>,
     cargo_home: Option<PathBuf>,
     rustup_home: Option<PathBuf>,
+    scratch: Option<PathBuf>,
 }
 
 impl BwrapConfig {
@@ -35,6 +36,7 @@ impl BwrapConfig {
             rw_binds: Vec::new(),
             cargo_home: tool_home("CARGO_HOME", ".cargo"),
             rustup_home: tool_home("RUSTUP_HOME", ".rustup"),
+            scratch: None,
         }
     }
 
@@ -72,6 +74,13 @@ impl BwrapConfig {
         self.rw_binds.push(path.into());
         self
     }
+
+    /// Use `path` as this sandbox's `TMPDIR`, visible at the same path and at `/tmp`.
+    /// Without one, each sandbox gets a private directory removed when it drops.
+    pub fn scratch_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.scratch = Some(path.into());
+        self
+    }
 }
 
 /// 機能確認済み bubblewrap 実行方式。
@@ -79,7 +88,8 @@ impl BwrapConfig {
 pub struct BwrapSandbox {
     program: PathBuf,
     config: BwrapConfig,
-    scratch: Arc<crate::scratch::Scratch>,
+    scratch: PathBuf,
+    _owned_scratch: Option<Arc<crate::scratch::Scratch>>,
 }
 
 impl BwrapSandbox {
@@ -109,14 +119,24 @@ impl BwrapSandbox {
                 detail: format!("機能確認が終了コード {status} で失敗しました"),
             });
         }
-        let scratch =
-            crate::scratch::Scratch::new().map_err(|error| SandboxError::BwrapUnavailable {
-                detail: format!("/var/tmp の作業領域を作成できません: {error}"),
-            })?;
+        let unavailable = |error: std::io::Error| SandboxError::BwrapUnavailable {
+            detail: format!("/var/tmp の作業領域を作成できません: {error}"),
+        };
+        let (scratch, owned) = match &config.scratch {
+            Some(path) => {
+                crate::scratch::ensure_layout(path).map_err(unavailable)?;
+                (path.clone(), None)
+            }
+            None => {
+                let owned = crate::scratch::Scratch::new().map_err(unavailable)?;
+                (owned.path().to_path_buf(), Some(Arc::new(owned)))
+            }
+        };
         Ok(Self {
             program: program.to_path_buf(),
             config,
-            scratch: Arc::new(scratch),
+            scratch,
+            _owned_scratch: owned,
         })
     }
 
@@ -125,11 +145,11 @@ impl BwrapSandbox {
         if self.config.isolate_processes {
             args.push("--unshare-pid".to_owned());
         }
-        args.extend([
-            "--bind".to_owned(),
-            self.scratch.path().to_string_lossy().into_owned(),
-            "/tmp".to_owned(),
-        ]);
+        // The same directory at its host path lets file tools and unsandboxed
+        // shells resolve `$TMPDIR` paths; `/tmp` serves programs that hardcode it.
+        let scratch = self.scratch.to_string_lossy().into_owned();
+        args.extend(["--bind".to_owned(), scratch.clone(), "/tmp".to_owned()]);
+        args.extend(["--bind".to_owned(), scratch.clone(), scratch]);
         for path in &self.config.ro_binds {
             if let Some(parent) = path.parent()
                 && parent != Path::new("/")
@@ -226,6 +246,12 @@ impl Sandbox for BwrapSandbox {
     }
 
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        // An ownership transition may have emptied a shared directory since detection.
+        crate::scratch::ensure_layout(&self.scratch).map_err(|error| {
+            SandboxError::BwrapUnavailable {
+                detail: format!("/var/tmp の作業領域を作成できません: {error}"),
+            }
+        })?;
         let args = self.build_argv(&spec);
         let mut env = merge_environment(spec.extra_env);
         env.retain(|(key, _)| {
@@ -236,7 +262,10 @@ impl Sandbox for BwrapSandbox {
         });
         env.extend([
             ("HOME".to_owned(), "/tmp/home".to_owned()),
-            ("TMPDIR".to_owned(), "/tmp".to_owned()),
+            (
+                "TMPDIR".to_owned(),
+                self.scratch.to_string_lossy().into_owned(),
+            ),
             ("CARGO_HOME".to_owned(), "/tmp/home/.cargo".to_owned()),
             ("RUSTUP_HOME".to_owned(), "/tmp/home/.rustup".to_owned()),
         ]);
@@ -287,10 +316,12 @@ mod tests {
     use super::*;
 
     fn sandbox(config: BwrapConfig) -> BwrapSandbox {
+        let owned = Arc::new(crate::scratch::Scratch::new().unwrap());
         BwrapSandbox {
             program: PathBuf::from("bwrap"),
             config,
-            scratch: Arc::new(crate::scratch::Scratch::new().unwrap()),
+            scratch: owned.path().to_path_buf(),
+            _owned_scratch: Some(owned),
         }
     }
 
@@ -314,6 +345,9 @@ mod tests {
         assert!(argv.windows(3).any(|args| args[0] == "--bind"
             && args[1].starts_with("/var/tmp/evorch-scratch-")
             && args[2] == "/tmp"));
+        assert!(argv.windows(3).any(|args| args[0] == "--bind"
+            && args[1].starts_with("/var/tmp/evorch-scratch-")
+            && args[2] == args[1]));
         assert!(!argv.iter().any(|arg| arg == "--tmpfs"));
         assert!(argv.contains(&"--unshare-net".to_owned()));
         for path in DEFAULT_RO_BINDS {
@@ -486,6 +520,63 @@ mod tests {
             BwrapConfig::new(PathBuf::from("/workspace")),
         );
         assert!(matches!(result, Err(SandboxError::BwrapUnavailable { .. })));
+    }
+
+    // Given: a configured scratch directory / When: wrapping / Then: it is bound at its host
+    // path and at /tmp, TMPDIR names the host path, and HOME and caches stay under /tmp/home
+    #[test]
+    fn configured_scratch_is_shared_by_host_path_and_tmp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("thread");
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cache.path().join("registry/src")).unwrap();
+        let mut config = BwrapConfig::new(PathBuf::from("/workspace"))
+            .cargo_cache(cache.path())
+            .scratch_dir(&path);
+        config.rustup_home = None;
+        let sandbox = BwrapSandbox {
+            program: PathBuf::from("bwrap"),
+            scratch: path.clone(),
+            _owned_scratch: None,
+            config,
+        };
+        let wrapped = sandbox.wrap(spec(None)).unwrap();
+        assert!(path.join("home/.cargo").is_dir());
+        let host = path.to_string_lossy().into_owned();
+        let tmp = wrapped
+            .args
+            .windows(3)
+            .position(|args| args == ["--bind", host.as_str(), "/tmp"])
+            .unwrap();
+        let same = wrapped
+            .args
+            .windows(3)
+            .position(|args| args == ["--bind", host.as_str(), host.as_str()])
+            .unwrap();
+        let cache_mount = wrapped
+            .args
+            .windows(3)
+            .position(|args| args[0] == "--ro-bind" && args[2] == "/tmp/home/.cargo/registry/src")
+            .unwrap();
+        assert!(tmp < cache_mount && same < cache_mount);
+        for (key, value) in [
+            ("TMPDIR", host.as_str()),
+            ("HOME", "/tmp/home"),
+            ("CARGO_HOME", "/tmp/home/.cargo"),
+            ("RUSTUP_HOME", "/tmp/home/.rustup"),
+        ] {
+            assert!(
+                wrapped.env.contains(&(key.to_owned(), value.to_owned())),
+                "{key}: {:?}",
+                wrapped.env
+            );
+        }
+        let networked = sandbox
+            .with_network_access()
+            .unwrap()
+            .wrap(spec(None))
+            .unwrap();
+        assert!(networked.env.contains(&("TMPDIR".to_owned(), host.clone())));
     }
 
     // Given: bubblewrap 方式 / When: コマンドを包む / Then: HOME は隔離先へ固定される

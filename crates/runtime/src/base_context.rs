@@ -54,6 +54,8 @@ pub enum ContextSectionKind {
     Rules,
     CompactionPolicy,
     Workspace,
+    /// Where `$TMPDIR` is; never rewritten on restore, unlike the workspace note.
+    TemporaryFiles,
     /// Validated lessons appended to the first user message, not the system message.
     Memory,
 }
@@ -71,6 +73,7 @@ impl ContextSectionKind {
             Self::Rules => "Rules",
             Self::CompactionPolicy => "Compaction policy",
             Self::Workspace => "Workspace",
+            Self::TemporaryFiles => "Temporary files",
             Self::Memory => "Memory lessons",
         }
     }

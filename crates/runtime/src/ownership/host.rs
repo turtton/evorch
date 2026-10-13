@@ -12,6 +12,7 @@ use event_bus::{Event, EventBus, OwnershipAction, OwnershipEvent};
 use super::{
     Lease, OwnerPermit, OwnerState, Registry, RegistryError, ThreadOwner, ipc, permit::now_ms,
 };
+use crate::scratch::ThreadScratch;
 
 pub struct OwnerHost {
     root: PathBuf,
@@ -22,6 +23,7 @@ pub struct OwnerHost {
     reader: Mutex<Registry>,
     // A GUI drain keeps generation guards valid until its queued writes finish.
     release_deferred: Arc<AtomicBool>,
+    scratch: Arc<ThreadScratch>,
     stop: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -46,6 +48,9 @@ impl OwnerHost {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let registry = Registry::open(&root.join("owners.db"))?;
         let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
+        let scratch = Arc::new(ThreadScratch::for_ownership_root(root)?);
+        sweep_scratch(&scratch, root, &owner_id, &registry);
+        let worker_scratch = Arc::clone(&scratch);
         let (stop, receiver) = mpsc::channel();
         let id = owner_id.clone();
         let worker_settings = settings.clone();
@@ -61,6 +66,7 @@ impl OwnerHost {
                 &worker_settings,
                 &worker_bus,
                 &worker_deferred,
+                &worker_scratch,
             )
         });
         Ok(Self {
@@ -70,6 +76,7 @@ impl OwnerHost {
             bus,
             reader,
             release_deferred,
+            scratch,
             stop,
             worker: Some(worker),
         })
@@ -90,6 +97,7 @@ impl OwnerHost {
         );
         owner.settings = self.settings.clone();
         Registry::open_existing(&self.root.join("owners.db"))?.start(&owner)?;
+        self.scratch.reset_thread(thread_id);
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
     }
@@ -109,6 +117,7 @@ impl OwnerHost {
             },
             &self.settings,
         )?;
+        self.scratch.reset_thread(&owner.thread_id);
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
     }
@@ -136,6 +145,8 @@ impl OwnerHost {
             owner.settings = successor.settings.clone();
             owner.claim(&permit.lease, &successor.owner_id, now_ms(), 0)
         })?;
+        self.scratch.release_thread(&owner.thread_id);
+        successor.scratch.reset_thread(&owner.thread_id);
         emit(&successor.bus, &owner, OwnershipAction::Handoff);
         Ok(successor.permit(&owner))
     }
@@ -179,6 +190,7 @@ impl OwnerHost {
             if owner.state == OwnerState::Quiescing && !owner.active_turn {
                 let released =
                     registry.update(&owner.thread_id, |state| state.release(&owner.lease))?;
+                self.scratch.release_thread(&released.thread_id);
                 emit(&self.bus, &released, OwnershipAction::Released);
             }
         }
@@ -198,6 +210,11 @@ impl OwnerHost {
             .list()?
             .iter()
             .any(|owner| owner.lease.owner_id == self.owner_id && owner.active_turn))
+    }
+
+    /// The thread scratch directories this host empties on claim and deletes on release.
+    pub fn thread_scratch(&self) -> Arc<ThreadScratch> {
+        Arc::clone(&self.scratch)
     }
 
     fn reader(&self) -> Result<MutexGuard<'_, Registry>, RegistryError> {
@@ -234,6 +251,36 @@ impl Drop for OwnerHost {
     }
 }
 
+/// Delete scratch directories of threads without a live owner, before this
+/// host can claim any. Uncertain liveness keeps a directory, as for claims.
+fn sweep_scratch(scratch: &ThreadScratch, root: &Path, owner_id: &str, registry: &Registry) {
+    let owners = match registry.list() {
+        Ok(owners) => owners,
+        Err(error) => {
+            tracing::warn!(%error, "scratch sweep skipped: owner registry unreadable");
+            return;
+        }
+    };
+    let live = owners
+        .into_iter()
+        .filter(|owner| {
+            owner.state != OwnerState::Released
+                && ipc::owner_may_be_live(root, &owner.lease.owner_id)
+        })
+        .map(|owner| owner.thread_id)
+        .collect();
+    let other_process_may_be_live = std::fs::read_dir(root).map_or(true, |entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".sock"))
+                .is_some_and(|id| id != owner_id && ipc::owner_may_be_live(root, id))
+        })
+    });
+    scratch.sweep(&live, other_process_may_be_live);
+}
+
 fn emit(bus: &EventBus, owner: &ThreadOwner, action: OwnershipAction) {
     bus.emit(Event::new(OwnershipEvent {
         thread_id: owner.thread_id.clone(),
@@ -243,6 +290,7 @@ fn emit(bus: &EventBus, owner: &ThreadOwner, action: OwnershipAction) {
     }));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut registry: Registry,
     listener: UnixListener,
@@ -251,12 +299,23 @@ fn serve(
     settings: &config::OwnershipConfig,
     bus: &EventBus,
     release_deferred: &AtomicBool,
+    scratch: &ThreadScratch,
 ) {
     let mut heartbeat = std::time::Instant::now();
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let _ = ipc::serve_connection_with_bus(&mut stream, &mut registry, now_ms(), bus);
+                let _ = ipc::serve_connection_releasing(
+                    &mut stream,
+                    &mut registry,
+                    now_ms(),
+                    bus,
+                    &|thread, previous| {
+                        if previous == id {
+                            scratch.release_thread(thread);
+                        }
+                    },
+                );
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,
@@ -279,6 +338,11 @@ fn serve(
                             }
                             Ok(())
                         });
+                        if let Ok(changed) = &result
+                            && changed.state == OwnerState::Released
+                        {
+                            scratch.release_thread(&changed.thread_id);
+                        }
                         match result {
                             Ok(changed) => emit(
                                 bus,

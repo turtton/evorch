@@ -5,7 +5,7 @@
 //! サンドボックスなしでの実行へのフォールバックは一切行いません。
 //! 通常の構築は常に `BwrapSandbox`、明示的に審査された例外だけが非隔離です。
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     bwrap::{BwrapConfig, BwrapSandbox},
@@ -28,20 +28,34 @@ pub fn production_sandbox(config: BwrapConfig) -> Result<Arc<dyn Sandbox>, Sandb
 /// evorch のプロセス環境（HOME、認証設定、agent socket 等）を継承し、
 /// `CommandSpec::extra_env` を上書きとして適用します。シェル設定は読み込みません。
 pub fn unsandboxed() -> Arc<dyn Sandbox> {
-    Arc::new(ReviewedHostSandbox)
+    Arc::new(ReviewedHostSandbox { tmpdir: None })
+}
+
+/// [`unsandboxed`] with `TMPDIR` set to the scratch directory the sandboxed shell uses.
+pub fn unsandboxed_with_tmpdir(tmpdir: PathBuf) -> Arc<dyn Sandbox> {
+    Arc::new(ReviewedHostSandbox {
+        tmpdir: Some(tmpdir),
+    })
 }
 
 /// Only the reviewed composition entry point can construct this host execution path.
-struct ReviewedHostSandbox;
+struct ReviewedHostSandbox {
+    tmpdir: Option<PathBuf>,
+}
 
 impl Sandbox for ReviewedHostSandbox {
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        let mut env = spec.extra_env;
+        if let Some(tmpdir) = &self.tmpdir {
+            env.retain(|(key, _)| key != "TMPDIR");
+            env.push(("TMPDIR".into(), tmpdir.to_string_lossy().into_owned()));
+        }
         Ok(WrappedCommand {
             program: spec.program,
             args: spec.args,
             cwd: spec.cwd,
             inherit_env: true,
-            env: spec.extra_env,
+            env,
         })
     }
 }
@@ -80,6 +94,35 @@ mod tests {
         assert_eq!(wrapped.args, spec.args);
         assert_eq!(wrapped.cwd, spec.cwd);
         assert!(wrapped.env.contains(&spec.extra_env[0]));
+        assert!(!wrapped.env.iter().any(|(key, _)| key == "TMPDIR"));
+    }
+
+    // Given: an opt-out with a thread scratch / When: wrapping / Then: TMPDIR names that scratch
+    #[test]
+    fn unsandboxed_with_tmpdir_overrides_tmpdir_only() {
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: None,
+            extra_env: vec![
+                ("TMPDIR".into(), "/tmp".into()),
+                ("KEEP".into(), "yes".into()),
+            ],
+        };
+        let wrapped = unsandboxed_with_tmpdir(PathBuf::from("/var/tmp/evorch-scratch-1-x/t-a"))
+            .wrap(spec)
+            .expect("wrap");
+        assert!(wrapped.inherit_env);
+        assert_eq!(
+            wrapped.env,
+            vec![
+                ("KEEP".to_owned(), "yes".to_owned()),
+                (
+                    "TMPDIR".to_owned(),
+                    "/var/tmp/evorch-scratch-1-x/t-a".to_owned()
+                ),
+            ]
+        );
     }
 
     // Given: 失敗する検出シーム / When: サンドボックスを構築する / Then: エラーがそのまま伝播する

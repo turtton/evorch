@@ -13,7 +13,7 @@ keychain = ["dep:keyring"]
 [dependencies]
 event-bus = { path = "../event-bus" }
 keyring = { workspace = true, optional = true }
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

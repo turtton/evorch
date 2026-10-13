@@ -98,6 +98,7 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,
+        scratch: None,
     };
     (runtime, state)
 }
