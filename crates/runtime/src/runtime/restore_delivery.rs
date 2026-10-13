@@ -131,7 +131,6 @@ impl AgentRuntime {
                 keep_alive: descriptor.keep_alive,
                 category: descriptor.category,
                 load_skills: descriptor.load_skills,
-                workspace_mode: descriptor.workspace_mode,
                 model_preference: descriptor.model_preference,
                 project_root: descriptor.project_root,
                 ..RunConfig::default()

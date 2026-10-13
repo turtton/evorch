@@ -144,3 +144,10 @@ run/taskの実行状態と、履歴の復元可否を分離したまま、現在
 rootの継続範囲を広げる。新しい実行engineや旧workerの再開機構は導入しない。
 blocking/securityの複合は引き続き拒否し、履歴から権限や未確認の副作用を復活させない。
 関連する実行状態の契約は `features/orchestration/durable-execution-states.md` を参照。
+
+## Addendum（2026-10-14、ADR 0031 ③ isolated workspace の削除）
+
+[ADR 0031](0031-remove-isolated-workspaces.md) で isolated workspace を削除し、`RunConfig` と
+`RunRestoreDescriptor` から `workspace_mode` / `workspace_branch` がなくなった。上の表の
+blocking にある `workspace_branch` は、拒否する対象そのものが存在しなくなったので、
+現在は該当しない。復元記述子は worktree を扱わない。

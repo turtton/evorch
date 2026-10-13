@@ -1,10 +1,9 @@
 //! No public terminal state until the old incarnation can no longer affect its successor.
-use super::{LoopState, cleanup_worktree};
-use crate::workspace::OwnedWorktree;
-use event_bus::{AgentRunPhase, LifecycleEvent};
+use super::LoopState;
+use event_bus::LifecycleEvent;
 
 impl LoopState {
-    pub(super) async fn finalize(&mut self, mut owned: Option<OwnedWorktree>) {
+    pub(super) async fn finalize(&mut self) {
         let run_id = self.task.run_id.to_string();
         // Cancelled tool futures may leave a supervisor reaping its child.
         // Every terminal path waits before shell, ownership or workspace teardown.
@@ -53,16 +52,6 @@ impl LoopState {
         } else {
             false
         };
-        let stopped = matches!(
-            self.pending_terminal.as_ref(),
-            Some((
-                _,
-                LifecycleEvent::AgentRunStateChanged {
-                    to: AgentRunPhase::Stopped,
-                    ..
-                }
-            ))
-        );
         if !self.benchmark_replay
             && let Some(checkpoint) = &self.benchmark
             && let Some(runtime) = self.shared.runtime.upgrade()
@@ -77,19 +66,10 @@ impl LoopState {
                 self.finalization_error(format!("benchmark completion recording failed: {error}"));
             }
         }
-        if released {
-            match self.take_pending_escalation() {
-                Some(memo) => {
-                    let shared = self.shared.runtime.clone();
-                    crate::escalation::handoff::complete(&shared, self, memo, owned.take()).await;
-                }
-                // Dropping the handle retains the dirty workspace for continuation.
-                None if stopped => drop(owned.take()),
-                None => cleanup_worktree(&self.shared, self.task.run_id, owned.take()).await,
-            }
+        if released && let Some(memo) = self.take_pending_escalation() {
+            let shared = self.shared.runtime.clone();
+            crate::escalation::handoff::complete(&shared, self, memo).await;
         }
-        // Failed teardown/persistence retains both handles and workspace for inspection.
-        // Dropping OwnedWorktree itself does not delete the worktree.
         self.publish_terminal();
     }
 

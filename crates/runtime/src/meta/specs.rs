@@ -25,8 +25,6 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
                 "background": {"type": "boolean", "default": false, "description": "Return the child run_id immediately instead of waiting."},
                 "interactive": {"type": "boolean", "default": false, "description": "Keep the child available for messages; requires background=true."},
                 "name": {"type": "string", "description": "Human-readable child name."},
-                "workspace_mode": {"type": "string", "enum": ["shared", "isolated"], "default": "shared"},
-                "workspace_branch": {"type": "string", "description": "Existing branch for an isolated workspace."},
                 "load_skills": {"type": "array", "items": {"type": "string"}, "description": "Registered skills to load into the child."},
                 "task": {
                     "type": "object", "description": "Team-mode task assignment.",

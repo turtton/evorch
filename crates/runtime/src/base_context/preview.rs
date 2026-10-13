@@ -18,7 +18,7 @@ use crate::compaction::estimator::estimate_tool_tokens;
 use crate::memory::MemoryBoundary;
 use crate::prompt::{AvailableSkill, classify};
 use crate::rules::{StartupRuleExclusion, startup_rule_files};
-use crate::{AgentRuntime, ExecutionPolicy, RunConfig, RuntimeError, WorkspaceMode};
+use crate::{AgentRuntime, ExecutionPolicy, RunConfig, RuntimeError};
 
 /// The run shape to preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +30,6 @@ pub struct BaseContextRequest {
     pub conversation: bool,
     /// Delegated by a parent run; child runs never see `escalate`.
     pub child: bool,
-    pub workspace_mode: WorkspaceMode,
     /// Lessons captured for the project, appended to the first user message.
     pub memory: Option<MemoryBoundary>,
     /// Project the previewed run would work in; `None` uses the active project.
@@ -48,7 +47,6 @@ impl BaseContextRequest {
             load_skills: Vec::new(),
             conversation: false,
             child: false,
-            workspace_mode: WorkspaceMode::Shared,
             memory: None,
             project_root: None,
             thread_id: None,
@@ -126,7 +124,6 @@ impl AgentRuntime {
             category: request.category.clone(),
             load_skills: request.load_skills.clone(),
             conversation: request.conversation,
-            workspace_mode: request.workspace_mode,
             ..RunConfig::default()
         };
         let policy = self
@@ -145,14 +142,8 @@ impl AgentRuntime {
                     .as_ref()
                     .map_or(root, |project| project.root.clone())
             });
-        let own_sandbox = match request.workspace_mode {
-            WorkspaceMode::Shared => sandbox_root.is_some(),
-            WorkspaceMode::Isolated => true,
-        };
-        let active_root = match request.workspace_mode {
-            WorkspaceMode::Shared => shared_active_root(shared.rules.as_deref(), sandbox_root),
-            WorkspaceMode::Isolated => None,
-        };
+        let own_sandbox = sandbox_root.is_some();
+        let active_root = shared_active_root(shared.rules.as_deref(), sandbox_root);
         let mut sections = compose_system_sections(
             &shared,
             &SystemInputs {
@@ -330,12 +321,6 @@ fn exclusions(inputs: &ExclusionInputs<'_>) -> Vec<ContextExclusion> {
                 );
             }
         }
-    }
-    if inputs.request.workspace_mode == WorkspaceMode::Isolated {
-        push(
-            "Workspace note",
-            "The isolated worktree path is decided when the run starts.".into(),
-        );
     }
     if inputs.request.load_skills.is_empty() && inputs.available_skills > 0 {
         push(

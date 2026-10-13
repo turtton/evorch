@@ -5,16 +5,15 @@ use std::sync::Arc;
 use agents::Role;
 use event_bus::{AgentRunPhase, Event, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole};
-use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode};
+use runtime::{AgentRuntime, RunConfig, RunId};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
 use support::{
-    ScriptedModel, drain_events, git, init_git_repo, recording_factory, text_response,
-    tool_response, tool_responses,
+    ScriptedModel, drain_events, init_git_repo, recording_factory, text_response, tool_response,
+    tool_responses,
 };
 
 fn escalation_response() -> providers::ChatResponse {
@@ -422,103 +421,6 @@ async fn child_worker_cannot_escalate_into_a_new_root() {
     }));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes() {
-    // Given: isolated Worker の昇格先だけを gate する共有モデルと recording factory
-    let (_temp, repo) = init_git_repo();
-    let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::new([]));
-    model
-        .add_keyed("ISOLATED SOURCE", [Ok(escalation_response())])
-        .await;
-    model
-        .add_keyed(
-            "[evorch escalation",
-            [Ok(text_response("引継ぎ完了", FinishReason::Stop))],
-        )
-        .await;
-    model
-        .gate_key("[evorch escalation", Arc::clone(&gate))
-        .await;
-    let bus = Arc::new(EventBus::new(128));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(
-        Arc::clone(&bus),
-        Arc::new(DirectSandbox::new_unchecked()),
-    ));
-    let manager = WorktreeManager::new(Project::new(repo.clone()).expect("git repo is valid"));
-    let (factory, mounts) = recording_factory();
-    let runtime = AgentRuntime::with_workspace_context(
-        Arc::clone(&bus),
-        executor,
-        model.clone(),
-        manager,
-        factory,
-    )
-    .with_sequential_run_ids();
-    let mut receiver = bus.subscribe();
-
-    // When: source が worktree を新 root run へ移譲し、新 run のモデル呼び出しで停止する
-    let source = runtime.delegate_background(
-        Role::Worker,
-        "ISOLATED SOURCE".to_string(),
-        RunConfig {
-            workspace_mode: WorkspaceMode::Isolated,
-            ..RunConfig::default()
-        },
-    );
-    let source_path = repo.join(".evorch/worktrees").join(source.to_string());
-    let source_branch = format!("evorch/task/{source}");
-    let (new_run, _events) = events_through_escalation(&mut receiver, source).await;
-    model.wait_for_request(1).await;
-
-    // Then: 所有中は同じ path/branch が新 run だけに紐付き、source cleanup は走らない
-    assert_eq!(
-        runtime
-            .inspect_agent(new_run)
-            .expect("new run inspection")
-            .workspace,
-        Some(WorkspaceInspection {
-            mode: WorkspaceMode::Isolated,
-            branch: Some(source_branch.clone()),
-            worktree_path: Some(source_path.clone()),
-            active_root: Some(source_path.clone()),
-            merge_mode: MergeMode::Branch,
-        })
-    );
-    assert_eq!(
-        runtime
-            .inspect_agent(source)
-            .expect("source inspection")
-            .workspace,
-        Some(WorkspaceInspection {
-            mode: WorkspaceMode::Isolated,
-            branch: Some(source_branch.clone()),
-            worktree_path: None,
-            active_root: None,
-            merge_mode: MergeMode::Branch,
-        })
-    );
-    assert!({
-        let captured = mounts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        captured
-            .iter()
-            .all(|mount| mount.workspace_root == source_path)
-    });
-    assert!(source_path.exists());
-
-    gate.notify_one();
-    assert_eq!(runtime.wait(new_run).await, Ok(AgentRunPhase::Done));
-    assert!(
-        !source_path.exists(),
-        "terminal publication follows workspace cleanup"
-    );
-    let branches = git(&repo, &["branch", "--list", &source_branch]);
-    assert!(branches.status.success());
-    assert!(String::from_utf8_lossy(&branches.stdout).contains(&source_branch));
-}
-
 #[tokio::test]
 async fn batch_edit_then_escalate_skips_remaining_tools_and_orders_terminal_before_spawn() {
     // Given: 最初の edit のみ実ファイルへ書き込み、その後の escalate を含む複数ツール応答
@@ -704,14 +606,12 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
                 Arc::new(DirectSandbox::new_unchecked()),
             ));
             let (factory, _) = recording_factory();
-            let runtime = AgentRuntime::with_workspace_context(
-                bus.clone(),
-                executor,
-                model.clone(),
-                WorktreeManager::new(Project::new(repo.clone()).unwrap()),
-                factory,
-            )
-            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+            let runtime =
+                AgentRuntime::with_sandbox_factory(bus.clone(), executor, model.clone(), factory)
+                    .with_run_store(
+                        runtime::RunStore::open(&storage_config, storage.handle()).unwrap(),
+                    )
+                    .with_sandbox_root(repo.clone());
             runtime.set_project_root(repo.clone()).unwrap();
             (runtime, bus)
         };
@@ -742,15 +642,13 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
                     lease,
                     run_id: None,
                 }),
-                workspace_mode: WorkspaceMode::Isolated,
                 ..Default::default()
             },
         );
         let (target, _) = events_through_escalation(&mut events, source).await;
         model.entered.notified().await;
         let child = event_bus::escalation_thread_id(&target.to_string());
-        let retained_path = repo.join(".evorch/worktrees").join(source.to_string());
-        std::fs::write(retained_path.join("keep.txt"), "pending handoff changes").unwrap();
+        std::fs::write(repo.join("keep.txt"), "pending handoff changes").unwrap();
         if failure == "stop" {
             runtime.stop(target, runtime::StopScope::SelfOnly).unwrap();
         }
@@ -774,7 +672,6 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
             usize::from(failure == "error-after-restart"),
             "{failure}"
         );
-        assert!(retained_path.exists());
         assert_eq!(model.script.observed().await.len(), 1);
         let inherited = runtime.thread_goal(&child).unwrap();
         let old_owner = registry.attach(&child).unwrap();
@@ -856,10 +753,10 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
                 .workspace
                 .unwrap()
                 .active_root,
-            Some(retained_path.clone())
+            Some(repo.clone())
         );
         assert_eq!(
-            std::fs::read_to_string(retained_path.join("keep.txt")).unwrap(),
+            std::fs::read_to_string(repo.join("keep.txt")).unwrap(),
             "pending handoff changes"
         );
         let resumed_goal = runtime.thread_goal(&child).unwrap();

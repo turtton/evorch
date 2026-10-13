@@ -155,7 +155,7 @@ impl AgentRuntime {
                 (None, None) => None,
             }
         });
-        let retained_worktree = if let Some(pending) = &pending_handoff {
+        if let Some(pending) = &pending_handoff {
             let child = event_bus::escalation_thread_id(&run_id.to_string());
             if role != Role::Orchestrator
                 || authority
@@ -168,12 +168,7 @@ impl AgentRuntime {
                     "current child-thread ownership is required to retry escalation".into(),
                 )));
             }
-            pending
-                .restore_worktree(&descriptor)
-                .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?
-        } else {
-            None
-        };
+        }
         if pending_handoff.is_some()
             && let Some(prompt) = prompt
         {
@@ -224,17 +219,10 @@ impl AgentRuntime {
             project_root,
             ..authority
         };
-        let handoff = if let Some(pending) = pending_handoff {
-            config.workspace_mode = descriptor.workspace_mode;
-            config.workspace_branch = pending.workspace_branch;
-            Some(RunHandoff {
-                source_run_id: pending.source_run_id,
-                worktree: retained_worktree,
-                restored: None,
-            })
-        } else {
-            None
-        };
+        let handoff = pending_handoff.map(|pending| RunHandoff {
+            source_run_id: pending.source_run_id,
+            restored: None,
+        });
         let continuation = if prompt.is_none() {
             RunContinuation::Resume { restored, handoff }
         } else if let Some(mut handoff) = handoff {

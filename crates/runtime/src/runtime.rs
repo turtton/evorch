@@ -41,11 +41,10 @@ use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
 use crate::rules::RulesSource;
-use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
+use crate::run::{RunConfig, WorkspaceInspection};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 use crate::skill_source::SkillCatalogSource;
 use crate::state::{RunInterrupt, StopScope};
-use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 pub(crate) mod user_inbox;
@@ -102,7 +101,7 @@ pub(crate) struct Shared {
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
     pub(crate) review_runs: Mutex<HashMap<RunId, crate::escalation_review::ReviewRunContext>>,
-    pub(crate) workspace: Option<WorkspaceContext>,
+    pub(crate) sandbox_factory: Option<Arc<dyn SandboxFactory>>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     pub(crate) run_ids: crate::run_ids::RunIds,
     /// Project that root runs bind to when their config names none.
@@ -126,10 +125,10 @@ impl Shared {
     }
 }
 
-/// isolated sandbox を構築するための mount policy 入力。
+/// run の sandbox を構築するための mount policy 入力。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IsolatedMounts {
-    /// run 専用 worktree root。
+pub struct WorkspaceMounts {
+    /// run が作業するプロジェクトルート。
     pub workspace_root: PathBuf,
     /// 読み取り専用で公開する path。
     pub ro_binds: Vec<PathBuf>,
@@ -139,8 +138,8 @@ pub struct IsolatedMounts {
     pub scratch: Option<PathBuf>,
 }
 
-impl IsolatedMounts {
-    /// A shared-workspace run: the project root without extra mounts.
+impl WorkspaceMounts {
+    /// A run in the project root without extra mounts.
     pub fn shared(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
@@ -160,35 +159,8 @@ pub trait SandboxFactory: Send + Sync {
     fn build(
         &self,
         policy: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
+        mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError>;
-}
-
-pub(crate) struct WorkspaceContext {
-    /// Follows the active project; `None` while that project is not a git repository root.
-    manager: Mutex<Option<WorktreeManager>>,
-    pub(crate) factory: Arc<dyn SandboxFactory>,
-}
-
-/// One run's view of [`WorkspaceContext`], resolved once per setup so a
-/// concurrent project switch cannot split a run across two repositories.
-pub(crate) struct IsolatedWorkspace {
-    pub(crate) manager: WorktreeManager,
-    pub(crate) factory: Arc<dyn SandboxFactory>,
-}
-
-impl WorkspaceContext {
-    pub(crate) fn isolated(&self) -> Option<IsolatedWorkspace> {
-        let manager = self
-            .manager
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
-        Some(IsolatedWorkspace {
-            manager,
-            factory: Arc::clone(&self.factory),
-        })
-    }
 }
 
 struct RunEntry {
@@ -241,8 +213,8 @@ impl AgentRuntime {
     }
 
     /// Rebind every project-scoped input to `root` for runs started afterwards:
-    /// the shell sandbox and cwd, project rules, repository skills and the
-    /// isolated worktree manager. Running runs keep the root they started with.
+    /// the shell sandbox and cwd, project rules and repository skills. Running
+    /// runs keep the root they started with.
     ///
     /// # Errors
     /// Propagates [`AgentRuntime::set_default_cwd`] failures.
@@ -265,21 +237,6 @@ impl AgentRuntime {
         }
         if let Some(source) = self.shared.skill_source.get() {
             source.set_repo_root(&root);
-        }
-        if let Some(workspace) = &self.shared.workspace {
-            let manager = match crate::workspace::Project::new(root) {
-                Ok(project) => Some(WorktreeManager::new(project)),
-                Err(error) => {
-                    // Fail closed: isolated runs report a missing workspace
-                    // instead of creating worktrees in the previous project.
-                    tracing::warn!(%error, "isolated workspaces are unavailable for this project");
-                    None
-                }
-            };
-            *workspace
-                .manager
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = manager;
         }
         Ok(())
     }
@@ -340,7 +297,7 @@ impl AgentRuntime {
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
                 review_runs: Mutex::new(HashMap::new()),
-                workspace: None,
+                sandbox_factory: None,
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
@@ -548,7 +505,7 @@ impl AgentRuntime {
         Ok(Self::new(bus, executor, model))
     }
 
-    /// production sandbox と isolated workspace context を持つランタイムを生成する。
+    /// production sandbox と run ごとの sandbox factory を持つランタイムを生成する。
     ///
     /// baseline executor は [`AgentRuntime::production`] と同様に web_search /
     /// web_fetch を [`ToolExecutor::with_web_tools`] で登録する。
@@ -564,22 +521,23 @@ impl AgentRuntime {
     ) -> Result<Self, RuntimeError> {
         let seam = crate::compose::WorkspaceSeam::production(project_root)?;
         let executor =
-            production_executor(Arc::clone(&bus), policy, seam.repo_root().to_path_buf())?;
-        let (manager, factory) = seam.into_manager_and_factory();
-        Ok(Self::with_workspace_context(
-            bus, executor, model, manager, factory,
+            production_executor(Arc::clone(&bus), policy, seam.project_root().to_path_buf())?;
+        Ok(Self::with_sandbox_factory(
+            bus,
+            executor,
+            model,
+            seam.into_factory(),
         ))
     }
 
-    /// 明示的な isolated workspace test seam を持つランタイムを生成する。
+    /// run ごとの sandbox を明示的な factory で構築するランタイムを生成する。
     ///
     /// production は [`AgentRuntime::production_with_project`] を使用する。隔離なし sandbox
     /// は既存の [`AgentRuntime::new`] とこの明示的 seam のテスト実装でのみ許可する。
-    pub fn with_workspace_context(
+    pub fn with_sandbox_factory(
         bus: Arc<EventBus>,
         executor: Arc<ToolExecutor>,
         model: Arc<dyn AgentModel>,
-        manager: WorktreeManager,
         factory: Arc<dyn SandboxFactory>,
     ) -> Self {
         Self {
@@ -613,10 +571,7 @@ impl AgentRuntime {
                 escalations: Mutex::new(HashMap::new()),
                 review_runs: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
-                workspace: Some(WorkspaceContext {
-                    manager: Mutex::new(Some(manager)),
-                    factory,
-                }),
+                sandbox_factory: Some(factory),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
@@ -1170,7 +1125,6 @@ impl AgentRuntime {
         &self,
         memo: EscalationMemo,
         source_config: &RunConfig,
-        worktree: &mut Option<OwnedWorktree>,
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
         let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
@@ -1185,14 +1139,7 @@ impl AgentRuntime {
             name: Some("escalation-orchestrator".to_string()),
             category: None,
             load_skills: Vec::new(),
-            workspace_mode: source_config.workspace_mode,
-            merge_mode: source_config.merge_mode,
-            workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
-            project_root: source_config.project_root.clone().or_else(|| {
-                worktree
-                    .as_ref()
-                    .map(|owned| owned.repo_root().to_path_buf())
-            }),
+            project_root: source_config.project_root.clone(),
             ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
@@ -1225,7 +1172,6 @@ impl AgentRuntime {
             source_run_id,
             &prompt,
             &config,
-            worktree.as_ref(),
             source_config.ownership.is_some(),
         )
         .map_err(|error| error.to_string())?;
@@ -1235,20 +1181,6 @@ impl AgentRuntime {
             source_config.ownership.as_ref(),
             |owner| {
                 self.reserve_admission(run_id, None, owner.clone());
-                // No fallible work remains. Detach before the public terminal
-                // state allows a new incarnation of the source conversation.
-                if let Some(owned) = worktree.as_ref()
-                    && let Some(source) = self
-                        .shared
-                        .workspaces
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .get_mut(&source_run_id)
-                    && source.worktree_path.as_ref() == Some(&owned.path)
-                {
-                    source.worktree_path = None;
-                    source.active_root = None;
-                }
                 before_spawn();
                 self.shared
                     .bus
@@ -1267,7 +1199,6 @@ impl AgentRuntime {
             config,
             RunContinuation::Handoff(RunHandoff {
                 source_run_id,
-                worktree: worktree.take(),
                 restored: None,
             }),
         ))
@@ -1647,13 +1578,7 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&run_id)
             .cloned()
-            .unwrap_or(WorkspaceInspection {
-                mode: WorkspaceMode::Shared,
-                branch: None,
-                worktree_path: None,
-                active_root: None,
-                merge_mode: entry.config.merge_mode,
-            });
+            .unwrap_or(WorkspaceInspection { active_root: None });
         Ok(AgentInspection {
             run_id,
             role_name: entry.role.name().to_string(),
@@ -2085,7 +2010,7 @@ pub fn production_executor_with_config(
     let sandbox =
         crate::network::build_sandbox(policy, workspace_root.clone()).map_err(sandbox_error)?;
     let boundary =
-        crate::network::sandbox_boundary(&IsolatedMounts::shared(workspace_root.clone()))
+        crate::network::sandbox_boundary(&WorkspaceMounts::shared(workspace_root.clone()))
             .map_err(sandbox_error)?;
     configured_executor(
         bus,
@@ -2097,7 +2022,7 @@ pub fn production_executor_with_config(
     )
 }
 
-/// Shared production composition, also used after isolated sandbox creation.
+/// Production executor composition, also used after a run builds its own sandbox.
 /// File tools are confined to `boundary`, the list the sandbox was built from.
 pub(crate) fn configured_executor(
     bus: Arc<EventBus>,

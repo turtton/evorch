@@ -97,7 +97,7 @@ fn working_tree_diff_shows_modified_file() {
 }
 
 // Given: main と分岐後に双方へ独立した commit があるリポジトリ
-// When: task branch から main...HEAD の diff を取得する
+// When: topic branch から main...HEAD の diff を取得する
 // Then: merge base 以降の branch 側変更だけが返る
 //
 // 任意 base は DiffMode::Branch が unit variant となった時点で型レベルで
@@ -105,13 +105,13 @@ fn working_tree_diff_shows_modified_file() {
 #[test]
 fn branch_diff_against_main_uses_merge_base() {
     let repo = initialized_repo();
-    git(repo.path(), &["switch", "-c", "evorch/task/run-1"]);
+    git(repo.path(), &["switch", "-c", "topic"]);
     fs::write(repo.path().join("branch.txt"), "branch\n").expect("branch fixture を書ける");
     commit(repo.path(), "branch change");
     git(repo.path(), &["switch", "main"]);
     fs::write(repo.path().join("unrelated.txt"), "main\n").expect("main fixture を書ける");
     commit(repo.path(), "unrelated main change");
-    git(repo.path(), &["switch", "evorch/task/run-1"]);
+    git(repo.path(), &["switch", "topic"]);
     let source = GitCliDiffSource;
 
     let text = source

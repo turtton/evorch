@@ -60,7 +60,7 @@ impl DiffModel {
         }
     }
 
-    /// Invalidate both scopes before polling results when project/worktree changes.
+    /// Invalidate both scopes before polling results when the project changes.
     pub fn set_repo_root(&mut self, root: Option<PathBuf>) {
         if self.repo_root != root {
             self.repo_root = root;

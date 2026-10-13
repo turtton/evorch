@@ -18,52 +18,53 @@ use tools::ToolExecutor;
 use crate::rules::{ProjectTrust, RulesSettings, RulesSource};
 use crate::skill::default_skill_dirs;
 use crate::skill_source::SkillCatalogSource;
-use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod hosted_search;
 
-/// composition root に production workspace context を渡す seam。
+/// composition root に production の project root と sandbox factory を渡す seam。
 pub struct WorkspaceSeam {
-    project: Project,
+    project_root: PathBuf,
     factory: Arc<dyn crate::SandboxFactory>,
 }
 
 impl WorkspaceSeam {
-    /// production project を検証して workspace seam を生成する。
+    /// production project root から workspace seam を生成する。
     ///
     /// # Errors
-    /// project root が有効な git repository でない場合に [`RuntimeError::Workspace`] を返す。
+    /// project root を canonicalize できない場合に [`RuntimeError::Workspace`] を返す。
     pub fn production(project_root: PathBuf) -> Result<Self, RuntimeError> {
         Self::with_factory(project_root, Arc::new(crate::network::BwrapFactory))
     }
 
     /// sandbox factory を明示した workspace seam を生成する。
     ///
-    /// bwrap 実行環境を持たない CI でも isolated workspace の結線を検証できるように
+    /// bwrap 実行環境を持たない CI でも run ごとの sandbox の結線を検証できるように
     /// するテスト seam。production 経路は [`WorkspaceSeam::production`] を使うこと。
     ///
     /// # Errors
-    /// project root が有効な git repository でない場合に [`RuntimeError::Workspace`] を返す。
+    /// project root を canonicalize できない場合に [`RuntimeError::Workspace`] を返す。
     pub fn with_factory(
         project_root: PathBuf,
         factory: Arc<dyn crate::SandboxFactory>,
     ) -> Result<Self, RuntimeError> {
-        let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
-            detail: error.to_string(),
-        })?;
-        Ok(Self { project, factory })
+        let project_root =
+            std::fs::canonicalize(&project_root).map_err(|error| RuntimeError::Workspace {
+                detail: format!("{}: {error}", project_root.display()),
+            })?;
+        Ok(Self {
+            project_root,
+            factory,
+        })
     }
 
-    /// 検証済み repository root を返す。
-    pub fn repo_root(&self) -> &Path {
-        self.project.repo_root()
+    /// canonical な project root を返す。
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
-    pub(crate) fn into_manager_and_factory(
-        self,
-    ) -> (WorktreeManager, Arc<dyn crate::SandboxFactory>) {
-        (WorktreeManager::new(self.project), self.factory)
+    pub(crate) fn into_factory(self) -> Arc<dyn crate::SandboxFactory> {
+        self.factory
     }
 }
 
@@ -119,7 +120,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
     let repo_root = input
         .workspace
         .as_ref()
-        .map(|seam| seam.repo_root().to_path_buf());
+        .map(|seam| seam.project_root().to_path_buf());
     let user_dir = input
         .user_config_dir
         .clone()
@@ -191,10 +192,7 @@ fn compose_agent_runtime(
     workspace: Option<WorkspaceSeam>,
 ) -> AgentRuntime {
     match workspace {
-        Some(seam) => {
-            let (manager, factory) = seam.into_manager_and_factory();
-            AgentRuntime::with_workspace_context(bus, executor, model, manager, factory)
-        }
+        Some(seam) => AgentRuntime::with_sandbox_factory(bus, executor, model, seam.into_factory()),
         None => AgentRuntime::new(bus, executor, model),
     }
 }

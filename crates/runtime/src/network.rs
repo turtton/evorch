@@ -2,14 +2,13 @@
 //! network-enabled variant for one invocation. Web tools use a separate
 //! tool-call authorization gate.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxBoundary, SandboxError};
 
 use crate::policy::ExecutionPolicy;
-use crate::runtime::{IsolatedMounts, SandboxFactory};
-use crate::workspace::OwnedWorktree;
+use crate::runtime::{SandboxFactory, WorkspaceMounts};
 
 /// Build the default process sandbox with networking isolated. A reviewed
 /// shell invocation may request a network-only variant through `Sandbox`.
@@ -17,13 +16,13 @@ pub fn build_sandbox(
     _policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-    let boundary = sandbox_boundary(&IsolatedMounts::shared(workspace_root))?;
+    let boundary = sandbox_boundary(&WorkspaceMounts::shared(workspace_root))?;
     detect(boundary)
 }
 
 /// The one place a run's boundary is assembled. Production bwrap mounts and
 /// the direct file-tool check are both built from its result (ADR 0033).
-pub(crate) fn sandbox_boundary(mounts: &IsolatedMounts) -> Result<SandboxBoundary, SandboxError> {
+pub(crate) fn sandbox_boundary(mounts: &WorkspaceMounts) -> Result<SandboxBoundary, SandboxError> {
     let outputs = tools::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
         detail: format!("一時ツール出力ディレクトリを作成できません: {error}"),
     })?;
@@ -45,35 +44,13 @@ fn detect(boundary: SandboxBoundary) -> Result<Arc<dyn Sandbox>, SandboxError> {
         .map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
 }
 
-/// isolated worktree が git 操作に必要とする最小 mount set を構築する。
-///
-/// `packed-refs` の rewrite (`git pack-refs` / auto gc) は意図的に writable にしない。
-/// 通常の branch 更新に必要な個別 metadata だけを writable にする最小性との trade-off。
-pub(crate) fn isolated_mounts(worktree: &OwnedWorktree, git_common_dir: &Path) -> IsolatedMounts {
-    let worktree_name = match worktree.path.file_name() {
-        Some(name) => name,
-        None => worktree.path.as_os_str(),
-    };
-    IsolatedMounts {
-        workspace_root: worktree.path.clone(),
-        ro_binds: vec![git_common_dir.to_path_buf()],
-        rw_binds: vec![
-            git_common_dir.join("worktrees").join(worktree_name),
-            git_common_dir.join("objects"),
-            git_common_dir.join("refs/heads"),
-            git_common_dir.join("logs"),
-        ],
-        scratch: None,
-    }
-}
-
 pub(crate) struct BwrapFactory;
 
 impl SandboxFactory for BwrapFactory {
     fn build(
         &self,
         _policy: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
+        mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         detect(sandbox_boundary(mounts)?)
     }
@@ -124,6 +101,8 @@ pub fn judge_web_network_access(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use agents::Role;
     use sandbox::PolicyDecision;
@@ -132,10 +111,10 @@ mod tests {
     // extra binds, scratch and project root are all listed for bwrap and file tools
     #[test]
     fn run_boundary_lists_every_mount_with_its_access() {
-        let mounts = IsolatedMounts {
+        let mounts = WorkspaceMounts {
             workspace_root: PathBuf::from("/project"),
-            ro_binds: vec![PathBuf::from("/repo/.git")],
-            rw_binds: vec![PathBuf::from("/repo/.git/objects")],
+            ro_binds: vec![PathBuf::from("/opt/reference")],
+            rw_binds: vec![PathBuf::from("/opt/shared")],
             scratch: Some(PathBuf::from("/var/tmp/evorch-scratch-test/t-1")),
         };
         let boundary = sandbox_boundary(&mounts).unwrap();
@@ -143,12 +122,9 @@ mod tests {
         let outputs = tools::output::output_root().unwrap();
         for (path, access) in [
             (outputs.as_path(), sandbox::PathAccess::ReadOnly),
-            (Path::new("/repo/.git"), sandbox::PathAccess::ReadOnly),
+            (Path::new("/opt/reference"), sandbox::PathAccess::ReadOnly),
             (Path::new("/usr"), sandbox::PathAccess::ReadOnly),
-            (
-                Path::new("/repo/.git/objects"),
-                sandbox::PathAccess::ReadWrite,
-            ),
+            (Path::new("/opt/shared"), sandbox::PathAccess::ReadWrite),
             (
                 Path::new("/var/tmp/evorch-scratch-test/t-1"),
                 sandbox::PathAccess::ReadWrite,

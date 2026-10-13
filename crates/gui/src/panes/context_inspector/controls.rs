@@ -105,7 +105,6 @@ fn spec_editor(ui: &mut egui::Ui, id: &str, spec: &mut PreviewSpec) -> bool {
     } else {
         spec.conversation = false;
     }
-    ui.checkbox(&mut spec.isolated, "Isolated worktree");
     if spec.conversation {
         spec.category = Some(CategoryId::Conversation);
     } else if spec.category == Some(CategoryId::Conversation) {

@@ -98,14 +98,13 @@ fn allowed_directory_rejects_relative_missing_and_nested_paths() {
 }
 
 #[test]
-fn membership_resolves_root_runtime_worktree_allowed_and_outside() {
-    // Given: a project root, runtime worktree, explicit allowed dir, and unrelated sibling.
+fn membership_resolves_root_allowed_and_outside() {
+    // Given: a project root, explicit allowed dir, and unrelated sibling.
     let directory = tempdir().expect("temporary directory must be created");
     let root = directory.path().join("project");
-    let run_dir = root.join(".evorch/worktrees/run-7");
     let allowed = directory.path().join("allowed");
     let outside = directory.path().join("outside");
-    for path in [&run_dir, &allowed, &outside] {
+    for path in [&root, &allowed, &outside] {
         std::fs::create_dir_all(path).expect("fixture directory must be created");
     }
     let mut sidebar = SidebarState::default();
@@ -119,14 +118,10 @@ fn membership_resolves_root_runtime_worktree_allowed_and_outside() {
     let project = &sidebar.projects[0];
 
     // When: membership is resolved for each canonical path class.
-    // Then: runtime worktrees are auto-allowed while explicit directories retain trust.
+    // Then: explicit directories retain their trust.
     assert_eq!(
         project.resolve_membership(&project.repo_root),
         Membership::ProjectRoot
-    );
-    assert_eq!(
-        project.resolve_membership(&run_dir),
-        Membership::RuntimeWorktree { run_dir }
     );
     assert_eq!(
         project.resolve_membership(&allowed),

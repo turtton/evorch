@@ -135,29 +135,6 @@ impl<'de> Deserialize<'de> for RunId {
     }
 }
 
-/// AgentRun が親 workspace を共有するか、専用の git worktree を使うかを示す。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WorkspaceMode {
-    /// 親 run と同じ workspace を使用する。
-    #[default]
-    Shared,
-    /// run 専用の git worktree を使用する。
-    Isolated,
-}
-
-/// isolated workspace の変更を統合する方法を示す。
-///
-/// branch が既定である。patch mode は v0.2 スコープ外の型トークン
-/// (packet v02-workspace-isolation) とする。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MergeMode {
-    /// 専用 branch を統合する。
-    #[default]
-    Branch,
-}
-
 /// Internal learning stages are assigned by the runtime, never by delegate arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunPurpose {
@@ -214,14 +191,6 @@ pub struct RunConfig {
     pub category: Option<String>,
     /// 委譲時に子 run の初期 System メッセージへ本文を注入する skill 名。既定は空。
     pub load_skills: Vec<String>,
-    /// 親 workspace を共有するか、専用 git worktree を使用するか。
-    pub workspace_mode: WorkspaceMode,
-    /// isolated workspace の変更を統合する方法。
-    pub merge_mode: MergeMode,
-    /// isolated workspace で checkout する既存 branch。`None` なら run 専用の新規
-    /// branch (`evorch/task/run-<id>`) を作成する。既定は `None`。worktree path は
-    /// この値からは導出されず、常に run 名 (`run-<id>`) から決まる (issue #73 D2)。
-    pub workspace_branch: Option<String>,
     /// Project this run works in. Children always inherit their parent's;
     /// `None` binds a root run to the runtime's active project at registration.
     pub project_root: Option<PathBuf>,
@@ -237,17 +206,9 @@ pub struct DelegateImage {
 /// AgentRun に割り当てられた workspace の検査用 DTO。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkspaceInspection {
-    /// 親 workspace を共有するか、専用 worktree を使うか。
-    pub mode: WorkspaceMode,
-    /// isolated run の merge deliverable branch。cleanup 後も保持される。
-    pub branch: Option<String>,
-    /// isolated worktree の path。cleanup 成功後は `None`。
-    pub worktree_path: Option<PathBuf>,
-    /// run 開始時に決定した作業 root。cleanup 成功・handoff 切離し後は `None`。
+    /// run 開始時に決定した作業 root。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_root: Option<PathBuf>,
-    /// isolated workspace の変更を統合する方法。
-    pub merge_mode: MergeMode,
 }
 
 /// AgentRun の要約 (一覧表示用 DTO)。
@@ -289,45 +250,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_inspection_serializes_active_root_without_changing_existing_keys() {
+    fn workspace_inspection_serializes_only_active_root() {
         let workspace = WorkspaceInspection {
-            mode: WorkspaceMode::Isolated,
-            branch: Some("evorch/task/run-7".into()),
-            worktree_path: Some(PathBuf::from("/project/.evorch/worktrees/run-7")),
-            active_root: Some(PathBuf::from("/project/.evorch/worktrees/run-7")),
-            merge_mode: MergeMode::Branch,
+            active_root: Some(PathBuf::from("/project")),
         };
 
         assert_eq!(
             serde_json::to_value(workspace).expect("serialize WorkspaceInspection"),
-            serde_json::json!({
-                "mode": "isolated",
-                "branch": "evorch/task/run-7",
-                "worktree_path": "/project/.evorch/worktrees/run-7",
-                "active_root": "/project/.evorch/worktrees/run-7",
-                "merge_mode": "branch",
-            }),
+            serde_json::json!({ "active_root": "/project" }),
         );
     }
 
     #[test]
-    fn workspace_inspection_omits_only_absent_active_root() {
-        let workspace = WorkspaceInspection {
-            mode: WorkspaceMode::Shared,
-            branch: None,
-            worktree_path: None,
-            active_root: None,
-            merge_mode: MergeMode::Branch,
-        };
+    fn workspace_inspection_omits_absent_active_root() {
+        let workspace = WorkspaceInspection { active_root: None };
 
         assert_eq!(
             serde_json::to_value(workspace).expect("serialize WorkspaceInspection"),
-            serde_json::json!({
-                "mode": "shared",
-                "branch": null,
-                "worktree_path": null,
-                "merge_mode": "branch",
-            }),
+            serde_json::json!({}),
         );
     }
 
@@ -400,60 +340,5 @@ mod tests {
     #[test]
     fn run_config_default_has_no_load_skills() {
         assert!(RunConfig::default().load_skills.is_empty());
-    }
-
-    // Given: RunConfig / When: Default / Then: workspace_mode は Shared (共有 workspace が既定)
-    #[test]
-    fn workspace_mode_on_config_defaults_to_shared() {
-        assert_eq!(RunConfig::default().workspace_mode, WorkspaceMode::Shared);
-    }
-
-    // Given: RunConfig / When: Default / Then: merge_mode は Branch (branch merge が既定)
-    #[test]
-    fn merge_mode_on_config_defaults_to_branch() {
-        assert_eq!(RunConfig::default().merge_mode, MergeMode::Branch);
-    }
-
-    // Given: RunConfig / When: Default / Then: workspace_branch は None (専用 branch 新規作成が既定)
-    #[test]
-    fn run_config_default_has_no_workspace_branch() {
-        assert!(RunConfig::default().workspace_branch.is_none());
-    }
-
-    // Given: Isolated workspace mode / When: JSON 化 / Then: lowercase の "isolated" となる
-    #[test]
-    fn workspace_mode_serializes_lowercase() {
-        let json = serde_json::to_value(WorkspaceMode::Isolated).expect("serialize WorkspaceMode");
-
-        assert_eq!(json, serde_json::json!("isolated"));
-    }
-
-    // Given: "shared" と "isolated" / When: WorkspaceMode として JSON 復元 / Then: 対応する既知 variant となる
-    #[test]
-    fn workspace_mode_deserializes_known_values() {
-        assert_eq!(
-            serde_json::from_value::<WorkspaceMode>(serde_json::json!("shared"))
-                .expect("deserialize shared WorkspaceMode"),
-            WorkspaceMode::Shared
-        );
-        assert_eq!(
-            serde_json::from_value::<WorkspaceMode>(serde_json::json!("isolated"))
-                .expect("deserialize isolated WorkspaceMode"),
-            WorkspaceMode::Isolated
-        );
-    }
-
-    // Given: 未知の workspace mode / When: WorkspaceMode として JSON 復元 / Then: fail-closed でエラーとなる
-    #[test]
-    fn workspace_mode_rejects_unknown_value() {
-        assert!(serde_json::from_value::<WorkspaceMode>(serde_json::json!("hybrid")).is_err());
-    }
-
-    // Given: Branch merge mode / When: JSON 化 / Then: lowercase の "branch" となる
-    #[test]
-    fn merge_mode_branch_serializes_lowercase() {
-        let json = serde_json::to_value(MergeMode::Branch).expect("serialize MergeMode");
-
-        assert_eq!(json, serde_json::json!("branch"));
     }
 }

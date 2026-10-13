@@ -32,15 +32,13 @@ use crate::compaction;
 use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
-use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
-use crate::runtime::{IsolatedWorkspace, SandboxFactory, Shared, loop_shared};
+use crate::runtime::{SandboxFactory, Shared, loop_shared};
 use crate::skill::SkillRegistry;
-use crate::workspace::OwnedWorktree;
 use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
-    RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
+    RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
 pub(crate) use tool_calls::{
     append_subagent_context_note, standard_tool_specs, visible_tool_specs,
@@ -64,13 +62,9 @@ pub(crate) enum RunStart {
     Resume,
 }
 
-/// 終端済み run から新規 root run へ排他的に移す workspace 所有権。
-///
-/// `OwnedWorktree` は clone せず値で移動するため、移譲元と移譲先が同時に cleanup
-/// できない。Shared mode では移す worktree がないため `worktree` は `None` となる。
+/// 終端済み run から新規 root run への引き継ぎ。
 pub(crate) struct RunHandoff {
     pub(crate) source_run_id: RunId,
-    pub(crate) worktree: Option<OwnedWorktree>,
     pub(crate) restored: Option<crate::restore::RestoredState>,
 }
 
@@ -292,7 +286,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         pending_terminal: None,
         scratch: None,
     };
-    let mut owned_worktree = None;
     // Every setup/execute return flows through one finalization boundary.
     async {
         if state.cancelled()
@@ -319,11 +312,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             return;
         }
         // Runs that get their own sandbox share their thread's scratch (ADR 0033).
-        let own_sandbox = match state.task.config.workspace_mode {
-            WorkspaceMode::Shared => sandbox_root.is_some(),
-            WorkspaceMode::Isolated => true,
-        };
-        if own_sandbox && !benchmark_mode {
+        if sandbox_root.is_some() && !benchmark_mode {
             match state.prepare_scratch(is_restored) {
                 Ok(scratch) => state.scratch = scratch,
                 Err(error) => {
@@ -332,9 +321,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 }
             }
         }
-        if state.task.config.workspace_mode == WorkspaceMode::Shared
-            && let Some(root) = sandbox_root.clone()
-        {
+        if let Some(root) = sandbox_root.clone() {
             let executor = if benchmark_mode {
                 crate::runtime::benchmark_executor(Arc::clone(&state.shared.bus), root)
             } else {
@@ -344,20 +331,19 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     .upgrade()
                     .and_then(|shared| shared.comment_checker.get().cloned())
                     .unwrap_or_default();
-                // Reuse the existing explicit workspace sandbox seam for shared runs too.
                 // Production's factory has the same fail-closed base config as build_sandbox.
-                let mounts = crate::IsolatedMounts {
+                let mounts = crate::WorkspaceMounts {
                     workspace_root: root.clone(),
                     ro_binds: Vec::new(),
                     rw_binds: Vec::new(),
                     scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
                 };
-                let sandbox = match state.shared.runtime.upgrade().and_then(|runtime| {
-                    runtime
-                        .workspace
-                        .as_ref()
-                        .map(|workspace| Arc::clone(&workspace.factory))
-                }) {
+                let sandbox = match state
+                    .shared
+                    .runtime
+                    .upgrade()
+                    .and_then(|runtime| runtime.sandbox_factory.clone())
+                {
                     Some(factory) => factory.build(&state.policy, &mounts),
                     None => crate::network::BwrapFactory.build(&state.policy, &mounts),
                 };
@@ -442,55 +428,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 }
             }
         }
-        owned_worktree = match state.task.config.workspace_mode {
-            WorkspaceMode::Shared => None,
-            WorkspaceMode::Isolated => {
-                let Some(runtime_shared) = shared.upgrade() else {
-                    return;
-                };
-                let Some(workspace) =
-                    runtime_shared
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| match &project {
-                            Some(project) => project.isolated(workspace),
-                            None => workspace.isolated(),
-                        })
-                else {
-                    state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
-                    return;
-                };
-                let adopted = state
-                    .task
-                    .handoff
-                    .as_mut()
-                    .and_then(|handoff| handoff.worktree.take());
-                let setup = match adopted {
-                    Some(owned) => {
-                        attach_adopted_workspace(&workspace, &runtime_shared, &state, owned).await
-                    }
-                    None => setup_isolated_workspace(&workspace, &runtime_shared, &state).await,
-                };
-                match setup {
-                    Ok((owned, executor)) => {
-                        state.shared.executor = executor;
-                        Some(owned)
-                    }
-                    Err(reason) => {
-                        state.finish_error(reason);
-                        return;
-                    }
-                }
-            }
-        };
-        let active_root = match owned_worktree.as_ref() {
-            Some(owned) => Some(owned.path.clone()),
-            None => shared_active_root(state.shared.rules.as_deref(), sandbox_root).or_else(|| {
+        let active_root =
+            shared_active_root(state.shared.rules.as_deref(), sandbox_root).or_else(|| {
                 benchmark_mode
                     .then(|| state.shared.executor.default_cwd())
                     .flatten()
-            }),
-        };
+            });
         if benchmark_mode
             && let Some(root) = &active_root
             && let Err(error) = state.shared.executor.set_workspace_boundary(root.clone())
@@ -498,9 +441,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_error(error.to_string());
             return;
         }
-        if state.task.config.workspace_mode == WorkspaceMode::Shared
-            && let Some(runtime_shared) = shared.upgrade()
-        {
+        if let Some(runtime_shared) = shared.upgrade() {
             runtime_shared
                 .workspaces
                 .lock()
@@ -508,11 +449,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 .insert(
                     state.task.run_id,
                     WorkspaceInspection {
-                        mode: WorkspaceMode::Shared,
-                        branch: None,
-                        worktree_path: None,
                         active_root: active_root.clone(),
-                        merge_mode: state.task.config.merge_mode,
                     },
                 );
         }
@@ -530,7 +467,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
                 // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
                 state.finish_error(error.to_string());
-                cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
                 return;
             }
             if benchmark_mode {
@@ -576,7 +512,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
         state.publish_message_count();
         if state.transition(AgentRunPhase::Running, None).is_err() {
-            cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
             return;
         }
         state.save_checkpoint();
@@ -586,7 +521,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         state.execute().await;
     }
     .await;
-    state.finalize(owned_worktree).await;
+    state.finalize().await;
 }
 
 /// workspace 情報は既存 System 内で更新し、System がなければ履歴末尾へ追加する。
@@ -622,221 +557,6 @@ pub(crate) fn shared_active_root(
     sandbox_root.or_else(|| {
         rules.and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
     })
-}
-
-async fn setup_isolated_workspace(
-    workspace: &IsolatedWorkspace,
-    runtime_shared: &Arc<Shared>,
-    state: &LoopState,
-) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
-    let owned = create_worktree(workspace, runtime_shared, state).await?;
-    match attach_worktree_executor(workspace, runtime_shared, state, &owned).await {
-        Ok(executor) => Ok((owned, executor)),
-        Err(reason) => {
-            cleanup_failed_setup(runtime_shared, state.task.run_id, owned).await;
-            Err(reason)
-        }
-    }
-}
-
-async fn create_worktree(
-    workspace: &IsolatedWorkspace,
-    runtime_shared: &Arc<Shared>,
-    state: &LoopState,
-) -> Result<OwnedWorktree, String> {
-    let run_id = state.task.run_id;
-    if state.resumed {
-        let manager = workspace.manager.clone();
-        match tokio::task::spawn_blocking(move || manager.open_existing(run_id)).await {
-            Ok(Ok(owned)) => {
-                runtime_shared
-                    .workspaces
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        run_id,
-                        WorkspaceInspection {
-                            mode: WorkspaceMode::Isolated,
-                            branch: Some(owned.branch.clone()),
-                            worktree_path: Some(owned.path.clone()),
-                            active_root: Some(owned.path.clone()),
-                            merge_mode: state.task.config.merge_mode,
-                        },
-                    );
-                return Ok(owned);
-            }
-            Ok(Err(crate::workspace::WorkspaceError::PathMissing { .. })) => {}
-            Ok(Err(error)) => {
-                remove_workspace_inspection(runtime_shared, run_id);
-                return Err(format!("workspace setup failed: {error}"));
-            }
-            Err(error) => {
-                remove_workspace_inspection(runtime_shared, run_id);
-                return Err(format!("workspace setup failed: {error}"));
-            }
-        }
-    }
-    // inspection は sandbox build より先に登録する。factory.build の完了を観測してから
-    // inspect する利用者が Shared fallback を読まないようにするため (issue #71 CI 失敗の
-    // root cause: 旧実装は build 完了後に登録しており、その間の inspect が Shared を返した)。
-    // workspace_branch 指定時は既存 branch の checkout 用に、path 導出だけを run 名で行う
-    // (issue #73 D2)。
-    let (planned_branch, planned_path) = match state.task.config.workspace_branch.as_deref() {
-        Some(branch) => workspace.manager.planned_on_branch(run_id, branch),
-        None => workspace.manager.planned(run_id),
-    };
-    runtime_shared
-        .workspaces
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(
-            run_id,
-            WorkspaceInspection {
-                mode: WorkspaceMode::Isolated,
-                branch: Some(planned_branch),
-                worktree_path: Some(planned_path.clone()),
-                active_root: Some(planned_path),
-                merge_mode: state.task.config.merge_mode,
-            },
-        );
-    let branch_override = state.task.config.workspace_branch.clone();
-    let manager = workspace.manager.clone();
-    match tokio::task::spawn_blocking(move || match branch_override {
-        Some(branch) => manager.create_on_branch(run_id, &branch),
-        None => manager.create(run_id),
-    })
-    .await
-    {
-        Ok(Ok(owned)) => Ok(owned),
-        Ok(Err(error)) => {
-            remove_workspace_inspection(runtime_shared, run_id);
-            Err(format!("workspace setup failed: {error}"))
-        }
-        Err(error) => {
-            remove_workspace_inspection(runtime_shared, run_id);
-            Err(format!("workspace setup failed: {error}"))
-        }
-    }
-}
-
-async fn attach_adopted_workspace(
-    workspace: &IsolatedWorkspace,
-    runtime_shared: &Arc<Shared>,
-    state: &LoopState,
-    owned: OwnedWorktree,
-) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
-    let run_id = state.task.run_id;
-    let _source_run_id = state
-        .task
-        .handoff
-        .as_ref()
-        .map(|handoff| handoff.source_run_id)
-        .ok_or_else(|| "adopted workspace requires handoff context".to_string())?;
-    {
-        let mut workspaces = runtime_shared
-            .workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        workspaces.insert(
-            run_id,
-            WorkspaceInspection {
-                mode: WorkspaceMode::Isolated,
-                branch: Some(owned.branch.clone()),
-                worktree_path: Some(owned.path.clone()),
-                active_root: Some(owned.path.clone()),
-                merge_mode: state.task.config.merge_mode,
-            },
-        );
-    }
-
-    match attach_worktree_executor(workspace, runtime_shared, state, &owned).await {
-        Ok(executor) => Ok((owned, executor)),
-        Err(reason) => {
-            cleanup_failed_setup(runtime_shared, run_id, owned).await;
-            Err(reason)
-        }
-    }
-}
-
-async fn attach_worktree_executor(
-    workspace: &IsolatedWorkspace,
-    runtime_shared: &Arc<Shared>,
-    state: &LoopState,
-    owned: &OwnedWorktree,
-) -> Result<Arc<ToolExecutor>, String> {
-    let manager = workspace.manager.clone();
-    let git_common_dir = tokio::task::spawn_blocking(move || manager.git_common_dir())
-        .await
-        .map_err(|error| format!("workspace setup failed: {error}"))?
-        .map_err(|error| format!("workspace setup failed: {error}"))?;
-    let mut mounts = isolated_mounts(owned, &git_common_dir);
-    mounts.scratch = state.scratch_dir().map(std::path::Path::to_path_buf);
-    let sandbox = workspace
-        .factory
-        .build(&state.policy, &mounts)
-        .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
-    let boundary = crate::network::sandbox_boundary(&mounts)
-        .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
-    let checker_config = runtime_shared
-        .comment_checker
-        .get()
-        .cloned()
-        .unwrap_or_default();
-    let forbidden_roots = [
-        workspace.manager.repo_root().to_path_buf(),
-        owned.path.clone(),
-    ];
-    let executor = crate::runtime::configured_executor(
-        Arc::clone(&runtime_shared.bus),
-        sandbox,
-        &boundary,
-        &checker_config,
-        &forbidden_roots,
-        state.shared.executor.approval_policy(),
-    )
-    .map_err(|error| format!("workspace tool setup failed: {error}"))?;
-    crate::AgentRuntime {
-        shared: runtime_shared.clone(),
-    }
-    .configure_shell_escalation(&executor, state.scratch_dir());
-    Ok(executor)
-}
-
-fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {
-    runtime_shared
-        .workspaces
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&run_id);
-}
-
-async fn cleanup_failed_setup(runtime_shared: &Arc<Shared>, run_id: RunId, owned: OwnedWorktree) {
-    // Setup failure is the exception: discard the inspection rather than retain/clear its roots.
-    remove_workspace_inspection(runtime_shared, run_id);
-    let _ = tokio::task::spawn_blocking(move || owned.cleanup()).await;
-}
-
-pub(crate) async fn cleanup_worktree(
-    shared: &LoopShared,
-    run_id: RunId,
-    owned: Option<OwnedWorktree>,
-) {
-    let Some(owned) = owned else {
-        return;
-    };
-    let cleanup = tokio::task::spawn_blocking(move || owned.cleanup()).await;
-    // cleanup failure 用 lifecycle event は追加せず、inspection の path を残して回収対象を可視にする。
-    if matches!(cleanup, Ok(Ok(())))
-        && let Some(runtime_shared) = shared.runtime.upgrade()
-        && let Some(inspection) = runtime_shared
-            .workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&run_id)
-    {
-        inspection.worktree_path = None;
-        inspection.active_root = None;
-    }
 }
 
 /// run 開始時の初期 System メッセージを履歴へ push する (単一 System 不変条件)。

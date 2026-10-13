@@ -43,7 +43,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 └──────────────┴──────────────────────────────┴────────────────────┘
 ```
 
-- **プロジェクト概念**: プロジェクトは「基準 repo/path + アクセス許可ディレクトリ集合」を持つ。subagent worktree の cwd はプロジェクトルートと一致しないため（cwd != プロジェクト）、プロジェクトごとにアクセス可能ディレクトリを設定し、sandbox 境界・project trust（ADR 0008 v0.2 項目）と一体化する。worktree（`evorch/task/<run-id>`）はプロジェクト許可ディレクトリ傘下として自動許可
+- **プロジェクト概念**: プロジェクトは「基準 repo/path + アクセス許可ディレクトリ集合」を持つ。subagent worktree の cwd はプロジェクトルートと一致しないため（cwd != プロジェクト）、プロジェクトごとにアクセス可能ディレクトリを設定し、sandbox 境界・project trust（ADR 0008 v0.2 項目）と一体化する。worktree（`evorch/task/<run-id>`）はプロジェクト許可ディレクトリ傘下として自動許可（runtime 所有の worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で削除）
 - **thread 管理**: 複数 session の作成/切替/pin/状態表示を左サイドバーで提供（v0.2 スコープ）
 - **Agents 可視化（主眼、t3code を超える水準）**: 右サイドバー Agents tab は一覧（identity/phase/model/provider/現在 tool/token・usage）のライブ更新 + 選択 agent の中央 pane drill-down + dock 機構による複数 agent transcript pane 同時ライブ。既定レイアウトは orchestrator + 直近 worker + reviewer の3分割程度。t3code の Agents tab は dashboard 止まりなので、ここは独自実装
 - **diff tab（最小版のみ v0.2）**: working tree / branch の unified diff 表示（人間 merge 承認の判断材料）。file tree / turn 別 diff / whitespace 制御等の完全版は v0.3 以降
@@ -62,7 +62,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 ## v0.2 GUI workbench 3領域再構成の実装確定（issue #65、PR #66、2026-09-05）
 
 - workspace schema v2 + `migrate.rs` による v1 自動移行。PanelKind に Sidebar / Agents / AgentTranscript（target=run_id 必須）/ Diff / Goal / Merge を追加し、load は fail-closed（不正 panel 参照・duplicate・invalid trust path を拒否）
-- project/thread/trust モデルは workspace-ui 所有（config 不変）。allowed-directory は mutation/load で同一 validator を通し、runtime 所有 worktree（`<root>/.evorch/worktrees/`）は membership 自動許可（runtime 所有 worktree は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で廃止）、任意外部 path は明示 trust なしに許可しない。trust 済みの許可ディレクトリを runtime へ渡し、エージェントに届ける方法は [ADR 0032](../../decisions/0032-project-allowed-directories.md) で定める
+- project/thread/trust モデルは workspace-ui 所有（config 不変）。allowed-directory は mutation/load で同一 validator を通し、runtime 所有 worktree（`<root>/.evorch/worktrees/`）は membership 自動許可（runtime 所有 worktree と `Membership::RuntimeWorktree` は [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) で削除）、任意外部 path は明示 trust なしに許可しない。trust 済みの許可ディレクトリを runtime へ渡し、エージェントに届ける方法は [ADR 0032](../../decisions/0032-project-allowed-directories.md) で定める
 - TranscriptRegistry が run-addressed event（tool は run_id、approval は call_id index、AgentMessage は sender/recipient）を決定配送。MessageDelta は run_id を持たないため thread + 単一 Running run のみ mirror（follow-up 候補: event-bus の MessageDelta/ReasoningDelta へ run_id 付与）
 - Telemetry は ProviderEvent の run_id Some のみ集約、UsageEvent は推測せず無視
 - Diff は working tree / main 固定 branch のみ（turn 別・split・whitespace・file tree・base 任意選択は v0.3 scope 据置）、256KiB cap、空/Error は明示状態

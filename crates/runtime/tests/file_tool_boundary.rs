@@ -10,8 +10,7 @@ use config::EscalationApproval;
 use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
 use providers::{ContentBlock, FinishReason, Message, ToolResultContent};
 use runtime::scratch::ThreadScratch;
-use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, ExecutionPolicy, IsolatedMounts, RunConfig, SandboxFactory};
+use runtime::{AgentRuntime, ExecutionPolicy, RunConfig, SandboxFactory, WorkspaceMounts};
 use sandbox::{CommandSpec, DirectSandbox, Sandbox, SandboxError, WrappedCommand};
 use serde_json::json;
 use support::{ScriptedModel, init_git_repo, text_response, tool_response};
@@ -39,7 +38,7 @@ impl SandboxFactory for ScratchFactory {
     fn build(
         &self,
         _: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
+        mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         Ok(Arc::new(ScratchSandbox(mounts.scratch.clone())))
     }
@@ -93,14 +92,13 @@ impl Paths {
         approval: EscalationApproval,
     ) -> (AgentRuntime, Arc<EventBus>) {
         let bus = Arc::new(EventBus::new(512));
-        let runtime = AgentRuntime::with_workspace_context(
+        let runtime = AgentRuntime::with_sandbox_factory(
             Arc::clone(&bus),
             Arc::new(ToolExecutor::with_standard_tools(
                 Arc::clone(&bus),
                 Arc::new(DirectSandbox::new_unchecked()),
             )),
             model,
-            WorktreeManager::new(Project::new(self.repo.clone()).unwrap()),
             Arc::new(ScratchFactory),
         )
         .with_sequential_run_ids()

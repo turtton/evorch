@@ -6,36 +6,28 @@ use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event};
 
 use super::EscalationMemo;
-use crate::agent_loop::{LoopState, cleanup_worktree};
+use crate::agent_loop::LoopState;
 use crate::runtime::Shared;
-use crate::workspace::OwnedWorktree;
 
-pub(crate) async fn complete(
-    shared: &Weak<Shared>,
-    state: &mut LoopState,
-    memo: EscalationMemo,
-    mut worktree: Option<OwnedWorktree>,
-) {
+pub(crate) async fn complete(shared: &Weak<Shared>, state: &mut LoopState, memo: EscalationMemo) {
     match state.phase() {
         AgentRunPhase::Done | AgentRunPhase::Error => {}
-        // Operator stop is resumable, not a completed escalation. Retain its workspace.
+        // Operator stop is resumable, not a completed escalation.
         AgentRunPhase::Stopped => return,
         AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
             tracing::warn!(
                 source_run_id = %memo.source_run_id,
                 "escalation handoff rejected before terminal state"
             );
-            cleanup_worktree(&state.shared, state.caller_run_id(), worktree).await;
             return;
         }
     }
     let Some(runtime) = crate::AgentRuntime::from_weak(shared) else {
-        cleanup_worktree(&state.shared, state.caller_run_id(), worktree).await;
         return;
     };
     let source_run_id = memo.source_run_id;
     let config = state.run_config().clone();
-    match runtime.spawn_escalated_root(memo, &config, &mut worktree, || {
+    match runtime.spawn_escalated_root(memo, &config, || {
         state.publish_terminal();
     }) {
         Ok(_) => {}
@@ -50,9 +42,6 @@ pub(crate) async fn complete(
                 thread_id: None,
                 call_id: None,
             }));
-            // Preparation did not detach the source workspace. Retain its
-            // edits and restore metadata so the worker can be continued.
-            drop(worktree);
         }
     }
 }

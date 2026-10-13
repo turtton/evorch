@@ -6,11 +6,10 @@ use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
 use providers::FinishReason;
-use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, Role, RunConfig, RunId, RunStore, StopScope, WorkspaceMode};
+use runtime::{AgentRuntime, Role, RunConfig, RunId, RunStore, StopScope};
 use serde_json::json;
 use storage::{Storage, StorageConfig};
-use support::{ScriptedModel, git, init_git_repo, recording_factory, text_response, tool_response};
+use support::{ScriptedModel, init_git_repo, recording_factory, text_response, tool_response};
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 use tools::ToolExecutor;
@@ -57,16 +56,15 @@ impl Fixture {
                 [Ok(text_response("child done", FinishReason::Stop))],
             )
             .await;
-        let manager = WorktreeManager::new(Project::new(repo.clone()).unwrap());
         let (factory, _) = recording_factory();
-        let runtime = AgentRuntime::with_workspace_context(
+        let runtime = AgentRuntime::with_sandbox_factory(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus)),
             model.clone(),
-            manager,
             factory,
         )
-        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap())
+        .with_sandbox_root(repo.clone());
         Self {
             runtime,
             model,
@@ -79,18 +77,11 @@ impl Fixture {
         }
     }
 
-    async fn start(&self, isolated: bool) -> (RunId, RunId) {
+    async fn start(&self) -> (RunId, RunId) {
         let parent = self.runtime.delegate_background(
             Role::Orchestrator,
             "PARENT".into(),
-            RunConfig {
-                workspace_mode: if isolated {
-                    WorkspaceMode::Isolated
-                } else {
-                    WorkspaceMode::Shared
-                },
-                ..Default::default()
-            },
+            RunConfig::default(),
         );
         let child = timeout(DEADLINE, async {
             loop {
@@ -117,8 +108,8 @@ impl Fixture {
             .unwrap()
             .workspace
             .unwrap();
-        let path = workspace.worktree_path.unwrap();
-        assert_eq!(path, self.repo.join(format!(".evorch/worktrees/{parent}")));
+        let path = workspace.active_root.unwrap();
+        assert_eq!(path, self.repo);
         std::fs::write(path.join("dirty.txt"), "retained unfinished work").unwrap();
         path
     }
@@ -147,7 +138,7 @@ impl Fixture {
 #[tokio::test]
 async fn stage1_self_only_stops_parent_and_keeps_children() {
     let fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(false).await;
+    let (parent, child) = fixture.start().await;
     fixture.runtime.stop(parent, StopScope::SelfOnly).unwrap();
     fixture.wait(parent, AgentRunPhase::Stopped).await;
     assert_eq!(
@@ -164,9 +155,9 @@ async fn stage1_self_only_stops_parent_and_keeps_children() {
 }
 
 #[tokio::test]
-async fn stage1_persists_stopped_snapshot_and_retains_worktree() {
+async fn stage1_persists_stopped_snapshot_and_keeps_workspace_edits() {
     let fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(true).await;
+    let (parent, child) = fixture.start().await;
     let path = fixture.dirty_workspace(parent);
     fixture.runtime.stop(parent, StopScope::SelfOnly).unwrap();
     fixture.wait(parent, AgentRunPhase::Stopped).await;
@@ -183,16 +174,11 @@ async fn stage1_persists_stopped_snapshot_and_retains_worktree() {
         .unwrap()
         .workspace
         .unwrap();
-    assert_eq!(workspace.worktree_path.as_ref(), Some(&path));
     assert_eq!(workspace.active_root.as_ref(), Some(&path));
     assert_eq!(
         std::fs::read_to_string(path.join("dirty.txt")).unwrap(),
         "retained unfinished work"
     );
-    let reopened = WorktreeManager::new(Project::new(fixture.repo.clone()).unwrap())
-        .open_existing(parent)
-        .unwrap();
-    assert_eq!(reopened.path, path);
     fixture.child_gate.notify_one();
     fixture.wait(child, AgentRunPhase::Done).await;
 }
@@ -200,7 +186,7 @@ async fn stage1_persists_stopped_snapshot_and_retains_worktree() {
 #[tokio::test]
 async fn stage2_subtree_stops_descendants() {
     let fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(false).await;
+    let (parent, child) = fixture.start().await;
     fixture.runtime.stop(parent, StopScope::Subtree).unwrap();
     fixture.wait(parent, AgentRunPhase::Stopped).await;
     fixture.wait(child, AgentRunPhase::Stopped).await;
@@ -210,7 +196,7 @@ async fn stage2_subtree_stops_descendants() {
 #[tokio::test]
 async fn stage2_after_stage1_stops_remaining_descendants() {
     let fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(false).await;
+    let (parent, child) = fixture.start().await;
     fixture.runtime.stop(parent, StopScope::SelfOnly).unwrap();
     fixture.wait(parent, AgentRunPhase::Stopped).await;
     fixture.runtime.stop(parent, StopScope::Subtree).unwrap();
@@ -224,7 +210,7 @@ async fn stage2_after_stage1_stops_remaining_descendants() {
 #[tokio::test]
 async fn cancel_regression() {
     let mut fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(true).await;
+    let (parent, child) = fixture.start().await;
     let path = fixture.dirty_workspace(parent);
     fixture.runtime.cancel(parent).unwrap();
     fixture.wait(parent, AgentRunPhase::Error).await;
@@ -246,28 +232,17 @@ async fn cancel_regression() {
     })
     .await
     .unwrap();
-    assert!(
-        !path.exists(),
-        "hard cancellation must still remove the worktree"
-    );
-    assert!(
-        git(
-            &fixture.repo,
-            &[
-                "show-ref",
-                "--verify",
-                &format!("refs/heads/evorch/task/{parent}")
-            ]
-        )
-        .status
-        .success()
+    assert_eq!(
+        std::fs::read_to_string(path.join("dirty.txt")).unwrap(),
+        "retained unfinished work",
+        "cancellation leaves the shared project untouched"
     );
 }
 
 #[tokio::test]
 async fn resume_after_stage1_reattaches_and_reports_unknown() {
     let fixture = Fixture::new().await;
-    let (parent, child) = fixture.start(true).await;
+    let (parent, child) = fixture.start().await;
     let path = fixture.dirty_workspace(parent);
     fixture.runtime.stop(parent, StopScope::SelfOnly).unwrap();
     fixture.wait(parent, AgentRunPhase::Stopped).await;
@@ -290,14 +265,7 @@ async fn resume_after_stage1_reattaches_and_reports_unknown() {
     let before = fixture.model.observed().await.len();
     let resumed = fixture
         .runtime
-        .continue_goal(
-            parent,
-            "inspect retained work".into(),
-            RunConfig {
-                workspace_mode: WorkspaceMode::Isolated,
-                ..Default::default()
-            },
-        )
+        .continue_goal(parent, "inspect retained work".into(), RunConfig::default())
         .expect("stopped root can resume while its own child remains live");
     assert_eq!(resumed, parent);
     fixture.observed_calls(before + 1).await;
@@ -312,12 +280,7 @@ async fn resume_after_stage1_reattaches_and_reports_unknown() {
         .unwrap()
         .workspace
         .unwrap();
-    assert_eq!(workspace.worktree_path.as_ref(), Some(&path));
     assert_eq!(workspace.active_root.as_ref(), Some(&path));
-    assert_eq!(
-        workspace.branch.as_deref(),
-        Some(format!("evorch/task/{parent}").as_str())
-    );
     gate.notify_one();
     fixture.observed_calls(before + 2).await;
     let observed = fixture.model.observed().await;

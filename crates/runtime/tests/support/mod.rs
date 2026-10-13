@@ -18,8 +18,8 @@ use providers::{
 #[allow(unused_imports)]
 use super::*;
 use runtime::{
-    AgentInvocationContext, AgentModel, ExecutionPolicy, IsolatedMounts, RuntimeError,
-    SandboxFactory,
+    AgentInvocationContext, AgentModel, ExecutionPolicy, RuntimeError, SandboxFactory,
+    WorkspaceMounts,
 };
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tempfile::TempDir;
@@ -37,14 +37,14 @@ pub struct ScriptedModel {
 }
 
 struct RecordingSandboxFactory {
-    mounts: Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,
+    mounts: Arc<std::sync::Mutex<Vec<WorkspaceMounts>>>,
 }
 
 impl SandboxFactory for RecordingSandboxFactory {
     fn build(
         &self,
         _policy: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
+        mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         self.mounts
             .lock()
@@ -346,7 +346,7 @@ pub fn spawn_run_scoped_approval_responder(
 
 pub fn recording_factory() -> (
     Arc<dyn SandboxFactory>,
-    Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,
+    Arc<std::sync::Mutex<Vec<WorkspaceMounts>>>,
 ) {
     let mounts = Arc::new(std::sync::Mutex::new(Vec::new()));
     (
@@ -366,7 +366,7 @@ impl SandboxFactory for GatedSandboxFactory {
     fn build(
         &self,
         _policy: &ExecutionPolicy,
-        _mounts: &IsolatedMounts,
+        _mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         let _ = self.entered.send(());
         let _ = self

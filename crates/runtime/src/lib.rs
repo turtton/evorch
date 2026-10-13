@@ -60,7 +60,6 @@ mod thread_todos;
 pub mod topology;
 pub use topology::CoordinationTopology;
 pub mod benchmark;
-pub mod workspace;
 
 pub use compose::{
     ComposedRuntime, CompositionError, ModelIdentity, ModelSource, RoutedModel, RuntimeComposition,
@@ -89,13 +88,13 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, DelegateImage, MergeMode, ParseRunIdError, RunConfig, RunId,
-    RunPurpose, WorkspaceInspection, WorkspaceMode,
+    AgentInspection, AgentSummary, DelegateImage, ParseRunIdError, RunConfig, RunId, RunPurpose,
+    WorkspaceInspection,
 };
 pub use run_store::RunStore;
 pub use runtime::{
-    AgentRuntime, FollowUpStatus, IsolatedMounts, ProjectModelResolver, ProjectSlugResolver,
-    SandboxFactory, production_executor, production_executor_with_config,
+    AgentRuntime, FollowUpStatus, ProjectModelResolver, ProjectSlugResolver, SandboxFactory,
+    WorkspaceMounts, production_executor, production_executor_with_config,
 };
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,

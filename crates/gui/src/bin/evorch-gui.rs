@@ -256,8 +256,8 @@ fn demo_diff_source() -> FixtureDiffSource {
 
 /// --demo 用の隔離 git リポジトリ (1 commit) を作成する。
 ///
-/// demo モードの worker は isolated worktree で動くため、runtime の
-/// project root には実在する git リポジトリが必要になる。
+/// runtime は git リポジトリを必要としないが、demo の diff パネルが変更を
+/// 表示できるように、project root を実在する git リポジトリにする。
 fn init_demo_repo(base: &Path) -> Result<PathBuf, GuiError> {
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo)?;
@@ -618,7 +618,7 @@ fn run() -> Result<(), GuiError> {
             let executor = production_executor_with_config(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                seam.repo_root().to_path_buf(),
+                seam.project_root().to_path_buf(),
                 &composition_config,
             )?;
             let demo_model: Arc<dyn AgentModel> = Arc::new(DemoScriptModel::new(Arc::clone(&bus)));
@@ -1375,7 +1375,7 @@ mod effective_project_tests {
         fn build(
             &self,
             _: &ExecutionPolicy,
-            _: &runtime::IsolatedMounts,
+            _: &runtime::WorkspaceMounts,
         ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
             Ok(self.0.clone())
         }

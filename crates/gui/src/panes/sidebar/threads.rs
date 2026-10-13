@@ -187,14 +187,7 @@ fn render_tree(
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
         }
-        if !archived && let (Some(branch), Some(worktree)) = (&thread.branch, &thread.worktree_path)
-        {
-            ui.label(crate::theme::text::muted(format!(
-                "{branch} @ {}",
-                worktree.display()
-            )));
-        } else if !archived
-            && thread.worktree_path.is_none()
+        if !archived
             && let Some(root) = &thread.active_root
             && sidebar
                 .projects
@@ -202,7 +195,6 @@ fn render_tree(
                 .find(|project| project.id == thread.project_id)
                 .is_some_and(|project| project.repo_root != *root)
         {
-            // Reconciliation populates this no-worktree root only for Shared mode.
             ui.label(crate::theme::text::muted(format!(
                 "Shared workspace: {}",
                 root.display()

@@ -118,9 +118,11 @@ stopped. A refusal leaves the checkpoint available for a later safe continuation
 
 - `restore_and_deliver` is disk-authoritative and still rejects these records.
   Sending a message does not supply new team/storage authority.
-- Team workers (`team_task`), non-root team runs, `learning_internal`, and
-  `workspace_branch` remain unsupported. Restoring an old worker lease or branch
-  checkout would require a separate fencing/reconciliation contract.
+- Team workers (`team_task`), non-root team runs, and `learning_internal`
+  remain unsupported. Restoring an old worker lease would require a separate
+  fencing/reconciliation contract. (`workspace_branch` no longer exists: runs
+  have no runtime-owned worktree since
+  [ADR 0031](../intents/evorch/decisions/0031-remove-isolated-workspaces.md).)
 - Memory/finding configuration on child runs remains blocked. The existing
   ownership-only renewal rule is unchanged.
 - A root's persisted TeamStore identity cannot, by itself, enable a GUI button to

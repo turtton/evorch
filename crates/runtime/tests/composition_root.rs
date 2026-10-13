@@ -11,17 +11,14 @@ use model::ModelCatalog;
 use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, MapEnv, compose_providers};
 use runtime::{
-    AgentModel, AgentRunPhase, ExecutionPolicy, IsolatedMounts, ModelIdentity, ModelSource, Role,
-    RoutedModel, RunConfig, RuntimeComposition, SandboxFactory, WorkspaceMode, WorkspaceSeam,
-    compose_runtime,
+    AgentModel, AgentRunPhase, ExecutionPolicy, ModelIdentity, ModelSource, Role, RoutedModel,
+    RunConfig, RuntimeComposition, SandboxFactory, WorkspaceMounts, WorkspaceSeam, compose_runtime,
 };
 use sandbox::credential::{CredentialStore, FileCredentialStore};
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
-use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, drain_events, init_git_repo, text_response};
+use support::{ScriptedModel, text_response};
 
 const PROFILE: &str = "local";
 const MODEL: &str = "local-model";
@@ -33,7 +30,7 @@ impl SandboxFactory for DirectSandboxFactory {
     fn build(
         &self,
         _policy: &ExecutionPolicy,
-        _mounts: &IsolatedMounts,
+        _mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         Ok(Arc::new(DirectSandbox::new_unchecked()))
     }
@@ -214,89 +211,57 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
     }
 }
 
-// Given: test factory seam (bwrap 非依存) と完了を gate した固定モデル
-// When: compose_runtime が返した runtime で isolated Worker を起動する
-// Then: モデル呼び出し中に run 専用 worktree が存在し、run は正常終了する
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_composition_uses_workspace_seam_for_isolated_run() {
-    let (_directory, repo) = init_git_repo();
+// Given: git リポジトリではないディレクトリを project root にした workspace seam
+// When: compose_runtime が返した runtime で Worker を起動する
+// Then: seam は canonical な root を受け付け、run はその root で正常終了する (ADR 0031)
+#[tokio::test]
+async fn fixed_composition_accepts_a_non_git_project_root() {
+    let directory = tempfile::tempdir().expect("plain directory");
+    let root = directory.path().canonicalize().expect("canonical root");
     let config = Config::default();
     let bus = Arc::new(EventBus::new(64));
-    let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::gated(
-        [Ok(text_response(
-            "isolated done",
-            providers::FinishReason::Stop,
-        ))],
-        Arc::clone(&gate),
-    ));
-    let seam = WorkspaceSeam::with_factory(repo.clone(), Arc::new(DirectSandboxFactory))
-        .expect("workspace seam");
+    let seam = WorkspaceSeam::with_factory(root.clone(), Arc::new(DirectSandboxFactory))
+        .expect("a non-git directory is a valid project root");
+    assert_eq!(seam.project_root(), root.as_path());
     let composed = compose_runtime(composition(
         &config,
         bus,
-        ModelSource::Fixed(model),
+        ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
+            "done",
+            providers::FinishReason::Stop,
+        ))]))),
         Some(seam),
     ))
     .expect("fixed model composes with workspace");
 
     let run = composed.runtime.delegate_background(
         Role::Worker,
-        "isolated".to_string(),
-        RunConfig {
-            workspace_mode: WorkspaceMode::Isolated,
-            ..RunConfig::default()
-        },
+        "work".to_string(),
+        RunConfig::default(),
     );
-    let worktree = repo.join(".evorch/worktrees").join(run.to_string());
-    timeout(Duration::from_secs(5), async {
-        while !worktree.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("isolated worktree appears");
-    gate.notify_one();
 
     assert_eq!(composed.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    assert_eq!(
+        composed
+            .runtime
+            .inspect_agent(run)
+            .expect("inspection")
+            .workspace
+            .expect("workspace inspection")
+            .active_root,
+        Some(root)
+    );
+    assert!(!directory.path().join(".evorch").exists());
 }
 
-// Given: workspace seam を持たない固定モデル composition
-// When: composed runtime で isolated Worker を起動する
-// Then: workspace context 必須エラーをイベントで公開して Error 終了する
-#[tokio::test]
-async fn fixed_composition_without_workspace_rejects_isolated_run() {
-    let config = Config::default();
-    let bus = Arc::new(EventBus::new(64));
-    let mut events = bus.subscribe();
-    let composed = compose_runtime(composition(
-        &config,
-        bus,
-        ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
-            "unused",
-            providers::FinishReason::Stop,
-        ))]))),
-        None,
-    ))
-    .expect("fixed model composes without workspace");
+// Given: 存在しない project root / When: workspace seam を作る / Then: fail-closed でエラーを返す
+#[test]
+fn workspace_seam_rejects_a_missing_project_root() {
+    let directory = tempfile::tempdir().expect("parent directory");
+    let missing = directory.path().join("missing");
 
-    let run = composed.runtime.delegate_background(
-        Role::Worker,
-        "isolated".to_string(),
-        RunConfig {
-            workspace_mode: WorkspaceMode::Isolated,
-            ..RunConfig::default()
-        },
-    );
-
-    assert_eq!(composed.runtime.wait(run).await, Ok(AgentRunPhase::Error));
-    let drained = drain_events(&mut events).await;
-    assert!(drained.iter().any(|event| matches!(
-        &event.kind,
-        event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
-            to: AgentRunPhase::Error,
-            reason: Some(reason),
-            ..
-        }) if reason == "workspace isolation requires workspace context"
-    )));
+    assert!(matches!(
+        WorkspaceSeam::with_factory(missing, Arc::new(DirectSandboxFactory)),
+        Err(runtime::RuntimeError::Workspace { .. })
+    ));
 }

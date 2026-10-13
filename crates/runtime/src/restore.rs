@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use storage::{RunContextRecord, StorageError};
 
 use crate::agent_loop::LoopState;
-use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
+use crate::{CoordinationTopology, ModelPreference, RunId};
 
 mod diagnostics;
 mod escalation;
@@ -123,7 +123,6 @@ pub struct RunRestoreDescriptor {
     pub keep_alive: bool,
     pub category: Option<String>,
     pub load_skills: Vec<String>,
-    pub workspace_mode: WorkspaceMode,
     pub model_preference: Option<ModelPreference>,
     pub restorable: bool,
     pub non_restorable_reason: Option<String>,
@@ -308,7 +307,6 @@ fn write_snapshot(
             "learning_purpose",
         ),
         (config.ownership.is_some(), "ownership"),
-        (config.workspace_branch.is_some(), "workspace_branch"),
     ] {
         if present {
             unsupported.push(field);
@@ -394,7 +392,6 @@ fn write_snapshot(
         keep_alive: config.keep_alive,
         category: config.category.clone(),
         load_skills: config.load_skills.clone(),
-        workspace_mode: config.workspace_mode,
         model_preference: state.channels.model_preference_rx.borrow().clone(),
         restorable: non_restorable_reason.is_none(),
         non_restorable_reason,

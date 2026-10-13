@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
 use crate::agent_loop::LoopState;
-use crate::{AgentRuntime, InterruptKind, RunConfig, WorkspaceMode};
+use crate::{AgentRuntime, InterruptKind, RunConfig};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,10 +21,6 @@ pub(super) struct DelegateArgs {
     interactive: bool,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    workspace_mode: Option<WorkspaceMode>,
-    #[serde(default)]
-    workspace_branch: Option<String>,
     #[serde(default)]
     load_skills: Vec<String>,
 }
@@ -209,8 +205,6 @@ pub(crate) fn spawn_delegate(
         name: args.name,
         category,
         load_skills,
-        workspace_mode: args.workspace_mode.unwrap_or_default(),
-        workspace_branch: args.workspace_branch,
         ..RunConfig::default()
     };
     if args.background {

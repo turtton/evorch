@@ -9,8 +9,7 @@ use config::EscalationApproval;
 use event_bus::{AgentRunPhase, EventBus};
 use providers::{ContentBlock, FinishReason, Message, ToolResultContent};
 use runtime::scratch::ThreadScratch;
-use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, ExecutionPolicy, IsolatedMounts, RunConfig, SandboxFactory};
+use runtime::{AgentRuntime, ExecutionPolicy, RunConfig, SandboxFactory, WorkspaceMounts};
 use sandbox::{CommandSpec, DirectSandbox, Sandbox, SandboxError, WrappedCommand};
 use serde_json::json;
 use support::{ScriptedModel, init_git_repo, text_response, tool_response};
@@ -32,13 +31,13 @@ impl Sandbox for ScratchSandbox {
 }
 
 #[derive(Default)]
-struct ScratchFactory(Mutex<Vec<IsolatedMounts>>);
+struct ScratchFactory(Mutex<Vec<WorkspaceMounts>>);
 
 impl SandboxFactory for ScratchFactory {
     fn build(
         &self,
         _: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
+        mounts: &WorkspaceMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
         self.0.lock().unwrap().push(mounts.clone());
         Ok(Arc::new(ScratchSandbox(mounts.scratch.clone())))
@@ -123,14 +122,13 @@ async fn thread_runs_share_tmpdir_with_children_escalation_and_file_tools() {
     ]));
     let bus = Arc::new(EventBus::new(256));
     let factory = Arc::new(ScratchFactory::default());
-    let runtime = AgentRuntime::with_workspace_context(
+    let runtime = AgentRuntime::with_sandbox_factory(
         Arc::clone(&bus),
         Arc::new(ToolExecutor::with_standard_tools(
             bus,
             Arc::new(DirectSandbox::new_unchecked()),
         )),
         model.clone(),
-        WorktreeManager::new(Project::new(repo.clone()).unwrap()),
         factory.clone(),
     )
     .with_sequential_run_ids()
@@ -211,14 +209,13 @@ async fn rebinding_a_thread_root_keeps_its_scratch_directory() {
     ]));
     let bus = Arc::new(EventBus::new(256));
     let factory = Arc::new(ScratchFactory::default());
-    let runtime = AgentRuntime::with_workspace_context(
+    let runtime = AgentRuntime::with_sandbox_factory(
         Arc::clone(&bus),
         Arc::new(ToolExecutor::with_standard_tools(
             bus,
             Arc::new(DirectSandbox::new_unchecked()),
         )),
         model,
-        WorktreeManager::new(Project::new(repo.clone()).unwrap()),
         factory.clone(),
     )
     .with_sequential_run_ids()

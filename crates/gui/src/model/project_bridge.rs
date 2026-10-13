@@ -12,7 +12,7 @@ pub fn run_membership(sidebar: &SidebarState, inspection: &AgentInspection) -> M
     let inspected_path = inspection
         .workspace
         .as_ref()
-        .and_then(|workspace| workspace.worktree_path.as_deref());
+        .and_then(|workspace| workspace.active_root.as_deref());
 
     if let Some(path) = inspected_path {
         return sidebar
@@ -41,24 +41,18 @@ pub fn run_membership(sidebar: &SidebarState, inspection: &AgentInspection) -> M
 #[cfg(test)]
 mod tests {
     use event_bus::AgentRunPhase;
-    use runtime::{MergeMode, RunId, WorkspaceInspection, WorkspaceMode};
+    use runtime::{RunId, WorkspaceInspection};
     use workspace_ui::ProjectId;
 
     use super::*;
 
-    fn inspection(worktree_path: Option<std::path::PathBuf>) -> AgentInspection {
+    fn inspection(active_root: Option<std::path::PathBuf>) -> AgentInspection {
         AgentInspection {
             run_id: RunId::new(1),
             role_name: "Worker".into(),
             phase: AgentRunPhase::Running,
             message_count: 0,
-            workspace: Some(WorkspaceInspection {
-                mode: WorkspaceMode::Isolated,
-                branch: Some("evorch/task/run-1".into()),
-                active_root: worktree_path.clone(),
-                worktree_path,
-                merge_mode: MergeMode::Branch,
-            }),
+            workspace: Some(WorkspaceInspection { active_root }),
         }
     }
 
@@ -78,8 +72,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_worktree_falls_back_to_selected_project_root() {
-        // Given: a selected project and an inspection without a worktree path
+    fn missing_active_root_falls_back_to_selected_project_root() {
+        // Given: a selected project and an inspection without an active root
         let temp = tempfile::tempdir().expect("temp dir");
         let mut sidebar = SidebarState::default();
         let project_id = ProjectId::new("demo");

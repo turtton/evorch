@@ -331,8 +331,8 @@ async fn root_reference_memory_and_finding_path_are_renewed_not_restored() {
 }
 
 #[tokio::test]
-async fn team_workers_branch_and_learning_state_are_not_blanket_renewed() {
-    for blocker in ["team_task", "workspace_branch", "learning_internal"] {
+async fn team_workers_and_learning_state_are_not_blanket_renewed() {
+    for blocker in ["team_task", "learning_internal"] {
         let fixture = Fixture::new();
         let runtime = fixture.runtime();
         let mut config = fixture.authority();
@@ -343,7 +343,6 @@ async fn team_workers_branch_and_learning_state_are_not_blanket_renewed() {
                     paths: vec!["src".into()],
                 })
             }
-            "workspace_branch" => config.workspace_branch = Some("existing-branch".into()),
             "learning_internal" => config.learning_internal = true,
             _ => unreachable!(),
         }

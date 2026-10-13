@@ -89,7 +89,6 @@ async fn current_authority_replaces_old_authority_when_goal_restored() {
         config.load_skills = vec!["old-skill".into()];
         config.finding_store = Some(fixture._dir.path().into());
         config.delegation_value = Some("old delegation".into());
-        config.workspace_branch = Some("old-branch".into());
         config.topology = crate::CoordinationTopology::DynamicTeam { max_workers: 3 };
     }
     // When: the current sender grants only default authority.
@@ -101,7 +100,6 @@ async fn current_authority_replaces_old_authority_when_goal_restored() {
     assert!(entry.config.load_skills.is_empty());
     assert!(entry.config.finding_store.is_none());
     assert!(entry.config.delegation_value.is_none());
-    assert!(entry.config.workspace_branch.is_none());
     assert_eq!(entry.config.topology, crate::CoordinationTopology::Single);
     assert_eq!(entry.config.name.as_deref(), Some("goal-1"));
 }

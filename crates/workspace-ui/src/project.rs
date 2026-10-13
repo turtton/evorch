@@ -49,7 +49,6 @@ pub struct ProjectRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Membership {
     ProjectRoot,
-    RuntimeWorktree { run_dir: PathBuf },
     AllowedDirectory { trust: TrustState },
     Outside,
 }
@@ -58,15 +57,6 @@ impl ProjectRecord {
     pub fn resolve_membership(&self, path: &Path) -> Membership {
         if path == self.repo_root {
             return Membership::ProjectRoot;
-        }
-        let worktrees = self.repo_root.join(".evorch/worktrees");
-        if path.starts_with(&worktrees) {
-            let run_dir = path
-                .strip_prefix(&worktrees)
-                .ok()
-                .and_then(|relative| relative.components().next())
-                .map_or_else(|| path.to_path_buf(), |run| worktrees.join(run));
-            return Membership::RuntimeWorktree { run_dir };
         }
         self.allowed_directories
             .iter()
