@@ -202,13 +202,29 @@ impl ThreadRecord {
         // A conversation's status belongs to its current root, not every run in
         // its history. Failed children and superseded roots remain browsable.
         if let Some(root) = &self.root_run_id {
-            return match phases.get(root) {
+            let state = match phases.get(root) {
                 Some(ThreadRunPhase::Stopped) => ThreadState::Stopped,
                 Some(ThreadRunPhase::Pending | ThreadRunPhase::Running) => ThreadState::Running,
                 Some(ThreadRunPhase::Waiting) => ThreadState::Waiting,
                 Some(ThreadRunPhase::Done) => ThreadState::Done,
                 Some(ThreadRunPhase::Error) => ThreadState::Error,
                 None => ThreadState::Active,
+            };
+            // Subagents keep working while the root waits on them or between turns.
+            let subagent_running = self.run_ids.iter().any(|run_id| {
+                run_id != root
+                    && matches!(
+                        phases.get(run_id),
+                        Some(ThreadRunPhase::Pending | ThreadRunPhase::Running)
+                    )
+            });
+            return match state {
+                ThreadState::Waiting | ThreadState::Done | ThreadState::Active
+                    if subagent_running =>
+                {
+                    ThreadState::Running
+                }
+                state => state,
             };
         }
         let phases = self.run_ids.iter().filter_map(|run_id| phases.get(run_id));

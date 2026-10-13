@@ -358,3 +358,102 @@ fn zero_duration_never_invents_average_throughput() {
     assert_eq!(metrics.ttft_label(), "TTFT —");
     assert_eq!(metrics.tok_s_label(), "— tok/s");
 }
+
+fn protocol_request(run: &str, protocol: &str) -> [Event; 3] {
+    let [first_token, mut completed] = observed(run, 1_000, 0, 0, 1_000);
+    let mut started = request_started(run);
+    for kind in [&mut started.kind, &mut completed.kind] {
+        if let EventKind::Provider(
+            ProviderEvent::RequestStarted { protocol: wire, .. }
+            | ProviderEvent::RequestCompleted { protocol: wire, .. },
+        ) = kind
+        {
+            *wire = protocol.into();
+        }
+    }
+    [started, first_token, completed]
+}
+
+fn complete_with(event: &mut Event, output: u64, reasoning: Option<u64>, duration: u64) {
+    if let EventKind::Provider(ProviderEvent::RequestCompleted {
+        output_tokens,
+        reasoning_tokens,
+        duration_ms,
+        ..
+    }) = &mut event.kind
+    {
+        *output_tokens = output;
+        *reasoning_tokens = reasoning;
+        *duration_ms = duration;
+    }
+}
+
+fn delta(run: &str, reasoning: bool, chars: usize) -> Event {
+    let (delta, run_id) = ("a".repeat(chars), Some(run.into()));
+    Event::new(if reasoning {
+        MessageEvent::ReasoningDelta { delta, run_id }
+    } else {
+        MessageEvent::MessageDelta { delta, run_id }
+    })
+}
+
+#[test]
+fn summarized_reasoning_is_excluded_from_throughput_tokens_and_time() {
+    let mut telemetry = TelemetryOverlay::new();
+    let start = Instant::now();
+    let [started, first_token, mut completed] = protocol_request("run", "openai-codex-responses");
+    telemetry.apply_event_at(&started, start);
+    // The summary streams before the first visible output at 1s.
+    telemetry.apply_event_at(&delta("run", true, 4_000), start);
+    telemetry.apply_event_at(&first_token, start + Duration::from_secs(1));
+    telemetry.apply_event_at(&delta("run", false, 400), start + Duration::from_secs(2));
+    let live = telemetry.thread_metrics_at(&["run".into()], start + Duration::from_secs(2));
+    assert_eq!(live.tok_s, Some(100.0));
+
+    complete_with(&mut completed, 1_100, Some(1_000), 3_000);
+    telemetry.apply_event_at(&completed, start + Duration::from_secs(3));
+    let done = telemetry.thread_metrics(&["run".into()]);
+    assert_eq!(done.tok_s, Some(50.0));
+    assert_eq!(done.average_tok_s, Some(50.0));
+}
+
+#[test]
+fn hidden_reasoning_is_excluded_only_when_its_text_never_streamed() {
+    let mut telemetry = TelemetryOverlay::new();
+    // Hidden: 500 reasoning tokens arrive as no reasoning text at all.
+    let [started, first_token, mut completed] = protocol_request("hidden", "fixture");
+    complete_with(&mut completed, 600, Some(500), 3_000);
+    for event in [started, first_token, completed] {
+        telemetry.apply_event(&event);
+    }
+    assert_eq!(
+        telemetry.thread_metrics(&["hidden".into()]).tok_s,
+        Some(50.0)
+    );
+
+    // Visible: the full reasoning text streamed, so it is ordinary output.
+    let [started, first_token, mut completed] = protocol_request("visible", "fixture");
+    complete_with(&mut completed, 600, Some(500), 3_000);
+    telemetry.apply_event(&started);
+    telemetry.apply_event(&delta("visible", true, 2_000));
+    for event in [first_token, completed] {
+        telemetry.apply_event(&event);
+    }
+    assert_eq!(
+        telemetry.thread_metrics(&["visible".into()]).tok_s,
+        Some(200.0)
+    );
+}
+
+#[test]
+fn summarized_reasoning_without_visible_output_timing_is_not_rated() {
+    let mut telemetry = TelemetryOverlay::new();
+    let [started, _, mut completed] = protocol_request("run", "openai-codex-responses");
+    complete_with(&mut completed, 600, Some(500), 3_000);
+    for event in [started, completed] {
+        telemetry.apply_event(&event);
+    }
+    let metrics = telemetry.thread_metrics(&["run".into()]);
+    assert_eq!(metrics.tok_s, None);
+    assert_eq!(metrics.average_tok_s, None);
+}

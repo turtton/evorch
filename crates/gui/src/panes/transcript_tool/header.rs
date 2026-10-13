@@ -77,7 +77,7 @@ pub fn tool_header(
             if let Some(path) = file_arg() {
                 (header.subject, header.location) = split_path(path, repo_root);
             }
-            header.meta = input.and_then(read_range);
+            header.meta = result.and_then(|output| read_range(input, output));
             header
         }
         "edit" | "write" => {
@@ -212,16 +212,21 @@ fn split_path(path: &str, repo_root: Option<&Path>) -> (String, Option<String>) 
     }
 }
 
-fn read_range(input: &serde_json::Value) -> Option<String> {
-    let offset = input.get("offset").and_then(serde_json::Value::as_u64);
-    let limit = input.get("limit").and_then(serde_json::Value::as_u64);
-    match (offset, limit) {
-        (Some(offset), Some(limit)) if limit > 0 => {
-            Some(format!("L{offset}–{}", offset.saturating_add(limit - 1)))
-        }
-        (Some(offset), _) => Some(format!("from L{offset}")),
-        (None, Some(limit)) if limit > 0 => Some(format!("L1–{limit}")),
-        _ => None,
+/// Lines the read returned, not the requested `limit`, which a short file or
+/// the byte cap may not fill. The truncation notice is not file text.
+fn read_range(input: Option<&serde_json::Value>, output: &str) -> Option<String> {
+    let offset = input
+        .and_then(|input| input.get("offset")?.as_u64())
+        .unwrap_or(1)
+        .max(1);
+    let text = output
+        .rsplit_once("\n\n[Output truncated (range limit: ")
+        .filter(|(_, notice)| notice.ends_with(").]"))
+        .map_or(output, |(text, _)| text);
+    match text.lines().count() as u64 {
+        0 => None,
+        1 => Some(format!("L{offset}")),
+        lines => Some(format!("L{offset}–{}", offset.saturating_add(lines - 1))),
     }
 }
 
@@ -340,7 +345,7 @@ mod tests {
         let header = header(
             "read",
             json!({"path": path, "offset": 10, "limit": 50}),
-            None,
+            Some(&"line\n".repeat(50)),
         );
         // Then: the worktree prefix is gone and the file name leads.
         assert_eq!(header.text(), "Read lib.rs crates/gui/src · L10–59");
@@ -391,14 +396,36 @@ mod tests {
     }
 
     #[test]
-    fn read_range_shows_only_given_bounds() {
-        for (input, expected) in [
-            (json!({"path": "a"}), None),
-            (json!({"path": "a", "offset": 5}), Some("from L5")),
-            (json!({"path": "a", "limit": 20}), Some("L1–20")),
+    fn read_range_shows_only_the_lines_actually_returned() {
+        let truncated = "a\nb\nc\n\n[Output truncated (range limit: 300 lines / 16384 bytes). \
+                         Continue with read({\"offset\":4}).]";
+        for (input, output, expected) in [
+            // A short file returns fewer lines than the default or given limit.
+            (
+                json!({"path": "a"}),
+                Some("one\ntwo\nthree\n"),
+                Some("L1–3"),
+            ),
+            (
+                json!({"path": "a", "limit": 300}),
+                Some("one\ntwo"),
+                Some("L1–2"),
+            ),
+            (
+                json!({"path": "a", "offset": 5, "limit": 20}),
+                Some("x\n"),
+                Some("L5"),
+            ),
+            (json!({"path": "a", "offset": 9}), Some(""), None),
+            // The truncation notice is not counted as file text.
+            (json!({"path": "a"}), Some(truncated), Some("L1–3")),
+            // Nothing has been read while the call runs.
+            (json!({"path": "a", "offset": 5, "limit": 20}), None, None),
         ] {
-            assert_eq!(header("read", input, None).meta.as_deref(), expected);
+            assert_eq!(header("read", input, output).meta.as_deref(), expected);
         }
+        let failed = tool_header("read", None, Some("not found"), true, None);
+        assert_eq!(failed.meta, None);
     }
 
     #[test]

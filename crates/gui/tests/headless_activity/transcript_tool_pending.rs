@@ -94,7 +94,7 @@ fn tool_card_pending_is_visible_when_collapsed() {
     let harness = self::harness(registry.thread().clone());
     assert!(spinner_rect(&harness).is_none());
     assert!(harness.query_by_label("file contents").is_none());
-    assert!(harness.query_by_label("✓ Read .").is_some());
+    assert!(harness.query_by_label("✓ Read . · L1").is_some());
 }
 
 #[test]
@@ -105,10 +105,10 @@ fn read_tool_input_shows_path_not_json() {
     model.apply(&completed());
     let mut harness = harness(model);
     // When: expanding its details.
-    harness.get_by_label("✓ Read .").click();
+    harness.get_by_label("✓ Read . · L1").click();
     harness.run_steps(3);
     // Then: both the title and Input use the path, not JSON.
-    assert!(harness.query_by_label("✓ Read .").is_some());
+    assert!(harness.query_by_label("✓ Read . · L1").is_some());
     assert!(harness.query_by_label("Input").is_some());
     assert!(harness.query_by_label(".").is_some());
     assert!(harness.query_by_label_contains("\"file\"").is_none());
@@ -127,7 +127,7 @@ fn tool_completed_stops_spinner_and_reveals_result_in_place() {
     // Then: the existing card stops animating without revealing output.
     assert_eq!(harness.state().entries().len(), 1);
     assert!(spinner_rect(&harness).is_none());
-    assert!(harness.query_by_label("✓ Read .").is_some());
+    assert!(harness.query_by_label("✓ Read . · L1").is_some());
     assert!(harness.query_by_label("file contents").is_none());
 }
 
@@ -189,7 +189,7 @@ fn capture_tool_pending_states_when_evidence_directory_is_set() {
         .expect("render completed")
         .save(directory.join("completed.png"))
         .expect("save completed");
-    harness.get_by_label("✓ Read .").click();
+    harness.get_by_label("✓ Read . · L1").click();
     harness.run_steps(3);
     harness
         .render()

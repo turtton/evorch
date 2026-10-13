@@ -129,6 +129,58 @@ fn current_root_state_ignores_historical_roots_and_children() {
 }
 
 #[test]
+fn running_subagent_shows_thread_running_while_root_is_idle() {
+    // Given: a conversation root with one subagent run.
+    let mut thread =
+        workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+    thread.run_ids = vec!["root".into(), "child".into()];
+    thread.root_run_id = Some("root".into());
+
+    for (root, child, expected) in [
+        // When: the root waits on the subagent or ended its turn.
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Running,
+            ThreadState::Running,
+        ),
+        (
+            Some(ThreadRunPhase::Done),
+            ThreadRunPhase::Pending,
+            ThreadState::Running,
+        ),
+        (None, ThreadRunPhase::Running, ThreadState::Running),
+        // Then: a finished subagent leaves the root's own state.
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Done,
+            ThreadState::Waiting,
+        ),
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Waiting,
+            ThreadState::Waiting,
+        ),
+        // Operator stops and root failures still take precedence.
+        (
+            Some(ThreadRunPhase::Stopped),
+            ThreadRunPhase::Running,
+            ThreadState::Stopped,
+        ),
+        (
+            Some(ThreadRunPhase::Error),
+            ThreadRunPhase::Running,
+            ThreadState::Error,
+        ),
+    ] {
+        let mut phases = BTreeMap::from([("child".to_owned(), child)]);
+        if let Some(root) = root {
+            phases.insert("root".into(), root);
+        }
+        assert_eq!(thread.state(&phases), expected, "{root:?} / {child:?}");
+    }
+}
+
+#[test]
 fn thread_creation_rejects_unknown_project() {
     // Given: an empty sidebar.
     let mut sidebar = SidebarState::default();

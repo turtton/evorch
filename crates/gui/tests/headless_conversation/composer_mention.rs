@@ -59,9 +59,18 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
         assert!(harness.has_label(label), "{label}");
     }
 
-    // When: narrowing to the folder and accepting it with Tab keeps browsing.
+    // When: Tab and Shift+Tab cycle the candidates without editing the draft.
     type_text(&mut harness, "sr");
     harness.key_press(Modifiers::NONE, Key::Tab);
+    harness.run();
+    assert_eq!(harness.state().composer().completion_selected, 1);
+    harness.key_press(Modifiers::SHIFT, Key::Tab);
+    harness.run();
+    assert_eq!(harness.state().composer().completion_selected, 0);
+    assert_eq!(harness.state().composer().input, "@sr");
+
+    // When: accepting the highlighted folder keeps browsing.
+    harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
     assert_eq!(harness.state().composer().input, "@src/");
     assert!(harness.has_label("@src/lib.rs"));
@@ -71,7 +80,7 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
 
     // When: a skill is completed mid-sentence and the message is sent.
     type_text(&mut harness, "with @rev");
-    harness.key_press(Modifiers::NONE, Key::Tab);
+    harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
     type_text(&mut harness, "please");
     harness.key_press(Modifiers::NONE, Key::Enter);
