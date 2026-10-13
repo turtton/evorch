@@ -65,9 +65,18 @@ pub struct TelemetryRow {
     ttft_sum_ms: u64,
     ttft_count: u64,
     pub request_duration: Option<Duration>,
-    completed_request_duration: Duration,
+    /// Completed output tokens and generation time that throughput averages rate.
+    rated_output_tokens: u64,
+    rated_duration: Duration,
     pub output_tokens: u64,
     streamed_chars: u64,
+    /// Share of `streamed_chars` that arrived as reasoning text.
+    reasoning_chars: u64,
+    /// The provider streams only a summary of its reasoning, so the reasoning
+    /// tokens it bills never arrive and are not rated as throughput.
+    summarized_reasoning: bool,
+    /// Reported reasoning share of the completed request's `output_tokens`.
+    reasoning_tokens: Option<u64>,
 }
 
 impl TelemetryRow {
@@ -81,13 +90,29 @@ impl TelemetryRow {
     pub fn tok_s_at(&self, now: Instant) -> Option<f64> {
         // Text/reasoning deltas are estimates; tool arguments have no GUI delta.
         // Until any output is observable, displaying 0 tok/s invents a sample.
-        if self.output_tokens == 0 {
+        let (tokens, elapsed) = self.rated_output_at(now)?;
+        if tokens == 0 {
             return None;
         }
-        let elapsed = self.elapsed_at(now)?;
         // Duration converts the u64 count without a lossy integer narrowing cast.
         (!elapsed.is_zero())
-            .then(|| Duration::from_secs(self.output_tokens).as_secs_f64() / elapsed.as_secs_f64())
+            .then(|| Duration::from_secs(tokens).as_secs_f64() / elapsed.as_secs_f64())
+    }
+
+    /// Output tokens and the time spent generating them. Summarized reasoning
+    /// is excluded from both: its tokens and the time before the first visible
+    /// output, which `ttft` measures without reasoning deltas.
+    fn rated_output_at(&self, now: Instant) -> Option<(u64, Duration)> {
+        let elapsed = self.elapsed_at(now)?;
+        if !self.summarized_reasoning {
+            return Some((self.output_tokens, elapsed));
+        }
+        let tokens = match self.reasoning_tokens {
+            Some(reasoning) => self.output_tokens.saturating_sub(reasoning),
+            None => (self.streamed_chars - self.reasoning_chars).div_ceil(4),
+        };
+        let hidden = Duration::from_millis(self.ttft_ms?);
+        Some((tokens, elapsed.checked_sub(hidden)?))
     }
 
     pub fn average_ttft_ms(&self) -> Option<u64> {
@@ -97,6 +122,11 @@ impl TelemetryRow {
     pub fn latest_ttft_ms(&self) -> Option<u64> {
         self.ttft_ms
     }
+}
+
+/// Codex Responses streams reasoning summaries in place of reasoning text.
+fn protocol_summarizes_reasoning(protocol: &str) -> bool {
+    protocol == "openai-codex-responses"
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +211,7 @@ impl TelemetryOverlay {
             EventKind::Provider(ProviderEvent::RequestStarted {
                 provider,
                 profile,
+                protocol,
                 model,
                 run_id: Some(run_id),
                 ..
@@ -208,6 +239,10 @@ impl TelemetryOverlay {
                 row.ttft_ms = None;
                 row.output_tokens = 0;
                 row.streamed_chars = 0;
+                row.reasoning_chars = 0;
+                row.reasoning_tokens = None;
+                // Completion confirms this from the reported reasoning tokens.
+                row.summarized_reasoning = protocol_summarizes_reasoning(protocol);
                 row.pending_reuse = None;
             }
             EventKind::Provider(ProviderEvent::CacheReuseObserved {
@@ -230,25 +265,27 @@ impl TelemetryOverlay {
                 row.ttft_ms = Some(*ttft_ms);
             }
             EventKind::Message(
-                MessageEvent::MessageDelta {
+                message @ (MessageEvent::MessageDelta {
                     delta,
                     run_id: Some(run_id),
                 }
                 | MessageEvent::ReasoningDelta {
                     delta,
                     run_id: Some(run_id),
-                },
+                }),
             ) => {
                 if let Some(row) = self.rows.get_mut(run_id)
                     && row.request_started_at.is_some()
                     && row.request_duration.is_none()
                 {
                     // Deltas carry no token count: estimate across chunks, never bill this value.
-                    row.streamed_chars = row.streamed_chars.saturating_add(
-                        delta
-                            .chars()
-                            .fold(0_u64, |count, _| count.saturating_add(1)),
-                    );
+                    let chars = delta
+                        .chars()
+                        .fold(0_u64, |count, _| count.saturating_add(1));
+                    row.streamed_chars = row.streamed_chars.saturating_add(chars);
+                    if matches!(message, MessageEvent::ReasoningDelta { .. }) {
+                        row.reasoning_chars = row.reasoning_chars.saturating_add(chars);
+                    }
                     row.output_tokens = row.streamed_chars.div_ceil(4);
                 }
             }
@@ -263,6 +300,7 @@ impl TelemetryOverlay {
                 finish_reason,
                 duration_ms,
                 run_id: Some(run_id),
+                reasoning_tokens,
                 ..
             }) => {
                 let usage = self
@@ -307,8 +345,16 @@ impl TelemetryOverlay {
                 row.output_tokens = *output_tokens;
                 let duration = Duration::from_millis(*duration_ms);
                 row.request_duration = Some(duration);
-                row.completed_request_duration =
-                    row.completed_request_duration.saturating_add(duration);
+                let reasoning = reasoning_tokens.unwrap_or_default();
+                // A provider without a summary protocol may still hide reasoning:
+                // fewer visible characters than reasoning tokens cannot be its text.
+                row.summarized_reasoning =
+                    reasoning > 0 && (row.summarized_reasoning || row.reasoning_chars < reasoning);
+                row.reasoning_tokens = row.summarized_reasoning.then_some(reasoning);
+                if let Some((tokens, rated)) = row.rated_output_at(now) {
+                    row.rated_output_tokens = row.rated_output_tokens.saturating_add(tokens);
+                    row.rated_duration = row.rated_duration.saturating_add(rated);
+                }
             }
             EventKind::Provider(ProviderEvent::RequestFailed {
                 duration_ms,

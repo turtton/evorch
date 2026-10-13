@@ -122,7 +122,8 @@ impl TelemetryOverlay {
         let mut has_usage = false;
         let mut ttft_sum_ms = 0_u64;
         let mut ttft_count = 0_u64;
-        let mut provider_duration = Duration::ZERO;
+        let mut rated_tokens = 0_u64;
+        let mut rated_duration = Duration::ZERO;
         let mut cache_reuse = CacheReuseSummary::default();
         for row in roots.iter().copied() {
             has_usage |= row.latest_context.is_some();
@@ -130,7 +131,8 @@ impl TelemetryOverlay {
             usage.output = usage.output.saturating_add(row.usage.output);
             ttft_sum_ms = ttft_sum_ms.saturating_add(row.ttft_sum_ms);
             ttft_count = ttft_count.saturating_add(row.ttft_count);
-            provider_duration = provider_duration.saturating_add(row.completed_request_duration);
+            rated_tokens = rated_tokens.saturating_add(row.rated_output_tokens);
+            rated_duration = rated_duration.saturating_add(row.rated_duration);
             usage.cache_read = usage.cache_read.saturating_add(row.usage.cache_read);
             cache_reuse.add_totals(&row.cache_reuse);
         }
@@ -154,8 +156,8 @@ impl TelemetryOverlay {
             tok_s: latest.and_then(|row| row.tok_s_at(now)),
             // RequestCompleted has provider duration, which excludes tool execution
             // and idle time between requests. Streaming estimates never enter this sum.
-            average_tok_s: (!provider_duration.is_zero()).then(|| {
-                Duration::from_secs(usage.output).as_secs_f64() / provider_duration.as_secs_f64()
+            average_tok_s: (!rated_duration.is_zero()).then(|| {
+                Duration::from_secs(rated_tokens).as_secs_f64() / rated_duration.as_secs_f64()
             }),
         }
     }
