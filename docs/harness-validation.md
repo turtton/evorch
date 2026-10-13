@@ -59,8 +59,9 @@ rendering, browser and Nix environments. Local tests call no external model.
 
 ## Interaction and diagnostic coverage
 
-- Shell start/yield cancellation, reaping before snapshot unlock, read availability,
-  conflicting write rejection, unobserved results, stop/finish, pipe and PTY capture.
+- Shell start/yield cancellation, reaping on cancel, drain and drop, read availability,
+  same-run write rejection, other runs mutating the workspace without waiting for a
+  running job, unobserved results, stop/finish, pipe and PTY capture.
 - Durable questions across restart, free text, first-answer idempotence, finite
   limits, explicit consumer links, run-ID reservation, late-answer completion race,
   failed reads, stale owners including admission, and old source event fencing.

@@ -321,8 +321,7 @@ fn acquire_run(
 fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
     match &event.kind {
         EventKind::Lifecycle(event) => match event {
-            LifecycleEvent::WorkspaceWaitChanged { run_id, .. }
-            | LifecycleEvent::RunProgress { run_id, .. }
+            LifecycleEvent::RunProgress { run_id, .. }
             | LifecycleEvent::AgentRunStarted { run_id, .. }
             | LifecycleEvent::TaskPromptPublished { run_id, .. }
             | LifecycleEvent::AgentRunRestored { run_id, .. }
@@ -379,7 +378,6 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             accepts(&message.sender_run_id) && accepts(&message.recipient_run_id)
         }
         EventKind::Compaction(CompactionEvent::Compacted { run_id, .. }) => accepts(run_id),
-        EventKind::Snapshot(event) => accepts(&event.run_id),
         EventKind::Ledger(crate::LedgerEvent::RunLedgerAppended { run_id, .. }) => accepts(run_id),
         EventKind::Diagnostic(event) => event.run_id.as_deref().is_none_or(accepts),
         EventKind::Provider(ProviderEvent::ProviderFallback { .. })

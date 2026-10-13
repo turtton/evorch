@@ -144,7 +144,7 @@ pub trait Tool: Send + Sync {
     fn cancel_shell_jobs(&self, _run_id: &str) {}
 
     /// Stop and await process teardown before deleting its workspace. Failure
-    /// means the workspace must be retained; mutation guards remain owned.
+    /// means the workspace must be retained.
     async fn drain_shell_jobs(&self, _run_id: &str) -> Result<(), ToolError> {
         Ok(())
     }
@@ -181,15 +181,6 @@ pub trait Tool: Send + Sync {
     fn take_shell_job_notifications(&self, _run_id: &str) -> Vec<String> {
         Vec::new()
     }
-
-    /// Retain a starting call's lease even when cancellation prevents delivery
-    /// of its job ID. Completed or absent jobs release the lease immediately.
-    fn retain_shell_call_guard(&self, _run_id: &str, _call_id: &str, _guard: Box<dyn Send + Sync>) {
-    }
-
-    /// Move the runtime's snapshot mutation lease to a yielded process. The
-    /// lease is released after termination, or immediately if already complete.
-    fn retain_shell_job_guard(&self, _run_id: &str, _job_id: &str, _guard: Box<dyn Send + Sync>) {}
 
     /// ツールが cwd を持つ場合、既定の作業ディレクトリを更新する。
     fn set_default_cwd(&self, _cwd: std::path::PathBuf) {}

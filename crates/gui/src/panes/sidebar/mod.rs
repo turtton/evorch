@@ -48,13 +48,11 @@ pub fn sidebar_pane(
     ui: &mut egui::Ui,
     sidebar: &SidebarState,
     phases: &BTreeMap<String, ThreadRunPhase>,
-    telemetry: &crate::model::telemetry::TelemetryOverlay,
     question_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
     let indicators = threads::ThreadIndicators {
         phases,
-        telemetry,
         question_threads,
         unread_threads,
     };

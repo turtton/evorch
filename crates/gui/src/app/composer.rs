@@ -258,15 +258,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         }
                     }
                 }
-                "undo" | "redo" => {
-                    if let Some(thread_id) = self.sidebar.active_thread.as_ref() {
-                        self.submit_command(WorkbenchCommand::RestoreSnapshot {
-                            thread_id: thread_id.to_string(),
-                            redo: spec.name == "redo",
-                        });
-                        self.composer.input.clear();
-                    }
-                }
                 "team" => {
                     if let Some((value, goal)) = args.split_once('|')
                         && !value.trim().is_empty()

@@ -393,23 +393,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.user_questions.remove(&question_id);
                 self.question_drafts.remove(&question_id);
             }
-            LoopEvent::SnapshotRestored { thread_id, diff } => {
-                if self
-                    .sidebar
-                    .active_thread
-                    .as_ref()
-                    .is_some_and(|id| id.to_string() == thread_id)
-                {
-                    match diff {
-                        Some(diff) => {
-                            self.diff.set_repo_root(self.active_repo_root());
-                            self.diff.show_snapshot(diff);
-                            self.focus_panel("diff-main");
-                        }
-                        None => self.push_notice("No snapshot to restore"),
-                    }
-                }
-            }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
                 // Acceptance indexes the run; lifecycle events identify the current
                 // conversation root. Follow-up receipts must not reroute its transcript.

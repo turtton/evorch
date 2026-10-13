@@ -693,8 +693,7 @@ impl SupervisorActor {
             | EventKind::Message(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {}
+            | EventKind::Ownership(_) => {}
         }
     }
 

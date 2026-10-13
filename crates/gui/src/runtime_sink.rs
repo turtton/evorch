@@ -63,8 +63,6 @@ pub struct RuntimeCommandSink {
     /// Project each thread last submitted from, for host follow-ups that carry none.
     thread_roots: BTreeMap<String, PathBuf>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
-    events_tx: std::sync::mpsc::Sender<LoopEvent>,
-    events_rx: std::sync::mpsc::Receiver<LoopEvent>,
 }
 
 impl RuntimeCommandSink {
@@ -94,7 +92,6 @@ impl RuntimeCommandSink {
         handle: tokio::runtime::Handle,
         supervisor: SupervisorHandle,
     ) -> Self {
-        let (events_tx, events_rx) = std::sync::mpsc::channel();
         Self {
             event_bus: None,
             team_writer: None,
@@ -113,8 +110,6 @@ impl RuntimeCommandSink {
             chat_permits: BTreeMap::new(),
             thread_roots: BTreeMap::new(),
             ownership: None,
-            events_tx,
-            events_rx,
         }
     }
 
@@ -332,10 +327,6 @@ impl CommandSink for RuntimeCommandSink {
         }
     }
 
-    fn poll(&mut self) -> Vec<LoopEvent> {
-        self.events_rx.try_iter().collect()
-    }
-
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
         let permit = if let Some(host) = &self.ownership {
             let thread = match &command {
@@ -352,7 +343,6 @@ impl CommandSink for RuntimeCommandSink {
                     Some(thread_id.as_str())
                 }
                 WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::RestoreSnapshot { .. } => None,
                 WorkbenchCommand::PauseGoal { .. }
                 | WorkbenchCommand::DecideToolApproval { .. }
                 | WorkbenchCommand::SetWebToolsEnabled { .. }
@@ -504,24 +494,6 @@ impl RuntimeCommandSink {
                         approved,
                     }));
                 }
-                Vec::new()
-            }
-            WorkbenchCommand::RestoreSnapshot { thread_id, redo } => {
-                let Some(&run) = self.chat_runs.get(&thread_id) else {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: "No chat snapshot available".into(),
-                    }];
-                };
-                let runtime = self.runtime.clone();
-                let tx = self.events_tx.clone();
-                self.handle.spawn(async move {
-                    let event = match runtime.restore_snapshot(run, redo).await {
-                        Ok(diff) => LoopEvent::SnapshotRestored { thread_id, diff },
-                        Err(reason) => LoopEvent::ChatRejected { thread_id, reason },
-                    };
-                    let _ = tx.send(event);
-                });
                 Vec::new()
             }
             WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
@@ -2256,7 +2228,6 @@ mod tests {
         assert_eq!(sink.chat_runs["failed-root"], root);
         assert!(sink.stop_marked.is_empty());
         assert!(sink.stopped_by_us.is_empty());
-        assert!(sink.poll().is_empty());
         runtime.cancel_subtree(root).unwrap();
         rt.block_on(async {
             for run in [grandchild, sibling] {

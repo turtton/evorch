@@ -87,10 +87,6 @@ pub enum WorkbenchCommand {
         question_id: String,
         answer: String,
     },
-    RestoreSnapshot {
-        thread_id: String,
-        redo: bool,
-    },
     SendChat(ChatSubmission),
     ContinueChat(ChatContinuation),
     StopChat {
@@ -193,10 +189,6 @@ pub enum LoopEvent {
     /// Host command acknowledgement, emitted only after durable storage accepted the answer.
     UserAnswerSaved {
         question_id: String,
-    },
-    SnapshotRestored {
-        thread_id: String,
-        diff: Option<String>,
     },
     ChatAccepted {
         thread_id: String,
@@ -335,12 +327,6 @@ pub struct FixtureLoopAdapter {
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
-            WorkbenchCommand::RestoreSnapshot { thread_id, .. } => {
-                vec![LoopEvent::SnapshotRestored {
-                    thread_id,
-                    diff: None,
-                }]
-            }
             WorkbenchCommand::ContinueChat(_) => vec![LoopEvent::CommandRejected {
                 reason: "No resumable conversation in demo mode".into(),
             }],

@@ -79,21 +79,15 @@ fn status_fixture(
     let phases = phase
         .map(|phase| BTreeMap::from([("run-status".into(), phase)]))
         .unwrap_or_default();
-    let telemetry = gui::model::telemetry::TelemetryOverlay::new();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(width, 400.0))
         .build_ui_state(
             move |ui, action| {
                 let _keep_root = &root;
                 gui::theme::install(ui.ctx());
-                if let Some(next) = sidebar_pane(
-                    ui,
-                    &sidebar,
-                    &phases,
-                    &telemetry,
-                    &questions,
-                    &Default::default(),
-                ) {
+                if let Some(next) =
+                    sidebar_pane(ui, &sidebar, &phases, &questions, &Default::default())
+                {
                     *action = Some(next);
                 }
             },

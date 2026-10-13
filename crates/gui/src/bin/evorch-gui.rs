@@ -813,15 +813,6 @@ fn run() -> Result<(), GuiError> {
     };
     let sandbox_runtime = runtime.clone();
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
-    let snapshot_directory = tempfile::tempdir()?;
-    let snapshot_root = match demo_directory.as_ref() {
-        Some(directory) => directory.path().join("repo"),
-        None => effective_project_root.clone(),
-    };
-    let runtime = runtime.with_snapshots(Arc::new(
-        runtime::snapshot::SnapshotService::new(&snapshot_root, snapshot_directory.path())
-            .map_err(|error| GuiError::Arguments(error.to_string()))?,
-    ));
     let storage_config = StorageConfig {
         db_path: storage_db_path,
         usage_retention_days: composition_config.metrics.retention_days,

@@ -108,8 +108,7 @@ fn issued_decisions(
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
         })
         .collect()
 }
@@ -187,8 +186,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. }
-            | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");

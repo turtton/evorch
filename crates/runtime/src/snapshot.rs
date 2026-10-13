@@ -1,13 +1,9 @@
-//! Workspace snapshots stored outside the user's repository metadata.
+//! Benchmark workspace snapshots stored outside the user's repository metadata.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 mod benchmark;
-mod history;
-mod service;
-pub use history::SnapshotHistory;
-pub use service::{SnapshotService, WorkspaceSnapshotGuard, WorkspaceSnapshots};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotId(String);
@@ -74,21 +70,6 @@ impl SnapshotStore {
             store.git(&["init", "--quiet"])?;
         }
         Ok(store)
-    }
-
-    pub fn capture(&mut self) -> Result<SnapshotId, SnapshotError> {
-        self.git(&["add", "--all", "--", "."])?;
-        let output = self.git(&["write-tree"])?;
-        Ok(SnapshotId(
-            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        ))
-    }
-
-    pub fn restore(&mut self, snapshot: &SnapshotId) -> Result<(), SnapshotError> {
-        // Refresh only our index so files created since the snapshot are removed on restore.
-        self.capture()?;
-        self.git(&["read-tree", "--reset", "-u", snapshot.as_str()])?;
-        Ok(())
     }
 
     pub fn diff(&self, before: &SnapshotId, after: &SnapshotId) -> Result<String, SnapshotError> {

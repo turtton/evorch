@@ -126,8 +126,7 @@ impl NotificationsModel {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => return,
+            | EventKind::Ownership(_) => return,
         };
         let phase = match &kind {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,

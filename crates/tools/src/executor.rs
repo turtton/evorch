@@ -223,7 +223,7 @@ impl ToolExecutor {
         })
     }
 
-    /// Reap checker supervisors before shell teardown or workspace lease release.
+    /// Reap checker supervisors before shell teardown.
     pub async fn drain_post_edit_hooks(&self) {
         if let Some(hook) = self.policy_checked_hook() {
             hook.drain().await;
@@ -356,26 +356,6 @@ impl ToolExecutor {
         self.tools.get("shell").map_or_else(Vec::new, |shell| {
             shell.tool.take_shell_job_notifications(run_id)
         })
-    }
-
-    pub fn retain_shell_call_guard(
-        &self,
-        run_id: &str,
-        call_id: &str,
-        guard: Box<dyn Send + Sync>,
-    ) {
-        if let Some(shell) = self.tools.get("shell") {
-            shell.tool.retain_shell_call_guard(run_id, call_id, guard);
-        }
-    }
-
-    /// Retain the workspace snapshot guard while an async shell can mutate it.
-    /// Control calls (poll/stdin/stop) keep normal tool authorization but must
-    /// not reacquire that same mutation lock.
-    pub fn retain_shell_job_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
-        if let Some(shell) = self.tools.get("shell") {
-            shell.tool.retain_shell_job_guard(run_id, job_id, guard);
-        }
     }
 
     /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。

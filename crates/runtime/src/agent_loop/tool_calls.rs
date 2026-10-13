@@ -228,12 +228,7 @@ mod rework_tests {
             batch,
             text_response("done", providers::FinishReason::Stop),
         ]));
-        let service = Arc::new(
-            crate::snapshot::SnapshotService::new(&root, &temp.path().join("snapshots"))
-                .expect("snapshot"),
-        );
         let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
-            .with_snapshots(service)
             .with_escalation_settings(EscalationSettings {
                 consecutive_edit_failures: 1,
                 same_file_rewrites: 100,
@@ -280,17 +275,12 @@ mod rework_tests {
     }
 
     #[tokio::test]
-    async fn invalid_edit_is_observed_without_snapshot() {
+    async fn invalid_edit_is_observed_by_escalation() {
         let (events, _, _) = scenario("invalid").await;
         assert!(events.iter().any(|e| matches!(
             e.kind,
             EventKind::Lifecycle(LifecycleEvent::EscalationProposed { .. })
         )));
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e.kind, EventKind::Snapshot(_)))
-        );
     }
 
     #[tokio::test]
@@ -691,36 +681,7 @@ impl LoopState {
                                 ));
                                 continue;
                             }
-                            let mut cancel = self.channels.cancel_rx.clone();
-                            let snapshot = if continuation {
-                                Ok(None)
-                            } else {
-                                tokio::select! {
-                                    biased;
-                                    _=cancel.wait_for(|interrupt| interrupt.is_interrupted())=>Err(match self.interrupted() { Some(InterruptKind::Stop) => "stopped while waiting for workspace", _ => "cancelled while waiting for workspace" }.into()),
-                                    result=self.snapshot_before_tool(&name,&id,&input)=>result,
-                                }
-                            };
-                            let guard = match snapshot {
-                                Ok(guard) => guard,
-                                Err(error) => {
-                                    completed.push((
-                                        index,
-                                        id,
-                                        name,
-                                        input,
-                                        ReadyCall::Rejected(ToolResult::error(error)),
-                                    ));
-                                    continue;
-                                }
-                            };
-                            if let Some(permit) = &self.task.config.ownership
-                                && let Err(error) = permit.validate_mutation()
-                            {
-                                self.finish_error(error.to_string());
-                                return false;
-                            }
-                            prepared_wave.push((index, id, name, input, call, guard));
+                            prepared_wave.push((index, id, name, input, call));
                         }
                         ReadyCall::Invalid(error) => {
                             completed.push((index, id, name, input, ReadyCall::Invalid(error)));
@@ -735,12 +696,11 @@ impl LoopState {
                     crate::budget_tracker::BudgetDecision::Continue => {}
                     crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
                 }
-                for (index, id, name, input, call, guard) in prepared_wave {
+                for (index, id, name, input, call) in prepared_wave {
                     let metadata = (index, id.clone(), name.clone(), input.clone());
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
                     let run_id = ctx.run_id.clone();
-                    let executor = Arc::clone(&self.shared.executor);
                     let handle = tasks.spawn(async move {
                             let result = tokio::select! {
                                 biased;
@@ -757,11 +717,6 @@ impl LoopState {
                                 },
                                 result = call.execute() => result.unwrap_or_else(|error| ToolResult::error(error.to_string())),
                             };
-                            // A cancelled start may never return its job ID. Its process
-                            // still owns this lease until it is actually reaped.
-                            if name == "shell" && let Some(guard) = guard {
-                                executor.retain_shell_call_guard(&run_id, &id, Box::new(guard));
-                            }
                             (index, id, name, input, ReadyCall::Executed(result))
                         });
                     pending.insert(handle.id(), metadata);
