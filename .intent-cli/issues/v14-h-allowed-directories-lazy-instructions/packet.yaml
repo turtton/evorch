@@ -1,0 +1,62 @@
+implementation_issue_packet:
+  issue_title: "ADR 0032 ③: 許可ディレクトリのルールと skills を初めて触ったときに読み込む"
+  issue_kind: feature
+  source_execution_unit: v14-h-allowed-directories-lazy-instructions
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ docs/ intents/"
+  target_part: "エージェントのツールが trust 済み許可ディレクトリの中のパスを初めて対象にしたとき、その許可ディレクトリのルール（AGENTS.md など）と repository skills の一覧を末尾へ追記する。ルールは許可ディレクトリを追加の探索ルートとして run の中で 1 回だけ注入し、skills は run 単位で registry を広げて skill_load と delegate の load_skills から使えるようにする。システムプロンプトと共有の skill catalog は変えない"
+  dependencies:
+    - v14-g-allowed-directories-prompt
+  technical_baseline:
+    - "ADR 0032（intents/evorch/decisions/0032-project-allowed-directories.md）で方針合意済み。v14-f で runtime が trust 済み許可ディレクトリの一覧を持ち、v14-g で末尾への追記の境界と run スナップショットへの保存の仕組みがある"
+    - "ルールの途中注入は crates/runtime/src/agent_loop/tool_calls.rs が、成功した read / write / edit / grep の path を rule_targets に集め、ラウンドの後に rules::after_successful_tools（crates/runtime/src/rules/api.rs）の結果を push_user する。shell の cwd は rule_targets に入らない"
+    - "rules::after_successful_tools はプロジェクトの trust（session.source.trust）が Approved のときだけ動き、chain_for_target（crates/runtime/src/rules/discovery.rs）でプロジェクトルートから対象までの各階層の AGENTS.md とスコープ付きルールを集める。プロジェクトルートの外は EscapedRoot になり、そのパスのルールは無効化のマーカーになる"
+    - "現状のルールの途中注入には run の中での重複除去がない。RulesSession（rules/session.rs）は last_usage しか持たず、render_snapshot はマーカーだけを重複除去する。対象のパスに当たるルールは、ツールのラウンドごとに毎回注入され直す。ADR 0032 はこの現状を踏まえ、許可ディレクトリの分だけ run ごとに重複を防ぐと決めている"
+    - "注入の予算は injection_budget_bytes（RulesSettings の max_injection_bytes と、直近のプロバイダ使用量）で決まる"
+    - "skills の registry は run ごとに state.skills() で引き、crates/runtime/src/meta/skills.rs の skill_load と meta/delegation.rs の validate_load_skills がこれを参照する。repository skills のディレクトリは skill/discovery.rs の repo_skill_dirs(root) で決まり、skill_source.rs の SkillCatalogSource が共有の catalog を持つ"
+    - "delegate の load_skills は、子 run の registry で名前を解決する。親の run で広げた skills を子 run に渡すには、子 run の registry にも同じ拡張が要る"
+  intent_references:
+    - intents/evorch/decisions/0032-project-allowed-directories.md
+    - intents/evorch/features/context-engine/overview.md
+  acceptance_criteria:
+    - "read / grep / write / edit のパス、または shell の cwd が trust 済み許可ディレクトリの中を初めて指したとき、そのラウンドの後に、許可ディレクトリをルートとして対象までの階層で見つかったルールが末尾へ追記される"
+    - "同じ許可ディレクトリのルールは run の中で 1 回だけ注入され、同じルールファイルを二度注入しない。注入は max_injection_bytes の予算に従う"
+    - "初めて触ったとき、その許可ディレクトリの repository skills の一覧（名前と説明）が末尾へ追記され、その run の中で skill_load から読み込める。delegate の load_skills で子 run に渡した場合も、子 run で読み込める"
+    - "システムメッセージの skills 節と、共有の skill catalog（ほかの run やプロジェクトから見える skills）は変わらない"
+    - "未 trust の許可ディレクトリや、許可ディレクトリの外のパスでは、ルールも skills も読み込まれない。shell のコマンド引数に書かれたパスは検出しない"
+    - "どのルールと skills を読み込んだかが run スナップショットに残り、復元後に同じものを再び注入しない"
+    - "cache の contract テストで、読み込みの追記の前後で wire prefix が保たれる"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+intent_placement:
+  primary_intent: intents/evorch/decisions/0032-project-allowed-directories.md
+  supporting_intents:
+    - intents/evorch/features/context-engine/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0032 の「指示ファイルは、初めて触ったときに読み込む」節の実装"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0032 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/
+    summary: "許可ディレクトリのルールと skills がいつ読み込まれるかを記載する"
+closeout_learning:
+  expected: "別のリポジトリの指示が、そこを触ったときに初めてエージェントに届き、システムプロンプトと cache は変わらない"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0032-project-allowed-directories.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

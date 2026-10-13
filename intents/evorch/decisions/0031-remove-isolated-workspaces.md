@@ -22,7 +22,7 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 ### isolated workspace mode を廃止する
 
 - すべての run はプロジェクトルート（と [ADR 0032](0032-project-allowed-directories.md) の許可ディレクトリ）を共有する。
-- 削除するもの: `WorkspaceMode` / `MergeMode`、delegate の `workspace_mode` / `workspace_branch` 引数、`WorktreeManager` と `OwnedWorktree`、isolated 用の bwrap マウント構成、エスカレーションでの worktree の引き渡し、restore 記述子の worktree 情報、cancellation での worktree 後始末、`<root>/.evorch/worktrees/` の membership（workspace-ui の `Membership::RuntimeWorktree`）、context inspector の Isolated チェックボックス、GUI の isolated 表示。
+- 削除するもの: `WorkspaceMode` / `MergeMode`、delegate の `workspace_mode` / `workspace_branch` 引数、`WorktreeManager` と `OwnedWorktree`、isolated 用の bwrap マウント構成（worktree の git common dir の重ね方。`SandboxFactory` と `IsolatedMounts` は shared run の sandbox の組み立てにも使われているので、名前を改めて残す）、エスカレーションでの worktree の引き渡し、restore 記述子の worktree 情報、cancellation での worktree 後始末、`<root>/.evorch/worktrees/` の membership（workspace-ui の `Membership::RuntimeWorktree`）、context inspector の Isolated チェックボックス、GUI の isolated 表示。
 - AGENTS.md の互換方針（v0.x では内部の永続化形式の互換を保たない）に従い、移行層は作らない。
 - **名前の注意**: shell の引数 `sandbox_access: "isolated"`（[ADR 0033](0033-file-tool-path-boundary.md) でファイルツールにも加える）は「sandbox の境界の中で実行する」という意味で、ここで廃止する isolated workspace とは関係がない。削除作業で `sandbox_access` の `"isolated"` を巻き込まないこと。
 
@@ -35,13 +35,16 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 ### ワークスペース snapshot、ロック、`/undo` / `/redo` を廃止する
 
 - 書き込み系のツール呼び出しの前に snapshot を撮る処理と、それに伴うプロジェクトルート単位のロックを削除する。shell はロックを待たなくなる。
-- `/undo` / `/redo` コマンド、`restore_snapshot`、`SnapshotService` / `SnapshotStore`、ロックの持ち主を伝えるイベント（`WorkspaceLockHolder` / `WorkspaceWait`）と GUI の待ち表示を削除する。
+- `/undo` / `/redo` コマンド、`restore_snapshot`、`SnapshotService` と snapshot の履歴、`SnapshotStore` の run 単位の記録と復元、ロックの持ち主を伝えるイベント（`WorkspaceLockHolder` / `WorkspaceWait`）と GUI の待ち表示を削除する。
 - 巻き戻しは git で行う（commit、ブランチ、worktree の破棄）。
+- `SnapshotStore` のうち、ワークスペース全体の記録・復元・差分（`capture_all` / `restore_all` / `diff`）は benchmark の記録と再生（`crates/evorch/src/benchmark/`）が使っているので残す。
 
 ### 旧 PR delivery supervisor を削除する
 
 - goal から PR、Reviewer、merge 承認、closeout までを進める旧 supervisor（`crates/runtime/src/orchestration/`、isolated の Reviewer を起動する経路を含む）を削除する。汎用 goal は [ADR 0028](0028-thread-goals-and-completion-checks.md) の thread goals が担っている。
-- ゲート、Reviewer の結果契約、goal のキャンセルなど、ほかから参照されている部分は、実装時に依存を洗って、残すか thread goals 側へ移すかを決める。[ADR 0026](0026-durable-execution-substrate.md) の durable execution の語彙のうち、storage や GUI が共有しているものも同様に扱う。
+- `crates/runtime/src/orchestration/supervisor/` の中には、team task の durable な状態（`TaskProgressed` / `TaskCheckpoint`、stale の検出、予算の診断、task の受け付け）も入っている。これらは supervisor とは別の機能なので残し、supervisor の外へ移す。
+- Reviewer の `submit_review` / `ReviewResult` は旧 supervisor だけが使っているので、Reviewer の権限ごと削除する（thread goals は `submit_goal_review` を使う）。`max_review_rounds` は thread goals も使うので残す。
+- そのほか、ほかから参照されている部分は、実装時に依存を洗って、残すか thread goals 側へ移すかを決める。[ADR 0026](0026-durable-execution-substrate.md) の durable execution の語彙のうち、storage や GUI が共有しているものも同様に扱う。
 
 ## Consequences
 
@@ -50,7 +53,7 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 - evorch の中から、未 commit の編集を 1 手ずつ戻すことはできなくなる。
 - runtime と gui から、isolated、snapshot、旧 supervisor の分のコードとテストが減る。restore の契約（[ADR 0027](0027-restore-contract.md)）からも worktree の扱いが消える。
 - 許可ディレクトリ（[ADR 0032](0032-project-allowed-directories.md)）は、isolated の特例なしで、role の権限どおりに扱える。ほかのリポジトリで作業する場合も、エージェントがその許可ディレクトリの中に worktree を作ればよい。
-- 実装は 3 段に分ける。①ワークスペース snapshot、ロック、`/undo` / `/redo` の削除、②isolated workspace の削除、③旧 PR delivery supervisor の削除。①は単独で入れられ、効果がいちばん大きい。
+- 実装は 3 段に分ける。①ワークスペース snapshot、ロック、`/undo` / `/redo` の削除、②旧 PR delivery supervisor の削除、③isolated workspace の削除。①は単独で入れられ、効果がいちばん大きい。旧 supervisor は Reviewer を isolated で起動しているので、②を③より先に入れる。
 
 ## Open questions
 

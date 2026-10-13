@@ -57,11 +57,11 @@ shell には、呼び出しごとに sandbox を外してもらう経路がす�
 
 これを次のように改める。
 
-- scratch は root run（thread の最上位の run）ごとに 1 つとし、その下の子 run はすべて同じ scratch を使う。並列の run どうしで同じファイル名を使うと衝突するので、プロンプトでは一時ファイルに固有の名前を付けるよう案内する。
-- パスは thread から決まる固定のものにする。例: `/var/tmp/evorch-scratch-<uid>-<データディレクトリのハッシュ>/<root run の ID>/`。親ディレクトリは 0700 とする。パスが復元の前後で変わらないので、システムメッセージに載せても Stable Prefix が崩れない。
+- scratch は thread ごとに 1 つとし、その thread の root run と、その下の子 run はすべて同じ scratch を使う。キーには `bind_thread_root` が結んだ thread id を使い、thread に結ばれていない run は root run の ID を使う。復元やエスカレーションでは同じ thread に別の root run が結び直されるので、root run の ID をキーにすると途中でパスが変わってしまうためである。並列の run どうしで同じファイル名を使うと衝突するので、プロンプトでは一時ファイルに固有の名前を付けるよう案内する。
+- パスは thread から決まる固定のものにする。例: `/var/tmp/evorch-scratch-<uid>-<ownership root のハッシュ>/<thread id>/`（ownership root は [ADR 0024](0024-process-owner-claim.md) の registry の置き場所。`$XDG_STATE_HOME/evorch/threads`）。親ディレクトリは 0700 とする。パスが復元の前後で変わらないので、システムメッセージに載せても Stable Prefix が崩れない。
 - sandbox の中では、scratch をホストと同じパスでマウントし、`TMPDIR` をそのパスにする。`/tmp` を直接使うプログラムのために、`/tmp` も同じ scratch に bind する。`unsandboxed` に昇格した shell でも `TMPDIR` を同じパスにする。
 - ファイルツールの境界に、その thread の scratch を読み書き可として加える。shell とファイルツールが同じパスで同じファイルを見るので、パスの変換は要らない。
-- システムメッセージでは「一時ファイルは `$TMPDIR`（実際のパス）に置き、ファイルツールでもそのパスを使う。`/tmp` と `~` は shell とファイルツールで指す先が違う」と案内する。shell の `HOME` は、利用者の本物の home や資格情報を見せないため、これまでどおり scratch の中に置く。
+- システムメッセージでは、workspace note とは別の節で「一時ファイルは `$TMPDIR`（実際のパス）に置き、ファイルツールでもそのパスを使う。`/tmp` と `~` は shell とファイルツールで指す先が違う」と案内する。workspace note は復元のたびに書き換えられる（`update_workspace_system_message`）ので、そこには入れない。この案内を持たない既存の thread には、システムメッセージを変えずに次のターンで末尾へ追記する。shell の `HOME` は、利用者の本物の home や資格情報を見せないため、これまでどおり scratch の中に置く。
 - 中身の寿命は、その thread の owner プロセス（[ADR 0024](0024-process-owner-claim.md)）が持っている間だけとする。複数の evorch プロセスが同じデータディレクトリを使い、thread ごとに owner が分かれうるため、単位はプロセス全体ではなく thread とする。
   - owner が thread を手放すとき（プロセスの終了、安全な停止、handoff）に、その thread の scratch を削除する。
   - プロセスが thread の owner になったとき（起動後の復元や、クラッシュした owner からの claim）は、使い始める前にその thread の scratch を空にする。前の owner の一時ファイルを引き継がない。

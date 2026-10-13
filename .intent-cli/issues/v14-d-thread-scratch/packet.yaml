@@ -1,0 +1,67 @@
+implementation_issue_packet:
+  issue_title: "ADR 0033 ①: 一時領域を thread 単位の固定パスにし、shell とファイルツールで共有する"
+  issue_kind: feature
+  source_execution_unit: v14-d-thread-scratch
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/sandbox/ crates/runtime/ crates/tools/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0033 の前半。sandbox ごとにランダムに作っていた一時領域（scratch）を thread 単位の固定パスに改め、sandbox の中でもホストと同じパスでマウントして TMPDIR に設定する。中身の寿命を thread の owner（ADR 0024）に合わせ、システムメッセージで案内する"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0033（intents/evorch/decisions/0033-file-tool-path-boundary.md）の「一時領域（scratch）」節で方針合意済み"
+    - "scratch は BwrapSandbox::detect_with_program（crates/sandbox/src/bwrap.rs）が Scratch::new（crates/sandbox/src/scratch.rs）で作る。/var/tmp/evorch-scratch-<ランダム>/ を 0700 で作り、home/.cargo を作ってから keep する。Drop で有界キューの後始末スレッドに渡し、クラッシュ時の残りは OS に任せる"
+    - "build_argv は scratch を --bind で sandbox の /tmp にマウントする。wrap は HOME=/tmp/home、TMPDIR=/tmp、CARGO_HOME=/tmp/home/.cargo、RUSTUP_HOME=/tmp/home/.rustup を設定し、Cargo / rustup のキャッシュを /tmp/home 以下へ ro-bind する（append_build_cache_mounts）"
+    - "shared run は run ごとに sandbox を作り直す（crates/runtime/src/agent_loop.rs の WorkspaceMode::Shared 分岐で factory.build → configured_executor）。そのため scratch も run ごとに別で、親 run と子 run の /tmp は別物である"
+    - "unsandboxed に昇格した shell は sandbox::composition::unsandboxed() の ReviewedHostSandbox で動き、evorch のプロセス環境を継承する（inherit_env: true）。TMPDIR はホストのものになり、/tmp はホストの /tmp である"
+    - "ファイルツール（read / grep / write / edit）は本体プロセスで動き、パスを制限していないので、ホスト側のパスを渡せば scratch の中身をすでに読み書きできる。境界の導入は v14-e で行う"
+    - "ToolExecutionContext.thread_id は agent_loop のツール呼び出しでは None で渡されている。thread と root run の対応は AgentRuntime::bind_thread_root（crates/runtime/src/thread_goals.rs）が持ち、復元や escalation で同じ thread に別の root run が結び直されることがある。root run は run_root（crates/runtime/src/runtime/artifacts.rs）でたどれる"
+    - "ADR 0024 の owner は実装済み。OwnerHost（crates/runtime/src/ownership/host.rs）が start / claim / handoff / begin_quiesce / release_ready を持ち、OwnershipEvent（Claimed / Handoff / Quiescing / Released など）を bus に流す。GUI は app/ownership.rs の chat_permit で start / claim し、終了時に GuiStorageResources::drop（crates/gui/src/bin/evorch-gui.rs）で begin_quiesce → release_ready を呼ぶ。owner の生存確認は ownership::ipc::owner_may_be_live（unix socket の probe）で行う。ownership root は $XDG_STATE_HOME/evorch/threads（demo では一時ディレクトリ）"
+    - "システムメッセージの workspace note（base_context.rs の workspace_note、接頭辞 \"Current workspace (evorch): \"）は、復元時も含めて run の開始時に update_workspace_system_message が書き換える。作業中のルールの追記は tool_calls.rs で rules::after_successful_tools → context.push_user の経路を使う"
+    - "AGENTS.md の Cache correctness gate により、システムメッセージの変更は scripts/check-cache-contracts.sh の end-to-end シナリオ（crates/runtime/tests/cache_preservation_e2e.rs など）で送信済み prefix の維持を確かめる必要がある"
+    - "AGENTS.md の Compatibility policy により、内部の永続化形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/decisions/0024-process-owner-claim.md
+    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/features/tools-sandbox/overview.md
+  acceptance_criteria:
+    - "同じ thread の run（root run とその子 run）の shell が同じ一時領域を使い、親 run が $TMPDIR に置いたファイルを子 run の shell から読める。別の thread は別の領域を使う"
+    - "一時領域のパスは、ownership root から決まる親ディレクトリと thread の識別子（bind_thread_root で結ばれた thread id。結ばれていない root run は root run ID）だけで決まり、復元や root run の結び直しの前後で変わらない。親ディレクトリは 0700 で、所有者以外は入れない"
+    - "sandbox の中で一時領域がホストと同じパスでマウントされ、TMPDIR がそのパスになる。sandbox の /tmp も同じ領域を指す。unsandboxed に昇格した shell の TMPDIR も同じパスになる。HOME と Cargo / rustup のキャッシュのマウントはこれまでどおり一時領域の中に置かれ、ホストの home や資格情報は見えない"
+    - "新しく始まる run のシステムメッセージに、$TMPDIR の実際のパスと「/tmp と ~ は shell とファイルツールで指す先が違うので、一時ファイルは $TMPDIR の実パスで扱う」という案内が載る。この案内は workspace note とは別の節で、復元時に書き換えない。案内を持たない既存の thread を復元したときは、システムメッセージを変えずに次のターンで同じ案内を末尾へ追記する"
+    - "一時領域の中身は thread の owner が持っている間だけ残る。owner が thread を手放したとき（Released / Handoff）に削除し、プロセスが owner になったとき（start / claim による Claimed）は使い始める前に空にする。起動時に、生きている owner がいない thread の領域を削除する。ownership を使わない構成（テストなど）では、runtime の破棄時に削除する"
+    - "空にした状態で復元・claim した thread では、次のターンで「一時領域は空になった」と末尾へ追記し、送信済みの prefix は変わらない"
+    - "cache の end-to-end シナリオで、案内の追記と一時領域を空にした通知の追記の前後で以前の wire prefix が保たれ、追記後のターンでも新しい prefix が保たれる"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+intent_placement:
+  primary_intent: intents/evorch/decisions/0033-file-tool-path-boundary.md
+  supporting_intents:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0024-process-owner-claim.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0033 の「一時領域（scratch）は thread 単位で共有し、shell とファイルツールで同じパスにする」節の実装。v14-e のファイルツールの境界はこの一時領域を読み書き可として含むので、先に入れる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "thread id をキーにする点は ADR 0033 に反映済み。実装で別の判断が必要になった場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/harness-reliability.md
+    summary: "Sandbox /tmp の節を、thread 単位の固定パス、TMPDIR、owner に合わせた寿命の説明に書き換える"
+closeout_learning:
+  expected: "shell とファイルツール、親 run と子 run の間で、$TMPDIR を通して一時ファイルを受け渡せるようになる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

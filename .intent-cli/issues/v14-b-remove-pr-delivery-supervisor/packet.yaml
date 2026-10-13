@@ -1,0 +1,69 @@
+implementation_issue_packet:
+  issue_title: "ADR 0031 ②: 旧 PR delivery supervisor の削除"
+  issue_kind: feature
+  source_execution_unit: v14-b-remove-pr-delivery-supervisor
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/event-bus/ crates/storage/ crates/agents/ crates/config/ crates/gui/ docs/ intents/"
+  target_part: "goal から PR、CI、Reviewer、merge 承認、closeout までを進める旧 GoalSupervisor と、その PR delivery の経路（DeliveryPort、merge 承認、submit_review、finish の gate）を削除する。thread goals・thread todos・team task の durable 状態など、ほかから使われている部分は残すか supervisor の外へ移す"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0031（intents/evorch/decisions/0031-remove-isolated-workspaces.md）で方針合意済み。汎用 goal は ADR 0028 の thread goals が担う"
+    - "本番で新しい supervisor goal は作られない。SupervisorHandle::create_goal を呼ぶのはテストだけで、GUI の SubmitGoal は thread goals に入る（crates/gui/src/runtime_sink.rs の冒頭コメント）"
+    - "crates/gui/src/bin/evorch-gui.rs が GoalSupervisor::spawn に DeliveryPort（ShellDeliveryAdapter）と OrchestrationSettings を渡して起動し、起動時に永続化済みの goal を SupervisorHandle::adopt で引き継ぐ。runtime_sink.rs は DecideMerge / PauseGoal / ResumeGoal / CancelGoal を supervisor に転送する"
+    - "GoalSupervisor::spawn（crates/runtime/src/orchestration/supervisor.rs）が AgentRuntime::with_goal_gate で GoalGate を登録し、crates/runtime/src/meta/mod.rs の finish 処理が thread goal を持たない run の finish をその gate に通す"
+    - "submit_review meta op（crates/runtime/src/meta/registry.rs、specs.rs）、orchestration/reviewer_channel.rs、orchestration/review.rs の ReviewResult、AgentRuntime の reviewer_results は supervisor の review ループだけが使う。Reviewer role の capability に submit_review が入っている（crates/agents/src/role.rs）。thread goals のレビューは別の submit_goal_review を使う（crates/runtime/src/thread_goals/tools.rs）"
+    - "Reviewer を isolated で起動する経路が supervisor.rs と orchestration/prompts.rs にある（workspace_mode: WorkspaceMode::Isolated、workspace_branch）。supervisor/tasks.rs も task の再試行に workspace_branch を渡す"
+    - "OrchestratorEvent（crates/event-bus/src/orchestrator.rs）のうち ThreadGoalUpdated / ThreadTodoUpdated は thread_goals.rs / thread_todos.rs が、TaskProgressed / TaskCheckpoint は agent_loop/durable.rs / budget_tracker.rs が team task（RunConfig.team_task）の run について発行する。task の durable 状態は orchestration/ledger/durable.rs、supervisor/tasks.rs・stale.rs・task_admission.rs・budget.rs、storage/src/projection/durable.rs、GUI の model/durable_tasks/orchestrator.rs が扱う"
+    - "OrchestrationConfig（crates/config/src/types/orchestration.rs）の max_review_rounds は thread goals（event-bus thread_goal.rs、runtime thread_goals.rs、gui panes/agent/goal.rs）も使う。それ以外の項目は orchestration モジュールの中だけで使われる"
+    - "crates/gui/docs/workbench-panels.md の「Goals and merge approval」節が DeliveryPort と merge 承認を説明している"
+    - "AGENTS.md の Compatibility policy により、イベントと goal ledger の保存形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0031-remove-isolated-workspaces.md
+    - intents/evorch/decisions/0028-thread-goals-and-completion-checks.md
+    - intents/evorch/decisions/0026-durable-execution-substrate.md
+    - intents/evorch/features/orchestration/overview.md
+  acceptance_criteria:
+    - "GoalSupervisor / SupervisorHandle、DeliveryPort / ShellDeliveryAdapter / FixtureDeliveryAdapter、merge 承認（MergeApprovals、MergeBinding、ApprovedMerge）、closeout、continuation、stall の nudge、PR の gate（GoalGate と finish の gate）が削除され、evorch-gui はそれらを組み立てない"
+    - "submit_review meta op、reviewer_channel、ReviewResult、AgentRuntime の reviewer_results が削除され、Reviewer role の capability から submit_review が外れている"
+    - "GUI の DecideMerge / PauseGoal / ResumeGoal / CancelGoal と merge 承認の通知が削除されている。/goal はこれまでどおり thread goals に入る"
+    - "thread goals、thread todos、team task の durable 状態（TaskProgressed / TaskCheckpoint とその保存・復元・GUI 表示）は、supervisor を削除したあともこれまでどおり動く。supervisor の中にあったこれらの処理は、残す場所を決めて supervisor の外へ移す"
+    - "PR delivery だけで使っていた OrchestratorEvent の variant、GoalStage・CiState・GateEvidence などの型、storage の projection、OrchestrationConfig の項目が削除されている。max_review_rounds は thread goals が使うので残す"
+    - "旧 supervisor の goal イベントが残る DB で起動しても GUI が起動できる"
+    - "supervisor だけを検証していたテスト（goal_supervisor_*、merge_approval、closeout_sequence、shell_delivery_adapter、orchestrator_loop_e2e、review_loop など）は削除し、setup に supervisor を使っていただけのテストは supervisor なしで動く形に直す"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0031-remove-isolated-workspaces.md
+  supporting_intents:
+    - intents/evorch/decisions/0028-thread-goals-and-completion-checks.md
+    - intents/evorch/decisions/0026-durable-execution-substrate.md
+    - intents/evorch/features/orchestration/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0031 の「旧 PR delivery supervisor を削除する」節の実装。supervisor は Reviewer を isolated で起動しているので、isolated workspace の削除（v14-c）より先に入れる"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0026-durable-execution-substrate.md
+    summary: "durable execution の処理を supervisor の外へ移した場合は、ADR 0026 に置き場所の変更を追記する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - crates/gui/docs/workbench-panels.md
+    summary: "「Goals and merge approval」節を、/goal が thread goals に入ることだけの説明に改める"
+closeout_learning:
+  expected: "使われていない PR delivery の経路と、その設定・イベント・テストが runtime と GUI から消える"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

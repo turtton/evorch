@@ -1,0 +1,70 @@
+implementation_issue_packet:
+  issue_title: "ADR 0033 ②: ファイルツールのパス境界と shell と同じ gate による昇格"
+  issue_kind: feature
+  source_execution_unit: v14-e-file-tool-boundary
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/sandbox/ crates/tools/ crates/runtime/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0033 の本体。read / grep / write / edit が昇格なしで触れる範囲を shell の sandbox から見える範囲（ホスト側のパス）にそろえ、境界の外は sandbox_access: \"unsandboxed\" と justification を付けて shell と同じ審査の gate を通す"
+  dependencies:
+    - v14-d-thread-scratch
+  technical_baseline:
+    - "ADR 0033（intents/evorch/decisions/0033-file-tool-path-boundary.md）で方針合意済み"
+    - "read / grep / write / edit は ToolExecutor（crates/tools/src/executor.rs）から本体プロセスで実行される。execute_inner は scoped_args（相対パスを default_cwd で絶対パス化）→ schema::validate_args → validate_workspace_args → policy.classify / resolve の順に進む。policy の判定はツール単位で、パスは見ていない（crates/sandbox/src/policy.rs）"
+    - "validate_workspace_args（crates/tools/src/executor/workspace_boundary.rs）は benchmark でだけ有効な opt-in の境界で、単一の root について絶対パス必須・.. 禁止・存在する最も深い祖先の canonicalize（existing_ancestor_is_inside）・通常ファイル / ディレクトリ以外の拒否を行う。read は path / file / file_path / filename / target、write / edit / grep は path、shell / git_diff は cwd を対象にする"
+    - "grep は rg を --no-config --hidden --glob !.git で起動し、--follow は付けない（crates/tools/src/tools/grep.rs）。rg は引数に渡したパス以外のシンボリックリンクをたどらない"
+    - "shell は sandbox_access（isolated / network / unsandboxed、既定 isolated）と justification を持つ（crates/tools/src/tools/shell.rs）。ShellEscalationGate（crates/tools/src/tools/shell_escalation.rs）は shell 専用の trait で、shell ツールに set_shell_escalation で gate と unsandboxed の Sandbox を渡す"
+    - "本番の gate は SandboxEscalationGate（crates/runtime/src/escalation_review/gate.rs）で、sandbox.escalation_approval（auto / user / off）と escalate_to_user_on_deny に従う。auto は QuickModelReviewer（crates/runtime/src/escalation_review.rs）が審査し、web_fetch には専用の review_web_fetch がある。user は ApprovalGate.request_with_input(\"shell\", <run>:<call>, {command, justification, kind}) で利用者に聞く。gate は AgentRuntime::configure_shell_escalation（crates/runtime/src/sandbox_settings.rs）が run の executor ごとに設定する"
+    - "shell の sandbox の可視範囲は、BwrapConfig::new の DEFAULT_RO_BINDS（/usr /bin /lib /lib64 /etc /nix）、with_production_sandbox が足す output_root（crates/tools/src/output.rs。/var/tmp/evorch-output-<uid> または EVORCH_OUTPUT_DIR）、run ごとの factory.build に渡す IsolatedMounts（workspace_root / ro_binds / rw_binds）、append_build_cache_mounts の Cargo（registry/index・cache・src、git/db・checkouts、bin）と rustup（toolchains、settings.toml）のキャッシュ、v14-d の一時領域からなる。キャッシュは sandbox の中では /tmp/home 以下に見えるが、ホスト側のパスは CARGO_HOME / RUSTUP_HOME（なければ ~/.cargo、~/.rustup）である"
+    - "benchmark では filter_benchmark_tools（crates/runtime/src/agent_loop/benchmark.rs）が shell のスキーマを command / args / cwd / timeout_ms に絞り、ツールのスキーマと順番をチェックポイントと比べる"
+    - "ツールのスキーマは Stable Prefix の一部である。ツール定義の差し替えは evorch の更新でだけ起き、セッションの途中では起きない"
+    - "ADR 0031 の isolated workspace の削除（v14-c）で IsolatedMounts は名前や形が変わりうる。ADR 0032 の許可ディレクトリ（v14-f）は、この unit が作る境界の一覧に後から加わる"
+  intent_references:
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/features/tools-sandbox/overview.md
+  acceptance_criteria:
+    - "境界の一覧（読み書き可の領域と読み取り専用の領域）を 1 か所で組み立て、bwrap のマウントとファイルツールの判定の両方がその一覧を使う。読み書き可はプロジェクトルートとその thread の一時領域（v14-d）、読み取り専用は DEFAULT_RO_BINDS、output_root、Cargo / rustup のキャッシュのホスト側のパスである。許可ディレクトリ（v14-f）を後から足せる形になっている"
+    - "read / grep は境界の中（読み取り専用を含む）なら昇格なしで動き、write / edit は読み書き可の領域の中だけ昇格なしで動く。それ以外は sandbox_access を省略した場合や \"isolated\" の場合に拒否され、拒否のメッセージで sandbox_access: \"unsandboxed\" と justification による昇格と、許可ディレクトリとしての登録の両方を案内する"
+    - "read / grep / write / edit が sandbox_access（\"isolated\" / \"unsandboxed\"、既定 \"isolated\"）と justification を受け取る。\"unsandboxed\" は空でない justification を必須とし、shell と同じ審査の gate を 1 回の呼び出しごとに通る。sandbox.escalation_approval の auto / user / off と escalate_to_user_on_deny が shell と同じように効き、off では境界の外へのアクセスがすべて拒否される"
+    - "審査役（auto の QuickModelReviewer と user の承認要求）に、ツール名、canonicalize した対象のパス、justification が渡る。write / edit の場合は、長さを制限した差分（または書き込む内容の先頭）も渡る。GUI の承認表示が新しい種類の要求で壊れない"
+    - "昇格で外れるのはパスの境界だけで、role の権限は外れない。role に見えていないツールは昇格でも使えず、読み取り専用の role が昇格で書き込めるようにはならない"
+    - "パスは正規化してから判定する。.. を含むパスや、シンボリックリンクで境界の外を指すパス（存在する最も深い祖先を canonicalize して判定）は境界の外として扱う。通常ファイルとディレクトリ以外は拒否する。grep は境界の中から始めても、シンボリックリンクをたどって境界の外の内容を返さない"
+    - "benchmark では従来どおり固定した workspace の境界を使い、ファイルツールのスキーマから sandbox_access と justification を取り除き、昇格を認めない"
+    - "ツールのスキーマとシステムプロンプトのテスト（スキーマのコンパイル検証、prompt の end-to-end テストなど）が新しい引数に追従する。sandbox_access の \"isolated\" は sandbox の中で実行するという意味で、ADR 0031 で廃止する isolated workspace とは関係がないことを、引数の説明かコードのコメントで明示する"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0033-file-tool-path-boundary.md
+  supporting_intents:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0033 の「境界は shell の sandbox から見える範囲にそろえる」「境界の外は、shell と同じ gate で 1 回ごとに昇格する」「パスの判定」節の実装。一時領域を境界に含めるため v14-d の後に入れ、許可ディレクトリ（v14-f）はこの境界の一覧に加わる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0033 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/harness-reliability.md
+    summary: "ファイルツールの境界の一覧、昇格の引数と審査の流れ、sandbox_access の \"isolated\" の意味を記載する"
+closeout_learning:
+  expected: "ファイルツールからプロジェクトと一時領域の外へ黙って読み書きできなくなり、shell とファイルツールで触れる範囲と外に出る手順がそろう"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

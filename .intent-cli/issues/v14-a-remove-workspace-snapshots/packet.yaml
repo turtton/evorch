@@ -1,0 +1,65 @@
+implementation_issue_packet:
+  issue_title: "ADR 0031 ①: ワークスペース snapshot・ロック・/undo /redo の廃止"
+  issue_kind: feature
+  source_execution_unit: v14-a-remove-workspace-snapshots
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/tools/ crates/event-bus/ crates/storage/ crates/gui/ docs/ intents/"
+  target_part: "書き込み系ツール（write / edit / shell）の呼び出しごとにプロジェクトルート全体のロックを取って snapshot を撮る処理と、それを使う /undo /redo を削除し、shell のロック待ちをなくす。benchmark が使う SnapshotStore は残す"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0031（intents/evorch/decisions/0031-remove-isolated-workspaces.md）で方針合意済み"
+    - "crates/runtime/src/agent_loop/snapshots.rs の snapshot_before_tool が、fs_write 権限を持つツール（write / edit / shell。shell は Permissions::process で fs_write: true）の前に SnapshotService::lock_observed でロックを取り、checkpoint して SnapshotEvent を発行する"
+    - "crates/runtime/src/agent_loop/tool_calls.rs がそのガードを保持し、shell の場合は ToolExecutor::retain_shell_call_guard（crates/tools/src/executor.rs、tool.rs、tools/shell.rs）でジョブが刈り取られるまでロックを持ち続ける。そのため裏で動く shell ジョブがあると、同じルートの別の run の write / edit / shell が待たされる"
+    - "crates/runtime/src/snapshot/service.rs の SnapshotService / WorkspaceSnapshots / WorkspaceSnapshotGuard はルートごとの tokio Mutex と、待ち状況を LifecycleEvent::WorkspaceWaitChanged（event-bus の WorkspaceWait / WorkspaceLockHolder）で通知する仕組みを持つ"
+    - "crates/runtime/src/snapshot/history.rs の SnapshotHistory が run ごとの undo / redo 履歴を持ち、AgentRuntime::restore_snapshot（crates/runtime/src/runtime.rs）が WorkbenchCommand::RestoreSnapshot（crates/gui/src/model/commands.rs、runtime_sink.rs）から呼ばれる。GUI の /undo /redo は crates/gui/src/model/composer.rs と app/composer.rs で定義される"
+    - "SnapshotStore（crates/runtime/src/snapshot.rs）の diff と、snapshot/benchmark.rs の capture_all / restore_all は、benchmark の記録・再生（crates/evorch/src/benchmark/record_run.rs、replay_run.rs、storage.rs）が SnapshotService とは独立に使っている。SnapshotStore::capture / restore は SnapshotHistory と SnapshotService だけが使う"
+    - "WorkspaceWaitChanged は event-bus の fencing.rs と otel/span/lifecycle.rs、GUI の model/telemetry.rs・model/workspace_wait.rs・panes/sidebar/threads.rs が扱う。SnapshotEvent は storage/src/entity.rs と GUI の各 match（frame.rs、notifications.rs、transcript_registry.rs ほか）で網羅されている"
+    - "crates/gui/src/bin/evorch-gui.rs が起動時に SnapshotService を一時ディレクトリで作り、AgentRuntime::with_snapshots で渡している"
+    - "AGENTS.md の Compatibility policy により、イベントの保存形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0031-remove-isolated-workspaces.md
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "write / edit / shell の呼び出しがワークスペースのロックを取らず、snapshot も撮らない。裏で動く shell ジョブがあっても、同じプロジェクトの別の run の write / edit / shell が待たされない"
+    - "SnapshotService、WorkspaceSnapshots、WorkspaceSnapshotGuard、SnapshotHistory、AgentRuntime::with_snapshots / restore_snapshot、ToolExecutor::retain_shell_call_guard とその Tool trait のメソッドが削除されている"
+    - "SnapshotEvent、LifecycleEvent::WorkspaceWaitChanged、WorkspaceWait、WorkspaceLockHolder が event-bus から削除され、storage・otel・GUI の扱いも削除されている"
+    - "GUI の /undo /redo コマンド、WorkbenchCommand::RestoreSnapshot、LoopEvent::SnapshotRestored、サイドバーのワークスペース待ち表示が削除され、補完候補と /help に出ない"
+    - "SnapshotStore の capture_all / restore_all と benchmark の記録・再生がこれまでどおり動く。使われなくなった SnapshotStore の capture / restore は削除する（diff は benchmark が使うので残す）"
+    - "削除した機能だけを検証していたテスト（runtime の snapshots.rs、shell_jobs_integration/workspace_wait.rs、event-bus の workspace_wait.rs など）は削除し、ほかの検証も兼ねるテストは snapshot に依存しない形に直す"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0031-remove-isolated-workspaces.md
+  supporting_intents:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0031 の「ワークスペース snapshot、ロック、/undo /redo を廃止する」節の実装。3 段のうち単独で入れられ、shell のロック待ちをなくす効果がいちばん大きい"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0031 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/harness-validation.md
+      - docs/harness-runtime-improvements.md
+    summary: "shell ジョブの刈り取りと snapshot のロック解放の順序についての記述を削除し、ワークスペースのロックがないことを反映する"
+closeout_learning:
+  expected: "並列の run が互いの cargo test や gh pr checks を待たなくなる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

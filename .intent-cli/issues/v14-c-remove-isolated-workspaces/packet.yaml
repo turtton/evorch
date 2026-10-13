@@ -1,0 +1,67 @@
+implementation_issue_packet:
+  issue_title: "ADR 0031 ③: isolated workspace の削除"
+  issue_kind: feature
+  source_execution_unit: v14-c-remove-isolated-workspaces
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/workspace-ui/ crates/gui/ crates/event-bus/ docs/ intents/"
+  target_part: "runtime が委譲した run ごとに git worktree を作る isolated workspace mode を削除し、すべての run がプロジェクトルートを共有するようにする。shared run も使っている sandbox の factory と mount の構造は残す"
+  dependencies:
+    - v14-b-remove-pr-delivery-supervisor
+  technical_baseline:
+    - "ADR 0031（intents/evorch/decisions/0031-remove-isolated-workspaces.md）で方針合意済み"
+    - "WorkspaceMode（Shared / Isolated）と MergeMode は crates/runtime/src/run.rs にあり、RunConfig.workspace_mode / workspace_branch / merge_mode と WorkspaceInspection（mode / branch / worktree_path / active_root / merge_mode）が持つ。既定は Shared"
+    - "isolated になるのは delegate の workspace_mode 引数（crates/runtime/src/meta/delegation.rs、meta/specs.rs、specs/contracts.rs）で指定したときと、旧 supervisor が Reviewer を起動するとき（v14-b で削除）だけである"
+    - "crates/runtime/src/workspace.rs の Project / WorktreeManager / OwnedWorktree が <root>/.evorch/worktrees/<run> と branch evorch/task/<run> を作る。agent_loop.rs の setup_isolated_workspace / attach_adopted_workspace / cleanup_worktree、agent_loop/finalization.rs、escalation/handoff.rs（エスカレーションでの worktree の引き渡し）、restore.rs と restore/escalation.rs（復元記述子の workspace_mode と branch）、runtime/cancellation.rs、runtime/chat_restore.rs（retained_worktree）が扱う"
+    - "crates/runtime/src/network.rs の isolated_mounts が worktree 用の git common dir の ro/rw の mount を作る。一方、SandboxFactory と IsolatedMounts（crates/runtime/src/runtime.rs）、BwrapFactory、compose.rs の WorkspaceSeam の factory は、shared run の sandbox の組み立て（agent_loop.rs）にも使われている"
+    - "AgentRuntime::set_project_root（runtime.rs）がプロジェクトを切り替えるたびに WorktreeManager を作り直す。isolated 以外の用途はない"
+    - "isolated を前提にした表示・入力: crates/runtime/src/base_context/preview.rs、GUI の model/context_inspector.rs と panes/context_inspector/controls.rs の Isolated worktree チェックボックス、app/frame.rs の diff ルートの選択、model/project_bridge.rs、panes/sidebar/threads.rs と workspace-ui/src/thread.rs の branch / worktree_path、model/demo.rs と bin/evorch-gui.rs の demo の isolated worker、workspace-ui/src/project.rs の Membership::RuntimeWorktree"
+    - "benchmark は shared だけを受け付け（crates/runtime/src/benchmark.rs）、agent_loop/benchmark.rs が delegate の schema から workspace_mode を外している"
+    - "shell の引数 sandbox_access: \"isolated\"（crates/tools/src/tools/shell.rs）は sandbox の中で実行するという意味で、isolated workspace とは関係がない（ADR 0031、ADR 0033）"
+    - "AGENTS.md の Compatibility policy により、run スナップショットと復元記述子の保存形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0031-remove-isolated-workspaces.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/tools-sandbox/overview.md
+  acceptance_criteria:
+    - "WorkspaceMode、MergeMode、RunConfig の workspace_mode / workspace_branch / merge_mode、delegate の workspace_mode / workspace_branch 引数が削除され、すべての run がプロジェクトルートで動く"
+    - "workspace.rs の WorktreeManager / OwnedWorktree / Project、isolated_mounts、エスカレーションでの worktree の引き渡し、復元記述子の worktree 情報、cancellation と chat restore での worktree の後始末が削除されている"
+    - "shared run の sandbox の組み立てに使う SandboxFactory と mount の構造体は残り、名前から isolated が外れている（例: IsolatedMounts → WorkspaceMounts）。後続の ADR 0032 / 0033 がここに ro / rw の mount を加えられる"
+    - "WorkspaceInspection は active_root だけを持ち、GUI の diff・サイドバー・context inspector・demo から isolated の表示と入力（Isolated worktree チェックボックス、branch / worktree_path の表示）が消えている。workspace-ui の Membership::RuntimeWorktree も削除されている"
+    - "shell の sandbox_access: \"isolated\" と、それを扱う shell の昇格の経路は変更されていない"
+    - "isolated だけを検証していたテスト（workspace_runtime.rs、workspace_cleanup.rs、workspace_sandbox_e2e.rs のうち worktree 部分など）は削除し、ほかの検証も兼ねるテストは shared の前提に直す"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0031-remove-isolated-workspaces.md
+  supporting_intents:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0027-restore-contract.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0031 の「isolated workspace mode を廃止する」節の実装。Reviewer を isolated で起動する旧 supervisor を v14-b で消したあとに入れる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0031 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "docs/ に isolated workspace の説明はない。docs/harness-runtime-improvements.md の sandbox_access \"isolated\" の表は shell の話なので変更しない"
+closeout_learning:
+  expected: "runtime と GUI から isolated workspace の経路が消え、worktree での作業はエージェントの運用だけになる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

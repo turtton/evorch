@@ -1,0 +1,66 @@
+implementation_issue_packet:
+  issue_title: "ADR 0032 ②: 許可ディレクトリの一覧をシステムメッセージで固定し、途中の変更を末尾に追記する"
+  issue_kind: feature
+  source_execution_unit: v14-g-allowed-directories-prompt
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/gui/ docs/ intents/"
+  target_part: "run の開始時に、その時点の許可ディレクトリの一覧（パスとアクセス権）をシステムメッセージの一節として載せ、以後は書き換えない。一覧が変わったら次のモデル呼び出しの前に差分を末尾へ追記し、最後に伝えた一覧を復元用の run スナップショットに保存し、compaction の後は現在の一覧を履歴に書き直す。prompt cache の契約を保つ"
+  dependencies:
+    - v14-f-allowed-directories-mounts
+  technical_baseline:
+    - "ADR 0032（intents/evorch/decisions/0032-project-allowed-directories.md）で方針合意済み。v14-f で runtime がプロジェクト単位の trust 済み許可ディレクトリの一覧と、run ごとのアクセス権を持っている"
+    - "初期のシステムメッセージは crates/runtime/src/base_context.rs の compose_system_sections が唯一の組み立て元で、agent_loop.rs の push_initial_system_message が join して push_system する。preview（base_context/preview.rs）も同じ sections を出すので、inspector と実際の送信内容はずれない。ContextSectionKind が節の種類と順番を決める"
+    - "workspace note は agent_loop.rs の update_workspace_system_message が、run の開始時と復元時に既存の System メッセージの中で書き換える。許可ディレクトリの節はこれと違い、復元時にも書き換えない"
+    - "復元された run（is_restored）は push_initial_system_message を通らず、保存済みの履歴をそのまま使う"
+    - "途中で状態を末尾へ追記する前例が 2 つある。crates/runtime/src/thread_todos.rs の append_todo_context は todo_context_pending が立っているとき、完全なツールラウンドの後・次のプロバイダ入力の直前にだけ push_user し、既存の履歴を編集しない（agent_loop.rs の 2 か所から呼ばれる）。agent_loop/tool_calls.rs は rules::after_successful_tools の結果を push_user する"
+    - "compaction は crates/runtime/src/compaction/mod.rs で apply_checkpoint した直後に todo_context_pending を立て、次の完全なリクエスト境界で最新の procedure を書き直す。ADR 0030 のモデル切り替えの境界も同じ compaction の経路を通る"
+    - "復元用の設定は crates/runtime/src/restore.rs の RunRestoreDescriptor（serde(deny_unknown_fields)、追加フィールドは serde(default)）に保存される"
+    - "cache の契約は AGENTS.md の Cache correctness gate と scripts/check-cache-contracts.sh（crates/runtime/tests/cache_preservation_e2e.rs などの contract テスト）が強制する。procedure_compaction_reuses_new_prefix など、途中の状態追記と compaction 後の prefix 再利用を確かめる前例がある"
+    - "AGENTS.md の Compatibility policy により、run スナップショットの保存形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0032-project-allowed-directories.md
+    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - intents/evorch/features/context-engine/overview.md
+  acceptance_criteria:
+    - "run の開始時に、その run のプロジェクトの trust 済み許可ディレクトリの一覧（パスとアクセス権）が、システムメッセージの一節（ContextSectionKind の新しい種類）として載る。一覧が空なら節を出さない。base context の preview にも同じ節が出る"
+    - "委譲で始まる子 run は、開始時点の一覧を自分のシステムメッセージに持つ"
+    - "一覧が変わった後、その run の次のプロバイダ入力の直前（完全なツールラウンドの後）に、前回伝えた一覧との差分（追加・削除・アクセス権の変更）が 1 つのユーザー側メッセージとして末尾に追記される。変更がなければ何も追記しない"
+    - "その run のシステムメッセージは、一覧の変更でも復元でも書き換わらない"
+    - "最後に伝えた一覧が復元用の run スナップショットに保存され、復元後は保存した一覧と現在の一覧の差分だけが追記される"
+    - "compaction（モデル切り替えの境界を含む）の後は、現在の一覧が履歴に書き直され、それが新しい「最後に伝えた一覧」になる。システムメッセージとツールは変わらない"
+    - "cache の contract テストに、途中で許可ディレクトリを追加しても以前の wire prefix が保たれること、差分を追記した後のターンでその prefix が保たれること、復元と compaction の後も同様であることのシナリオが加わる"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0032-project-allowed-directories.md
+  supporting_intents:
+    - intents/evorch/features/context-engine/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0032 の「システムプロンプトはスレッド開始時の一覧で固定する」「途中の変更は次のターンで末尾に追記する」節の実装。cache の契約に関わる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0032 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/
+    summary: "許可ディレクトリがシステムメッセージと途中の追記でどう伝わるかを記載する"
+closeout_learning:
+  expected: "エージェントが許可ディレクトリを知ったうえで作業でき、スレッドの途中で追加しても cache が失われない"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

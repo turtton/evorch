@@ -1,0 +1,68 @@
+implementation_issue_packet:
+  issue_title: "ADR 0032 ①: trust 済み許可ディレクトリの runtime への受け渡しと sandbox へのマウント"
+  issue_kind: feature
+  source_execution_unit: v14-f-allowed-directories-mounts
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/workspace-ui/ crates/gui/ crates/runtime/ crates/sandbox/ crates/tools/ docs/ intents/"
+  target_part: "ADR 0032 の基盤。GUI がプロジェクトの trust 済み許可ディレクトリを runtime に宣言し、runtime がプロジェクト単位で保持して、shell の bwrap マウントとファイルツールの境界（v14-e の共通一覧）に role の権限どおり（読み書き可 / 読み取り専用）に加える。未 trust のものは runtime に渡さない"
+  dependencies:
+    - v14-c-remove-isolated-workspaces
+    - v14-e-file-tool-boundary
+  technical_baseline:
+    - "ADR 0032（intents/evorch/decisions/0032-project-allowed-directories.md）で方針合意済み。isolated の特例は ADR 0031 で廃止するため設けない（v14-c が前提）"
+    - "許可ディレクトリは crates/workspace-ui/src/project.rs の ProjectRecord.allowed_directories（AllowedDirectory { path, trust: TrustState }）にある。追加時に validate_allowed_directory が canonical 化・プロジェクトルート配下の拒否・重複拒否を行う"
+    - "GUI から runtime に渡るのはプロジェクトルート（crates/gui/src/app/actions.rs の sync_shell_cwd → runtime_sink.rs の set_default_cwd → AgentRuntime::set_project_root）とプロジェクト単位の trust（sync_project_trust → set_project_trust）だけである。許可ディレクトリは runtime に届いていない"
+    - "AgentRuntime::set_project_trust（crates/runtime/src/runtime/project.rs）は Shared.project_trust にルートをキーにして保存し、ProjectContext のキャッシュを捨てる。走行中の run は開始時の context を使い続ける"
+    - "crates/gui/src/model/project_bridge.rs の run_membership はテストからしか呼ばれていない"
+    - "shared run の sandbox は run 開始時に agent_loop.rs で factory.build(&policy, &IsolatedMounts { workspace_root, ro_binds, rw_binds }) により作られる。BwrapFactory::build（crates/runtime/src/network.rs）は policy を使わず、BwrapConfig の ro_binds / rw_binds は sandbox インスタンスの生成時に固定される。bwrap の argv はコマンドごとに build_argv で組み立てるが、マウント一覧そのものは動的に変わらない"
+    - "書き込みツール（write / edit / shell）を持つ role は Worker だけである（crates/agents/src/role.rs）。git_diff は read 系の role にもあり、sandbox の中で動く"
+    - "v14-e で、bwrap のマウントとファイルツールの判定が共有する境界の一覧が 1 か所に作られる（ADR 0033）"
+    - "AGENTS.md の Compatibility policy により、GUI の永続化形式は後方互換を保たなくてよい"
+  intent_references:
+    - intents/evorch/decisions/0032-project-allowed-directories.md
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/decisions/0031-remove-isolated-workspaces.md
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "GUI がプロジェクトごとに TrustState::Approved の許可ディレクトリの一覧を runtime に宣言し、Unapproved のものは宣言に含まれない。Trust を押す・ディレクトリを追加/削除する・trust を外すたびに宣言が更新される"
+    - "runtime はプロジェクトのルートをキーに一覧を保持し、run はその run のプロジェクトの一覧を使う。別プロジェクトの許可ディレクトリは見えない"
+    - "書き込みツールを持つ role の run では許可ディレクトリが読み書き可で、それ以外の role では読み取り専用でマウントされる。shell からの書き込みが読み取り専用の場合は失敗する"
+    - "許可ディレクトリは v14-e の共通の境界一覧に入り、read / grep / write / edit も同じ範囲・同じアクセス権で昇格なしに扱える"
+    - "一覧の変更は、走行中の run の次のコマンド・次のツール呼び出しから効く。削除や trust の取り消しの後は、その run の shell からもファイルツールからも見えない（昇格が要る）"
+    - "存在しないパスや canonical でないパスは宣言時に拒否されるか、マウントから除かれて run の開始を妨げない"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0032-project-allowed-directories.md
+  supporting_intents:
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/features/tools-sandbox/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0032 の「対象は trust 済みの許可ディレクトリだけ」「アクセス権は role に従う」節の実装。プロンプトへの記載（v14-g）と指示ファイルの読み込み（v14-h）の前提になる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0032 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/
+    summary: "許可ディレクトリの trust と、role ごとのアクセス権（読み書き可 / 読み取り専用）を記載する"
+closeout_learning:
+  expected: "trust した許可ディレクトリを、エージェントが shell からもファイルツールからも同じアクセス権で使えるようになる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
