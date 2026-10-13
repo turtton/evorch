@@ -4,6 +4,7 @@
 //! 実装する。スキーマと権限の宣言は最終契約である。
 
 pub mod edit;
+pub mod file_access;
 mod file_diff;
 pub mod git_diff;
 pub mod grep;
@@ -75,6 +76,42 @@ mod tests {
         for (name, schema) in schemas {
             jsonschema::validator_for(&schema)
                 .unwrap_or_else(|error| panic!("{name} のスキーマのコンパイルに失敗: {error}"));
+        }
+    }
+
+    // Given: the four direct file tools / When: reading their schemas and validating args
+    // Then: each accepts isolated / unsandboxed with a justification, and nothing else
+    #[test]
+    fn file_tool_schemas_accept_sandbox_access_and_justification() {
+        let schemas = [
+            (Read.name(), Read.schema()),
+            (Edit.name(), Edit.schema()),
+            (Write.name(), Write.schema()),
+            (Grep.name(), Grep.schema()),
+        ];
+        for (name, schema) in schemas {
+            let access = &schema["properties"]["sandbox_access"];
+            assert_eq!(
+                access["enum"],
+                serde_json::json!(["isolated", "unsandboxed"]),
+                "{name}"
+            );
+            assert_eq!(access["default"], "isolated", "{name}");
+            let description = access["description"].as_str().unwrap();
+            assert!(description.contains("not an isolated workspace"), "{name}");
+            assert!(schema["properties"]["justification"].is_object(), "{name}");
+            let validator = jsonschema::validator_for(&schema).unwrap();
+            let mut args = serde_json::json!({
+                "path": "/x", "content": "c", "old_string": "a", "new_string": "b",
+                "pattern": "p", "sandbox_access": "unsandboxed", "justification": "why",
+            });
+            let properties = schema["properties"].as_object().unwrap();
+            args.as_object_mut()
+                .unwrap()
+                .retain(|key, _| properties.contains_key(key));
+            assert!(validator.is_valid(&args), "{name}");
+            args["sandbox_access"] = "network".into();
+            assert!(!validator.is_valid(&args), "{name} has no network mode");
         }
     }
 }

@@ -1,6 +1,9 @@
 //! 呼び出し単位の隔離解除を審査する境界。
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use sandbox::Sandbox;
 
@@ -19,9 +22,35 @@ pub enum EscalationDecision {
     Deny { reason: String },
 }
 
+/// One direct file-tool call that needs paths outside the sandbox boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAccessRequest {
+    pub tool: String,
+    /// Canonicalized where the path exists, so links cannot hide the target.
+    pub paths: Vec<PathBuf>,
+    pub write: bool,
+    pub justification: String,
+    /// Bounded content (write) or replacement (edit) shown to the reviewer.
+    pub change: Option<String>,
+}
+
 /// 内部エラーも `Deny` に変換する fail-closed な審査インターフェース。
+///
+/// Shared by shell sandbox escalation and file-tool boundary escalation, so
+/// both follow the same `sandbox.escalation_approval` settings.
 #[async_trait::async_trait]
 pub trait ShellEscalationGate: Send + Sync {
+    /// Gates without a file-access review deny every request.
+    async fn decide_file_access(
+        &self,
+        _ctx: &ToolExecutionContext,
+        _request: &FileAccessRequest,
+    ) -> EscalationDecision {
+        EscalationDecision::Deny {
+            reason: "file access escalation is unavailable".into(),
+        }
+    }
+
     async fn decide(
         &self,
         ctx: &ToolExecutionContext,

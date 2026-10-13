@@ -475,6 +475,19 @@ async fn local_replay_preserves_input_and_settings_before_real_tool_writes() {
     ] {
         assert!(!properties.contains_key(hidden));
     }
+    let file_tools = checkpoint
+        .tools
+        .iter()
+        .filter(|tool| matches!(tool.name.as_str(), "read" | "grep" | "write" | "edit"))
+        .collect::<Vec<_>>();
+    assert!(!file_tools.is_empty(), "{:?}", checkpoint.tools);
+    for tool in file_tools {
+        let properties = tool.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("path"), "{}", tool.name);
+        for hidden in ["sandbox_access", "justification"] {
+            assert!(!properties.contains_key(hidden), "{}: {hidden}", tool.name);
+        }
+    }
     let root_tools = requests.lock().unwrap()[0].tools.clone();
     assert!(!root_tools.iter().any(|tool| tool.name == "git_diff"));
     for hidden in [

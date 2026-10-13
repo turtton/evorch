@@ -1,7 +1,11 @@
 use std::path::{Component, Path, PathBuf};
 
+use sandbox::{BoundaryRegion, PathAccess, SandboxBoundary};
+
 use super::ToolExecutor;
-use crate::{Permissions, ToolError, ToolResult};
+use crate::tools::file_access::{JUSTIFICATION, SANDBOX_ACCESS};
+use crate::tools::shell_escalation::{EscalationDecision, FileAccessRequest};
+use crate::{Permissions, ToolError, ToolExecutionContext, ToolResult};
 
 impl ToolExecutor {
     /// Constrain direct filesystem tools to an existing workspace directory.
@@ -125,6 +129,211 @@ impl ToolExecutor {
         }
         Ok(())
     }
+}
+
+impl ToolExecutor {
+    /// Confine read / grep / write / edit to the paths `boundary` mounts for the
+    /// shell (ADR 0033). Paths outside need a reviewed `sandbox_access: "unsandboxed"`.
+    pub fn set_file_boundary(&self, boundary: &SandboxBoundary) {
+        *self
+            .file_boundary
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(boundary.regions());
+    }
+
+    /// Runs before the tool, so a denial never reads or returns file content.
+    /// Only the path boundary is lifted here; role capabilities and the
+    /// approval policy are enforced independently of this check.
+    pub(super) async fn enforce_file_boundary(
+        &self,
+        ctx: &ToolExecutionContext,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<(), String> {
+        let keys = file_path_keys(name);
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let unsandboxed =
+            args.get(SANDBOX_ACCESS).and_then(serde_json::Value::as_str) == Some("unsandboxed");
+        if self
+            .workspace_boundary
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return if unsandboxed {
+                Err("benchmark file tools cannot leave the recorded workspace".into())
+            } else {
+                Ok(())
+            };
+        }
+        let Some(regions) = self
+            .file_boundary
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(());
+        };
+        let write = matches!(name, "write" | "edit");
+        let mut targets = Vec::new();
+        let mut violation = None;
+        for path in keys
+            .iter()
+            .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        {
+            let path = Path::new(path);
+            if std::fs::metadata(path)
+                .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
+            {
+                return Err(format!(
+                    "{} is not a regular file or directory",
+                    path.display()
+                ));
+            }
+            let location = canonical_location(path);
+            let placement = place(&regions, location.as_deref());
+            let allowed = match placement {
+                Some(PathAccess::ReadWrite) => true,
+                Some(PathAccess::ReadOnly) => !write,
+                None => false,
+            };
+            let target = location.unwrap_or_else(|| path.to_path_buf());
+            if !allowed && violation.is_none() {
+                violation = Some((target.clone(), placement.is_some()));
+            }
+            targets.push(target);
+        }
+        if !unsandboxed {
+            return match violation {
+                None => Ok(()),
+                Some((path, read_only)) => Err(boundary_denial(&path, read_only)),
+            };
+        }
+        let justification = args
+            .get(JUSTIFICATION)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if justification.trim().is_empty() {
+            return Err("file access escalation denied: justification is required".into());
+        }
+        let gate = self
+            .file_escalation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(gate) = gate else {
+            return Err("file access escalation denied: no escalation gate configured".into());
+        };
+        let request = FileAccessRequest {
+            tool: name.to_owned(),
+            paths: targets,
+            write,
+            justification: justification.to_owned(),
+            change: requested_change(name, args),
+        };
+        match gate.decide_file_access(ctx, &request).await {
+            EscalationDecision::Approve => Ok(()),
+            EscalationDecision::Deny { reason } if reason.starts_with("file access escalation") => {
+                Err(reason)
+            }
+            EscalationDecision::Deny { reason } => {
+                Err(format!("file access escalation denied: {reason}"))
+            }
+        }
+    }
+}
+
+fn file_path_keys(name: &str) -> &'static [&'static str] {
+    match name {
+        "read" => &["path", "file", "file_path", "filename", "target"],
+        "write" | "edit" | "grep" => &["path"],
+        _ => &[],
+    }
+}
+
+/// The canonical host path, or `None` when it cannot be placed safely: a
+/// relative path, any `..`, a dangling link, or an unresolvable ancestor.
+fn canonical_location(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    let mut missing = Vec::new();
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(mut resolved) => {
+                resolved.extend(missing.iter().rev());
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(ancestor).is_ok() {
+                    return None;
+                }
+                missing.push(ancestor.file_name()?.to_owned());
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Like bwrap, the last mounted region covering a path decides its access.
+fn place(regions: &[BoundaryRegion], location: Option<&Path>) -> Option<PathAccess> {
+    let location = location?;
+    regions
+        .iter()
+        .rev()
+        .find(|region| {
+            region
+                .path
+                .canonicalize()
+                .is_ok_and(|root| location.starts_with(root))
+        })
+        .map(|region| region.access)
+}
+
+fn boundary_denial(path: &Path, read_only: bool) -> String {
+    let problem = if read_only {
+        format!(
+            "{} is read-only for file tools inside the sandbox boundary",
+            path.display()
+        )
+    } else {
+        format!(
+            "{} is outside the sandbox boundary (the project root and this thread's $TMPDIR, plus read-only system, tool output and Cargo/rustup cache paths)",
+            path.display()
+        )
+    };
+    format!(
+        "{problem}. To access it once, retry with sandbox_access: \"unsandboxed\" and a justification for review. If the location is needed repeatedly, ask the user to register it as an allowed directory of the project."
+    )
+}
+
+const MAX_CHANGE_BYTES: usize = 4000;
+
+fn requested_change(name: &str, args: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str);
+    match name {
+        "write" => text("content").map(|content| bounded(content, MAX_CHANGE_BYTES)),
+        "edit" => Some(format!(
+            "old_string:\n{}\nnew_string:\n{}",
+            bounded(text("old_string")?, MAX_CHANGE_BYTES / 2),
+            bounded(text("new_string")?, MAX_CHANGE_BYTES / 2)
+        )),
+        _ => None,
+    }
+}
+
+fn bounded(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[{} more bytes]", &text[..end], text.len() - end)
 }
 
 fn existing_ancestor_is_inside(path: &Path, root: &Path) -> Result<bool, ToolError> {

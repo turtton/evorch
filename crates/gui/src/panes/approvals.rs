@@ -5,8 +5,9 @@ use crate::theme::tokens::{FONT_MONO, SP_2, palette};
 
 use super::requests::{RequestAction, request_card};
 
-/// Always render the complete input. Commands get a literal, selectable code
-/// block (including newlines), with all other arguments retained below it.
+/// Always render the complete input. Commands (or a file access's paths) get a
+/// literal, selectable code block (including newlines), with all other
+/// arguments retained below it.
 pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestAction> {
     let mut action = None;
     ui.push_id(("approval", &item.call_id), |ui| {
@@ -36,12 +37,12 @@ pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestActio
             .on_hover_text(&item.call_id);
             match item.input.as_ref() {
                 Some(input) => {
-                    if let Some(command) = input.get("command").and_then(serde_json::Value::as_str)
-                    {
+                    let primary = primary_key(input);
+                    if let Some(command) = input.get(primary).and_then(serde_json::Value::as_str) {
                         full_input(ui, command);
                         let mut rest = input.clone();
                         if let Some(args) = rest.as_object_mut() {
-                            args.remove("command");
+                            args.remove(primary);
                             if !args.is_empty() {
                                 full_input(
                                     ui,
@@ -73,6 +74,15 @@ pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestActio
         });
     });
     action
+}
+
+/// File-tool escalations lead with their target path, as shell ones do with the command.
+fn primary_key(input: &serde_json::Value) -> &'static str {
+    if input.get("kind").and_then(serde_json::Value::as_str) == Some("file_access") {
+        "path"
+    } else {
+        "command"
+    }
 }
 
 fn full_input(ui: &mut Ui, text: &str) {

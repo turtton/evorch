@@ -24,7 +24,7 @@ impl Tool for Read {
     }
 
     fn schema(&self) -> serde_json::Value {
-        serde_json::json!({
+        super::file_access::with_access_arguments(serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -40,7 +40,7 @@ impl Tool for Read {
                 "byte_offset": { "type": "integer", "minimum": 0, "description": "Bytes to skip within the selected line (default 0). Use the continuation value returned for a long line; must be a UTF-8 boundary." }
             },
             "additionalProperties": false
-        })
+        }))
     }
 
     fn permissions(&self) -> Permissions {
