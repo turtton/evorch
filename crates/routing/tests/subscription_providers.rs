@@ -81,3 +81,89 @@ fn corrupt_stored_claude_credentials_are_rejected_without_echoing_the_secret() {
     let first_lock = adapter.refresh_lock();
     assert!(Arc::ptr_eq(&first_lock, &second.refresh_lock()));
 }
+
+#[tokio::test]
+async fn cursor_api_key_profile_reexchanges_stored_key_before_native_model_discovery() {
+    use providers::provider::cursor::{CursorTokenBundle, CursorTokenStore};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn CredentialStore> = Arc::new(FileCredentialStore::open(dir.path()).unwrap());
+    let tokens =
+        routing::factory::CredentialStoreCursorTokenStore::new(store.clone(), "cursor".into());
+    tokens
+        .save(&CursorTokenBundle {
+            access_token: "expired-access-secret".into(),
+            refresh_token: String::new(),
+            api_key: Some("cursor-key-secret".into()),
+            expires_at: 0,
+            account_id: None,
+            email: None,
+        })
+        .unwrap();
+    Mock::given(path("/auth/exchange_user_api_key"))
+        .and(method("POST"))
+        .and(header("authorization", "Bearer cursor-key-secret"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"accessToken":"exchanged-access-secret"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/agent.v1.AgentService/GetUsableModels"))
+        .and(header("authorization", "Bearer exchanged-access-secret"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(vec![10, 9, 10, 7, b'm', b'o', b'd', b'e', b'l', b'-', b'1']),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut config = Config::default();
+    config.providers.insert(
+        "cursor".into(),
+        ProviderProfileConfig {
+            provider_type: ProviderTypeConfig::Cursor,
+            api_protocol: ApiProtocolConfig::CursorAgent,
+            base_url: server.uri(),
+            credential: CredentialRefConfig::Keyring {
+                service: "evorch".into(),
+                account: "cursor".into(),
+            },
+            models: vec![config::ModelEntryConfig::enabled("model-1")],
+            default_model: "model-1".into(),
+            ..Default::default()
+        },
+    );
+    let composed = compose_providers(
+        &config,
+        ComposeDeps {
+            credential_store: store,
+            env: Arc::new(MapEnv::default()),
+            event_bus: None,
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions {
+                auth_base_url_override: Some(server.uri()),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let provider = composed.provider("cursor").unwrap();
+    assert!(provider.auth.api_key.is_empty());
+    let models = provider
+        .client
+        .list_models(&provider.auth)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(models.contains(&"model-1".to_owned()));
+    let saved = tokens.load().unwrap().unwrap();
+    assert_eq!(saved.api_key.as_deref(), Some("cursor-key-secret"));
+    assert_eq!(saved.access_token, "exchanged-access-secret");
+    assert!(!format!("{composed:?} {saved:?}").contains("cursor-key-secret"));
+}

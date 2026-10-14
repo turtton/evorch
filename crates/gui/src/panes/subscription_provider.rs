@@ -2,7 +2,9 @@ use super::provider_settings::ProviderSettingsAction;
 use crate::{
     model::{
         model_metadata::MetadataSources,
-        subscription_provider::{SubscriptionAuthState, SubscriptionEditorModel, unix_now},
+        subscription_provider::{
+            SubscriptionAuthMethod, SubscriptionAuthState, SubscriptionEditorModel, unix_now,
+        },
     },
     theme::{text::muted, tokens::palette},
 };
@@ -27,12 +29,42 @@ pub fn subscription_body(
         ui.text_edit_singleline(&mut editor.models.base_url)
             .labelled_by(label.id);
     });
+    let cursor = editor.models.provider_type == config::ProviderTypeConfig::Cursor;
+    if cursor {
+        ui.add_enabled_ui(!busy, |ui| {
+            let mut method = editor.auth_method;
+            ui.horizontal(|ui| {
+                ui.label("Authentication");
+                ui.selectable_value(
+                    &mut method,
+                    SubscriptionAuthMethod::Browser,
+                    "Browser sign-in",
+                );
+                ui.selectable_value(&mut method, SubscriptionAuthMethod::ApiKey, "API key");
+            });
+            editor.set_auth_method(method);
+            if editor.auth_method == SubscriptionAuthMethod::ApiKey {
+                ui.hyperlink_to(
+                    "Create a Cursor user API key",
+                    "https://cursor.com/dashboard/api",
+                );
+                let label = ui.label("Cursor API key");
+                ui.add(egui::TextEdit::singleline(&mut editor.api_key_input).password(true))
+                    .labelled_by(label.id);
+                ui.label(muted(
+                    "Stored in the credential store, never in config.toml. Uses your Cursor plan.",
+                ));
+            }
+        });
+    }
+    let api_key = cursor && editor.auth_method == SubscriptionAuthMethod::ApiKey;
     match &editor.auth {
         SubscriptionAuthState::SignedOut => {
-            ui.label(muted(format!(
-                "Sign in to {} in your browser",
-                editor.service()
-            )));
+            ui.label(muted(if api_key {
+                "Authenticate with a Cursor user API key".into()
+            } else {
+                format!("Sign in to {} in your browser", editor.service())
+            }));
         }
         SubscriptionAuthState::Waiting { manual_code } => {
             ui.spinner();
@@ -71,7 +103,7 @@ pub fn subscription_body(
             ui.label(muted(format!("Signed in · token expires {expiry}")));
             if *expires_at <= unix_now() {
                 ui.label(muted(
-                    "Token expired; it will refresh automatically when used.",
+                    "Token expired; it will renew automatically when used.",
                 ));
             }
         }
@@ -83,11 +115,21 @@ pub fn subscription_body(
         if ui.button("Cancel sign-in").clicked() {
             action = Some(ProviderSettingsAction::CancelSubscriptionLogin);
         }
-    } else if ui
-        .button(format!("Sign in to {}", editor.service()))
-        .clicked()
-    {
-        action = Some(ProviderSettingsAction::StartSubscriptionLogin);
+    } else {
+        let label = if api_key {
+            "Authenticate with API key".into()
+        } else {
+            format!("Sign in to {}", editor.service())
+        };
+        if ui
+            .add_enabled(
+                !api_key || !editor.api_key_input.trim().is_empty(),
+                egui::Button::new(label),
+            )
+            .clicked()
+        {
+            action = Some(ProviderSettingsAction::StartSubscriptionLogin);
+        }
     }
     ui.add_enabled_ui(!busy, |ui| {
         if super::provider_models::provider_models(ui, &mut editor.models, sources) {

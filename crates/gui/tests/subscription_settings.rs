@@ -236,3 +236,77 @@ fn renaming_existing_subscription_preserves_stored_account_reference() {
         assert_eq!(editor.to_input().account, "new-profile");
     }
 }
+
+#[test]
+fn cursor_api_key_ui_masks_input_dispatches_login_and_disables_controls_while_busy() {
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use gui::model::subscription_provider::{SubscriptionAuthMethod, SubscriptionAuthState};
+    use gui::panes::provider_settings::ProviderSettingsAction;
+    let mut settings = ProviderSettingsModel::default();
+    settings.add(ProviderKind::Cursor);
+    let mut harness = settings_harness(settings);
+    harness.run_steps(8);
+    assert!(harness.query_by_label("Sign in to Cursor").is_some());
+    harness.get_by_label("API key").click();
+    harness.run_steps(4);
+    assert_eq!(
+        match harness.state().0.editor.as_ref().unwrap() {
+            ProfileEditor::Subscription(editor) => editor.auth_method,
+            _ => panic!("subscription editor"),
+        },
+        SubscriptionAuthMethod::ApiKey
+    );
+    assert!(
+        harness
+            .get_by_label("Authenticate with API key")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness
+        .state_mut()
+        .0
+        .subscription_mut()
+        .unwrap()
+        .api_key_input = "cursor-key-secret".into();
+    harness.run_steps(4);
+    assert!(harness.query_by_label("cursor-key-secret").is_none());
+    assert!(
+        harness
+            .get_by_label("Cursor API key")
+            .accesskit_node()
+            .value()
+            .is_none_or(|value| !value.contains("cursor-key-secret"))
+    );
+    harness.get_by_label("Authenticate with API key").click();
+    harness.run_steps(4);
+    assert_eq!(
+        harness.state().1,
+        Some(ProviderSettingsAction::StartSubscriptionLogin)
+    );
+    harness.state_mut().0.subscription_mut().unwrap().auth = SubscriptionAuthState::Exchanging;
+    harness.run_steps(4);
+    for label in ["Save", "Browser sign-in", "API key", "Cursor API key"] {
+        assert!(
+            harness.get_by_label(label).accesskit_node().is_disabled(),
+            "{label}"
+        );
+    }
+    harness.get_by_label("Cancel sign-in").click();
+    harness.run_steps(4);
+    assert_eq!(
+        harness.state().1,
+        Some(ProviderSettingsAction::CancelSubscriptionLogin)
+    );
+}
+
+#[test]
+fn claude_subscription_does_not_offer_cursor_api_key_authentication() {
+    use egui_kittest::kittest::Queryable;
+    let mut settings = ProviderSettingsModel::default();
+    settings.add(ProviderKind::ClaudeSubscription);
+    let mut harness = settings_harness(settings);
+    harness.run_steps(8);
+    assert!(harness.query_by_label("API key").is_none());
+    assert!(harness.query_by_label("Cursor API key").is_none());
+    assert!(harness.query_by_label("Sign in to Claude").is_some());
+}

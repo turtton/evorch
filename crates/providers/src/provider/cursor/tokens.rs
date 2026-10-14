@@ -10,6 +10,9 @@ use std::{
 pub struct CursorTokenBundle {
     pub access_token: String,
     pub refresh_token: String,
+    /// User API key used to re-exchange short-lived access tokens instead of OAuth refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// UNIX seconds. The refresh skew is applied only by `needs_refresh`.
     pub expires_at: u64,
     #[serde(default)]

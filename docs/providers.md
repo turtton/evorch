@@ -1,14 +1,27 @@
 # Claude and Cursor providers
 
 Open **Provider settings** to add a Claude API, Claude subscription, or Cursor
-profile. API keys can be read from an environment variable or saved in the
-credential store. Subscription profiles use browser sign-in. Use **Refresh
+profile. Claude API keys can be read from an environment variable or saved in
+the credential store. Subscription profiles support browser sign-in; Cursor also
+supports a user API key. Use **Refresh
 models** after signing in, select the models to enable, choose a default, and
 save the profile. Routing settings can then select the profile.
 
 Claude subscription sign-in uses a local callback. If the browser cannot reach
 this machine, paste the final redirect URL or authorization code into the login
-dialog. Cursor sign-in waits for the browser authorization to finish.
+dialog. Cursor browser sign-in waits for the browser authorization to finish.
+
+For Cursor token authentication, choose **API key**, create a **user API key** at
+[Cursor Dashboard → API Keys](https://cursor.com/dashboard/api), paste it into
+**Cursor API key**, and click **Authenticate with API key**. This uses your Cursor
+plan, not an OpenAI or Anthropic API account. evorch exchanges the key for a native
+agent access token and re-exchanges it automatically when that token expires.
+The key and access token are kept together in the credential store; the masked
+input is cleared when login starts, is cancelled, or the editor closes. Existing
+browser credentials continue using OAuth refresh. Model discovery, chat, and
+quota requests use the exchanged access token, never the API key directly.
+See Cursor's [CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+and [documented token exchange](https://cursor.com/docs/rollouts#send-deployment-events).
 
 The footer displays each subscription's remaining quota, with reset information
 on hover. Claude shows the five-hour and weekly windows advertised by the
@@ -36,8 +49,9 @@ do not gain retries; recovery remains in the shared `send_streaming` path.
 
 ## Configuration
 
-Only credential references are written to TOML; OAuth token families are stored
-in the credential store and refreshed automatically.
+Only credential references are written to TOML; OAuth token families and Cursor
+API key credentials are stored in the credential store and renewed automatically.
+Cursor uses the same configuration below for either authentication method.
 
 ```toml
 version = 3

@@ -263,9 +263,31 @@ async fn handle(mut socket: TcpStream, state: Arc<ServerState>) {
 
 #[tokio::test]
 async fn cursor_cache_prefix_survives_tool_handoff_and_later_user_turn() {
+    assert_cursor_cache_prefix(false).await;
+    assert_cursor_cache_prefix(true).await;
+}
+
+async fn assert_cursor_cache_prefix(api_key: bool) {
     let harness = Harness::start().await;
     let store = Arc::new(InMemoryCursorTokenStore::new());
-    store.save(&token()).unwrap();
+    let mut bundle = token();
+    if api_key {
+        let server = MockServer::start().await;
+        Mock::given(path("/exchange"))
+            .and(header("authorization", "Bearer cursor-key-secret"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"accessToken":bundle.access_token})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        bundle = oauth(&server)
+            .exchange_api_key("cursor-key-secret")
+            .await
+            .unwrap();
+    }
+    store.save(&bundle).unwrap();
     let client = CursorClient::new(
         CursorConfig {
             base_url: harness.url.clone(),

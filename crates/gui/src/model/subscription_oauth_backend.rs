@@ -105,16 +105,24 @@ pub(super) async fn cursor_login(
     account: String,
     events: &mpsc::Sender<LoginEvent>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+    api_key: Option<sandbox::Secret>,
+    config: CursorOAuthConfig,
 ) -> Result<u64, &'static str> {
-    let client = CursorOAuthClient::new(CursorOAuthConfig::default())
-        .map_err(|_| "Could not initialize Cursor login")?;
-    let request = client.begin().map_err(|_| "Could not start Cursor login")?;
-    events
-        .send(LoginEvent::Prompt(request.authorization_url.clone(), false))
-        .map_err(|_| "Login cancelled")?;
-    let bundle = tokio::select! {
-        result = client.complete(&request) => result.map_err(|_| "Cursor authorization failed; retry login")?,
-        _ = commands.recv() => return Err("Login cancelled"),
+    let client = CursorOAuthClient::new(config).map_err(|_| "Could not initialize Cursor login")?;
+    let bundle = if let Some(api_key) = api_key {
+        tokio::select! {
+            result = client.exchange_api_key(api_key.expose()) => result.map_err(|_| "Cursor API key authentication failed; check the key and retry")?,
+            _ = commands.recv() => return Err("Login cancelled"),
+        }
+    } else {
+        let request = client.begin().map_err(|_| "Could not start Cursor login")?;
+        events
+            .send(LoginEvent::Prompt(request.authorization_url.clone(), false))
+            .map_err(|_| "Login cancelled")?;
+        tokio::select! {
+            result = client.complete(&request) => result.map_err(|_| "Cursor authorization failed; retry login")?,
+            _ = commands.recv() => return Err("Login cancelled"),
+        }
     };
     let tokens = routing::factory::CredentialStoreCursorTokenStore::new(store, account);
     let lock = tokens.refresh_lock();

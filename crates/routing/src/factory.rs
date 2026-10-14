@@ -109,7 +109,7 @@ impl ClaudeTokenStore for CredentialStoreClaudeTokenStore {
     }
 }
 
-/// Native Cursor OAuth storage adapter.
+/// Native Cursor browser and API key credential storage adapter.
 pub struct CredentialStoreCursorTokenStore {
     store: Arc<dyn CredentialStore>,
     key: String,
@@ -233,7 +233,7 @@ fn build_cursor(
     }
     let CredentialRef::Keyring { account, .. } = &profile.credential else {
         return Err(RoutingError::InvalidProfile {
-            reason: "Cursor OAuth requires a keyring credential reference".into(),
+            reason: "Cursor requires a keyring credential reference".into(),
         });
     };
     let config = CursorConfig {
@@ -255,6 +255,7 @@ fn build_cursor(
     if let Some(base) = &options.auth_base_url_override {
         let oauth = providers::provider::cursor::CursorOAuthConfig {
             token_url: format!("{}/oauth/token", base.trim_end_matches('/')),
+            api_key_url: format!("{}/auth/exchange_user_api_key", base.trim_end_matches('/')),
             ..Default::default()
         };
         client = client.with_oauth_config(oauth).map_err(fail)?;
