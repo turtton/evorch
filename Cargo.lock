@@ -2465,6 +2465,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wiremock",
  "workspace-ui",
 ]
 

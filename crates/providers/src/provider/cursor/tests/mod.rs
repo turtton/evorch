@@ -25,6 +25,7 @@ fn token() -> CursorTokenBundle {
             URL_SAFE_NO_PAD.encode(br#"{"exp":9999999999,"sub":"auth0|user_1"}"#)
         ),
         refresh_token: "refresh-secret".into(),
+        api_key: None,
         expires_at: 9_999_999_999,
         account_id: Some("user_1".into()),
         email: Some("user@example.test".into()),
@@ -35,6 +36,7 @@ fn oauth(server: &MockServer) -> CursorOAuthClient {
         login_url: format!("{}/login", server.uri()),
         poll_url: format!("{}/poll", server.uri()),
         token_url: format!("{}/token", server.uri()),
+        api_key_url: format!("{}/exchange", server.uri()),
         profile_url: format!("{}/profile", server.uri()),
     })
     .unwrap()

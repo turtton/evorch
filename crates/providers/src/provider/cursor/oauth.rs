@@ -12,6 +12,7 @@ pub struct CursorOAuthConfig {
     pub login_url: String,
     pub poll_url: String,
     pub token_url: String,
+    pub api_key_url: String,
     pub profile_url: String,
 }
 impl Default for CursorOAuthConfig {
@@ -20,6 +21,7 @@ impl Default for CursorOAuthConfig {
             login_url: "https://cursor.com/loginDeepControl".into(),
             poll_url: "https://api2.cursor.sh/auth/poll".into(),
             token_url: "https://api2.cursor.sh/oauth/token".into(),
+            api_key_url: "https://api2.cursor.sh/auth/exchange_user_api_key".into(),
             profile_url: "https://cursor.com/api/auth/me".into(),
         }
     }
@@ -46,6 +48,7 @@ impl CursorOAuthClient {
             &config.login_url,
             &config.poll_url,
             &config.token_url,
+            &config.api_key_url,
             &config.profile_url,
         ] {
             super::validate_endpoint(url)?;
@@ -134,10 +137,40 @@ impl CursorOAuthClient {
         }
         Err(auth_error("Cursor browser login timed out"))
     }
+    /// Exchange a dashboard user API key for the native agent access token.
+    pub async fn exchange_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<CursorTokenBundle, ProviderError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(auth_error("Enter a Cursor user API key"));
+        }
+        let response = self
+            .http
+            .post(&self.config.api_key_url)
+            .bearer_auth(api_key)
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|error| map_request_error(error.without_url()))?;
+        let payload = auth_json(response).await?;
+        let access = nonempty(&payload, "accessToken")
+            .ok_or_else(|| auth_error("Cursor API key exchange returned no access token"))?;
+        let mut bundle = bundle(access.into(), String::new());
+        bundle.api_key = Some(api_key.into());
+        Ok(bundle)
+    }
     pub async fn refresh(
         &self,
         previous: &CursorTokenBundle,
     ) -> Result<CursorTokenBundle, ProviderError> {
+        if let Some(api_key) = &previous.api_key {
+            let mut renewed = self.exchange_api_key(api_key).await?;
+            renewed.account_id = renewed.account_id.or_else(|| previous.account_id.clone());
+            renewed.email = previous.email.clone();
+            return Ok(renewed);
+        }
         let response = self.http.post(&self.config.token_url).json(&json!({"grant_type":"refresh_token", "client_id":CURSOR_CLIENT_ID, "refresh_token":previous.refresh_token}))
             .send().await.map_err(|e| map_request_error(e.without_url()))?;
         let payload = auth_json(response).await?;
@@ -225,6 +258,7 @@ fn bundle(access_token: String, refresh_token: String) -> CursorTokenBundle {
         account_id: account_id(&access_token),
         access_token,
         refresh_token,
+        api_key: None,
         expires_at,
         email: None,
     }

@@ -60,6 +60,7 @@ workspace-ui = { path = "../workspace-ui" }
 notify-rust = "4"
 
 [dev-dependencies]
+wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 tools = { path = "../tools" }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

@@ -101,3 +101,160 @@ async fn independent_clients_share_refresh_rotation_lock() {
     assert_eq!(a.unwrap().refresh_token, "rotated");
     assert_eq!(b.unwrap().refresh_token, "rotated");
 }
+
+#[tokio::test]
+async fn api_key_exchange_uses_bearer_header_and_never_treats_key_as_refresh_token() {
+    let server = MockServer::start().await;
+    Mock::given(path("/exchange"))
+        .and(method("POST"))
+        .and(header("authorization", "Bearer cursor-key-secret"))
+        .and(wiremock::matchers::body_json(json!({})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"accessToken": token().access_token})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let bundle = oauth(&server)
+        .exchange_api_key("  cursor-key-secret\n")
+        .await
+        .unwrap();
+    assert_eq!(bundle.access_token, token().access_token);
+    assert_eq!(bundle.account_id.as_deref(), Some("user_1"));
+    assert_eq!(bundle.expires_at, token().expires_at);
+    assert_eq!(bundle.api_key.as_deref(), Some("cursor-key-secret"));
+    assert!(bundle.refresh_token.is_empty());
+    assert!(!format!("{bundle:?}").contains("cursor-key-secret"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn api_key_exchange_rejects_empty_keys_and_redacts_failed_or_malformed_responses() {
+    let server = MockServer::start().await;
+    let client = oauth(&server);
+    assert!(client.exchange_api_key(" \n").await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    for response in [
+        ResponseTemplate::new(401).set_body_string("cursor-key-secret"),
+        ResponseTemplate::new(403).set_body_json(json!({"error":"cursor-key-secret"})),
+        ResponseTemplate::new(200).set_body_string("cursor-key-secret"),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"accessToken":"  ","error":"cursor-key-secret"})),
+    ] {
+        server.reset().await;
+        Mock::given(path("/exchange"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let error = client
+            .exchange_api_key("cursor-key-secret")
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("cursor-key-secret"));
+    }
+    assert!(
+        CursorOAuthClient::new(CursorOAuthConfig {
+            api_key_url: "https://cursor.example/exchange?key=secret".into(),
+            ..Default::default()
+        })
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn api_key_clients_share_reexchange_and_quota_uses_renewed_access_token() {
+    let server = MockServer::start().await;
+    let mut expired = token();
+    expired.expires_at = 0;
+    expired.refresh_token.clear();
+    expired.api_key = Some("cursor-key-secret".into());
+    let store = Arc::new(InMemoryCursorTokenStore::new());
+    store.save(&expired).unwrap();
+    Mock::given(path("/exchange"))
+        .and(header("authorization", "Bearer cursor-key-secret"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"accessToken":token().access_token})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = CursorOAuthConfig {
+        api_key_url: format!("{}/exchange", server.uri()),
+        ..Default::default()
+    };
+    let a = CursorClient::new(CursorConfig::default(), store.clone())
+        .unwrap()
+        .with_oauth_config(config.clone())
+        .unwrap();
+    let b = CursorClient::new(CursorConfig::default(), store.clone())
+        .unwrap()
+        .with_oauth_config(config)
+        .unwrap();
+    let (a, b) = tokio::join!(a.access_token(), b.access_token());
+    for renewed in [a.unwrap(), b.unwrap()] {
+        assert_eq!(renewed.api_key, expired.api_key);
+        assert_eq!(renewed.email, expired.email);
+        assert_eq!(renewed.expires_at, token().expires_at);
+        assert!(renewed.refresh_token.is_empty());
+    }
+    let mut expired = store.load().unwrap().unwrap();
+    expired.expires_at = 0;
+    store.save(&expired).unwrap();
+    server.reset().await;
+    Mock::given(path("/exchange"))
+        .and(header("authorization", "Bearer cursor-key-secret"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"accessToken":token().access_token})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/auth/usage"))
+        .and(header(
+            "authorization",
+            format!("Bearer {}", token().access_token),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"requests":{"numRequests":4,"maxRequestUsage":10}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let snapshot = CursorQuotaClient::new(CursorQuotaConfig {
+        base_url: server.uri(),
+        ..Default::default()
+    })
+    .unwrap()
+    .fetch_for_store(store.as_ref(), &oauth(&server))
+    .await
+    .unwrap();
+    assert_eq!(snapshot.windows[0].used, Some(4.0));
+    assert_eq!(store.load().unwrap().unwrap().api_key, expired.api_key);
+}
+
+#[tokio::test]
+async fn rejected_api_key_renewal_preserves_the_stored_credential_family() {
+    let server = MockServer::start().await;
+    let mut expired = token();
+    expired.expires_at = 0;
+    expired.api_key = Some("cursor-key-secret".into());
+    let store = Arc::new(InMemoryCursorTokenStore::new());
+    store.save(&expired).unwrap();
+    Mock::given(path("/exchange"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("cursor-key-secret"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = CursorClient::new(CursorConfig::default(), store.clone())
+        .unwrap()
+        .with_oauth_config(CursorOAuthConfig {
+            api_key_url: format!("{}/exchange", server.uri()),
+            ..Default::default()
+        })
+        .unwrap();
+    let error = client.access_token().await.unwrap_err();
+    assert_eq!(error.status(), Some(401));
+    assert!(!error.to_string().contains("cursor-key-secret"));
+    assert_eq!(store.load().unwrap().unwrap(), expired);
+}

@@ -12,6 +12,13 @@ use std::{
 #[path = "subscription_oauth_backend.rs"]
 mod oauth;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubscriptionAuthMethod {
+    #[default]
+    Browser,
+    ApiKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscriptionAuthState {
     SignedOut,
@@ -34,6 +41,8 @@ pub struct SubscriptionEditorModel {
     pub models: OpenAiEditorModel,
     pub account: String,
     pub auth: SubscriptionAuthState,
+    pub auth_method: SubscriptionAuthMethod,
+    pub api_key_input: String,
     pub code_input: String,
     pub authorize_url: Option<String>,
     loaded_account: Option<String>,
@@ -91,6 +100,8 @@ impl SubscriptionEditorModel {
                 ..Default::default()
             },
             auth: SubscriptionAuthState::SignedOut,
+            auth_method: SubscriptionAuthMethod::Browser,
+            api_key_input: String::new(),
             code_input: String::new(),
             authorize_url: None,
             loaded_account: None,
@@ -134,6 +145,12 @@ impl SubscriptionEditorModel {
             "Claude"
         }
     }
+    pub fn set_auth_method(&mut self, method: SubscriptionAuthMethod) {
+        if !self.busy() && self.auth_method != method {
+            self.api_key_input.clear();
+            self.auth_method = method;
+        }
+    }
     pub fn busy(&self) -> bool {
         matches!(
             self.auth,
@@ -170,7 +187,16 @@ impl SubscriptionEditorModel {
         let loaded = if self.models.provider_type == config::ProviderTypeConfig::Cursor {
             routing::factory::CredentialStoreCursorTokenStore::new(store, self.account.clone())
                 .load()
-                .map(|b| b.map(|b| b.expires_at))
+                .map(|bundle| {
+                    bundle.map(|bundle| {
+                        self.auth_method = if bundle.api_key.is_some() {
+                            SubscriptionAuthMethod::ApiKey
+                        } else {
+                            SubscriptionAuthMethod::Browser
+                        };
+                        bundle.expires_at
+                    })
+                })
         } else {
             routing::factory::CredentialStoreClaudeTokenStore::new(store, self.account.clone())
                 .load()
@@ -188,7 +214,19 @@ impl SubscriptionEditorModel {
         if self.busy() {
             return;
         }
+        let cursor = self.models.provider_type == config::ProviderTypeConfig::Cursor;
+        let api_key = if cursor && self.auth_method == SubscriptionAuthMethod::ApiKey {
+            let input = std::mem::take(&mut self.api_key_input);
+            if input.trim().is_empty() {
+                self.auth = SubscriptionAuthState::Failed("Enter a Cursor user API key");
+                return;
+            }
+            Some(sandbox::Secret::from(input))
+        } else {
+            None
+        };
         let Some(store) = store else {
+            self.api_key_input.clear();
             self.auth = SubscriptionAuthState::Failed("Credential store unavailable");
             return;
         };
@@ -196,13 +234,16 @@ impl SubscriptionEditorModel {
         self.loaded_account = Some(self.account.clone());
         self.loaded_store_available = true;
         self.login_account = Some(self.account.clone());
-        self.auth = SubscriptionAuthState::Waiting { manual_code: false };
+        self.auth = if api_key.is_some() {
+            SubscriptionAuthState::Exchanging
+        } else {
+            SubscriptionAuthState::Waiting { manual_code: false }
+        };
         let (tx, rx) = mpsc::channel();
         let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
         self.login_rx = Some(rx);
         self.login_tx = Some(commands);
         let account = self.account.clone();
-        let cursor = self.models.provider_type == config::ProviderTypeConfig::Cursor;
         std::thread::spawn(move || {
             let result = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -210,7 +251,15 @@ impl SubscriptionEditorModel {
             {
                 Ok(runtime) => runtime.block_on(async {
                     if cursor {
-                        oauth::cursor_login(store, account, &tx, command_rx).await
+                        oauth::cursor_login(
+                            store,
+                            account,
+                            &tx,
+                            command_rx,
+                            api_key,
+                            providers::provider::cursor::CursorOAuthConfig::default(),
+                        )
+                        .await
                     } else {
                         oauth::claude_login(store, account, &tx, command_rx).await
                     }
@@ -242,6 +291,7 @@ impl SubscriptionEditorModel {
         self.authorize_url = None;
         self.url_to_open = None;
         self.code_input.clear();
+        self.api_key_input.clear();
         if self.busy() {
             self.auth = SubscriptionAuthState::SignedOut;
         }
@@ -434,3 +484,7 @@ mod credential_tests {
         assert!(!format!("{editor:?}").contains("private-access"));
     }
 }
+
+#[cfg(test)]
+#[path = "subscription_token_tests.rs"]
+mod token_tests;
