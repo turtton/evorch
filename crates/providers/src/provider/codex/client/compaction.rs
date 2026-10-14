@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Deserialize;
 
-use super::{CodexClient, PROVIDER_LABEL};
+use super::{CodexClient, PROVIDER_LABEL, ResponseMode};
 use crate::http::{UsageEmitter, map_request_error};
 use crate::sse::{SseFrame, SseParser};
 use crate::wire::codex::to_wire_compaction_request;
@@ -16,8 +16,9 @@ impl Compactor for CodexClient {
         let wire = to_wire_compaction_request(request);
         let mut observer = self.observer(request, true);
         let result = async {
-            // 専用パスにもリクエスト全体のタイムアウトを適用する。
-            let response = self.send_response(&wire, false, &mut observer).await?;
+            let response = self
+                .send_response(&wire, ResponseMode::Compaction, &mut observer)
+                .await?;
             let mut stream = response.bytes_stream();
             let mut parser = SseParser::new();
             let mut compaction = CompactionStream::default();

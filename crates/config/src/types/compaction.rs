@@ -46,7 +46,7 @@ impl Default for CompactionConfig {
             cooldown_turns: 1,
             failure_cooldown_turns: 4,
             summary_idle_timeout_secs: 90,
-            summary_timeout_secs: 300,
+            summary_timeout_secs: 600,
             max_compactions_per_run: 32,
             max_summary_bytes: 16_384,
             summarizer: SummarizerKind::Model,
@@ -82,6 +82,8 @@ mod tests {
         assert!(config.compaction.model_overrides.is_empty());
         assert_eq!(config.compaction.keep_recent_tokens, 20_000);
         assert_eq!(config.compaction.cooldown_turns, 1);
+        assert_eq!(config.compaction.summary_idle_timeout_secs, 90);
+        assert_eq!(config.compaction.summary_timeout_secs, 600);
         assert_eq!(config.compaction.max_compactions_per_run, 32);
         assert_eq!(config.compaction.max_summary_bytes, 16_384);
         assert_eq!(config.compaction.summarizer, SummarizerKind::Model);
@@ -99,6 +101,8 @@ threshold = 0.9
 context_window_tokens = 128000
 keep_recent_tokens = 12000
 cooldown_turns = 3
+summary_idle_timeout_secs = 45
+summary_timeout_secs = 420
 max_summary_bytes = 8192
 summarizer = "structural"
 
@@ -114,6 +118,8 @@ summarizer = "structural"
         assert_eq!(config.compaction.context_window_tokens, 128_000);
         assert_eq!(config.compaction.keep_recent_tokens, 12_000);
         assert_eq!(config.compaction.cooldown_turns, 3);
+        assert_eq!(config.compaction.summary_idle_timeout_secs, 45);
+        assert_eq!(config.compaction.summary_timeout_secs, 420);
         assert_eq!(config.compaction.max_summary_bytes, 8_192);
         assert_eq!(config.compaction.summarizer, SummarizerKind::Structural);
         assert_eq!(config.compaction.model_overrides["gpt-5.2"], 150_000);
@@ -145,7 +151,7 @@ summarizer = "structural"
             cooldown_turns: 2,
             failure_cooldown_turns: 5,
             summary_idle_timeout_secs: 120,
-            summary_timeout_secs: 600,
+            summary_timeout_secs: 420,
             max_compactions_per_run: 12,
             max_summary_bytes: 4_096,
             summarizer: SummarizerKind::Structural,

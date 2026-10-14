@@ -6,6 +6,7 @@ use event_bus::{Event, EventBus, MessageEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
 
 use super::{ModelSummarizer, SummarizeError, Summarizer, SummaryInput};
+use crate::compaction::policy::CompactionSettings;
 use crate::{AgentInvocationContext, AgentModel, RuntimeError};
 
 struct SlowStream {
@@ -69,6 +70,8 @@ impl AgentModel for SlowStream {
 }
 
 fn summarizer(interval: u64, chunks: u32) -> ModelSummarizer {
+    let settings = CompactionSettings::from(&config::CompactionConfig::default());
+    assert_eq!(settings, CompactionSettings::default());
     ModelSummarizer {
         model: Arc::new(SlowStream {
             interval: Duration::from_secs(interval),
@@ -82,15 +85,15 @@ fn summarizer(interval: u64, chunks: u32) -> ModelSummarizer {
             model: None,
             reasoning_effort: None,
         }),
-        idle_timeout: Duration::from_secs(90),
-        timeout: Duration::from_secs(300),
+        idle_timeout: Duration::from_secs(settings.summary_idle_timeout_secs),
+        timeout: Duration::from_secs(settings.summary_timeout_secs),
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn streaming_summary_survives_former_sixty_second_deadline() {
+async fn streaming_summary_survives_former_three_hundred_second_deadline() {
     let start = tokio::time::Instant::now();
-    let summary = summarizer(30, 4)
+    let summary = summarizer(30, 11)
         .summarize(&SummaryInput {
             goal: Some("goal"),
             compacted: &[],
@@ -98,7 +101,7 @@ async fn streaming_summary_survives_former_sixty_second_deadline() {
         .await
         .unwrap();
     assert_eq!(summary, "continuation summary");
-    assert_eq!(start.elapsed(), Duration::from_secs(120));
+    assert_eq!(start.elapsed(), Duration::from_secs(330));
 }
 
 #[tokio::test(start_paused = true)]
@@ -117,7 +120,7 @@ async fn silent_summary_is_cancelled_at_idle_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn active_summary_still_has_overall_deadline() {
-    let result = summarizer(30, 20)
+    let result = summarizer(30, 21)
         .summarize(&SummaryInput {
             goal: None,
             compacted: &[],
@@ -125,7 +128,7 @@ async fn active_summary_still_has_overall_deadline() {
         .await;
     assert!(matches!(
         result,
-        Err(SummarizeError::Deadline { seconds: 300 })
+        Err(SummarizeError::Deadline { seconds: 600 })
     ));
 }
 
