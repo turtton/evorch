@@ -193,6 +193,7 @@ async fn partial_eof_deltas_visible_but_response_not_committed() {
 
 #[tokio::test]
 async fn canonical_response_is_published_before_waiting_and_preserves_provider_history() {
+    let review_storage = support::ReviewStorage::new();
     // Given: display deltas omit text that is present in the accepted model response.
     let canonical = text_response("first missing second", FinishReason::Stop);
     let model = Arc::new(LiveModel {
@@ -239,6 +240,7 @@ async fn canonical_response_is_published_before_waiting_and_preserves_provider_h
     assert_eq!(completed, ["first missing second"]);
 
     // When: a follow-up resumes that same interactive run.
+    review_storage.attach(&runtime);
     runtime.send_message(run, "continue".into()).unwrap();
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
     for event in support::drain_events(&mut receiver).await {

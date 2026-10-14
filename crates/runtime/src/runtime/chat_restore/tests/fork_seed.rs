@@ -110,6 +110,25 @@ async fn fork_seed_replays_history_only_up_to_the_completed_turn() {
             }),
         )
         .unwrap();
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    assert!(
+        store
+            .review_lineage_edges(&fork.to_string())
+            .unwrap()
+            .is_empty()
+    );
+    let review = crate::run_store::materialize_review_context(store, fork).unwrap();
+    assert_eq!(
+        review
+            .requests()
+            .0
+            .iter()
+            .map(|request| request.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["branch"]
+    );
+    assert_eq!(review.lineage_run_ids, vec![fork.to_string()]);
+
     next_turn(&mut events, fork).await;
     // Then: the model sees the first turn and the new prompt, never the later turn.
     let request = model.requests.lock().unwrap().last().unwrap().clone();

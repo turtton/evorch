@@ -111,6 +111,7 @@ async fn finish_and_collect(
 // Then: 予算超過後は新しいイベントを出さず Done で完了する
 #[tokio::test]
 async fn budget_exhaustion_blocks_further_compactions() {
+    let review_storage = support::ReviewStorage::new();
     let request = compaction_context::probe(|model| {
         runtime_with(model, settings(1_000_000, 4, SummarizerKind::Structural))
     })
@@ -141,6 +142,7 @@ async fn budget_exhaustion_blocks_further_compactions() {
     gate.notify_one();
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("run resumes");
@@ -170,6 +172,7 @@ async fn budget_exhaustion_blocks_further_compactions() {
 // Then: 低使用率境界では圧縮せず、次の高使用率境界で自動圧縮を再開する
 #[tokio::test]
 async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
+    let review_storage = support::ReviewStorage::new();
     let request = compaction_context::probe(|model| {
         runtime_with(model, settings(1_000_000, 4, SummarizerKind::Structural))
     })
@@ -206,6 +209,7 @@ async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
     runtime
         .compact(run_id)
         .expect("manual compaction requested");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("run resumes");
@@ -285,6 +289,7 @@ impl AgentModel for BlockingSummaryModel {
 // Then: CompactionInFlight を返し、解放後は一つの圧縮だけで Done になる
 #[tokio::test]
 async fn compact_rejected_while_compaction_in_flight() {
+    let review_storage = support::ReviewStorage::new();
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let inner = ScriptedModel::new([Ok(text_response("summary", FinishReason::Stop))]);
@@ -315,6 +320,7 @@ async fn compact_rejected_while_compaction_in_flight() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
     runtime.compact(run_id).expect("first compaction accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("run resumes");

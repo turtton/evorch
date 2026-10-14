@@ -90,8 +90,14 @@ async fn delegated_merge_uses_real_user_context_and_executes_only_on_review_appr
         runtime.set_sandbox_escalation(EscalationApproval::Auto, false);
         executor.set_shell_escalation(runtime.shell_escalation_gate(), host.clone());
 
-        let root =
-            runtime.delegate_background(Role::Orchestrator, REQUEST.into(), RunConfig::default());
+        let root = runtime
+            .delegate_chat(
+                "review",
+                Role::Orchestrator,
+                REQUEST.into(),
+                RunConfig::default(),
+            )
+            .unwrap();
         assert_eq!(runtime.wait(root).await, Ok(AgentRunPhase::Done));
         let child = runtime
             .delegate_background_as_child(root, Role::Worker, DELEGATION, RunConfig::default())

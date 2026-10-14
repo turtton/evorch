@@ -92,6 +92,7 @@ fn has_checkpoint(messages: &[Message]) -> bool {
 
 #[tokio::test]
 async fn automatic_compaction_emits_complete_audit_event() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a long first turn crosses a window that includes fixed tool schemas.
     let request =
         compaction_context::probe(|model| runtime_with(model, structural_settings(1_000_000)))
@@ -117,6 +118,7 @@ async fn automatic_compaction_emits_complete_audit_event() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
     // When: a user message resumes the run and opens the next turn boundary
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "continue".to_string())
         .expect("waiting run resumes");
@@ -161,6 +163,7 @@ async fn automatic_compaction_emits_complete_audit_event() {
 
 #[tokio::test]
 async fn manual_requests_coalesce_and_run_before_resumed_provider_call() {
+    let review_storage = support::ReviewStorage::new();
     // Given: an interactive run waiting with compactable history
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(&"old answer ".repeat(20), FinishReason::Stop)),
@@ -181,6 +184,7 @@ async fn manual_requests_coalesce_and_run_before_resumed_provider_call() {
     // When: two manual generations arrive before a message resumes the run
     runtime.compact(run_id).expect("first request accepted");
     runtime.compact(run_id).expect("second request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("waiting run resumes");
@@ -204,6 +208,7 @@ async fn manual_requests_coalesce_and_run_before_resumed_provider_call() {
 
 #[tokio::test]
 async fn model_summarizer_reply_becomes_checkpoint_summary() {
+    let review_storage = support::ReviewStorage::new();
     // Given: provider replies keyed by the original goal and a summary reply keyed by the
     // summarizer's own first User message, matching ScriptedModel's routing contract
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
@@ -240,6 +245,7 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
 
     // When: manual compaction runs at the resumed boundary
     runtime.compact(run_id).expect("manual request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("waiting run resumes");
@@ -268,6 +274,7 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
 
 #[tokio::test]
 async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event() {
+    let review_storage = support::ReviewStorage::new();
     // Given: provider replies remain keyed by the original goal while the summarizer's own
     // first User message selects a failing summary script, and the structural fallback is
     // truncated to nothing, so no summary can be produced
@@ -304,6 +311,7 @@ async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event
 
     // When: the failing manual compaction is followed by the normal provider turn
     runtime.compact(run_id).expect("manual request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume-after-failure".to_string())
         .expect("waiting run resumes");
@@ -332,6 +340,7 @@ async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event
 
 #[tokio::test]
 async fn zero_max_summary_bytes_fails_closed_without_checkpoint_or_event() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a structural summarizer whose body is truncated to nothing by max_summary_bytes=0
     //        (provider replies stay keyed by the goal; the structural path never calls the model)
     let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
@@ -367,6 +376,7 @@ async fn zero_max_summary_bytes_fails_closed_without_checkpoint_or_event() {
 
     // When: the degenerate manual compaction runs and the run then resumes normally
     runtime.compact(run_id).expect("manual request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("waiting run resumes");
@@ -389,6 +399,7 @@ async fn zero_max_summary_bytes_fails_closed_without_checkpoint_or_event() {
 
 #[tokio::test]
 async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a tiny waiting context whose keep budget covers every message
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response("short", FinishReason::Stop)),
@@ -415,6 +426,7 @@ async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
     // When: manual compaction is requested for the tiny run and an unknown run
     runtime.compact(run_id).expect("known run accepts request");
     let unknown = runtime.compact(RunId::new(999));
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("waiting run resumes");
@@ -440,6 +452,7 @@ async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
 
 #[tokio::test]
 async fn still_above_threshold_compacts_once_without_reentry() {
+    let review_storage = support::ReviewStorage::new();
     let request =
         compaction_context::probe(|model| runtime_with(model, structural_settings(1_000_000)))
             .await;
@@ -479,6 +492,7 @@ async fn still_above_threshold_compacts_once_without_reentry() {
         },
     );
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "continue through large context".to_string())
         .expect("waiting run resumes at a legal User boundary");

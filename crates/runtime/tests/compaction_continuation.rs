@@ -350,6 +350,7 @@ async fn collect_compactions(receiver: &mut EventReceiver, run_id: &str) -> Vec<
 //       kept tail のみ (raw 文は消え、tool pair は対で閉じたまま) になる
 #[tokio::test]
 async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
+    let review_storage = support::ReviewStorage::new();
     // Given: fixture 素材と小さめ window の compaction 設定
     let fixture = load_compaction_fixture();
     let goal = text_of(&fixture[1]);
@@ -494,6 +495,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         if step == 12 {
             // fixture[26] の text-only Stop で対話待機になる → fixture[27] をそのまま送る
             wait_for_phase(&mut phases, child, AgentRunPhase::Waiting).await;
+            review_storage.attach(&runtime);
             runtime
                 .send_message(child, closeout_text.clone())
                 .expect("waiting run accepts the closeout message");

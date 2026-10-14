@@ -93,11 +93,19 @@ async fn automatic_compaction_records_catalog_window_through_live_runtime() {
         bus.clone(),
         Arc::new(sandbox::DirectSandbox::new_unchecked()),
     ));
+    let review_dir = tempfile::tempdir().unwrap();
+    let review_config = storage::StorageConfig {
+        db_path: review_dir.path().join("review.db"),
+        ..Default::default()
+    };
+    let review_storage = storage::Storage::open(review_config.clone()).unwrap();
+    let review_store = crate::RunStore::open(&review_config, review_storage.handle()).unwrap();
     let runtime = AgentRuntime::new(
         bus,
         executor,
         Arc::new(SwitchableModel::new(Arc::new(routed))),
     )
+    .with_run_store(review_store)
     .with_compaction(config::CompactionConfig {
         summarizer: config::SummarizerKind::Structural,
         keep_recent_tokens: 1,

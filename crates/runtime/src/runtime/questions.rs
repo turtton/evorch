@@ -2,6 +2,10 @@
 use crate::{AgentRuntime, RunId};
 use event_bus::{AgentRunPhase, Event, ToolEvent, UserQuestion};
 
+#[cfg(test)]
+#[path = "questions_tests.rs"]
+mod tests;
+
 impl AgentRuntime {
     pub fn request_user_question(
         &self,
@@ -134,9 +138,6 @@ impl AgentRuntime {
         trusted_user: bool,
     ) -> Result<UserQuestion, String> {
         let question = self.user_question(id)?.ok_or("unknown question")?;
-        if question.answer.as_deref() == Some(answer) {
-            return Ok(question);
-        }
         let store = self
             .shared
             .run_store
@@ -170,44 +171,123 @@ impl AgentRuntime {
             .map(|permit| permit.mutation_guard())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        store
-            .handle
-            .answer_user_question(id, answer)
-            .map_err(|e| e.to_string())?;
-        drop(guards);
-        let question = store
-            .user_question(id)
-            .map_err(|e| e.to_string())?
-            .ok_or("question disappeared")?;
+        // Serialize host evidence writes and resync with the same map fence as chat.
+        let reviews = self
+            .shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut targets: Vec<(String, crate::escalation_review::ReviewRunContext)> = Vec::new();
         if trusted_user {
-            // The durable answer is written before it becomes review evidence. A
-            // question can be linked to a continuation run whose review context
-            // is distinct after restoration, so register once per shared lineage.
-            let reviews = self
-                .shared
-                .review_runs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut targets: Vec<(String, crate::escalation_review::ReviewRunContext)> = Vec::new();
             for recipient in std::iter::once(&question.run_id).chain(recipients.iter()) {
-                let Ok(run) = crate::meta::parse_run_id(recipient) else {
-                    continue;
-                };
+                let run = crate::meta::parse_run_id(recipient)?;
                 let Some(review) = reviews.get(&run) else {
                     continue;
                 };
-                if targets.iter().any(|(_, existing)| {
+                if !targets.iter().any(|(_, existing)| {
                     std::sync::Arc::ptr_eq(&existing.user_requests, &review.user_requests)
                 }) {
-                    continue;
+                    targets.push((recipient.clone(), review.clone()));
                 }
-                targets.push((recipient.clone(), review.clone()));
-            }
-            drop(reviews);
-            for (recipient, review) in targets {
-                review.add_user_answer(&recipient, &question, answer);
             }
         }
+        let resync = |review: &crate::escalation_review::ReviewRunContext| {
+            let lineage = reviews
+                .values()
+                .filter(|candidate| {
+                    std::sync::Arc::ptr_eq(&candidate.user_requests, &review.user_requests)
+                })
+                .flat_map(|candidate| candidate.lineage_run_ids.iter().cloned())
+                .collect::<Vec<_>>();
+            crate::run_store::resync_review_context(store, review, &lineage)
+                .map_err(|error| error.to_string())
+        };
+        // Re-read under the fence: a concurrent identical host answer must not be
+        // reflected twice. Plan A fences conflicting answers through the writer's
+        // checked UPDATE of the answer (not recipient-specific UPDATEs), atomically
+        // with evidence. The synced/resync protocol below repairs live recipients
+        // after a failed post-commit reflection; an unsynced context cannot approve.
+        let question = store
+            .user_question(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("question disappeared")?;
+        if question.answer.as_deref() == Some(answer) {
+            let mut repaired = false;
+            for (_, review) in &targets {
+                if !review.stamp().synced {
+                    resync(review)?;
+                    repaired = true;
+                }
+            }
+            // A failed post-commit reflection may not have published the answer.
+            if repaired {
+                self.shared
+                    .bus
+                    .emit(Event::new(ToolEvent::UserQuestionUpdated {
+                        question: question.clone(),
+                    }));
+                self.shared
+                    .question_version
+                    .send_modify(|version| *version = version.wrapping_add(1));
+            }
+            return Ok(question);
+        }
+        if trusted_user {
+            let mut recipients = recipients;
+            recipients.push(question.run_id.clone());
+            recipients.sort();
+            recipients.dedup();
+            let evidence = recipients
+                .iter()
+                .map(|recipient| {
+                    use sha2::{Digest, Sha256};
+                    let registered = reviews.contains_key(&crate::meta::parse_run_id(recipient)?);
+                    let root = answer_evidence_root(store, recipient, registered)?;
+                    let mut row =
+                        crate::run_store::evidence_row(&root, recipient, "user_answer", answer);
+                    row.id = format!(
+                        "{:x}",
+                        Sha256::digest(format!(
+                            "{root}|{recipient}|user_answer|{answer}|{}",
+                            question.id
+                        ))
+                    );
+                    row.in_reply_to_question_id = Some(question.id.clone());
+                    row.in_reply_to_title = Some(question.title.clone());
+                    Ok(row)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            store
+                .handle
+                .answer_user_question_with_evidence(id, answer, &evidence)
+                .map_err(|error| error.to_string())?;
+        } else {
+            store
+                .handle
+                .answer_user_question(id, answer)
+                .map_err(|error| error.to_string())?;
+        }
+        drop(guards);
+        let mut reflection_error = None;
+        for (recipient, review) in &targets {
+            if review.user_requests.is_poisoned() {
+                review.mark_unsynced();
+                reflection_error = Some("review context lock is poisoned".to_string());
+            } else if !review.stamp().synced {
+                if let Err(error) = resync(review) {
+                    review.mark_unsynced();
+                    reflection_error = Some(error);
+                }
+            } else {
+                review.add_user_answer(recipient, &question, answer);
+            }
+        }
+        drop(reviews);
+        if let Some(error) = reflection_error {
+            return Err(error);
+        }
+        let mut question = question;
+        question.answer = Some(answer.into());
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {
@@ -335,4 +415,44 @@ impl AgentRuntime {
         self.user_answers(run)
             .is_ok_and(|questions| questions.iter().any(|q| q.answer.is_none()))
     }
+}
+
+/// Resolve only explicit edges, rejecting an absent legacy lineage rather than
+/// treating the question's cached root as authority.
+fn answer_evidence_root(
+    store: &crate::RunStore,
+    recipient: &str,
+    registered: bool,
+) -> Result<String, String> {
+    let mut lineage = store
+        .review_lineage_ancestors(recipient)
+        .map_err(|error| error.to_string())?;
+    if !registered
+        && lineage.is_empty()
+        && store
+            .review_evidence_for_lineage(&[recipient.to_string()])
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        && store
+            .restore_record(crate::meta::parse_run_id(recipient)?)
+            .map_err(|error| error.to_string())?
+            .is_none()
+    {
+        return Err("review lineage is unavailable for question recipient".into());
+    }
+    lineage.push(recipient.to_string());
+    let mut roots = Vec::new();
+    for run in lineage {
+        if store
+            .review_lineage_edges(&run)
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            roots.push(run);
+        }
+    }
+    if roots.len() != 1 {
+        return Err("review lineage has no unique root".into());
+    }
+    Ok(roots.remove(0))
 }

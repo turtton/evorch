@@ -1,5 +1,6 @@
 //! A chain fallback to a smaller window compacts at an explicit cache boundary, then the
 //! new member's prefix is preserved across later turns (ADR 0030).
+mod support;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};
@@ -62,6 +63,7 @@ fn chat_requests(mock: &StreamingMockOpenAi) -> Vec<Value> {
 
 #[tokio::test]
 async fn fallback_to_a_smaller_window_compacts_once_then_preserves_the_new_prefix() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a worker chain whose primary answers two turns and then fails, and a
     // fallback whose 40K window cannot hold the accumulated history.
     let old_reply = "old analysis that can be summarized ".repeat(3_000);
@@ -163,6 +165,7 @@ summarizer = "structural"
     };
     through(AgentRunPhase::Waiting).await;
     // When: the next turn fails over to the small member.
+    review_storage.attach(&runtime);
     runtime
         .send_message(run, "Continue after this boundary".into())
         .unwrap();

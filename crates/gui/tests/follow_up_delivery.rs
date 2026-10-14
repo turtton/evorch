@@ -11,7 +11,9 @@ use gui::model::composer::ProviderStatus;
 use gui::runtime_sink::RuntimeCommandSink;
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
-use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunStore, RuntimeError,
+};
 use tokio::sync::Notify;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -78,12 +80,18 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
         let bus = Arc::new(EventBus::new(256));
         let mut receiver = bus.subscribe();
         let model = Arc::new(GatedModel::default());
+        let storage_config = storage::StorageConfig {
+            db_path: directory.path().join("runs.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(storage_config.clone()).unwrap();
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(tools::ToolExecutor::new(bus.clone())),
             model.clone(),
         )
-        .with_sequential_run_ids();
+        .with_sequential_run_ids()
+        .with_run_store(RunStore::open(&storage_config, storage.handle()).unwrap());
         let mut sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         let run = rt.block_on(async {
             if goal {

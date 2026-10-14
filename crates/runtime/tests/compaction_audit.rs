@@ -272,6 +272,7 @@ fn has_checkpoint(messages: &[Message]) -> bool {
 
 #[tokio::test]
 async fn compaction_is_auditable_in_storage() {
+    let review_storage = support::ReviewStorage::new();
     // Given: persisted transcript/projection rows and a waiting run with compactable history
     let temp = TempDir::new().expect("temporary directory");
     let config = storage_config(&temp);
@@ -338,6 +339,7 @@ async fn compaction_is_auditable_in_storage() {
 
     // When: manual compaction completes, while the following provider response remains blocked
     runtime.compact(run_id).expect("manual compaction accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume".to_string())
         .expect("waiting run resumes");
@@ -432,6 +434,7 @@ async fn compaction_is_auditable_in_storage() {
 
 #[tokio::test]
 async fn summarizer_failure_is_atomic_end_to_end() {
+    let review_storage = support::ReviewStorage::new();
     // Given: persisted rows and a model summarizer that fails before a blocked provider
     // continuation, with the structural fallback truncated to nothing
     let temp = TempDir::new().expect("temporary directory");
@@ -485,6 +488,7 @@ async fn summarizer_failure_is_atomic_end_to_end() {
 
     // When: manual summarization fails and the unchanged visible window reaches the next request
     runtime.compact(run_id).expect("manual compaction accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "resume-after-failure".to_string())
         .expect("waiting run resumes");

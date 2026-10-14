@@ -1,3 +1,4 @@
+mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,7 @@ impl AgentModel for RecordingModel {
 
 #[tokio::test]
 async fn set_model_preference_applies_to_next_completion() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a keep-alive run with a blocked first completion and an initial preference.
     let bus = Arc::new(EventBus::new(64));
     let (tx, mut rx) = mpsc::channel(4);
@@ -84,6 +86,7 @@ async fn set_model_preference_applies_to_next_completion() {
     };
     for next in [Some(preference), None] {
         runtime.set_model_preference(run, next.clone()).unwrap();
+        review_storage.attach(&runtime);
         runtime.send_message(run, "continue".into()).unwrap();
         model.proceed.add_permits(1);
         // Then: the next invocation receives the new snapshot.

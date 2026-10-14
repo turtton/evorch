@@ -10,7 +10,9 @@ use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
-use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunId, RuntimeError};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunId, RunStore, RuntimeError,
+};
 use tools::ToolExecutor;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -74,6 +76,8 @@ fn sidebar_with_thread(root: &std::path::Path) -> SidebarState {
 struct Fixture {
     runtime: tokio::runtime::Runtime,
     _temp_dir: tempfile::TempDir,
+    _storage: storage::Storage,
+    _db_temp_dir: tempfile::TempDir,
     bus: Arc<EventBus>,
     agent_runtime: AgentRuntime,
     repaint_rx: mpsc::Receiver<()>,
@@ -88,6 +92,14 @@ impl Fixture {
         let model = Arc::new(HeldModel);
         let runtime =
             AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids();
+        let db_temp_dir = tempfile::tempdir().expect("database temp dir");
+        let storage_config = storage::StorageConfig {
+            db_path: db_temp_dir.path().join("runs.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(storage_config.clone()).expect("storage");
+        let runtime = runtime
+            .with_run_store(RunStore::open(&storage_config, storage.handle()).expect("run store"));
         let (repaint_tx, repaint_rx) = mpsc::channel();
         let pump = EventPump::spawn(
             rt.handle(),
@@ -111,6 +123,8 @@ impl Fixture {
         Self {
             runtime: rt,
             _temp_dir: temp_dir,
+            _storage: storage,
+            _db_temp_dir: db_temp_dir,
             bus,
             agent_runtime: runtime,
             repaint_rx,

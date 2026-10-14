@@ -34,6 +34,27 @@ impl Admission {
 }
 
 impl AgentRuntime {
+    pub(super) fn fail_review_admission(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        config: &RunConfig,
+        reason: String,
+    ) {
+        self.reserve_admission(run_id, parent, config.ownership.clone());
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(completion) = admissions
+            .get_mut(&run_id)
+            .and_then(|admission| admission.completion.take())
+        {
+            completion.send_replace(Some(Err(Self::review_error(run_id, reason))));
+        }
+    }
+
     /// Establish an awaitable identity before publishing a handoff. Provider
     /// admission reuses this channel so event consumers can immediately wait.
     pub(super) fn reserve_admission(
@@ -66,6 +87,8 @@ impl AgentRuntime {
         );
     }
 
+    // Forward the prepared review seed without performing storage reads.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn register_without_admission(
         &self,
         run_id: RunId,
@@ -74,6 +97,7 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
         continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
     ) -> RunId {
         let mut admissions = self
             .shared
@@ -84,7 +108,15 @@ impl AgentRuntime {
             .get(&run_id)
             .is_some_and(|admission| admission.result.borrow().is_none() && admission.cancelled);
         if !cancelled {
-            self.register_run(run_id, parent, role, prompt, config, continuation);
+            self.register_run(
+                run_id,
+                parent,
+                role,
+                prompt,
+                config,
+                continuation,
+                review_seed,
+            );
         }
         if let Some(admission) = admissions.get_mut(&run_id)
             && let Some(completion) = admission.completion.take()
@@ -101,6 +133,8 @@ impl AgentRuntime {
     }
 
     // The synchronous API reserves an ID; only successful admission registers a run.
+    // Forward the prepared review seed without performing storage reads.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn admit_run(
         &self,
         run_id: RunId,
@@ -109,6 +143,7 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
         continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
     ) -> RunId {
         self.reserve_admission(run_id, parent, config.ownership.clone());
         let result = self
@@ -155,7 +190,15 @@ impl AgentRuntime {
                 });
             }
             if admitted.is_ok() {
-                runtime.register_run(run_id, parent, role, prompt, config, continuation);
+                runtime.register_run(
+                    run_id,
+                    parent,
+                    role,
+                    prompt,
+                    config,
+                    continuation,
+                    review_seed,
+                );
             }
             let failure = handoff.then(|| admitted.as_ref().err()).flatten();
             drop(admissions);

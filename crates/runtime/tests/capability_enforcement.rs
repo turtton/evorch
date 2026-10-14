@@ -190,11 +190,14 @@ async fn web_fetch_auto_review_audits_actual_url_and_verdict() {
         ]));
         let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
         let mut events = bus.subscribe();
-        let run_id = runtime.delegate_background(
-            Role::Orchestrator,
-            "Read a public page".into(),
-            RunConfig::default(),
-        );
+        let run_id = runtime
+            .delegate_chat(
+                "review",
+                Role::Orchestrator,
+                "Read a public page".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
         assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
         let events = drain_events(&mut events).await;
         let audits: Vec<_> = events

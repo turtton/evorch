@@ -88,6 +88,7 @@ enum Delivery {
 }
 
 async fn scenario(delivery: Delivery, batch: bool) {
+    let review_storage = support::ReviewStorage::new();
     let model = Arc::new(WaitingModel {
         turn: AtomicUsize::new(0),
         parent_requests: Mutex::new(Vec::new()),
@@ -124,6 +125,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
         model.release_child.notify_one();
         runtime.wait(RunId::new(2)).await.unwrap();
     }
+    review_storage.attach(&runtime);
     runtime
         .send_message_with_images(
             parent,
@@ -134,6 +136,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
             }],
         )
         .unwrap();
+    review_storage.attach(&runtime);
     runtime
         .send_message(parent, "Use the updated requirement".into())
         .unwrap();

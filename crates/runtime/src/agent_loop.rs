@@ -14,6 +14,8 @@ mod messages;
 mod observability;
 mod questions;
 mod retracted_delegates;
+#[cfg(test)]
+mod review_evidence_tests;
 mod team;
 mod tool_calls;
 
@@ -872,6 +874,13 @@ impl LoopState {
             self.context.push_assistant(response.message);
             self.completed_turn_end = (!has_tool_uses && finish_reason == FinishReason::Stop)
                 .then_some(self.context.messages.len());
+            if self.completed_turn_end.is_some()
+                && let Some(runtime) = self.runtime()
+                && let Err(error) =
+                    runtime.capture_pending_reference(self.task.run_id, text.clone())
+            {
+                tracing::warn!(run_id = %self.task.run_id, %error, "assistant reference capture failed");
+            }
             self.shared
                 .bus
                 .emit(Event::new(MessageEvent::MessageCompleted {

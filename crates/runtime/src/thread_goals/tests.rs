@@ -21,6 +21,8 @@ enum Step {
 }
 type ObservedRequest = (String, Vec<Message>, Vec<ToolSpec>);
 struct Model {
+    _storage: storage::Storage,
+    _dir: tempfile::TempDir,
     root: Mutex<VecDeque<Step>>,
     reviewer: Mutex<VecDeque<Step>>,
     child: Mutex<VecDeque<Step>>,
@@ -141,7 +143,16 @@ fn harness(
     root: Vec<Step>,
     reviewer: Vec<Step>,
 ) -> (AgentRuntime, Arc<Model>, event_bus::EventReceiver) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_config = storage::StorageConfig {
+        db_path: dir.path().join("review.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let store = crate::RunStore::open(&storage_config, storage.handle()).unwrap();
     let model = Arc::new(Model {
+        _storage: storage,
+        _dir: dir,
         root: Mutex::new(root.into()),
         reviewer: Mutex::new(reviewer.into()),
         child: Mutex::new(VecDeque::new()),
@@ -154,7 +165,8 @@ fn harness(
         bus.clone(),
         Arc::new(::tools::ToolExecutor::new(bus)),
         model.clone(),
-    );
+    )
+    .with_run_store(store);
     model
         .runtime
         .set(Arc::downgrade(&runtime.shared))

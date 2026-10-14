@@ -449,3 +449,49 @@ pub fn load_compaction_fixture() -> Vec<Message> {
     serde_json::from_str(raw)
         .expect("compaction long-session fixture must parse as Vec<providers::Message>")
 }
+
+/// Keeps a durable writer alive for host-input tests that previously used only RAM.
+pub struct ReviewStorage {
+    storage: storage::Storage,
+    config: storage::StorageConfig,
+    _directory: TempDir,
+}
+
+impl ReviewStorage {
+    pub fn new() -> Self {
+        let directory = tempfile::tempdir().expect("review storage directory");
+        let config = storage::StorageConfig {
+            db_path: directory.path().join("review.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).expect("review storage");
+        Self {
+            storage,
+            config,
+            _directory: directory,
+        }
+    }
+
+    pub fn attach(&self, runtime: &runtime::AgentRuntime) {
+        // An explicitly configured test store wins; never replace its failure modes.
+        runtime.clone().with_run_store(
+            runtime::RunStore::open(&self.config, self.storage.handle()).expect("review run store"),
+        );
+    }
+}
+
+/// Host provenance without allowing the unrelated chat loop to consume reviewer scripts.
+pub fn review_host_run(runtime: &runtime::AgentRuntime) -> runtime::RunId {
+    let run = runtime
+        .delegate_chat(
+            "review-fixture",
+            Role::Worker,
+            "Inspect the requested host command".into(),
+            runtime::RunConfig::default(),
+        )
+        .expect("host submission");
+    runtime
+        .cancel(run)
+        .expect("cancel unrelated agent loop before it starts");
+    run
+}

@@ -251,6 +251,7 @@ async fn stop_cancels_pending_admission_for_self_and_subtree() {
             "pending".into(),
             RunConfig::default(),
             RunContinuation::Fresh,
+            None,
         );
         assert_eq!(runtime.live_descendants(root), vec![pending]);
         let target = if scope == StopScope::SelfOnly {

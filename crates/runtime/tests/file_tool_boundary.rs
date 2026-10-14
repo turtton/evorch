@@ -110,9 +110,9 @@ impl Paths {
 }
 
 async fn run(runtime: &AgentRuntime, role: Role) -> AgentRunPhase {
-    let run = runtime.reserve_run_id();
-    runtime.bind_thread_root("thread-a", run).unwrap();
-    runtime.spawn_reserved(run, None, role, "WORK", RunConfig::default());
+    let run = runtime
+        .delegate_chat("thread-a", role, "WORK".into(), RunConfig::default())
+        .unwrap();
     runtime.wait(run).await.unwrap()
 }
 

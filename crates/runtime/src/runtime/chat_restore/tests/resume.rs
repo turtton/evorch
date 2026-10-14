@@ -220,7 +220,8 @@ async fn unfinished_response_resumes_without_ledger_memory_or_new_review_evidenc
             assert_eq!(requests[1], saved);
         }
         let review = fresh.shared.review_runs.lock().unwrap()[&run].clone();
-        assert!(review.user_requests.lock().unwrap().is_empty());
+        assert_eq!(review.requests().0.len(), 1);
+        assert_eq!(review.requests().0[0].text, "original request");
         assert!(fresh.trusted_thread_request(run).is_none());
         fresh.stop(run, StopScope::SelfOnly).unwrap();
         fresh.wait(run).await.unwrap();
@@ -291,16 +292,40 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
     runtime
         .answer_user_question(&question.id, "yes, publish")
         .unwrap();
-    let evidence = serde_json::to_value(review.requests()).unwrap();
+    let evidence = serde_json::to_value(review.requests().0).unwrap();
     assert_eq!(
         evidence,
         serde_json::json!([
             {"target_run_id": source.to_string(), "text": "trusted original"},
-            {"target_run_id": target.to_string(), "text": "real followup"},
+            {"target_run_id": target.to_string(), "text": "real followup",
+                "reference_context": {"text": "done", "source_run_id": target.to_string(), "turn_end": 0}},
             {"target_run_id": target.to_string(), "text": "yes, publish",
                 "in_reply_to": {"id": question.id, "title": question.title}}
         ])
     );
     runtime.stop(target, StopScope::SelfOnly).unwrap();
     runtime.wait(target).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_runtime_legacy_history_resumes_without_review_authority() {
+    let fixture = Fixture::new();
+    let run = fixture.terminal().await;
+    let config = storage::StorageConfig {
+        db_path: fixture._dir.path().join("goal.sqlite3"),
+        ..Default::default()
+    };
+    let bus = Arc::new(EventBus::new(32));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(CompletingModel),
+    )
+    .with_run_store(crate::RunStore::open(&config, fixture.storage.handle()).unwrap());
+    runtime.resume_chat(run, RunConfig::default()).unwrap();
+    wait_for_waiting(&runtime, run).await;
+    let review = runtime.shared.review_runs.lock().unwrap()[&run].clone();
+    assert!(review.requests().0.is_empty());
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    runtime.wait(run).await.unwrap();
 }

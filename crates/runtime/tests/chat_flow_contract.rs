@@ -129,6 +129,7 @@ mod chat_flow_contract {
 
     #[tokio::test]
     async fn follow_up_while_waiting_lands_in_same_run() {
+        let review_storage = support::ReviewStorage::new();
         // Given: an interactive worker has answered once and is waiting for input.
         let first_answer = text_response("first answer", FinishReason::Stop);
         let model = Arc::new(ScriptedModel::new([
@@ -153,6 +154,7 @@ mod chat_flow_contract {
         );
 
         // When: a follow-up is delivered through the public interactive inbox.
+        review_storage.attach(&runtime);
         runtime.send_message(run, "second question".into()).unwrap();
         let second = until_phase(&mut receiver, run, AgentRunPhase::Done).await;
 
@@ -183,6 +185,7 @@ mod chat_flow_contract {
 
     #[tokio::test]
     async fn post_error_continue_reuses_same_run_preserving_context() {
+        let review_storage = support::ReviewStorage::new();
         // Given: a persisted interactive chat with one successful turn before a model error.
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
@@ -212,6 +215,7 @@ mod chat_flow_contract {
         );
         let first = until_phase(&mut receiver, failed, AgentRunPhase::Waiting).await;
         assert_answer(&first, failed, "remembered answer");
+        review_storage.attach(&runtime);
         runtime
             .send_message(failed, "failing question".into())
             .unwrap();

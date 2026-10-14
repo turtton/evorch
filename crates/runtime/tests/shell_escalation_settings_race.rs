@@ -26,7 +26,7 @@ impl AgentModel for PausedReviewer {
         self.entered.wait().await;
         self.release.wait().await;
         Ok(support::text_response(
-            r#"{"approve":true}"#,
+            r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
             FinishReason::Stop,
         ))
     }
@@ -58,8 +58,9 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
     });
     let runtime = AgentRuntime::new(bus, executor.clone(), model.clone());
     executor.set_shell_escalation(runtime.shell_escalation_gate(), host.clone());
+    let run = support::review_host_run(&runtime);
     let ctx = ToolExecutionContext {
-        run_id: "race".into(),
+        run_id: run.to_string(),
         thread_id: None,
         call_id: None,
     };
