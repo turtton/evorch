@@ -2,6 +2,8 @@
 mod codex_support;
 #[path = "support/codex_contract.rs"]
 mod contract_support;
+#[path = "support/codex_compaction_timeouts.rs"]
+mod timeout_tests;
 
 use codex_support::{client, request};
 use contract_support::{CodexBodyMatcher, CodexIdMatcher, seeded_store};

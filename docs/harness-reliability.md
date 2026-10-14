@@ -151,10 +151,13 @@ response when available, followed by models.dev and the configured fallback.
 Old bulky tool results are replaced by saved artifact references, retaining
 call IDs and error status. The eight most recent results remain visible.
 Summaries stream through a private event bus, without mixing summary text into
-the chat. Defaults are 90 seconds of stream inactivity and a 300-second overall
-summary deadline. Failed summaries back off for 4, 8, 16, ... turns. If context
-still reaches the model window, the run stops with a recoverable checkpoint.
-The provider HTTP layer also has a 90-second network-read timeout.
+the chat. Model summaries default to 90 seconds of stream inactivity and a
+600-second overall deadline, including provider retries. Official Codex
+compaction uses a dedicated HTTP client with a 600-second overall deadline and
+a 300-second network-read timeout. Ordinary provider requests retain their
+90-second network-read timeout. Failed summaries back off for 4, 8, 16, ...
+turns. If context still reaches the model window, the run stops with a
+recoverable checkpoint.
 
 The following configuration fields are exposed (values shown are defaults):
 
@@ -164,7 +167,7 @@ max_elapsed_secs = 7200
 
 [compaction]
 summary_idle_timeout_secs = 90
-summary_timeout_secs = 300
+summary_timeout_secs = 600
 failure_cooldown_turns = 4
 ```
 

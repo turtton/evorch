@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
-use super::{CodexClient, PROTOCOL, PROVIDER_LABEL};
+use super::{CodexClient, PROTOCOL, PROVIDER_LABEL, ResponseMode};
 use crate::http::{UsageEmitter, map_request_error};
 use crate::observe::AttemptObserver;
 use crate::sse::SseParser;
@@ -38,7 +38,11 @@ impl HostedWebSearch for CodexClient {
         let emitter = UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL);
         let result = async {
             let response = self
-                .post_response(&wire_request(request), false, &mut observer)
+                .post_response(
+                    &wire_request(request),
+                    ResponseMode::NonStreaming,
+                    &mut observer,
+                )
                 .await
                 .map_err(sanitize)?;
             if !response.status().is_success() {

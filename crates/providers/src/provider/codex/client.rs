@@ -19,7 +19,10 @@ use crate::client::ProviderClient;
 use crate::codex_catalog_version::{CodexCatalogVersion, CodexClientVersion};
 use crate::error::ProviderError;
 use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
-use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
+use crate::http::{
+    UsageEmitter, build_http_client, build_http_client_with_read_timeout, map_request_error,
+    map_response_error,
+};
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
@@ -29,9 +32,18 @@ use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter, to_wire_
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const COMPACTION_TIMEOUT: Duration = Duration::from_secs(600);
+const COMPACTION_READ_TIMEOUT: Duration = Duration::from_secs(300);
 const PROVIDER_LABEL: &str = "openai-codex";
 const PROTOCOL: &str = "openai-codex-responses";
 const ORIGINATOR: &str = "codex_cli_rs";
+
+#[derive(Clone, Copy)]
+enum ResponseMode {
+    Streaming,
+    NonStreaming,
+    Compaction,
+}
 
 /// base URL から responses endpoint を一意に解決します。正の形は
 /// `https://chatgpt.com/backend-api/codex` で、二重 append による 404 を防ぐため
@@ -56,7 +68,7 @@ pub struct CodexConfig {
     pub base_url: String,
     /// OAuth refresh endpoint のベース URL。
     pub auth_base_url: String,
-    /// 非ストリーミングリクエスト全体のタイムアウト。
+    /// 通常の非ストリーミング生成と web search のリクエスト全体のタイムアウト。
     pub timeout: Duration,
     /// usage と attempt 観測イベントの発行先。
     pub event_bus: Option<Arc<EventBus>>,
@@ -79,6 +91,8 @@ impl Default for CodexConfig {
 /// Codex subscription backend を canonical provider 契約へ接続します。
 pub struct CodexClient {
     http_client: reqwest::Client,
+    /// Compaction は通常生成より長い無応答期限と、本文受信までの全体期限を使う。
+    compaction_http_client: reqwest::Client,
     endpoint: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
@@ -99,6 +113,10 @@ impl CodexClient {
     pub fn new(config: CodexConfig, session: CodexSessionManager) -> Result<Self, ProviderError> {
         Ok(Self {
             http_client: build_http_client(None)?,
+            compaction_http_client: build_http_client_with_read_timeout(
+                Some(COMPACTION_TIMEOUT),
+                COMPACTION_READ_TIMEOUT,
+            )?,
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
@@ -125,6 +143,10 @@ impl CodexClient {
         );
         Ok(Self {
             http_client,
+            compaction_http_client: build_http_client_with_read_timeout(
+                Some(COMPACTION_TIMEOUT),
+                COMPACTION_READ_TIMEOUT,
+            )?,
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
@@ -174,7 +196,15 @@ impl CodexClient {
             .observer(request, streaming)
             .with_cache_observation(&wire_request);
         let response = self
-            .send_response(&wire_request, streaming, &mut observer)
+            .send_response(
+                &wire_request,
+                if streaming {
+                    ResponseMode::Streaming
+                } else {
+                    ResponseMode::NonStreaming
+                },
+                &mut observer,
+            )
             .await?;
         Ok(adapt_sse_stream(
             response.bytes_stream(),
@@ -189,12 +219,10 @@ impl CodexClient {
     async fn send_response(
         &self,
         wire_request: &CodexResponsesRequest,
-        streaming: bool,
+        mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
-        let response = self
-            .post_response(wire_request, streaming, observer)
-            .await?;
+        let response = self.post_response(wire_request, mode, observer).await?;
         if !response.status().is_success() {
             let error = map_response_error(response).await;
             observer.emit_failed(&error);
@@ -208,7 +236,7 @@ impl CodexClient {
     async fn post_response(
         &self,
         wire_request: &impl serde::Serialize,
-        streaming: bool,
+        mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let token = self.session.current().await?;
@@ -217,8 +245,11 @@ impl CodexClient {
             .resolved_client_version
             .get_or_init(|| self.client_version.resolve())
             .await;
-        let mut builder = self
-            .http_client
+        let http_client = match mode {
+            ResponseMode::Compaction => &self.compaction_http_client,
+            ResponseMode::Streaming | ResponseMode::NonStreaming => &self.http_client,
+        };
+        let mut builder = http_client
             .post(&self.endpoint)
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
@@ -234,13 +265,12 @@ impl CodexClient {
             .header("thread-id", &turn_id)
             .header("x-client-request-id", &turn_id)
             .json(&wire_request);
-        if !streaming {
+        if matches!(mode, ResponseMode::NonStreaming) {
             builder = builder.timeout(self.timeout);
         }
         let http_request = builder.build().map_err(map_request_error)?;
         observer.emit_started();
-        let response = self
-            .http_client
+        let response = http_client
             .execute(http_request)
             .await
             .map_err(map_request_error)

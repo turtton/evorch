@@ -76,7 +76,7 @@
         "model_overrides": {},
         "summarizer": "model",
         "summary_idle_timeout_secs": 90,
-        "summary_timeout_secs": 300,
+        "summary_timeout_secs": 600,
         "threshold": 0.75
       }
     },
@@ -568,7 +568,7 @@
           "description": "Overall deadline for one summary attempt (including provider retries).",
           "type": "integer",
           "format": "uint64",
-          "default": 300,
+          "default": 600,
           "minimum": 0
         },
         "threshold": {
