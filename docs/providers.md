@@ -21,6 +21,19 @@ the previous snapshot marked stale and does not interrupt chat.
 Claude API keys do not provide the Claude Pro/Max subscription quota endpoint.
 The normal request usage and cost views remain available for API-key profiles.
 
+## Transient overload recovery
+
+Streaming chat requests retry `server_is_overloaded` failures even when Codex
+reports them as HTTP 400, including `response.failed` SSE events. The default
+policy makes at most three attempts in total: the initial request, a retry after
+250 ms, and a final retry after another 500 ms. If overload persists, the failure
+includes the attempt count and the last provider error. Cancelling the run also
+cancels pending retries.
+
+Other HTTP 400 errors and authentication failures still fail immediately. Rate
+limits retain their existing quota handling. Low-level `send` and `stream` calls
+do not gain retries; recovery remains in the shared `send_streaming` path.
+
 ## Configuration
 
 Only credential references are written to TOML; OAuth token families are stored
