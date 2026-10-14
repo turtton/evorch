@@ -2,6 +2,8 @@
 mod codex_support;
 #[path = "support/codex_contract.rs"]
 mod contract_support;
+#[path = "support/codex_overload_contract.rs"]
+mod overload_contract;
 #[path = "support/codex_priority_contract.rs"]
 mod priority_contract;
 mod support;

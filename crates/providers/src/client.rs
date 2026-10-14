@@ -78,7 +78,7 @@ pub trait ProviderClient: Send + Sync {
 
     /// Delivers text/reasoning deltas live and returns the provider's accumulated response.
     /// Non-streaming clients retain their `send` behavior; premature EOF is an error.
-    /// transport 系失敗と早期 EOF は既定で計3回まで指数 backoff で再試行する。
+    /// transport 系失敗・過負荷・早期 EOF は既定で計3回まで指数 backoff で再試行する。
     /// 認証系は即失敗し、再試行対象の連敗時は `RetriesExhausted` を返す。
     async fn send_streaming(
         &self,
@@ -163,6 +163,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     mod divergence;
+    mod overload;
 
     use super::*;
     use crate::message::{ContentBlock, FinishReason, Message, Role, Usage};
@@ -177,6 +178,7 @@ mod tests {
     struct ScriptedClient {
         scripts: Vec<Attempt>,
         attempts: AtomicUsize,
+        policy: crate::retry::RetryPolicy,
     }
 
     impl ScriptedClient {
@@ -184,6 +186,12 @@ mod tests {
             Self {
                 scripts,
                 attempts: AtomicUsize::new(0),
+                policy: crate::retry::RetryPolicy {
+                    max_attempts: 3,
+                    initial_delay: Duration::ZERO,
+                    backoff_factor: 1,
+                    max_delay: Duration::ZERO,
+                },
             }
         }
     }
@@ -199,12 +207,7 @@ mod tests {
         }
 
         fn retry_policy(&self) -> crate::retry::RetryPolicy {
-            crate::retry::RetryPolicy {
-                max_attempts: 3,
-                initial_delay: Duration::ZERO,
-                backoff_factor: 1,
-                max_delay: Duration::ZERO,
-            }
+            self.policy.clone()
         }
 
         async fn send(

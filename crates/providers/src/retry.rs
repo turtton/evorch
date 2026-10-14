@@ -44,16 +44,31 @@ impl RetryPolicy {
 /// エラーが provider 層の再試行対象かを分類する。
 ///
 /// 認証系を含むその他の 4xx は即時 escalation し、`RateLimited` は quota 領域のため本スコープ外とする。
+/// ただし HTTP 400 の `server_is_overloaded` は一時的な過負荷として再試行する。
 pub fn is_retryable(error: &ProviderError) -> bool {
     match error {
         ProviderError::Timeout | ProviderError::Transport { .. } => true,
-        ProviderError::Http { status, .. } => *status == 408 || (500..=599).contains(status),
+        ProviderError::Http { status, body } => {
+            *status == 408
+                || (500..=599).contains(status)
+                || (*status == 400 && is_server_overloaded(body))
+        }
         ProviderError::RateLimited { .. }
         | ProviderError::InvalidSse { .. }
         | ProviderError::InvalidJson { .. }
         | ProviderError::Request(_)
         | ProviderError::RetriesExhausted { .. } => false,
     }
+}
+
+fn is_server_overloaded(body: &str) -> bool {
+    const CODE: &str = "server_is_overloaded";
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let error = value.get("error").unwrap_or(&value);
+        return error.get("code").and_then(serde_json::Value::as_str) == Some(CODE);
+    }
+    // Codex の response.failed は code と message を `code: message` に平坦化する。
+    body.trim().split(':').next() == Some(CODE)
 }
 
 #[cfg(test)]
@@ -99,6 +114,48 @@ mod tests {
         let policy = RetryPolicy::default();
 
         assert_eq!(policy.backoff_for(u32::MAX), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn http_400_with_explicit_overload_code_is_retryable() {
+        for body in [
+            "server_is_overloaded: Our servers are currently overloaded. Please try again later.",
+            " server_is_overloaded: Please try again later. \n",
+            "server_is_overloaded",
+            r#"{"error":{"code":"server_is_overloaded","message":"Please try again later."}}"#,
+            r#"{"code":"server_is_overloaded","message":"Please try again later."}"#,
+        ] {
+            let error = ProviderError::Http {
+                status: 400,
+                body: body.into(),
+            };
+            assert!(is_retryable(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn ordinary_client_errors_and_overload_mentions_are_not_retryable() {
+        for body in [
+            "Bad request",
+            "invalid_request_error: server_is_overloaded is not a valid model",
+            "server_is_overloaded_extra: not the overload code",
+            "Our servers are currently overloaded. Please try again later.",
+            r#"{"error":{"code":"invalid_request_error","message":"server_is_overloaded"}}"#,
+            r#"{"error":{"code":"invalid_request_error"},"request":{"code":"server_is_overloaded"}}"#,
+        ] {
+            let error = ProviderError::Http {
+                status: 400,
+                body: body.into(),
+            };
+            assert!(!is_retryable(&error), "{error}");
+        }
+        for status in [401, 403, 404, 422, 429] {
+            let error = ProviderError::Http {
+                status,
+                body: "server_is_overloaded: Please try again later.".into(),
+            };
+            assert!(!is_retryable(&error), "{error}");
+        }
     }
 
     // Given: 各 ProviderError バリアント / When: 再試行可否を分類 / Then: 一時障害だけが再試行可能になる
