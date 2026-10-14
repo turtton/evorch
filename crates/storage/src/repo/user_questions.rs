@@ -74,10 +74,15 @@ pub fn answer(conn: &Connection, id: &str, answer: &str) -> Result<(), StorageEr
     }
     question.answer = Some(answer.into());
     let payload = serde_json::to_string(&question).map_err(|e| invalid(&e.to_string()))?;
-    conn.execute(
+    // Plan A's fence is on the answer itself, not each recipient. Never persist
+    // evidence for a losing answer, even if the caller read a stale pending row.
+    let updated = conn.execute(
         "UPDATE user_questions SET payload=?2,answered=1 WHERE id=?1 AND answered=0",
         params![id, payload],
     )?;
+    if updated != 1 {
+        return Err(invalid("question answer changed during checked update"));
+    }
     Ok(())
 }
 

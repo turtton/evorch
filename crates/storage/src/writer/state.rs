@@ -34,6 +34,22 @@ struct WriterState {
     reclaim_wal_pending: bool,
 }
 
+/// All review mutations share the same suspension gate and rollback boundary.
+fn review_transaction(
+    state: &WriterState,
+    operation: impl FnOnce(&Connection) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    if state.writes_suspended {
+        return Err(StorageError::Serialization(
+            "review writes suspended by storage limit".into(),
+        ));
+    }
+    let transaction = state.conn.unchecked_transaction()?;
+    operation(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 pub(super) fn run_writer(
     conn: Connection,
     rx: Receiver<Command>,
@@ -170,6 +186,43 @@ pub(super) fn run_writer(
                 } else {
                     crate::repo::run_context::upsert(&state.conn, &record)
                 };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AnswerUserQuestionWithEvidence(id, answer, rows, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    // Plan A: the answer's checked UPDATE is the first-answer-wins
+                    // fence. Evidence shares this transaction; recipient-specific
+                    // UPDATEs are unnecessary (runtime reflection uses synced/resync).
+                    crate::repo::user_questions::answer(conn, &id, &answer)?;
+                    crate::repo::review_evidence::insert(conn, &rows)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::RecordReviewEvidence(rows, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::review_evidence::insert(conn, &rows)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::RecordReviewEvidenceWithEdges(rows, edges, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::review_lineage::insert(conn, &edges)?;
+                    crate::repo::review_evidence::insert(conn, &rows)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::RecordReviewLineageEdge(edges, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::review_lineage::insert(conn, &edges)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpsertRunContextWithEvidence(record, rows, edges, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::run_context::upsert(conn, &record)?;
+                    crate::repo::review_evidence::insert(conn, &rows)?;
+                    crate::repo::review_lineage::insert(conn, &edges)
+                });
                 let _ = reply.send(result);
             }
             Ok(Command::InvalidateRunContext(run_id, reply)) => {
