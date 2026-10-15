@@ -7,14 +7,17 @@ use egui::{
 };
 
 use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey, ShellJobs, result_body};
-use crate::model::transcript::{ToolStatus, TranscriptEntry};
+use crate::model::transcript::{ToolReview, ToolStatus, TranscriptEntry};
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
 use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette};
 use crate::theme::widgets::{icon_button, soft_frame};
 
 mod header;
+mod orchestration;
 mod sticky;
+
+pub use orchestration::agent_name;
 
 const LIVE_TAIL_LINES: usize = 4;
 
@@ -28,6 +31,8 @@ pub struct ToolCardContext<'a> {
     /// Whether the card is the latest one about its shell job, which alone
     /// previews the job's live output.
     pub latest_for_job: bool,
+    /// Resolves run IDs in coordination tool inputs to agent names.
+    pub agents: &'a [crate::model::tasks::TaskRow],
 }
 
 pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
@@ -36,6 +41,7 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
         repo_root: None,
         jobs: &jobs,
         latest_for_job: false,
+        agents: &[],
     };
     tool_card_group(ui, std::slice::from_ref(entry), pane_id, context);
 }
@@ -140,6 +146,7 @@ pub fn tool_card_group(
         is_error,
         status,
         run_id,
+        reviews,
     }) = group.last()
     else {
         return;
@@ -162,6 +169,7 @@ pub fn tool_card_group(
         output.as_deref(),
         *is_error,
         context.repo_root,
+        context.agents,
     );
     let last = &group[folded - 1];
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
@@ -189,15 +197,15 @@ pub fn tool_card_group(
         ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
     };
     let label = format!("{mark}{header_text}");
-    let tooltip = match focused_input(tool_name, input.as_ref()) {
-        Some(full) => format!("{call_id}\n{full}"),
-        None => match job.and_then(|job| job.command.as_deref()) {
-            Some(command) => format!("{call_id}\n{command}"),
-            None => format!("{call_id}\n{header_text}"),
-        },
-    };
+    let tooltip = focused_input(tool_name, input.as_ref())
+        .or_else(|| job.and_then(|job| job.command.as_deref()))
+        .unwrap_or(&header_text)
+        .to_owned();
     soft_frame(palette().SURFACE).show(ui, |ui| {
         let title = sticky::Header::reserve(ui, id);
+        for review in reviews {
+            review_line(ui, review);
+        }
         // An expanded card already shows the output in full.
         let preview = context.latest_for_job && (running || !expanded);
         if let Some(job) = job.filter(|job| preview && job.is_running()) {
@@ -307,6 +315,25 @@ pub fn tool_card_group(
             ui.ctx().request_repaint();
         }
     });
+}
+
+/// Access review outcome, shown whether or not the card is expanded.
+fn review_line(ui: &mut Ui, review: &ToolReview) {
+    let (icon, color) = if review.needs_attention() {
+        (icons::SHIELD_WARNING, palette().WARNING_FG)
+    } else {
+        (icons::SHIELD_CHECK, palette().TEXT_MUTED)
+    };
+    let text = review.summary();
+    let response = ui.add(
+        egui::Label::new(
+            RichText::new(icons::with_icon(icon, &text))
+                .size(FONT_SMALL)
+                .color(color),
+        )
+        .wrap(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
 }
 
 /// The last few lines of a running job, muted, so progress shows without

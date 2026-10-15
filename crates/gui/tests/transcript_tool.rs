@@ -287,3 +287,91 @@ fn read_tool_card_keeps_file_name_visible_in_narrow_pane() {
     assert!(painted.contains("…/"), "{painted}");
     assert!(!painted.contains(".evorch"), "{painted}");
 }
+
+#[test]
+fn reviewed_shell_card_shows_its_verdict_while_collapsed() {
+    // Given: a shell call whose sandbox escape was denied.
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "shell".into(),
+        call_id: "call-secret-77".into(),
+        input: Some(serde_json::json!({"command": "curl example.com"})),
+        run_id: Some("run-77".into()),
+    }));
+    model.apply(&Event::new(event_bus::DiagnosticEvent {
+        source: "sandbox".into(),
+        severity: event_bus::DiagnosticSeverity::Warning,
+        code: "escalation_review".into(),
+        detail: "denied: network is not needed".into(),
+        run_id: Some("run-77".into()),
+        thread_id: None,
+        call_id: Some("call-secret-77".into()),
+    }));
+    // When: the collapsed card renders.
+    let mut harness = Harness::new_ui(move |ui| {
+        gui::theme::install(ui.ctx());
+        ui.ctx()
+            .global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        gui::panes::agent::transcript_body(ui, &model);
+    });
+    harness.run_steps(2);
+    // Then: the verdict sits in the card, without a separate review card or IDs.
+    harness.get_by_label("Sandbox escape reviewed: denied: network is not needed");
+    assert!(harness.query_by_label("Input").is_none());
+    assert_eq!(
+        harness
+            .query_all_by_label_contains("curl example.com")
+            .count(),
+        1
+    );
+    harness
+        .get_by_label_contains("Shell curl example.com")
+        .hover();
+    harness.run_steps(2);
+    harness.get_by_label("curl example.com");
+    assert!(harness.query_by_label_contains("call-secret-77").is_none());
+    assert!(harness.query_by_label_contains("run-77").is_none());
+}
+
+#[test]
+fn agent_messages_name_their_peer_and_keep_the_run_id_copyable() {
+    // Given: one message to a known reviewer and one from an unknown run.
+    let unknown = "run-01HZX3K9M2Q8ABCDEFGHJKMN";
+    let mut registry = gui::model::transcript_registry::TranscriptRegistry::new();
+    for (sender, recipient, content) in [
+        ("run-1", "run-3", "review run-2"),
+        (unknown, "run-1", "done"),
+    ] {
+        registry.apply(&Event::new(event_bus::AgentMessageEvent::Delivered {
+            message: event_bus::AgentMessage {
+                message_id: content.into(),
+                sender_run_id: sender.into(),
+                recipient_run_id: recipient.into(),
+                kind: event_bus::AgentMessageKind::Send,
+                content: content.into(),
+                reply_to: None,
+            },
+            disposition: event_bus::DeliveryDisposition::Aside,
+        }));
+    }
+    let model = registry.run("run-1").unwrap().clone();
+    let agents = [gui::model::tasks::TaskRow {
+        run_id: runtime::RunId::new(3),
+        name: "reviewer-r1".into(),
+        role: "reviewer".into(),
+        status: event_bus::AgentRunPhase::Running,
+        model: String::new(),
+        category: None,
+        cancelled: false,
+    }];
+    // When: the run transcript renders with the task rows.
+    let harness = Harness::new_ui(move |ui| {
+        gui::theme::install(ui.ctx());
+        gui::panes::agent::transcript_body_with_agents(ui, &model, None, &agents);
+    });
+    // Then: peers read as names, unknown runs are shortened, and IDs are copyable.
+    harness.get_by_label("→ reviewer-r1 (reviewer): review run-2");
+    harness.get_by_label("← run-01HZ…: done");
+    assert_eq!(harness.query_all_by_label("Copy run ID").count(), 2);
+    assert!(harness.query_by_label_contains(unknown).is_none());
+}

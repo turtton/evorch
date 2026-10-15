@@ -122,7 +122,12 @@ fn assert_card(
         gui::panes::transcript_tool::tool_card(ui, entry, egui::Id::new("ledger-test"));
     });
     harness.run_steps(2);
-    let header = format!("{} {name}", if error { "✗" } else { "✓" });
+    let title = match (name, input["body"].as_str()) {
+        ("ledger_read", _) => "Read ledger".to_owned(),
+        (_, Some(body)) if !body.is_empty() => format!("Note {body}"),
+        _ => "Note".to_owned(),
+    };
+    let header = format!("{} {title}", if error { "✗" } else { "✓" });
     assert!(harness.query_by_label("Input").is_none());
     harness.get_by_label(&header).click();
     harness.run_steps(3);

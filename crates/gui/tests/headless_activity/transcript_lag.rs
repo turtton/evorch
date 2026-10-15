@@ -51,7 +51,7 @@ fn lag_episodes_never_interrupt_stream_or_add_boundary_notices() {
                 text: "hello!".into(),
                 run_id: Some("root".into())
             },
-            summary("subagent unknown (child) completed"),
+            summary("a subagent completed"),
         ]
     );
     assert_eq!(
@@ -81,7 +81,7 @@ fn multiple_subscribers_never_add_terminal_summaries() {
         };
         assert_eq!(
             registry.thread().entries(),
-            &[summary(&format!("subagent unknown (child) {state}")),]
+            &[summary(&format!("a subagent {state}")),]
         );
     }
 }
@@ -104,9 +104,9 @@ fn repeated_boundaries_never_flush_lag_entries() {
     assert_eq!(
         registry.thread().entries(),
         &[
-            summary("subagent unknown (first) completed"),
-            summary("subagent unknown (second) completed"),
-            summary("subagent unknown (third) completed"),
+            summary("a subagent completed"),
+            summary("a subagent completed"),
+            summary("a subagent completed"),
         ]
     );
 }

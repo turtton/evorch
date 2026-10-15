@@ -50,14 +50,15 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
         (
             Event::new(event),
             TranscriptEntry::Tool {
-                run_id: None,
+                run_id: Some(run.into()),
                 tool_name: tool_name.into(),
-                call_id: call_id.clone(),
+                call_id: "call-x".into(),
                 input: None,
                 output: None,
                 detail: None,
                 is_error: false,
                 status,
+                reviews: Vec::new(),
             },
         )
     })
@@ -80,27 +81,83 @@ fn scoped_child_preflight_approval_stays_in_run() {
     }
 }
 
+fn started(run: &str) -> Event {
+    Event::new(ToolEvent::ToolStarted {
+        tool_name: "write".into(),
+        call_id: "call-x".into(),
+        run_id: Some(run.into()),
+        input: Some(serde_json::json!({"path": "a.rs"})),
+    })
+}
+
+fn status(entry: &TranscriptEntry) -> &ToolStatus {
+    match entry {
+        TranscriptEntry::Tool { status, .. } => status,
+        other => panic!("not a tool entry: {other:?}"),
+    }
+}
+
 #[test]
-fn scoped_child_approval_after_plain_tool_start_stays_in_run() {
+fn scoped_child_approval_after_plain_tool_start_updates_that_card() {
     for (event, expected) in approvals(CHILD) {
         // Given: ToolStarted indexed the plain id, not the scoped approval id.
         let mut registry = registry();
-        registry.apply(&Event::new(ToolEvent::ToolStarted {
-            tool_name: "write".into(),
-            call_id: "call-x".into(),
-            run_id: Some(CHILD.into()),
-            input: None,
-        }));
-        let started = registry.run(CHILD).expect("child").entries()[0].clone();
+        registry.apply(&started(CHILD));
         // When: the scoped approval arrives on the denial path.
         registry.apply(&event);
-        // Then: the plain entry is preserved and the child receives the approval.
+        // Then: the original card carries the approval status; no second card appears.
         assert!(registry.thread().entries().is_empty());
-        assert_eq!(
-            registry.run(CHILD).expect("child").entries(),
-            &[started, expected]
-        );
+        let entries = registry.run(CHILD).expect("child").entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(status(&entries[0]), status(&expected));
     }
+}
+
+#[test]
+fn approval_before_start_and_approval_while_running_keep_one_card() {
+    let approval_id = format!("{ROOT}:call-x");
+    let request = Event::new(ToolEvent::ApprovalRequested {
+        tool_name: "write".into(),
+        call_id: approval_id.clone(),
+        input: Some(serde_json::json!({"path": "a.rs"})),
+    });
+    let approve = Event::new(ToolEvent::ApprovalResolved {
+        call_id: approval_id,
+        approved: true,
+    });
+    // Given: the approval opens the card before the call starts.
+    let mut before = registry();
+    before.apply(&request);
+    before.apply(&approve);
+    // When: the approved call starts.
+    before.apply(&started(ROOT));
+    // Then: execution continues in the card the approval opened.
+    let entries = before.run(ROOT).expect("root").entries();
+    assert!(matches!(
+        entries,
+        [TranscriptEntry::Tool {
+            status: ToolStatus::Running,
+            input: Some(_),
+            ..
+        }]
+    ));
+    assert_eq!(before.thread().entries(), entries);
+
+    // Given: a running call asks for approval mid-execution (sandbox escalation).
+    let mut during = registry();
+    during.apply(&started(ROOT));
+    during.apply(&request);
+    let [entry] = during.run(ROOT).expect("root").entries() else {
+        panic!("one card")
+    };
+    assert_eq!(status(entry), &ToolStatus::AwaitingApproval);
+    // When: the user approves.
+    during.apply(&approve);
+    // Then: the same card resumes running.
+    let [entry] = during.run(ROOT).expect("root").entries() else {
+        panic!("one card")
+    };
+    assert_eq!(status(entry), &ToolStatus::Running);
 }
 
 #[test]

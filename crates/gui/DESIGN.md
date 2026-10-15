@@ -63,6 +63,14 @@ animation. Output continues to use the transcript's single vertical scroll area.
 Agent rows read `model · provider profile` (provider kind as fallback, kind on
 hover); tokens use `format::compact_count`, TTFT `format::latency`, Δ
 `format::elapsed`; exact counts stay in the tooltip.
+One tool call is one card: approval states update the original card, and sandbox
+escape and network access reviews show as a small line under its title, visible
+while collapsed; denied or declined reviews use WARNING_FG and a shield-warning icon.
+Reviews without a card (legacy history) render standalone. Coordination tools name
+their agents (`Delegate worker-w1 (worker)`, `Message → reviewer-r1 · preview`).
+Agent messages read `→ name (role): text`; unknown runs show a shortened ID.
+Compaction shows one `Context compacted` line; range, threshold, window,
+checkpoint and summary sit in a closed `details` section with a custom header.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
@@ -81,6 +89,8 @@ No motion is introduced. Long IDs must remain inspectable without clipping.
 Runs read by agent name (else thread title), never by run ID; the ID sits behind
 `copy_id_button` (named `Copy run ID`, full value on hover). Notification
 summaries name runs the same way. Clicking an agent name drills into its run.
+Transcript prose avoids inline run, call and question IDs; `copy_id_button` keeps
+them available, with the full ID on hover.
 The ownership header abbreviates owner IDs to five characters plus `…`, with the
 full ID, generation and state on hover. Access retains the last confirmed state
 (or `checking ownership` initially) while probes retry. SQLite contention gets a

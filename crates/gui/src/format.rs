@@ -104,6 +104,18 @@ pub fn usd(cost: f64) -> String {
     }
 }
 
+/// Identifier short enough to sit in running text: IDs up to 12 characters
+/// stay whole, longer ones keep their first 8 characters plus `…`.
+pub fn short_id(id: &str) -> String {
+    if id.chars().count() <= 12 {
+        id.to_owned()
+    } else {
+        let mut short: String = id.chars().take(8).collect();
+        short.push('…');
+        short
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +167,12 @@ mod tests {
         assert_eq!(elapsed(Duration::from_millis(400)), "400ms");
         assert_eq!(elapsed(Duration::from_millis(45_300)), "45.3s");
         assert_eq!(elapsed(Duration::from_secs(125)), "2m 5s");
+    }
+
+    #[test]
+    fn short_ids_keep_readable_prefixes() {
+        assert_eq!(short_id("run-3"), "run-3");
+        assert_eq!(short_id("run-01HZX3K9"), "run-01HZX3K9");
+        assert_eq!(short_id("run-01HZX3K9M2Q8"), "run-01HZ…");
     }
 }

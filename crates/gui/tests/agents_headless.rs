@@ -170,7 +170,10 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
         "run-2 transcript should show its current tool"
     );
     assert!(
-        fixture.workbench.count_labels("-> run-1: run-two handoff") >= 1,
+        fixture
+            .workbench
+            .count_labels("→ worker-one (worker): run-two handoff")
+            >= 1,
         "run-2 transcript should show the outgoing handoff"
     );
 
@@ -272,7 +275,11 @@ fn three_transcript_panes_do_not_mix_run_events() {
             messages: &["two-to-three"],
         },
     );
-    assert!(fixture.workbench.has_label("<- run-2: two-to-three"));
+    assert!(
+        fixture
+            .workbench
+            .has_label("← worker (worker): two-to-three")
+    );
     assert!(!fixture.workbench.has_label("one-to-two"));
 }
 

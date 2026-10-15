@@ -27,6 +27,7 @@ fn harness() -> Harness<'static, State> {
             detail: None,
             is_error: false,
             status: ToolStatus::Succeeded,
+            reviews: Vec::new(),
         }],
         jobs: ShellJobs::default(),
         viewport: Rect::NOTHING,
@@ -56,6 +57,7 @@ fn harness() -> Harness<'static, State> {
                                 repo_root: None,
                                 jobs: &state.jobs,
                                 latest_for_job: false,
+                                agents: &[],
                             },
                         );
                         ui.label("Following conversation");

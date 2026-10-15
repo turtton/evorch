@@ -38,7 +38,7 @@ fn child_run_delta_stays_out_of_thread() {
     }
     // Then: only metadata reaches the thread; the run keeps the complete stream.
     let notice = TranscriptEntry::Notice {
-        text: "subagent worker (child) started".into(),
+        text: "subagent worker started".into(),
     };
     assert_eq!(registry.thread().entries(), std::slice::from_ref(&notice));
     assert_eq!(
@@ -89,10 +89,10 @@ fn terminal_notices_are_metadata_only() {
             registry.thread().entries(),
             &[
                 TranscriptEntry::Notice {
-                    text: "subagent worker (child) started".into()
+                    text: "subagent worker started".into()
                 },
                 TranscriptEntry::Notice {
-                    text: format!("subagent worker (child) {state}")
+                    text: format!("subagent worker {state}")
                 },
             ]
         );

@@ -126,13 +126,8 @@ pub fn icon_button(ui: &mut Ui, icon: &str, label: &str) -> Response {
     icon_button_rich(ui, icon_text(icon), label)
 }
 
-pub fn icon_button_rich(ui: &mut Ui, icon: RichText, label: &str) -> Response {
-    let side = ROW_DENSE - SP_1;
-    labeled(ui.add(ghost(icon).min_size(egui::vec2(side, side))), label)
-}
-
-/// Icon-only button copying `value` (e.g. a run ID) to the clipboard; the full
-/// value stays inspectable on hover while it is hidden from the row text.
+/// Copies `value` on click; the tooltip shows the full ID and the accessible
+/// name stays `label`.
 pub fn copy_id_button(ui: &mut Ui, label: &str, value: &str) -> Response {
     let side = ROW_DENSE - SP_1;
     let response = ui.add(ghost(icon_text(icons::COPY)).min_size(egui::vec2(side, side)));
@@ -142,6 +137,11 @@ pub fn copy_id_button(ui: &mut Ui, label: &str, value: &str) -> Response {
         ui.ctx().copy_text(value.to_owned());
     }
     response
+}
+
+pub fn icon_button_rich(ui: &mut Ui, icon: RichText, label: &str) -> Response {
+    let side = ROW_DENSE - SP_1;
+    labeled(ui.add(ghost(icon).min_size(egui::vec2(side, side))), label)
 }
 
 /// Icon + text ghost button keeping `text` as its accessible name.
