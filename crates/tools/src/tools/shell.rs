@@ -16,7 +16,7 @@ use crate::error::ToolError;
 use crate::executor::ToolExecutionContext;
 use crate::output::Capture;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, ShellJobSummary, Tool, ToolExecutionMode};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 use crate::tools::shell_escalation::{
     EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
@@ -332,10 +332,6 @@ impl Tool for Shell {
     fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.release(run_id)
     }
-    fn running_shell_job_summary(&self, run_id: &str) -> Option<ShellJobSummary> {
-        self.jobs.running_shell_job_summary(run_id)
-    }
-
     fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.jobs.running(run_id)
     }
@@ -522,7 +518,6 @@ impl Tool for Shell {
                 .start(
                     ctx,
                     jobs::JobLaunch {
-                        command,
                         wrapped,
                         interactive: args.interactive,
                         timeout_ms: args.timeout_ms,

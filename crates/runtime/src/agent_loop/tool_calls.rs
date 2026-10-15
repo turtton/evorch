@@ -653,34 +653,6 @@ impl LoopState {
                                     }
                                 }
                             }
-                            let continuation = name == "shell"
-                                && matches!(
-                                    input.get("action").and_then(Value::as_str),
-                                    Some("poll" | "stdin" | "stop")
-                                );
-                            if !continuation
-                                && self
-                                    .shared
-                                    .executor
-                                    .tool_permissions(&name)
-                                    .is_some_and(|p| p.fs_write)
-                                && self.shared.executor.has_running_shell_jobs(&ctx.run_id)
-                            {
-                                let message = self.shared.executor
-                                    .running_shell_job_summary(&ctx.run_id)
-                                    .map_or_else(
-                                        || "A shell job still owns this workspace. Poll or stop it before another mutation.".to_owned(),
-                                        |job| format!("A shell job still owns this workspace: {} ({}). Poll or stop it before another mutation.", job.handle, job.command_summary),
-                                    );
-                                completed.push((
-                                    index,
-                                    id,
-                                    name,
-                                    input,
-                                    ReadyCall::Rejected(ToolResult::error(message)),
-                                ));
-                                continue;
-                            }
                             prepared_wave.push((index, id, name, input, call));
                         }
                         ReadyCall::Invalid(error) => {

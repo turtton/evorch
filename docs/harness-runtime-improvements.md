@@ -51,10 +51,10 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   private `/var/tmp` artifact facility. Truncation and the file path remain visible.
   An async job defaults to a one-hour lifetime unless a timeout is supplied.
 - Process groups are stopped and reaped before a job reports completion. There is
-  no workspace lock: `write` / `edit` / `shell` in another run never wait for a
-  running job. In the run that owns the job, read tools may run; mutating calls
-  report a useful error with the occupying handle and command summary (at most 80
-  characters). The model must observe each
+  no workspace lock: `write` / `edit` / `shell` never wait for a running job, in
+  another run or in the run that owns it. (The run that owned a job used to have
+  its mutating calls rejected until the job was polled or stopped; this was
+  removed on 2026-10-15 by user decision.) The model must observe each
   terminal result before declaring completion. Run completion is published after
   process drain, final checkpoint and workspace teardown. Only then may the same
   run ID be reused; completed job handles can be released without losing persisted
