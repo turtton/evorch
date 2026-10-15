@@ -93,6 +93,7 @@ pub(crate) struct Shared {
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
+    pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
@@ -464,6 +465,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
@@ -529,6 +531,7 @@ impl AgentRuntime {
             .shared
             .comment_checker
             .set(config.comment_checker.clone());
+        let _ = self.shared.orchestration.set(config.orchestration.clone());
         let _ = self.shared.budget.set((&config.budget).into());
         self.set_web_tools_enabled(config.sandbox.web_tools_enabled);
         self.set_sandbox_escalation(
@@ -739,6 +742,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),

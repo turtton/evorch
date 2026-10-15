@@ -216,7 +216,14 @@ impl AgentRuntime {
             findings: Vec::new(),
             reason: None,
             usage: ThreadGoalUsage::default(),
-            max_review_rounds: 3,
+            max_review_rounds: self
+                .shared
+                .orchestration
+                .get()
+                .cloned()
+                .unwrap_or_default()
+                .max_review_rounds
+                .get(),
             max_tokens: None,
         };
         let previous = goals.goals.insert(

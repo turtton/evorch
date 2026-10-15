@@ -1,5 +1,7 @@
 //! オーケストレーションの境界設定型を定義します。
 
+use std::num::NonZeroU32;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -9,14 +11,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrchestrationConfig {
-    /// レビュー (request-update → repair) ラウンド数の上限。
-    pub max_review_rounds: u32,
+    /// thread goal の独立レビューのラウンド数の上限。上限に達した goal は Blocked になる。
+    ///
+    /// 新しく作る goal から適用し、作成済みの goal の上限は変えない。
+    pub max_review_rounds: NonZeroU32,
 }
 
 impl Default for OrchestrationConfig {
     fn default() -> Self {
         Self {
-            max_review_rounds: 3,
+            max_review_rounds: NonZeroU32::MIN.saturating_add(2),
         }
     }
 }
@@ -32,7 +36,6 @@ mod tests {
     fn orchestration_defaults_are_bounded() {
         let config = OrchestrationConfig::default();
 
-        assert_eq!(config.max_review_rounds, 3);
-        assert!(config.max_review_rounds > 0);
+        assert_eq!(config.max_review_rounds.get(), 3);
     }
 }
