@@ -1,6 +1,6 @@
 //! プロジェクトルールの公開スナップショット API。
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use providers::Usage;
@@ -9,7 +9,7 @@ use super::budget::injection_budget_bytes;
 use super::discovery::{chain_for_target, union_targets};
 use super::frontmatter::{body_without_frontmatter, parse_frontmatter};
 use super::matcher::matches;
-use super::render::render_with_markers;
+use super::render::{render_under, render_with_markers};
 use super::session::RulesSession;
 use super::source::RulesSource;
 use super::types::{
@@ -130,6 +130,66 @@ pub fn after_successful_tools(session: &mut RulesSession, targets: &[PathBuf]) -
         markers,
         injection_budget_bytes(&session.source.settings, session.last_usage.as_ref(), 0),
     )
+}
+
+/// The injection budget for rules appended after this run's latest request.
+pub(crate) fn injection_budget(session: &RulesSession) -> u64 {
+    injection_budget_bytes(&session.source.settings, session.last_usage.as_ref(), 0)
+}
+
+/// Rules for `targets` inside the allowed directory `root` (ADR 0032), the directory
+/// acting as the rule root. Files in `injected` are skipped; the second value lists
+/// the files whose bodies the block includes, so omitted ones are retried later.
+pub(crate) fn allowed_directory_rules(
+    root: &Path,
+    targets: &[PathBuf],
+    injected: &BTreeSet<PathBuf>,
+    header: &str,
+    budget: u64,
+) -> (Option<String>, Vec<PathBuf>) {
+    let mut markers = Vec::new();
+    let mut chains = Vec::new();
+    let mut target_paths = Vec::new();
+    for target in targets {
+        match chain_for_target(root, target) {
+            Ok(chain) => chains.push(chain),
+            Err(error) => disable(&error, &mut markers),
+        }
+        if let Some(relative) = lexical_relative(root, target) {
+            target_paths.push(relative);
+        }
+    }
+    let mut resolved = Vec::new();
+    for source in union_targets(chains) {
+        if injected.contains(&source.canonical_path) {
+            continue;
+        }
+        match resolve_for_targets(source, &target_paths) {
+            Ok(Some(mut rule)) => {
+                rule.source.rel_path = root.join(&rule.source.rel_path).display().to_string();
+                resolved.push(rule);
+            }
+            Ok(None) => {}
+            Err(error) => disable(&error, &mut markers),
+        }
+    }
+    if resolved.is_empty() && markers.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut seen = HashSet::new();
+    markers.retain(|marker| seen.insert(marker.clone()));
+    let (rendered, included) = render_under(header, resolved, budget);
+    let mut text = if rendered.starts_with(header) {
+        rendered
+    } else if rendered.is_empty() {
+        header.to_owned()
+    } else {
+        format!("{header}\n{rendered}")
+    };
+    if !markers.is_empty() {
+        text = format!("{text}\n{}", markers.join("\n"));
+    }
+    (Some(text), included)
 }
 
 fn user_startup_rules(source: &RulesSource, markers: &mut Vec<String>) -> Vec<ResolvedRule> {

@@ -138,6 +138,9 @@ pub(crate) struct LoopState {
     /// by every command and file tool call. Benchmark runs have none.
     pub(crate) allowed_directories: Option<sandbox::AllowedRegions>,
     pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
+    pub(crate) allowed_instructions: crate::allowed_instructions::AllowedInstructions,
+    /// Allowed directory each run-local skill came from, checked before every load.
+    pub(crate) allowed_skill_origins: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -194,6 +197,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let told_directories = restored
         .as_ref()
         .map(|restored| (*restored.allowed_directories).clone())
+        .unwrap_or_default();
+    let allowed_instructions = restored
+        .as_ref()
+        .map(|restored| (*restored.allowed_instructions).clone())
         .unwrap_or_default();
     let history_only = task.start == RunStart::Resume;
     // An interrupted provider request retries its exact saved input. Restore
@@ -297,6 +304,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         scratch: None,
         allowed_directories: None,
         told_directories,
+        allowed_instructions,
+        allowed_skill_origins: Default::default(),
     };
     // Every setup/execute return flows through one finalization boundary.
     async {
@@ -490,6 +499,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 &state.policy,
             ));
         }
+        let skill_roots = std::mem::take(&mut state.allowed_instructions.skill_roots);
+        let inherited = state.task.config.allowed_skill_roots.clone();
+        state.restore_allowed_skills(skill_roots.into_iter().chain(inherited));
         if !is_restored && !benchmark_replay {
             let allowed = state
                 .allowed_directories

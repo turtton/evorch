@@ -16,6 +16,13 @@ pub(super) struct SkillLoadArgs {
 }
 
 pub(super) fn skill_load(state: &LoopState, input: serde_json::Value) -> DispatchResult {
+    if let Some(reason) = input
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|name| state.revoked_skill(name))
+    {
+        return error(reason);
+    }
     skill_load_with_registry(state.skills(), input)
 }
 

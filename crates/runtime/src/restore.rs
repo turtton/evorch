@@ -25,6 +25,7 @@ pub(crate) struct RestoredState {
     pub(crate) turn_completed: bool,
     /// Boxed so the restore continuations stay small.
     pub(crate) allowed_directories: Box<crate::allowed_directories::ToldDirectories>,
+    pub(crate) allowed_instructions: Box<crate::allowed_instructions::AllowedInstructions>,
 }
 
 impl RestoredState {
@@ -79,6 +80,7 @@ impl RestoredState {
             trigger: None,
             turn_completed,
             allowed_directories: Box::new(descriptor.allowed_directories),
+            allowed_instructions: Box::new(descriptor.allowed_instructions),
         })
     }
 }
@@ -159,6 +161,12 @@ pub struct RunRestoreDescriptor {
         skip_serializing_if = "crate::allowed_directories::ToldDirectories::is_unused"
     )]
     pub allowed_directories: crate::allowed_directories::ToldDirectories,
+    /// Allowed-directory rules and skills the run has read (ADR 0032); never re-appended.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::allowed_instructions::AllowedInstructions::is_empty"
+    )]
+    pub allowed_instructions: crate::allowed_instructions::AllowedInstructions,
 }
 
 impl RunRestoreDescriptor {
@@ -423,6 +431,7 @@ fn write_snapshot(
             .model
             .route_pins(&state.caller_run_id().to_string()),
         allowed_directories: state.told_directories.clone(),
+        allowed_instructions: state.allowed_instructions.clone(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),

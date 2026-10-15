@@ -55,6 +55,7 @@ pub(crate) fn persist_escalation_seed(
         completed_turn_end: None,
         route_pins: vec![],
         allowed_directories: Default::default(),
+        allowed_instructions: Default::default(),
     };
     let messages = [providers::Message {
         role: providers::Role::User,

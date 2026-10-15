@@ -138,6 +138,9 @@ fn validate_load_skills(state: &LoopState, names: &[String]) -> Result<Vec<Strin
         if registry.get(name).is_none() {
             return Err(format!("unknown skill: {name}"));
         }
+        if let Some(reason) = state.revoked_skill(name) {
+            return Err(reason);
+        }
     }
     Ok(unique)
 }
@@ -204,6 +207,7 @@ pub(crate) fn spawn_delegate(
         images: args.images,
         name: args.name,
         category,
+        allowed_skill_roots: state.allowed_skill_roots(&load_skills),
         load_skills,
         ..RunConfig::default()
     };

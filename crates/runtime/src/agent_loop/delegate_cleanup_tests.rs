@@ -120,6 +120,8 @@ fn fixture_with_model(
         scratch: None,
         allowed_directories: None,
         told_directories: Default::default(),
+        allowed_instructions: Default::default(),
+        allowed_skill_origins: Default::default(),
     };
     (runtime, state)
 }

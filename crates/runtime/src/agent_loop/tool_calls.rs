@@ -372,6 +372,7 @@ impl LoopState {
             call_id: None,
         };
         let mut rule_targets = Vec::new();
+        let mut shell_cwds = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
         while remaining.peek().is_some() {
             match self.publish_budget() {
@@ -885,6 +886,13 @@ impl LoopState {
                     {
                         rule_targets.push(target);
                     }
+                    if observed
+                        && !result.is_error
+                        && name == "shell"
+                        && let Some(cwd) = input.get("cwd").and_then(Value::as_str)
+                    {
+                        shell_cwds.push(PathBuf::from(cwd));
+                    }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
                 }
@@ -910,12 +918,16 @@ impl LoopState {
                 }
             }
         }
-        if !rule_targets.is_empty()
+        let routed = self.route_rule_targets(rule_targets, shell_cwds);
+        if !routed.project.is_empty()
             && let Some(session) = &mut self.rules_session
-            && let Some(text) = rules::after_successful_tools(session, &rule_targets)
+            && let Some(text) = rules::after_successful_tools(session, &routed.project)
         {
             self.context.push_user(&text);
             self.publish_message_count();
+        }
+        if !routed.allowed.is_empty() {
+            self.append_allowed_instructions(routed.allowed);
         }
         true
     }
