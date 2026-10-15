@@ -17,6 +17,7 @@ pub type ProjectSlugResolver = Arc<dyn Fn(&std::path::Path) -> String + Send + S
 
 /// Project-scoped inputs resolved once per project root and shared by its runs.
 pub(crate) struct ProjectContext {
+    /// The canonical root, so every spelling of a project mounts and reads the same path.
     pub(crate) root: PathBuf,
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) model: Arc<dyn AgentModel>,
@@ -35,23 +36,24 @@ impl Shared {
     }
 
     pub(crate) fn project(&self, root: &std::path::Path) -> Arc<ProjectContext> {
+        let root = canonical_root(root);
         let mut projects = self
             .projects
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(project) = projects.get(root) {
+        if let Some(project) = projects.get(&root) {
             return Arc::clone(project);
         }
         let model = self
             .project_models
             .get()
-            .and_then(|resolve| resolve(root))
+            .and_then(|resolve| resolve(&root))
             .unwrap_or_else(|| Arc::clone(&self.model));
-        let declared = self.declared_trust(root);
+        let declared = self.declared_trust(&root);
         let project = Arc::new(ProjectContext {
-            root: root.to_path_buf(),
+            root: root.clone(),
             rules: self.rules().map(|rules| {
-                let rules = rules.with_project_root(Some(root.to_path_buf()));
+                let rules = rules.with_project_root(Some(root.clone()));
                 Arc::new(match declared {
                     Some(trust) => rules.with_trust(trust),
                     None => rules,
@@ -61,7 +63,7 @@ impl Shared {
             repo_skills: declared.is_none_or(|trust| trust == ProjectTrust::Approved),
             slug: OnceLock::new(),
         });
-        projects.insert(root.to_path_buf(), Arc::clone(&project));
+        projects.insert(root, Arc::clone(&project));
         project
     }
 
@@ -69,7 +71,7 @@ impl Shared {
         self.project_trust
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(root)
+            .get(&canonical_root(root))
             .copied()
     }
 
@@ -102,12 +104,8 @@ impl Shared {
     /// The record partition of a run's project, when the host names projects.
     pub(crate) fn project_slug(&self, root: &std::path::Path) -> Option<String> {
         let resolve = self.project_slugs.get()?;
-        Some(
-            self.project(root)
-                .slug
-                .get_or_init(|| resolve(root))
-                .clone(),
-        )
+        let project = self.project(root);
+        Some(project.slug.get_or_init(|| resolve(&project.root)).clone())
     }
 
     /// The model that serves `config`'s project.
@@ -145,6 +143,7 @@ impl AgentRuntime {
     /// Declares whether a project's own instructions (`AGENTS.md` rules and
     /// `.evorch/skills`) may reach its runs. Applies to runs started afterwards.
     pub fn set_project_trust(&self, root: PathBuf, trust: ProjectTrust) {
+        let root = canonical_root(&root);
         self.shared
             .project_trust
             .lock()
@@ -197,8 +196,8 @@ impl AgentRuntime {
     }
 }
 
-/// Allowed directories are keyed by the canonical root so a host and a run
-/// naming the same project differently share one list. Trust keeps its raw key.
+/// Project-keyed state (trust, contexts, allowed directories) is keyed by the
+/// canonical root so a host and a run naming the same project differently agree.
 fn canonical_root(root: &std::path::Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
