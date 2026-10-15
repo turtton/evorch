@@ -325,14 +325,7 @@ pub fn tool_difference(
     (only(left, right), only(right, left))
 }
 
-/// Compact token count: `950`, `12.4K`, `1.2M`.
-pub fn compact_tokens(tokens: u64) -> String {
-    match tokens {
-        0..1_000 => tokens.to_string(),
-        1_000..1_000_000 => format!("{:.1}K", tokens as f64 / 1_000.0),
-        _ => format!("{:.1}M", tokens as f64 / 1_000_000.0),
-    }
-}
+pub use crate::format::compact_count as compact_tokens;
 
 #[cfg(test)]
 #[path = "context_inspector_tests.rs"]
