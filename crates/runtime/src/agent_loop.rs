@@ -1004,8 +1004,10 @@ impl LoopState {
                     if !self.task.config.interactive
                         || (self.resumed && !self.task.config.keep_alive)
                     {
-                        self.finish_success();
-                        return;
+                        if self.finish_success() {
+                            return;
+                        }
+                        continue;
                     }
                     if !self.wait_for_input().await {
                         return;
@@ -1250,7 +1252,29 @@ impl LoopState {
         }
     }
 
-    pub(crate) fn finish_success(&mut self) {
+    /// False keeps the loop alive for answers accepted before input closure.
+    pub(crate) fn finish_success(&mut self) -> bool {
+        let runtime = self.runtime();
+        let _completion = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.shared.run_store.get())
+            .map(|store| {
+                store
+                    .restore_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+        match self.user_question_readiness() {
+            Ok(questions::UserQuestionReadiness::Ready) => {}
+            Ok(
+                questions::UserQuestionReadiness::AnswersAvailable
+                | questions::UserQuestionReadiness::Waiting,
+            ) => return false,
+            Err(error) => {
+                self.finish_error(error);
+                return true;
+            }
+        }
         // 位相遷移より先に公開する。wait() は Done 位相で return するため、
         // run_result() を wait 後に読む利用者に最終テキストが確定済みであることを
         // 保証するためである。
@@ -1258,6 +1282,7 @@ impl LoopState {
             self.channels.result_tx.send_replace(Some(text));
         }
         let _ = self.transition(AgentRunPhase::Done, None);
+        true
     }
 
     /// エスカレーションで run を終端させる。

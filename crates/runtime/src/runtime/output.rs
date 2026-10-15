@@ -16,6 +16,7 @@ pub(crate) struct RunOutput {
 #[serde(rename_all = "snake_case")]
 enum OutputStatus {
     StillRunning,
+    Waiting,
     Completed,
     Cancelled,
     Stopped,
@@ -84,7 +85,8 @@ impl AgentRuntime {
                 };
                 (status, None, entry.terminal_reason.clone())
             }
-            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
+            AgentRunPhase::Waiting => (OutputStatus::Waiting, None, None),
+            AgentRunPhase::Pending | AgentRunPhase::Running => {
                 (OutputStatus::StillRunning, None, None)
             }
         };

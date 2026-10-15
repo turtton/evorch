@@ -175,6 +175,7 @@ async fn multiple_recipients_resync_after_commit_without_duplicate_evidence() {
         .unwrap();
     runtime
         .answer_subagent_question(root, &agent_question.id, "agent answer")
+        .await
         .unwrap();
     assert!(
         !store

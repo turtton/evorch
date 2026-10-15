@@ -572,6 +572,124 @@ async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalat
 }
 
 #[tokio::test]
+async fn answering_a_completed_child_preserves_its_wire_prefix() {
+    let read = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let mut harness = harness_with_read(
+        vec![
+            read_response(1),
+            ScriptedResponse::tool_call(
+                "child-question",
+                MODEL,
+                0,
+                "child-question",
+                "ask_user",
+                [json!({"title":"Which scope?", "blocking":false}).to_string()],
+            ),
+            text_response("Completed the independent investigation"),
+            read_response(0),
+            text_response("Applied the late scope answer"),
+        ],
+        1_000_000,
+        read.clone(),
+    );
+    let config = storage::StorageConfig {
+        db_path: harness
+            ._directory
+            .path()
+            .join("completed-child-questions.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate the scope investigation".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..RunConfig::default()
+        },
+    );
+    // Keep the parent in independent work so completion notifications cannot
+    // consume the responses reserved for the child's continuation.
+    read.child_started.notified().await;
+    let child = harness
+        .runtime
+        .delegate_background_as_child(
+            parent,
+            Role::Worker,
+            "Investigate the scope independently",
+            RunConfig::default(),
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, child, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let question = harness.runtime.user_answers(child).unwrap().remove(0);
+    harness
+        .runtime
+        .answer_subagent_question(parent, &question.id, "Use scope A")
+        .await
+        .unwrap();
+    assert_ne!(
+        harness.runtime.inspect_agent(child).unwrap().phase,
+        AgentRunPhase::Done,
+        "a late answer must schedule the completed child to continue"
+    );
+    read.started.notified().await;
+    read.release.notify_one();
+    events.extend(through_phase(&mut harness.receiver, child, AgentRunPhase::Done).await);
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if run == &child.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(usage.len(), 4);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    for (index, (previous, next)) in [(1, 2), (2, 3), (3, 4)].into_iter().enumerate() {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[index].0 > 0);
+        assert!(usage[index + 1].1 >= usage[index].0);
+    }
+    assert_eq!(
+        requests[3].to_string().matches("[user-answer id=").count(),
+        1
+    );
+    assert!(requests[3].to_string().contains("Use scope A"));
+    harness.runtime.cancel(parent).unwrap();
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Error
+    );
+}
+
+#[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
     interrupted_tool_recovery(Some("Explain the interrupted result"), false).await;
 }

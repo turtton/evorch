@@ -23,6 +23,9 @@ mod ledger_events;
 mod mcp_scope;
 
 #[cfg(test)]
+mod finish_tests;
+
+#[cfg(test)]
 mod rework_tests {
     use super::*;
     use crate::{AgentRuntime, EscalationSettings, Role, RunConfig};
@@ -355,6 +358,41 @@ impl BatchCall {
 }
 
 impl LoopState {
+    pub(super) async fn finish_tool_batch(
+        &mut self,
+        result: &str,
+        remaining: impl Iterator<Item = (String, String, Value)>,
+    ) -> bool {
+        // A new answer or goal can keep this run alive after finish dispatch.
+        // Close the unexecuted tail before any final text or follow-up input.
+        for (id, _, _) in remaining {
+            self.context.push_tool_result(
+                id,
+                ToolResult::error("Not executed because an earlier finish call ended this tool batch. Submit a new call if the work is still needed."),
+            );
+        }
+        self.push_final_result(result);
+        if self
+            .runtime()
+            .is_some_and(|runtime| runtime.goal_for_root(self.task.run_id).is_some())
+        {
+            if self.flush_aside() || self.thread_goal_boundary().await {
+                return true;
+            }
+            if let Some(kind) = self.interrupted() {
+                self.finish_interrupted(kind);
+                return false;
+            }
+            if self.flush_aside() {
+                return true;
+            }
+            if self.task.config.keep_alive {
+                return self.wait_for_input().await;
+            }
+        }
+        !self.finish_success()
+    }
+
     pub(super) async fn execute_tools(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
@@ -813,26 +851,7 @@ impl LoopState {
                             match dispatch.terminal {
                                 meta::Terminal::Continue => continue,
                                 meta::Terminal::Finish(result) => {
-                                    self.push_final_result(&result);
-                                    if self.runtime().is_some_and(|runtime| {
-                                        runtime.goal_for_root(self.task.run_id).is_some()
-                                    }) {
-                                        if self.flush_aside() || self.thread_goal_boundary().await {
-                                            return true;
-                                        }
-                                        if let Some(kind) = self.interrupted() {
-                                            self.finish_interrupted(kind);
-                                            return false;
-                                        }
-                                        if self.flush_aside() {
-                                            return true;
-                                        }
-                                        if self.task.config.keep_alive {
-                                            return self.wait_for_input().await;
-                                        }
-                                    }
-                                    self.finish_success();
-                                    return false;
+                                    return self.finish_tool_batch(&result, remaining).await;
                                 }
                                 meta::Terminal::Escalate(memo) => {
                                     // 終端指示を返した時点で残りのバッチ tool call は

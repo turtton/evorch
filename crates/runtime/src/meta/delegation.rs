@@ -292,8 +292,10 @@ pub(crate) async fn wait_delegates(
                     .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id.to_string()));
                 match run {
                     Some(run)
-                        if run["status"] != "still_running"
-                            && run["has_pending_question"] != true =>
+                        if matches!(
+                            run["status"].as_str(),
+                            Some("completed" | "cancelled" | "stopped" | "failed")
+                        ) && run["has_pending_question"] != true =>
                     {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }

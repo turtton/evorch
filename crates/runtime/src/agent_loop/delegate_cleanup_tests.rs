@@ -50,7 +50,7 @@ impl AgentModel for BlockedModel {
     }
 }
 
-fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState) {
+pub(super) fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState) {
     fixture_with_model(cancel_rx, BlockedModel::default())
 }
 
