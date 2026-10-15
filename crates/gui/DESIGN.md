@@ -29,6 +29,18 @@ Thread archive uses a Painter-drawn box at Small text height, a 1.2pt stroke,
 a wider lid with a centered handle slit, and native interaction text color.
 Its native small Button reserves Small text height + SP_2 on each axis;
 pinned threads use egui's disabled painting and cannot activate Archive.
+Thread titles open a right-click menu with Copy thread ID / Copy thread title.
+Pending tool approvals, including a subagent's, mark the owning thread with the
+question's WARNING_FG dot and "Approval needed" text; beside a question dot they
+use a SHIELD_WARNING glyph instead so both stay distinguishable.
+Quota bars fill SUCCESS above 50% remaining, WARNING_FG from 20–50% and ERROR_FG
+below 20%; the percentage stays in the summary, tooltip and accessible value.
+Reset and expiry times read relative ("resets in 1d 5h 30m"), with the absolute
+UTC time in the same detail line or tooltip; unknown stays "resets unknown".
+Saved/refresh/candidate times read as "5m 12s ago" with absolute UTC on hover.
+File previews have no reload button: a visible preview stats its file once per
+second and, on an mtime/size change or (dis)appearance, loads the new version in
+the background, swapping it in only when ready so content never flashes.
 Workspace contention adds a Painter-drawn hourglass in WARNING_FG alongside the
 thread's existing status and question indicators, including waits from subagents.
 Its tooltip lists elapsed wait, waiting tool, authoritative current holder and

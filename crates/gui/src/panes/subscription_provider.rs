@@ -93,15 +93,13 @@ pub fn subscription_body(
             ui.label(muted("Completing sign-in…"));
         }
         SubscriptionAuthState::SignedIn { expires_at } => {
-            let expiry = i64::try_from(*expires_at)
-                .ok()
-                .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
-                .map_or_else(
-                    || "unknown".into(),
-                    |at| at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                );
-            ui.label(muted(format!("Signed in · token expires {expiry}")));
-            if *expires_at <= unix_now() {
+            let now = unix_now();
+            let (label, absolute) = token_expiry(*expires_at, now);
+            let response = ui.label(muted(label));
+            if let Some(absolute) = absolute {
+                response.on_hover_text(absolute);
+            }
+            if *expires_at <= now {
                 ui.label(muted(
                     "Token expired; it will renew automatically when used.",
                 ));
@@ -151,4 +149,49 @@ pub fn subscription_body(
             .labelled_by(label.id);
     });
     action
+}
+
+/// Relative expiry for the label, with the absolute UTC time for its tooltip.
+fn token_expiry(expires_at: u64, now: u64) -> (String, Option<String>) {
+    let at = |seconds: u64| {
+        i64::try_from(seconds)
+            .ok()
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+    };
+    match (at(expires_at), at(now)) {
+        (Some(expiry), Some(now)) if expiry > now => (
+            format!(
+                "Signed in · token expires {}",
+                crate::format::time_until(expiry, now)
+            ),
+            Some(crate::format::utc_timestamp(expiry)),
+        ),
+        (Some(expiry), _) => (
+            "Signed in · token expired".into(),
+            Some(crate::format::utc_timestamp(expiry)),
+        ),
+        (None, _) => ("Signed in · token expiry unknown".into(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_expiry;
+
+    #[test]
+    fn token_expiry_reads_as_remaining_time_with_absolute_tooltip() {
+        let now = 1_791_000_000;
+        assert_eq!(
+            token_expiry(now + 5 * 3_600 + 20 * 60, now),
+            (
+                "Signed in · token expires in 5h 20m".into(),
+                Some("2026-10-03 09:20 UTC".into())
+            )
+        );
+        assert_eq!(token_expiry(now, now).0, "Signed in · token expired");
+        assert_eq!(
+            token_expiry(u64::MAX, now),
+            ("Signed in · token expiry unknown".into(), None)
+        );
+    }
 }

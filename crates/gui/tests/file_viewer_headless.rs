@@ -118,7 +118,7 @@ fn markdown_links_resolve_against_the_document_directory_and_errors_stay_in_the_
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         harness.run();
-        if !harness.has_label("ファイルを読み込み中…") {
+        if !harness.has_label("Loading file…") {
             break;
         }
         assert!(Instant::now() < deadline);

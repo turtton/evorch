@@ -292,14 +292,14 @@ fn archive_click_moves_thread_out_of_main_and_persists() {
     harness.click_label("Archive");
     harness.run();
     // Then: the closed archive hides the title, clears selection and persists.
-    assert!(harness.has_label("アーカイブ済み (1)"));
+    assert!(harness.has_label("Archived (1)"));
     assert!(!harness.has_label("Target"));
     assert!(!harness.has_label("Pause"));
     assert!(harness.state().sidebar().active_thread.is_none());
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();
     assert_eq!(saved["threads"][0]["archived"], true);
-    harness.click_label("アーカイブ済み (1)");
+    harness.click_label("Archived (1)");
     harness.run();
     assert_eq!(harness.count_labels("Target"), 1);
     assert!(harness.has_label("Restore"));
@@ -311,7 +311,7 @@ fn restore_click_returns_archived_thread_to_main_and_persists() {
     let temp = tempfile::tempdir().unwrap();
     let mut harness = fixture(temp.path(), true);
     harness.run();
-    harness.click_label("アーカイブ済み (1)");
+    harness.click_label("Archived (1)");
     harness.run();
     // When: restoring the archived row.
     harness.click_label("Restore");
@@ -400,7 +400,7 @@ fn archived_title_switches_thread_when_clicked() {
     let mut harness = fixture(temp.path(), true);
     harness.state_mut().create_thread("Next").unwrap();
     harness.run();
-    harness.click_label("アーカイブ済み (1)");
+    harness.click_label("Archived (1)");
     harness.run();
     // When: selecting the archived title without restoring it.
     harness.click_label("Target");
@@ -449,7 +449,7 @@ fn capture_archive_states() {
         .unwrap()
         .save_png(std::path::Path::new("/tmp/opencode/archive-closed.png"))
         .unwrap();
-    harness.click_label("アーカイブ済み (1)");
+    harness.click_label("Archived (1)");
     harness.run();
     harness
         .capture()

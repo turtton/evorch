@@ -16,13 +16,18 @@ pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
         if state.is_busy() {
             ui.spinner();
         }
-        let updated = state
-            .modified
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-        ui.label(muted(updated.map_or_else(
-            || "Last refresh: not loaded".into(),
-            |time| format!("Last refresh: {} (Unix seconds)", time.as_secs()),
-        )));
+        match state.modified {
+            Some(modified) => {
+                ui.label(muted(format!(
+                    "Last refresh: {}",
+                    crate::format::time_since(modified, std::time::SystemTime::now())
+                )))
+                .on_hover_text(crate::format::utc_timestamp(modified.into()));
+            }
+            None => {
+                ui.label(muted("Last refresh: not loaded"));
+            }
+        }
     });
     if let Some(error) = &state.error {
         ui.colored_label(palette().ERROR_FG, error);

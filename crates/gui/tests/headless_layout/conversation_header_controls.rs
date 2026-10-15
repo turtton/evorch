@@ -46,7 +46,7 @@ fn diagnostics_info_button_sits_before_thread_title_and_opens_dialog() {
     );
     workbench.click_label("ℹ");
     workbench.run();
-    assert!(workbench.has_label("実行の診断"));
+    assert!(workbench.has_label("Run diagnostics"));
 }
 
 #[test]

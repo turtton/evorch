@@ -447,6 +447,7 @@ impl UsagePane {
                 self.cost_mode,
                 self.live.window_minutes,
                 quota,
+                std::time::SystemTime::now(),
             );
             self.live.view = Some((key, data));
         }

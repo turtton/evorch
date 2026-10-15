@@ -1,6 +1,35 @@
+use crate::format;
 use crate::model::telemetry::quota::{QuotaData, QuotaState};
-use crate::theme::text::muted;
+use crate::theme::{text::muted, tokens::palette};
+use chrono::{DateTime, Utc};
 use providers::provider::kimi_quota::KimiQuotaSnapshot;
+
+const HEALTHY_PERCENT: f64 = 50.0;
+const LOW_PERCENT: f64 = 20.0;
+
+/// The percentage stays in the label, tooltip and accessible value too.
+pub fn remaining_fill(remaining_percent: f64) -> egui::Color32 {
+    if remaining_percent > HEALTHY_PERCENT {
+        palette().SUCCESS
+    } else if remaining_percent >= LOW_PERCENT {
+        palette().WARNING_FG
+    } else {
+        palette().ERROR_FG
+    }
+}
+
+fn reset_text(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    resets_at.map_or_else(
+        || "resets unknown".into(),
+        |at| {
+            format!(
+                "resets {} ({})",
+                format::time_until(at, now),
+                format::utc_timestamp(at)
+            )
+        },
+    )
+}
 
 /// How much of one subscription's quota a call draws.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,12 +43,29 @@ enum View {
 }
 
 /// Compact remaining quota, with window duration and reset details on hover.
-pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
-    subscriptions_footer(ui, "Codex", state, render_codex, codex_summary);
+/// `now` is the frame's wall-clock time used for relative reset times.
+pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState, now: DateTime<Utc>) {
+    subscriptions_footer(
+        ui,
+        "Codex",
+        state,
+        |ui, state, view| render_codex(ui, state, view, now),
+        codex_summary,
+    );
 }
 
-pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>) {
-    subscriptions_footer(ui, "Kimi", state, render_kimi, kimi_summary);
+pub fn kimi_quota_footer(
+    ui: &mut egui::Ui,
+    state: &QuotaState<KimiQuotaSnapshot>,
+    now: DateTime<Utc>,
+) {
+    subscriptions_footer(
+        ui,
+        "Kimi",
+        state,
+        |ui, state, view| render_kimi(ui, state, view, now),
+        kimi_summary,
+    );
 }
 
 fn subscriptions_footer<T: QuotaData>(
@@ -134,7 +180,7 @@ fn status<T: QuotaData>(state: &QuotaState<T>) -> String {
     }
 }
 
-fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View) {
+fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View, now: DateTime<Utc>) {
     let Some(snapshot) = &state.snapshot else {
         unavailable(ui, "Codex", state, view);
         return;
@@ -156,10 +202,10 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View) {
                 window.duration_label()
             };
             details.push(format!(
-                "{duration}: {:.1}% remaining · {:.1}% used · resets {}",
+                "{duration}: {:.1}% remaining · {:.1}% used · {}",
                 window.remaining_percent,
                 window.used_percent,
-                window.resets_at.format("%Y-%m-%d %H:%M UTC")
+                reset_text(Some(window.resets_at), now)
             ));
             (duration, window.remaining_percent)
         })
@@ -167,10 +213,10 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View) {
     if view == View::Details {
         if let Some(window) = &snapshot.quota.code_review {
             details.push(format!(
-                "Code review: {:.1}% remaining · {:.1}% used · resets {}",
+                "Code review: {:.1}% remaining · {:.1}% used · {}",
                 window.remaining_percent,
                 window.used_percent,
-                window.resets_at.format("%Y-%m-%d %H:%M UTC")
+                reset_text(Some(window.resets_at), now)
             ));
         }
         show_expanded(ui, details, snapshot.stale, &state.error);
@@ -186,7 +232,12 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View) {
     );
 }
 
-fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, view: View) {
+fn render_kimi(
+    ui: &mut egui::Ui,
+    state: &QuotaState<KimiQuotaSnapshot>,
+    view: View,
+    now: DateTime<Utc>,
+) {
     let Some(snapshot) = &state.snapshot else {
         unavailable(ui, "Kimi", state, view);
         return;
@@ -196,13 +247,12 @@ fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, view: V
         .windows
         .iter()
         .map(|window| {
-            let reset = window.resets_at.map_or_else(
-                || "unknown".into(),
-                |at| at.format("%Y-%m-%d %H:%M UTC").to_string(),
-            );
             details.push(format!(
-                "{}: {:.1}% remaining · {:.1}% used · resets {reset}",
-                window.label, window.remaining_percent, window.used_percent
+                "{}: {:.1}% remaining · {:.1}% used · {}",
+                window.label,
+                window.remaining_percent,
+                window.used_percent,
+                reset_text(window.resets_at, now)
             ));
             (window.label.clone(), window.remaining_percent)
         })
@@ -248,6 +298,8 @@ fn show_expanded(
     if let Some(error) = error {
         details.push(format!("Quota error: {error}"));
     }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
     for detail in details {
         ui.label(muted(detail));
     }
@@ -303,6 +355,7 @@ fn render(
         let ratio = (remaining / 100.0) as f32;
         ui.add(
             egui::ProgressBar::new(ratio)
+                .fill(remaining_fill(remaining))
                 .desired_width(54.0)
                 .desired_height(7.0),
         )
@@ -311,6 +364,9 @@ fn render(
 }
 
 fn show_details(ui: &mut egui::Ui, details: &[String]) {
+    // Only a visible tooltip keeps its relative reset times ticking.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
     for detail in details {
         ui.label(detail);
     }
@@ -320,13 +376,14 @@ pub fn subscription_quota_footer(
     ui: &mut egui::Ui,
     service: &str,
     state: &QuotaState<crate::model::subscription_quota::SubscriptionQuotaSnapshot>,
+    now: DateTime<Utc>,
 ) {
     // Each service has an independent profile picker and worker tree.
     subscriptions_footer(
         ui,
         service,
         state,
-        |ui, state, view| render_subscription(ui, service, state, view),
+        |ui, state, view| render_subscription(ui, service, state, view, now),
         subscription_summary,
     );
 }
@@ -356,6 +413,7 @@ fn render_subscription(
     service: &str,
     state: &QuotaState<crate::model::subscription_quota::SubscriptionQuotaSnapshot>,
     view: View,
+    now: DateTime<Utc>,
 ) {
     let Some(snapshot) = &state.snapshot else {
         unavailable(ui, service, state, view);
@@ -364,17 +422,18 @@ fn render_subscription(
     let mut details = vec![format!("{service} · remaining quota")];
     let mut segments = Vec::new();
     for window in &snapshot.windows {
+        let reset = reset_text(window.resets_at, now);
         match (window.remaining_percent, window.used_percent) {
             (Some(remaining), Some(used)) => {
                 details.push(format!(
-                    "{}: {remaining:.1}% remaining · {used:.1}% used · resets {}",
-                    window.label, window.resets_at
+                    "{}: {remaining:.1}% remaining · {used:.1}% used · {reset}",
+                    window.label
                 ));
                 segments.push((window.label.clone(), remaining));
             }
             _ => details.push(format!(
-                "{}: quota percentage unavailable · resets {}",
-                window.label, window.resets_at
+                "{}: quota percentage unavailable · {reset}",
+                window.label
             )),
         }
         if let Some(usage) = &window.usage {
@@ -397,4 +456,39 @@ fn render_subscription(
         &state.error,
         details,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_fill_tracks_remaining_quota_thresholds() {
+        let p = palette();
+        for (remaining, expected) in [
+            (100.0, p.SUCCESS),
+            (50.1, p.SUCCESS),
+            (50.0, p.WARNING_FG),
+            (20.0, p.WARNING_FG),
+            (19.9, p.ERROR_FG),
+            (0.0, p.ERROR_FG),
+        ] {
+            assert_eq!(remaining_fill(remaining), expected, "{remaining}%");
+        }
+    }
+
+    #[test]
+    fn reset_time_reads_as_remaining_time_with_absolute_instant() {
+        let now: DateTime<Utc> = "2026-09-12T06:30:00Z".parse().unwrap();
+        let reset = "2026-09-13T12:00:00Z".parse().ok();
+        assert_eq!(
+            reset_text(reset, now),
+            "resets in 1d 5h 30m (2026-09-13 12:00 UTC)"
+        );
+        assert_eq!(
+            reset_text(Some(now), now),
+            "resets now (2026-09-12 06:30 UTC)"
+        );
+        assert_eq!(reset_text(None, now), "resets unknown");
+    }
 }
