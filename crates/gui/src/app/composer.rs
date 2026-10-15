@@ -336,7 +336,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let root = self.active_repo_root();
         let skills = runtime::skill::build_standard_registry(root.as_deref());
         crate::model::composer::expand_skill_mentions(text, root.as_deref(), &skills)
-            .map_err(|name| format!("skill @{name} を読み込めませんでした"))
+            .map_err(|name| format!("Could not load skill @{name}"))
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {

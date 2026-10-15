@@ -157,7 +157,7 @@ fn metrics_render_in_status_line_below_composer() {
     gui.run();
     // Then: cost lives in the status line below the composer; header keeps only the title.
     let title = gui.label_rects("Thread: one")[0];
-    let metrics = gui.label_rects("$1.000");
+    let metrics = gui.label_rects("$1.00");
     assert_eq!(metrics.len(), 1);
     let metrics = metrics[0];
     let composer = gui.label_rects("Message or /command")[0];
@@ -184,8 +184,8 @@ fn conversation_status_excludes_child_cost_while_header_shows_thread_total() {
     assert_eq!(metrics.conversation_cost, Some(1.0));
     assert_eq!(metrics.cost, Some(4.0));
     let title = gui.label_rects("Thread: one")[0];
-    let total = gui.label_rects("Total cost $4.000")[0];
-    let main = gui.label_rects("$1.000")[0];
+    let total = gui.label_rects("Total cost (incl. subagents) $4.00")[0];
+    let main = gui.label_rects("$1.00")[0];
     let composer = gui.label_rects("Message or /command")[0];
     assert!(total.top() >= title.bottom());
     assert!(total.bottom() < composer.top());
@@ -236,7 +236,7 @@ fn conversation_and_focused_agent_show_their_own_request_metrics() {
         };
         assert!(gui.has_label(ttft), "missing {ttft}");
         assert!(gui.has_label(rate), "missing {rate}");
-        let own_cost = if focused_agent { "$0.002" } else { "$0.001" };
+        let own_cost = if focused_agent { "$0.0018" } else { "$0.0011" };
         assert!(gui.has_label(own_cost), "missing {own_cost}");
     }
 }

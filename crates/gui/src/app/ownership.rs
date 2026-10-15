@@ -85,6 +85,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_storage_settings();
                     ui.close();
                 }
+                if ui
+                    .button("Self-improvement drafts")
+                    .on_hover_text("Settings for collecting improvement-candidate drafts (default off)")
+                    .clicked()
+                {
+                    self.open_self_improvement_settings();
+                    ui.close();
+                }
                 if ui.button("Agent context").clicked() {
                     self.open_context_tab(
                         crate::panes::context_inspector::InspectorMode::Preview,

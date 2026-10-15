@@ -25,7 +25,7 @@ fn reload(path: &std::path::Path) -> config::Config {
 }
 
 #[test]
-fn composer_settings_entry_shows_defaults_and_saves_for_restart_only() {
+fn settings_menu_entry_shows_defaults_and_saves_for_restart_only() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).unwrap();
     std::fs::write(
@@ -35,7 +35,14 @@ fn composer_settings_entry_shows_defaults_and_saves_for_restart_only() {
     .unwrap();
     let mut harness = fixture(dir.path());
     harness.run();
-    harness.click_label("Self-improvement settings");
+    assert!(
+        !harness.has_label("Drafts"),
+        "the composer no longer links settings"
+    );
+    assert!(!harness.has_label("Self-improvement settings"));
+    harness.click_label("⚙");
+    harness.run();
+    harness.click_label("Self-improvement drafts");
     harness.run();
     for label in [
         "Enable self-improvement drafts (default off)",

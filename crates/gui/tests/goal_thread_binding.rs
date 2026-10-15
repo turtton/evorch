@@ -188,7 +188,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
     gui.run();
     let metrics = gui.state().telemetry().thread_metrics(&runs);
     assert_eq!(metrics.cost, Some(0.0));
-    let cost_label = format!("${:.3}", metrics.cost.unwrap());
+    let cost_label = gui::format::usd(metrics.cost.unwrap());
     assert!(
         gui.has_label(&cost_label),
         "missing status line {cost_label}"

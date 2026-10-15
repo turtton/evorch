@@ -13,10 +13,12 @@ use workspace_ui::ThreadRunPhase;
 #[path = "composer_images.rs"]
 mod images;
 mod selectors;
+pub(crate) use selectors::sandbox_mode;
 
 #[derive(Clone, Copy, Default)]
 pub struct SandboxPickerContext {
     pub mode: config::EscalationApproval,
+    pub escalate_to_user_on_deny: bool,
     pub enabled: bool,
 }
 
@@ -30,34 +32,51 @@ pub enum ComposerAction {
     ToggleRole,
     ModelPreference(Option<workspace_ui::ModelPreference>),
     OpenSandboxSettings,
-    OpenSelfImprovementSettings,
+}
+
+fn count(amount: usize, noun: &str) -> String {
+    format!("{amount} {noun}{}", if amount == 1 { "" } else { "s" })
 }
 
 pub fn stopped_banner(running_children: usize) -> String {
     if running_children > 0 {
-        format!("子agent {running_children}件は実行中 — もう一度押すと全停止")
+        format!(
+            "{} still running — press Stop all to stop them",
+            count(running_children, "subagent")
+        )
     } else {
-        "停止中（再開可能）— /continue またはメッセージ送信で再開".into()
+        "Stopped (resumable) — send a message or /continue to resume".into()
     }
 }
 
 pub fn follow_up_banner(status: runtime::FollowUpStatus) -> String {
     if status.closed {
         format!(
-            "未配送 {}件 — agent が停止・終了しました。これらは未反映です",
-            status.pending
+            "{} not delivered — the agent stopped or finished first",
+            count(status.pending, "message")
         )
     } else if status.next_turn_requested {
         format!(
-            "配送待ち {}件 — 現在の応答・ツール完了後、次のターンで反映",
-            status.pending
+            "{} queued — delivered on the next turn, after the current response and tools finish",
+            count(status.pending, "message")
         )
     } else {
         format!(
-            "配送待ち {}件 — agent には未反映（通常は回答完了後に配送）",
-            status.pending
+            "{} queued — not yet seen by the agent (usually delivered once it finishes answering)",
+            count(status.pending, "message")
         )
     }
+}
+
+/// What the strip reports to the pane that sizes it.
+pub struct ComposerStripOutput {
+    pub action: Option<ComposerAction>,
+    /// Height the input viewport occupied this frame.
+    pub input_viewport: f32,
+    /// Height the input wants to show every wrapped row, capped at
+    /// [`COMPOSER_MAX_HEIGHT`]; it can exceed `input_viewport` when the pane
+    /// granted less room.
+    pub input_wanted: f32,
 }
 
 pub fn composer_strip(
@@ -68,8 +87,45 @@ pub fn composer_strip(
     phase: Option<ThreadRunPhase>,
     sandbox: SandboxPickerContext,
 ) -> Option<ComposerAction> {
+    composer_strip_within(
+        ui,
+        model,
+        (picker, picker_state),
+        phase,
+        sandbox,
+        COMPOSER_MAX_HEIGHT,
+    )
+    .action
+}
+
+/// [`composer_strip`] whose input viewport grows with wrapped rows up to
+/// `max_input` (itself capped at [`COMPOSER_MAX_HEIGHT`]) and scrolls beyond.
+pub fn composer_strip_within(
+    ui: &mut egui::Ui,
+    model: &mut ComposerModel,
+    (picker, picker_state): (
+        crate::panes::model_picker::ModelPickerContext<'_>,
+        &mut crate::model::model_picker::ModelPickerState,
+    ),
+    phase: Option<ThreadRunPhase>,
+    sandbox: SandboxPickerContext,
+    max_input: f32,
+) -> ComposerStripOutput {
     let mut action = None;
     let input_id = ui.id().with("composer-input");
+    let min_input = COMPOSER_MIN_HEIGHT - 2.0 * SP_2;
+    // Wrapped rows are only known after layout, so the viewport follows the
+    // last measured document height and the pass is redone when it changes.
+    let measured_id = input_id.with("wanted-height");
+    let wanted = ui
+        .data(|data| data.get_temp::<f32>(measured_id))
+        .unwrap_or_else(|| {
+            let rows = model.input.split('\n').count().max(1);
+            rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 2.0 * SP_2
+        });
+    let wanted = wanted.clamp(min_input, COMPOSER_MAX_HEIGHT);
+    let viewport = wanted.min(max_input.clamp(min_input, COMPOSER_MAX_HEIGHT));
+    let mut measured = wanted;
     surface_frame(palette().SURFACE_RAISED)
         .corner_radius(R_2XL)
         .inner_margin(egui::vec2(SP_3, SP_2))
@@ -96,7 +152,7 @@ pub fn composer_strip(
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(stopped_banner(model.running_children))
                         .color(palette().WARNING_FG));
-                    if ui.small_button("破棄").on_hover_text("キャンセルして破棄").clicked() {
+                    if ui.small_button("Discard").on_hover_text("Cancel this stopped run and its subagents. It can no longer be resumed with /continue.").clicked() {
                         action = Some(ComposerAction::Discard);
                     }
                 });
@@ -106,8 +162,8 @@ pub fn composer_strip(
                     ui.label(egui::RichText::new(follow_up_banner(model.follow_ups))
                         .color(palette().WARNING_FG));
                     if ui.add_enabled(!model.follow_ups.closed && !model.follow_ups.next_turn_requested,
-                        egui::Button::new("次のターンで届ける"))
-                        .on_hover_text("現在のモデル応答やツールは中断しません。完了後の最初の安全な境界で、配送待ちの全メッセージを反映します。")
+                        egui::Button::new("Deliver next turn"))
+                        .on_hover_text("Doesn't interrupt the current model response or tools. Every queued message is delivered at the first safe point after they finish.")
                         .clicked() {
                         action = Some(ComposerAction::DeliverNextTurn);
                     }
@@ -119,11 +175,10 @@ pub fn composer_strip(
                 let can_stop = (phase == Some(ThreadRunPhase::Running) && items.is_empty())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
                 let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {
-                    Some(primary_button(ui, "Queue").on_hover_text("配送待ちに追加（Enter）。送信後に「次のターンで届ける」を選べます。"))
+                    Some(primary_button(ui, "Queue").on_hover_text("Queue this message for the agent (Enter). Afterwards you can choose Deliver next turn."))
                 } else { None };
                 let send = if can_stop {
-ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::Stopped) { "全停止" } else { "Stop" }).color(if phase == Some(ThreadRunPhase::Stopped) { palette().WARNING_FG } else { palette().ERROR_FG }))
-.fill(if phase == Some(ThreadRunPhase::Stopped) { palette().SURFACE_RAISED } else { palette().ERROR_SURFACE }))
+                    stop_button(ui, phase == Some(ThreadRunPhase::Stopped), model.running_children)
                 } else if can_send {
                     primary_icon_button(ui, icons::PAPER_PLANE_RIGHT, "Send")
                 } else {
@@ -131,14 +186,11 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                     accessible(&send, "Send");
                     send
                 };
-                let rows = model.input.split('\n').count().max(1);
-                let input_height = (rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 2.0 * SP_2)
-                    .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
                 let input = egui::ScrollArea::vertical()
                     .id_salt("composer-scroll")
                     .min_scrolled_width(0.0)
-                    .min_scrolled_height(input_height)
-                    .max_height(COMPOSER_MAX_HEIGHT)
+                    .min_scrolled_height(viewport)
+                    .max_height(viewport)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -162,6 +214,7 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
 .background_color(palette().INPUT))
                         }).inner
                     }).inner;
+                measured = input.rect.height().clamp(min_input, COMPOSER_MAX_HEIGHT);
                 input.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::TextEdit,
@@ -198,7 +251,45 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
             }); });
         });
     });
-    action
+    if (measured - wanted).abs() > 0.5 {
+        ui.data_mut(|data| data.insert_temp(measured_id, measured));
+        ui.ctx().request_discard("composer input rows changed");
+        ui.ctx().request_repaint();
+    }
+    ComposerStripOutput {
+        action,
+        input_viewport: viewport,
+        input_wanted: measured,
+    }
+}
+
+/// Stop halts only the current run; once it is stopped with subagents still
+/// running, the same button becomes Stop all and halts the whole subtree.
+fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egui::Response {
+    let (label, color, fill, hover) = if stopped {
+        (
+            "Stop all",
+            palette().WARNING_FG,
+            palette().SURFACE_RAISED,
+            format!(
+                "Stop {} of this stopped run (Esc). The run itself stays resumable.",
+                if running_children == 1 {
+                    "the running subagent".to_owned()
+                } else {
+                    format!("all {running_children} running subagents")
+                }
+            ),
+        )
+    } else {
+        (
+            "Stop",
+            palette().ERROR_FG,
+            palette().ERROR_SURFACE,
+            "Stop the current run (Esc). Its subagents keep running until you press Stop all; resume with /continue or a new message.".to_owned(),
+        )
+    };
+    ui.add(egui::Button::new(egui::RichText::new(label).color(color)).fill(fill))
+        .on_hover_text(hover)
 }
 
 /// Tracks IME preedit across frames so Enter can confirm a conversion without sending.
@@ -384,19 +475,35 @@ mod tests {
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 2;
         h.run();
-        h.get_by_label("子agent 2件は実行中 — もう一度押すと全停止");
-        h.get_by_label("全停止").click();
+        h.get_by_label("2 subagents still running — press Stop all to stop them");
+        h.get_by_label("Stop all").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Stop));
         assert_eq!(h.state().model.input, "draft");
         h.state_mut().model.running_children = 0;
         h.state_mut().action = None;
         h.run();
-        h.get_by_label("停止中（再開可能）— /continue またはメッセージ送信で再開");
-        assert!(h.query_by_label("全停止").is_none());
+        h.get_by_label("Stopped (resumable) — send a message or /continue to resume");
+        assert!(h.query_by_label("Stop all").is_none());
         h.get_by_label("Send").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn stop_tooltips_name_what_each_press_stops() {
+        let mut h = harness("");
+        h.state_mut().phase = Some(ThreadRunPhase::Running);
+        h.run();
+        h.get_by_label("Stop").hover();
+        h.run();
+        h.get_by_label("Stop the current run (Esc). Its subagents keep running until you press Stop all; resume with /continue or a new message.");
+        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
+        h.state_mut().model.running_children = 3;
+        h.run();
+        h.get_by_label("Stop all").hover();
+        h.run();
+        h.get_by_label("Stop all 3 running subagents of this stopped run (Esc). The run itself stays resumable.");
     }
 
     #[test]
@@ -405,23 +512,23 @@ mod tests {
         h.state_mut().phase = Some(ThreadRunPhase::Running);
         h.state_mut().model.follow_ups.pending = 2;
         h.run();
-        h.get_by_label("配送待ち 2件 — agent には未反映（通常は回答完了後に配送）");
-        h.get_by_label("次のターンで届ける").click();
+        h.get_by_label("2 messages queued — not yet seen by the agent (usually delivered once it finishes answering)");
+        h.get_by_label("Deliver next turn").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::DeliverNextTurn));
         assert_eq!(h.state().model.input, "draft");
         h.state_mut().model.follow_ups.next_turn_requested = true;
         h.run();
-        h.get_by_label("配送待ち 2件 — 現在の応答・ツール完了後、次のターンで反映");
+        h.get_by_label("2 messages queued — delivered on the next turn, after the current response and tools finish");
         assert!(
-            h.query_by_label("次のターンで届ける")
+            h.query_by_label("Deliver next turn")
                 .unwrap()
                 .accesskit_node()
                 .is_disabled()
         );
         h.state_mut().model.follow_ups.pending = 0;
         h.run();
-        assert!(h.query_by_label("次のターンで届ける").is_none());
+        assert!(h.query_by_label("Deliver next turn").is_none());
     }
 
     #[test]
@@ -433,9 +540,9 @@ mod tests {
             next_turn_requested: true,
         };
         h.run();
-        h.get_by_label("未配送 1件 — agent が停止・終了しました。これらは未反映です");
+        h.get_by_label("1 message not delivered — the agent stopped or finished first");
         assert!(
-            h.query_by_label("次のターンで届ける")
+            h.query_by_label("Deliver next turn")
                 .unwrap()
                 .accesskit_node()
                 .is_disabled()
@@ -448,10 +555,7 @@ mod tests {
             let mut h = harness(input);
             h.state_mut().phase = Some(ThreadRunPhase::Running);
             h.run();
-            assert!(
-                h.query_by_label("実行中の送信はキューに追加され、通常は回答完了後に届きます")
-                    .is_none()
-            );
+            assert!(h.query_by_label_contains("queued").is_none());
             h.get_by_label("Stop");
         }
     }
@@ -473,7 +577,7 @@ mod tests {
         let mut h = harness("");
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.run();
-        h.get_by_label("破棄").click();
+        h.get_by_label("Discard").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Discard));
     }

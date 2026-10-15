@@ -67,7 +67,7 @@ fn agents_display_additional_role_names() {
         harness.state_mut().drill_down(&run_id);
         harness.step();
         harness.run();
-        assert!(harness.has_label(&format!("{run_id} / agent-{id} / {role}")));
+        assert!(harness.has_label(&format!("agent-{id} / {role}")));
         assert!(
             harness.count_labels("read") >= 1,
             "tool read should be visible for {run_id}"

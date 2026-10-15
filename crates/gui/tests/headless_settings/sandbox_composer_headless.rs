@@ -36,7 +36,7 @@ fn composer_selectors_wrap_above_input_without_exceeding_conversation_width() {
             egui::vec2(width, 600.0),
         ));
         harness.run();
-        let sandbox = harness.label_rects("Sandbox: auto")[0];
+        let sandbox = harness.label_rects("Sandbox: auto review")[0];
         let model = harness.label_rects("Select model")[0];
         let input = harness.label_rects("Message or /command")[0];
         let path = harness
@@ -76,8 +76,13 @@ fn composer_loads_persisted_mode_when_modal_was_never_opened() {
     let mut harness = workbench(dir.path(), config::EscalationApproval::Off);
     // When: starting the workbench without opening settings.
     harness.run();
-    // Then: the composer reflects the persisted mode.
-    assert!(harness.has_label("Sandbox: off"));
+    // Then: the composer reflects the persisted mode and explains it on hover.
+    let button = harness.label_rects("Sandbox: always deny")[0];
+    harness.pointer_move(button.center());
+    harness.run();
+    assert!(harness.has_label(
+        "Requests to run commands or access files outside the sandbox are always denied. The sandbox itself stays on.\nClick to change sandbox settings."
+    ));
 }
 
 #[test]
@@ -87,15 +92,15 @@ fn chatbox_button_opens_modal_with_approval_controls() {
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
     // When: clicking the chatbox sandbox button.
-    harness.click_label("Sandbox: auto");
+    harness.click_label("Sandbox: auto review");
     harness.run();
     // Then: Web tool visibility and shell approval controls are available in the modal.
     assert!(harness.has_label("Enable web tools"));
     for label in [
-        "審査で拒否された場合はユーザー承認へ昇格",
-        "auto",
-        "user",
-        "off",
+        "Ask me when auto review denies a request",
+        "auto review",
+        "ask me",
+        "always deny",
     ] {
         assert!(harness.has_label(label), "missing modal control: {label}");
     }
@@ -108,15 +113,15 @@ fn sandbox_button_label_tracks_saved_mode() {
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
     // When: saving user approval through the modal closes it automatically.
-    harness.click_label("Sandbox: auto");
+    harness.click_label("Sandbox: auto review");
     harness.run();
-    harness.click_label("user");
+    harness.click_label("ask me");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
     assert!(!harness.has_label("Save sandbox"));
     // Then: the button and a fresh workbench both reflect the saved mode.
-    assert!(harness.has_label("Sandbox: user"));
+    assert!(harness.has_label("Sandbox: ask me"));
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
         .with_settings_load_options(config::LoadOptions {
@@ -128,7 +133,7 @@ fn sandbox_button_label_tracks_saved_mode() {
         .with_provider_settings_path(config::project_main_config_path(dir.path()));
     let mut reopened = HeadlessWorkbench::new(state, [960.0, 600.0]);
     reopened.run();
-    assert!(reopened.has_label("Sandbox: user"));
+    assert!(reopened.has_label("Sandbox: ask me"));
 }
 
 #[test]
@@ -137,14 +142,14 @@ fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable()
     let dir = tempfile::tempdir().expect("temp");
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
-    harness.click_label("Sandbox: auto");
+    harness.click_label("Sandbox: auto review");
     harness.run();
     let path = config::project_main_config_path(dir.path());
     std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::remove_file(&path).expect("remove fixture");
     std::fs::create_dir(&path).expect("block config path");
     // When: saving a mode that cannot be persisted.
-    harness.click_label("user");
+    harness.click_label("ask me");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
@@ -152,7 +157,7 @@ fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable()
     assert!(harness.has_label("Save sandbox"));
     harness.click_label("Cancel");
     harness.run();
-    assert!(harness.has_label("Sandbox: auto"));
+    assert!(harness.has_label("Sandbox: auto review"));
 }
 
 #[test]
@@ -170,8 +175,8 @@ fn capture_sandbox_composer_states() {
         // When: rendering closed, expanded and selected states.
         for state in ["closed", "expanded", "selected"] {
             match state {
-                "expanded" => harness.click_label("Sandbox: auto"),
-                "selected" => harness.click_label("user"),
+                "expanded" => harness.click_label("Sandbox: auto review"),
+                "selected" => harness.click_label("ask me"),
                 _ => {}
             }
             harness.run();

@@ -96,7 +96,16 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
     // When: the selected agent's conversation renders.
     harness.run_steps(2);
     // Then: switching from a thread to an agent preserves the title hierarchy.
-    assert_header(&harness, "run-1 / Worker / explorer", FONT_H3);
+    assert_header(&harness, "Worker / explorer", FONT_H3);
+    // And: the run ID left the title but stays one click away.
+    assert!(harness.query_by_label_contains("run-1").is_none());
+    harness.get_by_label("Copy run ID").click();
+    harness.step();
+    assert!(
+        harness.output().platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "run-1")
+        )
+    );
 }
 
 #[test]
