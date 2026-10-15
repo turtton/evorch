@@ -183,7 +183,7 @@ async fn latest_terminal_chat_preserves_checkpoints_and_ignores_other_threads() 
 }
 
 #[tokio::test]
-async fn followup_request_includes_prior_terminal_turn_when_original_run_gone() {
+async fn followup_restores_signed_anthropic_blocks_in_order_when_original_run_gone() {
     // Given: a terminal chat snapshot, with no original runtime left in memory.
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -191,7 +191,28 @@ async fn followup_request_includes_prior_terminal_turn_when_original_run_gone() 
         ..StorageConfig::default()
     };
     let storage = Storage::open(config.clone()).unwrap();
-    let answer = text_response("turn-1-answer", FinishReason::Stop);
+    let mut answer = text_response("turn-1-answer", FinishReason::Stop);
+    answer.message.content = vec![
+        ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"thinking","thinking":"verified reasoning","signature":"sk-abcdefghijklmnopqrstuvwxyz0123456789"}),
+            prefix_hash: Some("original-prefix-fingerprint".into()),
+        },
+        ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"redacted_thinking","data":"sk-abcdefghijklmnopqrstuvwxyz0123456789"}),
+            prefix_hash: Some("original-prefix-fingerprint".into()),
+        },
+        ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"server_tool_use","id":"server-1","name":"web_search","input":{"query":"safe query"}}),
+            prefix_hash: None,
+        },
+        ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"text","text":"turn-1-answer","citations":[{"type":"web_search_result_location","url":"https://example.com","title":"source","cited_text":"evidence"}]}),
+            prefix_hash: None,
+        },
+        ContentBlock::Text {
+            text: "turn-1-answer".into(),
+        },
+    ];
     let model = Arc::new(ScriptedModel::new([
         Ok(answer.clone()),
         Ok(text_response("turn-2-answer", FinishReason::Stop)),
@@ -206,6 +227,10 @@ async fn followup_request_includes_prior_terminal_turn_when_original_run_gone() 
         },
     );
     assert_eq!(first.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let database = storage::Database::open(&config).unwrap();
+    let record = database.run_context(&run.to_string()).unwrap().unwrap();
+    let saved: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    assert_eq!(saved[1], answer.message);
     drop(first);
     let next = runtime(model.clone(), &config, &storage);
     // When: a follow-up is submitted through the chat continuation entry point.

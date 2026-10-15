@@ -11,6 +11,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=cache_regression_contract)
       | binary(=codex_cache_regression)
       | binary(=claude_contract)
+      | binary(=anthropic_signed_replay)
       | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)

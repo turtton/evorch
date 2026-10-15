@@ -164,6 +164,7 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
             }
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::Image { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -278,7 +279,7 @@ fn to_input_items(
                     encrypted_content: encrypted_content.clone(),
                 });
             }
-            ContentBlock::Reasoning { .. } => {}
+            ContentBlock::Reasoning { .. } | ContentBlock::Anthropic { .. } => {}
         }
     }
     flush_message(&mut items, &mut content, role);

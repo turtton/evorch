@@ -122,7 +122,18 @@ impl ModelSummarizer {
                 text: SUMMARY_SYSTEM_PROMPT.to_string(),
             }],
         });
-        messages.extend_from_slice(input.compacted);
+        messages.extend(input.compacted.iter().filter_map(|message| {
+            let content = message
+                .content
+                .iter()
+                .filter(|block| !matches!(block, ContentBlock::Anthropic { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!content.is_empty()).then_some(Message {
+                role: message.role,
+                content,
+            })
+        }));
         // cut の protected floor が先頭 User を compacted slice から外すため、
         // goal は最終 User プロンプトへ明示同梱しないと summary モデルに届かない。
         let user_prompt = match input.goal {
@@ -194,6 +205,7 @@ fn summary_text(response: &ChatResponse) -> Result<String, SummarizeError> {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -236,6 +248,7 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -254,6 +267,7 @@ fn assistant_lines(messages: &[Message], predicate: impl Fn(&str) -> bool) -> Ve
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -324,6 +338,7 @@ fn verification_lines(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. } => None,
         })
         .flatten()
@@ -346,6 +361,7 @@ fn recent_context(messages: &[Message]) -> Vec<String> {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -376,6 +392,7 @@ fn agent_messages(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -437,6 +454,13 @@ mod tests {
             messages: &[Message],
             tools: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
+            assert!(
+                messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .all(|block| !matches!(block, ContentBlock::Anthropic { .. })),
+                "summary requests must not contain provider signatures or opaque state"
+            );
             let last_user_text = messages
                 .iter()
                 .rev()
@@ -493,6 +517,7 @@ mod tests {
                 }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
@@ -552,6 +577,7 @@ mod tests {
                 ContentBlock::Image { .. }
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
@@ -574,6 +600,7 @@ mod tests {
                 ContentBlock::Image { .. }
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. } => None,
             })
         {
@@ -674,7 +701,18 @@ mod tests {
             idle_timeout: std::time::Duration::from_secs(90),
             timeout: std::time::Duration::from_secs(300),
         };
-        let messages = fixture();
+        let mut messages = fixture();
+        let original = messages[1].clone();
+        messages[1].content.extend([
+            ContentBlock::Anthropic {
+                block: serde_json::json!({"type":"thinking","thinking":"private thought","signature":"signature-must-not-be-summarized"}),
+                prefix_hash: None,
+            },
+            ContentBlock::Anthropic {
+                block: serde_json::json!({"type":"redacted_thinking","data":"encrypted-must-not-be-summarized"}),
+                prefix_hash: None,
+            },
+        ]);
 
         let summary = summarizer
             .summarize(&SummaryInput {
@@ -685,6 +723,11 @@ mod tests {
             .expect("stub response succeeds");
 
         assert_eq!(summary, "first second");
+        assert_eq!(
+            &messages[1].content[..original.content.len()],
+            original.content.as_slice()
+        );
+        assert_eq!(messages[1].content.len(), original.content.len() + 2);
         assert_eq!(
             *model
                 .observed

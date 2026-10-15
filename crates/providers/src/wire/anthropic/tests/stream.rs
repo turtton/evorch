@@ -144,14 +144,14 @@ fn interpreter_maps_error_event_to_typed_error() {
     );
 }
 
-// Given: 未知の Anthropic SSE type / When: 解釈 / Then: InvalidSse になる
+// New discriminators are an explicitly supported API extension mechanism.
 #[test]
-fn interpreter_rejects_unknown_event_type() {
+fn interpreter_ignores_unknown_event_type() {
     let mut interpreter = AnthropicStreamInterpreter::new();
 
-    let error = interpreter
+    let events = interpreter
         .interpret(&frame(None, json!({"type": "future_event"})))
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(error, ProviderError::InvalidSse { .. }));
+    assert!(events.is_empty());
 }

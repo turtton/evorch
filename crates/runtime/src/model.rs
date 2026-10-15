@@ -171,9 +171,9 @@ pub trait AgentModel: Send + Sync {
                         run_id: Some(invocation.run_id.clone()),
                     }
                 }
-                providers::ContentBlock::Reasoning { text } if !text.is_empty() => {
+                block if block.reasoning_text().is_some_and(|text| !text.is_empty()) => {
                     event_bus::MessageEvent::ReasoningDelta {
-                        delta: text.clone(),
+                        delta: block.reasoning_text().unwrap().to_owned(),
                         run_id: Some(invocation.run_id.clone()),
                     }
                 }
@@ -184,6 +184,7 @@ pub trait AgentModel: Send + Sync {
                 providers::ContentBlock::Image { .. }
                 | providers::ContentBlock::Text { .. }
                 | providers::ContentBlock::Reasoning { .. }
+                | providers::ContentBlock::Anthropic { .. }
                 | providers::ContentBlock::ToolUse { .. }
                 | providers::ContentBlock::ToolResult { .. } => continue,
             };

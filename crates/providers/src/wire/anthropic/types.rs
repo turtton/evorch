@@ -44,6 +44,7 @@ pub enum WireRole {
 /// Anthropic Messages API のコンテンツブロック。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[serde(try_from = "serde_json::Value")]
 pub enum WireContentBlock {
     Image {
         source: WireImageSource,
@@ -86,6 +87,14 @@ pub enum WireContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Complete provider block. Internal replay binding is never sent to the API.
+    #[serde(untagged)]
+    Raw {
+        #[serde(flatten)]
+        block: serde_json::Value,
+        #[serde(skip)]
+        prefix_hash: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,8 +115,71 @@ impl WireContentBlock {
             }
             // Anthropic forbids explicit breakpoints on thinking blocks.
             Self::Thinking { .. } => false,
+            Self::Raw { block, .. } => {
+                if !matches!(
+                    block["type"].as_str(),
+                    Some("text" | "tool_use" | "tool_result" | "image")
+                ) {
+                    false
+                } else if let Some(object) = block.as_object_mut() {
+                    object.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type":"ephemeral"}),
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
+}
+
+impl TryFrom<serde_json::Value> for WireContentBlock {
+    type Error = String;
+
+    fn try_from(block: serde_json::Value) -> Result<Self, Self::Error> {
+        validate_block(&block)?;
+        Ok(Self::Raw {
+            block,
+            prefix_hash: None,
+        })
+    }
+}
+
+pub(super) fn validate_block(block: &serde_json::Value) -> Result<(), String> {
+    let kind = block
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "content block type must be a string".to_string())?;
+    let required_strings: &[&str] = match kind {
+        "text" => &["text"],
+        "thinking" => &["thinking"],
+        "redacted_thinking" => &["data"],
+        "tool_use" | "server_tool_use" | "mcp_tool_use" => &["id", "name"],
+        _ => &[],
+    };
+    for field in required_strings {
+        if !block.get(*field).is_some_and(serde_json::Value::is_string) {
+            return Err(format!("{kind}.{field} must be a string"));
+        }
+    }
+    if kind == "thinking" && block.get("signature").is_some_and(|v| !v.is_string()) {
+        return Err("thinking.signature must be a string".into());
+    }
+    if matches!(kind, "tool_use" | "server_tool_use" | "mcp_tool_use")
+        && !block.get("input").is_some_and(serde_json::Value::is_object)
+    {
+        return Err(format!("{kind}.input must be an object"));
+    }
+    if kind == "text"
+        && block
+            .get("citations")
+            .is_some_and(|v| !v.is_null() && !v.is_array())
+    {
+        return Err("text.citations must be an array or null".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

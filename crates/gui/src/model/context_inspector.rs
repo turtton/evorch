@@ -179,6 +179,7 @@ fn role_label(message: &Message) -> &'static str {
 fn block_text(block: &ContentBlock) -> String {
     match block {
         ContentBlock::Text { text } | ContentBlock::Reasoning { text } => text.clone(),
+        ContentBlock::Anthropic { .. } => block.reasoning_text().unwrap_or_default().to_owned(),
         ContentBlock::Image { media_type, .. } => format!("[image {media_type}]"),
         ContentBlock::ToolUse { name, input, .. } => format!("→ {name} {input}"),
         ContentBlock::ToolResult { content, .. } => content

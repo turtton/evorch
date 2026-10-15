@@ -43,6 +43,14 @@ async fn reviewer_uses_only_final_text_for_approval_and_denial() {
         response.message.content.push(ContentBlock::Reasoning {
             text: "Additional reasoning must not change the decision".into(),
         });
+        response.message.content.insert(0, ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"thinking","thinking":"intermediate approval reasoning","signature":"signed-reasoning"}),
+            prefix_hash: None,
+        });
+        response.message.content.push(ContentBlock::Anthropic {
+            block: serde_json::json!({"type":"redacted_thinking","data":"opaque-reasoning"}),
+            prefix_hash: None,
+        });
         let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(response)])));
         // When / Then: only the final text can approve or deny escalation.
         assert_eq!(
@@ -105,6 +113,12 @@ async fn reviewer_rejects_text_plus_tool_use_as_invalid() {
         id: "call".into(),
         name: "shell".into(),
         input: serde_json::json!({}),
+    });
+    assert_invalid(response).await;
+    let mut response = text_response(r#"{"approve":true}"#, FinishReason::Stop);
+    response.message.content.push(ContentBlock::Anthropic {
+        block: serde_json::json!({"type":"server_tool_use","id":"server","name":"web_search","input":{"query":"lookup"}}),
+        prefix_hash: None,
     });
     assert_invalid(response).await;
 }

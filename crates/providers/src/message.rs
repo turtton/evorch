@@ -32,6 +32,13 @@ pub enum ContentBlock {
         /// 思考の本文。
         text: String,
     },
+    /// Anthropic response data retained verbatim for replay, including signed thinking.
+    Anthropic {
+        block: serde_json::Value,
+        /// Fingerprint of the provider input that produced this block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_hash: Option<String>,
+    },
     /// 公式 compaction の暗号化状態。内容を解釈せず後続リクエストへ再生する。
     Compaction {
         encrypted_content: String,
@@ -54,6 +61,34 @@ pub enum ContentBlock {
         /// ツール実行がエラー終了したかどうか。
         is_error: bool,
     },
+}
+
+impl ContentBlock {
+    /// Visible text; Anthropic text metadata has a separate canonical projection.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Displayable reasoning, excluding opaque redacted data and signatures.
+    pub fn reasoning_text(&self) -> Option<&str> {
+        match self {
+            Self::Reasoning { text } => Some(text),
+            Self::Anthropic { block, .. } if block["type"] == "thinking" => {
+                block["thinking"].as_str()
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the block carries reasoning, including redacted provider state.
+    pub fn is_reasoning(&self) -> bool {
+        matches!(self, Self::Reasoning { .. })
+            || matches!(self, Self::Anthropic { block, .. }
+                if matches!(block["type"].as_str(), Some("thinking" | "redacted_thinking")))
+    }
 }
 
 /// ツール実行結果の内容要素。将来の拡張に備えた enum。

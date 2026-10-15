@@ -893,6 +893,7 @@ impl LoopState {
                     ContentBlock::Image { .. }
                     | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
+                    | ContentBlock::Anthropic { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
                 .collect();
@@ -1371,6 +1372,7 @@ impl LoopState {
                 }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })

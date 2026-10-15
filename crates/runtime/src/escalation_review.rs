@@ -421,11 +421,10 @@ impl QuickModelReviewer {
         if !matches!(response.finish_reason, providers::FinishReason::Stop) {
             return Err(ReviewError::InvalidVerdict);
         }
-        let mut answer = response
-            .message
-            .content
-            .iter()
-            .filter(|block| !matches!(block, ContentBlock::Reasoning { .. }));
+        let mut answer = response.message.content.iter().filter(|block| {
+            !block.is_reasoning()
+                && !matches!(block, ContentBlock::Anthropic { block, .. } if block["type"] == "text")
+        });
         let Some(ContentBlock::Text { text }) = answer.next() else {
             return Err(ReviewError::InvalidVerdict);
         };
@@ -525,11 +524,10 @@ impl QuickModelReviewer {
         if !matches!(response.finish_reason, providers::FinishReason::Stop) {
             return Err(ReviewError::InvalidVerdict);
         }
-        let mut answer = response
-            .message
-            .content
-            .iter()
-            .filter(|block| !matches!(block, ContentBlock::Reasoning { .. }));
+        let mut answer = response.message.content.iter().filter(|block| {
+            !block.is_reasoning()
+                && !matches!(block, ContentBlock::Anthropic { block, .. } if block["type"] == "text")
+        });
         let Some(ContentBlock::Text { text }) = answer.next() else {
             return Err(ReviewError::InvalidVerdict);
         };
@@ -657,11 +655,10 @@ impl QuickModelReviewer {
             | providers::FinishReason::ContentFilter
             | providers::FinishReason::Other(_) => return Err(ReviewError::InvalidVerdict),
         }
-        let mut answer = response
-            .message
-            .content
-            .iter()
-            .filter(|block| !matches!(block, ContentBlock::Reasoning { .. }));
+        let mut answer = response.message.content.iter().filter(|block| {
+            !block.is_reasoning()
+                && !matches!(block, ContentBlock::Anthropic { block, .. } if block["type"] == "text")
+        });
         let Some(ContentBlock::Text { text }) = answer.next() else {
             return Err(ReviewError::InvalidVerdict);
         };

@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use super::UsageEmitter;
 use super::map_request_error;
 use crate::error::ProviderError;
-use crate::message::{FinishReason, Usage};
+use crate::message::{FinishReason, Message, Usage};
 use crate::observe::AttemptObserver;
 use crate::sse::{SseFrame, SseParseError, SseParser};
 use crate::stream::{DeltaStream, StreamAccumulator, StreamEvent};
@@ -58,6 +58,11 @@ pub(crate) trait WireStreamInterpreter: Send {
     /// # Errors
     /// 終端状態が wire 形式として不正な場合 [`ProviderError`] を返す。
     fn finish(&mut self) -> Result<FrameInterpretation, ProviderError>;
+
+    /// Provider-native message assembly may retain data absent from display deltas.
+    fn take_message(&mut self) -> Option<Message> {
+        None
+    }
 }
 
 /// SSE バイト列を canonical イベント列へ変換するポンプ。
@@ -215,7 +220,10 @@ impl<I: WireStreamInterpreter> SsePump<I> {
             for call in accumulator.malformed_tool_calls() {
                 self.observer.emit_malformed_tool_call(&call);
             }
-            let response = accumulator.finish(usage, finish_reason);
+            let mut response = accumulator.finish(usage, finish_reason);
+            if let Some(message) = self.interpreter.take_message() {
+                response.message = message;
+            }
             self.usage.emit_usage(&self.model, &response.usage);
             self.observer
                 .emit_completed(&response.usage, response.finish_reason.clone());

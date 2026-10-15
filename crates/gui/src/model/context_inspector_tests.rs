@@ -168,6 +168,33 @@ fn message_rows_label_tool_traffic_and_summarize_first_line() {
 }
 
 #[test]
+fn anthropic_context_displays_plaintext_once_without_signatures_or_redacted_data() {
+    let rows = message_rows(&[Message {
+        role: MessageRole::Assistant,
+        content: vec![
+            ContentBlock::Anthropic {
+                block: serde_json::json!({"type":"thinking","thinking":"visible reasoning","signature":"private-signature"}),
+                prefix_hash: None,
+            },
+            ContentBlock::Anthropic {
+                block: serde_json::json!({"type":"redacted_thinking","data":"private-encrypted-data"}),
+                prefix_hash: None,
+            },
+            ContentBlock::Anthropic {
+                block: serde_json::json!({"type":"text","text":"visible answer","citations":[]}),
+                prefix_hash: None,
+            },
+            ContentBlock::Text {
+                text: "visible answer".into(),
+            },
+        ],
+    }]);
+    assert_eq!(rows[0].summary, "visible reasoning");
+    assert_eq!(rows[0].text.matches("visible answer").count(), 1);
+    assert!(!rows[0].text.contains("private-"));
+}
+
+#[test]
 fn preview_spec_defaults_delegated_roles_to_child_runs() {
     assert!(!PreviewSpec::new(Role::Orchestrator).child);
     assert!(PreviewSpec::new(Role::Worker).child);

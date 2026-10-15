@@ -72,6 +72,75 @@ fn failed_update_retains_the_last_valid_checkpoint() {
 }
 
 #[test]
+fn anthropic_payloads_redact_plaintext_and_preserve_opaque_signatures() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("anthropic.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut record = context();
+    let blocks = json!([
+        {"type":"anthropic","prefix_hash":"prefix","block":{"type":"thinking","thinking":"safe reasoning","signature":SECRET}},
+        {"type":"anthropic","block":{"type":"redacted_thinking","data":SECRET}},
+        {"type":"anthropic","block":{"type":"compaction","content":"safe summary","signature":SECRET,"encrypted_content":SECRET}},
+        {"type":"anthropic","block":{"type":"text","text":SECRET,"citations":[{"cited_text":SECRET}]}},
+        {"type":"anthropic","block":{"type":"server_tool_use","id":"server-1","input":{"query":SECRET}}},
+        {"type":"anthropic","block":{"type":"web_search_tool_result","content":[{"title":SECRET}]}},
+        {"type":"anthropic","block":{"type":"future_block","payload":SECRET}}
+    ]);
+    record.messages_json = json!([{"role":"assistant","content":blocks}]).to_string();
+    record.checkpoints_json = "[]".into();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let db = Database::open(&config).unwrap();
+    let saved = db.run_context("run-1").unwrap().unwrap();
+    let messages: Value = serde_json::from_str(&saved.messages_json).unwrap();
+    let persisted = &messages[0]["content"];
+    assert_eq!(persisted[0], blocks[0]);
+    assert_eq!(persisted[1], blocks[1]);
+    assert_eq!(persisted[2], blocks[2]);
+    for block in persisted.as_array().unwrap().iter().skip(3) {
+        assert!(!block.to_string().contains(SECRET));
+        assert!(block.to_string().contains("[REDACTED:openai-style-key]"));
+    }
+}
+
+#[test]
+fn signed_anthropic_secret_rejects_snapshot_without_overwriting_prior_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("signed.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut record = context();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let db = Database::open(&config).unwrap();
+    let prior = db.run_context("run-1").unwrap().unwrap();
+    for (signed, in_checkpoint) in [
+        json!({"type":"anthropic","block":{"type":"thinking","thinking":SECRET,"signature":"unchanged-signature"}}),
+        json!({"type":"anthropic","block":{"type":"compaction","content":SECRET,"signature":"unchanged-signature","encrypted_content":"unchanged-encrypted-content"}}),
+    ].into_iter().flat_map(|signed| [false, true].map(|in_checkpoint| (signed.clone(), in_checkpoint))) {
+        record.messages_json = "[]".into();
+        record.checkpoints_json = "[]".into();
+        let message = json!({"role":"assistant","content":[signed.clone()]});
+        if in_checkpoint {
+            record.checkpoints_json = json!([{"summary":message}]).to_string();
+        } else {
+            record.messages_json = json!([message]).to_string();
+        }
+        let error = storage.handle().upsert_run_context(&record).unwrap_err();
+        assert!(matches!(error, storage::StorageError::Serialization(_)));
+        assert!(!error.to_string().contains(SECRET));
+        assert_eq!(db.run_context("run-1").unwrap().unwrap(), prior);
+        record.run_id = "new-run".into();
+        assert!(storage.handle().upsert_run_context(&record).is_err());
+        assert!(db.run_context("new-run").unwrap().is_none());
+        record.run_id = "run-1".into();
+    }
+}
+
+#[test]
 fn persisted_tool_event_copy_masks_arguments_output_and_metadata() {
     use event_bus::{Event, ToolEvent};
     let dir = tempfile::tempdir().unwrap();

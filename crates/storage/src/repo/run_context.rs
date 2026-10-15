@@ -11,7 +11,7 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
     let mut count = 0;
     if let Some(messages) = messages.as_array_mut() {
         for message in messages {
-            count += redact_message(&redactor, message);
+            count += redact_message(&redactor, message)?;
         }
     } else {
         count += redactor.redact_json(&mut messages);
@@ -19,7 +19,7 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
     if let Some(checkpoints) = checkpoints.as_array_mut() {
         for checkpoint in checkpoints {
             if let Some(summary) = checkpoint.get_mut("summary") {
-                count += redact_message(&redactor, summary);
+                count += redact_message(&redactor, summary)?;
             } else {
                 count += redactor.redact_json(checkpoint);
             }
@@ -63,16 +63,22 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
 fn redact_message(
     redactor: &secret_guard::SecretRedactor,
     message: &mut serde_json::Value,
-) -> usize {
+) -> Result<usize, StorageError> {
     let Some(blocks) = message
         .get_mut("content")
         .and_then(serde_json::Value::as_array_mut)
     else {
-        return redactor.redact_json(message);
+        return Ok(redactor.redact_json(message));
     };
     let mut count = 0;
     for block in blocks {
         let field = match block.get("type").and_then(serde_json::Value::as_str) {
+            Some("anthropic") => {
+                if let Some(payload) = block.get_mut("block") {
+                    count += redact_anthropic_block(redactor, payload)?;
+                }
+                continue;
+            }
             Some("text" | "reasoning") => "text",
             Some("tool_use") => "input",
             Some("tool_result") => "content",
@@ -82,7 +88,39 @@ fn redact_message(
             count += redactor.redact_json(payload);
         }
     }
-    count
+    Ok(count)
+}
+
+fn redact_anthropic_block(
+    redactor: &secret_guard::SecretRedactor,
+    block: &mut serde_json::Value,
+) -> Result<usize, StorageError> {
+    let protected_fields: &[&str] = match block.get("type").and_then(serde_json::Value::as_str) {
+        Some("thinking") => &["signature"],
+        Some("redacted_thinking") => &["data"],
+        Some("compaction") => &["signature", "encrypted_content"],
+        _ => &[],
+    };
+    let protected: Vec<_> = protected_fields
+        .iter()
+        .filter_map(|&field| {
+            let object = block.as_object_mut()?;
+            object.get(field)?.as_str()?;
+            object.remove(field).map(|value| (field, value))
+        })
+        .collect();
+    let count = redactor.redact_json(block);
+    let signed = protected.iter().any(|(field, _)| *field == "signature");
+    for (field, value) in protected {
+        block.as_object_mut().unwrap().insert(field.into(), value);
+    }
+    if signed && count > 0 {
+        return Err(StorageError::Serialization(
+            "signed Anthropic content contains a secret; redaction would invalidate its signature"
+                .into(),
+        ));
+    }
+    Ok(count)
 }
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {

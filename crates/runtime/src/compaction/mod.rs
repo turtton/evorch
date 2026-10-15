@@ -462,6 +462,7 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
