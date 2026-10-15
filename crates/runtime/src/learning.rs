@@ -469,7 +469,8 @@ impl SourceSnapshot {
                             tracing::warn!("この処理では compaction block をスキップします");
                             continue
                         }
-                        providers::ContentBlock::Reasoning { .. } | providers::ContentBlock::Image { .. } => continue,
+                        providers::ContentBlock::Reasoning { .. }
+                        | providers::ContentBlock::Anthropic { .. } | providers::ContentBlock::Image { .. } => continue,
                     };
                     visible.push(SourceRecord {
                         reference: format!(

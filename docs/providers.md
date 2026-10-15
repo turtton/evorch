@@ -87,10 +87,11 @@ evorch's runtime for execution.
 Choose Cursor's thinking, effort, and fast variants from the refreshed model
 list; the selected variant determines these settings.
 
-Claude supports normal text and tool calls. Explicit reasoning controls are
-currently unavailable; OAuth also requires signed thinking replay before it can
-support extended thinking. Cursor does not expose temperature, output-token
-limits, or service-tier controls.
+Claude supports text and tool calls, and preserves signed thinking returned by
+the provider across tool continuations and saved history. Explicit reasoning
+controls are currently unavailable. See the [Anthropic stream contract](anthropic-stream-events.md)
+for supported events and signature replay boundaries. Cursor does not expose
+temperature, output-token limits, or service-tier controls.
 
 The protocol implementation was informed by
 [oh-my-pi](https://github.com/can1357/oh-my-pi/tree/602b6c812fa9ef774f359f1e399a09d30ee2eaca),

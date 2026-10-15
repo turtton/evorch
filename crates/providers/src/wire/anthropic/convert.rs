@@ -27,6 +27,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
                 None
             }
             ContentBlock::Image { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -57,11 +58,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
             };
             WireMessage {
                 role,
-                content: message
-                    .content
-                    .iter()
-                    .filter_map(|block| to_wire_block(block, role))
-                    .collect(),
+                content: to_wire_content(&message.content, role),
             }
         })
         .collect();
@@ -123,7 +120,11 @@ pub fn from_wire_response(response: WireMessagesResponse) -> ChatResponse {
                 WireRole::User => Role::User,
                 WireRole::Assistant => Role::Assistant,
             },
-            content: response.content.into_iter().map(from_wire_block).collect(),
+            content: response
+                .content
+                .into_iter()
+                .flat_map(from_wire_block)
+                .collect(),
         },
         usage: from_wire_usage(response.usage),
         finish_reason: to_finish_reason(response.stop_reason.as_deref()),
@@ -159,6 +160,15 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
 
 fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBlock> {
     Some(match block {
+        ContentBlock::Anthropic { block, prefix_hash } => {
+            if role != WireRole::Assistant {
+                return None;
+            }
+            WireContentBlock::Raw {
+                block: block.clone(),
+                prefix_hash: prefix_hash.clone(),
+            }
+        }
         ContentBlock::Compaction { .. } => {
             tracing::warn!("Anthropic では compaction block をスキップします");
             return None;
@@ -209,8 +219,9 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBloc
     })
 }
 
-fn from_wire_block(block: WireContentBlock) -> ContentBlock {
-    match block {
+fn from_wire_block(block: WireContentBlock) -> Vec<ContentBlock> {
+    vec![match block {
+        WireContentBlock::Raw { block, .. } => return from_raw_block(block),
         WireContentBlock::Image {
             source: super::types::WireImageSource::Base64 { media_type, data },
             ..
@@ -235,5 +246,82 @@ fn from_wire_block(block: WireContentBlock) -> ContentBlock {
                 .collect(),
             is_error,
         },
+    }]
+}
+
+fn to_wire_content(content: &[ContentBlock], role: WireRole) -> Vec<WireContentBlock> {
+    let mut result = Vec::new();
+    let mut blocks = content.iter().peekable();
+    while let Some(block) = blocks.next() {
+        if let Some(wire) = to_wire_block(block, role) {
+            result.push(wire);
+        }
+        if role == WireRole::Assistant
+            && let ContentBlock::Anthropic { block, .. } = block
+            && let Some(projection) = raw_projection(block)
+            && blocks.peek().is_some_and(|next| **next == projection)
+        {
+            blocks.next();
+        }
+    }
+    result
+}
+
+pub(super) fn from_raw_block(block: serde_json::Value) -> Vec<ContentBlock> {
+    let kind = block["type"].as_str().unwrap_or_default();
+    if kind == "thinking" && block.get("signature").is_none() {
+        return vec![ContentBlock::Reasoning {
+            text: block["thinking"].as_str().unwrap_or_default().into(),
+        }];
+    }
+    let projection = raw_projection(&block);
+    let simple_fields: &[&str] = match kind {
+        "text" => &["type", "text"],
+        "tool_use" => &["type", "id", "name", "input"],
+        "image" if projection.is_some() => &["type", "source"],
+        _ => &[],
+    };
+    if !simple_fields.is_empty()
+        && block
+            .as_object()
+            .is_some_and(|o| o.keys().all(|key| simple_fields.contains(&key.as_str())))
+    {
+        return projection.into_iter().collect();
+    }
+    if kind == "tool_result"
+        && let (Some(id), Ok(content)) = (
+            block["tool_use_id"].as_str(),
+            serde_json::from_value::<Vec<ToolResultContent>>(block["content"].clone()),
+        )
+    {
+        return vec![ContentBlock::ToolResult {
+            tool_call_id: id.into(),
+            content,
+            is_error: block["is_error"].as_bool().unwrap_or(false),
+        }];
+    }
+    let mut result = vec![ContentBlock::Anthropic {
+        block,
+        prefix_hash: None,
+    }];
+    result.extend(projection);
+    result
+}
+
+fn raw_projection(block: &serde_json::Value) -> Option<ContentBlock> {
+    match block["type"].as_str()? {
+        "text" => Some(ContentBlock::Text {
+            text: block["text"].as_str()?.into(),
+        }),
+        "tool_use" => Some(ContentBlock::ToolUse {
+            id: block["id"].as_str()?.into(),
+            name: block["name"].as_str()?.into(),
+            input: block["input"].clone(),
+        }),
+        "image" if block["source"]["type"] == "base64" => Some(ContentBlock::Image {
+            media_type: block["source"]["media_type"].as_str()?.into(),
+            data: block["source"]["data"].as_str()?.into(),
+        }),
+        _ => None,
     }
 }

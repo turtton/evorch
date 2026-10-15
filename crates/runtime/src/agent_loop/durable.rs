@@ -91,6 +91,7 @@ impl LoopState {
                                 }
                                 ContentBlock::Image { .. }
                                 | ContentBlock::Reasoning { .. }
+                                | ContentBlock::Anthropic { .. }
                                 | ContentBlock::ToolUse { .. }
                                 | ContentBlock::ToolResult { .. } => None,
                             })

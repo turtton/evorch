@@ -57,8 +57,13 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
             message: Message {
                 role: MessageRole::Assistant,
                 content: vec![
-                    ContentBlock::Reasoning {
-                        text: "weighing options".into(),
+                    ContentBlock::Anthropic {
+                        block: serde_json::json!({"type":"thinking","thinking":"weighing options","signature":"private-signature"}),
+                        prefix_hash: None,
+                    },
+                    ContentBlock::Anthropic {
+                        block: serde_json::json!({"type":"redacted_thinking","data":"private-encrypted-data"}),
+                        prefix_hash: None,
                     },
                     ContentBlock::Text {
                         text: "final answer".into(),
@@ -118,8 +123,8 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     ];
     loop {
         repaint_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("event repaint before transcript deadline");
+            .recv()
+            .expect("event pump remains alive until the transcript is rendered");
         harness.run_steps(4);
         if harness
             .state()

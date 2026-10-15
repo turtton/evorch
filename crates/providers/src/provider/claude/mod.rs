@@ -158,7 +158,7 @@ impl ProviderClient for ClaudeClient {
 fn reject_reasoning_controls(request: &ChatRequest) -> Result<(), ProviderError> {
     if request.reasoning_effort.is_some() {
         Err(ProviderError::Request(
-            "Claude OAuth reasoning controls require signed thinking support".into(),
+            "Claude OAuth reasoning controls are not configured".into(),
         ))
     } else {
         Ok(())
@@ -243,14 +243,32 @@ pub(super) fn shape_oauth_request(wire: &mut WireMessagesRequest) {
             if let WireContentBlock::ToolUse { name, .. } = block {
                 *name = prefix_tool(name);
             }
+            if let WireContentBlock::Raw { block, .. } = block
+                && block["type"] == "tool_use"
+                && let Some(name) = block["name"].as_str()
+            {
+                block["name"] = serde_json::Value::String(prefix_tool(name));
+            }
         }
     }
 }
 
 pub(super) fn restore_response_tool_names(response: &mut ChatResponse) {
-    for block in &mut response.message.content {
+    restore_message_tool_names(&mut response.message);
+}
+
+pub(super) fn restore_message_tool_names(message: &mut crate::message::Message) {
+    for block in &mut message.content {
         if let ContentBlock::ToolUse { name, .. } = block {
             strip_tool_prefix(name);
+        }
+        if let ContentBlock::Anthropic { block, .. } = block
+            && block["type"] == "tool_use"
+            && let Some(name) = block["name"].as_str()
+        {
+            let mut name = name.to_owned();
+            strip_tool_prefix(&mut name);
+            block["name"] = serde_json::Value::String(name);
         }
     }
 }

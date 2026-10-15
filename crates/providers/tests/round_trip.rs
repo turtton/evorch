@@ -287,3 +287,41 @@ fn openai_response_converts_to_anthropic_request_shape() {
         ]
     );
 }
+
+#[test]
+fn anthropic_opaque_state_is_not_sent_to_other_protocols() {
+    let response: anthropic_wire::WireMessagesResponse = serde_json::from_value(json!({
+        "role":"assistant", "content":[
+            {"type":"thinking","thinking":"private-thought","signature":"opaque-signature"},
+            {"type":"redacted_thinking","data":"opaque-redacted"},
+            {"type":"text","text":"Visible answer","citations":[{"type":"future_citation","source":"source"}]},
+            {"type":"tool_use","id":"local","name":"read","input":{"path":"report"},"caller":{"type":"direct"}},
+            {"type":"server_tool_use","id":"server","name":"web_search","input":{"q":"opaque-server-input"}}
+        ]
+    })).unwrap();
+    let request: ChatRequest = serde_json::from_value(json!({
+        "model":"kimi-test", "messages":[anthropic_wire::from_wire_response(response).message]
+    }))
+    .unwrap();
+    let payloads = [
+        serde_json::to_value(providers::wire::openai::to_wire_request(&request, false)).unwrap(),
+        serde_json::to_value(providers::wire::codex::to_wire_request(&request)).unwrap(),
+    ];
+    for payload in payloads {
+        let serialized = payload.to_string();
+        for private in [
+            "private-thought",
+            "opaque-signature",
+            "opaque-redacted",
+            "opaque-server-input",
+        ] {
+            assert!(
+                !serialized.contains(private),
+                "foreign provider received {private}"
+            );
+        }
+        assert!(serialized.contains("Visible answer"));
+        assert!(serialized.contains("local"));
+        assert!(serialized.contains("report"));
+    }
+}

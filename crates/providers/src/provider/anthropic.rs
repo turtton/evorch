@@ -14,12 +14,13 @@ use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_
 use crate::http::{
     UsageEmitter, build_http_client_without_redirects, map_request_error, map_response_error,
 };
-use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
+use crate::message::{ChatRequest, ChatResponse, Message, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
 use crate::stream::DeltaStream;
 use crate::wire::anthropic::{
-    AnthropicStreamInterpreter, WireMessagesResponse, from_wire_response, to_wire_request,
+    AnthropicStreamInterpreter, WireMessagesResponse, bind_response, discard_unbound_thinking,
+    from_wire_response, prefix_hash, to_wire_request,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -107,27 +108,10 @@ impl AnthropicClient {
 
     fn wire_request(&self, request: &ChatRequest, stream: bool) -> MessagesRequest {
         let mut wire = to_wire_request(request, stream);
-        // Canonical reasoning carries no provider signature. Anthropic rejects
-        // unsigned assistant thinking, including histories from other providers.
-        for message in &mut wire.messages {
-            message.content.retain(|block| {
-                !matches!(
-                    block,
-                    crate::wire::anthropic::WireContentBlock::Thinking { .. }
-                )
-            });
-            if message.content.is_empty() {
-                message
-                    .content
-                    .push(crate::wire::anthropic::WireContentBlock::Text {
-                        text: "[Reasoning omitted from replay]".into(),
-                        cache_control: None,
-                    });
-            }
-        }
         if self.claude_oauth {
             super::claude::shape_oauth_request(&mut wire);
         }
+        discard_unbound_thinking(&mut wire);
         let metadata = self.claude_oauth.then(|| {
             super::claude::request_metadata(
                 self.claude_account_id.as_deref(),
@@ -283,6 +267,7 @@ impl ProviderClient for AnthropicClient {
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
         let wire_request = self.wire_request(request, false);
+        let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             self.provider_label(),
@@ -327,6 +312,7 @@ impl ProviderClient for AnthropicClient {
                 observer.emit_failed(error);
             })?;
         let mut response = from_wire_response(wire);
+        bind_response(&mut response.message, &response_prefix);
         if self.claude_oauth {
             super::claude::restore_response_tool_names(&mut response);
         }
@@ -342,6 +328,7 @@ impl ProviderClient for AnthropicClient {
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
         let wire_request = self.wire_request(request, true);
+        let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             self.provider_label(),
@@ -377,6 +364,7 @@ impl ProviderClient for AnthropicClient {
             AnthropicInterpreterAdapter {
                 inner: AnthropicStreamInterpreter::new(),
                 claude_oauth: self.claude_oauth,
+                response_prefix,
             },
             UsageEmitter::new(self.event_bus.clone(), self.provider_label()),
             request.model.clone(),
@@ -388,6 +376,7 @@ impl ProviderClient for AnthropicClient {
 struct AnthropicInterpreterAdapter {
     inner: AnthropicStreamInterpreter,
     claude_oauth: bool,
+    response_prefix: String,
 }
 
 /// New Claude family/version IDs have a stable alias for their dated snapshot.
@@ -443,5 +432,14 @@ impl WireStreamInterpreter for AnthropicInterpreterAdapter {
 
     fn finish(&mut self) -> Result<FrameInterpretation, ProviderError> {
         Ok(FrameInterpretation::default())
+    }
+
+    fn take_message(&mut self) -> Option<Message> {
+        let mut message = self.inner.take_message();
+        bind_response(&mut message, &self.response_prefix);
+        if self.claude_oauth {
+            super::claude::restore_message_tool_names(&mut message);
+        }
+        Some(message)
     }
 }

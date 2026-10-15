@@ -69,11 +69,39 @@ impl Respond for ClaudeEndpoint {
             ),
             (
                 "content_block_start",
-                json!({"type":"content_block_start", "index":0,"content_block":block}),
+                json!({"type":"content_block_start", "index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type":"content_block_delta", "index":0,"delta":{"type":"thinking_delta","thinking":format!("reasoning-{index}")}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type":"content_block_delta", "index":0,"delta":{"type":"signature_delta","signature":"replaced-signature"}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type":"content_block_delta", "index":0,"delta":{"type":"signature_delta","signature":format!("signature-{index}")}}),
             ),
             (
                 "content_block_stop",
                 json!({"type":"content_block_stop", "index":0}),
+            ),
+            (
+                "content_block_start",
+                json!({"type":"content_block_start", "index":1,"content_block":{"type":"redacted_thinking","data":format!("opaque-{index}")}}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type":"content_block_stop", "index":1}),
+            ),
+            (
+                "content_block_start",
+                json!({"type":"content_block_start", "index":2,"content_block":block}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type":"content_block_stop", "index":2}),
             ),
             (
                 "message_delta",
@@ -232,6 +260,22 @@ async fn exercise(oauth: bool) {
     }
     let last = oracle.requests[2]["messages"].to_string();
     assert!(last.contains(&"result-0\n".repeat(10_000).replace('\n', "\\n")));
+    for turn in 0..2 {
+        let blocks = oracle.requests[2]["messages"][1 + turn * 2]["content"]
+            .as_array()
+            .unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks[0],
+            json!({"type":"thinking","thinking":format!("reasoning-{turn}"),"signature":format!("signature-{turn}")})
+        );
+        assert_eq!(
+            blocks[1],
+            json!({"type":"redacted_thinking","data":format!("opaque-{turn}")})
+        );
+        assert_eq!(blocks[2]["type"], "tool_use");
+        assert_eq!(blocks[2]["id"], format!("call-{turn}"));
+    }
 }
 
 #[tokio::test]

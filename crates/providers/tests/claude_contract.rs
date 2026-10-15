@@ -313,7 +313,7 @@ async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rot
 }
 
 #[tokio::test]
-async fn claude_stream_restores_tool_names_and_refuses_unsigned_thinking_controls() {
+async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_controls() {
     let server = MockServer::start().await;
     let sse = include_str!("fixtures/anthropic/stream_tool_use.sse")
         .replace("get_weather", "_get_weather");
@@ -348,14 +348,10 @@ async fn claude_stream_restores_tool_names_and_refuses_unsigned_thinking_control
     );
     let mut input = request();
     input.reasoning_effort = Some("medium".into());
-    assert!(
-        client
-            .send(&auth, &input)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("signed thinking")
-    );
+    assert!(matches!(
+        client.send(&auth, &input).await,
+        Err(providers::ProviderError::Request(_))
+    ));
 }
 
 #[tokio::test]

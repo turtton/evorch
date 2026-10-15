@@ -65,6 +65,7 @@ fn text_of(message: &Message) -> String {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -85,6 +86,7 @@ fn tool_use_of(message: &Message) -> (&str, &str) {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
         .expect("fixture assistant turn carries a tool use")
@@ -102,6 +104,7 @@ fn request_texts(messages: &[Message]) -> Vec<&str> {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -121,6 +124,7 @@ fn tool_use_ids(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
         .collect()
@@ -139,6 +143,7 @@ fn tool_result_ids(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. } => None,
         })
         .collect()
@@ -637,6 +642,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
                     ContentBlock::Text { .. }
                     | ContentBlock::Image { .. }
                     | ContentBlock::Reasoning { .. }
+                    | ContentBlock::Anthropic { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => {}
                 }

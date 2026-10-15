@@ -33,6 +33,7 @@ impl ReasoningReplay {
                 }
                 ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
+                | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => output,
             }),

@@ -148,6 +148,7 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
                 None
             }
             ContentBlock::Image { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -171,6 +172,7 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
             }
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
+            | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -190,6 +192,7 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
         }
         ContentBlock::Image { .. }
         | ContentBlock::Text { .. }
+        | ContentBlock::Anthropic { .. }
         | ContentBlock::Reasoning { .. }
         | ContentBlock::ToolUse { .. } => None,
     });
@@ -223,7 +226,8 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
                                 tracing::warn!("この処理では compaction block をスキップします");
                                 None
                             }
-                            ContentBlock::Reasoning { .. }
+                            ContentBlock::Anthropic { .. }
+                            | ContentBlock::Reasoning { .. }
                             | ContentBlock::ToolUse { .. }
                             | ContentBlock::ToolResult { .. } => None,
                         })

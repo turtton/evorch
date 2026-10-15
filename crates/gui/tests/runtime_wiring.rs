@@ -96,6 +96,7 @@ impl AgentModel for ScriptedModel {
                     }
                     ContentBlock::Image { .. }
                     | ContentBlock::Reasoning { .. }
+                    | ContentBlock::Anthropic { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
