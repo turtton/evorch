@@ -109,7 +109,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             {
                 self.open_usage_tab();
             }
-            crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
+            let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+            crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota, now);
             if self.provider_settings.profiles.iter().any(|profile| profile.kind == crate::model::provider_settings::ProviderKind::ClaudeApi) {
                 ui.separator();
                 ui.label(crate::theme::text::muted("Claude API · quota unavailable"))
@@ -127,6 +128,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     ui,
                     "Claude",
                     &self.telemetry.subscription_quota.claude,
+                    now,
                 );
             }
             if !self
@@ -141,11 +143,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     ui,
                     "Cursor",
                     &self.telemetry.subscription_quota.cursor,
+                    now,
                 );
             }
             if self.telemetry.kimi_quota.configured() {
                 ui.separator();
-                crate::panes::quota_footer::kimi_quota_footer(ui, &self.telemetry.kimi_quota.state);
+                crate::panes::quota_footer::kimi_quota_footer(ui, &self.telemetry.kimi_quota.state, now);
             }
         });
     }

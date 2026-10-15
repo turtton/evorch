@@ -18,7 +18,7 @@ pub struct SubscriptionQuotaWindow {
     pub label: String,
     pub remaining_percent: Option<f64>,
     pub used_percent: Option<f64>,
-    pub resets_at: String,
+    pub resets_at: Option<chrono::DateTime<chrono::Utc>>,
     pub usage: Option<String>,
 }
 #[derive(Debug, Clone)]
@@ -214,11 +214,7 @@ impl QuotaBackend<SubscriptionQuotaSnapshot> for SubscriptionBackend {
                             resets_at: w
                                 .resets_at
                                 .and_then(|t| i64::try_from(t).ok())
-                                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-                                .map_or_else(
-                                    || "unknown".into(),
-                                    |d| d.format("%Y-%m-%d %H:%M UTC").to_string(),
-                                ),
+                                .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
                             usage: w.used.map(|used| match w.limit {
                                 Some(limit) => format!("{used:.2} / {limit:.2} {}", w.unit),
                                 None => format!("{used:.2} {} used; limit unavailable", w.unit),
@@ -257,10 +253,7 @@ fn claude_windows(
             label: w.label,
             remaining_percent: Some(w.remaining_percent),
             used_percent: Some(w.used_percent),
-            resets_at: w.resets_at.map_or_else(
-                || "unknown".into(),
-                |d| d.format("%Y-%m-%d %H:%M UTC").to_string(),
-            ),
+            resets_at: w.resets_at,
             usage: None,
         })
         .collect();
@@ -273,7 +266,7 @@ fn claude_windows(
             label: "Extra usage".into(),
             remaining_percent: used_percent.map(|percent| 100.0 - percent),
             used_percent,
-            resets_at: "unknown".into(),
+            resets_at: None,
             usage: Some(limit.map_or_else(
                 || format!("${:.2} used; spending cap unavailable", extra.used_usd),
                 |limit| format!("${:.2} / ${limit:.2}", extra.used_usd),
@@ -335,7 +328,7 @@ mod tests {
                 label: "monthly".into(),
                 remaining_percent: None,
                 used_percent: None,
-                resets_at: "unknown".into(),
+                resets_at: None,
                 usage: Some("12 requests used; limit unavailable".into()),
             }],
             stale: false,
@@ -450,6 +443,25 @@ mod extra_usage_tests {
             let windows = claude_windows(snapshot);
             assert_eq!(windows[0].remaining_percent, expected);
             assert!(windows[0].usage.as_ref().unwrap().contains("$5.00"));
+            assert_eq!(windows[0].resets_at, None);
         }
+    }
+
+    #[test]
+    fn claude_windows_keep_reset_instants_for_render_time_formatting() {
+        let reset = chrono::DateTime::from_timestamp(1_760_000_000, 0);
+        let snapshot = providers::provider::claude::ClaudeQuotaSnapshot {
+            windows: vec![providers::provider::claude::ClaudeQuotaWindow {
+                label: "5h".into(),
+                used_percent: 25.0,
+                remaining_percent: 75.0,
+                resets_at: reset,
+            }],
+            extra_usage: None,
+            stale: false,
+            fetched_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            last_error: None,
+        };
+        assert_eq!(claude_windows(snapshot)[0].resets_at, reset);
     }
 }

@@ -3,7 +3,7 @@
 //! reads the same way everywhere in the workbench.
 
 use chrono::{DateTime, Utc};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Count with K/M/B suffixes: `950`, `12.4K`, `1.23M`, `4.56B`.
 pub fn compact_count(value: u64) -> String {
@@ -74,6 +74,12 @@ pub fn time_ago(age: Duration) -> String {
     }
 }
 
+/// Elapsed time from a wall-clock instant to `now`; instants after `now`
+/// (clock skew) read as `just now` rather than a negative age.
+pub fn time_since(at: SystemTime, now: SystemTime) -> String {
+    time_ago(now.duration_since(at).unwrap_or_default())
+}
+
 /// Absolute UTC timestamp for tooltips next to a relative time.
 pub fn utc_timestamp(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M UTC").to_string()
@@ -122,6 +128,9 @@ mod tests {
         assert_eq!(time_until(now, later), "now");
         assert_eq!(time_ago(Duration::from_secs(3_742)), "1h 2m ago");
         assert_eq!(time_ago(Duration::from_millis(400)), "just now");
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000);
+        assert_eq!(time_since(at, at + Duration::from_secs(312)), "5m 12s ago");
+        assert_eq!(time_since(at + Duration::from_secs(5), at), "just now");
     }
 
     #[test]

@@ -495,3 +495,64 @@ fn pending_user_question_keeps_blob_alongside_running_spinner() {
     assert_eq!(thread_status_icon_color(&harness, "two"), running);
     assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 0);
 }
+
+#[test]
+fn subagent_tool_approval_marks_its_parent_thread_until_resolved() {
+    const APPROVAL_LABEL: &str = "Approval needed: a tool call is waiting";
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let mut sidebar = state.sidebar().clone();
+    sidebar.select_project(&ProjectId::new("project")).unwrap();
+    let mut state = state.with_sidebar(sidebar);
+    // Given: thread "one" owns a root run and a subagent run under it.
+    state.apply_events([
+        started(),
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-7".into(),
+            parent_run_id: Some("run-1".into()),
+            agent_name: "reviewer".into(),
+            role: "reviewer".into(),
+        }),
+    ]);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1600.0, 900.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label(APPROVAL_LABEL).count(), 0);
+
+    // When: the subagent's tool call waits for approval.
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::ApprovalRequested {
+            call_id: "run-7:call-1".into(),
+            tool_name: "shell".into(),
+            input: Some(serde_json::json!({"command": "pwd"})),
+        })]);
+    harness.run_steps(3);
+    // Then: only the owning thread is marked, and as an approval, not a question.
+    assert_eq!(harness.query_all_by_label(APPROVAL_LABEL).count(), 1);
+    assert_eq!(
+        thread_status_icon_color(&harness, "one"),
+        Some(gui::theme::tokens::palette().WARNING_FG)
+    );
+    assert_eq!(thread_status_icon_color(&harness, "two"), None);
+    assert_eq!(
+        harness
+            .query_all_by_label("Answer needed: this thread has an unanswered question")
+            .count(),
+        0
+    );
+
+    // When: the approval is resolved, the mark clears.
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::ApprovalResolved {
+            call_id: "run-7:call-1".into(),
+            approved: true,
+        })]);
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label(APPROVAL_LABEL).count(), 0);
+}

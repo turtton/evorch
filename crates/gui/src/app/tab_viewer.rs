@@ -306,11 +306,28 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     })
                     .map(|thread| thread.id.clone())
                     .collect();
+                // Subagent runs are bound to their parent's thread, so an
+                // approval waiting in a child run marks the owning thread.
+                let approval_threads = self
+                    .sidebar
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        self.pending_approvals.items().any(|approval| {
+                            approval
+                                .run_id
+                                .as_ref()
+                                .is_some_and(|run| thread.run_ids.contains(run))
+                        })
+                    })
+                    .map(|thread| thread.id.clone())
+                    .collect();
                 if let Some(action) = sidebar_pane(
                     ui,
                     self.sidebar,
                     self.phases,
                     &question_threads,
+                    &approval_threads,
                     self.unread_threads,
                 ) {
                     *self.sidebar_action = Some(action);

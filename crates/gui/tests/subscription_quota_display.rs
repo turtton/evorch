@@ -15,20 +15,23 @@ fn snapshot(remaining: f64) -> SubscriptionQuotaSnapshot {
                 label: "5h".into(),
                 remaining_percent: Some(remaining),
                 used_percent: Some(100.0 - remaining),
-                resets_at: "2026-10-09 12:00 UTC".into(),
+                resets_at: Some("2026-10-09T12:00:00Z".parse().unwrap()),
                 usage: None,
             },
             SubscriptionQuotaWindow {
                 label: "Extra usage".into(),
                 remaining_percent: None,
                 used_percent: None,
-                resets_at: "unknown".into(),
+                resets_at: None,
                 usage: Some("$5.00 used; spending cap unavailable".into()),
             },
         ],
         stale: false,
         last_error: None,
     }
+}
+fn now() -> chrono::DateTime<chrono::Utc> {
+    "2026-10-09T06:40:00Z".parse().unwrap()
 }
 fn leaf(remaining: f64) -> QuotaState<SubscriptionQuotaSnapshot> {
     let mut state = QuotaState::default();
@@ -48,7 +51,7 @@ fn native_quota_displays_known_bars_unknown_spending_and_stale_errors() {
                 style.interaction.show_tooltips_only_when_still = false;
             });
             ui.horizontal(|ui| {
-                gui::panes::quota_footer::subscription_quota_footer(ui, "Claude", &state)
+                gui::panes::quota_footer::subscription_quota_footer(ui, "Claude", &state, now())
             });
         });
     harness.run();
@@ -57,6 +60,8 @@ fn native_quota_displays_known_bars_unknown_spending_and_stale_errors() {
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
     bar.hover();
     harness.run_steps(3);
+    harness
+        .get_by_label("5h: 75.0% remaining · 25.0% used · resets in 5h 20m (2026-10-09 12:00 UTC)");
     harness.get_by_label("Extra usage: quota percentage unavailable · resets unknown");
     harness.get_by_label("$5.00 used; spending cap unavailable");
     harness.get_by_label("Stale · quota refresh failed");
@@ -72,7 +77,7 @@ fn native_quota_profile_picker_switches_remaining_values() {
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
             ui.horizontal(|ui| {
-                gui::panes::quota_footer::subscription_quota_footer(ui, "Cursor", &state)
+                gui::panes::quota_footer::subscription_quota_footer(ui, "Cursor", &state, now())
             });
         });
     harness.run();

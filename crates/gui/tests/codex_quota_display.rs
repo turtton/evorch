@@ -147,6 +147,11 @@ fn snapshot(stale: bool) -> QuotaSnapshot {
     }
 }
 
+/// A fixed frame clock, 1d 5h 30m before the fixture windows reset.
+fn now() -> chrono::DateTime<chrono::Utc> {
+    "2026-09-12T06:30:00Z".parse().expect("timestamp")
+}
+
 fn quota_harness(state: QuotaState) -> Harness<'static> {
     Harness::builder()
         .with_size(egui::vec2(900.0, 400.0))
@@ -155,7 +160,7 @@ fn quota_harness(state: QuotaState) -> Harness<'static> {
                 style.interaction.tooltip_delay = 0.0;
                 style.interaction.show_tooltips_only_when_still = false;
             });
-            gui::panes::quota_footer::quota_footer(ui, &state);
+            gui::panes::quota_footer::quota_footer(ui, &state, now());
         })
 }
 
@@ -176,8 +181,12 @@ fn quota_snapshot_renders_compact_remaining_windows_with_hover_details() {
     harness.get_by_label("Codex · 75% 5h · 40% wk").hover();
     harness.run_steps(3);
     harness.get_by_label("Codex · plus · remaining quota");
-    harness.get_by_label("5h: 75.0% remaining · 25.0% used · resets 2026-09-13 12:00 UTC");
-    harness.get_by_label("wk: 40.0% remaining · 60.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label(
+        "5h: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
+    harness.get_by_label(
+        "wk: 40.0% remaining · 60.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
 }
 
 #[test]
@@ -258,10 +267,18 @@ fn multiple_codex_subscriptions_show_first_usage_and_switch_from_details() {
     harness.get_by_label("work · Codex");
     harness.get_by_label("Codex · plus · remaining quota");
     harness.get_by_label("Codex · pro · remaining quota");
-    harness.get_by_label("5h: 75.0% remaining · 25.0% used · resets 2026-09-13 12:00 UTC");
-    harness.get_by_label("wk: 40.0% remaining · 60.0% used · resets 2026-09-13 12:00 UTC");
-    harness.get_by_label("5h: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
-    harness.get_by_label("Code review: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label(
+        "5h: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
+    harness.get_by_label(
+        "wk: 40.0% remaining · 60.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
+    harness.get_by_label(
+        "5h: 10.0% remaining · 90.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
+    harness.get_by_label(
+        "Code review: 10.0% remaining · 90.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
+    );
     harness.get_by_label("work · Codex").click();
     harness.run();
     harness.get_by_label("Codex · work · 10% 5h");

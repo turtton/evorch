@@ -141,3 +141,83 @@ fn image_shapes(harness: &egui_kittest::Harness<'_, ()>) -> usize {
         matches!(&shape.shape, egui::epaint::Shape::Rect(rect) if rect.brush.as_ref().is_some_and(|brush| matches!(brush.fill_texture_id, egui::TextureId::Managed(id) if id > 0)))
     }).count()
 }
+
+/// Blocks on the loader's completion signal instead of polling frames.
+fn wait_loaded(cache: &FileCache) {
+    let mut loaded = cache
+        .slot
+        .loaded
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    while loaded.is_none() {
+        loaded = cache
+            .slot
+            .ready
+            .wait(loaded)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+}
+
+fn pending_reload(harness: &egui_kittest::Harness<'_, ()>, path: &Path) -> Option<FileCache> {
+    harness
+        .ctx
+        .data_mut(|data| data.get_temp::<ReloadWatch>(watch_id(path)))
+        .and_then(|watch| watch.next)
+}
+
+#[test]
+fn preview_reloads_on_disk_changes_without_flashing_to_loading() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "first version\n").unwrap();
+    let viewed = path.clone();
+    // A zero poll interval checks the file on every frame.
+    let mut harness = Harness::new_ui(move |ui| file_viewer(ui, &viewed, Duration::ZERO));
+
+    // Given: the preview shows the file's current content.
+    harness.step();
+    let initial = harness
+        .ctx
+        .data_mut(|data| data.get_temp::<FileCache>(cache_id(&path)))
+        .expect("load started");
+    wait_loaded(&initial);
+    harness.step();
+    assert!(harness.query_by_label("first version").is_some());
+    assert!(pending_reload(&harness, &path).is_none(), "unchanged file");
+
+    // When: the file changes on disk.
+    std::fs::write(&path, "second, longer version\n").unwrap();
+    harness.step();
+
+    // Then: the old content stays visible while the new version loads ...
+    let next = pending_reload(&harness, &path).expect("reload started");
+    assert!(harness.query_by_label("first version").is_some());
+    assert!(harness.query_by_label("Loading file…").is_none());
+    wait_loaded(&next);
+    // ... and replaces it once ready (one frame swaps, the next renders).
+    harness.step();
+    harness.step();
+    assert!(harness.query_by_label("second, longer version").is_some());
+    assert!(harness.query_by_label("first version").is_none());
+
+    // When: the file disappears, the preview reports it instead of stale text.
+    std::fs::remove_file(&path).unwrap();
+    harness.step();
+    wait_loaded(&pending_reload(&harness, &path).expect("reload after removal"));
+    harness.step();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Cannot open file")
+            .is_some()
+    );
+
+    // When: it reappears, the new content is shown again.
+    std::fs::write(&path, "restored\n").unwrap();
+    harness.step();
+    wait_loaded(&pending_reload(&harness, &path).expect("reload after restore"));
+    harness.step();
+    harness.step();
+    assert!(harness.query_by_label("restored").is_some());
+}
