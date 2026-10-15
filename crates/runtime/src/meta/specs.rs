@@ -13,10 +13,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: format!(
-            "Delegate a task to a child agent using the required target object. Choose target.role by what the child must do: worker implements, fixes, runs commands or commits; explorer only reads local code; planner creates a plan through read-only investigation and returns it in the final response body, and cannot create/edit files, run shell commands or delegate; reviewer only judges work that already exists and never carries out the task. Then choose target.category only from that role's branch. Reviewer category {plan_review} is solely for reviewing a planner-produced plan before execution. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.",
-            plan_review = CategoryId::PlanReview
-        ),
+        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -32,7 +29,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
                     "required": ["id", "paths"], "additionalProperties": false
                 },
                 "images": {
-                    "type": "array", "description": "Image payloads for multimodal_looker only.",
+                    "type": "array", "description": "Image payloads; requires target.role=multimodal_looker (alias: multimodallooker).",
                     "items": {"type": "object", "properties": {
                         "media_type": {"type": "string"}, "data": {"type": "string", "description": "Base64-encoded image data."}
                     }, "required": ["media_type", "data"], "additionalProperties": false}
@@ -47,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Retrieve a run's output without waiting or consuming its inbox. Only your direct children or parent are readable, like send_message; self, siblings and unrelated runs are denied. Returns phase and status (still_running for Pending/Running, waiting for Waiting, completed, cancelled, stopped, failed), output only on completion, and reason on failure/cancellation/stop. Waiting is nonterminal and does not by itself mean a question needs an answer; use wait's attention fields and subagent_questions to identify unanswered questions. Does not restore terminal runs.".into(),
+        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -59,12 +56,12 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for terminal completion of directly related parent/child runs using runtime notifications, without consuming their inboxes. Finish independent work first, then prefer the default 10-minute wait over repeated short waits or status polling. Supply exactly one of run_id or run_ids (1-8 unique IDs); mode=any returns when one finishes, mode=all when all finish. Either mode returns early when a target has an unanswered question (including a nonblocking child question), your inbox has an agent message to handle, or new user input arrives; automatic completion notifications alone still follow mode. Omit timeout_ms or use 600000 ms (10 minutes) for normal waiting; this is the maximum/default, and completion or attention returns immediately. timeout_ms=0 returns a snapshot. Timeout does not cancel targets. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; each run has needs_user_input for a required answer and has_pending_question for any unanswered question. timed_out is false on completion, question attention, an inbox message, or new user input. New user input has user_input_ready=true and is supplied automatically in the next model input, including images; do not use inbox to retrieve it. If inbox_ready is true, use inbox to read the queued messages, which wait does not consume. Each entry in runs includes phase/status/output/reason; status is waiting for phase Waiting and still_running for Pending/Running. Waiting is nonterminal; question attention is determined by needs_user_input and has_pending_question. Entries also include truncation flags (output 4096 bytes, reason 1024 bytes). The legacy run_id-only call returns Done/Error upon completion without question attention, and a snapshot on timeout, question attention, an inbox message, or new user input. Self, sibling, unrelated and unknown IDs fail before waiting. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
-            "mode":{"type":"string", "enum":["any","all"], "default":"any"},
-            "timeout_ms":{"type":"integer", "minimum":0, "maximum":super::runs::waiting::MAX_WAIT_MS, "default":super::runs::waiting::MAX_WAIT_MS}
+            "mode":{"type":"string", "enum":["any","all"], "default":"any", "description":"any returns when one target terminates; all waits for every target. Both return early for attention."},
+            "timeout_ms":{"type":"integer", "minimum":0, "maximum":super::runs::waiting::MAX_WAIT_MS, "default":super::runs::waiting::MAX_WAIT_MS, "description":"Maximum wait in milliseconds; 0 returns a snapshot. Completion or attention returns immediately."}
         }),
         &[],
         true,
@@ -79,7 +76,7 @@ pub(super) fn wait(name: &str) -> ToolSpec {
 pub(super) fn send_message(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Send a fire-and-forget message to a distinct direct child or parent. Returns message_id; does not wait for a reply. Unrelated, sibling and self recipients fail; absent or terminal recipients are restored only when the persisted restore contract permits delivery, otherwise the restore error is returned. Send only blockers, ownership/spec changes or findings that affect the recipient; avoid progress-only messages when a clear task can finish independently.",
+        "Send a fire-and-forget message to a direct child or parent and return message_id. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
         json!({"run_id":run_id(), "message":{"type":"string", "description":"Self-contained update or instruction."}}),
         &["run_id", "message"],
         false,
@@ -89,8 +86,8 @@ pub(super) fn send_message(name: &str) -> ToolSpec {
 pub(super) fn send(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Deliver a message to a distinct direct child or parent and return its message_id. kind defaults to send; reply requires reply_to containing the original message_id; steering provides a parent instruction at the recipient's next safe boundary. Unrelated, sibling and self recipients fail; absent or terminal recipients are restored only when the persisted restore contract permits delivery, otherwise the restore error is returned. Use wait_reply only when subsequent work depends on a reply.",
-        json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send"}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply."}}),
+        "Deliver a message to a direct child or parent and return message_id without waiting for a reply. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
+        json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send", "description":"send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary."}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply."}}),
         &["run_id", "message"],
         false,
     );
@@ -101,8 +98,8 @@ pub(super) fn send(name: &str) -> ToolSpec {
 pub(super) fn wait_reply(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Wait on mailbox notifications for a reply to a message previously sent by this run. message_id is the ID returned by send/send_message; timeout_ms is the maximum wait in milliseconds. Returns and consumes the matching reply without consuming unrelated messages. Timeout returns ReplyTimeout; recipient termination returns RunTerminated; unknown message IDs or invalid ownership fail. Prefer a substantial bounded wait over frequent inbox polling.",
-        json!({"message_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0}}),
+        "Wait for and consume a reply to this run's sent message, leaving unrelated messages queued. Timeout returns ReplyTimeout; recipient termination returns RunTerminated. Unknown message IDs or invalid ownership fail.",
+        json!({"message_id":{"type":"string", "description":"ID returned by send or send_message."},"timeout_ms":{"type":"integer","minimum":0, "description":"Maximum wait in milliseconds."}}),
         &["message_id", "timeout_ms"],
         false,
     )
@@ -111,7 +108,7 @@ pub(super) fn wait_reply(name: &str) -> ToolSpec {
 pub(super) fn inbox(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Drain and return this run's currently queued agent messages as a JSON array, including IDs, sender, kind, content and reply correlation. An empty array means no messages. This consumes those messages; use runtime completion notifications or wait/wait_reply instead of repeated inbox polling.",
+        "Consume this run's queued agent messages and return a JSON array with IDs, sender, kind, content and reply correlation. Returns an empty array if none are queued.",
         json!({}),
         &[],
         true,
@@ -301,8 +298,8 @@ fn delegate_target_schema() -> Value {
         let guidance = match *role {
             "orchestrator" => "Coordinate agents and execution.".to_owned(),
             "explorer" => "Read-only local code investigation.".to_owned(),
-            "worker" => "Implement a task; choose a category by its primary difficulty.".to_owned(),
-            "reviewer" => format!("Review work; {} reviews a planner-produced plan.", CategoryId::PlanReview),
+            "worker" => "Implement, fix, run commands or commit; choose a category by the task's primary difficulty.".to_owned(),
+            "reviewer" => format!("Evaluate existing work without executing the task; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
             "oracle" => "Provide expert reasoning and advice.".to_owned(),
@@ -326,7 +323,7 @@ fn delegate_target_schema() -> Value {
         }
         branch
     }).collect();
-    json!({"description": "Select a role, then a category only if that role's branch offers one.", "anyOf": branches})
+    json!({"description": "Select a role, then a category only if that role's branch offers one. Omission uses that role's base binding, without automatic task classification.", "anyOf": branches})
 }
 
 fn run_id() -> Value {
@@ -421,13 +418,6 @@ mod tests {
             assert_eq!(schema["properties"][name]["type"], "boolean");
             assert_eq!(schema["properties"][name]["default"], false);
         }
-        // A lone copyable literal anchors models onto that one role/category, so
-        // the always-visible guidance stays prose; rejections carry exact targets.
-        assert!(
-            !spec.description.contains("target={"),
-            "{}",
-            spec.description
-        );
     }
 
     #[test]

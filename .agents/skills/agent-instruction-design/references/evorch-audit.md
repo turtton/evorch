@@ -1,8 +1,8 @@
 # evorch の agent 指示・ツール説明の最適化候補
 
 調査日: 2026-10-15。対象 revision: `198d46a3170c71ad7bb9d183dcaabd358c87bda3`。
-以下は実装と指示文の監査による仮説であり、短文化による性能改善はまだ測定していない。
-候補の修正はこの skill 追加の範囲に含めない。適用時は現在の実装を読み直す。
+以下は編集前の実装と指示文に対する監査記録である。改善候補の根拠として保持し、
+PR #244 での適用結果は末尾に追記する。今後の編集では現在の実装を読み直す。
 
 ## どの指示が届くか
 
@@ -84,3 +84,42 @@ planner の計画項目と出力見出し、worker baseline と category の検�
 本文の整理、説明の条件付き取得、tool catalog の変更は別々に評価する。通常ターン中の system / tools / 送信済み prefix の改変で削減しない。cache に関わる実装変更は [check-cache-contracts.sh](https://github.com/turtton/evorch/blob/198d46a3170c71ad7bb9d183dcaabd358c87bda3/scripts/check-cache-contracts.sh) の契約と、変更経路の独立した prefix 検証を保つ。
 
 今回の planner 事例の再現を含め、代表的な task の成功率・不要な tool call・未完了・誤った制約報告・総 token / cache を比較する。プロンプト文字列の一致テストや固定された最終回答だけでは、モデルが指示を理解した証拠にならない。
+
+## PR #244 での適用
+
+上記の優先候補1〜5を、既存の組立・schema・ツール説明の範囲で整理した。
+
+- family 6種類の既定本文を空にした。同名 preset の登録・モデル分類・ユーザー上書きは維持する。
+- Orchestrator は調整・委譲・受け入れ責務へ、Planner は実装できる計画と実行不能時の応答へ整理した。固定見出し、Worker/category の固定テスト回数・報告行数・検証順序を除いた。
+- conversation の TODO/Goal 操作説明は既存 tool と重ねず、選択条件、元の依頼・権限の境界、Stop/Pause、Web 情報の出所を残した。
+- delegate の能力説明を nested target branch に集約し、wait/message の引数説明を property へ移した。非消費・復元・attention・非終端 Waiting・単数 legacy 結果の意味は残した。
+- Anthropic はトップレベルの schema 合成条件を除くため、wait の ID 排他と send の返信相関条件を、wire に残る本文・property 説明にも維持した。
+
+既存 family の上書きテストは非空 fixture を使って6種類の選択・非漏洩・由来を検証し、空文字の `contains` による自明な成功を避けた。既定 family の省略は、余計な区切りを残さない実際の組立で検証する。meta 説明の100文字超という条件と特定の文言の禁止は、説明の存在・schema/parser の契約確認へ整理した。
+
+### 静的な変更量
+
+上の編集前表と同じ数え方で比較した UTF-8 bytes。生成された Intent Gate、tool schema、project rules、履歴を含む provider 入力全体の値ではない。
+
+| 対象 | 編集前 | 編集後 |
+| --- | ---: | ---: |
+| family（選択される1つ） | 386–436 | 0 |
+| role-orchestrator | 3476 | 1866 |
+| role-planner | 1991 | 1236 |
+| role-worker | 596 | 477 |
+| category-quick | 364 | 221 |
+| category-deep | 416 | 289 |
+| category-conversation | 2343 | 1239 |
+| 対象7 meta tool のトップレベル description 合計 | 5566 | 2461 |
+
+meta tool の55.8%減には、property/branch へ移した説明の量を含まない。全ツールが各ロールに公開されるわけでもないため、1リクエストの token・費用削減率として使わない。
+
+Intent Gate の再設計、keyTriggers や tool catalog の動的削減、compaction の説明変更は今回は適用していない。通常ターンの prefix 保持と実行側の権限処理を維持する。
+
+### 検証範囲
+
+独立レビューで回帰の指摘はなかった。provider wire、preset の解決・上書き・組立、meta schema/parser、待機・メッセージ・権限の関連127件が通過した。`scripts/check-cache-contracts.sh` は186件通過し、送信済み prefix と明示的な履歴置換境界の契約を維持した。
+
+一時 runner の offline probe は production runtime / executor / Planner の能力制約を使い、編集前後の本文が最初の model input に届き、公開 tool 11個の定義が両条件で同一であることを確認した。評価用構成の system 本文は1755→1299文字、3375→2233 bytesだった。この値も provider の token usage ではない。
+
+実モデル A/B は未実施。準備した比較は2種類の preset、設定済み2モデル、通常計画とファイル保存・commit を求める依頼の2ケースを各1試行とする。直接 Planner を起動するため、測るのは Planner/family の変更であり、delegate/wait の説明や Orchestrator の判断、Worker category の効果は含まない。各 model route の候補を評価時だけ1つに固定するので、fallback の振る舞いもこの比較の対象ではない。単一試行から性能向上や費用削減を結論づけない。

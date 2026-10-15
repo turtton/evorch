@@ -178,7 +178,7 @@ mod tests {
     use super::*;
 
     // Given: 同梱 role / family / category プリセットの一覧 / When: ユーザー上書きなしで解決する
-    // Then: すべて解決でき、本文が空でない
+    // Then: すべて登録済みで、family の既定本文だけが空である
     #[test]
     fn bundled_store_contains_all_role_family_category_presets() {
         let bundled_names = [
@@ -207,7 +207,8 @@ mod tests {
         for name in bundled_names {
             let body =
                 PresetStore::resolve(name, None).unwrap_or_else(|err| panic!("{name}: {err}"));
-            assert!(!body.is_empty(), "{name} の本文は空でない");
+            assert_eq!(PresetStore::origin(name, None), Some(PresetOrigin::Bundled));
+            assert_eq!(body.is_empty(), name.starts_with("family-"), "{name}");
         }
     }
 }

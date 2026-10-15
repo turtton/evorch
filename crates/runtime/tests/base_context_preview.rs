@@ -179,12 +179,16 @@ async fn preview_and_run_carry_the_same_allowed_directories_section() {
     }
 }
 
-// Given: a user override for the worker baseline only
+// Given: user overrides for the worker baseline and generic family
 // When: previewing a worker
 // Then: each preset section names the layer it was read from
 #[tokio::test]
 async fn preview_reports_where_each_preset_comes_from() {
     let fixture = Fixture::new();
+    write(
+        &fixture.user_dir.path().join("presets/family-generic.md"),
+        "USER-GENERIC-FAMILY",
+    );
     let runtime = fixture.runtime(Arc::new(ScriptedModel::new([])), ProjectTrust::Approved);
     let report = runtime
         .preview_base_context(BaseContextRequest {
@@ -211,8 +215,9 @@ async fn preview_reports_where_each_preset_comes_from() {
     );
     assert_eq!(
         source_of(ContextSectionKind::ModelFamily),
-        ContextSource::BundledPreset {
-            name: "family-generic".into()
+        ContextSource::UserPreset {
+            name: "family-generic".into(),
+            path: fixture.user_dir.path().join("presets/family-generic.md"),
         }
     );
     assert_eq!(
