@@ -96,6 +96,34 @@ saved directory that no longer exists keeps its record and trust: the sidebar
 still loads, the directory is just not declared until it exists again, and it
 can still be untrusted or removed.
 
+### What runs are told
+
+A run's system message lists the allowed directories it started with, with its
+access, in an `Allowed directories (evorch): ` section right before the
+workspace note (the inspector shows the same section). An empty list adds no
+section. The section is never rewritten, not even on restore, so a change never
+invalidates the sent prefix. Delegated children start with the list current at
+their own start. Runs see the list whether or not they are sandboxed; benchmark
+runs see none.
+
+Changes are appended instead. After a complete tool round, right before the
+next provider request (never between a tool call and its result), a run whose
+list differs from the one it was last told gets one message:
+
+```text
+[workspace update] Allowed directories changed (+ added, - removed, ~ access changed):
++ /srv/shared (read-only)
+- /srv/old
+```
+
+The last told list is saved in the restore snapshot, so a restored run is told
+only what changed while it was stopped; an interrupted request is first retried
+with its exact saved input. Compaction (including a model-switch compaction)
+and a fork replace history, so the next boundary restates the whole current
+list as `[workspace update] Current allowed directories; ...`, or says `none`
+when a run that once had directories has none left. Runs that never had any
+get no extra message.
+
 ## Temporary output
 
 Shell pipes and PTYs are drained into bounded buffers (8 MiB per stream).

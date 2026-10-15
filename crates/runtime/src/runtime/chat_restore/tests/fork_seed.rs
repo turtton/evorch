@@ -212,3 +212,69 @@ async fn fork_seed_is_ignored_once_the_thread_has_its_own_history() {
     assert!(texts.iter().any(|text| text == "branch"));
     assert!(texts.iter().any(|text| text == "again"));
 }
+
+#[tokio::test]
+async fn fork_seed_restates_the_current_allowed_directories() {
+    // Given: a source chat told one allowed directory, told a second one in its later turn
+    let model = Arc::new(EchoModel::default());
+    let fixture = Fixture::with_model(model.clone());
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    let (first_dir, second_dir) = (root.join("first"), root.join("second"));
+    for dir in [&first_dir, &second_dir] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    let runtime = fixture
+        .runtime
+        .clone()
+        .with_project_rules(Arc::new(crate::RulesSource::new(
+            crate::ProjectTrust::Approved,
+            crate::RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(root.clone()),
+            None,
+        )));
+    runtime.set_project_allowed_directories(root.clone(), vec![first_dir.clone()]);
+    let mut events = fixture.runtime.shared.bus.subscribe();
+    let source = runtime
+        .delegate_chat("source", Role::Worker, "first".into(), chat_config())
+        .unwrap();
+    let first = next_turn(&mut events, source).await;
+    runtime
+        .set_project_allowed_directories(root.clone(), vec![first_dir.clone(), second_dir.clone()]);
+    runtime.send_message(source, "second".into()).unwrap();
+    next_turn(&mut events, source).await;
+    let source_texts = user_texts(&model.requests.lock().unwrap().last().unwrap().clone());
+    assert!(
+        source_texts
+            .iter()
+            .any(|text| text.contains("+ ") && text.contains("second"))
+    );
+
+    // When: a new thread forks at the first turn, before that update
+    let fork = runtime
+        .delegate_chat_seeded(
+            "fork",
+            Role::Worker,
+            "branch".into(),
+            chat_config(),
+            Some(ChatForkSeed {
+                source_run_id: source.to_string(),
+                context_len: first,
+            }),
+        )
+        .unwrap();
+    next_turn(&mut events, fork).await;
+
+    // Then: it is told the whole current list once instead of a difference it never saw
+    let texts = user_texts(&model.requests.lock().unwrap().last().unwrap().clone());
+    let updates: Vec<_> = texts
+        .iter()
+        .filter(|text| text.starts_with("[workspace update]"))
+        .collect();
+    assert_eq!(updates.len(), 1, "{texts:?}");
+    assert!(updates[0].contains("Current allowed directories"));
+    for dir in [&first_dir, &second_dir] {
+        assert!(updates[0].contains(&format!("* {} (read-write)", dir.display())));
+    }
+}

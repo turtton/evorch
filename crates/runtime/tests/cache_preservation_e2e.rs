@@ -2629,3 +2629,431 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
         );
     }
 }
+
+/// Gives harness runs `harness`'s directory as their project, so its allowed directories reach them.
+fn allowed_project(harness: &Harness) -> std::path::PathBuf {
+    let root = harness._directory.path().canonicalize().unwrap();
+    harness.runtime.set_project_root(root.clone()).unwrap();
+    root
+}
+
+fn allowed_dir(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = root.join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn chat_requests(harness: &Harness) -> Vec<Value> {
+    harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect()
+}
+
+fn workspace_updates(request: &Value) -> Vec<String> {
+    wire_texts(request, "user")
+        .into_iter()
+        .filter(|text| text.contains("[workspace update]"))
+        .collect()
+}
+
+fn last_message_text(request: &Value) -> String {
+    request["messages"].as_array().unwrap().last().unwrap()["content"].to_string()
+}
+
+// Given: a Worker conversation started with one allowed directory
+// When: a second directory is declared while a tool runs, then the first is removed
+// Then: each change is appended once after the complete tool round or the next input,
+//       the system message never changes, and every request reuses the previous input
+#[tokio::test]
+async fn allowed_directory_changes_append_after_the_tool_round_and_preserve_the_wire_prefix() {
+    let gate = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let mut harness = harness_with_read(
+        vec![
+            read_response(0),
+            text_response("Read once"),
+            text_response("Nothing changed"),
+            text_response("First removed"),
+        ],
+        1_000_000,
+        gate.clone(),
+    );
+    let review_storage = support::ReviewStorage::new();
+    let root = allowed_project(&harness);
+    let first = allowed_dir(&root, "first");
+    let second = allowed_dir(&root, "second");
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![first.clone()]);
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "allowed-updates",
+            Role::Worker,
+            "Read the shared files".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    gate.started.notified().await;
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![first.clone(), second.clone()]);
+    gate.release.notify_one();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Continue unchanged".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![second.clone()]);
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Continue after removal".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(
+            wire_texts(request, "system"),
+            systems,
+            "system is never rewritten"
+        );
+    }
+    let section = systems.join("\n");
+    assert!(section.contains(&format!("* {} (read-write)", first.display())));
+    assert!(!section.contains(&second.display().to_string()));
+    let added = format!("+ {} (read-write)", second.display());
+    let removed = format!("- {}", first.display());
+    assert!(workspace_updates(&requests[0]).is_empty());
+    assert_eq!(workspace_updates(&requests[1]).len(), 1);
+    assert!(
+        last_message_text(&requests[1]).contains(&added),
+        "the update follows the tool result"
+    );
+    assert_eq!(
+        workspace_updates(&requests[2]).len(),
+        1,
+        "no change, no update"
+    );
+    assert!(last_message_text(&requests[2]).contains("Continue unchanged"));
+    let updates = workspace_updates(&requests[3]);
+    assert_eq!(updates.len(), 2);
+    assert!(updates[1].contains(&removed) && !updates[1].contains(&added));
+    assert!(last_message_text(&requests[3]).contains(&removed));
+}
+
+// Given: an Orchestrator started without allowed directories
+// When: a directory is declared while it reads, and it then delegates to a Planner
+// Then: the parent gets the addition appended, the child's system message carries the
+//       current list, and the parent's own system message and wire prefix are unchanged
+#[tokio::test]
+async fn delegated_child_starts_with_the_current_list_while_the_parent_only_appends() {
+    let gate = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let harness = harness_with_read(
+        vec![
+            read_response(0),
+            ScriptedResponse::tool_call(
+                "planner",
+                MODEL,
+                0,
+                "planner",
+                "delegate",
+                [json!({"target":{"role":"planner"},"prompt":"Create a plan"}).to_string()],
+            ),
+            text_response("Plan ready"),
+            text_response("Planning complete"),
+        ],
+        1_000_000,
+        gate.clone(),
+    );
+    let root = allowed_project(&harness);
+    let shared = allowed_dir(&root, "shared");
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate planning".into(),
+        RunConfig::default(),
+    );
+    gate.started.notified().await;
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![shared.clone()]);
+    gate.release.notify_one();
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    let listed = format!("* {} (read-only)", shared.display());
+    let added = format!("+ {} (read-only)", shared.display());
+    let child = &requests[2];
+    assert!(wire_texts(child, "system").join("\n").contains(&listed));
+    assert!(workspace_updates(child).is_empty());
+    let parent_system = wire_texts(&requests[0], "system");
+    assert!(
+        !parent_system
+            .join("\n")
+            .contains("Allowed directories (evorch)")
+    );
+    for (previous, next) in [(0, 1), (1, 3)] {
+        assert_eq!(wire_texts(&requests[next], "system"), parent_system);
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+    }
+    for index in [1, 3] {
+        let updates = workspace_updates(&requests[index]);
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].contains(&added));
+    }
+}
+
+#[tokio::test]
+async fn allowed_directories_restore_appends_only_the_saved_difference() {
+    for changed in [true, false] {
+        allowed_restore_preserves_wire_prefix(changed).await;
+    }
+}
+
+// Given: a stopped Worker run that was told one allowed directory
+// When: it is restored, with the list replaced (`changed`) or kept
+// Then: the system message stays byte-identical and only the difference is appended,
+//       once, after the restored turn's input
+async fn allowed_restore_preserves_wire_prefix(changed: bool) {
+    let mut harness = harness(
+        vec![
+            text_response("Initial work"),
+            text_response("Continued after restore"),
+            text_response("Followed up"),
+        ],
+        1_000_000,
+    );
+    let root = allowed_project(&harness);
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("allowed-history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let first = allowed_dir(&root, "first");
+    let second = allowed_dir(&root, "second");
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![first.clone()]);
+    let run = harness.runtime.reserve_run_id();
+    harness.runtime.bind_thread_root("thread", run).unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Start work",
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    if changed {
+        harness
+            .runtime
+            .set_project_allowed_directories(root.clone(), vec![second.clone()]);
+    }
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "After restore".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "Followup".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(
+            wire_texts(request, "system"),
+            systems,
+            "restoring never rewrites the system message"
+        );
+    }
+    assert!(
+        systems
+            .join("\n")
+            .contains(&format!("* {} (read-write)", first.display()))
+    );
+    for request in &requests[1..] {
+        let updates = workspace_updates(request);
+        assert_eq!(updates.len(), usize::from(changed), "changed={changed}");
+        if changed {
+            assert!(updates[0].contains(&format!("+ {} (read-write)", second.display())));
+            assert!(updates[0].contains(&format!("- {}", first.display())));
+            let users = wire_texts(request, "user");
+            let update = users.iter().position(|text| text == &updates[0]).unwrap();
+            let restored = users
+                .iter()
+                .position(|text| text.contains("After restore"))
+                .unwrap();
+            assert_eq!(
+                update,
+                restored + 1,
+                "the update follows the restored input"
+            );
+        }
+    }
+}
+
+// Given: a conversation told one allowed directory, then given a second one
+// When: the next turn crosses a successful compaction boundary
+// Then: the whole current list is restated once after that boundary, and later
+//       turns preserve the new prefix with the system message and tools unchanged
+async fn allowed_compaction_restates_the_list(reason: CompactionReason) {
+    let automatic = reason == CompactionReason::Automatic;
+    let old_reply =
+        "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
+    let mut script = vec![read_response(0), text_response(&old_reply)];
+    if reason == CompactionReason::Agent {
+        script.push(ScriptedResponse::tool_call(
+            "compact-allowed",
+            MODEL,
+            0,
+            "compact-allowed",
+            "compact",
+            ["{}"],
+        ));
+    }
+    script.extend([read_response(2), text_response("done")]);
+    let mut harness = harness(script, if automatic { 64_000 } else { 1_000_000 });
+    let review_storage = support::ReviewStorage::new();
+    let root = allowed_project(&harness);
+    let first = allowed_dir(&root, "first");
+    let second = allowed_dir(&root, "second");
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![first.clone()]);
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "allowed-compaction",
+            if reason == CompactionReason::Agent {
+                Role::Orchestrator
+            } else {
+                Role::Worker
+            },
+            "Inspect the shared files".into(),
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![first.clone(), second.clone()]);
+    if reason == CompactionReason::Manual {
+        harness.runtime.compact(run).unwrap();
+    }
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Continue after the context boundary".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::Compaction(CompactionEvent::Compacted { reason: actual, .. }) if *actual == reason)),
+        "expected successful {reason:?} compaction"
+    );
+    verify_trace(&harness, run, &events, 1);
+
+    let requests = chat_requests(&harness);
+    let final_request = requests.last().unwrap();
+    let access = if reason == CompactionReason::Agent {
+        "read-only"
+    } else {
+        "read-write"
+    };
+    let restatements: Vec<_> = workspace_updates(final_request)
+        .into_iter()
+        .filter(|text| text.contains("Current allowed directories"))
+        .collect();
+    assert_eq!(restatements.len(), 1, "{reason:?}: restated once");
+    for directory in [&first, &second] {
+        assert!(restatements[0].contains(&format!("* {} ({access})", directory.display())));
+    }
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(wire_texts(request, "system"), systems);
+    }
+    if reason == CompactionReason::Agent {
+        let messages = final_request["messages"].as_array().unwrap();
+        let result = messages
+            .iter()
+            .position(|message| message["tool_call_id"] == "compact-allowed")
+            .expect("compact result");
+        let restated = messages
+            .iter()
+            .position(|message| {
+                message["content"]
+                    .to_string()
+                    .contains("Current allowed directories")
+            })
+            .unwrap();
+        assert!(result < restated, "restated after the compact result");
+    }
+}
+
+#[tokio::test]
+async fn allowed_directories_are_restated_after_compaction_then_reuse_the_wire_prefix() {
+    for reason in [
+        CompactionReason::Manual,
+        CompactionReason::Automatic,
+        CompactionReason::Agent,
+    ] {
+        allowed_compaction_restates_the_list(reason).await;
+    }
+}

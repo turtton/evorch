@@ -109,6 +109,7 @@ pub fn preview_segments(report: &BaseContextReport) -> Vec<BudgetSegment> {
             label: "Runtime notes",
             tokens: sum(&[
                 ContextSectionKind::CompactionPolicy,
+                ContextSectionKind::AllowedDirectories,
                 ContextSectionKind::Workspace,
                 ContextSectionKind::TemporaryFiles,
                 ContextSectionKind::Memory,
@@ -253,7 +254,7 @@ pub struct CompareRow {
     pub identical: Option<bool>,
 }
 
-const COMPARE_KINDS: [ContextSectionKind; 11] = [
+const COMPARE_KINDS: [ContextSectionKind; 12] = [
     ContextSectionKind::RoleBaseline,
     ContextSectionKind::ModelFamily,
     ContextSectionKind::CategoryOverlay,
@@ -262,6 +263,7 @@ const COMPARE_KINDS: [ContextSectionKind; 11] = [
     ContextSectionKind::Skills,
     ContextSectionKind::Rules,
     ContextSectionKind::CompactionPolicy,
+    ContextSectionKind::AllowedDirectories,
     ContextSectionKind::Workspace,
     ContextSectionKind::TemporaryFiles,
     ContextSectionKind::Memory,

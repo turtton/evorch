@@ -119,6 +119,7 @@ fn fixture_with_model(
         pending_terminal: None,
         scratch: None,
         allowed_directories: None,
+        told_directories: Default::default(),
     };
     (runtime, state)
 }

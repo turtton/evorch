@@ -144,6 +144,12 @@ summarizer = "structural"
     .unwrap()
     .runtime
     .with_compaction(config.compaction.clone());
+    // The run was told an allowed directory, which the boundary must restate (ADR 0032).
+    let root = directory.path().canonicalize().unwrap();
+    let shared = root.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    runtime.set_project_root(root.clone()).unwrap();
+    runtime.set_project_allowed_directories(root, vec![shared.clone()]);
     let run = runtime.delegate_background(
         Role::Worker,
         "Preserve this original goal".into(),
@@ -199,6 +205,28 @@ summarizer = "structural"
     )
     .unwrap();
     assert_append_only(CacheProtocol::OpenAi, &after[0], &after[1]).unwrap();
+    let listed = format!("* {} (read-write)", shared.display());
+    let restatements = |request: &Value| {
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| {
+                message["role"] == "user"
+                    && message["content"]
+                        .to_string()
+                        .contains("[workspace update] Current allowed directories")
+            })
+            .count()
+    };
+    assert!(
+        before[0]["messages"][0]["content"]
+            .to_string()
+            .contains(&listed)
+    );
+    assert_eq!(restatements(before.last().unwrap()), 0);
+    assert_eq!(restatements(&after[0]), 1, "restated at the switch");
+    assert_eq!(restatements(&after[1]), 1);
     let usage = events
         .iter()
         .filter_map(|event| match &event.kind {

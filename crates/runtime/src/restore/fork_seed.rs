@@ -83,6 +83,9 @@ impl RestoredState {
         .map_err(|error| corrupt(error.to_string()))?;
         truncated.config_json =
             serde_json::to_string(&descriptor).map_err(|error| corrupt(error.to_string()))?;
-        Self::from_record(&truncated)
+        // Updates appended after the boundary were cut off with it.
+        let mut restored = Self::from_record(&truncated)?;
+        restored.allowed_directories.rewrite_pending = true;
+        Ok(restored)
     }
 }

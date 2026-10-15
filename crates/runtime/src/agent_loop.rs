@@ -134,9 +134,10 @@ pub(crate) struct LoopState {
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
     pub(crate) scratch: Option<crate::scratch::RunScratch>,
-    /// The run project's live allowed directories with this run's access; set for
-    /// sandboxed runs and read again by every command and file tool call.
+    /// The run project's live allowed directories with this run's access, read again
+    /// by every command and file tool call. Benchmark runs have none.
     pub(crate) allowed_directories: Option<sandbox::AllowedRegions>,
+    pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -190,6 +191,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
+    let told_directories = restored
+        .as_ref()
+        .map(|restored| (*restored.allowed_directories).clone())
+        .unwrap_or_default();
     let history_only = task.start == RunStart::Resume;
     // An interrupted provider request retries its exact saved input. Restore
     // procedure context only after that response, or a new compaction boundary.
@@ -291,6 +296,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         pending_terminal: None,
         scratch: None,
         allowed_directories: None,
+        told_directories,
     };
     // Every setup/execute return flows through one finalization boundary.
     async {
@@ -472,11 +478,28 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         if let Some(source) = state.shared.rules.as_ref() {
             state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
         }
+        // Runs without a sandbox are told the same list (ADR 0032); only mounts need one.
+        if state.allowed_directories.is_none()
+            && !benchmark_mode
+            && let Some(root) = &active_root
+            && let Some(runtime) = shared.upgrade()
+        {
+            state.allowed_directories = Some(crate::allowed_directories::regions(
+                &runtime,
+                root,
+                &state.policy,
+            ));
+        }
         if !is_restored && !benchmark_replay {
+            let allowed = state
+                .allowed_directories
+                .as_ref()
+                .map_or_else(Vec::new, crate::allowed_directories::snapshot);
             if let Err(error) = push_initial_system_message(
                 &state.shared,
                 &state.task,
                 state.rules_session.as_ref(),
+                &allowed,
                 &mut state.context,
             ) {
                 // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
@@ -485,6 +508,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 state.finish_error(error.to_string());
                 return;
             }
+            state.told_directories = crate::allowed_directories::ToldDirectories::started(allowed);
             if benchmark_mode {
                 state.append_benchmark_instructions();
             }
@@ -586,6 +610,7 @@ fn push_initial_system_message(
     shared: &LoopShared,
     task: &RunTask,
     rules_session: Option<&RulesSession>,
+    allowed_directories: &[crate::allowed_directories::ToldDirectory],
     context: &mut AgentContext,
 ) -> Result<(), InitialSystemPromptError> {
     let sections = base_context::compose_system_sections(
@@ -596,6 +621,7 @@ fn push_initial_system_message(
             load_skills: &task.config.load_skills,
             prompt_len: task.prompt.len(),
             active_root: rules_session.and_then(|session| session.active_root.as_deref()),
+            allowed_directories,
         },
     )?;
     let composed = base_context::join_system_sections(&sections);
@@ -732,8 +758,7 @@ impl LoopState {
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
             }
             let (window, _) = self.resolved_context_window();
-            self.append_todo_context();
-            self.append_scratch_context();
+            self.append_boundary_context();
             let mut visible_messages = self.context.visible_messages();
             let mut estimated = self.estimated_context_tokens(&visible_messages);
             // A cooldown or the post-compaction latch must not terminate a run
@@ -747,7 +772,7 @@ impl LoopState {
                 }
                 match compaction::compact_now(self, CompactionReason::Automatic).await {
                     Ok(_) => {
-                        self.append_todo_context();
+                        self.append_boundary_context();
                         visible_messages = self.context.visible_messages();
                         let after = self.estimated_context_tokens(&visible_messages);
                         if after >= estimated {
@@ -1213,6 +1238,14 @@ impl LoopState {
         }));
     }
 
+    /// Runtime state appended after a complete tool round, right before the next
+    /// provider input, so the already-sent prefix is never edited.
+    fn append_boundary_context(&mut self) {
+        self.append_todo_context();
+        self.append_scratch_context();
+        self.append_allowed_directories_context();
+    }
+
     pub(crate) fn publish_message_count(&self) {
         self.channels
             .message_count_tx
@@ -1418,6 +1451,34 @@ mod workspace_tests {
 
         update_workspace_system_message(&mut context, Path::new("/new"));
 
+        assert_eq!(context, expected);
+    }
+
+    #[test]
+    fn workspace_refresh_on_restore_keeps_the_allowed_directories_section() {
+        // Given: a restored system message whose composed text ends with the allowed directories
+        let allowed = crate::allowed_directories::section_text(&[
+            crate::allowed_directories::ToldDirectory {
+                path: "/shared".into(),
+                access: crate::allowed_directories::DirectoryAccess::ReadOnly,
+            },
+        ])
+        .unwrap();
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_system(&format!("stable instructions\n\n{allowed}"));
+        context.messages[0].content.push(ContentBlock::Text {
+            text: "Current workspace (evorch): /old.".to_string(),
+        });
+        context.push_system(&allowed);
+        let mut expected = context.clone();
+        expected.messages[0].content[1] = ContentBlock::Text {
+            text: "Current workspace (evorch): /new.".to_string(),
+        };
+
+        // When: restore refreshes the workspace note
+        update_workspace_system_message(&mut context, Path::new("/new"));
+
+        // Then: only the workspace block changed
         assert_eq!(context, expected);
     }
 
