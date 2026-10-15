@@ -1,5 +1,7 @@
 #[path = "role_settings_headless/chain.rs"]
 mod chain;
+#[path = "role_settings_headless/compactor.rs"]
+mod compactor;
 #[path = "role_settings_headless/evidence.rs"]
 mod evidence;
 #[path = "role_settings_headless/implicit.rs"]

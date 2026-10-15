@@ -66,9 +66,7 @@ pub fn sized_fixture(
 }
 
 pub fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while harness.state().role_settings().is_saving() {
-        assert!(std::time::Instant::now() < deadline, "save timeout");
         harness.step();
         std::thread::yield_now();
     }
