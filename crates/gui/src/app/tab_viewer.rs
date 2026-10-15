@@ -338,6 +338,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     run_id,
                     self.transcripts.run(run_id),
                     self.repo_root,
+                    self.tasks.rows(),
                 );
             }
             PanelKind::FileViewer => {

@@ -4,7 +4,7 @@ use egui::Color32;
 use workspace_ui::ThreadRunPhase;
 
 use crate::model::composer::ComposerModel;
-use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
+use crate::model::transcript::{TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
 use crate::panes::sidebar::SidebarAction;
@@ -13,6 +13,8 @@ use crate::theme::text::medium;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
+mod agent_message;
+mod compaction;
 mod goal;
 pub use goal::GoalAction;
 mod branch;
@@ -243,7 +245,24 @@ pub fn transcript_body_with_repo_root(
     model: &TranscriptModel,
     repo_root: Option<&std::path::Path>,
 ) {
-    run_detail_body(ui, model, (None, &[]), repo_root, None, (None, &mut None));
+    transcript_body_with_agents(ui, model, repo_root, &[]);
+}
+
+/// A run transcript whose run IDs resolve to the names in `agents`.
+pub fn transcript_body_with_agents(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    repo_root: Option<&std::path::Path>,
+    agents: &[crate::model::tasks::TaskRow],
+) {
+    run_detail_body(
+        ui,
+        model,
+        (None, agents),
+        repo_root,
+        None,
+        (None, &mut None),
+    );
 }
 
 fn run_detail_body(
@@ -310,6 +329,7 @@ fn run_detail_body(
                             repo_root,
                             jobs: model.shell_jobs(),
                             latest_for_job,
+                            agents: task_rows,
                         },
                     );
                     continue;
@@ -328,6 +348,16 @@ fn run_detail_body(
                     if let Some(branch) = branch {
                         branch::edit_button(ui, model, entry_id, branch);
                     }
+                    continue;
+                }
+                if let TranscriptEntry::AgentMessage {
+                    direction,
+                    peer_run_id,
+                    content,
+                    ..
+                } = entry
+                {
+                    agent_message::show(ui, *direction, peer_run_id, content, task_rows);
                     continue;
                 }
                 if let Some((icon, color)) = event_icon(entry) {
@@ -365,19 +395,12 @@ fn run_detail_body(
                         );
                         return;
                     }
-                    if let TranscriptEntry::SandboxReview {
-                        text,
-                        run_id,
-                        call_id,
-                    } = entry
-                    {
-                        sandbox_review::show(
-                            ui,
-                            pane_id.with(("sandbox-review", model.visible_entry_id(entry_idx))),
-                            text,
-                            run_id.as_deref(),
-                            call_id.as_deref(),
-                        );
+                    if let TranscriptEntry::SandboxReview { text, call_id, .. } = entry {
+                        sandbox_review::show(ui, text, call_id.as_deref());
+                        return;
+                    }
+                    if let TranscriptEntry::Compaction { .. } = entry {
+                        compaction::show(ui, pane_id.with(("compaction", entry_id)), entry);
                         return;
                     }
                     if let TranscriptEntry::Reasoning { text, run_id } = entry {
@@ -409,11 +432,8 @@ fn run_detail_body(
 fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
     match entry {
         TranscriptEntry::Notice { .. } => Some((icons::INFO, palette().TEXT_MUTED)),
-        TranscriptEntry::AgentMessage { direction, .. } => Some(match direction {
-            MessageDirection::Incoming => (icons::ARROW_BEND_DOWN_RIGHT, palette().SUCCESS),
-            MessageDirection::Outgoing => (icons::PAPER_PLANE_RIGHT, palette().WARNING_FG),
-        }),
-        TranscriptEntry::Error { .. }
+        TranscriptEntry::AgentMessage { .. }
+        | TranscriptEntry::Error { .. }
         | TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::SandboxReview { .. }
         | TranscriptEntry::Compaction { .. }
@@ -519,27 +539,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
         TranscriptEntry::Reasoning { text, .. } => text.clone(),
-        TranscriptEntry::Compaction {
-            reason,
-            threshold,
-            context_window_tokens,
-            estimated_tokens_before,
-            estimated_tokens_after,
-            compacted_range_start,
-            compacted_range_end,
-            checkpoint_id,
-            summary,
-        } => {
-            let reason = match reason {
-                event_bus::CompactionReason::Automatic => "automatic",
-                event_bus::CompactionReason::Manual => "manual",
-                event_bus::CompactionReason::Agent => "agent",
-                event_bus::CompactionReason::ModelSwitch => "model switch",
-            };
-            format!(
-                "Compaction ({reason}): {estimated_tokens_before} → {estimated_tokens_after} tokens\nrange {compacted_range_start}..{compacted_range_end}; threshold {threshold}; context window {context_window_tokens}\ncheckpoint {checkpoint_id}\n{summary}"
-            )
-        }
+        TranscriptEntry::Compaction { .. } => compaction::summary(entry).unwrap_or_default(),
         TranscriptEntry::Tool {
             tool_name,
             call_id,
@@ -551,13 +551,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             peer_run_id,
             content,
             ..
-        } => {
-            let prefix = match direction {
-                MessageDirection::Incoming => "<-",
-                MessageDirection::Outgoing => "->",
-            };
-            format!("{prefix} {peer_run_id}: {content}")
-        }
+        } => agent_message::label(*direction, peer_run_id, content, &[]),
         TranscriptEntry::TurnEnd {
             run_id,
             context_len,

@@ -88,16 +88,30 @@ fn compaction_survives_replay_without_loss_or_duplication() {
         });
     harness.run_steps(2);
     let mut previous_bottom = 0.0;
-    for (index, reason) in ["automatic", "manual", "agent"].into_iter().enumerate() {
-        let expected_label = format!("Compaction ({reason}): 180000 → 60000 tokens");
+    for reason in ["automatic", "manual", "agent"] {
+        let expected_label = format!("Context compacted ({reason}): 180.0K → 60.0K tokens");
         let label = harness
-            .query_by_label_contains(&expected_label)
+            .query_by_label(&expected_label)
             .expect("reason and token transition");
         assert!(label.rect().top() > previous_bottom);
         previous_bottom = label.rect().bottom();
+    }
+    // Details stay collapsed until requested.
+    assert!(harness.query_by_label_contains("summarized at").is_none());
+    assert_eq!(harness.get_all_by_label("details").count(), 3);
+    for index in 0..3 {
+        harness
+            .get_all_by_label("details")
+            .nth(index)
+            .unwrap()
+            .click();
+        harness.run_steps(3);
         assert!(
             harness
-                .query_by_label_contains(&format!("range {index}..{}", index + 42))
+                .query_by_label(&format!(
+                    "Messages {index}–{} summarized at 80% of a 200.0K-token window",
+                    index + 42
+                ))
                 .is_some()
         );
     }

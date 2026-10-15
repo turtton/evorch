@@ -43,6 +43,14 @@ is being read, then leave with the card's bottom edge. The original title button
 and shell-log action retain their identities; collapsed/running calls do not
 stick. Collapsing a pinned call reveals its normal title position without an
 animation. Output continues to use the transcript's single vertical scroll area.
+One tool call is one card: approval states update the original card, and sandbox
+escape and network access reviews show as a small line under its title, visible
+while collapsed; denied or declined reviews use WARNING_FG and a shield-warning icon.
+Reviews without a card (legacy history) render standalone. Coordination tools name
+their agents (`Delegate worker-w1 (worker)`, `Message → reviewer-r1 · preview`).
+Agent messages read `→ name (role): text`; unknown runs show a shortened ID.
+Compaction shows one `Context compacted` line; range, threshold, window,
+checkpoint and summary sit in a closed `details` section with a custom header.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
@@ -58,6 +66,8 @@ Never request external focus or activate a browser target from the UI.
 ## 7. Accessibility
 Label every input, retain keyboard focus, and never use color as the only status.
 No motion is introduced. Long IDs must remain inspectable without clipping.
+Transcript prose avoids inline run, call and question IDs; `copy_id_button` keeps
+them available, with the full ID on hover.
 The ownership header abbreviates owner IDs to five characters plus `…`, with the
 full ID, generation and state on hover. Access retains the last confirmed state
 (or `checking ownership` initially) while probes retry. SQLite contention gets a

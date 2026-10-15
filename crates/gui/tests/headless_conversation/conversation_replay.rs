@@ -293,7 +293,7 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
             .iter()
             .position(|entry| {
                 matches!(entry,
-            TranscriptEntry::Notice { text } if text == "subagent reviewer (child) completed")
+            TranscriptEntry::Notice { text } if text == "subagent reviewer completed")
             })
             .unwrap();
         assert!(result < terminal);
@@ -488,4 +488,105 @@ fn history_with_removed_supervisor_events_still_restores() {
         entry,
         TranscriptEntry::Message { text, .. } if text == "kept reply"
     )));
+}
+
+#[test]
+fn access_reviews_replay_inside_their_tool_cards_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut original = state(dir.path(), &["one"]);
+    original.composer_mut().input = "fetch the release notes".into();
+    original.submit_composer();
+    let name = "chat:Worker:one";
+    let diagnostic = |source: &str, code: &str, detail: String, call: &str| {
+        Event::new(event_bus::DiagnosticEvent {
+            source: source.into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: code.into(),
+            detail,
+            run_id: Some("root".into()),
+            thread_id: None,
+            call_id: Some(call.into()),
+        })
+    };
+    // Given: a reviewed shell escape and a denied fetch are persisted.
+    persist_and_apply(
+        &storage,
+        &mut original,
+        vec![
+            started("root", None, name),
+            prompt("root", None, name, "fetch the release notes"),
+            Event::new(ToolEvent::ToolStarted {
+                tool_name: "shell".into(),
+                call_id: "call-shell".into(),
+                input: Some(serde_json::json!({"command": "curl example.com"})),
+                run_id: Some("root".into()),
+            }),
+            diagnostic(
+                "sandbox",
+                "escalation_review",
+                "denied: network is not needed".into(),
+                "call-shell",
+            ),
+            Event::new(ToolEvent::ToolCompleted {
+                tool_name: "shell".into(),
+                call_id: "call-shell".into(),
+                is_error: true,
+                output: Some("denied".into()),
+                detail: None,
+                run_id: Some("root".into()),
+            }),
+            diagnostic(
+                "network_access",
+                "tool_call_access",
+                serde_json::json!({"tool": "web_fetch", "input": {"url": "https://example.com"},
+                    "decision": "deny", "reviewer": "tool_policy", "reason": "web tools are disabled"})
+                .to_string(),
+                "call-fetch",
+            ),
+        ],
+    );
+    storage.close();
+    let expected = original.transcript().entries().to_vec();
+    let tools: Vec<_> = expected
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Tool {
+                tool_name,
+                status,
+                reviews,
+                ..
+            } => Some((tool_name.as_str(), status.clone(), reviews.len())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            ("shell", ToolStatus::Failed, 1),
+            (
+                "web_fetch",
+                ToolStatus::Denied {
+                    reason: "web tools are disabled".into()
+                },
+                1
+            ),
+        ]
+    );
+    assert!(!expected.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::SandboxReview { .. } | TranscriptEntry::Notice { .. }
+    )));
+    // When: the conversation is restored from storage.
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path(), &["one"]).with_sidebar(sidebar);
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    // Then: each review is attached to the same card as it was live.
+    assert_eq!(reopened.transcript().entries(), expected);
 }

@@ -237,11 +237,10 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
         registry.thread().entries(),
         &[
             TranscriptEntry::Notice {
-                text: "Subagent question from child reached orchestrator [question-1]: Which API?"
-                    .into()
+                text: "Subagent question reached orchestrator: Which API?".into()
             },
             TranscriptEntry::Notice {
-                text: "Answer sent to subagent child [question-1]: Use the public API".into()
+                text: "Answer sent to a subagent: Use the public API".into()
             },
         ]
     );
@@ -249,10 +248,10 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
         registry.run("child").unwrap().entries(),
         &[
             TranscriptEntry::Notice {
-                text: "Question [question-1]: Which API?".into()
+                text: "Question: Which API?".into()
             },
             TranscriptEntry::Notice {
-                text: "Answer [question-1]: Use the public API".into()
+                text: "Answer: Use the public API".into()
             },
         ]
     );

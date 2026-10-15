@@ -500,7 +500,11 @@ fn v02_end_to_end_chained_scenario() {
         },
     );
     assert!(fixture.workbench.has_label("Transcript: run-3"));
-    assert!(fixture.workbench.has_label("<- run-2: two-to-three"));
+    assert!(
+        fixture
+            .workbench
+            .has_label("← implementer (worker): two-to-three")
+    );
     assert!(!fixture.workbench.has_label("one-to-two"));
 
     // When: a working tree diff is requested and polled to completion.
