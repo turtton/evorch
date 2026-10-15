@@ -29,3 +29,5 @@ mod transcript_lag;
 mod transcript_tool_cli;
 #[path = "headless_activity/transcript_tool_pending.rs"]
 mod transcript_tool_pending;
+#[path = "headless_activity/transcript_tool_sticky.rs"]
+mod transcript_tool_sticky;

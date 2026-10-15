@@ -14,6 +14,7 @@ use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette
 use crate::theme::widgets::{icon_button, soft_frame};
 
 mod header;
+mod sticky;
 
 const LIVE_TAIL_LINES: usize = 4;
 
@@ -196,46 +197,13 @@ pub fn tool_card_group(
         },
     };
     soft_frame(palette().SURFACE).show(ui, |ui| {
-        let response = ui.horizontal(|ui| {
-            if running {
-                ui.add(
-                    egui::Spinner::new()
-                        .size(FONT_SMALL)
-                        .color(palette().RUNNING),
-                );
-            }
-            let reserved = if job.is_some() { ROW_DENSE } else { 0.0 };
-            let width = ui.available_width() - ui.spacing().button_padding.x * 2.0 - reserved;
-            let layout = fitted_header_job(ui, glyph, color, &header, width);
-            let button =
-                ui.add_enabled(!running, egui::Button::new(layout).frame(false).truncate());
-            button.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
-            });
-            if let Some(job) = job {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, icons::SCROLL, "Open shell job log").clicked() {
-                        crate::panes::shell_jobs::request_open(ui.ctx(), &job.key);
-                    }
-                });
-            }
-            button
-                .on_hover_text(&tooltip)
-                .on_disabled_hover_text(&tooltip)
-        });
+        let title = sticky::Header::reserve(ui, id);
         // An expanded card already shows the output in full.
         let preview = context.latest_for_job && (running || !expanded);
         if let Some(job) = job.filter(|job| preview && job.is_running()) {
             live_tail(ui, job);
         }
-        if running {
-            return;
-        }
-        if response.inner.clicked() {
-            expanded = !expanded;
-            ui.data_mut(|data| data.insert_temp(id, expanded));
-        }
-        if expanded && folded > 1 {
+        if expanded && !running && folded > 1 {
             let combined: String = group
                 .iter()
                 .filter_map(|entry| match entry {
@@ -256,7 +224,7 @@ pub fn tool_card_group(
                 },
                 palette().TEXT,
             );
-        } else if expanded {
+        } else if expanded && !running {
             if let Some(input) = input {
                 ui.label("Input");
                 let content = focused_input(tool_name, Some(input))
@@ -302,6 +270,41 @@ pub fn tool_card_group(
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, palette().ERROR_FG);
             }
+        }
+        let response = title.show(ui, expanded && !running, |ui| {
+            if running {
+                ui.add(
+                    egui::Spinner::new()
+                        .size(FONT_SMALL)
+                        .color(palette().RUNNING),
+                );
+            }
+            let reserved = if job.is_some() { ROW_DENSE } else { 0.0 };
+            let width = ui.available_width() - ui.spacing().button_padding.x * 2.0 - reserved;
+            let layout = fitted_header_job(ui, glyph, color, &header, width);
+            let button =
+                ui.add_enabled(!running, egui::Button::new(layout).frame(false).truncate());
+            button.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
+            });
+            if let Some(job) = job {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, icons::SCROLL, "Open shell job log").clicked() {
+                        crate::panes::shell_jobs::request_open(ui.ctx(), &job.key);
+                    }
+                });
+            }
+            button
+                .on_hover_text(&tooltip)
+                .on_disabled_hover_text(&tooltip)
+        });
+        if response.inner.clicked() {
+            if expanded {
+                title.reveal_after_collapse(ui);
+            }
+            expanded = !expanded;
+            ui.data_mut(|data| data.insert_temp(id, expanded));
+            ui.ctx().request_repaint();
         }
     });
 }

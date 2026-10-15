@@ -38,6 +38,11 @@ Reasoning uses a lowercase `thinking` collapsing header in TEXT_MUTED, with a
 wrapped, muted italic body. Live reasoning opens; the following answer or run
 completion closes it once. History starts closed. Native keyboard and pointer
 toggles remain available, and manual expansion persists across subsequent frames.
+Expanded tool-call titles stay at the transcript viewport's top while their card
+is being read, then leave with the card's bottom edge. The original title button
+and shell-log action retain their identities; collapsed/running calls do not
+stick. Collapsing a pinned call reveals its normal title position without an
+animation. Output continues to use the transcript's single vertical scroll area.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
