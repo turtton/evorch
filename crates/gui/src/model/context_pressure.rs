@@ -74,7 +74,11 @@ impl TelemetryRow {
     }
 
     pub fn tokens_label(&self) -> String {
-        let tokens = format!("{} / {}", self.usage.input, self.usage.output);
+        let tokens = format!(
+            "{} / {}",
+            crate::format::compact_count(self.usage.input),
+            crate::format::compact_count(self.usage.output)
+        );
         match self.context_pressure_label() {
             Some(pressure) => format!("{tokens} ({pressure})"),
             None => tokens,

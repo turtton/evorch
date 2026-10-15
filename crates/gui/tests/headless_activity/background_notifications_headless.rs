@@ -46,8 +46,18 @@ fn activate<S: AgentRunSource>(state: &mut WorkbenchState<S>, id: &str) {
 
 #[test]
 fn run_done_event_surfaces_unread_notification_and_read_after_display() {
-    // Given: the Notifications tab is hidden in an explicitly focused viewport.
-    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
+    // Given: the Notifications tab is hidden in an explicitly focused viewport,
+    // and the completing run is a known delegated agent.
+    let run = AgentSummary {
+        run_id: RunId::new(7),
+        parent_run_id: Some(RunId::new(0)),
+        name: "release-checker".into(),
+        role_name: "worker".into(),
+        phase: AgentRunPhase::Running,
+        model: "test-model".into(),
+        category: None,
+    };
+    let mut state = WorkbenchState::new(DemoSource(vec![run]), &UiSettings::default()).unwrap();
     activate(&mut state, "subagents-home");
     let mut harness = harness(state);
     harness
@@ -70,7 +80,12 @@ fn run_done_event_surfaces_unread_notification_and_read_after_display() {
     assert_eq!(model.unread_count(), 1);
     activate(harness.state_mut(), "notifications-main");
     harness.run_steps(3);
-    assert!(harness.query_by_label("Run run-7 completed").is_some());
+    // Then: the row names the agent; its run ID is only the click target.
+    assert!(
+        harness
+            .query_by_label("release-checker completed")
+            .is_some()
+    );
     assert_eq!(harness.state().notifications().unread_count(), 0);
 }
 
@@ -86,7 +101,7 @@ fn notification_click_opens_run_transcript() {
     // Unowned background runs do not create a thread-local right-side tab.
     assert!(harness.state().dock().find_tab(&panel).is_none());
     // When: the actual notification row is clicked.
-    harness.get_by_label("Run run-X completed").click();
+    harness.get_by_label("Agent run completed").click();
     harness.run_steps(3);
     // Then: the targeted transcript exists and is the active tab of its leaf.
     let dock = harness.state().dock();
@@ -163,20 +178,19 @@ fn multiple_concurrent_runs_display_states() {
             state,
         );
     harness.run();
-    // Then: all names, ids and distinct state indicators are visible; only Error notifies.
+    // Then: all names and distinct state indicators are visible, each ID one copy
+    // away; only the failure notifies.
     for label in [
         "running-run",
         "waiting-run",
         "error-run",
-        "run-1",
-        "run-2",
-        "run-3",
         "Running",
-        "Waiting",
-        "Error",
+        "Waiting for input",
+        "Failed",
     ] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
+    assert_eq!(harness.query_all_by_label("Copy run ID").count(), 3);
     let model = harness.state().notifications();
     assert_eq!(model.items().count(), 1);
     let item = model.items().next().unwrap();

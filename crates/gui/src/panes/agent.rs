@@ -672,10 +672,10 @@ mod tests {
     #[test]
     fn thread_header_omits_phase_pill() {
         for (phase, label) in [
-            (ThreadRunPhase::Running, "running"),
-            (ThreadRunPhase::Waiting, "waiting (input)"),
-            (ThreadRunPhase::Done, "done"),
-            (ThreadRunPhase::Stopped, "stopped (resumable)"),
+            (ThreadRunPhase::Running, "Running"),
+            (ThreadRunPhase::Waiting, "Waiting for input"),
+            (ThreadRunPhase::Done, "Done"),
+            (ThreadRunPhase::Stopped, "Stopped (resumable)"),
         ] {
             let mut harness = Harness::builder()
                 .with_size(egui::vec2(400.0, 80.0))

@@ -32,7 +32,7 @@ fn transcript_header_uses_h3_when_run_is_selected() {
     // When: the conversation transcript renders.
     harness.run_steps(2);
     // Then: the title uses the h3 proportional role, not code typography.
-    assert_header(&harness, "Transcript: run-1", FONT_H3);
+    assert_header(&harness, "Transcript", FONT_H3);
 }
 
 #[test]

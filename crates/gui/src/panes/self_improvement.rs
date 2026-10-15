@@ -213,7 +213,14 @@ impl SelfImprovementPane {
                         ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
                             ui.monospace(&entry.evidence);
                             if let Some(run_id) = &entry.run_id {
-                                ui.monospace(format!("Run: {run_id}"));
+                                ui.horizontal(|ui| {
+                                    ui.label(crate::theme::text::muted("Run"));
+                                    crate::theme::widgets::copy_id_button(
+                                        ui,
+                                        "Copy run ID",
+                                        run_id,
+                                    );
+                                });
                             }
                             if entry.recent_run_ids.len() > 1 {
                                 ui.monospace(format!(

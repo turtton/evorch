@@ -39,6 +39,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TelemetryRow {
     pub provider: Option<String>,
+    /// The routing provider profile the user named, when the request had one.
+    pub profile: Option<String>,
     pub model: Option<String>,
     pub current_tool: Option<String>,
     pub activity: Option<event_bus::RunActivity>,
@@ -117,6 +119,11 @@ impl TelemetryRow {
 
     pub fn latest_ttft_ms(&self) -> Option<u64> {
         self.ttft_ms
+    }
+
+    /// The user's routing profile name, falling back to the provider kind.
+    pub fn provider_label(&self) -> Option<&str> {
+        self.profile.as_deref().or(self.provider.as_deref())
     }
 }
 
@@ -211,6 +218,7 @@ impl TelemetryOverlay {
                 row.context_order = self.context_order;
                 row.in_flight = true;
                 row.provider = Some(provider.clone());
+                row.profile.clone_from(profile);
                 row.model = Some(model.clone());
                 if let Some(context) = &mut row.latest_context {
                     let key = pricing::ModelKey {

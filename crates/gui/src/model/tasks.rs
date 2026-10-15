@@ -283,6 +283,25 @@ pub fn role_for_run<'a>(rows: &'a [TaskRow], run_id: &str) -> Option<&'a str> {
         .map(|row| row.role.as_str())
 }
 
+/// Human name for a run: its delegated agent's name, else the title of the
+/// conversation thread that owns it. Run IDs are never used as a fallback.
+pub fn run_display_name<'a>(
+    rows: &'a [TaskRow],
+    threads: &'a [workspace_ui::ThreadRecord],
+    run_id: &str,
+) -> Option<&'a str> {
+    rows.iter()
+        .find(|row| row.run_id.to_string() == run_id)
+        .map(|row| row.name.as_str())
+        .or_else(|| {
+            threads
+                .iter()
+                .find(|thread| thread.run_ids.iter().any(|id| id == run_id))
+                .map(|thread| thread.title.as_str())
+        })
+        .filter(|name| !name.trim().is_empty())
+}
+
 impl<S: AgentRunSource> TasksModel<S> {
     pub fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
         self.source.teams()

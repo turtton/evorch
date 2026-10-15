@@ -29,6 +29,16 @@ pub fn latency(ms: f64) -> String {
     }
 }
 
+/// Elapsed request time: [`latency`] precision below a minute, where whole
+/// seconds would read `0s`, then [`duration`] units (`2m 5s`).
+pub fn elapsed(value: Duration) -> String {
+    if value < Duration::from_secs(60) {
+        latency(value.as_secs_f64() * 1_000.0)
+    } else {
+        duration(value)
+    }
+}
+
 /// Human duration with at most three units, dropping seconds once the value
 /// reaches an hour and omitting zero units: `45s`, `12m 34s`, `5h 30m`,
 /// `1d 5h 30m`, `2d`.
@@ -133,5 +143,8 @@ mod tests {
         assert_eq!(usd(1.5), "$1.50");
         assert_eq!(latency(840.0), "840ms");
         assert_eq!(latency(1_234.0), "1.2s");
+        assert_eq!(elapsed(Duration::from_millis(400)), "400ms");
+        assert_eq!(elapsed(Duration::from_millis(45_300)), "45.3s");
+        assert_eq!(elapsed(Duration::from_secs(125)), "2m 5s");
     }
 }

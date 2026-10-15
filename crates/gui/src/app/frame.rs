@@ -241,9 +241,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .flatten()
             },
         );
-        self.notifications.apply_event(event, |call_id| {
-            self.transcripts.run_for_call(call_id).map(str::to_owned)
-        });
+        self.notifications.apply_event_named(
+            event,
+            |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
+            |run_id| {
+                crate::model::tasks::run_display_name(
+                    self.tasks.rows(),
+                    &self.sidebar.threads,
+                    run_id,
+                )
+                .map(str::to_owned)
+            },
+        );
         self.ledger.apply(event);
         self.tasks.apply_event(event);
         self.durable_tasks.apply_event(event);

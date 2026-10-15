@@ -226,7 +226,7 @@ fn completed_metrics_render_as_headless_labels() {
     // When: egui renders its real widgets.
     harness.run();
     // Then: all three measured labels are accessible.
-    for label in ["45.2 tok/s", "TTFT 0.8s", "Δ 12.3s"] {
+    for label in ["45.2 tok/s", "TTFT 800ms", "Δ 12.3s"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }

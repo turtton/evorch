@@ -6,6 +6,11 @@ Preserve the operational egui workbench; no redesign or new visual dependencies.
 ## 2. Color
 Use `theme/tokens.rs`: CANVAS, SURFACE, TEXT, TEXT_MUTED, ERROR_FG.
 Status is expressed in text as well as color.
+Run status text and color come only from `phase_label`/`agent_phase_label` and
+`phase_color`/`agent_phase_color`: Pending, Running, Waiting for input, Done,
+Failed, Stopped (resumable); owner-cancelled runs read Cancelled in TEXT_MUTED.
+Questions and approvals awaiting the user use `attention_color` (WARNING_FG);
+error text uses ERROR_FG.
 
 ## 3. Typography
 Use the installed egui theme: body 14, small/mono 12. IDs use monospace.
@@ -43,6 +48,9 @@ is being read, then leave with the card's bottom edge. The original title button
 and shell-log action retain their identities; collapsed/running calls do not
 stick. Collapsing a pinned call reveals its normal title position without an
 animation. Output continues to use the transcript's single vertical scroll area.
+Agent rows read `model · provider profile` (provider kind as fallback, kind on
+hover); tokens use `format::compact_count`, TTFT `format::latency`, Δ
+`format::elapsed`; exact counts stay in the tooltip.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
@@ -58,6 +66,9 @@ Never request external focus or activate a browser target from the UI.
 ## 7. Accessibility
 Label every input, retain keyboard focus, and never use color as the only status.
 No motion is introduced. Long IDs must remain inspectable without clipping.
+Runs read by agent name (else thread title), never by run ID; the ID sits behind
+`copy_id_button` (named `Copy run ID`, full value on hover). Notification
+summaries name runs the same way. Clicking an agent name drills into its run.
 The ownership header abbreviates owner IDs to five characters plus `…`, with the
 full ID, generation and state on hover. Access retains the last confirmed state
 (or `checking ownership` initially) while probes retry. SQLite contention gets a

@@ -336,6 +336,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 agent_transcript_pane_with_repo_root(
                     ui,
                     run_id,
+                    crate::model::tasks::run_display_name(
+                        self.tasks.rows(),
+                        &self.sidebar.threads,
+                        run_id,
+                    ),
                     self.transcripts.run(run_id),
                     self.repo_root,
                 );

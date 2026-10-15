@@ -123,7 +123,7 @@ fn assert_notification_opens_transcript(legacy: Workspace) {
         .set_active_tab(notification_tab)
         .unwrap();
     harness.run_steps(3);
-    harness.get_by_label("Run legacy-run completed").click();
+    harness.get_by_label("Agent run completed").click();
     harness.run_steps(3);
     // Then: the rendered row opens and selects the targeted run transcript.
     let dock = harness.state().dock();

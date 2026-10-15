@@ -199,16 +199,14 @@ fn past_subagents_remain_browsable_after_restart() {
     let mut gui = gui::headless::HeadlessWorkbench::new(reopened, [1200.0, 900.0]);
     gui.run();
     assert!(gui.has_label("agent two"));
-    assert!(gui.has_label("run-4"));
     assert!(!gui.has_label("agent one"));
-    gui.click_label("run-4");
+    gui.click_label("agent two");
     gui.run();
     assert!(gui.has_label("result from second child"));
 
     gui.state_mut().switch_thread(ThreadId::new("one")).unwrap();
     gui.run();
     assert!(gui.has_label("agent one"));
-    assert!(gui.has_label("run-2"));
     assert!(!gui.has_label("agent two"));
 }
 
