@@ -451,6 +451,7 @@ async fn optional_child_question_wakes_parent_wait_for_orchestrator_resolution()
     );
     runtime
         .answer_subagent_question(parent, &question.id, "Use A")
+        .await
         .unwrap();
     let result = observe(
         &runtime,

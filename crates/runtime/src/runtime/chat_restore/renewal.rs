@@ -3,7 +3,7 @@
 use super::*;
 
 impl AgentRuntime {
-    pub(super) fn validate_history_restore(
+    pub(in crate::runtime) fn validate_history_restore(
         &self,
         record: &storage::RunContextRecord,
         descriptor: &RunRestoreDescriptor,

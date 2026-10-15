@@ -87,7 +87,7 @@ pub(super) fn subagent_questions(
     }
 }
 
-pub(super) fn answer_subagent_question(
+pub(super) async fn answer_subagent_question(
     state: &LoopState,
     runtime: &AgentRuntime,
     input: serde_json::Value,
@@ -96,7 +96,10 @@ pub(super) fn answer_subagent_question(
         Ok(args) => args,
         Err(e) => return error(e),
     };
-    match runtime.answer_subagent_question(state.caller_run_id(), &args.question_id, &args.answer) {
+    match runtime
+        .answer_subagent_question(state.caller_run_id(), &args.question_id, &args.answer)
+        .await
+    {
         Ok(question) => serialize(&question),
         Err(e) => error(e),
     }

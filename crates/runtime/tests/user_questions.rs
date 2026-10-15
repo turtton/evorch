@@ -953,11 +953,13 @@ async fn only_direct_orchestrator_parent_can_read_or_answer_child_question() {
     assert!(
         runtime
             .answer_subagent_question(unrelated, &question.id, "A")
+            .await
             .is_err()
     );
     assert!(
         runtime
             .answer_subagent_question(child, &question.id, "A")
+            .await
             .is_err()
     );
     assert_eq!(runtime.user_question(&question.id).unwrap(), Some(question));

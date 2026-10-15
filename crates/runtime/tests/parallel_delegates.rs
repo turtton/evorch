@@ -6,7 +6,7 @@ use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEven
 use providers::{ContentBlock, FinishReason};
 use runtime::{AgentRuntime, Role, RunConfig, RunId, RuntimeError};
 use serde_json::json;
-use support::{ScriptedModel, text_response, tool_responses};
+use support::{ScriptedModel, text_response, tool_response, tool_responses};
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
@@ -143,6 +143,99 @@ async fn failed_awaited_child_does_not_prevent_sibling_result() {
     assert_eq!(fixture.runtime.wait(parent).await, Ok(AgentRunPhase::Done));
     // Then: the existing phase-result contract is preserved independently.
     fixture.assert_results("Error").await;
+}
+
+#[tokio::test]
+async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives() {
+    let review_storage = support::ReviewStorage::new();
+    let model = Arc::new(ScriptedModel::new([]));
+    model
+        .add_keyed(
+            "ROOT",
+            [
+                Ok(tool_response(
+                    "foreground",
+                    "delegate",
+                    json!({"target":{"role":"orchestrator"}, "prompt":"CHILD"}),
+                )),
+                Ok(text_response("Parent handled input", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    model
+        .add_keyed(
+            "CHILD",
+            [
+                Ok(tool_response(
+                    "background",
+                    "delegate",
+                    json!({"target":{"role":"worker"}, "prompt":"GRANDCHILD", "background":true, "interactive":true}),
+                )),
+                Ok(tool_response("wait", "wait", json!({"run_id":"run-3"}))),
+            ],
+        )
+        .await;
+    model
+        .add_keyed(
+            "GRANDCHILD",
+            [Ok(text_response("Ready for input", FinishReason::Stop))],
+        )
+        .await;
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids();
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
+    loop {
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Waiting,
+            ..
+        }) = events.recv().await.unwrap().kind
+            && run_id == "run-2"
+        {
+            break;
+        }
+    }
+    review_storage.attach(&runtime);
+    runtime
+        .send_message(parent, "New instruction".into())
+        .unwrap();
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+    for child in [RunId::new(2), RunId::new(3)] {
+        runtime.cancel(child).unwrap();
+        runtime.wait(child).await.unwrap();
+    }
+
+    let observed = model.observed().await;
+    let result = observed
+        .last()
+        .unwrap()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } if tool_call_id == "foreground" => {
+                let providers::ToolResultContent::Text { text } = content.first().unwrap();
+                assert!(!is_error, "{text}");
+                Some(
+                    serde_json::from_str::<serde_json::Value>(text)
+                        .expect("nonterminal delegation retains its attention snapshot"),
+                )
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(result["run_id"], "run-2");
+    assert_eq!(result["phase"], "Waiting");
+    assert_eq!(result["user_input_ready"], true);
+    assert_eq!(result["needs_user_input"], false);
+    assert_eq!(result["has_pending_question"], false);
+    assert_eq!(result["timed_out"], false);
 }
 
 #[tokio::test]

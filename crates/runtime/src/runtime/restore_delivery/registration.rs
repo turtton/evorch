@@ -1,14 +1,18 @@
 use super::*;
 
 impl AgentRuntime {
-    pub(super) fn register_restored(
+    pub(in crate::runtime) fn register_restored(
         &self,
         runs: &mut HashMap<RunId, RunEntry>,
         identity: (RunId, Option<RunId>, Role, RunConfig, RunId),
         restored: RestoredState,
         trigger: &AgentMessage,
     ) {
-        let (run_id, parent, role, config, sender) = identity;
+        let (run_id, parent, role, mut config, sender) = identity;
+        self.install_run_ownership_guard(run_id, &mut config);
+        // Durable question answers are flushed by the loop. They need neither
+        // a synthetic message nor a rewrite of the saved provider prefix.
+        let history_only = restored.trigger.is_none();
         let name = runs.get(&run_id).map_or_else(
             || config.name.clone().unwrap_or_else(|| role.name().into()),
             |entry| entry.name.clone(),
@@ -22,7 +26,8 @@ impl AgentRuntime {
             |entry| entry.model.clone(),
         );
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
-        let (message_count_tx, message_count_rx) = watch::channel(restored.messages.len() + 1);
+        let (message_count_tx, message_count_rx) =
+            watch::channel(restored.messages.len() + usize::from(!history_only));
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
         let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
@@ -44,7 +49,7 @@ impl AgentRuntime {
             compaction_busy: Arc::clone(&compaction_busy),
             result_tx,
         };
-        if trigger.kind != AgentMessageKind::Reply {
+        if !history_only && trigger.kind != AgentMessageKind::Reply {
             self.shared
                 .sent
                 .lock()
@@ -66,16 +71,21 @@ impl AgentRuntime {
             run_id,
             role,
             prompt: String::new(),
-            start: crate::agent_loop::RunStart::WithInput,
+            start: if history_only {
+                crate::agent_loop::RunStart::Resume
+            } else {
+                crate::agent_loop::RunStart::WithInput
+            },
             config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),
             handoff: None,
             restored: None,
         });
-        let completion_relayed = runs
-            .get(&run_id)
-            .is_none_or(|entry| entry.completion_relayed);
+        let completion_relayed = !history_only
+            && runs
+                .get(&run_id)
+                .is_none_or(|entry| entry.completion_relayed);
         runs.insert(
             run_id,
             RunEntry {

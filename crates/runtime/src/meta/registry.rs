@@ -128,7 +128,7 @@ define_meta_ops! {
         questions::subagent_questions(state, runtime, input)
     },
     AnswerSubagentQuestion => "answer_subagent_question" => specs::answer_subagent_question => |state, runtime, input| {
-        questions::answer_subagent_question(state, runtime, input)
+        questions::answer_subagent_question(state, runtime, input).await
     },
     InspectLearningSource => "inspect_learning_source" => specs::inspect_learning_source => |state, runtime, input| {
         learning_result(parse(input).and_then(|args| {

@@ -1078,25 +1078,7 @@ impl AgentRuntime {
             })),
             _ => None,
         };
-        if let Some(permit) = &mut config.ownership {
-            permit.run_id = Some(run_id.to_string());
-            let token = permit.clone();
-            let nonblocking_token = permit.clone();
-            self.shared.bus.register_nonblocking_mutation_guard(
-                run_id.to_string(),
-                Arc::new(move || {
-                    token
-                        .mutation_guard()
-                        .ok()
-                        .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
-                }),
-                Arc::new(move || match nonblocking_token.try_mutation_guard() {
-                    Ok(Some(guard)) => event_bus::MutationGuardAttempt::Acquired(Box::new(guard)),
-                    Ok(None) => event_bus::MutationGuardAttempt::Busy,
-                    Err(_) => event_bus::MutationGuardAttempt::Rejected,
-                }),
-            );
-        }
+        self.install_run_ownership_guard(run_id, &mut config);
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         if parent.is_some() && escalated_from.is_some() {
             tracing::debug!(%run_id, ?parent, ?escalated_from,
@@ -1830,6 +1812,28 @@ impl AgentRuntime {
                 })?;
         }
         Ok(())
+    }
+
+    fn install_run_ownership_guard(&self, run_id: RunId, config: &mut RunConfig) {
+        if let Some(permit) = &mut config.ownership {
+            permit.run_id = Some(run_id.to_string());
+            let token = permit.clone();
+            let nonblocking_token = permit.clone();
+            self.shared.bus.register_nonblocking_mutation_guard(
+                run_id.to_string(),
+                Arc::new(move || {
+                    token
+                        .mutation_guard()
+                        .ok()
+                        .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
+                }),
+                Arc::new(move || match nonblocking_token.try_mutation_guard() {
+                    Ok(Some(guard)) => event_bus::MutationGuardAttempt::Acquired(Box::new(guard)),
+                    Ok(None) => event_bus::MutationGuardAttempt::Busy,
+                    Err(_) => event_bus::MutationGuardAttempt::Rejected,
+                }),
+            );
+        }
     }
 
     fn entry(&self, run_id: RunId) -> Result<RunEntryView<'_>, RuntimeError> {
@@ -2726,6 +2730,7 @@ mod review_provenance_tests {
             .expect("worker question");
         runtime
             .answer_subagent_question(root, &agent_question.id, "Use option A")
+            .await
             .expect("orchestrator answer");
 
         let runs = runtime.shared.review_runs.lock().expect("review runs");

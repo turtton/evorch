@@ -6,6 +6,8 @@ use event_bus::{AgentRunPhase, Event, ToolEvent, UserQuestion};
 #[path = "questions_tests.rs"]
 mod tests;
 
+mod continuation;
+
 impl AgentRuntime {
     pub fn request_user_question(
         &self,
@@ -90,16 +92,51 @@ impl AgentRuntime {
 
     /// Answer a direct child's question without granting any tool permission.
     /// The host-facing answer API remains the only way to answer root questions.
-    pub fn answer_subagent_question(
+    /// If the child is finalizing, wait for cleanup before continuing its history.
+    pub async fn answer_subagent_question(
         &self,
         caller: RunId,
         id: &str,
         answer: &str,
     ) -> Result<UserQuestion, String> {
+        let (child, question) = self.persist_subagent_answer(caller, id, answer)?;
+        self.resume_answered_child(caller, child, &question).await?;
+        Ok(question)
+    }
+
+    fn persist_subagent_answer(
+        &self,
+        caller: RunId,
+        id: &str,
+        answer: &str,
+    ) -> Result<(RunId, UserQuestion), String> {
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or("question storage is not configured")?;
+        // finish_success holds this same gate for its final answer check and
+        // mailbox closure. An accepted answer is either live work or a restore.
+        let _completion = store
+            .restore_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let question = self.user_question(id)?.ok_or("unknown question")?;
         let child = crate::meta::parse_run_id(&question.run_id)?;
         self.validate_question_parent(caller, child)?;
-        self.answer_question(id, answer, false)
+        let ownership = self
+            .entry(caller)
+            .map_err(|error| error.to_string())?
+            .config
+            .ownership
+            .clone();
+        let _guard = ownership
+            .as_ref()
+            .map(|permit| permit.mutation_guard())
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let question = self.answer_question(id, answer, false)?;
+        Ok((child, question))
     }
 
     fn validate_question_parent(&self, caller: RunId, child: RunId) -> Result<(), String> {
