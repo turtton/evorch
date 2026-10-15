@@ -6,6 +6,7 @@
 
 use agents::Role;
 use config::{Config, ConfigError, resolve_prompt_sources};
+use runtime::prompt::PromptPartKind;
 use runtime::{CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog};
 use tempfile::TempDir;
 
@@ -87,6 +88,23 @@ fn config_driven_catalog_produces_byte_identical_system_prompt() {
         first, worker,
         "ロールとカテゴリが違えば出力は異なるはずです"
     );
+    assert_eq!(
+        worker,
+        [
+            sources.role_baselines["worker"].trim_end(),
+            sources.category_overlays["quick"].trim_end(),
+            sources.appendices[WORKER_APPENDIX_PRESET].trim_end(),
+        ]
+        .join("\n\n"),
+        "空の既定 family は余分な区切りを残さず省略される"
+    );
+    assert!(
+        catalog
+            .system_prompt_sections_for(Role::Worker, Some("quick"), "claude-opus-4-1")
+            .unwrap()
+            .iter()
+            .all(|section| section.kind != PromptPartKind::ModelFamily)
+    );
     assert!(
         first.ends_with(sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()),
         "Orchestrator の末尾セクションは binding 参照のプリセット本文のはずです"
@@ -100,6 +118,11 @@ fn config_driven_catalog_produces_byte_identical_system_prompt() {
 #[test]
 fn user_override_preset_changes_appendix_layer_only() {
     let user_dir = empty_user_dir();
+    std::fs::write(
+        user_dir.path().join("presets/family-claude.md"),
+        "USER-CLAUDE-FAMILY-SENTINEL\n",
+    )
+    .unwrap();
     let config = bound_config();
     let before_sources = resolve_prompt_sources(&config, Some(user_dir.path()))
         .expect("上書き前は同梱プリセットで解決できるはずです");
@@ -130,30 +153,12 @@ fn user_override_preset_changes_appendix_layer_only() {
         !before.contains(OVERRIDE_SENTINEL),
         "上書き前はセンチネルを含まないはずです"
     );
-    let before_baseline = before
-        .split("\n\n")
-        .next()
-        .expect("baseline セクションは存在するはずです");
-    let after_baseline = after
-        .split("\n\n")
-        .next()
-        .expect("baseline セクションは存在するはずです");
-    assert_eq!(
-        before_baseline, after_baseline,
-        "baseline セクションはバイト単位で不変のはずです"
-    );
-    assert!(
-        after.contains(before_sources.family_sections["claude"].trim_end()),
-        "family セクションは不変のはずです"
-    );
-    assert!(
-        after.contains(before_sources.category_overlays["quick"].trim_end()),
-        "quick overlay は不変のはずです"
-    );
-    assert!(
-        before.ends_with(before_sources.appendices[WORKER_APPENDIX_PRESET].trim_end()),
-        "上書き前の末尾セクションは同梱プリセット本文のはずです"
-    );
+    let original_appendix = before_sources.appendices[WORKER_APPENDIX_PRESET].trim_end();
+    let unchanged_prefix = before
+        .strip_suffix(original_appendix)
+        .expect("上書き前は同梱 appendix で終わる");
+    assert_eq!(after, format!("{unchanged_prefix}{OVERRIDE_SENTINEL}"));
+    assert!(after.contains(before_sources.family_sections["claude"].trim_end()));
     assert!(
         after.ends_with(OVERRIDE_SENTINEL),
         "上書き後の末尾セクションはセンチネルのはずです"
@@ -169,6 +174,11 @@ fn user_override_preset_changes_appendix_layer_only() {
 #[test]
 fn missing_referenced_preset_fails_before_catalog_exists() {
     let user_dir = empty_user_dir();
+    std::fs::write(
+        user_dir.path().join("presets/family-claude.md"),
+        "PRIVATE-FAMILY-BODY-SENTINEL\n",
+    )
+    .unwrap();
     let config = bound_config();
     // 本文センチネルは正常系の解決結果から導出する (本文をテスト定数に書かない)
     let good_sources =
@@ -217,37 +227,49 @@ fn missing_referenced_preset_fails_before_catalog_exists() {
     // 経路の呼び出しのみで、カタログ構築に到達しないこと自体が検証対象。
 }
 
-// Given: 同梱プリセットのみで構築したカタログ
-// When: 未知の model id で system_prompt_for する (AC4 fail-safe を全体経路で検証)
-// Then: family-generic セクション本文が選ばれ、他ファミリの本文は一切現れない
+// ユーザーが上書きした各 family の選択と非漏洩を production 経路で検証する。
 #[test]
-fn unknown_model_id_uses_generic_family_section_end_to_end() {
+fn user_family_overrides_are_selected_by_model_without_leaking_other_families() {
     let user_dir = empty_user_dir();
-    let config = bound_config();
-    let sources = resolve_prompt_sources(&config, Some(user_dir.path()))
-        .expect("同梱プリセットのみで解決できるはずです");
-    let catalog =
-        production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
-
-    let prompt = catalog
-        .system_prompt_for(Role::Orchestrator, None, "totally-unknown-model")
-        .expect("登録済みの部品のみを参照するはずです");
-
-    assert!(
-        prompt.contains(sources.family_sections["generic"].trim_end()),
-        "未知 model id は family-generic セクションを選ぶはずです"
-    );
-    for (family_key, body) in &sources.family_sections {
-        if family_key == "generic" {
-            continue;
-        }
-        assert!(
-            !prompt.contains(body.trim_end()),
-            "family-{family_key} の本文は現れないはずです"
-        );
+    let cases = [
+        ("claude", "claude-opus-4-1"),
+        ("openai-reasoning", "o3"),
+        ("gpt5", "gpt-5"),
+        ("gemini", "gemini-2.5-pro"),
+        ("kimi", "kimi-k2"),
+        ("generic", "totally-unknown-model"),
+    ];
+    for (family, _) in cases {
+        std::fs::write(
+            user_dir.path().join(format!("presets/family-{family}.md")),
+            format!("USER-FAMILY-{family}-SENTINEL\n"),
+        )
+        .unwrap();
     }
-    assert!(
-        prompt.ends_with(sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()),
-        "appendix は binding 参照のプリセット本文で終わるはずです"
-    );
+    let config = bound_config();
+    let sources = resolve_prompt_sources(&config, Some(user_dir.path())).unwrap();
+    let catalog = production_catalog(&config, &user_dir).unwrap();
+
+    for (selected, model) in cases {
+        let sections = catalog
+            .system_prompt_sections_for(Role::Orchestrator, None, model)
+            .unwrap();
+        let family = sections
+            .iter()
+            .find(|section| section.kind == PromptPartKind::ModelFamily)
+            .expect("非空のユーザー family が組み込まれる");
+        assert_eq!(family.preset, Some(format!("family-{selected}")));
+        assert_eq!(family.text, sources.family_sections[selected].trim_end());
+        let prompt = catalog
+            .system_prompt_for(Role::Orchestrator, None, model)
+            .unwrap();
+        for (key, body) in &sources.family_sections {
+            assert_eq!(
+                prompt.contains(body.trim_end()),
+                key == selected,
+                "{model}: {key}"
+            );
+        }
+        assert!(prompt.ends_with(sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()));
+    }
 }

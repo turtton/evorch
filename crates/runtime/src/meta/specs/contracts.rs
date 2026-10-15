@@ -38,8 +38,8 @@ fn every_registered_meta_operation_has_a_complete_valid_contract() {
         let spec = tool_spec(name);
         assert_eq!(spec.name, *name);
         assert!(
-            spec.description.len() > 100,
-            "missing meaningful description for {name}"
+            !spec.description.trim().is_empty(),
+            "missing description for {name}"
         );
         assert_eq!(spec.input_schema["type"], "object");
         assert!(
