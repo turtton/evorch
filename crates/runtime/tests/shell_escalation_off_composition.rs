@@ -83,7 +83,7 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
         ..Default::default()
     };
     let model = Arc::new(support::ScriptedModel::new([Ok(support::text_response(
-        r#"{"approve":true}"#,
+        r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
         providers::FinishReason::Stop,
     ))]));
     let runtime = compose_runtime(RuntimeComposition {
@@ -100,8 +100,9 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
     })
     .expect("compose")
     .runtime;
+    let run = support::review_host_run(&runtime);
     let ctx = ToolExecutionContext {
-        run_id: "off-composed".into(),
+        run_id: run.to_string(),
         thread_id: None,
         call_id: None,
     };

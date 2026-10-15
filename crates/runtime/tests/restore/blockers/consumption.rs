@@ -122,13 +122,13 @@ async fn failed_first_snapshot_stays_missing_context() {
     let (_dir, config, storage, _) = storage_fixture();
     let (runtime, _) = runtime_with(model());
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    storage.close();
     let parent =
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
-    terminal(&runtime, parent).await;
     let child = runtime
         .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
         .unwrap();
+    storage.close();
+    terminal(&runtime, parent).await;
     terminal(&runtime, child).await;
     // When: its authorized child asks it to resume.
     let result = runtime.send_agent_message(child, parent, AgentMessageKind::Send, "resume", None);

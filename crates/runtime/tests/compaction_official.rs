@@ -64,6 +64,7 @@ async fn scenario(
     official: bool,
     summarizer: SummarizerKind,
 ) {
+    let review_storage = support::ReviewStorage::new();
     let chat = ScriptedModel::new([Ok(text_response(
         "model fallback summary",
         FinishReason::Stop,
@@ -123,6 +124,7 @@ async fn scenario(
     .await
     .unwrap();
     runtime.compact(run).unwrap();
+    review_storage.attach(&runtime);
     runtime.send_message(run, "resume".into()).unwrap();
     assert_eq!(
         timeout(Duration::from_secs(5), runtime.wait(run))

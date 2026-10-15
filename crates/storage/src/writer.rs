@@ -50,7 +50,21 @@ enum Command {
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
     AnswerUserQuestion(String, String, ReplyTx),
+    AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
     UpsertRunContext(crate::RunContextRecord, ReplyTx),
+    RecordReviewEvidence(Vec<crate::ReviewEvidenceRow>, ReplyTx),
+    RecordReviewEvidenceWithEdges(
+        Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
+        ReplyTx,
+    ),
+    RecordReviewLineageEdge(Vec<crate::LineageEdge>, ReplyTx),
+    UpsertRunContextWithEvidence(
+        crate::RunContextRecord,
+        Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
+        ReplyTx,
+    ),
     InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
@@ -177,6 +191,23 @@ impl StorageHandle {
         self.request(|reply| Command::AnswerUserQuestion(id.into(), answer.into(), reply))
     }
 
+    /// Atomically persists a host answer and all recipient evidence, first answer wins.
+    pub fn answer_user_question_with_evidence(
+        &self,
+        id: &str,
+        answer: &str,
+        evidence: &[crate::ReviewEvidenceRow],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AnswerUserQuestionWithEvidence(
+                id.into(),
+                answer.into(),
+                evidence.to_vec(),
+                reply,
+            )
+        })
+    }
+
     /// Appends to a cross-session stream, retaining daily, event and database limits.
     pub fn append_stream_event(
         &self,
@@ -207,6 +238,62 @@ impl StorageHandle {
     /// Returns an error for suspended writes, SQLite failure or a closed writer.
     pub fn upsert_run_context(&self, record: &crate::RunContextRecord) -> Result<(), StorageError> {
         self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
+    }
+
+    /// Persist an idempotent evidence batch without truncating or redacting user text.
+    ///
+    /// # Errors
+    /// Rejects oversized or secret-bearing text, suspended writes, SQLite failure or a closed writer.
+    pub fn record_review_evidence(
+        &self,
+        rows: &[crate::ReviewEvidenceRow],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::RecordReviewEvidence(rows.to_vec(), reply))
+    }
+
+    /// Atomically persist evidence and lineage without requiring a run snapshot.
+    ///
+    /// # Errors
+    /// Rejects invalid evidence, suspended writes, SQLite failure or a closed writer.
+    pub fn record_review_evidence_with_edges(
+        &self,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::RecordReviewEvidenceWithEdges(rows.to_vec(), edges.to_vec(), reply)
+        })
+    }
+
+    /// Persist explicit lineage edges as one idempotent batch.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn record_review_lineage_edge(
+        &self,
+        edges: &[crate::LineageEdge],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::RecordReviewLineageEdge(edges.to_vec(), reply))
+    }
+
+    /// Atomically replace a snapshot and persist its evidence and lineage edges.
+    ///
+    /// # Errors
+    /// Rejects invalid snapshots or evidence, suspended writes, SQLite failure or a closed writer.
+    pub fn upsert_run_context_with_evidence(
+        &self,
+        record: &crate::RunContextRecord,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::UpsertRunContextWithEvidence(
+                record.clone(),
+                rows.to_vec(),
+                edges.to_vec(),
+                reply,
+            )
+        })
     }
 
     /// Disable restore atomically without reading or rewriting legacy history payloads.

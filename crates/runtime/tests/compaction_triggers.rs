@@ -189,6 +189,7 @@ async fn finish_and_collect(
 
 #[tokio::test]
 async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window() {
+    let review_storage = support::ReviewStorage::new();
     // Given: the resumed boundary is exactly 75%, while the first request is below it.
     let request =
         compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
@@ -230,6 +231,7 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
     // When: the user resumes the run, opening the boundary at exactly 75%.
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, resume.to_string())
         .expect("waiting run resumes");
@@ -275,6 +277,7 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
 
 #[tokio::test]
 async fn below_threshold_never_fires() {
+    let review_storage = support::ReviewStorage::new();
     // Given: the complete resumed request is exactly 74% of its configured window.
     let request =
         compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
@@ -316,6 +319,7 @@ async fn below_threshold_never_fires() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
     // When: the run resumes below the inclusive automatic threshold.
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, resume.to_string())
         .expect("waiting run resumes");
@@ -335,6 +339,7 @@ async fn below_threshold_never_fires() {
 
 #[tokio::test]
 async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
+    let review_storage = support::ReviewStorage::new();
     // Given: an interactive Waiting run with compactable history.
     let old_request = "manual-request-".repeat(12);
     let old_reply = "manual-reply-".repeat(12);
@@ -362,6 +367,7 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
             run_id: "run-999999".to_string()
         })
     );
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "manual-resume".to_string())
         .expect("waiting run resumes");
@@ -386,6 +392,7 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
 
 #[tokio::test]
 async fn still_above_threshold_reports_once_and_never_loops() {
+    let review_storage = support::ReviewStorage::new();
     let request =
         compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
     // Given: a window including tool schemas and a mid-session User boundary whose first
@@ -415,6 +422,7 @@ async fn still_above_threshold_reports_once_and_never_loops() {
         },
     );
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "continue-large-session".to_string())
         .expect("waiting run resumes at a legal User boundary");
@@ -453,6 +461,7 @@ async fn still_above_threshold_reports_once_and_never_loops() {
 
 #[tokio::test]
 async fn duplicate_manual_requests_within_cooldown_boundary_coalesce() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a compactable run paused in Waiting.
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(
@@ -476,6 +485,7 @@ async fn duplicate_manual_requests_within_cooldown_boundary_coalesce() {
     // When: duplicate manual generations arrive before the same resume boundary.
     assert_eq!(runtime.compact(run_id), Ok(()));
     assert_eq!(runtime.compact(run_id), Ok(()));
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "coalesce-resume".to_string())
         .expect("waiting run resumes");
@@ -496,6 +506,7 @@ async fn duplicate_manual_requests_within_cooldown_boundary_coalesce() {
 
 #[tokio::test]
 async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
+    let review_storage = support::ReviewStorage::new();
     // Given: one assistant response containing two compact calls and compactable history.
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(
@@ -521,6 +532,7 @@ async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
         },
     );
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "agent-resume".to_string())
         .expect("waiting run resumes");
@@ -550,6 +562,7 @@ async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
 
 #[tokio::test]
 async fn failed_agent_compaction_consumes_attempt_and_boundary() {
+    let review_storage = support::ReviewStorage::new();
     // Given: two compact calls share one response, and the first summary attempt fails:
     // the summary model errors and the structural fallback is truncated to nothing.
     let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
@@ -589,6 +602,7 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
 
     // When: both agent compact operations execute sequentially at the same boundary.
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "agent-resume".to_string())
         .expect("waiting run resumes");
@@ -650,6 +664,7 @@ async fn failed_agent_compaction_consumes_attempt_and_boundary() {
 
 #[tokio::test]
 async fn manual_compact_at_next_boundary_is_rejected_during_cooldown() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a run whose provider calls are held so manual generations can target boundaries.
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::gated(
@@ -676,6 +691,7 @@ async fn manual_compact_at_next_boundary_is_rejected_during_cooldown() {
     runtime
         .compact(run_id)
         .expect("first manual request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "first-resume".to_string())
         .expect("waiting run resumes");
@@ -703,6 +719,7 @@ async fn manual_compact_at_next_boundary_is_rejected_during_cooldown() {
 
 #[tokio::test]
 async fn manual_compact_succeeds_after_cooldown_expires() {
+    let review_storage = support::ReviewStorage::new();
     // Given: a first manual compaction at turn 2 and enough held turns to reach turn 8.
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::gated(
@@ -734,6 +751,7 @@ async fn manual_compact_succeeds_after_cooldown_expires() {
     runtime
         .compact(run_id)
         .expect("first manual request accepted");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "first-resume".to_string())
         .expect("waiting run resumes");
@@ -765,6 +783,7 @@ async fn manual_compact_succeeds_after_cooldown_expires() {
 
 #[tokio::test]
 async fn context_limit_retries_compaction_during_cooldown_before_stopping() {
+    let review_storage = support::ReviewStorage::new();
     let probe =
         compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
     let initial = [
@@ -794,6 +813,7 @@ async fn context_limit_retries_compaction_during_cooldown_before_stopping() {
     runtime
         .compact(run)
         .expect("first manual compaction requested");
+    review_storage.attach(&runtime);
     runtime.send_message(run, "continue".into()).unwrap();
 
     // The new reply crosses the hard limit before the next provider call.

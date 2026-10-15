@@ -21,6 +21,13 @@ use crate::runtime::Shared;
 
 const HUMAN_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Identity of the in-memory evidence snapshot used for an automatic review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceStamp {
+    pub revision: u64,
+    pub synced: bool,
+}
+
 pub struct SandboxEscalationGate {
     settings: Arc<Mutex<(EscalationApproval, bool)>>,
     reviewer: Option<Arc<QuickModelReviewer>>,
@@ -133,7 +140,7 @@ impl SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         cwd: Option<&Path>,
         command: &str,
-    ) -> Option<ReviewContext> {
+    ) -> Option<(ReviewContext, EvidenceStamp)> {
         let shared = self.runtime.as_ref().and_then(Weak::upgrade)?;
         let run_id = ctx.run_id.parse::<crate::RunId>().ok()?;
         let run = shared
@@ -146,7 +153,18 @@ impl SandboxEscalationGate {
             Some(project) => project.rules.clone(),
             None => shared.rules(),
         };
-        Some(review_context(run, rules.as_deref(), cwd, command))
+        review_context(run, rules.as_deref(), cwd, command).ok()
+    }
+
+    fn current_stamp(&self, ctx: &ToolExecutionContext) -> Option<EvidenceStamp> {
+        let shared = self.runtime.as_ref()?.upgrade()?;
+        let run_id = ctx.run_id.parse::<crate::RunId>().ok()?;
+        shared
+            .review_runs
+            .lock()
+            .ok()?
+            .get(&run_id)
+            .map(|run| run.stamp())
     }
 
     /// Applies `sandbox.escalation_approval` identically for every escalation
@@ -161,11 +179,12 @@ impl SandboxEscalationGate {
     ) -> EscalationDecision
     where
         R: FnOnce(Arc<QuickModelReviewer>) -> RF,
-        RF: Future<Output = Result<ReviewVerdict, ReviewError>>,
+        RF: Future<Output = Result<(ReviewVerdict, Option<EvidenceStamp>), ReviewError>>,
         H: FnOnce() -> HF,
         HF: Future<Output = EscalationDecision>,
     {
         let settings = self.settings.lock().ok().map(|settings| *settings);
+        let mut reviewed_stamp = None;
         let decision = match settings {
             None => EscalationDecision::Deny {
                 reason: format!("{label} settings unavailable"),
@@ -180,8 +199,11 @@ impl SandboxEscalationGate {
                     None => Err(ReviewError::Model),
                 };
                 let reason = match verdict {
-                    Ok(ReviewVerdict::Approve) => None,
-                    Ok(ReviewVerdict::Deny { reason }) => Some(reason),
+                    Ok((ReviewVerdict::Approve, stamp)) => {
+                        reviewed_stamp = stamp;
+                        None
+                    }
+                    Ok((ReviewVerdict::Deny { reason }, _)) => Some(reason),
                     Err(error) => Some(error.to_string()),
                 };
                 match reason {
@@ -203,7 +225,13 @@ impl SandboxEscalationGate {
         let decision = match decision {
             EscalationDecision::Approve => {
                 let current = self.settings.lock().ok().map(|settings| *settings);
-                if current.is_some() && current == settings {
+                if reviewed_stamp
+                    .is_some_and(|stamp| !stamp.synced || self.current_stamp(ctx) != Some(stamp))
+                {
+                    EscalationDecision::Deny {
+                        reason: "review context changed during review".into(),
+                    }
+                } else if current.is_some() && current == settings {
                     EscalationDecision::Approve
                 } else {
                     EscalationDecision::Deny {
@@ -260,7 +288,13 @@ impl ShellEscalationGate for SandboxEscalationGate {
             ctx,
             "shell escalation",
             |reviewer| async move {
-                let context = self.review_context_for(ctx, cwd, command);
+                let snapshot = self.review_context_for(ctx, cwd, command);
+                if self.runtime.is_some() && snapshot.is_none() {
+                    return Err(ReviewError::Unsynced);
+                }
+                let (context, stamp) = snapshot.map_or((None, None), |(context, stamp)| {
+                    (Some(context), Some(stamp))
+                });
                 reviewer
                     .review_scoped_with_context(
                         &ctx.run_id,
@@ -270,6 +304,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
                         access,
                     )
                     .await
+                    .map(|verdict| (verdict, stamp))
             },
             || self.human(ctx, command, justification, access),
         )
@@ -285,13 +320,134 @@ impl ShellEscalationGate for SandboxEscalationGate {
             ctx,
             "file access escalation",
             |reviewer| async move {
-                let context = self.review_context_for(ctx, None, "");
+                let snapshot = self.review_context_for(ctx, None, "");
+                if self.runtime.is_some() && snapshot.is_none() {
+                    return Err(ReviewError::Unsynced);
+                }
+                let (context, stamp) = snapshot.map_or((None, None), |(context, stamp)| {
+                    (Some(context), Some(stamp))
+                });
                 reviewer
                     .review_file_access(&ctx.run_id, request, context)
                     .await
+                    .map(|verdict| (verdict, stamp))
             },
             || self.human_file_access(ctx, request),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use crate::escalation_review::{ReviewRunContext, support::ScriptedModel};
+
+    fn fixture() -> (
+        crate::AgentRuntime,
+        SandboxEscalationGate,
+        ToolExecutionContext,
+        ReviewRunContext,
+    ) {
+        let bus = Arc::new(EventBus::new(32));
+        let model = Arc::new(ScriptedModel::new([]));
+        let runtime = crate::AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus.clone())),
+            model.clone(),
+        );
+        let id = runtime.reserve_run_id();
+        let run = ReviewRunContext::empty(&id.to_string());
+        runtime
+            .shared
+            .review_runs
+            .lock()
+            .unwrap()
+            .insert(id, run.clone());
+        let gate = SandboxEscalationGate::new(
+            Arc::new(Mutex::new((EscalationApproval::Auto, false))),
+            Some(Arc::new(QuickModelReviewer::new(model))),
+            bus,
+        )
+        .with_runtime(Arc::downgrade(&runtime.shared));
+        (
+            runtime,
+            gate,
+            ToolExecutionContext {
+                run_id: id.to_string(),
+                thread_id: None,
+                call_id: None,
+            },
+            run,
+        )
+    }
+
+    #[tokio::test]
+    async fn approve_is_rejected_when_host_input_changes_review_snapshot() {
+        let (_runtime, gate, ctx, run) = fixture();
+        run.add_user_request(&ctx.run_id, "initial request");
+        let entered = tokio::sync::Notify::new();
+        let changed = tokio::sync::Notify::new();
+        let review = gate.arbitrate(
+            &ctx,
+            "test",
+            |_| async {
+                let (_, stamp) = gate.review_context_for(&ctx, None, "").unwrap();
+                entered.notify_one();
+                changed.notified().await;
+                Ok((ReviewVerdict::Approve, Some(stamp)))
+            },
+            || async { panic!("no fallback") },
+        );
+        let input = async {
+            entered.notified().await;
+            run.add_user_request(&ctx.run_id, "new constraints");
+            changed.notify_one();
+        };
+        let (decision, ()) = tokio::join!(review, input);
+        assert!(
+            matches!(decision, EscalationDecision::Deny { reason } if reason == "review context changed during review")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsynced_evidence_denies_shell_file_and_web_with_or_without_requests() {
+        for populated in [false, true] {
+            let (_runtime, gate, ctx, run) = fixture();
+            if populated {
+                run.add_user_request(&ctx.run_id, "read docs");
+            }
+            run.mark_unsynced();
+            assert!(matches!(
+                gate.decide(&ctx, "pwd", "inspect").await,
+                EscalationDecision::Deny { .. }
+            ));
+            let request = FileAccessRequest {
+                tool: "read".into(),
+                paths: vec!["/outside".into()],
+                write: false,
+                justification: "docs".into(),
+                change: None,
+            };
+            assert!(matches!(
+                gate.decide_file_access(&ctx, &request).await,
+                EscalationDecision::Deny { .. }
+            ));
+            let snapshot = review_context(run, None, None, "");
+            assert!(matches!(snapshot, Err(ReviewError::Unsynced)));
+            let context = snapshot.ok().map(|(context, _)| context);
+            let verdict = gate
+                .reviewer
+                .as_ref()
+                .unwrap()
+                .review_web_fetch(
+                    &ctx.run_id,
+                    &serde_json::json!({"url":"https://example.com"}),
+                    context,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(verdict, ReviewVerdict::Deny { .. }));
+        }
     }
 }

@@ -1011,14 +1011,19 @@ impl LoopState {
                                 .ok()
                                 .and_then(|runs| runs.get(&self.task.run_id).cloned())
                         })
-                        .map(|run| {
+                        .and_then(|run| {
                             crate::escalation_review::review_context(
                                 run,
                                 self.shared.rules.as_deref(),
                                 None,
                                 "",
                             )
+                            .ok()
                         });
+                    let (context, stamp) = match context {
+                        Some((context, stamp)) => (Some(context), Some(stamp)),
+                        None => (None, None),
+                    };
                     let reviewer = crate::escalation_review::QuickModelReviewer::new(Arc::clone(
                         &self.shared.model,
                     ));
@@ -1036,6 +1041,18 @@ impl LoopState {
                     };
                     return match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {
+                            let current = self.runtime().and_then(|runtime| {
+                                runtime.shared.review_runs.lock().ok().and_then(|runs| {
+                                    runs.get(&self.task.run_id).map(|run| run.stamp())
+                                })
+                            });
+                            if !matches!((stamp, current), (Some(expected), Some(current))
+                                if current.synced && current == expected)
+                            {
+                                return NetworkGate::Reject(ToolResult::error(
+                                    "review context changed during review",
+                                ));
+                            }
                             self.audit_network_call(
                                 name,
                                 call_id,

@@ -16,9 +16,23 @@ pub struct FollowUpStatus {
 #[derive(Default)]
 pub(crate) struct UserInbox {
     state: Mutex<FollowUpStatus>,
+    // Separate from observation: host preparation can access the run map, whose
+    // readers may inspect status. Never hold state while preparing a host send.
+    trusted_send: Mutex<()>,
 }
 
 impl UserInbox {
+    pub(crate) fn serialize_trusted_send<E>(
+        &self,
+        send: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let _guard = self
+            .trusted_send
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        send()
+    }
+
     // Hold the observation lock through enqueueing so consumption cannot race
     // ahead of registration. A rejected send must not increase the count.
     pub(crate) fn enqueue<E>(&self, send: impl FnOnce() -> Result<(), E>) -> Result<(), E> {

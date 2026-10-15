@@ -127,6 +127,7 @@ async fn model_error_transitions_run_to_error_with_reason() {
 
 #[tokio::test]
 async fn interactive_run_waits_for_message_then_completes() {
+    let review_storage = support::ReviewStorage::new();
     // Given
     let (runtime, bus) = runtime_with(ScriptedModel::new([
         Ok(text_response("question", FinishReason::Stop)),
@@ -151,6 +152,7 @@ async fn interactive_run_waits_for_message_then_completes() {
             })
         );
     }
+    review_storage.attach(&runtime);
     assert_eq!(runtime.send_message(run_id, "continue".to_string()), Ok(()));
 
     // Then
@@ -207,6 +209,7 @@ async fn send_message_after_terminal_is_rejected() {
 
 #[tokio::test]
 async fn interactive_keep_alive_run_waits_again_after_resume() {
+    let review_storage = support::ReviewStorage::new();
     // Given
     let (runtime, bus) = runtime_with(ScriptedModel::new([
         Ok(text_response("question", FinishReason::Stop)),
@@ -250,6 +253,7 @@ async fn interactive_keep_alive_run_waits_again_after_resume() {
             let inspection = runtime.inspect_agent(run_id).expect("run exists");
             assert_eq!(inspection.phase, AgentRunPhase::Waiting);
             if inspection.message_count < 6 {
+                review_storage.attach(&runtime);
                 assert_eq!(runtime.send_message(run_id, "continue".to_string()), Ok(()));
             }
         }

@@ -18,6 +18,7 @@ impl AgentRuntime {
             prompt,
             config,
             RunContinuation::Awaited,
+            None,
         );
     }
     pub(crate) fn delegate_awaited_child(
@@ -34,6 +35,7 @@ impl AgentRuntime {
             prompt,
             config,
             RunContinuation::Awaited,
+            None,
         ))
     }
 

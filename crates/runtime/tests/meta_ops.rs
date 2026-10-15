@@ -192,6 +192,7 @@ async fn compaction_events_until_done(
 
 #[tokio::test]
 async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
+    let review_storage = support::ReviewStorage::new();
     // Given: 大きな prompt で始まり compact → finish を要求する Orchestrator。
     // window を十分大きくして自動圧縮を発火させず、keep_recent_tokens を 1 にして
     // Agent 起因の cut が成立するようにする
@@ -240,6 +241,7 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     })
     .await
     .expect("waiting phase timeout");
+    review_storage.attach(&runtime);
     runtime
         .send_message(orchestrator, "resume".to_string())
         .expect("waiting run resumes");

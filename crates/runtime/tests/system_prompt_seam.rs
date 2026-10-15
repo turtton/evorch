@@ -135,6 +135,7 @@ async fn run_starts_with_single_assembled_system_message() {
 
 #[tokio::test]
 async fn conversation_chat_gets_bundled_overlay_in_stable_system_prompt() {
+    let review_storage = support::ReviewStorage::new();
     // Given: the real config preset resolver, not a test-only conversation overlay.
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response("waiting", FinishReason::Stop)),
@@ -160,6 +161,7 @@ async fn conversation_chat_gets_bundled_overlay_in_stable_system_prompt() {
             },
         )
         .expect("direct conversation root");
+    review_storage.attach(&runtime);
     runtime
         .send_message(run, "continue".into())
         .expect("followup");
@@ -268,12 +270,14 @@ async fn compaction_policy_uses_selected_model_family() {
 // Then: すべての complete 呼び出しで先頭の System メッセージがバイト一致する (Stable Prefix)
 #[tokio::test]
 async fn system_message_is_assembled_once_and_byte_stable_across_turns() {
+    let review_storage = support::ReviewStorage::new();
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response("waiting", FinishReason::Stop)),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
     let (runtime, _bus) = runtime_with(model.clone(), Some(complete_catalog()));
     let run_id = runtime.delegate_background(Role::Worker, "W".to_string(), cfg(true, None));
+    review_storage.attach(&runtime);
     runtime
         .send_message(run_id, "continue".to_string())
         .expect("inbox は受信可能");

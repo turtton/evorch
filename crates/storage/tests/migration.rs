@@ -7,7 +7,9 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 28] = [
+const EXPECTED_TABLES: [&str; 30] = [
+    "review_evidence",
+    "review_lineage_edges",
     "usage_requests",
     "usage_run_threads",
     "usage_daily",
@@ -38,7 +40,11 @@ const EXPECTED_TABLES: [&str; 28] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 24] = [
+const EXPECTED_INDICES: [&str; 28] = [
+    "review_evidence_id",
+    "review_evidence_target",
+    "review_evidence_root",
+    "review_lineage_edges_parent",
     "idx_usage_requests_at",
     "idx_usage_requests_run",
     "idx_improvement_intake_dedup",
@@ -96,9 +102,9 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     let database = Database::open(&config_for(&path)).expect("fresh database must open");
 
-    // Then: v16 と定義済みテーブル・インデックスが作成される
+    // Then: v17 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 16);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 17);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -120,13 +126,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v16 のまま維持される
+    // Then: スキーマは重複せず v17 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        16
+        17
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -157,7 +163,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 16,
+            supported: 17,
         }
     );
 }
@@ -202,7 +208,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 16);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 17);
 }
 
 #[test]
@@ -239,7 +245,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 16);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 17);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -272,7 +278,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let database = Database::open(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 16);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 17);
     let columns: BTreeSet<String> = connection
         .prepare("PRAGMA table_info(tasks)")
         .unwrap()
@@ -334,7 +340,9 @@ fn v16_backfills_candidate_occurrence_tracking() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE improvement_candidates DROP COLUMN occurrences;
+            "DROP TABLE IF EXISTS review_evidence;
+             DROP TABLE IF EXISTS review_lineage_edges;
+             ALTER TABLE improvement_candidates DROP COLUMN occurrences;
              ALTER TABLE improvement_candidates DROP COLUMN last_seen_at_ns;
              ALTER TABLE improvement_candidates DROP COLUMN recent_run_ids;
              INSERT INTO improvement_candidates
@@ -369,4 +377,41 @@ fn v16_backfills_candidate_occurrence_tracking() {
         ),
         (1, 9, Vec::<String>::new())
     );
+}
+
+#[test]
+fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
+    // Given: a v16 database with existing data and no review tables.
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    drop(Database::open(&config_for(&path)).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS review_evidence;
+         DROP TABLE IF EXISTS review_lineage_edges;
+         INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('existing', 'keep me', 7);
+         INSERT INTO run_contexts VALUES ('existing', 'worker', 'name', NULL, '{}', '[]', '[]', 'Done', 1, 9);"
+    ).unwrap();
+    connection.pragma_update(None, "user_version", 16).unwrap();
+    drop(connection);
+
+    // When: opening applies v17 and reopening is idempotent.
+    for _ in 0..2 {
+        let database = Database::open(&config_for(&path)).unwrap();
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 17);
+        assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
+        assert_eq!(
+            database.run_context("existing").unwrap().unwrap().name,
+            "name"
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            schema_objects(&connection, "table"),
+            EXPECTED_TABLES.into_iter().map(String::from).collect()
+        );
+        assert_eq!(
+            schema_objects(&connection, "index"),
+            EXPECTED_INDICES.into_iter().map(String::from).collect()
+        );
+    }
 }

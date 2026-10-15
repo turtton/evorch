@@ -2,6 +2,7 @@
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
 #[path = "hosted_search_cache/mod.rs"]
 mod hosted_search_cache;
+mod support;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};
@@ -829,6 +830,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
 
 #[tokio::test]
 async fn continue_completed_turn_waits_without_input_then_real_followup_reuses_wire_prefix() {
+    let review_storage = support::ReviewStorage::new();
     let mut harness = harness(
         vec![
             read_response(2),
@@ -893,6 +895,7 @@ async fn continue_completed_turn_waits_without_input_then_real_followup_reuses_w
         .runtime
         .resume_chat(run, RunConfig::default())
         .unwrap();
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "Actual followup".into())
@@ -1050,6 +1053,7 @@ async fn ordinary_tool_turns_reuse_all_previous_wire_input() {
 
 #[tokio::test]
 async fn conversation_chat_preserves_overlay_web_schemas_and_wire_prefix_on_followup() {
+    let review_storage = support::ReviewStorage::new();
     // Only expose the real Web schemas; this offline scenario never invokes the network.
     let mut harness = harness_with_tools(
         vec![
@@ -1080,6 +1084,7 @@ async fn conversation_chat_preserves_overlay_web_schemas_and_wire_prefix_on_foll
         )
         .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "Continue the discussion".into())
@@ -1219,6 +1224,7 @@ async fn shell_scope_recovery_keeps_policy_and_failed_observations_in_the_wire_p
 }
 
 async fn compaction_restarts_cache(reason: CompactionReason) {
+    let review_storage = support::ReviewStorage::new();
     let automatic = reason == CompactionReason::Automatic;
     let old_reply =
         "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
@@ -1244,6 +1250,7 @@ async fn compaction_restarts_cache(reason: CompactionReason) {
     if !automatic {
         harness.runtime.compact(run).unwrap();
     }
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "Continue after this boundary".into())
@@ -1370,6 +1377,7 @@ async fn procedure_replacement_parallel_steps_and_clear_preserve_the_wire_prefix
 }
 
 async fn procedure_compaction_reuses_new_prefix(reason: CompactionReason, cleared: bool) {
+    let review_storage = support::ReviewStorage::new();
     let automatic = reason == CompactionReason::Automatic;
     let latest = if cleared {
         json!([])
@@ -1419,6 +1427,7 @@ async fn procedure_compaction_reuses_new_prefix(reason: CompactionReason, cleare
     if reason == CompactionReason::Manual {
         harness.runtime.compact(run).unwrap();
     }
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "Continue after the context boundary".into())
@@ -1574,6 +1583,7 @@ async fn procedure_only_handoff_presents_current_state_then_reuses_each_roots_wi
 
 #[tokio::test]
 async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
+    let review_storage = support::ReviewStorage::new();
     let read = Arc::new(GatedRead {
         started: Notify::new(),
         release: Notify::new(),
@@ -1617,6 +1627,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     read.child_started.notified().await;
     read.release.notify_one();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message_with_images(
@@ -1703,6 +1714,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 
 #[tokio::test]
 async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
+    let review_storage = support::ReviewStorage::new();
     for expedite in [false, true] {
         let read = Arc::new(GatedRead {
             started: Notify::new(),
@@ -1724,6 +1736,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             RunConfig::default(),
         );
         read.started.notified().await;
+        review_storage.attach(&harness.runtime);
         harness
             .runtime
             .send_message_with_images(
@@ -1735,6 +1748,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                 }],
             )
             .unwrap();
+        review_storage.attach(&harness.runtime);
         harness
             .runtime
             .send_message(run, "second queued follow-up".into())
@@ -1827,6 +1841,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
 
 #[tokio::test]
 async fn stopped_run_keeps_undelivered_status_and_rejects_early_delivery() {
+    let review_storage = support::ReviewStorage::new();
     let read = Arc::new(GatedRead {
         started: Notify::new(),
         release: Notify::new(),
@@ -1838,6 +1853,7 @@ async fn stopped_run_keeps_undelivered_status_and_rejects_early_delivery() {
             .runtime
             .delegate_background(Role::Worker, "task".into(), RunConfig::default());
     read.started.notified().await;
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "undelivered".into())
@@ -2435,6 +2451,7 @@ async fn scratch_guidance_and_emptied_notice_append_after_restore_and_preserve_w
 
 /// `legacy` threads were saved before their system message carried the scratch note.
 async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
+    let review_storage = support::ReviewStorage::new();
     let mut harness = harness(
         vec![
             text_response("Initial work"),
@@ -2552,11 +2569,13 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
         .resume_chat(run, RunConfig::default())
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "After restore".into())
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    review_storage.attach(&harness.runtime);
     harness
         .runtime
         .send_message(run, "Followup".into())

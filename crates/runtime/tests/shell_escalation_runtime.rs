@@ -22,6 +22,7 @@ impl Sandbox for ProbeSandbox {
 
 struct Fixture {
     runtime: AgentRuntime,
+    run: runtime::RunId,
     executor: Arc<ToolExecutor>,
     model: Arc<ScriptedModel>,
     bus: Arc<EventBus>,
@@ -38,16 +39,25 @@ impl Fixture {
             bus.clone(),
             sandbox.clone(),
         ));
+        let verdict = if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(verdict) {
+            value["risk_level"] = "low".into();
+            value["authorization_level"] = "high".into();
+            value.to_string()
+        } else {
+            verdict.into()
+        };
         let model = Arc::new(ScriptedModel::new([Ok(text_response(
-            verdict,
+            &verdict,
             providers::FinishReason::Stop,
         ))]));
         let runtime = AgentRuntime::new(bus.clone(), executor.clone(), model.clone());
+        let run = support::review_host_run(&runtime);
         runtime.set_sandbox_escalation(mode, false);
         let gate = runtime.shell_escalation_gate();
         executor.set_shell_escalation(gate, host.clone());
         Self {
             runtime,
+            run,
             executor,
             model,
             bus,
@@ -58,7 +68,7 @@ impl Fixture {
 
     async fn execute(&self) -> tools::ToolResult {
         self.executor.execute(
-            &ToolExecutionContext { run_id: "run-shell".into(), thread_id: None, call_id: None },
+            &ToolExecutionContext { run_id: self.run.to_string(), thread_id: None, call_id: None },
             "shell", "call-shell",
             json!({"command":"printf approved", "sandbox_access":"unsandboxed", "justification":"host inspection"}),
         ).await.expect("execute")
@@ -73,7 +83,10 @@ impl Fixture {
 // Given: approving reviewer and two probes / When: shell executes / Then: only host path runs.
 #[tokio::test]
 async fn escalated_shell_approved_runs_via_unsandboxed_and_returns_output() {
-    let fixture = Fixture::new(EscalationApproval::Auto, r#"{"approve":true}"#);
+    let fixture = Fixture::new(
+        EscalationApproval::Auto,
+        r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+    );
     let result = fixture.execute().await;
     assert!(!result.is_error);
     assert_eq!(result.content, "exit_code: 0\napproved");
@@ -100,7 +113,7 @@ async fn escalated_shell_user_mode_uses_scoped_approval_responder() {
     let responder = support::spawn_run_scoped_approval_responder(
         fixture.bus.clone(),
         fixture.bus.subscribe(),
-        "run-shell:".into(),
+        format!("{}:", fixture.run),
     );
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), fixture.execute())
         .await
@@ -114,7 +127,10 @@ async fn escalated_shell_user_mode_uses_scoped_approval_responder() {
 // Given: an already wired executor / When: settings switch Off / Then: no reviewer or host execution.
 #[tokio::test]
 async fn escalated_shell_live_setting_change_takes_effect_without_rebuild() {
-    let fixture = Fixture::new(EscalationApproval::Auto, r#"{"approve":true}"#);
+    let fixture = Fixture::new(
+        EscalationApproval::Auto,
+        r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+    );
     fixture
         .runtime
         .set_sandbox_escalation(EscalationApproval::Off, false);
@@ -151,14 +167,15 @@ async fn composed_executor_escalates_when_auto_reviewer_approves() {
         ),
         env: Arc::new(routing::MapEnv::default()),
         model_source: ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
-            r#"{"approve":true}"#,
+            r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
             providers::FinishReason::Stop,
         ))]))),
         workspace: None,
     })
     .expect("compose")
     .runtime;
-    let result = executor.execute(&ToolExecutionContext { run_id: "composed".into(), thread_id: None, call_id: None }, "shell", "call", json!({"command":"printf composed", "sandbox_access":"unsandboxed","justification":"inspect"})).await.expect("execute");
+    let run = support::review_host_run(&runtime);
+    let result = executor.execute(&ToolExecutionContext { run_id: run.to_string(), thread_id: None, call_id: None }, "shell", "call", json!({"command":"printf composed", "sandbox_access":"unsandboxed","justification":"inspect"})).await.expect("execute");
     assert_eq!(result.content, "exit_code: 0\ncomposed");
     assert_eq!(
         runtime.execution_policy(agents::Role::Worker),

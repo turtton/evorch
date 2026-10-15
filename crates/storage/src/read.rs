@@ -70,14 +70,66 @@ impl Database {
             .optional()?)
     }
 
-    /// Every run ID reserved by a context, ledger, or question recipient.
+    /// Evidence for one exact target, ordered by creation time and ID.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn review_evidence_for_target(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::ReviewEvidenceRow>, StorageError> {
+        crate::repo::review_evidence::for_target(&self.conn, run_id)
+    }
+
+    /// Evidence matching the cached root, ordered by creation time and ID.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn review_evidence_for_root(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::ReviewEvidenceRow>, StorageError> {
+        crate::repo::review_evidence::for_root(&self.conn, run_id)
+    }
+
+    /// Evidence for the exact target set, ordered by creation time and ID without duplicates.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access, set serialization or row decoding fails.
+    pub fn review_evidence_for_lineage(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<crate::ReviewEvidenceRow>, StorageError> {
+        crate::repo::review_evidence::for_lineage(&self.conn, run_ids)
+    }
+
+    /// Explicit parent edges for a child, ordered by parent ID.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn review_lineage_edges(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::LineageEdge>, StorageError> {
+        crate::repo::review_lineage::for_child(&self.conn, run_id)
+    }
+
+    /// All reachable parents in ID order, excluding the requested run itself.
+    ///
+    /// # Errors
+    /// Fails closed on cycles or paths exceeding 64 edges, as well as SQLite or decoding errors.
+    pub fn review_lineage_ancestors(&self, run_id: &str) -> Result<Vec<String>, StorageError> {
+        crate::repo::review_lineage::ancestors(&self.conn, run_id)
+    }
+
+    /// Every run ID reserved by contexts, ledgers, questions, evidence or lineage edges.
     ///
     /// # Errors
     /// Returns an error for unreadable rows.
     pub fn persisted_run_ids(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self
             .conn
-            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links")?;
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(ids.collect::<Result<_, _>>()?)
     }

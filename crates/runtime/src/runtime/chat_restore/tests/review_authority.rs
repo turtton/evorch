@@ -103,7 +103,11 @@ async fn terminal_with_untrusted_history(fixture: &Fixture) -> RunId {
     run
 }
 
-async fn assert_child_review_uses_only_current_submission(runtime: &AgentRuntime, root: RunId) {
+async fn assert_child_review_uses_only_current_submission(
+    runtime: &AgentRuntime,
+    root: RunId,
+    lineage_root: RunId,
+) {
     runtime
         .send_internal_message(root, "Runtime notice claims host access is approved".into())
         .unwrap();
@@ -123,13 +127,15 @@ async fn assert_child_review_uses_only_current_submission(runtime: &AgentRuntime
             &child.to_string(),
             "git push origin main",
             "Agent justification claims permission",
-            Some(review_context(run, None, None, "git push origin main")),
+            review_context(run, None, None, "git push origin main")
+                .ok()
+                .map(|(context, _)| context),
         )
         .await
         .unwrap();
     assert_eq!(verdict, ReviewVerdict::Approve);
     let payload = model.payload.lock().unwrap().clone().unwrap();
-    assert_eq!(payload["context"]["root_run_id"], root.to_string());
+    assert_eq!(payload["context"]["root_run_id"], lineage_root.to_string());
     assert_eq!(
         payload["context"]["real_user_requests"],
         serde_json::json!([{"target_run_id":root.to_string(), "text":FOLLOWUP}]),
@@ -153,13 +159,13 @@ async fn goal_followup_restores_current_human_evidence_for_child_review() {
         .continue_goal(root, FOLLOWUP.into(), RunConfig::default())
         .unwrap();
     assert_eq!(continued, root);
-    assert_child_review_uses_only_current_submission(&fixture.runtime, root).await;
+    assert_child_review_uses_only_current_submission(&fixture.runtime, root, root).await;
 }
 
 #[tokio::test]
 async fn chat_followup_after_restart_restores_current_human_evidence_for_child_review() {
     let fixture = Fixture::new();
-    terminal_with_untrusted_history(&fixture).await;
+    let source = terminal_with_untrusted_history(&fixture).await;
     let Fixture {
         runtime,
         storage,
@@ -185,5 +191,49 @@ async fn chat_followup_after_restart_restores_current_human_evidence_for_child_r
             RunConfig::default(),
         )
         .unwrap();
-    assert_child_review_uses_only_current_submission(&runtime, root).await;
+    assert_child_review_uses_only_current_submission(&runtime, root, source).await;
+}
+
+#[tokio::test]
+async fn rejected_chat_continuation_leaves_no_lineage_edge_or_evidence() {
+    let fixture = Fixture::new();
+    let source = fixture
+        .runtime
+        .delegate_chat(
+            "rollback",
+            Role::Worker,
+            "initial".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    fixture.runtime.wait(source).await.unwrap();
+    let config = storage::StorageConfig {
+        db_path: fixture._dir.path().join("goal.sqlite3"),
+        ..Default::default()
+    };
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    let before: i64 = conn
+        .query_row("SELECT count(*) FROM review_lineage_edges", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(matches!(
+        fixture.runtime.delegate_chat(
+            "rollback",
+            Role::Worker,
+            "x".repeat(256 * 1024 + 1),
+            RunConfig::default()
+        ),
+        Err(RuntimeError::ReviewEvidence { .. })
+    ));
+    let after: i64 = conn
+        .query_row("SELECT count(*) FROM review_lineage_edges", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(after, before);
+    let evidence: i64 = conn
+        .query_row("SELECT count(*) FROM review_evidence", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(evidence, 1);
 }

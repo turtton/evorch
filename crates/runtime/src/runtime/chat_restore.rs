@@ -203,10 +203,35 @@ impl AgentRuntime {
         }
         record.config_json = serde_json::to_string(&descriptor)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-        store
-            .handle
-            .upsert_run_context(&record)
-            .map_err(|error| fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string())))?;
+        let review = self.chat_review_context(store, run_id)?;
+        let evidence = prompt
+            .map(|prompt| {
+                crate::run_store::evidence_row(
+                    &review.root_run_id,
+                    &run_id.to_string(),
+                    "host_chat",
+                    prompt,
+                )
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        {
+            let mut shared = review
+                .user_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store
+                .handle
+                .upsert_run_context_with_evidence(&record, &evidence, &[])
+                .map_err(|error| Self::review_error(run_id, error))?;
+            for row in evidence {
+                shared.add_request(crate::run_store::request_from_evidence(row));
+            }
+        }
+        let review_seed = Some(ReviewSeed {
+            provenance: HostProvenance::PersistedHostSubmission { run_id },
+            context: review,
+        });
         // A continued conversation stays in the project it was started in.
         let project_root = descriptor
             .project_root
@@ -257,6 +282,7 @@ impl AgentRuntime {
             prompt.unwrap_or_default().into(),
             config,
             continuation,
+            review_seed,
         ))
     }
 
@@ -382,6 +408,48 @@ impl AgentRuntime {
         };
         config.name = Some(name);
         let run_id = self.shared.run_ids.next();
+        let provenance = restored_source.map_or(HostProvenance::FreshHostSubmission, |run_id| {
+            HostProvenance::PersistedHostSubmission { run_id }
+        });
+        let mut review =
+            if let (Some(source), Some(store)) = (restored_source, self.shared.run_store.get()) {
+                // Validate the existing ancestry before extending it with a fresh ID.
+                let mut review = self.chat_review_context(store, source)?;
+                review.lineage_run_ids.push(run_id.to_string());
+                review
+            } else {
+                crate::escalation_review::ReviewRunContext::empty(&run_id.to_string())
+            };
+        let kind = if restored_source.is_some() {
+            "host_chat"
+        } else {
+            "initial_prompt"
+        };
+        let row =
+            crate::run_store::evidence_row(&review.root_run_id, &run_id.to_string(), kind, &prompt);
+        // RAM-only host submissions have exactly the same validation contract.
+        row.validate()
+            .map_err(|error| Self::review_error(run_id, error))?;
+        if let Some(store) = self.shared.run_store.get() {
+            let edges = restored_source.map(|source| storage::LineageEdge {
+                child_run_id: run_id.to_string(),
+                parent_run_id: source.to_string(),
+                created_at_ns: crate::run_store::review_time_ns(),
+            });
+            store
+                .handle
+                .record_review_evidence_with_edges(std::slice::from_ref(&row), edges.as_slice())
+                .map_err(|error| Self::review_error(run_id, error))?;
+            // Materialize the committed graph, including depth/unique-root checks.
+            // An invalid graph still fails closed before the run is installed.
+            review = self.chat_review_context(store, run_id)?;
+        } else {
+            review.add_user_request(&run_id.to_string(), &prompt);
+        }
+        let review_seed = Some(ReviewSeed {
+            provenance,
+            context: review,
+        });
         // The continuation is a new run, so its chain pins move to the new ID.
         self.shared
             .model
@@ -413,7 +481,63 @@ impl AgentRuntime {
                 })?;
         }
         self.goal_user_input(run_id, &prompt);
-        Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
+        Ok(self.spawn_run_with_handoff(
+            run_id,
+            None,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+        ))
+    }
+
+    fn chat_review_context(
+        &self,
+        store: &crate::RunStore,
+        run_id: RunId,
+    ) -> Result<crate::escalation_review::ReviewRunContext, RuntimeError> {
+        let mut runs = self
+            .shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ancestors = store
+            .review_lineage_ancestors(&run_id.to_string())
+            .map_err(|error| Self::review_error(run_id, error))?;
+        if let Some(review) = runs.get(&run_id) {
+            if review.stamp().synced
+                && review.lineage_run_ids.len() == ancestors.len() + 1
+                && ancestors
+                    .iter()
+                    .all(|id| review.lineage_run_ids.contains(id))
+            {
+                return Ok(review.clone());
+            }
+            let review = self.materialize_review_locked(store, run_id, &mut runs)?;
+            runs.insert(run_id, review.clone());
+            return Ok(review);
+        }
+        // Legacy chat history can resume without authority; trusted send cannot.
+        let id = run_id.to_string();
+        if store
+            .review_lineage_ancestors(&id)
+            .map_err(|error| Self::review_error(run_id, error))?
+            .is_empty()
+            && store
+                .review_evidence_for_lineage(std::slice::from_ref(&id))
+                .map_err(|error| Self::review_error(run_id, error))?
+                .is_empty()
+        {
+            let review = crate::escalation_review::ReviewRunContext::empty(&id);
+            runs.insert(run_id, review.clone());
+            return Ok(review);
+        }
+        let review = self.materialize_review_locked(store, run_id, &mut runs)?;
+        // Publish under the materialization fence, before provider admission can
+        // await. Host answers must reach this exact Arc even before run install.
+        runs.insert(run_id, review.clone());
+        Ok(review)
     }
 
     fn fork_seed_history(

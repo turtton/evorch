@@ -136,15 +136,14 @@ async fn thread_runs_share_tmpdir_with_children_escalation_and_file_tools() {
     runtime.set_thread_scratch(Arc::clone(&scratch));
     runtime.set_sandbox_escalation(EscalationApproval::Auto, false);
 
-    let first = runtime.reserve_run_id();
-    runtime.bind_thread_root("thread-a", first).unwrap();
-    runtime.spawn_reserved(
-        first,
-        None,
-        Role::Orchestrator,
-        "SHARE",
-        RunConfig::default(),
-    );
+    let first = runtime
+        .delegate_chat(
+            "thread-a",
+            Role::Orchestrator,
+            "SHARE".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
     assert_eq!(runtime.wait(first).await, Ok(AgentRunPhase::Done));
     let second = runtime.reserve_run_id();
     runtime.bind_thread_root("thread-b", second).unwrap();

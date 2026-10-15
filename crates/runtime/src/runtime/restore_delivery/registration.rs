@@ -92,6 +92,7 @@ impl AgentRuntime {
                 message_count_rx,
                 inbox_tx,
                 user_inbox,
+                pending_reference: Arc::new(Mutex::new(None)),
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,
@@ -113,6 +114,94 @@ impl AgentRuntime {
         let join = tokio::spawn(run_agent(Arc::downgrade(&self.shared), task, channels));
         if let Some(entry) = runs.get_mut(&run_id) {
             entry._join = Some(join);
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restored_registration_defers_review_until_trusted_input_materializes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("review.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(crate::escalation_review::support::ScriptedModel::new([])),
+        )
+        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        for has_evidence in [false, true] {
+            let run = runtime.reserve_run_id();
+            if has_evidence {
+                storage
+                    .handle()
+                    .record_review_evidence(&[crate::run_store::evidence_row(
+                        &run.to_string(),
+                        &run.to_string(),
+                        "initial_prompt",
+                        "first",
+                    )])
+                    .unwrap();
+            }
+            let trigger = AgentMessage {
+                message_id: format!("trigger-{run}"),
+                sender_run_id: run.to_string(),
+                recipient_run_id: run.to_string(),
+                kind: AgentMessageKind::Send,
+                content: "internal".into(),
+                reply_to: None,
+            };
+            runtime.register_restored(
+                &mut lock_runs(&runtime.shared.runs),
+                (run, None, Role::Worker, RunConfig::default(), run),
+                RestoredState {
+                    messages: vec![],
+                    checkpoints: vec![],
+                    trigger: None,
+                    turn_completed: true,
+                },
+                &trigger,
+            );
+            assert!(
+                !runtime
+                    .shared
+                    .review_runs
+                    .lock()
+                    .unwrap()
+                    .contains_key(&run)
+            );
+            let result = runtime.send_message(run, "followup".into());
+            let rows = runtime
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .review_evidence_for_lineage(&[run.to_string()])
+                .unwrap();
+            if has_evidence {
+                result.unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(
+                    runtime.shared.review_runs.lock().unwrap()[&run]
+                        .requests()
+                        .0
+                        .len(),
+                    2
+                );
+                assert_eq!(runtime.follow_up_status(run).unwrap().pending, 1);
+            } else {
+                assert!(matches!(result, Err(RuntimeError::ReviewEvidence { .. })));
+                assert!(rows.is_empty());
+                assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
+            }
+            runtime.cancel(run).unwrap();
         }
     }
 }

@@ -112,6 +112,7 @@ pub(crate) struct Shared {
     /// Trust the host declared per project root; undeclared roots keep the shared rules' trust.
     pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
     next_message_id: AtomicU64,
+    next_reference_token: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
 }
@@ -163,6 +164,24 @@ pub trait SandboxFactory: Send + Sync {
     ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError>;
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HostProvenance {
+    FreshHostSubmission,
+    PersistedHostSubmission { run_id: RunId },
+}
+
+pub(crate) struct ReviewSeed {
+    provenance: HostProvenance,
+    context: crate::escalation_review::ReviewRunContext,
+}
+
+/// An unconsumed assistant reply reference. Its token prevents consuming a newer reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReference {
+    pub token: u64,
+    pub context: String,
+}
+
 struct RunEntry {
     role: Role,
     name: String,
@@ -177,6 +196,7 @@ struct RunEntry {
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<crate::runtime::user_inbox::UserInput>,
     user_inbox: Arc<UserInbox>,
+    pending_reference: Arc<Mutex<Option<PendingReference>>>,
     cancel_tx: watch::Sender<RunInterrupt>,
     compact_tx: watch::Sender<u64>,
     model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
@@ -194,6 +214,156 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
+    fn review_error(run_id: RunId, reason: impl ToString) -> RuntimeError {
+        RuntimeError::ReviewEvidence {
+            run_id: run_id.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Store a new reference and issue a fresh token while holding the same mutex.
+    pub fn capture_pending_reference(
+        &self,
+        run_id: RunId,
+        context: String,
+    ) -> Result<u64, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        let mut pending = entry
+            .pending_reference
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = self
+            .shared
+            .next_reference_token
+            .fetch_add(1, Ordering::Relaxed);
+        *pending = Some(PendingReference { token, context });
+        Ok(token)
+    }
+
+    /// A mismatching token leaves the newer reference unconsumed.
+    pub fn take_pending_reference(
+        &self,
+        run_id: RunId,
+        token: u64,
+    ) -> Result<Option<PendingReference>, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        let mut pending = entry
+            .pending_reference
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(
+            if pending
+                .as_ref()
+                .is_some_and(|pending| pending.token == token)
+            {
+                pending.take()
+            } else {
+                None
+            },
+        )
+    }
+
+    pub fn peek_pending_reference(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<PendingReference>, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        let pending = entry
+            .pending_reference
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(pending.clone())
+    }
+
+    /// Materialize under the map fence and reuse an existing lineage's shared Arc.
+    fn materialize_review_locked(
+        &self,
+        store: &crate::RunStore,
+        run_id: RunId,
+        runs: &mut HashMap<RunId, crate::escalation_review::ReviewRunContext>,
+    ) -> Result<crate::escalation_review::ReviewRunContext, RuntimeError> {
+        let mut review =
+            crate::run_store::materialize_review_context(store, run_id).map_err(|error| {
+                if let Some(run) = runs.get(&run_id) {
+                    run.mark_unsynced();
+                }
+                Self::review_error(run_id, error)
+            })?;
+        if let Some(existing) = runs
+            .values()
+            .find(|run| run.root_run_id == review.root_run_id)
+        {
+            let mut lineage = review.lineage_run_ids.clone();
+            for run in runs
+                .values()
+                .filter(|run| Arc::ptr_eq(&run.user_requests, &existing.user_requests))
+            {
+                lineage.extend(run.lineage_run_ids.clone());
+            }
+            lineage.sort();
+            lineage.dedup();
+            crate::run_store::resync_review_context(store, existing, &lineage)
+                .map_err(|error| Self::review_error(run_id, error))?;
+            review.user_requests = existing.user_requests.clone();
+        }
+        Ok(review)
+    }
+
+    fn record_host_input(
+        &self,
+        run_id: RunId,
+        text: &str,
+        reference: Option<crate::escalation_review::ReferenceContext>,
+    ) -> Result<(), RuntimeError> {
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| Self::review_error(run_id, "storage is not configured"))?;
+        let mut runs = self
+            .shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let review = match runs.get(&run_id) {
+            Some(run) if run.stamp().synced => run.clone(),
+            _ => {
+                let review = self.materialize_review_locked(store, run_id, &mut runs)?;
+                runs.insert(run_id, review.clone());
+                review
+            }
+        };
+        let mut row = crate::run_store::evidence_row(
+            &review.root_run_id,
+            &run_id.to_string(),
+            "host_chat",
+            text,
+        );
+        if let Some(reference) = reference {
+            row.reference_kind = Some("assistant_turn".into());
+            row.reference_context = Some(
+                serde_json::to_string(&reference)
+                    .map_err(|error| Self::review_error(run_id, error))?,
+            );
+        }
+        // Equal text responding to different assistant turns is distinct evidence.
+        // Keep plain host input's key unchanged; references are non-authoritative.
+        if let Some(reference) = &row.reference_context {
+            use sha2::{Digest, Sha256};
+            row.id = format!("{:x}", Sha256::digest(format!("{}|{reference}", row.id)));
+        }
+        let mut shared = review
+            .user_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .handle
+            .record_review_evidence(std::slice::from_ref(&row))
+            .map_err(|error| Self::review_error(run_id, error))?;
+        shared.add_request(crate::run_store::request_from_evidence(row));
+        Ok(())
+    }
+
     pub fn set_default_cwd(&self, root: PathBuf) -> Result<(), RuntimeError> {
         if let Some(current) = self
             .shared
@@ -306,6 +476,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
             }),
@@ -585,6 +756,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
             }),
@@ -687,6 +859,7 @@ impl AgentRuntime {
             prompt.into(),
             config,
             RunContinuation::Fresh,
+            None,
         )
     }
 
@@ -712,9 +885,19 @@ impl AgentRuntime {
         config: RunConfig,
     ) -> RunId {
         let run_id = self.shared.run_ids.next();
-        self.spawn_run_with_handoff(run_id, parent, role, prompt, config, RunContinuation::Fresh)
+        self.spawn_run_with_handoff(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            RunContinuation::Fresh,
+            None,
+        )
     }
 
+    // Keep host provenance explicit at this installation boundary.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_run_with_handoff(
         &self,
         run_id: RunId,
@@ -723,7 +906,34 @@ impl AgentRuntime {
         prompt: String,
         mut config: RunConfig,
         continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
     ) -> RunId {
+        let escalated_from = match &continuation {
+            RunContinuation::Handoff(handoff) => Some(handoff.source_run_id),
+            RunContinuation::Resume {
+                handoff: Some(handoff),
+                ..
+            } => Some(handoff.source_run_id),
+            _ => None,
+        };
+        if let Some(store) = self.shared.run_store.get() {
+            let edges = parent
+                .into_iter()
+                .chain(escalated_from)
+                .filter(|id| *id != run_id)
+                .map(|source| storage::LineageEdge {
+                    child_run_id: run_id.to_string(),
+                    parent_run_id: source.to_string(),
+                    created_at_ns: crate::run_store::review_time_ns(),
+                })
+                .collect::<Vec<_>>();
+            if !edges.is_empty()
+                && let Err(error) = store.handle.record_review_lineage_edge(&edges)
+            {
+                self.fail_review_admission(run_id, parent, &config, error.to_string());
+                return run_id;
+            }
+        }
         self.shared.bind_project(parent, &mut config);
         let mut intents = self
             .shared
@@ -758,9 +968,25 @@ impl AgentRuntime {
             },
         );
         let run = if self.shared.model_for(&config).requires_admission() {
-            self.admit_run(run_id, parent, role, prompt, config, continuation)
+            self.admit_run(
+                run_id,
+                parent,
+                role,
+                prompt,
+                config,
+                continuation,
+                review_seed,
+            )
         } else {
-            self.register_without_admission(run_id, parent, role, prompt, config, continuation)
+            self.register_without_admission(
+                run_id,
+                parent,
+                role,
+                prompt,
+                config,
+                continuation,
+                review_seed,
+            )
         };
         if cancelled {
             let _ = self.cancel(run);
@@ -768,6 +994,8 @@ impl AgentRuntime {
         run
     }
 
+    // Keep host provenance explicit at this installation boundary.
+    #[allow(clippy::too_many_arguments)]
     fn register_run(
         &self,
         run_id: RunId,
@@ -776,6 +1004,7 @@ impl AgentRuntime {
         prompt: String,
         mut config: RunConfig,
         continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
     ) -> RunId {
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
         let history_only = matches!(continuation, RunContinuation::Resume { .. });
@@ -862,6 +1091,10 @@ impl AgentRuntime {
             );
         }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
+        if parent.is_some() && escalated_from.is_some() {
+            tracing::debug!(%run_id, ?parent, ?escalated_from,
+                "review context has two live parents; parent takes precedence until rematerialization");
+        }
         let inherited_review = parent.or(escalated_from).and_then(|source| {
             self.shared
                 .review_runs
@@ -870,66 +1103,30 @@ impl AgentRuntime {
                 .get(&source)
                 .cloned()
         });
-        let retained_review = history_only
-            .then(|| {
-                self.shared
-                    .review_runs
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(&run_id)
-                    .cloned()
-            })
-            .flatten();
-        let review_run = match (retained_review, inherited_review) {
-            (Some(retained), _) => retained,
-            (None, Some(inherited)) => {
-                let mut delegation_chain = inherited.delegation_chain;
-                if !history_only {
-                    delegation_chain
-                        .push(crate::escalation_review::bounded(&original_prompt, 1500));
-                }
-                if delegation_chain.len() > 4 {
-                    delegation_chain.remove(0);
-                }
-                let mut lineage_run_ids = inherited.lineage_run_ids;
-                lineage_run_ids.push(run_id.to_string());
-                crate::escalation_review::ReviewRunContext {
-                    root_run_id: inherited.root_run_id,
-                    lineage_run_ids,
-                    user_requests: inherited.user_requests,
-                    delegation_chain,
+        // Installation only: all durable preparation belongs to the Result entry points.
+        let review_run = if let Some(seed) = review_seed {
+            match seed.provenance {
+                HostProvenance::FreshHostSubmission => {}
+                HostProvenance::PersistedHostSubmission { run_id: source } => {
+                    debug_assert!(seed.context.lineage_run_ids.contains(&source.to_string()));
                 }
             }
-            (None, None) => {
-                // A root prompt comes from the current host submission, including
-                // continue_goal/delegate_chat restores. Persisted messages and
-                // compaction summaries are history only, never user authority.
-                let requests = if parent.is_none()
-                    && escalated_from.is_none()
-                    && !history_only
-                    && !original_prompt.trim().is_empty()
-                {
-                    vec![crate::escalation_review::UserRequest {
-                        target_run_id: run_id.to_string(),
-                        text: crate::escalation_review::bounded(&original_prompt, 1500),
-                        in_reply_to: None,
-                    }]
-                } else {
-                    Vec::new()
-                };
-                crate::escalation_review::ReviewRunContext {
-                    root_run_id: run_id.to_string(),
-                    lineage_run_ids: vec![run_id.to_string()],
-                    user_requests: Arc::new(Mutex::new(requests)),
-                    delegation_chain: if !history_only
-                        && (parent.is_some() || escalated_from.is_some())
-                    {
-                        vec![crate::escalation_review::bounded(&original_prompt, 1500)]
-                    } else {
-                        Vec::new()
-                    },
-                }
+            // chat_review_context already registered this same Arc before any
+            // admission await, so answers received while waiting remain visible.
+            seed.context
+        } else if let Some(mut inherited) = inherited_review {
+            inherited.lineage_run_ids.push(run_id.to_string());
+            if !history_only {
+                inherited
+                    .delegation_chain
+                    .push(crate::escalation_review::bounded(&original_prompt, 1500));
             }
+            if inherited.delegation_chain.len() > 4 {
+                inherited.delegation_chain.remove(0);
+            }
+            inherited
+        } else {
+            crate::escalation_review::ReviewRunContext::empty(&run_id.to_string())
         };
         self.shared
             .review_runs
@@ -1015,6 +1212,7 @@ impl AgentRuntime {
                 message_count_rx,
                 inbox_tx,
                 user_inbox,
+                pending_reference: Arc::new(Mutex::new(None)),
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,
@@ -1201,6 +1399,7 @@ impl AgentRuntime {
                 source_run_id,
                 restored: None,
             }),
+            None,
         ))
     }
 
@@ -1256,48 +1455,74 @@ impl AgentRuntime {
             let entry = self.entry(run_id)?;
             (entry.inbox_tx.clone(), Arc::clone(&entry.user_inbox))
         };
-        let permit = sender
-            .try_reserve()
-            .map_err(|_| RuntimeError::RunTerminated {
-                run_id: run_id.to_string(),
-            })?;
-        if let Some((objective, criteria)) = initial_goal {
-            let thread =
-                self.goal_thread(run_id)
-                    .ok_or_else(|| RuntimeError::RunRestoreFailed {
-                        run_id: run_id.to_string(),
-                        reason: crate::RunRestoreFailure::CorruptContext(
-                            "missing thread binding".into(),
-                        ),
-                    })?;
-            self.create_thread_goal(&thread, run_id, objective, criteria)
-                .map_err(|reason| RuntimeError::RunRestoreFailed {
-                    run_id: run_id.to_string(),
-                    reason: crate::RunRestoreFailure::CorruptContext(reason),
-                })?;
-        }
-        // Invalidate the old check before the model can consume new host input.
-        if trusted_user {
-            self.goal_user_input(run_id, &text);
-        }
+        // Serialize the synchronous send API per inbox through persistence,
+        // review reflection and enqueue. The send mutex is separate from inbox
+        // observation to avoid a run-map -> status / send -> run-map lock cycle.
+        // Nothing in this closure re-enters the trusted-send serializer.
         let send = || {
-            permit.send((text.clone(), images, trusted_user));
+            let permit = sender
+                .try_reserve()
+                .map_err(|_| RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                })?;
+            if trusted_user {
+                let pending = self.peek_pending_reference(run_id)?;
+                let reference =
+                    pending
+                        .as_ref()
+                        .map(|pending| crate::escalation_review::ReferenceContext {
+                            text: pending.context.clone(),
+                            source_run_id: run_id.to_string(),
+                            // The pending API has no turn index; zero denotes unavailable.
+                            turn_end: 0,
+                        });
+                self.record_host_input(run_id, &text, reference)?;
+                if let Some(pending) = pending {
+                    match self.take_pending_reference(run_id, pending.token) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            tracing::debug!(%run_id, "newer assistant reference remains pending")
+                        }
+                        Err(error) => {
+                            tracing::warn!(%run_id, %error, "assistant reference take failed")
+                        }
+                    }
+                }
+            }
+            if let Some((objective, criteria)) = initial_goal {
+                let thread =
+                    self.goal_thread(run_id)
+                        .ok_or_else(|| RuntimeError::RunRestoreFailed {
+                            run_id: run_id.to_string(),
+                            reason: crate::RunRestoreFailure::CorruptContext(
+                                "missing thread binding".into(),
+                            ),
+                        })?;
+                self.create_thread_goal(&thread, run_id, objective, criteria)
+                    .map_err(|reason| RuntimeError::RunRestoreFailed {
+                        run_id: run_id.to_string(),
+                        reason: crate::RunRestoreFailure::CorruptContext(reason),
+                    })?;
+            }
+            // Invalidate the old check before the model can consume new host input.
+            if trusted_user {
+                self.goal_user_input(run_id, &text);
+            }
+            let enqueue = || {
+                permit.send((text.clone(), images, trusted_user));
+                Ok::<_, RuntimeError>(())
+            };
+            if trusted_user {
+                inbox.enqueue(enqueue)?;
+            } else {
+                enqueue()?;
+            }
             Ok::<_, RuntimeError>(())
         };
         if trusted_user {
-            inbox.enqueue(send)?;
+            inbox.serialize_trusted_send(send)?;
         } else {
             send()?;
-        }
-        if trusted_user
-            && let Some(review) = self
-                .shared
-                .review_runs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&run_id)
-        {
-            review.add_user_request(&run_id.to_string(), &text);
         }
         Ok(())
     }
@@ -2149,6 +2374,299 @@ mod review_provenance_tests {
         }
     }
 
+    fn bare_runtime() -> AgentRuntime {
+        let bus = Arc::new(EventBus::new(32));
+        AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(HangingModel),
+        )
+    }
+
+    #[tokio::test]
+    async fn ram_only_chat_rejects_secrets_and_oversized_host_input_before_reflection() {
+        let runtime = bare_runtime();
+        for text in [format!("sk-{}", "a".repeat(32)), "x".repeat(256 * 1024 + 1)] {
+            assert!(matches!(
+                runtime.delegate_chat("invalid", Role::Worker, text, RunConfig::default(),),
+                Err(RuntimeError::ReviewEvidence { .. })
+            ));
+            assert!(runtime.shared.review_runs.lock().unwrap().is_empty());
+            assert!(lock_runs(&runtime.shared.runs).is_empty());
+        }
+        let run = runtime
+            .delegate_chat(
+                "valid",
+                Role::Worker,
+                "x".repeat(256 * 1024),
+                RunConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.shared.review_runs.lock().unwrap()[&run]
+                .requests()
+                .0[0]
+                .text
+                .len(),
+            256 * 1024
+        );
+        runtime.cancel(run).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_trusted_send_persistence_reflection_and_delivery_have_the_same_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("ordered.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let runtime = bare_runtime()
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let run = runtime
+            .delegate_chat(
+                "ordered",
+                Role::Worker,
+                "initial".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        // Observe actual channel delivery independently of model scheduling.
+        let (sender, mut receiver) = mpsc::channel(INBOX_CAPACITY);
+        lock_runs(&runtime.shared.runs)
+            .get_mut(&run)
+            .unwrap()
+            .inbox_tx = sender;
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let sends = (0..16)
+            .map(|i| {
+                let runtime = runtime.clone();
+                let barrier = barrier.clone();
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    runtime.send_message(run, format!("followup-{i}")).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for send in sends {
+            send.await.unwrap();
+        }
+        let mut delivered = Vec::new();
+        for _ in 0..16 {
+            let (text, images, trusted) = receiver.recv().await.unwrap();
+            assert!(trusted && images.is_empty());
+            delivered.push(text);
+        }
+        let persisted = runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .review_evidence_for_lineage(&[run.to_string()])
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "host_chat")
+            .map(|row| row.text)
+            .collect::<Vec<_>>();
+        let reflected = runtime.shared.review_runs.lock().unwrap()[&run]
+            .requests()
+            .0
+            .iter()
+            .skip(1)
+            .map(|request| request.text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, delivered);
+        assert_eq!(reflected, delivered);
+        assert_eq!(runtime.follow_up_status(run).unwrap().pending, 16);
+        runtime.cancel(run).unwrap();
+    }
+
+    #[tokio::test]
+    async fn equal_replies_to_distinct_references_survive_rematerialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("references.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let runtime = bare_runtime()
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let run = runtime
+            .delegate_chat(
+                "references",
+                Role::Worker,
+                "initial".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        for reference in ["First assistant turn", "Second assistant turn"] {
+            runtime
+                .capture_pending_reference(run, reference.into())
+                .unwrap();
+            runtime.send_message(run, "いいよ".into()).unwrap();
+        }
+        let live = runtime.shared.review_runs.lock().unwrap()[&run]
+            .requests()
+            .0
+            .clone();
+        runtime.cancel(run).unwrap();
+        drop(runtime);
+        storage.close();
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let store = crate::RunStore::open(&config, storage.handle()).unwrap();
+        let rows = store
+            .review_evidence_for_lineage(&[run.to_string()])
+            .unwrap();
+        let replies = rows
+            .iter()
+            .filter(|row| row.kind == "host_chat")
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 2);
+        assert_ne!(replies[0].id, replies[1].id);
+        let restored = crate::run_store::materialize_review_context(&store, run).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.requests().0).unwrap(),
+            serde_json::to_value(live).unwrap()
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .map(
+                    |row| serde_json::from_str::<crate::escalation_review::ReferenceContext>(
+                        row.reference_context.as_ref().unwrap()
+                    )
+                    .unwrap()
+                    .text
+                )
+                .collect::<Vec<_>>(),
+            ["First assistant turn", "Second assistant turn"]
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_send_without_storage_never_enqueues_or_changes_evidence() {
+        let runtime = bare_runtime();
+        let run = runtime
+            .delegate_chat("fresh", Role::Worker, "first".into(), RunConfig::default())
+            .unwrap();
+        let before = runtime.shared.review_runs.lock().unwrap()[&run].stamp();
+        assert!(matches!(
+            runtime.send_message(run, "not accepted".into()),
+            Err(RuntimeError::ReviewEvidence { .. })
+        ));
+        assert_eq!(
+            runtime.shared.review_runs.lock().unwrap()[&run].stamp(),
+            before
+        );
+        assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
+        runtime.cancel(run).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_context_materializes_before_trusted_enqueue_and_reuses_live_arc() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("review.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let runtime = bare_runtime()
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let root = runtime
+            .delegate_chat("fresh", Role::Worker, "first".into(), RunConfig::default())
+            .unwrap();
+        let child = runtime.spawn_reserved_child(
+            root,
+            runtime.reserve_run_id(),
+            Role::Worker,
+            "delegated",
+            RunConfig::default(),
+        );
+        // register_restored deliberately leaves no review entry: model that state here.
+        runtime.shared.review_runs.lock().unwrap().remove(&child);
+        runtime.send_message(child, "child only".into()).unwrap();
+        let runs = runtime.shared.review_runs.lock().unwrap();
+        assert!(Arc::ptr_eq(
+            &runs[&root].user_requests,
+            &runs[&child].user_requests
+        ));
+        assert_eq!(runs[&root].requests().0.len(), 1);
+        assert_eq!(runs[&child].requests().0.len(), 2);
+        let store = runtime.shared.run_store.get().unwrap();
+        assert_eq!(
+            store
+                .review_evidence_for_lineage(&[child.to_string()])
+                .unwrap()[0]
+                .text,
+            "child only"
+        );
+        drop(runs);
+        let fresh = bare_runtime()
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let mut empty = fresh.shared.review_runs.lock().unwrap();
+        assert!(empty.is_empty());
+        let materialized = fresh
+            .materialize_review_locked(fresh.shared.run_store.get().unwrap(), child, &mut empty)
+            .unwrap();
+        assert_eq!(materialized.requests().0.len(), 2);
+        assert_eq!(
+            crate::run_store::materialize_review_context(store, root)
+                .unwrap()
+                .requests()
+                .0
+                .len(),
+            1
+        );
+        runtime.cancel_subtree(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn internal_root_is_not_user_evidence_and_pending_tokens_are_compare_and_take() {
+        let runtime = bare_runtime();
+        let run = runtime.delegate_background(
+            Role::Worker,
+            "agent authored".into(),
+            RunConfig::default(),
+        );
+        assert!(
+            runtime.shared.review_runs.lock().unwrap()[&run]
+                .requests()
+                .0
+                .is_empty()
+        );
+        let first = runtime
+            .capture_pending_reference(run, "old".into())
+            .unwrap();
+        let second = runtime
+            .capture_pending_reference(run, "new".into())
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(
+            runtime
+                .take_pending_reference(run, first)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .peek_pending_reference(run)
+                .unwrap()
+                .unwrap()
+                .context,
+            "new"
+        );
+        assert_eq!(
+            runtime
+                .take_pending_reference(run, second)
+                .unwrap()
+                .unwrap()
+                .token,
+            second
+        );
+        assert!(runtime.peek_pending_reference(run).unwrap().is_none());
+        runtime.cancel(run).unwrap();
+    }
+
     #[tokio::test]
     async fn host_question_answer_reaches_delegated_review_but_agent_answer_does_not() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2204,7 +2722,11 @@ mod review_provenance_tests {
             .expect("orchestrator answer");
 
         let runs = runtime.shared.review_runs.lock().expect("review runs");
-        let requests = runs.get(&worker).expect("worker review context").requests();
+        let requests = runs
+            .get(&worker)
+            .expect("worker review context")
+            .requests()
+            .0;
         let answers = requests
             .iter()
             .filter(|request| request.in_reply_to.is_some())
@@ -2234,14 +2756,22 @@ mod review_provenance_tests {
         ));
         let model = Arc::new(HangingModel);
         let runtime = AgentRuntime::new(bus, executor, model);
-        let root = runtime.reserve_run_id();
-        runtime.spawn_reserved(
-            root,
-            None,
-            Role::Orchestrator,
-            "Investigate the cause",
-            RunConfig::default(),
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("review.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let root = runtime
+            .delegate_chat(
+                "review",
+                Role::Orchestrator,
+                "Investigate the cause".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
         let child = runtime.reserve_run_id();
         runtime.spawn_reserved_child(
             root,
@@ -2260,6 +2790,13 @@ mod review_provenance_tests {
             RunConfig::default(),
         );
 
+        let sibling = runtime.spawn_reserved_child(
+            root,
+            runtime.reserve_run_id(),
+            Role::Worker,
+            "Sibling",
+            RunConfig::default(),
+        );
         runtime
             .send_internal_message(root, "Team leases expired".into())
             .expect("internal message");
@@ -2279,6 +2816,7 @@ mod review_provenance_tests {
         assert_eq!(
             parent
                 .requests()
+                .0
                 .iter()
                 .map(|request| request.text.as_str())
                 .collect::<Vec<_>>(),
@@ -2287,6 +2825,7 @@ mod review_provenance_tests {
         assert_eq!(
             nested
                 .requests()
+                .0
                 .iter()
                 .map(|request| request.text.as_str())
                 .collect::<Vec<_>>(),
@@ -2296,6 +2835,13 @@ mod review_provenance_tests {
                 "Only the child may do this"
             ],
         );
+        assert_eq!(runs[&sibling].requests().0.len(), 2);
+        let store = runtime.shared.run_store.get().unwrap();
+        let restored_parent = crate::run_store::materialize_review_context(store, root).unwrap();
+        let restored_nested =
+            crate::run_store::materialize_review_context(store, grandchild).unwrap();
+        assert_eq!(restored_parent.requests().0.len(), 2);
+        assert_eq!(restored_nested.requests().0.len(), 3);
         assert_eq!(delegated.delegation_chain, vec!["git push origin main"]);
         assert_eq!(
             nested.delegation_chain,
@@ -2533,3 +3079,76 @@ mod project_switch_tests;
 
 #[cfg(test)]
 use crate::escalation_review::support as comment_checker_support;
+
+#[cfg(test)]
+mod review_registration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registration_installs_seed_without_reading_a_closed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("review.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(crate::escalation_review::support::ScriptedModel::new([])),
+        )
+        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let run = runtime.reserve_run_id();
+        let context = crate::escalation_review::ReviewRunContext::empty(&run.to_string());
+        context.add_user_request(&run.to_string(), "prepared evidence");
+        drop(storage);
+        runtime.register_run(
+            run,
+            None,
+            Role::Worker,
+            "not evidence".into(),
+            RunConfig::default(),
+            RunContinuation::Fresh,
+            Some(ReviewSeed {
+                provenance: HostProvenance::FreshHostSubmission,
+                context,
+            }),
+        );
+        assert_eq!(
+            runtime.shared.review_runs.lock().unwrap()[&run]
+                .requests()
+                .0[0]
+                .text,
+            "prepared evidence"
+        );
+        runtime.cancel(run).unwrap();
+        let rejected = runtime.delegate_chat(
+            "rejected",
+            Role::Worker,
+            "cannot persist".into(),
+            RunConfig::default(),
+        );
+        assert!(matches!(rejected, Err(RuntimeError::ReviewEvidence { .. })));
+        let child = runtime.spawn_reserved_child(
+            run,
+            runtime.reserve_run_id(),
+            Role::Worker,
+            "no edge",
+            RunConfig::default(),
+        );
+        assert!(matches!(
+            runtime.wait_admission(child).await,
+            Err(RuntimeError::ReviewEvidence { .. })
+        ));
+        assert!(!lock_runs(&runtime.shared.runs).contains_key(&child));
+        assert!(
+            !runtime
+                .shared
+                .review_runs
+                .lock()
+                .unwrap()
+                .contains_key(&child)
+        );
+    }
+}

@@ -271,11 +271,19 @@ async fn fallback_without_official_compaction_resummarizes_the_checkpoint_end_to
         bus.clone(),
         Arc::new(sandbox::DirectSandbox::new_unchecked()),
     ));
+    let review_dir = tempfile::tempdir().unwrap();
+    let review_config = storage::StorageConfig {
+        db_path: review_dir.path().join("review.db"),
+        ..Default::default()
+    };
+    let review_storage = storage::Storage::open(review_config.clone()).unwrap();
+    let review_store = crate::RunStore::open(&review_config, review_storage.handle()).unwrap();
     let runtime = AgentRuntime::new(
         bus,
         executor,
         Arc::new(SwitchableModel::new(Arc::new(model))),
     )
+    .with_run_store(review_store)
     .with_compaction(config::CompactionConfig {
         keep_recent_tokens: 1,
         ..config::CompactionConfig::default()

@@ -16,6 +16,8 @@ enum Step {
 }
 type Request = (String, Vec<Message>, Vec<ToolSpec>);
 struct Model {
+    _storage: storage::Storage,
+    _dir: tempfile::TempDir,
     steps: Mutex<VecDeque<Step>>,
     requests: Mutex<Vec<Request>>,
 }
@@ -86,7 +88,22 @@ impl AgentModel for Model {
     }
 }
 fn harness(steps: Vec<Step>) -> (AgentRuntime, Arc<Model>, event_bus::EventReceiver) {
+    harness_with_store(steps, None)
+}
+fn harness_with_store(
+    steps: Vec<Step>,
+    configured: Option<crate::RunStore>,
+) -> (AgentRuntime, Arc<Model>, event_bus::EventReceiver) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_config = storage::StorageConfig {
+        db_path: dir.path().join("review.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let store = crate::RunStore::open(&storage_config, storage.handle()).unwrap();
     let model = Arc::new(Model {
+        _storage: storage,
+        _dir: dir,
         steps: Mutex::new(steps.into()),
         requests: Mutex::new(vec![]),
     });
@@ -96,7 +113,8 @@ fn harness(steps: Vec<Step>) -> (AgentRuntime, Arc<Model>, event_bus::EventRecei
         bus.clone(),
         Arc::new(::tools::ToolExecutor::new(bus)),
         model.clone(),
-    );
+    )
+    .with_run_store(configured.unwrap_or(store));
     (runtime, model, events)
 }
 fn config() -> RunConfig {
@@ -529,12 +547,13 @@ async fn restart_retries_interrupted_provider_input_before_appending_authoritati
     let storage = storage::Storage::open(storage_config.clone()).unwrap();
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let (original, old_model, _) = harness(vec![
-        write(vec![item("Keep procedure", ThreadTodoStatus::InProgress)]),
-        Step::Hold(entered.clone(), release),
-    ]);
-    let original =
-        original.with_run_store(crate::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let (original, old_model, _) = harness_with_store(
+        vec![
+            write(vec![item("Keep procedure", ThreadTodoStatus::InProgress)]),
+            Step::Hold(entered.clone(), release),
+        ],
+        Some(crate::RunStore::open(&storage_config, storage.handle()).unwrap()),
+    );
     let run = start(
         &original,
         Role::Worker,
@@ -550,9 +569,10 @@ async fn restart_retries_interrupted_provider_input_before_appending_authoritati
     assert_eq!(original.wait(run).await.unwrap(), AgentRunPhase::Stopped);
     let snapshot = original.thread_todo("thread").unwrap();
     let interrupted = old_model.requests.lock().unwrap().last().unwrap().clone();
-    let (runtime, model, mut events) = harness(vec![Step::Stop, Step::Stop]);
-    let runtime =
-        runtime.with_run_store(crate::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let (runtime, model, mut events) = harness_with_store(
+        vec![Step::Stop, Step::Stop],
+        Some(crate::RunStore::open(&storage_config, storage.handle()).unwrap()),
+    );
     runtime.restore_thread_todo(snapshot.clone()).unwrap();
     runtime.bind_thread_root("thread", run).unwrap();
     runtime.resume_chat(run, config()).unwrap();

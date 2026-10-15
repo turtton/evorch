@@ -9,6 +9,8 @@ pub mod event;
 pub(crate) mod memory;
 pub mod message;
 pub mod metrics;
+pub(crate) mod review_evidence;
+pub(crate) mod review_lineage;
 pub mod run_context;
 pub mod run_ledger;
 pub mod session;

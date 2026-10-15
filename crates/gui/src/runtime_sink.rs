@@ -1317,6 +1317,39 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    /// Persist a real requester's evidence, then leave it absent from the answering runtime.
+    fn offline_question_fixture(
+        rt: &tokio::runtime::Runtime,
+        config: &StorageConfig,
+        handle: StorageHandle,
+        thread: &str,
+        options: Vec<String>,
+    ) -> event_bus::UserQuestion {
+        let bus = Arc::new(EventBus::new(64));
+        let requester = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(HeldModel::default()),
+        )
+        .with_run_store(runtime::RunStore::open(config, handle).unwrap());
+        rt.block_on(async {
+            let run = requester
+                .delegate_chat(
+                    thread,
+                    Role::Worker,
+                    "Prepare the output".into(),
+                    RunConfig::default(),
+                )
+                .unwrap();
+            let question = requester
+                .request_user_question(run, "Which format?".into(), options, true)
+                .unwrap();
+            requester.cancel(run).unwrap();
+            requester.wait(run).await.unwrap();
+            question
+        })
+    }
+
     #[test]
     fn offline_question_rejects_caller_fenced_after_command_authorization() {
         let (rt, mut sink, runtime, _) = build_sink();
@@ -1328,19 +1361,13 @@ mod tests {
         let storage = Storage::open(config.clone()).unwrap();
         let runtime =
             runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-        // Persisted question from a stopped requester, as after restarting the GUI.
-        let question = event_bus::UserQuestion {
-            id: "question-offline".into(),
-            run_id: "run-99".into(),
-            root_run_id: "run-99".into(),
-            root_name: "chat:Worker:thread-1".into(),
-            recipient_run_ids: Vec::new(),
-            title: "Which format?".into(),
-            options: vec!["JSON".into()],
-            blocking: true,
-            answer: None,
-        };
-        storage.handle().create_user_question(&question).unwrap();
+        let question = offline_question_fixture(
+            &rt,
+            &config,
+            storage.handle(),
+            "thread-1",
+            vec!["JSON".into()],
+        );
         assert!(!runtime.has_active_question_recipient(&question.id).unwrap());
         let bus = Arc::new(EventBus::new(64));
         let first =
@@ -1411,7 +1438,7 @@ mod tests {
 
     #[test]
     fn inherited_question_requires_registered_recipient_and_current_thread_ownership() {
-        let (_rt, mut sink, runtime, _) = build_sink();
+        let (rt, mut sink, runtime, _) = build_sink();
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("questions.db"),
@@ -1422,22 +1449,11 @@ mod tests {
             runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         sink.submit(chat_command("recipient"));
         let recipient = sink.chat_runs["recipient"];
-        let question = event_bus::UserQuestion {
-            id: "inherited".into(),
-            run_id: "run-99".into(),
-            root_run_id: "run-99".into(),
-            root_name: "chat:Worker:source".into(),
-            recipient_run_ids: Vec::new(),
-            title: "Which format?".into(),
-            options: vec![],
-            blocking: true,
-            answer: None,
-        };
-        storage.handle().create_user_question(&question).unwrap();
+        let question = offline_question_fixture(&rt, &config, storage.handle(), "source", vec![]);
         storage
             .handle()
             .bind_user_questions(
-                "run-99",
+                &question.run_id,
                 &recipient.to_string(),
                 std::slice::from_ref(&question.id),
             )
@@ -1486,7 +1502,7 @@ mod tests {
         storage
             .handle()
             .bind_user_questions(
-                "run-99",
+                &question.run_id,
                 &recipient.to_string(),
                 std::slice::from_ref(&child.id),
             )

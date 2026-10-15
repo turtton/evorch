@@ -13,6 +13,7 @@ use support::{ScriptedModel, drain_events, text_response};
 
 #[tokio::test]
 async fn composed_runtime_compacts_with_preset_window() {
+    let review_storage = support::ReviewStorage::new();
     let mut entry = ModelEntryConfig::enabled("deepseek-v4-flash-0731");
     entry.metadata_source = Some(MetadataSource::Manual);
     entry.preset = Some("small".into());
@@ -77,6 +78,7 @@ async fn composed_runtime_compacts_with_preset_window() {
     })
     .await
     .unwrap();
+    review_storage.attach(&composed.runtime);
     composed
         .runtime
         .send_message(run, "continue".into())
