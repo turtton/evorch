@@ -109,7 +109,7 @@ pub(crate) struct Shared {
     pub(crate) projects: Mutex<HashMap<PathBuf, Arc<project::ProjectContext>>>,
     pub(crate) project_models: OnceLock<project::ProjectModelResolver>,
     pub(crate) project_slugs: OnceLock<project::ProjectSlugResolver>,
-    /// Trust the host declared per project root; undeclared roots keep the shared rules' trust.
+    /// Trust the host declared per canonical project root; undeclared roots keep the shared rules' trust.
     pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
     /// Allowed directories per canonical project root; runs hold the same live list.
     pub(crate) allowed_directories: Mutex<HashMap<PathBuf, sandbox::LivePaths>>,

@@ -321,3 +321,144 @@ async fn declared_trust_gates_project_rules_and_repository_skills() {
     assert_eq!(trust, ProjectTrust::Approved);
     assert!(skills.contains(&"untrusted-skill".to_owned()), "{skills:?}");
 }
+
+fn linked_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (temp, repo) = canonical_repo();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&repo, &link).unwrap();
+    (temp, repo, link)
+}
+
+/// A project with a rule and a repository skill, both named after `marker`.
+fn write_instructions(root: &std::path::Path, marker: &str) {
+    std::fs::write(root.join("AGENTS.md"), format!("{marker}-rule\n")).unwrap();
+    write_skill(root, &format!("{marker}-skill"));
+}
+
+/// Undeclared projects get the shared rules' trust, here Approved, so only a
+/// declaration that reaches the run can withhold its instructions.
+fn approving_runtime(
+    bus: &Arc<EventBus>,
+    model: Arc<ScriptedModel>,
+    root: &std::path::Path,
+) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<WorkspaceMounts>>>) {
+    let (factory, mounts) = support::recording_factory();
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::clone(bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    let runtime =
+        AgentRuntime::with_sandbox_factory(Arc::clone(bus), Arc::new(executor), model, factory)
+            .with_project_rules(Arc::new(RulesSource::new(
+                ProjectTrust::Approved,
+                RulesSettings::from(&config::RulesConfig::default()),
+                None,
+                Some(root.to_path_buf()),
+                None,
+            )))
+            .with_sandbox_root(root.to_path_buf())
+            .with_skill_source(Arc::new(SkillCatalogSource::new(
+                config::Config::default(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                Arc::clone(bus),
+            )));
+    (runtime, mounts)
+}
+
+/// Runs a worker in `root` and returns its system prompt text and repository skills.
+async fn run_inputs(
+    runtime: &AgentRuntime,
+    model: &ScriptedModel,
+    root: &std::path::Path,
+) -> (String, Vec<String>) {
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "go".into(),
+        RunConfig {
+            project_root: Some(root.to_path_buf()),
+            ..RunConfig::default()
+        },
+    );
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let request = model.observed().await.pop().unwrap();
+    assert_eq!(request[0].role, providers::Role::System);
+    let system = request[0]
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            providers::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let project = runtime.shared.project_of(run).unwrap();
+    let skills = loop_shared(&Arc::downgrade(&runtime.shared), Some(&project))
+        .unwrap()
+        .skills
+        .unwrap()
+        .available_skills()
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    (system, skills)
+}
+
+fn done_script(runs: usize) -> Arc<ScriptedModel> {
+    Arc::new(ScriptedModel::new((0..runs).map(|_| {
+        Ok(text_response("done", providers::FinishReason::Stop))
+    })))
+}
+
+// Trust declared under one spelling of a project root (symlink, `..`) gates runs
+// started under another, and those runs mount the canonical root.
+#[tokio::test]
+async fn declared_trust_applies_across_root_spellings() {
+    let (_linked_temp, linked, link) = linked_repo();
+    let (_dotted_temp, dotted) = canonical_repo();
+    write_instructions(&linked, "linked");
+    write_instructions(&dotted, "dotted");
+    let bus = Arc::new(EventBus::new(256));
+    let model = done_script(2);
+    let (runtime, mounts) = approving_runtime(&bus, Arc::clone(&model), &linked);
+    runtime.set_project_trust(link, ProjectTrust::Unapproved);
+    runtime.set_project_trust(dotted.clone(), ProjectTrust::Unapproved);
+
+    for (root, marker) in [
+        (linked.clone(), "linked"),
+        (dotted.join(".evorch/.."), "dotted"),
+    ] {
+        let (system, skills) = run_inputs(&runtime, &model, &root).await;
+        assert!(!system.contains(&format!("{marker}-rule")), "{system}");
+        assert!(!skills.contains(&format!("{marker}-skill")), "{skills:?}");
+    }
+    let mounted: Vec<_> = mounts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|mounts| mounts.workspace_root.clone())
+        .collect();
+    assert_eq!(mounted, [linked, dotted]);
+}
+
+// Re-declaring trust under another spelling drops the cached project context, so
+// the next run sees the new trust.
+#[tokio::test]
+async fn redeclared_trust_under_another_spelling_reaches_new_runs() {
+    let (_temp, repo, link) = linked_repo();
+    write_instructions(&repo, "project");
+    let bus = Arc::new(EventBus::new(256));
+    let model = done_script(2);
+    let (runtime, _mounts) = approving_runtime(&bus, Arc::clone(&model), &repo);
+    runtime.set_project_trust(repo.clone(), ProjectTrust::Unapproved);
+
+    let (system, skills) = run_inputs(&runtime, &model, &repo).await;
+    assert!(!system.contains("project-rule"), "{system}");
+    assert!(!skills.contains(&"project-skill".to_owned()), "{skills:?}");
+
+    runtime.set_project_trust(link, ProjectTrust::Approved);
+    let (system, skills) = run_inputs(&runtime, &model, &repo).await;
+    assert!(system.contains("project-rule"), "{system}");
+    assert!(skills.contains(&"project-skill".to_owned()), "{skills:?}");
+}
