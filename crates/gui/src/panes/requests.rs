@@ -8,6 +8,8 @@ use event_bus::UserQuestion;
 use crate::model::pending_approvals::PendingApproval;
 use crate::theme::tokens::{R_SM, SP_2, STATUS_STROKE, attention_color, palette};
 
+const MAX_ANSWER_BYTES: usize = 4096;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestAction {
     Decide {
@@ -42,19 +44,15 @@ impl ConversationRequests<'_> {
         }
         for question in &self.questions {
             ui.push_id(("question", &question.id), |ui| {
-                request_card(ui, "回答待ちの質問", |ui| {
+                request_card(ui, "Question for you", |ui| {
                     ui.add(egui::Label::new(RichText::new(&question.title).strong()).wrap());
                     ui.add(
                         egui::Label::new(
-                            RichText::new(format!(
-                                "{} · {}",
-                                question.run_id,
-                                if question.blocking {
-                                    "回答に依存する作業は待機します"
-                                } else {
-                                    "任意の回答"
-                                }
-                            ))
+                            RichText::new(if question.blocking {
+                                "Work that depends on this answer is waiting"
+                            } else {
+                                "Optional answer"
+                            })
                             .small()
                             .color(palette().TEXT_MUTED),
                         )
@@ -73,15 +71,20 @@ impl ConversationRequests<'_> {
                         egui::TextEdit::multiline(draft)
                             // Use the question's stable scope, not the changing transcript's auto ID.
                             .id_salt("answer-input")
-                            .hint_text("回答を入力（選択肢以外でも可）")
+                            .hint_text("Type an answer (free text or pick an option)")
                             .desired_width(f32::INFINITY)
                             .desired_rows(2),
                     );
                     if ui
                         .add_enabled(
-                            !draft.trim().is_empty() && draft.len() <= 4096,
-                            egui::Button::new("回答を送信"),
+                            !draft.trim().is_empty() && draft.len() <= MAX_ANSWER_BYTES,
+                            egui::Button::new("Send answer"),
                         )
+                        .on_disabled_hover_text(if draft.len() > MAX_ANSWER_BYTES {
+                            "The answer is longer than 4096 bytes"
+                        } else {
+                            "Type or pick an answer first"
+                        })
                         .clicked()
                     {
                         action = Some(RequestAction::Answer {

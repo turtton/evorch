@@ -289,7 +289,7 @@ fn thread_state_follows_lifecycle_events() {
         (AgentRunPhase::Pending, AgentRunPhase::Running, "Running"),
         (AgentRunPhase::Running, AgentRunPhase::Waiting, "Waiting"),
         (AgentRunPhase::Waiting, AgentRunPhase::Done, "Done"),
-        (AgentRunPhase::Done, AgentRunPhase::Error, "Error"),
+        (AgentRunPhase::Done, AgentRunPhase::Error, "Failed"),
     ] {
         bus.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-1".into(),
@@ -310,7 +310,7 @@ fn thread_state_follows_lifecycle_events() {
     assert!(!harness.has_label("⋯"));
     assert!(!harness.has_label("Pause"));
     assert!(!harness.has_label("Resume"));
-    assert!(harness.has_label("Thread status: Error"));
+    assert!(harness.has_label("Thread status: Failed"));
 }
 
 #[test]

@@ -397,7 +397,7 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
             )
             .sense(Sense::hover()),
         );
-        Some((response, "Thread status: Error"))
+        Some((response, "Thread status: Failed"))
     } else if unread {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());

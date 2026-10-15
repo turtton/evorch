@@ -182,7 +182,7 @@ fn disconnected_channel_becomes_failed() {
 #[test]
 fn format_expiry_reports_remaining_time_and_expiry() {
     // Given / When / Then: 秒単位の期限を残り時間または失効へ変換する。
-    assert_eq!(format_expiry(0, 3600), "Access token expires in 1h 0m");
+    assert_eq!(format_expiry(0, 3600), "Access token expires in 1h");
     assert_eq!(format_expiry(0, 90), "Access token expires in 1m");
     for expiry in [50, 100] {
         assert_eq!(

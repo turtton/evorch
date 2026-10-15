@@ -141,7 +141,7 @@ fn thread_status_icons_follow_state_and_question_priority() {
             );
             assert_eq!(harness.query_by_label(QUESTION_LABEL).is_some(), question);
             assert_eq!(
-                harness.query_by_label("Thread status: Error").is_some(),
+                harness.query_by_label("Thread status: Failed").is_some(),
                 error
             );
             assert!(harness.query_by_label("?").is_none());
@@ -197,7 +197,7 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
         for (phase, question, label) in [
             (ThreadRunPhase::Running, false, "Thread status: Running"),
             (ThreadRunPhase::Waiting, true, QUESTION_LABEL),
-            (ThreadRunPhase::Error, false, "Thread status: Error"),
+            (ThreadRunPhase::Error, false, "Thread status: Failed"),
         ] {
             let mut harness = status_fixture(Some(phase), question, width);
             let title = harness.get_by_label("Status thread").rect();
@@ -233,7 +233,7 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
         for (phase, status) in [
             (ThreadRunPhase::Pending, "Thread status: Running"),
             (ThreadRunPhase::Running, "Thread status: Running"),
-            (ThreadRunPhase::Error, "Thread status: Error"),
+            (ThreadRunPhase::Error, "Thread status: Failed"),
         ] {
             let mut harness = status_fixture(Some(phase), true, width);
             let title = harness.get_by_label("Status thread").rect();

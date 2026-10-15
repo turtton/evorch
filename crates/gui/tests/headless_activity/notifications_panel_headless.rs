@@ -148,7 +148,7 @@ fn question_notification_opens_owning_thread_and_conversation() {
             Some(ThreadId::new("one"))
         );
         assert!(harness.query_by_label("Which format?").is_some());
-        assert!(harness.query_by_label("回答を送信").is_some());
+        assert!(harness.query_by_label("Send answer").is_some());
     }
 }
 

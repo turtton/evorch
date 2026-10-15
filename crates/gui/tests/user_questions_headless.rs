@@ -55,13 +55,13 @@ fn question_card_is_thread_scoped_and_selection_requires_explicit_send() {
     let mut ui = HeadlessWorkbench::new(state, [1100.0, 760.0]);
     ui.run();
     assert!(ui.has_label("Which output format?"));
-    assert!(ui.has_label("回答待ちの質問"));
+    assert!(ui.has_label("Question for you"));
     assert!(!ui.has_label("No messages yet"));
     assert!(ui.state().issued().is_empty());
     ui.click_label("JSON");
     ui.run();
     assert!(ui.state().issued().is_empty());
-    ui.click_label("回答を送信");
+    ui.click_label("Send answer");
     ui.run();
     assert!(ui.state().issued().iter().any(|c|matches!(c,WorkbenchCommand::AnswerUserQuestion{thread_id,question_id,answer} if thread_id=="one" && question_id=="q-one" && answer=="JSON")));
     ui.state_mut().switch_thread(ThreadId::new("two")).unwrap();
@@ -155,7 +155,7 @@ fn answer_input_keeps_focus_and_cursor_across_conversation_updates() {
         assert!(harness.state().composer().input.is_empty());
         assert!(harness.state().issued().is_empty());
     }
-    harness.get_by_label("回答を送信").click();
+    harness.get_by_label("Send answer").click();
     harness.run_steps(4);
     assert!(harness.state().issued().iter().any(|command| matches!(
         command,
@@ -290,12 +290,12 @@ fn approvals_and_questions_share_conversation_without_a_floating_window() {
         );
     use egui_kittest::kittest::Queryable;
     h.run_steps(4);
-    let approval = h.get_by_label("ツールの承認待ち").rect();
+    let approval = h.get_by_label("Tool approval needed").rect();
     let question = h.get_by_label("Which output format?").rect();
     let composer = h.get_by_label("Message or /command").rect();
     assert!((approval.left() - question.left()).abs() < 1.0);
     assert!(approval.top() < question.top());
-    assert!(h.get_by_label("回答を送信").rect().bottom() < composer.top());
+    assert!(h.get_by_label("Send answer").rect().bottom() < composer.top());
     assert!(h.query_by_role(egui::accesskit::Role::Window).is_none());
 }
 
@@ -312,7 +312,7 @@ fn orchestrator_addressed_child_question_does_not_become_a_user_prompt() {
     ]);
     let mut ui = HeadlessWorkbench::new(state, [1100.0, 760.0]);
     ui.run();
-    assert!(!ui.has_label("回答を送信"));
+    assert!(!ui.has_label("Send answer"));
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn restored_question_is_visible_without_any_run_start_event() {
     assert!(!ui.has_label("Which output format?"));
     ui.state_mut().switch_thread(ThreadId::new("one")).unwrap();
     ui.run();
-    ui.click_label("回答を送信");
+    ui.click_label("Send answer");
     ui.run();
     assert!(ui.state().issued().iter().any(
         |c| matches!(c, WorkbenchCommand::AnswerUserQuestion { answer, .. } if answer == "JSON")

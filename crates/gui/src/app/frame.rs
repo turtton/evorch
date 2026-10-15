@@ -271,8 +271,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.prepare_escalation_thread(source_run_id, new_run_id);
                 }
             }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id, agent_name, ..
+            }) => {
                 self.open_subagent_pane(run_id);
+                if let Some(panel) = self
+                    .panels
+                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
+                    && !agent_name.trim().is_empty()
+                {
+                    panel.title = format!("Transcript: {agent_name}");
+                }
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));

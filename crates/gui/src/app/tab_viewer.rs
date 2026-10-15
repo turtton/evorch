@@ -181,34 +181,22 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 if panel.kind == PanelKind::SubagentRegion {
                     return format!("Subagents({})", self.subagent_count());
                 }
-                let owner = match panel.kind {
-                    PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_) => {
-                        panel.target.as_ref().and_then(|run| {
-                            self.sidebar
-                                .threads
-                                .iter()
-                                .find(|thread| thread.run_ids.contains(run))
-                        })
-                    }
-                    PanelKind::Agent
-                    | PanelKind::AgentTranscript
-                    | PanelKind::SubagentRegion
-                    | PanelKind::Sidebar
-                    | PanelKind::Agents
-                    | PanelKind::Notifications
-                    | PanelKind::FileViewer
-                    | PanelKind::Diff
-                    | PanelKind::Terminal
-                    | PanelKind::Tasks
-                    | PanelKind::Memory
-                    | PanelKind::Arena
-                    | PanelKind::Usage
-                    | PanelKind::ContextInspector
-                    | PanelKind::ShellJobs => None,
-                };
-                match owner {
-                    Some(thread) => format!("{} · {}", panel.title, thread.id),
-                    None => panel.title.clone(),
+                let agent = panel.target.as_deref().and_then(|run| {
+                    self.tasks
+                        .rows()
+                        .iter()
+                        .find(|row| row.run_id.to_string() == run)
+                        .map(|row| row.name.as_str())
+                        .filter(|name| !name.trim().is_empty())
+                });
+                // Subagent tabs only show beside their owner thread, so they need no
+                // thread suffix; they read by agent name once its run is known.
+                match (panel.kind, agent) {
+                    (
+                        PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_),
+                        Some(name),
+                    ) => format!("Transcript: {name}"),
+                    _ => panel.title.clone(),
                 }
             })
             .unwrap_or_else(|| tab.to_string());

@@ -101,7 +101,7 @@ fn displays_arguments_when_approval_arrives_before_tool_started() {
     harness.run_steps(3);
     // Then: 実行開始を待たずにイベントの引数要約を表示する。
     assert!(harness.query_by_label("pwd").is_some());
-    assert!(harness.query_by_label("引数情報なし").is_none());
+    assert!(harness.query_by_label("No arguments").is_none());
 }
 
 #[test]
@@ -153,13 +153,14 @@ fn displays_correlations_and_arguments_when_requests_are_pending() {
     for label in [
         "shell",
         "write",
-        "run-2 · call-1 · attempt 17",
-        "run-3 · call-1 · attempt 18",
+        "Attempt 17",
+        "Attempt 18",
         "pwd",
-        "引数情報なし",
+        "No arguments",
     ] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
+    assert_eq!(harness.query_all_by_label("Copy run ID").count(), 2);
     assert_eq!(harness.query_all_by_label("Approve").count(), 2);
     assert_eq!(harness.query_all_by_label("Reject").count(), 2);
     if let Ok(path) = std::env::var("APPROVALS_QA_CAPTURE") {
@@ -189,8 +190,9 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
     // When: 欠落情報を持つ行を描画する。
     harness.run_steps(3);
     // Then: 推測せずフォールバックを表示する。
-    assert!(harness.query_by_label("— · — · attempt —").is_some());
-    assert!(harness.query_by_label("引数情報なし").is_some());
+    assert!(harness.query_by_label("Copy run ID").is_none());
+    assert!(harness.query_by_label_contains("Attempt").is_none());
+    assert!(harness.query_by_label("No arguments").is_some());
     harness
         .state_mut()
         .apply_events([Event::new(ToolEvent::ApprovalResolved {
@@ -198,7 +200,7 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
             approved: false,
         })]);
     harness.run_steps(3);
-    assert!(harness.query_by_label("ツールの承認待ち").is_none());
+    assert!(harness.query_by_label("Tool approval needed").is_none());
     assert_eq!(harness.query_all_by_label("Approve").count(), 0);
 }
 
@@ -299,16 +301,8 @@ fn removes_only_resolved_row_when_resolution_arrives() {
             })]);
         harness.run_steps(3);
         // Then: B だけが消え、A は判断可能なまま残る。
-        assert!(
-            harness
-                .query_by_label("run-3 · call-1 · attempt 18")
-                .is_none()
-        );
-        assert!(
-            harness
-                .query_by_label("run-2 · call-1 · attempt 17")
-                .is_some()
-        );
+        assert!(harness.query_by_label("Attempt 18").is_none());
+        assert!(harness.query_by_label("Attempt 17").is_some());
         assert_eq!(harness.query_all_by_label("Approve").count(), 1);
         assert_eq!(harness.query_all_by_label("Reject").count(), 1);
     }
@@ -365,7 +359,7 @@ fn nested_subagent_approval_belongs_to_parent_conversation_not_selected_thread()
         "code must wrap within conversation: {code:?}, composer: {composer:?}"
     );
     assert!(h.get_by_label("Approve").rect().bottom() < composer.top());
-    assert!(h.query_by_label("run-12 · call · attempt 7").is_some());
+    assert!(h.query_by_label("Attempt 7").is_some());
     let rest = serde_json::to_string_pretty(
         &json!({"cwd": "/tmp/approval-test", "sandbox_access": "unsandboxed"}),
     )
