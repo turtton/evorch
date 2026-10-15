@@ -131,6 +131,19 @@ pub fn icon_button_rich(ui: &mut Ui, icon: RichText, label: &str) -> Response {
     labeled(ui.add(ghost(icon).min_size(egui::vec2(side, side))), label)
 }
 
+/// Copy icon button named `label`; hovering shows the full `value` and a
+/// click puts it on the clipboard, so abbreviated or hidden IDs stay usable.
+pub fn copy_id_button(ui: &mut Ui, label: &str, value: &str) -> Response {
+    let side = ROW_DENSE - SP_1;
+    let response = ui.add(ghost(icon_text(icons::COPY)).min_size(egui::vec2(side, side)));
+    accessible(&response, label);
+    let response = response.on_hover_text(format!("{label}\n{value}"));
+    if response.clicked() {
+        ui.ctx().copy_text(value.to_owned());
+    }
+    response
+}
+
 /// Icon + text ghost button keeping `text` as its accessible name.
 pub fn ghost_icon_button(ui: &mut Ui, icon: &str, text: &str) -> Response {
     let response = ui.add(ghost(RichText::new(icons::with_icon(icon, text))));

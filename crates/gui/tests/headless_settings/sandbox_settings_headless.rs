@@ -30,7 +30,7 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
     // When: disabling Web tools through the real checkbox and saving.
-    harness.click_label("Sandbox: auto");
+    harness.click_label("Sandbox: auto review");
     harness.run();
     harness.click_label("Enable web tools");
     harness.run();
@@ -155,15 +155,15 @@ fn chatbox_sandbox_button_opens_restored_modal() {
     harness.run();
     assert!(!harness.has_label("Enable web tools"));
     // When: opening settings from the chatbox.
-    harness.click_label("Sandbox: auto");
+    harness.click_label("Sandbox: auto review");
     harness.run();
     // Then: the modal exposes all sandbox settings.
     for label in [
         "Enable web tools",
-        "審査で拒否された場合はユーザー承認へ昇格",
-        "auto",
-        "user",
-        "off",
+        "Ask me when auto review denies a request",
+        "auto review",
+        "ask me",
+        "always deny",
     ] {
         assert!(harness.has_label(label), "missing control: {label}");
     }
@@ -210,9 +210,9 @@ fn modal_escalation_change_applies_live_when_saved() {
     let dir = tempfile::tempdir().expect("temp");
     let (mut harness, runtime) = escalation_fixture(dir.path(), config::SandboxConfig::default());
     // When: changing approval and deny escalation in the modal, then saving.
-    harness.click_label("user");
+    harness.click_label("ask me");
     harness.run();
-    harness.click_label("審査で拒否された場合はユーザー承認へ昇格");
+    harness.click_label("Ask me when auto review denies a request");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();

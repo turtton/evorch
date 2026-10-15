@@ -104,7 +104,8 @@ fn agent_focus_header_keeps_identity_label_and_return_button() {
         harness.state().focus(),
         &ConversationFocus::Agent("run-2".into())
     );
-    assert!(harness.has_label("run-2 / implementer / worker"));
+    assert!(harness.has_label("implementer / worker"));
+    assert!(harness.has_label("Copy run ID"));
 
     harness.click_label("← Thread");
     harness.run();

@@ -75,17 +75,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
                 ui.label(h3("Sandbox"));
                 ui.add_enabled_ui(!busy, |ui| {
-                    ui.label("エスカレーション審査");
+                    ui.label("Requests to run commands or access files outside the sandbox");
                     ui.horizontal(|ui| {
-                        for (mode, label) in [
-                            (config::EscalationApproval::Auto, "auto"),
-                            (config::EscalationApproval::User, "user"),
-                            (config::EscalationApproval::Off, "off"),
+                        for mode in [
+                            config::EscalationApproval::Auto,
+                            config::EscalationApproval::User,
+                            config::EscalationApproval::Off,
                         ] {
-                            ui.radio_value(&mut self.sandbox_settings.draft.escalation_approval, mode, label);
+                            let (label, explanation) = crate::panes::composer::sandbox_mode(
+                                mode,
+                                self.sandbox_settings.draft.escalate_to_user_on_deny,
+                            );
+                            ui.radio_value(&mut self.sandbox_settings.draft.escalation_approval, mode, label)
+                                .on_hover_text(explanation);
                         }
                     });
-                    ui.checkbox(&mut self.sandbox_settings.draft.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
+                    ui.checkbox(&mut self.sandbox_settings.draft.escalate_to_user_on_deny, "Ask me when auto review denies a request");
                     ui.separator();
                     ui.checkbox(&mut self.sandbox_settings.draft.web_tools_enabled, "Enable web tools");
                     ui.label(muted("Enabled tools follow each role's tool visibility. Search runs automatically; fetch requests are reviewed using their arguments."));

@@ -6,7 +6,7 @@ use workspace_ui::ThreadRunPhase;
 use crate::model::composer::ComposerModel;
 use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
-use crate::panes::composer::{ComposerAction, composer_strip};
+use crate::panes::composer::ComposerAction;
 use crate::panes::sidebar::SidebarAction;
 use crate::theme::icons::{self, with_icon};
 use crate::theme::text::medium;
@@ -17,8 +17,9 @@ mod goal;
 pub use goal::GoalAction;
 mod branch;
 pub use branch::BranchContext;
+mod composer_panel;
 mod header;
-use header::{header_strip, status_strip};
+use header::header_strip;
 mod sandbox_review;
 mod thinking;
 
@@ -88,69 +89,14 @@ pub fn agent_pane_with_repo_root(
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
-        let composer_id = ui.id().with("composer-height");
-        let previous_height = ui
-            .data(|data| data.get_temp::<f32>(composer_id))
-            .unwrap_or(COMPOSER_MIN_HEIGHT);
-        let lines = composer.input.split('\n').count().max(1);
-        let line_height = ui.text_style_height(&egui::TextStyle::Body);
-        let input_height = (lines as f32 * line_height + 2.0 * SP_2)
-            .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
-        let extra = input_height - (COMPOSER_MIN_HEIGHT - 2.0 * SP_2);
-        let previous_extra = ui.data(|data| {
-            data.get_temp::<f32>(composer_id.with("lines"))
-                .unwrap_or(0.0)
-        });
-        // Carry forward the measured chrome/attachments, but replace the old
-        // input height so deleting lines shrinks the composer too.
-        let composer_height = (previous_height - previous_extra + extra)
-            .max(COMPOSER_MIN_HEIGHT)
-            .min((ui.available_height() - ROW_COMPACT).max(COMPOSER_MIN_HEIGHT));
-        ui.data_mut(|data| data.insert_temp(composer_id.with("lines"), extra));
-        egui::Panel::bottom(ui.id().with("composer"))
-            .exact_size(composer_height)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                let strip = ui.scope(|ui| {
-                    let vertical_spacing = ui.spacing().item_spacing.y;
-                    if ctx.goal.is_some() || ctx.todo.is_some() {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        if let Some(goal_action) = goal::progress_strip(ui, ctx.goal, ctx.todo) {
-                            action = Some(AgentPaneAction::Goal(goal_action));
-                        }
-                    }
-                    let result = ui
-                        .push_id("composer-strip", |ui| {
-                            composer_strip(
-                                ui,
-                                composer,
-                                ctx.model_picker,
-                                picker_state,
-                                ctx.phase,
-                                ctx.sandbox_picker,
-                            )
-                        })
-                        .inner;
-                    ui.spacing_mut().item_spacing.y = vertical_spacing;
-                    status_strip(ui, &ctx);
-                    result
-                });
-                let height = strip.response.rect.height();
-                ui.data_mut(|data| data.insert_temp(composer_id, height));
-                if (height - composer_height).abs() > 0.5 {
-                    ui.ctx().request_repaint();
-                }
-                if let Some(composer_action) = strip.inner {
-                    action = Some(match composer_action {
-                        ComposerAction::ModelPreference(preference) => {
-                            AgentPaneAction::ModelPreference(preference)
-                        }
-                        other => AgentPaneAction::Composer(other),
-                    });
-                }
-            });
+        composer_panel::composer_panel(
+            ui,
+            &ctx,
+            composer,
+            picker_state,
+            identity.is_some(),
+            &mut action,
+        );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {

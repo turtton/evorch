@@ -151,11 +151,7 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
         fixture.workbench.state().focus(),
         &ConversationFocus::Agent("run-2".into())
     );
-    assert!(
-        fixture
-            .workbench
-            .has_label("run-2 / reviewer-two / reviewer")
-    );
+    assert!(fixture.workbench.has_label("reviewer-two / reviewer"));
     assert!(
         fixture.workbench.count_labels("review-two") >= 1,
         "run-2 transcript should show its current tool"

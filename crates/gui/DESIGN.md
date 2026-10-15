@@ -43,6 +43,17 @@ is being read, then leave with the card's bottom edge. The original title button
 and shell-log action retain their identities; collapsed/running calls do not
 stick. Collapsing a pinned call reveals its normal title position without an
 animation. Output continues to use the transcript's single vertical scroll area.
+The composer panel is sized from measured parts every frame. The input grows
+with wrapped rows up to COMPOSER_MAX_HEIGHT before expanded goal/procedure
+details, which shrink to a scroll viewport of at least ROW_DENSE; one
+transcript row stays visible. Only in-progress procedures use TEXT and a
+half-filled circle; pending (circle) and completed (check) use TEXT_MUTED.
+The sandbox button shows a shield and the escalation mode (auto review, ask me,
+always deny), explained on hover. Stop halts the current run; a stopped run with
+live subagents shows Stop all for the subtree. Both tooltips name the scope.
+Self-improvement drafts settings sit in the ⚙ menu, not the composer.
+The thread header shows `Total cost (incl. subagents)`; the status strip cost
+covers the main agent only and says so on hover. Wall time uses format::duration.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
@@ -58,6 +69,8 @@ Never request external focus or activate a browser target from the UI.
 ## 7. Accessibility
 Label every input, retain keyboard focus, and never use color as the only status.
 No motion is introduced. Long IDs must remain inspectable without clipping.
+Agent headers title `name / role`; the run ID sits behind a Copy run ID button
+that shows the full ID on hover.
 The ownership header abbreviates owner IDs to five characters plus `…`, with the
 full ID, generation and state on hover. Access retains the last confirmed state
 (or `checking ownership` initially) while probes retry. SQLite contention gets a

@@ -355,7 +355,7 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
     );
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
     gui.run();
-    gui.click_label("↳ 子 thread: Orchestrator · Worker task");
+    gui.click_label("↳ Child thread: Orchestrator · Worker task");
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,
@@ -367,7 +367,7 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
         gui.state().composer().role,
         gui::model::composer::ComposerRole::Orchestrator
     );
-    gui.click_label("← 親 thread: Worker task");
+    gui.click_label("← Parent thread: Worker task");
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,

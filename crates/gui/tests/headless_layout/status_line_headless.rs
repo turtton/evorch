@@ -78,7 +78,7 @@ fn status_line_renders_below_composer_with_metrics_order() {
     h.run_steps(4);
     // Then: the status dot precedes ordered metrics below the composer.
     let labels = [
-        "$0.125",
+        "$0.12",
         "cache 99% (avg 97%)",
         "TTFT —",
         "— tok/s",
@@ -106,7 +106,7 @@ fn running_phase_shows_spinner_without_badge_text() {
     h.run_steps(4);
     // Then: the spinner is at the left of the status row with no running text.
     assert!(h.query_by_label("running").is_none());
-    let cost = h.get_by_label("$0.125").rect();
+    let cost = h.get_by_label("$0.12").rect();
     assert!(h.get_by_label("TTFT 240ms (avg 400ms)").rect().left() > cost.right());
     assert!(
         h.get_by_label("40.0 tok/s (avg 35.0 tok/s)").rect().left()
@@ -126,8 +126,12 @@ fn header_shows_thread_total_below_title() {
     h.run_steps(4);
     // Then: the family total is below the title; the composer shows only the main cost.
     let title = h.get_by_label("Thread: Status test").rect();
-    let total = h.get_by_label("Total cost $0.225").rect();
-    let main = h.get_by_label("$0.125").rect();
+    let total = h.get_by_label("Total cost (incl. subagents) $0.23").rect();
+    let main = h.get_by_label("$0.12").rect();
     assert!(total.top() >= title.bottom());
     assert!(main.top() > h.get_by_label("Message or /command").rect().bottom());
+    // The two figures name their different scopes.
+    h.get_by_label("$0.12").hover();
+    h.run_steps(4);
+    h.get_by_label("Main agent cost (excludes subagents): $0.12");
 }

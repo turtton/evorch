@@ -105,7 +105,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_status = None;
         }
         let mut open = true;
-        egui::Window::new("実行の診断")
+        egui::Window::new("Run diagnostics")
             .id(egui::Id::new("restore-diagnostics"))
             .open(&mut open)
             .show(ctx, |ui| {

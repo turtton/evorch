@@ -50,20 +50,39 @@ enum Detail {
     Procedures,
 }
 
+/// Tallest the expanded goal/procedure details grow before scrolling.
+const DETAILS_MAX_HEIGHT: f32 = 180.0;
+
+#[derive(Debug, Default)]
+pub(super) struct BandOutput {
+    pub action: Option<GoalAction>,
+    /// Height the details viewport occupied this frame (0 when collapsed).
+    pub details_viewport: f32,
+    /// Height the details want, capped at [`DETAILS_MAX_HEIGHT`].
+    pub details_wanted: f32,
+}
+
 /// Goal controls and optional procedure tracking share one inset composer band.
+/// Expanded details scroll within `details_max` so the composer input below
+/// keeps its room.
 pub(super) fn progress_strip(
     ui: &mut egui::Ui,
     goal: Option<&ThreadGoalSnapshot>,
     todo: Option<&event_bus::ThreadTodoSnapshot>,
-) -> Option<GoalAction> {
-    let thread = goal
+    details_max: f32,
+) -> BandOutput {
+    let mut output = BandOutput::default();
+    let Some(thread) = goal
         .map(|goal| goal.thread_id.as_str())
-        .or_else(|| todo.map(|todo| todo.thread_id.as_str()))?;
+        .or_else(|| todo.map(|todo| todo.thread_id.as_str()))
+    else {
+        return output;
+    };
     let expanded_id = ui.id().with(("progress-details", thread));
     let todo = todo.filter(|todo| !todo.items.is_empty());
     if goal.is_none() && todo.is_none() {
         ui.data_mut(|data| data.remove::<Detail>(expanded_id));
-        return None;
+        return output;
     }
     let mut expanded = ui.data(|data| data.get_temp::<Detail>(expanded_id));
     if matches!(expanded, Some(Detail::Goal)) && goal.is_none()
@@ -71,7 +90,6 @@ pub(super) fn progress_strip(
     {
         expanded = None;
     }
-    let mut action = None;
     ui.horizontal(|ui| {
         ui.add_space(SP_3);
         egui::Frame::new()
@@ -87,23 +105,26 @@ pub(super) fn progress_strip(
                 ui.set_width((ui.available_width() - SP_3).max(80.0));
                 ui.vertical(|ui| {
                     if let Some(goal) = goal {
-                        action = goal_row(ui, goal, &mut expanded);
+                        output.action = goal_row(ui, goal, &mut expanded);
                     }
                     if let Some(todo) = todo {
                         procedure_row(ui, todo, &mut expanded);
                     }
                     if let Some(detail) = expanded {
                         ui.separator();
-                        egui::ScrollArea::vertical()
+                        let height = details_max.clamp(ROW_DENSE, DETAILS_MAX_HEIGHT);
+                        let details = egui::ScrollArea::vertical()
                             .id_salt(("progress-scroll", thread, detail))
-                            .min_scrolled_height(180.0)
-                            .max_height(180.0)
+                            .min_scrolled_height(height)
+                            .max_height(height)
                             .show(ui, |ui| match detail {
                                 Detail::Goal => goal_details(ui, goal.expect("visible goal")),
                                 Detail::Procedures => {
                                     procedure_details(ui, todo.expect("visible procedures"))
                                 }
                             });
+                        output.details_viewport = details.inner_rect.height();
+                        output.details_wanted = details.content_size.y.min(DETAILS_MAX_HEIGHT);
                     }
                 });
             });
@@ -115,7 +136,7 @@ pub(super) fn progress_strip(
             data.remove::<Detail>(expanded_id);
         }
     });
-    action
+    output
 }
 
 fn details_button(ui: &mut egui::Ui, expanded: &mut Option<Detail>, detail: Detail, subject: &str) {
@@ -278,6 +299,7 @@ fn procedure_row(
     let text = current
         .map(|item| item.content.as_str())
         .unwrap_or("All procedures completed");
+    let title_color = current.map_or(palette().TEXT_MUTED, |item| procedure_status(item.status).2);
     let accessible_text = if active > 1 {
         format!("{text} · +{} in progress", active - 1)
     } else {
@@ -292,7 +314,7 @@ fn procedure_row(
             )
         } else if active > 0 {
             (
-                icons::CIRCLE,
+                icons::CIRCLE_HALF,
                 "Procedures in progress (stored status)",
                 palette().ACCENT_FG,
             )
@@ -327,7 +349,7 @@ fn procedure_row(
             );
             let response = ui.add_sized(
                 [ui.available_width().max(0.0), ROW_DENSE - SP_1],
-                egui::Label::new(text).truncate(),
+                egui::Label::new(egui::RichText::new(text).color(title_color)).truncate(),
             );
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
@@ -341,20 +363,28 @@ fn procedure_row(
     });
 }
 
-fn procedure_details(ui: &mut egui::Ui, todo: &event_bus::ThreadTodoSnapshot) {
+/// Icon, status text and color of one procedure; only in-progress work reads
+/// as normal text so the current step stands out from pending and done ones.
+fn procedure_status(
+    status: event_bus::ThreadTodoStatus,
+) -> (&'static str, &'static str, egui::Color32) {
     use event_bus::ThreadTodoStatus;
+    match status {
+        ThreadTodoStatus::Pending => (icons::CIRCLE, "Pending", palette().TEXT_MUTED),
+        ThreadTodoStatus::InProgress => (icons::CIRCLE_HALF, "In progress", palette().TEXT),
+        ThreadTodoStatus::Completed => (icons::CHECK_CIRCLE, "Completed", palette().TEXT_MUTED),
+    }
+}
+
+fn procedure_details(ui: &mut egui::Ui, todo: &event_bus::ThreadTodoSnapshot) {
     for item in &todo.items {
-        let (icon, status) = match item.status {
-            ThreadTodoStatus::Pending => (icons::CIRCLE, "Pending"),
-            ThreadTodoStatus::InProgress => (icons::CIRCLE, "In progress"),
-            ThreadTodoStatus::Completed => (icons::CHECK_CIRCLE, "Completed"),
-        };
+        let (icon, status, color) = procedure_status(item.status);
         ui.horizontal_top(|ui| {
-            let response = ui.label(icon);
+            let response = ui.label(egui::RichText::new(icon).color(color));
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status));
             ui.vertical(|ui| {
-                ui.label(&item.content);
+                ui.label(egui::RichText::new(&item.content).color(color));
                 ui.label(
                     egui::RichText::new(status)
                         .size(FONT_SMALL)

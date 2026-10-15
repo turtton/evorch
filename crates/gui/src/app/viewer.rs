@@ -124,6 +124,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let tab_style = dock_style.tab.clone();
         let sandbox_picker = crate::panes::composer::SandboxPickerContext {
             mode: self.sandbox_settings.config.escalation_approval,
+            escalate_to_user_on_deny: self.sandbox_settings.config.escalate_to_user_on_deny,
             enabled: !self.settings_save_in_progress(),
         };
         {
@@ -322,9 +323,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Discard => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
-                ComposerAction::OpenSelfImprovementSettings => {
-                    self.open_self_improvement_settings()
-                }
                 ComposerAction::Complete(item) => self.composer.apply_completion(&item),
                 ComposerAction::ToggleRole => self.composer.toggle_role(),
             }
