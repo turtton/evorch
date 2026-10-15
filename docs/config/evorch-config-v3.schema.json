@@ -907,11 +907,11 @@
       "type": "object",
       "properties": {
         "max_review_rounds": {
-          "description": "レビュー (request-update → repair) ラウンド数の上限。",
+          "description": "thread goal の独立レビューのラウンド数の上限。上限に達した goal は Blocked になる。\n\n新しく作る goal から適用し、作成済みの goal の上限は変えない。",
           "type": "integer",
           "format": "uint32",
           "default": 3,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false

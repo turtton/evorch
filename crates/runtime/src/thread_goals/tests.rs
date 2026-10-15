@@ -327,6 +327,38 @@ async fn review_findings_repair_in_original_run_and_retry_to_completion() {
 }
 
 #[tokio::test]
+async fn configured_review_round_limit_is_snapshotted_and_blocks_at_that_limit() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut root_steps = vec![
+        Step::Create,
+        Step::Hold(started.clone(), release.clone()),
+        Step::Check(true),
+        Step::Stop,
+    ];
+    for _ in 0..5 {
+        root_steps.extend([Step::Stop, Step::Check(true), Step::Stop]);
+    }
+    let (runtime, _, _) = harness(root_steps, vec![Step::Review(false); 5]);
+    let mut config = config::Config::default();
+    config.orchestration.max_review_rounds = std::num::NonZeroU32::new(5).unwrap();
+    let runtime = runtime.with_model_resolution(&config, None);
+    let root = start(&runtime, Role::Worker, false);
+    started.notified().await;
+    let goal = runtime.thread_goal("thread").unwrap();
+    assert_eq!(goal.max_review_rounds, 5);
+    runtime
+        .set_goal_review("thread", &goal.goal_id, true)
+        .unwrap();
+    release.notify_one();
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+    let goal = runtime.thread_goal("thread").unwrap();
+    assert_eq!(goal.phase, ThreadGoalPhase::Blocked);
+    assert_eq!(goal.review_round, 5);
+    assert_eq!(goal.max_review_rounds, 5);
+}
+
+#[tokio::test]
 async fn pause_keeps_work_alive_survives_user_input_and_resume_checks_idle() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
