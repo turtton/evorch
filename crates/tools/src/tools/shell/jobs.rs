@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
 use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
-use crate::{Progress, ShellJobSummary, ToolError, ToolExecutionContext, ToolResult};
+use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 
 #[cfg(test)]
 mod handle_tests;
@@ -55,7 +55,6 @@ pub(super) struct ControlArgs {
 }
 
 pub(super) struct JobLaunch {
-    pub command: String,
     pub wrapped: WrappedCommand,
     pub interactive: bool,
     pub timeout_ms: Option<u64>,
@@ -104,7 +103,6 @@ struct Input {
 struct Job {
     id: String,
     handle: String,
-    command: String,
     owner: String,
     call_id: Option<String>,
     thread: Option<String>,
@@ -156,7 +154,6 @@ impl JobRegistry {
         launch: JobLaunch,
     ) -> Result<ToolResult, ToolError> {
         let JobLaunch {
-            command,
             wrapped,
             interactive,
             timeout_ms,
@@ -205,7 +202,6 @@ impl JobRegistry {
             let job = Arc::new(Job {
                 id: uuid::Uuid::new_v4().to_string(),
                 handle,
-                command,
                 owner: ctx.run_id.clone(),
                 call_id: ctx.call_id.clone(),
                 thread: ctx.thread_id.clone(),
@@ -459,23 +455,6 @@ impl JobRegistry {
             .values()
             .any(|job| job.owner == run_id && job.running())
     }
-    pub(super) fn running_shell_job_summary(&self, run_id: &str) -> Option<ShellJobSummary> {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .filter(|job| job.owner == run_id && job.running())
-            .min_by_key(|job| {
-                job.handle[4..]
-                    .parse::<u64>()
-                    .expect("allocated shell handle")
-            })
-            .map(|job| ShellJobSummary {
-                handle: job.handle.clone(),
-                command_summary: command_summary(&job.command),
-            })
-    }
-
     pub(super) fn unobserved(&self, run_id: &str) -> bool {
         self.jobs
             .lock()
@@ -514,18 +493,6 @@ impl JobRegistry {
         notices.sort_by(|a, b| a.0.cmp(&b.0));
         notices.into_iter().map(|(_, notice)| notice).collect()
     }
-}
-
-fn command_summary(command: &str) -> String {
-    let mut summary = command.replace(['\r', '\n'], " ");
-    let mut chars = summary.char_indices();
-    if let Some((end, _)) = chars.nth(79)
-        && chars.next().is_some()
-    {
-        summary.truncate(end);
-        summary.push('…');
-    }
-    summary
 }
 
 fn invalid(detail: &str) -> ToolError {

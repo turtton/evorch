@@ -35,6 +35,7 @@ isolated workspace は「委譲した run ごとに runtime が git worktree を
 ### ワークスペース snapshot、ロック、`/undo` / `/redo` を廃止する
 
 - 書き込み系のツール呼び出しの前に snapshot を撮る処理と、それに伴うプロジェクトルート単位のロックを削除する。shell はロックを待たなくなる。
+- 同じ run の中で shell ジョブが動いている間に書き込み系のツール呼び出しを拒否していた処理（"A shell job still owns this workspace"）も、2026-10-15 にユーザーの判断で削除した。書き込み系のツールは、自分の run のジョブの実行中でもそのまま実行される。
 - `/undo` / `/redo` コマンド、`restore_snapshot`、`SnapshotService` と snapshot の履歴、`SnapshotStore` の run 単位の記録と復元、ロックの持ち主を伝えるイベント（`WorkspaceLockHolder` / `WorkspaceWait`）と GUI の待ち表示を削除する。
 - 巻き戻しは git で行う（commit、ブランチ、worktree の破棄）。
 - `SnapshotStore` のうち、ワークスペース全体の記録・復元・差分（`capture_all` / `restore_all` / `diff`）は benchmark の記録と再生（`crates/evorch/src/benchmark/`）が使っているので残す。

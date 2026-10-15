@@ -262,9 +262,8 @@ async fn failed_terminal_snapshot_keeps_unobserved_handles_and_prior_uncertainty
     drop(call);
 }
 
-// Deliberately uses Tool's default summary hook while forwarding occupancy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn absent_summary_still_blocks_mutation_but_allows_reads_and_all_continuations() {
+async fn running_job_allows_mutation_reads_and_all_continuations() {
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let (started, _draining) = mpsc::unbounded_channel();
@@ -295,17 +294,19 @@ async fn absent_summary_still_blocks_mutation_but_allows_reads_and_all_continuat
     let job = call.job("start");
     assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
     assert!(executor.has_running_shell_jobs(&run.to_string()));
-    assert_eq!(executor.running_shell_job_summary(&run.to_string()), None);
     call.respond(tool_response(
-        "blocked",
         "write",
-        json!({"path":root.join("README.md"), "content":"blocked"}),
+        "write",
+        json!({"path":root.join("README.md"), "content":"written"}),
     ));
     let call = next(&mut calls).await;
-    assert!(call.result("blocked").1);
-    assert!(call.result("blocked").0.contains(
-        "A shell job still owns this workspace. Poll or stop it before another mutation."
-    ));
+    let (result, error) = call.result("write");
+    assert!(!error, "{result}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "written"
+    );
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
     call.respond(tool_response(
         "read",
         "read",
@@ -324,7 +325,6 @@ async fn absent_summary_still_blocks_mutation_but_allows_reads_and_all_continuat
         call.respond(tool_response(action, "shell", input));
         call = next(&mut calls).await;
         assert_eq!(call.job(action), job);
-        assert!(!call.result(action).0.contains("owns this workspace"));
         if action == "stop" {
             assert_eq!(field(&call.result(action).0, "status: "), "cancelled");
         } else {

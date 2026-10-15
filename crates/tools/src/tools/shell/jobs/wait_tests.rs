@@ -12,7 +12,6 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
     let job = Arc::new(Job {
         id: "internal-job-id".into(),
         handle: "job-0".into(),
-        command: "read value".into(),
         owner: "owner".into(),
         call_id: None,
         thread: None,

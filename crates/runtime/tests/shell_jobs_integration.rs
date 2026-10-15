@@ -120,7 +120,7 @@ fn assert_pid_reaped(pid: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn yielded_job_allows_reads_and_rejects_same_run_mutation_until_observed() {
+async fn yielded_job_allows_reads_and_same_run_mutation_while_it_runs() {
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -138,25 +138,18 @@ async fn yielded_job_allows_reads_and_rejects_same_run_mutation_until_observed()
     assert!(!call.result("read").1);
     assert!(call.result("read").0.contains("# test"));
     call.respond(tool_response(
-        "blocked-write",
+        "write-during",
         "write",
-        json!({"path":"README.md", "content":"must not write"}),
+        json!({"path":"README.md", "content":"written while the job runs"}),
     ));
     let call = next(&mut calls).await;
-    assert!(call.result("blocked-write").1);
-    let summary = executor
-        .running_shell_job_summary(&run.to_string())
-        .unwrap();
-    assert_eq!(summary.handle, job);
-    assert!(summary.command_summary.starts_with("printf 'ready"));
-    assert!(call.result("blocked-write").0.contains(&format!(
-        "A shell job still owns this workspace: {} ({}). Poll or stop it before another mutation.",
-        job, summary.command_summary
-    )));
+    let (result, error) = call.result("write-during");
+    assert!(!error, "{result}");
     assert_eq!(
         std::fs::read_to_string(root.join("README.md")).unwrap(),
-        "# test\n"
+        "written while the job runs"
     );
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
     call.respond(tool_response(
         "input",
         "shell",
