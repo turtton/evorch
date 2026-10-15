@@ -80,6 +80,7 @@ pub fn role_settings_modal(
                                             existing: &model.route_names,
                                             efforts: &model.route_efforts,
                                             name: "Role route",
+                                            inherit_label: "Inherit default",
                                         },
                                     );
                                     let effective = effective_route(binding.head_route(), None, role_key);
@@ -109,6 +110,7 @@ pub fn role_settings_modal(
                                                         existing: &model.route_names,
                                                         efforts: &model.route_efforts,
                                                         name: &format!("{category} route"),
+                                                        inherit_label: "Inherit default",
                                                     },
                                                 );
                                                 let effective = effective_route(
@@ -142,6 +144,34 @@ pub fn role_settings_modal(
                                 });
                             });
                         }
+                        ui.push_id("compactor", |ui| {
+                            ui.collapsing(badge("Compactor (fallback)"), |ui| {
+                                let binding = &mut agents.roles.compactor;
+                                chain_editor(
+                                    ui,
+                                    &mut binding.models,
+                                    ChainChoices {
+                                        routes: &model.logical_models,
+                                        existing: &model.route_names,
+                                        efforts: &model.route_efforts,
+                                        name: "Compactor route",
+                                        inherit_label: "Use running role's chain",
+                                    },
+                                );
+                                if let Some(logical) = binding_status(
+                                    ui,
+                                    binding.head_route(),
+                                    &model.route_names,
+                                ) {
+                                    action = Some(RoleSettingsAction::CreateRoute(logical));
+                                }
+                                ui.add_enabled_ui(!binding.models.is_empty(), |ui| {
+                                    ui.collapsing(badge("Generation overrides"), |ui| {
+                                        generation(ui, &mut binding.generation)
+                                    });
+                                });
+                            });
+                        });
                     });
             });
             if let Some(error) = &model.error {
@@ -187,16 +217,17 @@ fn chain_editor(
         existing,
         efforts,
         name,
+        inherit_label,
     } = choices;
     let mut head = models.first().map(|entry| entry.route.clone());
     let can_inherit = models.len() <= 1;
     let label = ui.label(name);
     egui::ComboBox::from_id_salt(name)
         .width(ui.available_width())
-        .selected_text(head.as_deref().unwrap_or("Inherit default"))
+        .selected_text(head.as_deref().unwrap_or(inherit_label))
         .show_ui(ui, |ui| {
             if can_inherit {
-                ui.selectable_value(&mut head, None, "Inherit default");
+                ui.selectable_value(&mut head, None, inherit_label);
             }
             for route in routes {
                 ui.selectable_value(&mut head, Some(route.clone()), route);
@@ -279,6 +310,7 @@ struct ChainChoices<'a> {
     existing: &'a std::collections::BTreeSet<String>,
     efforts: &'a BTreeMap<String, Vec<String>>,
     name: &'a str,
+    inherit_label: &'a str,
 }
 
 /// The entry's reasoning-effort picker, shown when its route offers levels or one is set.

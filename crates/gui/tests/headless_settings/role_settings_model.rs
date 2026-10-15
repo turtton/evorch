@@ -25,6 +25,17 @@ fn seed_preserves_all_bindings_when_config_has_overrides() {
     // Given: role and category overrides, including additional roles.
     let mut config = config::Config::default();
     config.agents.roles.oracle.preset = Some("oracle-preset".into());
+    config.agents.roles.compactor = config::RoleBindingConfig {
+        models: vec![config::ChainEntryConfig::with_effort(
+            "summary-route",
+            "high",
+        )],
+        preset: Some("compactor-preset".into()),
+        generation: config::GenerationOverridesConfig {
+            max_tokens: Some(4096),
+            ..Default::default()
+        },
+    };
     config.agents.worker.categories.insert(
         "quick".into(),
         config::CategoryBindingConfig {
@@ -40,6 +51,54 @@ fn seed_preserves_all_bindings_when_config_has_overrides() {
     // Then: no override is lost or materialized.
     assert_eq!(editor.agents, config.agents);
     assert!(editor.validate().is_ok());
+    assert!(
+        editor
+            .logical_models
+            .iter()
+            .any(|name| name == "summary-route")
+    );
+}
+
+#[test]
+fn compactor_generation_validation_rejects_non_finite_and_out_of_range_values() {
+    for (field, generation) in [
+        (
+            "temperature",
+            config::GenerationOverridesConfig {
+                temperature: Some(f64::NAN),
+                ..Default::default()
+            },
+        ),
+        (
+            "temperature",
+            config::GenerationOverridesConfig {
+                temperature: Some(2.1),
+                ..Default::default()
+            },
+        ),
+        (
+            "top_p",
+            config::GenerationOverridesConfig {
+                top_p: Some(f64::INFINITY),
+                ..Default::default()
+            },
+        ),
+        (
+            "top_p",
+            config::GenerationOverridesConfig {
+                top_p: Some(-0.1),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let mut editor = RoleSettingsModel::default();
+        editor.agents.roles.compactor.generation = generation;
+        assert!(matches!(
+            editor.validate(),
+            Err(config::ConfigError::InvalidField { path, .. })
+                if path == format!("agents.roles.compactor.generation.{field}")
+        ));
+    }
 }
 
 #[test]
