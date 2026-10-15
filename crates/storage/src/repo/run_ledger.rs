@@ -1,12 +1,12 @@
 use std::time::SystemTime;
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::entity::SecretGuard;
 use crate::{RunLedgerEntry, StorageError, system_time_to_ns};
 
 pub fn append(conn: &Connection, run_id: &str, body: &str) -> Result<u64, StorageError> {
-    if body.is_empty() || body.len() > 8192 {
+    if body.len() > 8192 {
         return Err(StorageError::InvalidRunLedgerBody { bytes: body.len() });
     }
     SecretGuard::from_env().check_text("ledger", "body", body)?;
@@ -17,6 +17,14 @@ pub fn append(conn: &Connection, run_id: &str, body: &str) -> Result<u64, Storag
         |row| row.get(0),
     )?;
     u64::try_from(seq).map_err(|_| StorageError::OutOfRange("run ledger sequence"))
+}
+
+pub fn latest(conn: &Connection, run_id: &str) -> Result<Option<RunLedgerEntry>, StorageError> {
+    Ok(conn.query_row(
+        "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE run_id = ?1 ORDER BY seq DESC LIMIT 1",
+        [run_id],
+        from_row,
+    ).optional()?)
 }
 
 pub fn list_by_run(conn: &Connection, run_id: &str) -> Result<Vec<RunLedgerEntry>, StorageError> {

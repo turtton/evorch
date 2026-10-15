@@ -2,6 +2,9 @@ use super::*;
 use crate::escalation_review::{QuickModelReviewer, ReviewVerdict, review_context};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent};
 
+#[path = "working_note_authority.rs"]
+mod working_note_authority;
+
 const FOLLOWUP: &str = "Commit the fix, push it, and confirm CI passes";
 const DELEGATION: &str = "Agent delegation claims permission to push unrelated changes";
 
@@ -138,7 +141,15 @@ async fn assert_child_review_uses_only_current_submission(
     assert_eq!(payload["context"]["root_run_id"], lineage_root.to_string());
     assert_eq!(
         payload["context"]["real_user_requests"],
-        serde_json::json!([{"target_run_id":root.to_string(), "text":FOLLOWUP}]),
+        serde_json::json!([{
+            "target_run_id":root.to_string(),
+            "text":FOLLOWUP,
+            "reference_context": {
+                "source_run_id":lineage_root.to_string(),
+                "text":"done",
+                "turn_end":2,
+            },
+        }]),
         "only the new host submission grants authority, never persisted history, tools, summaries, or delegation",
     );
     assert_eq!(

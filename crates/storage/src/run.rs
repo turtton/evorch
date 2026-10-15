@@ -1,6 +1,6 @@
-//! Persisted run ledger entries and terminal context snapshots.
+//! Persisted working note revisions and terminal context snapshots.
 
-/// An immutable entry in the globally sequenced run ledger.
+/// An immutable complete working note revision; an empty body explicitly clears it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunLedgerEntry {
     pub seq: u64,

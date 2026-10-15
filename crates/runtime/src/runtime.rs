@@ -186,6 +186,35 @@ pub(crate) struct ReviewSeed {
 pub struct PendingReference {
     pub token: u64,
     pub context: String,
+    pub reference_id: String,
+    pub source_run_id: String,
+    pub turn_end: usize,
+    storage: ReferenceStorage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceStorage {
+    Ephemeral { created_at_ns: i64 },
+    Durable,
+}
+
+impl PendingReference {
+    fn evidence_context(&self) -> crate::escalation_review::ReferenceContext {
+        crate::escalation_review::ReferenceContext {
+            text: self.context.clone(),
+            source_run_id: self.source_run_id.clone(),
+            turn_end: self.turn_end,
+        }
+    }
+
+    fn annotate(&self, row: &mut storage::ReviewEvidenceRow) {
+        use sha2::{Digest, Sha256};
+        row.reference_kind = Some("assistant_turn".into());
+        let reference =
+            serde_json::to_string(&self.evidence_context()).expect("reference serializes");
+        row.id = format!("{:x}", Sha256::digest(format!("{}|{reference}", row.id)));
+        row.reference_context = Some(reference);
+    }
 }
 
 struct RunEntry {
@@ -233,6 +262,15 @@ impl AgentRuntime {
         run_id: RunId,
         context: String,
     ) -> Result<u64, RuntimeError> {
+        self.capture_pending_reference_at(run_id, context, 0)
+    }
+
+    pub(crate) fn capture_pending_reference_at(
+        &self,
+        run_id: RunId,
+        context: String,
+        turn_end: usize,
+    ) -> Result<u64, RuntimeError> {
         let entry = self.entry(run_id)?;
         let mut pending = entry
             .pending_reference
@@ -242,8 +280,97 @@ impl AgentRuntime {
             .shared
             .next_reference_token
             .fetch_add(1, Ordering::Relaxed);
-        *pending = Some(PendingReference { token, context });
+        let created_at_ns = crate::run_store::review_time_ns();
+        let reference_id = format!("assistant:{run_id}:{created_at_ns}:{token}");
+        let store = self.shared.run_store.get();
+        if let Some(store) = store {
+            let saved = (|| {
+                if let Some(previous) = pending.as_ref()
+                    && store
+                        .handle
+                        .assistant_reference(&previous.reference_id)?
+                        .is_some_and(|row| !row.consumed)
+                {
+                    store
+                        .handle
+                        .append_review_evidence_with_reference_consumption(
+                            &[],
+                            &[],
+                            Some(&previous.reference_id),
+                        )?;
+                }
+                store
+                    .handle
+                    .save_assistant_reference(&storage::AssistantReferenceRow {
+                        reference_id: reference_id.clone(),
+                        source_run_id: run_id.to_string(),
+                        turn_end,
+                        text: context.clone(),
+                        consumed: false,
+                        created_at_ns,
+                    })
+            })();
+            if let Err(error) = saved {
+                *pending = None;
+                drop(pending);
+                drop(entry);
+                if let Some(review) = self
+                    .shared
+                    .review_runs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&run_id)
+                {
+                    review.mark_unsynced();
+                }
+                return Err(Self::review_error(run_id, error));
+            }
+        }
+        *pending = Some(PendingReference {
+            token,
+            context,
+            reference_id,
+            source_run_id: run_id.to_string(),
+            turn_end,
+            storage: if store.is_some() {
+                ReferenceStorage::Durable
+            } else {
+                ReferenceStorage::Ephemeral { created_at_ns }
+            },
+        });
         Ok(token)
+    }
+
+    fn resolve_pending_reference(
+        &self,
+        id: Option<&str>,
+    ) -> Result<Option<PendingReference>, RuntimeError> {
+        let (Some(id), Some(store)) = (id, self.shared.run_store.get()) else {
+            return Ok(None);
+        };
+        let row =
+            store
+                .handle
+                .assistant_reference(id)
+                .map_err(|error| RuntimeError::ReviewEvidence {
+                    run_id: id.into(),
+                    reason: error.to_string(),
+                })?;
+        let row = row.ok_or_else(|| RuntimeError::ReviewEvidence {
+            run_id: id.into(),
+            reason: "assistant reference is missing".into(),
+        })?;
+        Ok((!row.consumed).then(|| PendingReference {
+            token: self
+                .shared
+                .next_reference_token
+                .fetch_add(1, Ordering::Relaxed),
+            context: row.text,
+            reference_id: row.reference_id,
+            source_run_id: row.source_run_id,
+            turn_end: row.turn_end,
+            storage: ReferenceStorage::Durable,
+        }))
     }
 
     /// A mismatching token leaves the newer reference unconsumed.
@@ -262,6 +389,20 @@ impl AgentRuntime {
                 .as_ref()
                 .is_some_and(|pending| pending.token == token)
             {
+                if let Some(store) = self.shared.run_store.get() {
+                    let id = &pending.as_ref().expect("matched token").reference_id;
+                    if store
+                        .handle
+                        .assistant_reference(id)
+                        .map_err(|error| Self::review_error(run_id, error))?
+                        .is_some_and(|row| !row.consumed)
+                    {
+                        store
+                            .handle
+                            .append_review_evidence_with_reference_consumption(&[], &[], Some(id))
+                            .map_err(|error| Self::review_error(run_id, error))?;
+                    }
+                }
                 pending.take()
             } else {
                 None
@@ -282,6 +423,36 @@ impl AgentRuntime {
     }
 
     /// Materialize under the map fence and reuse an existing lineage's shared Arc.
+    /// Promote a runtime-only capture before referring to it from durable state.
+    pub(crate) fn persist_pending_reference(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<PendingReference>, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        let mut pending = entry
+            .pending_reference
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let (Some(reference), Some(store)) = (pending.as_mut(), self.shared.run_store.get())
+            && let ReferenceStorage::Ephemeral { created_at_ns } = reference.storage
+        {
+            store
+                .handle
+                .save_assistant_reference(&storage::AssistantReferenceRow {
+                    reference_id: reference.reference_id.clone(),
+                    source_run_id: reference.source_run_id.clone(),
+                    turn_end: reference.turn_end,
+                    text: reference.context.clone(),
+                    consumed: false,
+                    created_at_ns,
+                })
+                .map_err(|error| Self::review_error(run_id, error))?;
+            // A later evidence failure must not make this row eligible for recreation.
+            reference.storage = ReferenceStorage::Durable;
+        }
+        Ok(pending.clone())
+    }
+
     fn materialize_review_locked(
         &self,
         store: &crate::RunStore,
@@ -319,7 +490,7 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         text: &str,
-        reference: Option<crate::escalation_review::ReferenceContext>,
+        reference: Option<&PendingReference>,
     ) -> Result<(), RuntimeError> {
         let store = self
             .shared
@@ -348,7 +519,7 @@ impl AgentRuntime {
         if let Some(reference) = reference {
             row.reference_kind = Some("assistant_turn".into());
             row.reference_context = Some(
-                serde_json::to_string(&reference)
+                serde_json::to_string(&reference.evidence_context())
                     .map_err(|error| Self::review_error(run_id, error))?,
             );
         }
@@ -364,7 +535,11 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         store
             .handle
-            .record_review_evidence(std::slice::from_ref(&row))
+            .append_review_evidence_with_reference_consumption(
+                std::slice::from_ref(&row),
+                &[],
+                reference.map(|pending| pending.reference_id.as_str()),
+            )
             .map_err(|error| Self::review_error(run_id, error))?;
         shared.add_request(crate::run_store::request_from_evidence(row));
         Ok(())
@@ -1028,7 +1203,7 @@ impl AgentRuntime {
                 (Some(handoff), restored)
             }
             RunContinuation::Restored(restored) => (None, Some(restored)),
-            RunContinuation::Resume { restored, handoff } => (handoff, Some(restored)),
+            RunContinuation::Resume { restored, handoff } => (handoff, Some(*restored)),
         };
         if config.budget == crate::budget_tracker::BudgetSettings::default()
             && let Some(budget) = self.shared.budget.get()
@@ -1158,6 +1333,21 @@ impl AgentRuntime {
         let phase_tx_entry = phase_tx.clone();
         let mailbox = Arc::new(RunMailbox::new());
         let mailbox_version_rx = mailbox.subscribe_version();
+        let pending_reference_id = restored
+            .as_ref()
+            .and_then(|state| state.pending_reference_id.as_deref())
+            .or_else(|| {
+                handoff
+                    .as_ref()
+                    .and_then(|handoff| handoff.pending_reference_id.as_deref())
+            });
+        let pending_reference = match self.resolve_pending_reference(pending_reference_id) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%run_id, %error, "assistant reference restore failed");
+                None
+            }
+        };
         let task = RunTask {
             run_id,
             role,
@@ -1205,7 +1395,7 @@ impl AgentRuntime {
                 message_count_rx,
                 inbox_tx,
                 user_inbox,
-                pending_reference: Arc::new(Mutex::new(None)),
+                pending_reference: Arc::new(Mutex::new(pending_reference)),
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,
@@ -1316,6 +1506,7 @@ impl AgentRuntime {
         &self,
         memo: EscalationMemo,
         source_config: &RunConfig,
+        continuity: crate::continuity::Continuity,
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
         let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
@@ -1357,6 +1548,10 @@ impl AgentRuntime {
         }
         let summary = memo.summary();
         let prompt = crate::escalation::prompt::render_escalation_prompt(&memo, &questions);
+        let pending_reference_id = self
+            .persist_pending_reference(source_run_id)
+            .map_err(|error| error.to_string())?
+            .map(|pending| pending.reference_id);
         crate::restore::persist_escalation_seed(
             self,
             run_id,
@@ -1364,6 +1559,8 @@ impl AgentRuntime {
             &prompt,
             &config,
             source_config.ownership.is_some(),
+            &continuity,
+            pending_reference_id.clone(),
         )
         .map_err(|error| error.to_string())?;
         config.ownership = self.handoff_thread_goal(
@@ -1389,6 +1586,8 @@ impl AgentRuntime {
             prompt,
             config,
             RunContinuation::Handoff(RunHandoff {
+                continuity,
+                pending_reference_id,
                 source_run_id,
                 restored: None,
             }),
@@ -1459,17 +1658,8 @@ impl AgentRuntime {
                     run_id: run_id.to_string(),
                 })?;
             if trusted_user {
-                let pending = self.peek_pending_reference(run_id)?;
-                let reference =
-                    pending
-                        .as_ref()
-                        .map(|pending| crate::escalation_review::ReferenceContext {
-                            text: pending.context.clone(),
-                            source_run_id: run_id.to_string(),
-                            // The pending API has no turn index; zero denotes unavailable.
-                            turn_end: 0,
-                        });
-                self.record_host_input(run_id, &text, reference)?;
+                let pending = self.persist_pending_reference(run_id)?;
+                self.record_host_input(run_id, &text, pending.as_ref())?;
                 if let Some(pending) = pending {
                     match self.take_pending_reference(run_id, pending.token) {
                         Ok(Some(_)) => {}

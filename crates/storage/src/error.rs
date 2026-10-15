@@ -57,10 +57,14 @@ pub enum StorageError {
     Serialization(String),
     /// 値が許容範囲外でした。
     OutOfRange(&'static str),
-    /// Run ledger bodies must contain between 1 and 8192 UTF-8 bytes.
+    /// Run note revisions must contain at most 8192 UTF-8 bytes.
     InvalidRunLedgerBody {
         bytes: usize,
     },
+    /// The reference ID is already bound to different immutable content.
+    AssistantReferenceConflict,
+    /// The reference does not exist or its approval was already consumed.
+    AssistantReferenceUnavailable,
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -106,7 +110,15 @@ impl fmt::Display for StorageError {
             Self::OutOfRange(name) => write!(formatter, "value out of range: {name}"),
             Self::InvalidRunLedgerBody { bytes } => write!(
                 formatter,
-                "run ledger body must contain 1..=8192 bytes: actual={bytes}"
+                "run ledger body must contain 0..=8192 bytes: actual={bytes}"
+            ),
+            Self::AssistantReferenceConflict => write!(
+                formatter,
+                "assistant reference content conflicts with its immutable ID"
+            ),
+            Self::AssistantReferenceUnavailable => write!(
+                formatter,
+                "assistant reference is missing or already consumed"
             ),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
@@ -136,6 +148,8 @@ impl std::error::Error for StorageError {
             | Self::Serialization(_)
             | Self::OutOfRange(_)
             | Self::InvalidRunLedgerBody { .. }
+            | Self::AssistantReferenceConflict
+            | Self::AssistantReferenceUnavailable
             | Self::SecretDetected { .. } => None,
         }
     }

@@ -8,6 +8,7 @@ mod compaction;
 mod delegation;
 pub(crate) use delegation::{cleanup_delegates, spawn_delegate, wait_delegates};
 mod escalation;
+mod history;
 mod ledger;
 mod messaging;
 mod questions;

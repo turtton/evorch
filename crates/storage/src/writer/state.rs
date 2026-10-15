@@ -188,6 +188,18 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::LatestRunLedger(run_id, reply)) => {
+                let _ = reply.send(crate::repo::run_ledger::latest(&state.conn, &run_id));
+            }
+            Ok(Command::AssistantReference(id, reply)) => {
+                let _ = reply.send(crate::repo::assistant_reference::get(&state.conn, &id));
+            }
+            Ok(Command::SaveAssistantReference(row, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::assistant_reference::save(conn, &row)
+                });
+                let _ = reply.send(result);
+            }
             Ok(Command::AnswerUserQuestionWithEvidence(id, answer, rows, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     // Plan A: the answer's checked UPDATE is the first-answer-wins
@@ -198,14 +210,9 @@ pub(super) fn run_writer(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::RecordReviewEvidence(rows, reply)) => {
+            Ok(Command::RecordReviewEvidenceWithEdges(rows, edges, reference_id, reply)) => {
                 let result = review_transaction(&state, |conn| {
-                    crate::repo::review_evidence::insert(conn, &rows)
-                });
-                let _ = reply.send(result);
-            }
-            Ok(Command::RecordReviewEvidenceWithEdges(rows, edges, reply)) => {
-                let result = review_transaction(&state, |conn| {
+                    crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
                     crate::repo::review_lineage::insert(conn, &edges)?;
                     crate::repo::review_evidence::insert(conn, &rows)
                 });
@@ -217,8 +224,9 @@ pub(super) fn run_writer(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::UpsertRunContextWithEvidence(record, rows, edges, reply)) => {
+            Ok(Command::UpsertRunContextWithEvidence(record, rows, edges, reference_id, reply)) => {
                 let result = review_transaction(&state, |conn| {
+                    crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
                     crate::repo::run_context::upsert(conn, &record)?;
                     crate::repo::review_evidence::insert(conn, &rows)?;
                     crate::repo::review_lineage::insert(conn, &edges)

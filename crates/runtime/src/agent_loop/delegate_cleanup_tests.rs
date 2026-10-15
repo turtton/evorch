@@ -68,6 +68,8 @@ fn fixture_with_model(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        boundary_pending: false,
+        continuity: Default::default(),
         benchmark: None,
         benchmark_checked: false,
         benchmark_replay: false,

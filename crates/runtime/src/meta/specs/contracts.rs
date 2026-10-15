@@ -106,12 +106,17 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
             "files_touched":["src/x.rs"], "blockers":["decision"], "workspace_state":"dirty", "suggested_next":"inspect y"
         }),
     );
-    contract::<meta::ledger::AppendArgs>("ledger_append", json!({"body":"checkpoint"}));
+    contract::<meta::ledger::AppendArgs>("working_note_write", json!({"body":"checkpoint"}));
+    contract::<meta::history::Args>("history_read", json!({}));
+    contract::<meta::history::Args>(
+        "history_read",
+        json!({"source":"handoff:run-7", "offset":1, "limit":2, "content_offset":4096}),
+    );
     for name in [
         "list_agents",
         "inbox",
         "compact",
-        "ledger_read",
+        "working_note_read",
         "user_answers",
     ] {
         contract::<EmptyArgs>(name, json!({}));

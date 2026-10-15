@@ -78,10 +78,7 @@ async fn send_to_done_run_preserves_uncompacted_history() {
 }
 
 async fn terminal(runtime: &AgentRuntime, run_id: RunId) -> AgentRunPhase {
-    timeout(Duration::from_secs(5), runtime.wait(run_id))
-        .await
-        .expect("termination deadline")
-        .expect("known run")
+    runtime.wait(run_id).await.expect("known run")
 }
 
 #[tokio::test]
@@ -307,20 +304,28 @@ async fn error_transition_persists_context_snapshot() {
 }
 
 #[tokio::test]
-async fn closed_writer_does_not_block_run_termination() {
+async fn closed_writer_fails_closed_before_provider_input_and_still_terminates() {
     // Given: the configured storage writer has closed.
     let (_dir, config, storage, database) = storage_fixture();
-    let (runtime, _) = runtime_with(Arc::new(ScriptedModel::new([Ok(text_response(
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
         "done",
         FinishReason::Stop,
-    ))])));
+    ))]));
+    let (runtime, bus) = runtime_with(model.clone());
+    let mut events = bus.subscribe();
     let runtime =
         runtime.with_run_store(RunStore::open(&config, storage.handle()).expect("run store"));
     storage.close();
-    // When: the run attempts its terminal snapshot.
+    // When: the run cannot prepare its initial durable continuity state.
     let run = runtime.delegate_background(Role::Worker, "request".into(), RunConfig::default());
-    // Then: storage failure does not replace normal termination.
-    assert_eq!(terminal(&runtime, run).await, AgentRunPhase::Done);
+    // Then: it fails closed before provider input and still publishes a terminal state.
+    assert_eq!(terminal(&runtime, run).await, AgentRunPhase::Error);
+    assert!(model.observed().await.is_empty());
+    assert!(events.drain_pending_snapshot().iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Error, .. })
+            if run_id == &run.to_string()
+    )));
     assert!(
         database
             .run_context(&run.to_string())

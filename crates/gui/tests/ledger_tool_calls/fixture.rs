@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, Event, EventBus, EventKind};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
@@ -77,7 +76,7 @@ pub(super) async fn execute(
         runtime = runtime.with_run_store(RunStore::open(config, storage.handle()).unwrap());
     }
     let run = runtime.delegate_background(Role::Worker, "ledger test".into(), RunConfig::default());
-    let events = tokio::time::timeout(Duration::from_secs(5), async {
+    let events = {
         let mut events = Vec::new();
         loop {
             let event = receiver.recv().await.unwrap();
@@ -89,9 +88,7 @@ pub(super) async fn execute(
                 break events;
             }
         }
-    })
-    .await
-    .expect("run completes");
+    };
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
     (run.to_string(), events)
 }

@@ -9,7 +9,13 @@ use tools::ToolResult;
 use super::LoopState;
 
 /// Meta operations reported as ordinary tool calls in the transcript.
-const VISIBLE_META_OPS: &[&str] = &["ledger_append", "ledger_read", "skill_load", "create_goal"];
+const VISIBLE_META_OPS: &[&str] = &[
+    "working_note_write",
+    "working_note_read",
+    "history_read",
+    "skill_load",
+    "create_goal",
+];
 
 impl LoopState {
     pub(super) fn ledger_tool_started(&self, name: &str, id: &str, input: &Value) {

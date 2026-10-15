@@ -67,6 +67,12 @@ impl AgentRuntime {
             restored_by: trigger.sender_run_id.clone(),
             message_id: trigger.message_id.clone(),
         };
+        let pending_reference = self
+            .resolve_pending_reference(restored.pending_reference_id.as_deref())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%run_id, %error, "assistant reference restore failed");
+                None
+            });
         let task = restored.attach_to(RunTask {
             run_id,
             role,
@@ -102,7 +108,7 @@ impl AgentRuntime {
                 message_count_rx,
                 inbox_tx,
                 user_inbox,
-                pending_reference: Arc::new(Mutex::new(None)),
+                pending_reference: Arc::new(Mutex::new(pending_reference)),
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,
@@ -172,6 +178,9 @@ mod review_tests {
                 &mut lock_runs(&runtime.shared.runs),
                 (run, None, Role::Worker, RunConfig::default(), run),
                 RestoredState {
+                    boundary_pending: false,
+                    continuity: Default::default(),
+                    pending_reference_id: None,
                     messages: vec![],
                     checkpoints: vec![],
                     trigger: None,

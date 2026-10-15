@@ -624,15 +624,22 @@ mod tests {
                 );
             });
         harness.run_steps(2);
-        assert!(harness.query_by_label("- seq 1: First entry").is_none());
-        // When: the ledger header is expanded.
-        harness.get_by_label("> Ledger").click();
+        assert!(
+            harness
+                .query_by_label("Current revision 3: Last entry")
+                .is_none()
+        );
+        // When: the current note is expanded, previous revisions remain separate.
+        harness.get_by_label("> Working note").click();
         harness.run_steps(2);
-        // Then: rows follow the transcript in oldest-first order.
-        let first = harness.get_by_label("- seq 1: First entry").rect();
-        let last = harness.get_by_label("- seq 3: Last entry").rect();
-        assert!(first.top() > harness.get_by_label("Transcript content").rect().bottom());
-        assert!(last.top() > first.bottom());
+        let last = harness
+            .get_by_label("Current revision 3: Last entry")
+            .rect();
+        assert!(last.top() > harness.get_by_label("Transcript content").rect().bottom());
+        assert!(harness.query_by_label("Revision 1: First entry").is_none());
+        harness.get_by_label("Previous revisions").click();
+        harness.run_steps(2);
+        assert!(harness.get_by_label("Revision 1: First entry").rect().top() > last.bottom());
         if let Some(directory) = std::env::var_os("LEDGER_EVIDENCE_DIR") {
             harness
                 .render()
@@ -666,7 +673,7 @@ mod tests {
             );
         });
         // Then: no ledger header is exposed.
-        assert!(harness.query_by_label("> Ledger").is_none());
+        assert!(harness.query_by_label("> Working note").is_none());
     }
 
     #[test]

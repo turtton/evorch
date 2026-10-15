@@ -20,6 +20,9 @@ pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
     pub(crate) messages: Vec<providers::Message>,
+    pub(crate) continuity: crate::continuity::Continuity,
+    pub(crate) pending_reference_id: Option<String>,
+    pub(crate) boundary_pending: bool,
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
     pub(crate) trigger: Option<event_bus::AgentMessage>,
     pub(crate) turn_completed: bool,
@@ -75,6 +78,9 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            continuity: descriptor.continuity,
+            pending_reference_id: descriptor.pending_reference_id,
+            boundary_pending: descriptor.boundary_pending,
             messages,
             checkpoints,
             trigger: None,
@@ -121,6 +127,12 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    #[serde(default)]
+    pub boundary_pending: bool,
+    #[serde(default)]
+    pub continuity: crate::continuity::Continuity,
+    #[serde(default)]
+    pub pending_reference_id: Option<String>,
     pub role: String,
     pub name: Option<String>,
     pub parent_run_id: Option<RunId>,
@@ -204,6 +216,8 @@ impl RunRestoreDescriptor {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
+    #[error("assistant reference cannot be persisted: {0}")]
+    AssistantReference(String),
     #[error("復元コンテキストを直列化できません: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("復元コンテキストを保存できません: {0}")]
@@ -221,6 +235,14 @@ pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError>
         return Ok(());
     }
     write_snapshot(state, "Checkpoint", end)
+}
+
+pub(crate) fn persist_prepared_context(
+    state: &LoopState,
+    context: &crate::AgentContext,
+) -> Result<(), SnapshotError> {
+    let end = safe_context_end(&context.messages);
+    write_snapshot_with_context(state, context, "Checkpoint", end)
 }
 
 /// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
@@ -299,6 +321,15 @@ fn write_snapshot(
     terminal_phase: &str,
     end: usize,
 ) -> Result<(), SnapshotError> {
+    write_snapshot_with_context(state, &state.context, terminal_phase, end)
+}
+
+fn write_snapshot_with_context(
+    state: &LoopState,
+    context: &crate::AgentContext,
+    terminal_phase: &str,
+    end: usize,
+) -> Result<(), SnapshotError> {
     let Some(runtime) = state.runtime() else {
         return Ok(());
     };
@@ -356,8 +387,8 @@ fn write_snapshot(
         }
         _ => None,
     };
-    let mut interrupted_tool_calls = interrupted_tool_calls(&state.context.messages[end..]);
-    for call in cancelled_tool_calls(&state.context.messages[..end]) {
+    let mut interrupted_tool_calls = interrupted_tool_calls(&context.messages[end..]);
+    for call in cancelled_tool_calls(&context.messages[..end]) {
         if !interrupted_tool_calls
             .iter()
             .any(|pending| pending.call_id == call.call_id)
@@ -402,6 +433,12 @@ fn write_snapshot(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        boundary_pending: state.boundary_pending,
+        continuity: state.continuity.clone(),
+        pending_reference_id: runtime
+            .persist_pending_reference(state.caller_run_id())
+            .map_err(|error| SnapshotError::AssistantReference(error.to_string()))?
+            .map(|pending| pending.reference_id),
         role: state.run_role().name().to_string(),
         name: config.name.clone(),
         parent_run_id: state.task.parent,
@@ -442,10 +479,9 @@ fn write_snapshot(
             .unwrap_or_else(|| descriptor.role.clone()),
         parent_run_id: descriptor.parent_run_id.map(|id| id.to_string()),
         config_json: serde_json::to_string(&descriptor)?,
-        messages_json: serde_json::to_string(&state.context.messages[..end])?,
+        messages_json: serde_json::to_string(&context.messages[..end])?,
         checkpoints_json: serde_json::to_string(
-            &state
-                .context
+            &context
                 .checkpoints()
                 .iter()
                 .filter(|checkpoint| checkpoint.range.1 <= end)
@@ -500,7 +536,8 @@ fn tool_may_have_side_effects(executor: &tools::ToolExecutor, name: &str) -> boo
             | "wait"
             | "wait_reply"
             | "inbox"
-            | "ledger_read"
+            | "working_note_read"
+            | "history_read"
             | "compact"
     )
 }

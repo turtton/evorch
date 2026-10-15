@@ -15,6 +15,7 @@ pub struct PendingEscalation {
     pub trusted_request: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn persist_escalation_seed(
     runtime: &AgentRuntime,
     run_id: RunId,
@@ -22,11 +23,16 @@ pub(crate) fn persist_escalation_seed(
     prompt: &str,
     config: &RunConfig,
     requires_ownership: bool,
+    continuity: &crate::continuity::Continuity,
+    pending_reference_id: Option<String>,
 ) -> Result<(), SnapshotError> {
     let Some(store) = runtime.shared.run_store.get() else {
         return Ok(());
     };
     let descriptor = RunRestoreDescriptor {
+        boundary_pending: true,
+        continuity: continuity.clone(),
+        pending_reference_id,
         role: Role::Orchestrator.name().into(),
         name: Some(format!(
             "chat:{}:{}",
@@ -57,12 +63,19 @@ pub(crate) fn persist_escalation_seed(
         allowed_directories: Default::default(),
         allowed_instructions: Default::default(),
     };
-    let messages = [providers::Message {
+    let mut messages = vec![providers::Message {
         role: providers::Role::User,
         content: vec![providers::ContentBlock::Text {
             text: prompt.into(),
         }],
     }];
+    let blocks = continuity.blocks(continuity.inherited_note.as_ref())?;
+    if !blocks.is_empty() {
+        messages.push(providers::Message {
+            role: providers::Role::User,
+            content: blocks,
+        });
+    }
     store
         .handle
         .upsert_run_context(&storage::RunContextRecord {

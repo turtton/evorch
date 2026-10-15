@@ -148,9 +148,16 @@ impl Role {
             Role::Oracle => RoleCapabilities::new(["read", "grep", "git_diff"], false),
             Role::MultimodalLooker => RoleCapabilities::new(["read"], false),
         };
-        capabilities
-            .allowed_tools
-            .extend(["ledger_append", "ledger_read", "ask_user", "user_answers"].map(String::from));
+        capabilities.allowed_tools.extend(
+            [
+                "working_note_write",
+                "working_note_read",
+                "history_read",
+                "ask_user",
+                "user_answers",
+            ]
+            .map(String::from),
+        );
         capabilities
     }
 }

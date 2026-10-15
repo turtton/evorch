@@ -27,9 +27,15 @@ pub(crate) async fn complete(shared: &Weak<Shared>, state: &mut LoopState, memo:
     };
     let source_run_id = memo.source_run_id;
     let config = state.run_config().clone();
-    match runtime.spawn_escalated_root(memo, &config, || {
-        state.publish_terminal();
-    }) {
+    let frozen = state
+        .continuity
+        .freeze(&runtime, source_run_id, &state.context.messages);
+    let spawned = frozen.and_then(|continuity| {
+        runtime.spawn_escalated_root(memo, &config, continuity, || {
+            state.publish_terminal();
+        })
+    });
+    match spawned {
         Ok(_) => {}
         Err(reason) => {
             runtime.goal_work_stopped(source_run_id);

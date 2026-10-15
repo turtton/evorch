@@ -15,7 +15,7 @@ pub(super) enum RunContinuation {
     Restored(RestoredState),
     /// Resume the saved turn without submitting any new model input.
     Resume {
-        restored: RestoredState,
+        restored: Box<RestoredState>,
         handoff: Option<RunHandoff>,
     },
 }
@@ -139,7 +139,7 @@ impl AgentRuntime {
             self.validate_new_thread_goal(thread, objective, criteria)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
-        let restored = RestoredState::for_conversation(&record)?;
+        let mut restored = RestoredState::for_conversation(&record)?;
         self.reserve_restored_shell_handles(run_id, &restored)?;
         self.shared
             .model
@@ -204,7 +204,9 @@ impl AgentRuntime {
         record.config_json = serde_json::to_string(&descriptor)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         let review = self.chat_review_context(store, run_id)?;
-        let evidence = prompt
+        let pending_reference =
+            self.resolve_pending_reference(descriptor.pending_reference_id.as_deref())?;
+        let mut evidence = prompt
             .map(|prompt| {
                 crate::run_store::evidence_row(
                     &review.root_run_id,
@@ -215,6 +217,13 @@ impl AgentRuntime {
             })
             .into_iter()
             .collect::<Vec<_>>();
+        if let (Some(reference), Some(row)) = (&pending_reference, evidence.first_mut()) {
+            reference.annotate(row);
+            descriptor.pending_reference_id = None;
+            restored.pending_reference_id = None;
+            record.config_json = serde_json::to_string(&descriptor)
+                .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+        }
         {
             let mut shared = review
                 .user_requests
@@ -222,7 +231,14 @@ impl AgentRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             store
                 .handle
-                .upsert_run_context_with_evidence(&record, &evidence, &[])
+                .upsert_run_context_with_evidence_and_reference_consumption(
+                    &record,
+                    &evidence,
+                    &[],
+                    prompt
+                        .and(pending_reference.as_ref())
+                        .map(|pending| pending.reference_id.as_str()),
+                )
                 .map_err(|error| Self::review_error(run_id, error))?;
             for row in evidence {
                 shared.add_request(crate::run_store::request_from_evidence(row));
@@ -245,11 +261,16 @@ impl AgentRuntime {
             ..authority
         };
         let handoff = pending_handoff.map(|pending| RunHandoff {
+            continuity: descriptor.continuity.clone(),
+            pending_reference_id: descriptor.pending_reference_id.clone(),
             source_run_id: pending.source_run_id,
             restored: None,
         });
         let continuation = if prompt.is_none() {
-            RunContinuation::Resume { restored, handoff }
+            RunContinuation::Resume {
+                restored: Box::new(restored),
+                handoff,
+            }
         } else if let Some(mut handoff) = handoff {
             handoff.restored = Some(restored);
             RunContinuation::Handoff(handoff)
@@ -356,7 +377,7 @@ impl AgentRuntime {
         let name = format!("chat:{}:{thread_id}", role.name());
         let mut restored_source = None;
         let mut route_pins = Vec::new();
-        let restored = match self.shared.run_store.get() {
+        let mut restored = match self.shared.run_store.get() {
             None => None,
             Some(store) => {
                 let _guard = store
@@ -425,8 +446,19 @@ impl AgentRuntime {
         } else {
             "initial_prompt"
         };
-        let row =
+        let mut row =
             crate::run_store::evidence_row(&review.root_run_id, &run_id.to_string(), kind, &prompt);
+        let pending_reference = self.resolve_pending_reference(
+            restored
+                .as_ref()
+                .and_then(|state| state.pending_reference_id.as_deref()),
+        )?;
+        if let Some(reference) = &pending_reference {
+            reference.annotate(&mut row);
+            if let Some(state) = restored.as_mut() {
+                state.pending_reference_id = None;
+            }
+        }
         // RAM-only host submissions have exactly the same validation contract.
         row.validate()
             .map_err(|error| Self::review_error(run_id, error))?;
@@ -438,7 +470,13 @@ impl AgentRuntime {
             });
             store
                 .handle
-                .record_review_evidence_with_edges(std::slice::from_ref(&row), edges.as_slice())
+                .append_review_evidence_with_reference_consumption(
+                    std::slice::from_ref(&row),
+                    edges.as_slice(),
+                    pending_reference
+                        .as_ref()
+                        .map(|pending| pending.reference_id.as_str()),
+                )
                 .map_err(|error| Self::review_error(run_id, error))?;
             // Materialize the committed graph, including depth/unique-root checks.
             // An invalid graph still fails closed before the run is installed.

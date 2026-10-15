@@ -12,8 +12,7 @@ use tokio::sync::Notify;
 use tools::ToolExecutor;
 
 use support::{
-    ScriptedModel, drain_events, init_git_repo, recording_factory, text_response, tool_response,
-    tool_responses,
+    ScriptedModel, init_git_repo, recording_factory, text_response, tool_response, tool_responses,
 };
 
 fn escalation_response() -> providers::ChatResponse {
@@ -51,6 +50,19 @@ async fn events_through_escalation(
     let mut events = Vec::new();
     let new_run_id = loop {
         let event = receiver.recv().await.expect("event bus remains open");
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Error | AgentRunPhase::Stopped,
+            reason,
+            ..
+        }) = &event.kind
+        {
+            assert_ne!(
+                run_id,
+                &source_run_id.to_string(),
+                "source terminated before handoff: {reason:?}"
+            );
+        }
         let escalated = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 source_run_id: source,
@@ -74,7 +86,7 @@ async fn complete_escalation(
 ) -> (RunId, Vec<Event>) {
     let (new_run, mut events) = events_through_escalation(receiver, source).await;
     assert_eq!(runtime.wait(new_run).await, Ok(AgentRunPhase::Done));
-    events.extend(drain_events(receiver).await);
+    events.extend(receiver.drain_pending_snapshot());
     (new_run, events)
 }
 
@@ -412,7 +424,7 @@ async fn child_worker_cannot_escalate_into_a_new_root() {
         Ok(Some("child continued".to_string()))
     );
     assert!(runtime.escalation_memo(child).is_none());
-    let events = drain_events(&mut receiver).await;
+    let events = receiver.drain_pending_snapshot();
     assert!(!events.iter().any(|event| {
         matches!(
             &event.kind,
@@ -614,12 +626,24 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
                     )
                     .with_sandbox_root(repo.clone());
             runtime.set_project_root(repo.clone()).unwrap();
+            runtime.set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+                directory.path().join("scratch"),
+            )));
             (runtime, bus)
         };
         let (mut runtime, mut bus) = make_runtime();
         let mut events = bus.subscribe();
         let source = runtime.reserve_run_id();
         runtime.bind_thread_root("source-thread", source).unwrap();
+        let frozen_body = if failure == "stop" {
+            ""
+        } else {
+            "selected before handoff"
+        };
+        let frozen_revision = storage
+            .handle()
+            .append_run_ledger(&source.to_string(), frozen_body)
+            .unwrap();
         let goal = runtime
             .create_thread_goal(
                 "source-thread",
@@ -659,21 +683,19 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
         model.release.notify_one();
         assert!(runtime.wait(target).await.is_err());
         // Only a provider refusal is an admission failure; the user's stop is not.
-        let mut admission_failures = 0;
-        while let Ok(Ok(event)) =
-            tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await
-        {
-            if matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "EscalationAdmissionFailed")
-            {
-                admission_failures += 1;
-            }
-        }
+        let admission_failures = events.drain_pending_snapshot().iter().filter(|event| {
+            matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "EscalationAdmissionFailed")
+        }).count();
         assert_eq!(
             admission_failures,
             usize::from(failure == "error-after-restart"),
             "{failure}"
         );
         assert_eq!(model.script.observed().await.len(), 1);
+        storage
+            .handle()
+            .append_run_ledger(&source.to_string(), "changed after seed")
+            .unwrap();
         let inherited = runtime.thread_goal(&child).unwrap();
         let old_owner = registry.attach(&child).unwrap();
         registry
@@ -743,6 +765,33 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
         let text = serde_json::to_string(&requests[1]).unwrap();
         assert_eq!(text.matches("[evorch escalation").count(), 1);
         assert!(text.contains("Retry after provider recovery"));
+        let note = requests[1]
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => text
+                    .strip_prefix("[working-note]\n")
+                    .map(|json| serde_json::from_str::<serde_json::Value>(json).unwrap()),
+                _ => None,
+            })
+            .expect("frozen handoff note");
+        assert_eq!(note["body"], frozen_body);
+        assert_eq!(note["revision"], frozen_revision);
+        assert_eq!(note["writer_run_id"], source.to_string());
+        storage
+            .handle()
+            .append_run_ledger(&target.to_string(), "receiver owns this note")
+            .unwrap();
+        assert_eq!(
+            storage
+                .handle()
+                .latest_run_ledger(&source.to_string())
+                .unwrap()
+                .unwrap()
+                .body,
+            "changed after seed"
+        );
+
         assert_eq!(
             runtime.inspect_agent(target).unwrap().role_name,
             Role::Orchestrator.name()

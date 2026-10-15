@@ -111,6 +111,17 @@ fn harness_with_checker(
     extra_tools: Vec<Arc<dyn Tool>>,
     checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
 ) -> Harness {
+    harness_with_threshold(script, window, read, extra_tools, checker, 0.5)
+}
+
+fn harness_with_threshold(
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
     std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
@@ -135,7 +146,7 @@ profile = "local"
 profile = "local"
 [compaction]
 context_window_tokens = {window}
-threshold = 0.5
+threshold = {threshold}
 keep_recent_tokens = 1
 max_summary_bytes = 256
 summarizer = "structural"
@@ -791,15 +802,22 @@ async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
 }
 
 #[tokio::test]
-async fn continue_unfinished_model_request_reuses_identical_wire_input_without_ledger() {
+async fn continue_unfinished_model_request_reuses_identical_wire_input_without_working_note() {
     for compacted in [false, true] {
         for restart in [false, true] {
-            resume_unfinished_model_request(compacted, restart).await;
+            resume_unfinished_model_request(compacted, restart, false).await;
         }
     }
 }
 
-async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
+#[tokio::test]
+async fn above_threshold_unfinished_retry_preserves_wire_input_without_recompaction() {
+    for restart in [false, true] {
+        resume_unfinished_model_request(true, restart, true).await;
+    }
+}
+
+async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_threshold: bool) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
     if compacted {
@@ -811,7 +829,14 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
         text_response("interrupted").with_gate(gate.clone()),
         text_response("resumed"),
     ]);
-    let mut harness = harness(script, 1_000_000);
+    let mut harness = harness_with_threshold(
+        script,
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        if above_threshold { 0.000001 } else { 0.5 },
+    );
     // Release before the mock joins its HTTP workers, including on panic.
     struct ReleaseOnDrop(mock_openai::ResponseGate);
     impl Drop for ReleaseOnDrop {
@@ -864,7 +889,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool) {
     assert_eq!(!checkpoints.is_empty(), compacted);
     storage
         .handle()
-        .append_run_ledger(&run.to_string(), "Saved ledger entry must not become input")
+        .append_run_ledger(&run.to_string(), "Saved working note must not become input")
         .unwrap();
     let lesson = storage::memory::Lesson {
         id: "new-lesson".into(),
@@ -987,7 +1012,7 @@ async fn continue_completed_turn_waits_without_input_then_real_followup_reuses_w
         .unwrap();
     storage
         .handle()
-        .append_run_ledger(&run.to_string(), "Saved ledger entry must not become input")
+        .append_run_ledger(&run.to_string(), "Saved working note must not become input")
         .unwrap();
     harness
         .runtime
@@ -1393,6 +1418,166 @@ async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;
 }
 
+fn note_response(id: &str, body: &str) -> ScriptedResponse {
+    ScriptedResponse::tool_call(
+        id,
+        MODEL,
+        0,
+        id,
+        "working_note_write",
+        [json!({"body":body}).to_string()],
+    )
+}
+
+fn wire_working_notes(request: &Value) -> Vec<Value> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .flat_map(|message| match &message["content"] {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect(),
+            _ => Vec::new(),
+        })
+        .flat_map(|text| text.split("[working-note]\n").skip(1))
+        .map(|text| {
+            serde_json::Deserializer::from_str(text)
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap()
+        })
+        .collect()
+}
+
+async fn note_compaction_reuses_new_prefix(reason: CompactionReason, cleared: bool) {
+    let automatic = reason == CompactionReason::Automatic;
+    let latest = if cleared {
+        ""
+    } else {
+        "Latest finding; original evidence remains retrievable"
+    };
+    let old_reply =
+        "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
+    let mut script = vec![
+        note_response("old-note", "Superseded finding"),
+        note_response("current-note", latest),
+        text_response(&old_reply),
+    ];
+    if reason == CompactionReason::Agent {
+        script.push(ScriptedResponse::tool_call(
+            "compact-note",
+            MODEL,
+            0,
+            "compact-note",
+            "compact",
+            ["{}"],
+        ));
+    }
+    script.extend([read_response(0), read_response(2), text_response("done")]);
+    let mut harness = harness(script, if automatic { 64_000 } else { 1_000_000 });
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("note.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let run = harness.runtime.delegate_background(
+        if reason == CompactionReason::Agent {
+            Role::Orchestrator
+        } else {
+            Role::Worker
+        },
+        "Inspect requested changes".into(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    if reason == CompactionReason::Manual {
+        harness.runtime.compact(run).unwrap();
+    }
+    harness
+        .runtime
+        .send_message(run, "Continue after the boundary".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Compaction(CompactionEvent::Compacted { reason: actual, .. }) if *actual == reason)));
+    let current = storage
+        .handle()
+        .latest_run_ledger(&run.to_string())
+        .unwrap()
+        .unwrap();
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect::<Vec<_>>();
+    let mut compacted = false;
+    let mut request_index = 0;
+    let boundary_index = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Compaction(CompactionEvent::Compacted { run_id, .. })
+                if run_id == &run.to_string() =>
+            {
+                compacted = true;
+                None
+            }
+            EventKind::Provider(ProviderEvent::RequestStarted {
+                run_id: Some(id), ..
+            }) if id == &run.to_string() => {
+                let index = request_index;
+                request_index += 1;
+                compacted.then_some(index)
+            }
+            _ => None,
+        })
+        .expect("first provider request after compaction");
+    let notes = wire_working_notes(&requests[boundary_index].body);
+    assert_eq!(
+        notes.len(),
+        1,
+        "only the selected current revision is restated"
+    );
+    assert_eq!(notes[0]["body"], latest);
+    assert_eq!(notes[0]["revision"], current.seq);
+    assert_eq!(notes[0]["writer_run_id"], run.to_string());
+    for request in &requests[boundary_index + 1..] {
+        assert_eq!(
+            wire_working_notes(&request.body),
+            notes,
+            "selected state arrives on the first request and remains in its prefix"
+        );
+    }
+    verify_trace(&harness, run, &events, 1);
+}
+
+#[tokio::test]
+async fn latest_working_note_and_clear_survive_compaction_then_reuse_wire_prefix() {
+    for reason in [
+        CompactionReason::Manual,
+        CompactionReason::Automatic,
+        CompactionReason::Agent,
+    ] {
+        for cleared in [false, true] {
+            note_compaction_reuses_new_prefix(reason, cleared).await;
+        }
+    }
+}
+
 fn todo_response(id: &str, items: Value) -> ScriptedResponse {
     ScriptedResponse::tool_call(
         id,
@@ -1592,13 +1777,14 @@ async fn latest_procedure_and_clear_survive_compaction_then_reuse_the_wire_prefi
 }
 
 #[tokio::test]
-async fn procedure_only_handoff_presents_current_state_then_reuses_each_roots_wire_prefix() {
+async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_wire_prefix() {
     let mut harness = harness(
         vec![
             todo_response(
                 "handoff-procedure",
                 json!([{"content":"Verify the delegated findings","status":"pending"}]),
             ),
+            note_response("handoff-note", "Frozen handoff finding"),
             read_response(0),
             ScriptedResponse::tool_call(
                 "handoff",
@@ -1679,17 +1865,22 @@ async fn procedure_only_handoff_presents_current_state_then_reuses_each_roots_wi
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 7);
     assert_eq!(usage.len(), requests.len());
     assert_eq!(harness.mock.remaining_scripts(), 0);
-    let inherited = wire_todo_snapshots(&requests[3]);
+    let inherited = wire_todo_snapshots(&requests[4]);
     assert_eq!(inherited.len(), 1);
     assert_eq!(inherited[0].1, current);
+    let inherited_notes = wire_working_notes(&requests[4]);
+    assert_eq!(inherited_notes.len(), 1);
+    assert_eq!(inherited_notes[0]["body"], "Frozen handoff finding");
+    assert_eq!(inherited_notes[0]["writer_run_id"], source.to_string());
     for (previous, next, root) in [
         (0, 1, source),
         (1, 2, source),
-        (3, 4, recipient),
+        (2, 3, source),
         (4, 5, recipient),
+        (5, 6, recipient),
     ] {
         assert_eq!(usage[previous].0, &root.to_string());
         assert_eq!(usage[next].0, &root.to_string());
