@@ -183,6 +183,14 @@ pub trait CommandSink: Send {
     /// Declares whether a project's own instructions may reach its runs.
     fn set_project_trust(&mut self, _root: std::path::PathBuf, _trusted: bool) {}
 
+    /// Declares a project's trusted allowed directories; the list replaces the previous one.
+    fn set_project_allowed_directories(
+        &mut self,
+        _root: std::path::PathBuf,
+        _directories: Vec<std::path::PathBuf>,
+    ) {
+    }
+
     fn start_background_run(&self, _text: String) -> Option<runtime::RunId> {
         None
     }

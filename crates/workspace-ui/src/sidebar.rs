@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::{canonical_directory, validate_allowed_directory};
+use crate::project::{canonical_directory, validate_stored_allowed_directory};
 use crate::{
     ProjectError, ProjectId, ProjectRecord, SidebarError, ThreadError, ThreadId, ThreadRecord,
     TrustState,
@@ -118,6 +118,18 @@ impl SidebarState {
             .set_allowed_trust(path, trust)
     }
 
+    pub fn remove_allowed_directory(
+        &mut self,
+        project_id: &ProjectId,
+        path: &Path,
+    ) -> Result<(), ProjectError> {
+        self.projects
+            .iter_mut()
+            .find(|project| &project.id == project_id)
+            .ok_or(ProjectError::UnknownProject)?
+            .remove_allowed_directory(path)
+    }
+
     pub fn create_thread(
         &mut self,
         id: ThreadId,
@@ -179,15 +191,10 @@ impl SidebarState {
             let mut allowed_directories = project.allowed_directories.iter().collect::<Vec<_>>();
             allowed_directories.sort_by_key(|directory| directory.path.components().count());
             for directory in allowed_directories {
-                let validated = validate_allowed_directory(
-                    &validated_project,
-                    &directory.path,
-                    directory.trust,
-                )?;
-                if validated.path != directory.path {
-                    return Err(ProjectError::NotCanonical.into());
-                }
-                validated_project.allowed_directories.push(validated);
+                validate_stored_allowed_directory(&validated_project, directory)?;
+                validated_project
+                    .allowed_directories
+                    .push(directory.clone());
             }
         }
         if self

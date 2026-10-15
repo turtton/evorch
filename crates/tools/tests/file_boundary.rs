@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use event_bus::{EventBus, EventKind};
-use sandbox::{DirectSandbox, SandboxBoundary};
+use sandbox::{DirectSandbox, LivePaths, PathAccess, SandboxBoundary};
 use serde_json::json;
 use tools::tools::shell_escalation::{EscalationDecision, FileAccessRequest, ShellEscalationGate};
 use tools::{ToolError, ToolExecutionContext, ToolExecutor};
@@ -434,4 +434,62 @@ async fn benchmark_workspace_never_escalates() {
     // Then: it is refused without consulting the gate.
     assert!(reason.contains("benchmark"), "{reason}");
     assert!(gate.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn allowed_directories_apply_to_the_same_executor_as_they_change() {
+    // Given: one executor per access whose boundary follows a shared, initially empty list.
+    let layout = layout();
+    let allowed = LivePaths::default();
+    let executors = [PathAccess::ReadWrite, PathAccess::ReadOnly].map(|access| {
+        let executor = ToolExecutor::with_standard_tools_in(
+            Arc::new(EventBus::new(16)),
+            Arc::new(DirectSandbox::new_unchecked()),
+            Some(layout.project.clone()),
+        );
+        executor.set_file_boundary(
+            &SandboxBoundary::new(layout.project.clone()).with_allowed(allowed.clone(), access),
+        );
+        executor
+    });
+    let [writer, reader] = &executors;
+    let secret = layout.outside.join("secret.txt");
+    let notes = layout.outside.join("notes.txt");
+    let write = async |executor: &ToolExecutor, content: &str| {
+        executor
+            .execute(
+                &context(),
+                "write",
+                "w",
+                json!({"path": notes, "content": content}),
+            )
+            .await
+    };
+    assert!(denial(read(writer, &secret).await).contains("outside the sandbox boundary"));
+
+    // When: the directory is declared after the executors were configured.
+    allowed.set(vec![layout.outside.clone()]);
+
+    // Then: both read it, only the writing role may change it.
+    for executor in [writer, reader] {
+        assert!(
+            read(executor, &secret)
+                .await
+                .unwrap()
+                .content
+                .contains(SECRET)
+        );
+    }
+    write(writer, "from writer").await.unwrap();
+    assert!(denial(write(reader, "from reader").await).contains("read-only"));
+    assert_eq!(
+        std::fs::read_to_string(layout.outside.join("notes.txt")).unwrap(),
+        "from writer"
+    );
+
+    // When / Then: once the declaration is withdrawn, the next call is outside again.
+    allowed.set(Vec::new());
+    for executor in [writer, reader] {
+        assert!(denial(read(executor, &secret).await).contains("outside the sandbox boundary"));
+    }
 }

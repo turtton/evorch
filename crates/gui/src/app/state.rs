@@ -119,6 +119,8 @@ pub struct WorkbenchState<S> {
     pub(super) sink: Box<dyn CommandSink>,
     /// Project trust last declared to the sink, so only changes are re-sent.
     pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
+    /// Allowed directories last declared to the sink per project root.
+    pub(super) declared_allowed: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
@@ -229,6 +231,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             thread_todos: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
             declared_trust: std::collections::BTreeMap::new(),
+            declared_allowed: std::collections::BTreeMap::new(),
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
@@ -387,6 +390,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn with_command_sink(mut self, sink: Box<dyn CommandSink>) -> Self {
         self.sink = sink;
         self.declared_trust.clear();
+        self.declared_allowed.clear();
         self
     }
 

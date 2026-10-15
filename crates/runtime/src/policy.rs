@@ -142,6 +142,19 @@ impl ExecutionPolicy {
             .filter(|spec| self.capabilities.allowed_tools.contains(&spec.name))
             .collect()
     }
+
+    /// This role's access to the project's allowed directories (ADR 0032): read-write
+    /// when it may change files through `write`, `edit` or `shell`, read-only otherwise.
+    pub fn allowed_access(&self) -> sandbox::PathAccess {
+        if ["write", "edit", "shell"]
+            .iter()
+            .any(|tool| self.capabilities.allowed_tools.contains(*tool))
+        {
+            sandbox::PathAccess::ReadWrite
+        } else {
+            sandbox::PathAccess::ReadOnly
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +174,32 @@ mod tests {
             conversation: true,
             category: Some("conversation".into()),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_roles_that_change_files_write_allowed_directories() {
+        // Given / When / Then: Worker alone holds write, edit or shell.
+        for role in [
+            Role::Orchestrator,
+            Role::Explorer,
+            Role::Worker,
+            Role::Reviewer,
+            Role::WebResearcher,
+            Role::Planner,
+            Role::Oracle,
+            Role::MultimodalLooker,
+        ] {
+            assert_eq!(
+                ExecutionPolicy::for_role(role).allowed_access(),
+                if role == Role::Worker {
+                    sandbox::PathAccess::ReadWrite
+                } else {
+                    sandbox::PathAccess::ReadOnly
+                },
+                "{}",
+                role.name()
+            );
         }
     }
 

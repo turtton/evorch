@@ -113,7 +113,7 @@ pub struct ToolExecutor {
     default_cwd: RwLock<Option<std::path::PathBuf>>,
     post_edit_hook: Option<Arc<dyn PostEditHook>>,
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
-    file_boundary: RwLock<Option<Vec<sandbox::BoundaryRegion>>>,
+    file_boundary: RwLock<Option<sandbox::SandboxBoundary>>,
     file_escalation: RwLock<Option<Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>>>,
 }
 

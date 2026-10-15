@@ -213,3 +213,79 @@ fn set_allowed_trust_rejects_unknown_and_noncanonical_paths() {
     assert_eq!(relative, Err(ProjectError::NotAbsolute));
     assert_eq!(noncanonical_result, Err(ProjectError::NotCanonical));
 }
+
+#[test]
+fn allowed_directories_can_be_untrusted_and_removed_even_after_deletion() {
+    // Given: two approved allowed directories, one of which is then deleted.
+    let directory = tempdir().expect("temporary directory must be created");
+    let root = directory.path().join("project");
+    let kept = directory.path().join("kept");
+    let deleted = directory.path().join("deleted");
+    for path in [&root, &kept, &deleted] {
+        std::fs::create_dir(path).expect("directory must be created");
+    }
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("p1");
+    sidebar
+        .add_project(project_id.clone(), "One", &root)
+        .expect("project must be added");
+    for path in [&kept, &deleted] {
+        sidebar
+            .add_allowed_directory(&project_id, path, TrustState::Approved)
+            .expect("allowed directory must be added");
+    }
+    let kept = kept.canonicalize().expect("kept canonicalizes");
+    let deleted = deleted.canonicalize().expect("deleted canonicalizes");
+    std::fs::remove_dir(&deleted).expect("directory must be removed");
+
+    // When: the deleted one is untrusted and removed, and the kept one is untrusted.
+    sidebar
+        .set_allowed_trust(&project_id, &deleted, TrustState::Unapproved)
+        .expect("a deleted directory can still be untrusted");
+    sidebar
+        .remove_allowed_directory(&project_id, &deleted)
+        .expect("a deleted directory can still be removed");
+    sidebar
+        .set_allowed_trust(&project_id, &kept, TrustState::Unapproved)
+        .expect("trust can be withdrawn");
+    let again = sidebar.remove_allowed_directory(&project_id, &deleted);
+    let unknown_project = sidebar.remove_allowed_directory(&ProjectId::new("missing"), &kept);
+
+    // Then: only the kept directory remains, unapproved, and repeated removal is typed.
+    assert_eq!(sidebar.projects[0].allowed_directories.len(), 1);
+    assert_eq!(
+        sidebar.projects[0].resolve_membership(&kept),
+        Membership::AllowedDirectory {
+            trust: TrustState::Unapproved
+        }
+    );
+    assert_eq!(again, Err(ProjectError::UnknownAllowedDirectory));
+    assert_eq!(unknown_project, Err(ProjectError::UnknownProject));
+}
+
+#[test]
+fn allowed_directory_rejects_the_filesystem_root_and_home_itself() {
+    // Given: a project outside the home directory.
+    let directory = tempdir().expect("temporary directory must be created");
+    let root = directory.path().join("project");
+    std::fs::create_dir(&root).expect("project directory must be created");
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("p1");
+    sidebar
+        .add_project(project_id.clone(), "One", &root)
+        .expect("project must be added");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+
+    // When: `/` and the home directory itself are added.
+    let filesystem_root = sidebar.add_allowed_directory(
+        &project_id,
+        PathBuf::from("/").as_path(),
+        TrustState::Approved,
+    );
+    let home_itself = sidebar.add_allowed_directory(&project_id, &home, TrustState::Approved);
+
+    // Then: both are refused and nothing is stored.
+    assert_eq!(filesystem_root, Err(ProjectError::TooBroad));
+    assert_eq!(home_itself, Err(ProjectError::TooBroad));
+    assert!(sidebar.projects[0].allowed_directories.is_empty());
+}

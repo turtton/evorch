@@ -134,11 +134,12 @@ impl ToolExecutor {
 impl ToolExecutor {
     /// Confine read / grep / write / edit to the paths `boundary` mounts for the
     /// shell (ADR 0033). Paths outside need a reviewed `sandbox_access: "unsandboxed"`.
+    /// Regions are listed again on every call, so allowed directories declared later apply.
     pub fn set_file_boundary(&self, boundary: &SandboxBoundary) {
         *self
             .file_boundary
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(boundary.regions());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(boundary.clone());
     }
 
     /// Runs before the tool, so a denial never reads or returns file content.
@@ -173,6 +174,7 @@ impl ToolExecutor {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+            .map(|boundary| boundary.regions())
         else {
             return Ok(());
         };

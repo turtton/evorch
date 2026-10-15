@@ -73,6 +73,17 @@ impl Shared {
             .copied()
     }
 
+    /// The live allowed-directory list of a project. Created empty on first use,
+    /// so a run started before the host declares anything still sees later changes.
+    pub(crate) fn project_allowed_directories(&self, root: &std::path::Path) -> sandbox::LivePaths {
+        self.allowed_directories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(canonical_root(root))
+            .or_default()
+            .clone()
+    }
+
     pub(crate) fn run_project(&self, config: &RunConfig) -> Option<Arc<ProjectContext>> {
         config
             .project_root
@@ -147,6 +158,36 @@ impl AgentRuntime {
             .remove(&root);
     }
 
+    /// Declares the trusted allowed directories of a project (ADR 0032). Running
+    /// runs see the new list from their next command or file tool call; a
+    /// background shell job keeps the mounts it started with. Missing paths are
+    /// skipped so they never block a run.
+    pub fn set_project_allowed_directories(&self, root: PathBuf, directories: Vec<PathBuf>) {
+        let mut paths = Vec::with_capacity(directories.len());
+        for directory in directories {
+            match directory.canonicalize() {
+                Ok(path) if path.is_dir() => {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!(directory = %directory.display(), "allowed directory is not a directory; skipped");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, directory = %directory.display(), "allowed directory is unavailable; skipped");
+                }
+            }
+        }
+        self.shared.project_allowed_directories(&root).set(paths);
+    }
+
+    /// The live list of a project's declared, existing allowed directories, the same
+    /// handle its runs mount. It exists whether or not runs are sandboxed.
+    pub fn project_allowed_directories(&self, root: &std::path::Path) -> sandbox::LivePaths {
+        self.shared.project_allowed_directories(root)
+    }
+
     /// Lets the host name each project for project-partitioned records, so a
     /// run's learned memory lands in the project it worked in. First wins.
     #[must_use]
@@ -154,4 +195,10 @@ impl AgentRuntime {
         let _ = self.shared.project_slugs.set(resolver);
         self
     }
+}
+
+/// Allowed directories are keyed by the canonical root so a host and a run
+/// naming the same project differently share one list. Trust keeps its raw key.
+fn canonical_root(root: &std::path::Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }

@@ -36,6 +36,9 @@ pub(crate) fn sandbox_boundary(mounts: &WorkspaceMounts) -> Result<SandboxBounda
     if let Some(path) = &mounts.scratch {
         boundary = boundary.with_scratch(path.clone());
     }
+    if let Some(allowed) = &mounts.allowed {
+        boundary = boundary.with_allowed(allowed.paths.clone(), allowed.access);
+    }
     Ok(boundary)
 }
 
@@ -108,7 +111,8 @@ mod tests {
     use sandbox::PolicyDecision;
 
     // Given: a run's mounts / When: assembling its boundary / Then: the output store,
-    // extra binds, scratch and project root are all listed for bwrap and file tools
+    // extra binds, allowed directories, scratch and project root are all listed for
+    // bwrap and file tools
     #[test]
     fn run_boundary_lists_every_mount_with_its_access() {
         let mounts = WorkspaceMounts {
@@ -116,6 +120,10 @@ mod tests {
             ro_binds: vec![PathBuf::from("/opt/reference")],
             rw_binds: vec![PathBuf::from("/opt/shared")],
             scratch: Some(PathBuf::from("/var/tmp/evorch-scratch-test/t-1")),
+            allowed: Some(sandbox::AllowedRegions {
+                paths: sandbox::LivePaths::new(vec![PathBuf::from("/srv/allowed")]),
+                access: sandbox::PathAccess::ReadOnly,
+            }),
         };
         let boundary = sandbox_boundary(&mounts).unwrap();
         let regions = boundary.regions();
@@ -129,6 +137,7 @@ mod tests {
                 Path::new("/var/tmp/evorch-scratch-test/t-1"),
                 sandbox::PathAccess::ReadWrite,
             ),
+            (Path::new("/srv/allowed"), sandbox::PathAccess::ReadOnly),
             (Path::new("/project"), sandbox::PathAccess::ReadWrite),
         ] {
             assert!(

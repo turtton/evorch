@@ -118,6 +118,7 @@ fn fixture_with_model(
         durable_task: None,
         pending_terminal: None,
         scratch: None,
+        allowed_directories: None,
     };
     (runtime, state)
 }

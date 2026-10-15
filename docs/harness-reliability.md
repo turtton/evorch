@@ -27,9 +27,8 @@ from the other. All regions are host paths:
   `RUSTUP_HOME` (not the `/tmp/home` paths the shell sees them at). Cargo
   credentials and config stay outside.
 
-Allowed directories (ADR 0032) join the same list as further read-only or
-read-write regions. When regions overlap, the last mounted one decides, as in
-bwrap. `read` and `grep` may use every region; `write` and `edit` need a
+Allowed directories (ADR 0032) join the same list (see below). When regions
+overlap, the last mounted one decides, as in bwrap. `read` and `grep` may use every region; `write` and `edit` need a
 read-write one. Paths are checked after relative ones are resolved against the
 workspace: a path with `..`, a dangling link, or an ancestor that cannot be
 resolved is outside; otherwise the deepest existing ancestor is canonicalized,
@@ -61,6 +60,41 @@ capabilities still decide which tools a run can call, so a read-only role
 cannot write through escalation.
 Benchmark runs keep their fixed workspace guard, drop `sandbox_access` and
 `justification` from the file-tool schemas, and refuse `"unsandboxed"`.
+
+## Allowed directories
+
+A project's allowed directories reach its runs only once trusted (ADR 0032).
+The GUI declares, per project root, the `Approved` directories that currently
+exist (`AgentRuntime::set_project_allowed_directories`), and declares again
+after every add, Trust, Untrust or Remove in the project settings, and before
+runs start. Each declaration replaces the project's list. The runtime keys the
+list by the canonical project root, canonicalizes each directory, and skips
+(with a warning) any that is missing or not a directory, so a run never fails to
+start because of one. A run uses only the list of its own project.
+
+Access follows the run's role: a role whose tools include `write`, `edit` or
+`shell` (today only Worker) gets them read-write; every other role read-only,
+both in its shell and in its file tools. The project root stays read-write for
+every role.
+
+Runs hold the project's live list rather than a copy. bwrap builds its argv for
+each command from the list at that moment (`--bind-try` / `--ro-bind-try`, so a
+directory deleted in between is tolerated), and the file-tool check lists its
+regions again on every call. A change therefore applies from the running run's
+next command or file tool call; a background shell job keeps the mounts it was
+started with until it exits.
+
+Regions are mounted, and listed for the file tools, in this order, so later ones
+win where they overlap: system read-only paths, the `/tmp` alias of the scratch,
+allowed directories, the scratch at its host path, the tool output store, the
+build caches, then the project root. The `/tmp` alias comes first so that an
+allowed directory under the host `/tmp` is not hidden by it.
+
+Adding refuses `/` and the home directory itself (after canonicalization),
+paths inside the project root, and paths inside another allowed directory. A
+saved directory that no longer exists keeps its record and trust: the sidebar
+still loads, the directory is just not declared until it exists again, and it
+can still be untrusted or removed.
 
 ## Temporary output
 

@@ -3,9 +3,11 @@
 //! The bwrap mounts and the file-tool path check are both derived from one
 //! [`SandboxBoundary`], so a region added for one is never missing from the
 //! other. Allowed directories (ADR 0032) join through
-//! [`SandboxBoundary::read_only`] / [`SandboxBoundary::read_write`].
+//! [`SandboxBoundary::with_allowed`] and are read again on every use, so a
+//! declaration reaches running sandboxes from their next command.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 pub(crate) const DEFAULT_RO_BINDS: [&str; 6] = ["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix"];
 
@@ -34,6 +36,48 @@ pub struct BoundaryRegion {
     pub access: PathAccess,
 }
 
+/// A list of directories that the host may replace while runs use it.
+#[derive(Debug, Clone, Default)]
+pub struct LivePaths(Arc<RwLock<Arc<[PathBuf]>>>);
+
+impl LivePaths {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self(Arc::new(RwLock::new(paths.into())))
+    }
+
+    /// The current list; later [`LivePaths::set`] calls do not change it.
+    pub fn get(&self) -> Arc<[PathBuf]> {
+        Arc::clone(
+            &self
+                .0
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    pub fn set(&self, paths: Vec<PathBuf>) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = paths.into();
+    }
+}
+
+impl PartialEq for LivePaths {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.get() == other.get()
+    }
+}
+
+impl Eq for LivePaths {}
+
+/// Allowed directories with the access the run's role grants them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedRegions {
+    pub paths: LivePaths,
+    pub access: PathAccess,
+}
+
 /// A read-only build cache mounted at a different path inside the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheMount {
@@ -45,6 +89,8 @@ pub struct CacheMount {
 #[derive(Debug, Clone)]
 pub struct SandboxBoundary {
     pub(crate) workspace_root: PathBuf,
+    pub(crate) system: Vec<PathBuf>,
+    pub(crate) allowed: Option<AllowedRegions>,
     pub(crate) read_only: Vec<PathBuf>,
     pub(crate) read_write: Vec<PathBuf>,
     pub(crate) cargo_home: Option<PathBuf>,
@@ -57,7 +103,9 @@ impl SandboxBoundary {
     pub fn new(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
-            read_only: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
+            system: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
+            allowed: None,
+            read_only: Vec::new(),
             read_write: Vec::new(),
             cargo_home: tool_home("CARGO_HOME", ".cargo"),
             rustup_home: tool_home("RUSTUP_HOME", ".rustup"),
@@ -83,6 +131,17 @@ impl SandboxBoundary {
     pub fn read_write(mut self, path: impl Into<PathBuf>) -> Self {
         self.read_write.push(path.into());
         self
+    }
+
+    /// Allowed directories, read at each use with one access for all of them.
+    #[must_use]
+    pub fn with_allowed(mut self, paths: LivePaths, access: PathAccess) -> Self {
+        self.allowed = Some(AllowedRegions { paths, access });
+        self
+    }
+
+    pub fn allowed(&self) -> Option<&AllowedRegions> {
+        self.allowed.as_ref()
     }
 
     /// The thread's `TMPDIR`, read-write at its host path.
@@ -121,12 +180,28 @@ impl SandboxBoundary {
     }
 
     /// Host paths in bwrap mount order; a later region covering a path wins.
+    /// Allowed directories come right after the system paths, so a parent
+    /// directory never hides the scratch, output, caches or project root.
     pub fn regions(&self) -> Vec<BoundaryRegion> {
         let region = |path: &Path, access| BoundaryRegion {
             path: path.to_path_buf(),
             access,
         };
         let mut regions = Vec::new();
+        regions.extend(
+            self.system
+                .iter()
+                .map(|path| region(path, PathAccess::ReadOnly)),
+        );
+        if let Some(allowed) = &self.allowed {
+            regions.extend(
+                allowed
+                    .paths
+                    .get()
+                    .iter()
+                    .map(|path| region(path, allowed.access)),
+            );
+        }
         regions.extend(
             self.scratch
                 .iter()
@@ -209,5 +284,44 @@ mod tests {
         assert!(!read_only.iter().any(|path| path.starts_with("/tmp/home")));
         assert!(!read_only.iter().any(|path| path == "/home/u/.cargo"));
         assert_eq!(regions.last().unwrap().path, Path::new("/project"));
+    }
+
+    // Given: allowed directories shared with the host, one of them a parent of the runtime's paths
+    // When: the host replaces the list after the boundary was built
+    // Then: regions list the current directories right after the system paths, before the
+    // scratch, output, caches and project root that must win over them
+    #[test]
+    fn allowed_directories_are_read_live_and_precede_runtime_regions() {
+        let allowed = LivePaths::new(vec![PathBuf::from("/var")]);
+        let boundary = SandboxBoundary::new(PathBuf::from("/var/project"))
+            .with_allowed(allowed.clone(), PathAccess::ReadWrite)
+            .read_only("/var/tmp/out")
+            .with_scratch("/var/tmp/scratch/t-1");
+        let index = |regions: &[BoundaryRegion], path: &str| {
+            regions
+                .iter()
+                .position(|region| region.path == Path::new(path))
+                .unwrap_or_else(|| panic!("{path} is not listed"))
+        };
+        let regions = boundary.regions();
+        let allowed_at = index(&regions, "/var");
+        assert_eq!(regions[allowed_at].access, PathAccess::ReadWrite);
+        assert!(index(&regions, "/nix") < allowed_at);
+        for later in ["/var/tmp/scratch/t-1", "/var/tmp/out", "/var/project"] {
+            assert!(allowed_at < index(&regions, later), "{later}");
+        }
+
+        allowed.set(vec![PathBuf::from("/srv/reference")]);
+
+        let regions = boundary.regions();
+        assert!(
+            !regions
+                .iter()
+                .any(|region| region.path == Path::new("/var"))
+        );
+        assert_eq!(
+            regions[index(&regions, "/srv/reference")].access,
+            PathAccess::ReadWrite
+        );
     }
 }

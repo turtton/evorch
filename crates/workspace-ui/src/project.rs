@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +74,9 @@ impl ProjectRecord {
         trust: TrustState,
     ) -> Result<(), ProjectError> {
         let directory = validate_allowed_directory(self, path, trust)?;
+        if is_too_broad(&directory.path) {
+            return Err(ProjectError::TooBroad);
+        }
         self.allowed_directories.push(directory);
         Ok(())
     }
@@ -83,16 +86,24 @@ impl ProjectRecord {
         path: &Path,
         trust: TrustState,
     ) -> Result<(), ProjectError> {
-        let canonical = canonical_directory(path)?;
-        if canonical != path {
-            return Err(ProjectError::NotCanonical);
-        }
+        let path = stored_identity(path)?;
         let directory = self
             .allowed_directories
             .iter_mut()
-            .find(|directory| directory.path == canonical)
+            .find(|directory| directory.path == path)
             .ok_or(ProjectError::UnknownAllowedDirectory)?;
         directory.trust = trust;
+        Ok(())
+    }
+
+    pub(crate) fn remove_allowed_directory(&mut self, path: &Path) -> Result<(), ProjectError> {
+        let path = stored_identity(path)?;
+        let before = self.allowed_directories.len();
+        self.allowed_directories
+            .retain(|directory| directory.path != path);
+        if self.allowed_directories.len() == before {
+            return Err(ProjectError::UnknownAllowedDirectory);
+        }
         Ok(())
     }
 }
@@ -103,27 +114,78 @@ pub(crate) fn validate_allowed_directory(
     trust: TrustState,
 ) -> Result<AllowedDirectory, ProjectError> {
     let canonical = canonical_directory(path)?;
-    if canonical.starts_with(&project.repo_root) {
+    check_placement(project, &canonical)?;
+    Ok(AllowedDirectory {
+        path: canonical,
+        trust,
+    })
+}
+
+/// Load-time check. A directory that no longer exists keeps its record and is
+/// placed by its stored path, so a removed checkout never blocks startup.
+pub(crate) fn validate_stored_allowed_directory(
+    project: &ProjectRecord,
+    directory: &AllowedDirectory,
+) -> Result<(), ProjectError> {
+    let path = stored_identity(&directory.path)?;
+    if path.is_dir() {
+        validate_allowed_directory(project, &path, directory.trust)?;
+    } else {
+        check_placement(project, &path)?;
+    }
+    Ok(())
+}
+
+fn check_placement(project: &ProjectRecord, path: &Path) -> Result<(), ProjectError> {
+    if path.starts_with(&project.repo_root) {
         return Err(ProjectError::NestedInProjectRoot);
     }
     if project
         .allowed_directories
         .iter()
-        .any(|directory| canonical == directory.path)
+        .any(|directory| path == directory.path)
     {
         return Err(ProjectError::DuplicateAllowedDirectory);
     }
     if project
         .allowed_directories
         .iter()
-        .any(|directory| canonical.starts_with(&directory.path))
+        .any(|directory| path.starts_with(&directory.path))
     {
         return Err(ProjectError::NestedInExistingAllowed);
     }
-    Ok(AllowedDirectory {
-        path: canonical,
-        trust,
-    })
+    Ok(())
+}
+
+/// The stored form of a path: absolute and canonical while it exists, and
+/// free of `.` / `..` once it no longer does.
+fn stored_identity(path: &Path) -> Result<PathBuf, ProjectError> {
+    if !path.is_absolute() {
+        return Err(ProjectError::NotAbsolute);
+    }
+    let canonical = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_)
+            if path
+                .components()
+                .all(|part| matches!(part, Component::RootDir | Component::Normal(_))) =>
+        {
+            path.to_path_buf()
+        }
+        Err(_) => return Err(ProjectError::NotCanonical),
+    };
+    if canonical != path {
+        return Err(ProjectError::NotCanonical);
+    }
+    Ok(canonical)
+}
+
+/// Granting the filesystem root or the whole home directory would remove the boundary.
+fn is_too_broad(path: &Path) -> bool {
+    path == Path::new("/")
+        || std::env::var_os("HOME")
+            .and_then(|home| PathBuf::from(home).canonicalize().ok())
+            .is_some_and(|home| home == path)
 }
 
 pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf, ProjectError> {

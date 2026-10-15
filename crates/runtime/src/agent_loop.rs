@@ -134,6 +134,9 @@ pub(crate) struct LoopState {
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
     pub(crate) scratch: Option<crate::scratch::RunScratch>,
+    /// The run project's live allowed directories with this run's access; set for
+    /// sandboxed runs and read again by every command and file tool call.
+    pub(crate) allowed_directories: Option<sandbox::AllowedRegions>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -287,6 +290,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         durable_task: None,
         pending_terminal: None,
         scratch: None,
+        allowed_directories: None,
     };
     // Every setup/execute return flows through one finalization boundary.
     async {
@@ -327,6 +331,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             let executor = if benchmark_mode {
                 crate::runtime::benchmark_executor(Arc::clone(&state.shared.bus), root)
             } else {
+                state.allowed_directories =
+                    state
+                        .shared
+                        .runtime
+                        .upgrade()
+                        .map(|runtime| sandbox::AllowedRegions {
+                            paths: runtime.project_allowed_directories(&root),
+                            access: state.policy.allowed_access(),
+                        });
                 let checker_config = state
                     .shared
                     .runtime
@@ -339,6 +352,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     ro_binds: Vec::new(),
                     rw_binds: Vec::new(),
                     scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
+                    allowed: state.allowed_directories.clone(),
                 };
                 let sandbox = match state
                     .shared

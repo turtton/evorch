@@ -52,6 +52,8 @@ pub enum ProjectError {
     UnknownProject,
     #[error("unknown allowed directory")]
     UnknownAllowedDirectory,
+    #[error("allowed directory must not be the filesystem root or the home directory")]
+    TooBroad,
 }
 
 /// Thread mutation errors.
