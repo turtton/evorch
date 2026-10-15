@@ -3057,3 +3057,524 @@ async fn allowed_directories_are_restated_after_compaction_then_reuse_the_wire_p
         allowed_compaction_restates_the_list(reason).await;
     }
 }
+
+/// Reads by `path`, so a successful call names the file whose rules apply.
+struct PathRead;
+#[async_trait::async_trait]
+impl Tool for PathRead {
+    fn name(&self) -> &'static str {
+        "read"
+    }
+    fn schema(&self) -> Value {
+        json!({"type":"object", "required":["path"], "properties":{"path":{"type":"string"}}})
+    }
+    fn permissions(&self) -> Permissions {
+        Permissions::read_only()
+    }
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success(format!(
+            "contents of {}",
+            input["path"]
+        )))
+    }
+}
+
+/// Stands in for `shell`; only its `cwd` matters to allowed-directory instructions.
+struct CwdShell;
+#[async_trait::async_trait]
+impl Tool for CwdShell {
+    fn name(&self) -> &'static str {
+        "shell"
+    }
+    fn schema(&self) -> Value {
+        json!({"type":"object", "required":["command"], "properties":{"command":{"type":"string"}, "cwd":{"type":"string"}}})
+    }
+    fn permissions(&self) -> Permissions {
+        Permissions::read_only()
+    }
+    async fn execute(&self, _input: Value) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+const ALLOWED_INSTRUCTIONS: &str = "[allowed-directory instructions]";
+
+fn call(id: &str, tool: &str, input: Value) -> ScriptedResponse {
+    ScriptedResponse::tool_call(
+        &format!("response-{id}"),
+        MODEL,
+        0,
+        id,
+        tool,
+        [input.to_string()],
+    )
+}
+
+fn path_read(id: &str, path: &std::path::Path) -> ScriptedResponse {
+    call(id, "read", json!({"path": path}))
+}
+
+/// An allowed directory outside the project, with nested rules and a `deploy` skill.
+fn instructed_dir(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let dir = parent.join(name);
+    let write = |relative: &str, text: &str| {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("AGENTS.md", &format!("{name}-root-rule"));
+    write("sub/AGENTS.md", &format!("{name}-sub-rule"));
+    write(
+        ".evorch/skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy steps\n---\ndeploy body\n",
+    );
+    dir
+}
+
+fn instruction_messages(request: &Value) -> Vec<String> {
+    wire_texts(request, "user")
+        .into_iter()
+        .filter(|text| text.contains(ALLOWED_INSTRUCTIONS))
+        .collect()
+}
+
+fn tool_result_text(request: &Value, call_id: &str) -> String {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["tool_call_id"] == call_id)
+        .unwrap_or_else(|| panic!("no result for {call_id}"))["content"]
+        .to_string()
+}
+
+/// Asserts the newest message of `request` is the instructions appended right
+/// after the result of `call_id`.
+fn assert_instructions_follow(request: &Value, call_id: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    let [.., result, appended] = messages.as_slice() else {
+        panic!("too few messages");
+    };
+    assert_eq!(result["tool_call_id"], call_id);
+    let text = appended["content"].to_string();
+    assert!(text.contains(ALLOWED_INSTRUCTIONS), "{text}");
+    text
+}
+
+// Given: a Worker whose project has two allowed directories outside it, each with
+//        nested rules and a skill, and a directory that is not allowed
+// When: it reads two files in one directory, reads outside, runs a shell in the
+//       other directory and loads the listed skill
+// Then: each directory's rules and skills are appended once, right after the round
+//       that first touched it; nothing comes from outside; the system message never
+//       changes and every request keeps the previous one as its prefix
+#[tokio::test]
+async fn allowed_directory_instructions_append_once_after_the_touching_round_and_preserve_the_wire_prefix()
+ {
+    let outside = tempfile::tempdir().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let shared = instructed_dir(&base, "shared");
+    let tools_dir = instructed_dir(&base, "tooling");
+    let untrusted = instructed_dir(&base, "untrusted");
+    let mut harness = harness_with_tools(
+        vec![
+            path_read("first-read", &shared.join("sub/a.rs")),
+            path_read("second-read", &shared.join("sub/b.rs")),
+            path_read("outside-read", &untrusted.join("sub/x.rs")),
+            call(
+                "shell-cwd",
+                "shell",
+                json!({"command":"ls", "cwd": tools_dir.join("sub")}),
+            ),
+            call("load", "skill_load", json!({"name":"deploy"})),
+            text_response("done"),
+        ],
+        1_000_000,
+        Arc::new(PathRead),
+        vec![Arc::new(CwdShell)],
+    );
+    let root = allowed_project(&harness);
+    harness
+        .runtime
+        .set_project_allowed_directories(root, vec![shared.clone(), tools_dir.clone()]);
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Work across the shared directories".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 6);
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(wire_texts(request, "system"), systems);
+    }
+    assert!(!systems.join("\n").contains("shared-root-rule"));
+    let first = assert_instructions_follow(&requests[1], "first-read");
+    for token in [
+        "shared-root-rule",
+        "shared-sub-rule",
+        "- deploy: Deploy steps",
+        &shared.join("AGENTS.md").display().to_string(),
+    ] {
+        assert!(first.contains(token), "{token}: {first}");
+    }
+    assert_eq!(instruction_messages(&requests[2]).len(), 1, "rules once");
+    assert_eq!(
+        instruction_messages(&requests[3]).len(),
+        1,
+        "nothing outside"
+    );
+    let shell = assert_instructions_follow(&requests[4], "shell-cwd");
+    assert!(shell.contains("tooling-root-rule") && shell.contains("tooling-sub-rule"));
+    assert!(
+        shell.contains("- deploy: Deploy steps (not loadable"),
+        "the second deploy is shadowed: {shell}"
+    );
+    assert!(!shell.contains("shared-root-rule"));
+    let last = requests.last().unwrap();
+    assert_eq!(instruction_messages(last).len(), 2);
+    assert!(!last.to_string().contains("untrusted-root-rule"));
+    assert!(tool_result_text(last, "load").contains("deploy body"));
+}
+
+/// Waits until `run` waits for input after `requests` more of its own model
+/// requests; a parent also waits while its delegated child runs.
+async fn waiting_after(receiver: &mut EventReceiver, run: RunId, requests: usize) {
+    let mut completed = 0;
+    while completed < requests {
+        completed += through_phase(receiver, run, AgentRunPhase::Waiting)
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind,
+                EventKind::Provider(ProviderEvent::RequestCompleted { run_id: Some(id), .. })
+                    if id == &run.to_string())
+            })
+            .count();
+    }
+}
+
+// Given: an Orchestrator conversation that touched an allowed directory with a skill
+// When: it delegates with that skill, the directory is then removed from the list,
+//       and it tries to load or delegate the skill again
+// Then: the child receives the skill body; after removal both are refused with the
+//       reason, nothing new is appended, and the parent's wire prefix is preserved
+#[tokio::test]
+async fn delegated_allowed_skills_reach_the_child_and_are_refused_after_removal() {
+    let outside = tempfile::tempdir().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let shared = instructed_dir(&base, "shared");
+    let mut harness = harness_with_read(
+        vec![
+            path_read("touch", &shared.join("a.rs")),
+            call(
+                "delegate-skill",
+                "delegate",
+                json!({"target":{"role":"worker"},"prompt":"Deploy it","load_skills":["deploy"]}),
+            ),
+            text_response("Deployed"),
+            text_response("Delegated"),
+            call("load-revoked", "skill_load", json!({"name":"deploy"})),
+            call(
+                "delegate-revoked",
+                "delegate",
+                json!({"target":{"role":"worker"},"prompt":"Again","load_skills":["deploy"]}),
+            ),
+            text_response("Refused"),
+        ],
+        1_000_000,
+        Arc::new(PathRead),
+    );
+    let review_storage = support::ReviewStorage::new();
+    let root = allowed_project(&harness);
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), vec![shared.clone()]);
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "allowed-skills",
+            Role::Orchestrator,
+            "Deploy through a worker".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    waiting_after(&mut harness.receiver, run, 3).await;
+    harness
+        .runtime
+        .set_project_allowed_directories(root.clone(), Vec::new());
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Use the skill again".into())
+        .unwrap();
+    waiting_after(&mut harness.receiver, run, 3).await;
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 7);
+    let child = &requests[2];
+    assert!(
+        wire_texts(child, "system")
+            .join("\n")
+            .contains("deploy body")
+    );
+    let parent: Vec<_> = [0, 1, 3, 4, 5, 6].map(|index| &requests[index]).into();
+    let systems = wire_texts(parent[0], "system");
+    for pair in parent.windows(2) {
+        assert_eq!(wire_texts(pair[1], "system"), systems);
+        assert_append_only(CacheProtocol::OpenAi, pair[0], pair[1]).unwrap();
+    }
+    let last = parent.last().unwrap();
+    assert_eq!(instruction_messages(last).len(), 1);
+    let reason = format!("{} is no longer an allowed directory", shared.display());
+    for id in ["load-revoked", "delegate-revoked"] {
+        assert!(tool_result_text(last, id).contains(&reason), "{id}");
+    }
+}
+
+// Given: a conversation that touched an allowed directory before a compaction
+// When: after the compaction boundary it touches the directory again
+// Then: the directory's rules and skills are appended once more right after that
+//       tool round, since the summary may have dropped them; the system message is
+//       unchanged and the post-compaction prefix is reused
+async fn allowed_instructions_return_after_compaction(reason: CompactionReason) {
+    let automatic = reason == CompactionReason::Automatic;
+    let outside = tempfile::tempdir().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let shared = instructed_dir(&base, "shared");
+    let old_reply =
+        "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
+    let mut harness = harness_with_read(
+        vec![
+            path_read("before", &shared.join("a.rs")),
+            text_response(&old_reply),
+            path_read("after", &shared.join("b.rs")),
+            text_response("done"),
+        ],
+        if automatic { 64_000 } else { 1_000_000 },
+        Arc::new(PathRead),
+    );
+    let review_storage = support::ReviewStorage::new();
+    let root = allowed_project(&harness);
+    harness
+        .runtime
+        .set_project_allowed_directories(root, vec![shared.clone()]);
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "allowed-instructions-compaction",
+            Role::Worker,
+            "Inspect the shared files".into(),
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    if reason == CompactionReason::Manual {
+        harness.runtime.compact(run).unwrap();
+    }
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Continue after the context boundary".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::Compaction(CompactionEvent::Compacted { reason: actual, .. }) if *actual == reason)),
+        "expected successful {reason:?} compaction"
+    );
+    verify_trace(&harness, run, &events, 1);
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    assert_instructions_follow(&requests[1], "before");
+    let again = assert_instructions_follow(&requests[3], "after");
+    assert!(again.contains("shared-root-rule"), "{reason:?}: {again}");
+    assert!(
+        again.contains("- deploy: Deploy steps\""),
+        "{reason:?}: {again}"
+    );
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(wire_texts(request, "system"), systems);
+    }
+}
+
+#[tokio::test]
+async fn allowed_instructions_are_appended_again_after_compaction_then_reuse_the_wire_prefix() {
+    for reason in [CompactionReason::Manual, CompactionReason::Automatic] {
+        allowed_instructions_return_after_compaction(reason).await;
+    }
+}
+
+// Given: a stopped Worker run that already received an allowed directory's instructions
+// When: it is restored, touches the directory again and loads the listed skill
+// Then: nothing is appended again, the skill still loads, and the restored run keeps
+//       the system message and wire prefix
+#[tokio::test]
+async fn restored_runs_keep_allowed_instructions_without_appending_them_again() {
+    let outside = tempfile::tempdir().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let shared = instructed_dir(&base, "shared");
+    let mut harness = harness_with_read(
+        vec![
+            path_read("before", &shared.join("sub/a.rs")),
+            text_response("Initial work"),
+            path_read("after", &shared.join("sub/b.rs")),
+            call("load", "skill_load", json!({"name":"deploy"})),
+            text_response("Continued after restore"),
+        ],
+        1_000_000,
+        Arc::new(PathRead),
+    );
+    let root = allowed_project(&harness);
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("allowed-instructions.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    harness
+        .runtime
+        .set_project_allowed_directories(root, vec![shared.clone()]);
+    let run = harness.runtime.reserve_run_id();
+    harness.runtime.bind_thread_root("thread", run).unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Start work",
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "After restore".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 5);
+    assert_instructions_follow(&requests[1], "before");
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(wire_texts(request, "system"), systems);
+    }
+    let last = requests.last().unwrap();
+    assert_eq!(instruction_messages(last).len(), 1);
+    assert!(tool_result_text(last, "load").contains("deploy body"));
+}
+
+// Given: a source chat that received an allowed directory's instructions in its first turn
+// When: a new thread forks at that turn and touches the directory again
+// Then: the fork appends them once more after its own tool round, because a fork
+//       replaces history, and keeps the source's system message
+#[tokio::test]
+async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
+    let outside = tempfile::tempdir().unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    let shared = instructed_dir(&base, "shared");
+    let mut harness = harness_with_read(
+        vec![
+            path_read("source-read", &shared.join("a.rs")),
+            text_response("Source turn"),
+            path_read("fork-read", &shared.join("b.rs")),
+            text_response("Fork turn"),
+        ],
+        1_000_000,
+        Arc::new(PathRead),
+    );
+    let root = allowed_project(&harness);
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("allowed-fork.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    harness
+        .runtime
+        .set_project_allowed_directories(root, vec![shared.clone()]);
+    let config = RunConfig {
+        interactive: true,
+        keep_alive: true,
+        ..Default::default()
+    };
+    let source = harness
+        .runtime
+        .delegate_chat("source", Role::Worker, "Start".into(), config.clone())
+        .unwrap();
+    let context_len = loop {
+        if let EventKind::Lifecycle(LifecycleEvent::TurnCompleted {
+            run_id,
+            context_len,
+        }) = harness.receiver.recv().await.unwrap().kind
+            && run_id == source.to_string()
+        {
+            break context_len;
+        }
+    };
+    let fork = harness
+        .runtime
+        .delegate_chat_seeded(
+            "fork",
+            Role::Worker,
+            "Branch".into(),
+            config,
+            Some(runtime::ChatForkSeed {
+                source_run_id: source.to_string(),
+                context_len,
+            }),
+        )
+        .unwrap();
+    through_phase(&mut harness.receiver, fork, AgentRunPhase::Waiting).await;
+    for run in [source, fork] {
+        harness.runtime.cancel(run).unwrap();
+        harness.runtime.wait(run).await.unwrap();
+    }
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    assert_instructions_follow(&requests[1], "source-read");
+    let again = assert_instructions_follow(&requests[3], "fork-read");
+    assert!(again.contains("shared-root-rule"));
+    assert_eq!(instruction_messages(&requests[3]).len(), 2);
+    assert_eq!(
+        wire_texts(&requests[3], "system"),
+        wire_texts(&requests[0], "system")
+    );
+    assert_append_only(CacheProtocol::OpenAi, &requests[2], &requests[3]).unwrap();
+}

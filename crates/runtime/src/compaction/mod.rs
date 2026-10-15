@@ -239,6 +239,7 @@ pub(crate) async fn compact_now(
     // procedure only at the next complete request boundary, after all results.
     state.todo_context_pending = true;
     state.told_directories.rewrite_pending = true;
+    state.allowed_instructions.forget_history();
     state.todo_context_deferred = false;
     // Provider usage describes the pre-compaction input and cannot be reused.
     state.last_usage = None;
@@ -396,6 +397,7 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) {
     state.context.apply_checkpoint(checkpoint);
     state.todo_context_pending = true;
     state.told_directories.rewrite_pending = true;
+    state.allowed_instructions.forget_history();
     state.todo_context_deferred = false;
     // Provider usage describes the replaced history and cannot be reused.
     state.last_usage = None;

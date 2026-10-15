@@ -124,6 +124,40 @@ list as `[workspace update] Current allowed directories; ...`, or says `none`
 when a run that once had directories has none left. Runs that never had any
 get no extra message.
 
+### Instructions inside allowed directories
+
+Rules and repository skills of an allowed directory never enter the system
+message. They are read the first time a run touches the directory: the `path`
+of a successful `read`, `grep`, `write` or `edit`, or the `cwd` of a
+successful `shell` (paths inside shell commands are not detected). Targets are
+resolved through symlinks, and anything inside the project root keeps the
+project's own rules even when an allowed directory contains the root. After
+the tool round, right after its last result and separately from project rules,
+the run gets one message:
+
+```text
+[allowed-directory instructions] /srv/shared
+## rules: /srv/shared/AGENTS.md
+...
+Repository skills here (load with skill_load, or pass to delegate load_skills):
+- deploy: Deploy steps
+```
+
+The directory is the root of its own rule search, from the directory down to
+the target, within the `max_injection_bytes` budget. Each rule file is appended
+once per run; one left out by the budget is tried again on a later touch. The
+skills are listed on the first touch and become loadable with `skill_load` or
+delegate `load_skills` in that run only; the shared catalog and the system
+message stay as they are, and a name another skill already uses is listed as
+not loadable. When the directory leaves the list, loading its skills fails with
+the reason and nothing more is appended for it.
+
+What was appended and which directories' skills were loaded are saved in the
+restore snapshot, so a restored run does not get them again. Compaction
+(including a model-switch compaction) and a fork replace history, so the next
+touch appends the directory's instructions once more; loaded skills stay
+loadable.
+
 ## Temporary output
 
 Shell pipes and PTYs are drained into bounded buffers (8 MiB per stream).

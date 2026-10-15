@@ -158,6 +158,11 @@ impl SkillRegistry {
         }
     }
 
+    /// 登録済み entry を name 昇順で返す。
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &SkillEntry> {
+        self.skills.values()
+    }
+
     /// 指定名の entry を返す。
     pub fn get(&self, name: &str) -> Option<&SkillEntry> {
         self.skills.get(name)

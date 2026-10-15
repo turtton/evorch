@@ -86,6 +86,7 @@ impl RestoredState {
         // Updates appended after the boundary were cut off with it.
         let mut restored = Self::from_record(&truncated)?;
         restored.allowed_directories.rewrite_pending = true;
+        restored.allowed_instructions.forget_history();
         Ok(restored)
     }
 }

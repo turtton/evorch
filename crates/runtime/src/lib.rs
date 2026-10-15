@@ -16,6 +16,7 @@
 
 mod agent_loop;
 pub mod allowed_directories;
+pub mod allowed_instructions;
 pub mod artifacts;
 pub mod base_context;
 pub mod budget_tracker;

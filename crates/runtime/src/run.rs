@@ -191,6 +191,8 @@ pub struct RunConfig {
     pub category: Option<String>,
     /// 委譲時に子 run の初期 System メッセージへ本文を注入する skill 名。既定は空。
     pub load_skills: Vec<String>,
+    /// Allowed directories whose skills `load_skills` names, so the child can load them.
+    pub allowed_skill_roots: Vec<std::path::PathBuf>,
     /// Project this run works in. Children always inherit their parent's;
     /// `None` binds a root run to the runtime's active project at registration.
     pub project_root: Option<PathBuf>,

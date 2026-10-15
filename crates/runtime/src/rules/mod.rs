@@ -15,6 +15,7 @@ pub use api::{
     StartupRuleExclusion, StartupRuleFile, after_successful_tools, startup_rule_files,
     startup_snapshot,
 };
+pub(crate) use api::{allowed_directory_rules, injection_budget};
 pub use session::RulesSession;
 pub use source::RulesSource;
 pub use types::{ProjectTrust, RulesError, RulesSettings};
@@ -355,5 +356,69 @@ mod tests {
                 assert!(!snapshot.contains("[rules truncated:"));
             }
         }
+    }
+
+    // Given: an allowed directory with root, nested and scoped rules
+    // When: a deep target is read twice, the second time with its root rule already injected
+    // Then: rules come from the directory as root, under its own header with absolute
+    //       paths, and injected files are skipped
+    #[test]
+    fn allowed_directory_rules_use_the_directory_as_root_and_skip_injected_files() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let root = tmp.path().canonicalize().expect("canonical");
+        write(&root.join("AGENTS.md"), "allowed-root-rule");
+        write(&root.join("src/AGENTS.md"), "allowed-src-rule");
+        write(
+            &root.join(".claude/rules/rs.md"),
+            "---\nglobs: [\"**/*.rs\"]\n---\nallowed-rust-rule",
+        );
+        write(&root.join("docs/AGENTS.md"), "unrelated-rule");
+        let target = root.join("src/lib.rs");
+        let header = format!("[allowed-directory instructions] {}", root.display());
+
+        let (first, included) = super::allowed_directory_rules(
+            &root,
+            std::slice::from_ref(&target),
+            &Default::default(),
+            &header,
+            65_536,
+        );
+        let first = first.expect("規則がある");
+        assert!(first.starts_with(&header));
+        for token in ["allowed-root-rule", "allowed-src-rule", "allowed-rust-rule"] {
+            assert!(first.contains(token), "{token}");
+        }
+        assert!(!first.contains("unrelated-rule"));
+        assert!(first.contains(&format!("## rules: {}", root.join("AGENTS.md").display())));
+        assert_eq!(included.len(), 3);
+
+        let injected = included.into_iter().collect();
+        let (again, _) =
+            super::allowed_directory_rules(&root, &[target], &injected, &header, 65_536);
+        assert_eq!(again, None);
+    }
+
+    // Given: two rules and a budget that fits only the deepest
+    // When: rendered for an allowed directory
+    // Then: the omitted rule is marked and not reported as included, so it is retried
+    #[test]
+    fn allowed_directory_rules_omitted_by_budget_stay_pending() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let root = tmp.path().canonicalize().expect("canonical");
+        write(&root.join("AGENTS.md"), &"root body ".repeat(200));
+        write(&root.join("src/AGENTS.md"), "deep");
+        let header = "[allowed-directory instructions] x";
+
+        let (text, included) = super::allowed_directory_rules(
+            &root,
+            &[root.join("src/lib.rs")],
+            &Default::default(),
+            header,
+            400,
+        );
+
+        let text = text.expect("規則がある");
+        assert!(text.contains("[rules omitted:"));
+        assert_eq!(included, [root.join("src/AGENTS.md")]);
     }
 }

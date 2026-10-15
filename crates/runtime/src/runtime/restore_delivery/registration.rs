@@ -167,6 +167,7 @@ mod review_tests {
                     trigger: None,
                     turn_completed: true,
                     allowed_directories: Default::default(),
+                    allowed_instructions: Default::default(),
                 },
                 &trigger,
             );
