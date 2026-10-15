@@ -166,6 +166,7 @@ mod review_tests {
                     checkpoints: vec![],
                     trigger: None,
                     turn_completed: true,
+                    allowed_directories: Default::default(),
                 },
                 &trigger,
             );

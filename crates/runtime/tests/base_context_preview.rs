@@ -133,6 +133,52 @@ async fn preview_matches_the_system_message_a_run_sends() {
     }
 }
 
+// Given: a project with a declared allowed directory
+// When: previewing and then running a Worker (read-write) and an Explorer (read-only)
+// Then: the allowed directories section sits right before the workspace note and the
+//       preview joins into the exact system message, with each role's access
+#[tokio::test]
+async fn preview_and_run_carry_the_same_allowed_directories_section() {
+    let fixture = Fixture::new();
+    let shared = tempfile::tempdir().unwrap();
+    let shared_path = shared.path().canonicalize().unwrap();
+    for (role, access) in [(Role::Worker, "read-write"), (Role::Explorer, "read-only")] {
+        let model = Arc::new(ScriptedModel::new([Ok(text_response(
+            "done",
+            FinishReason::Stop,
+        ))]));
+        let runtime = fixture.runtime(model.clone(), ProjectTrust::Approved);
+        runtime.set_project_allowed_directories(
+            fixture.project.path().to_path_buf(),
+            vec![shared_path.clone()],
+        );
+        let report = runtime
+            .preview_base_context(BaseContextRequest::new(role))
+            .await
+            .unwrap();
+        let kinds: Vec<_> = report.sections.iter().map(|section| section.kind).collect();
+        let allowed = kinds
+            .iter()
+            .position(|kind| *kind == ContextSectionKind::AllowedDirectories)
+            .expect("allowed directories section");
+        assert_eq!(kinds[allowed + 1], ContextSectionKind::Workspace);
+        assert!(
+            report.sections[allowed]
+                .text
+                .contains(&format!("* {} ({access})", shared_path.display()))
+        );
+
+        let run = runtime.delegate_background(role, "TASK".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+
+        let observed = model.observed().await;
+        assert_eq!(
+            system_texts(&observed[0]),
+            [joined(&report, false), joined(&report, true)]
+        );
+    }
+}
+
 // Given: a user override for the worker baseline only
 // When: previewing a worker
 // Then: each preset section names the layer it was read from

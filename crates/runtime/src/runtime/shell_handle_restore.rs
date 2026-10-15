@@ -102,6 +102,7 @@ mod tests {
             }],
             trigger: None,
             turn_completed: true,
+            allowed_directories: Default::default(),
         };
         assert_eq!(restored_floor(&restored).unwrap(), Some(1000));
     }

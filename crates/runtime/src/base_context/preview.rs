@@ -14,6 +14,7 @@ use crate::agent_loop::{
     LoopShared, append_subagent_context_note, shared_active_root, standard_tool_specs,
     visible_tool_specs,
 };
+use crate::allowed_directories;
 use crate::compaction::estimator::estimate_tool_tokens;
 use crate::memory::MemoryBoundary;
 use crate::prompt::{AvailableSkill, classify};
@@ -144,6 +145,13 @@ impl AgentRuntime {
             });
         let own_sandbox = sandbox_root.is_some();
         let active_root = shared_active_root(shared.rules.as_deref(), sandbox_root);
+        let allowed_directories = active_root.as_deref().map_or_else(Vec::new, |root| {
+            allowed_directories::snapshot(&allowed_directories::regions(
+                &self.shared,
+                root,
+                &policy,
+            ))
+        });
         let mut sections = compose_system_sections(
             &shared,
             &SystemInputs {
@@ -152,6 +160,7 @@ impl AgentRuntime {
                 load_skills: &request.load_skills,
                 prompt_len: 0,
                 active_root: active_root.as_deref(),
+                allowed_directories: &allowed_directories,
             },
         )
         .map_err(|error| RuntimeError::Model {

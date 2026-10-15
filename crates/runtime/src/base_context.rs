@@ -14,6 +14,7 @@ use agents::Role;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_loop::LoopShared;
+use crate::allowed_directories::{self, ToldDirectory};
 use crate::compaction::policy::compaction_policy_text;
 use crate::prompt::{PromptPartKind, SystemPromptCatalogError, classify};
 use crate::rules;
@@ -53,6 +54,8 @@ pub enum ContextSectionKind {
     Skills,
     Rules,
     CompactionPolicy,
+    /// The run's allowed directories at its start; never rewritten, even on restore.
+    AllowedDirectories,
     Workspace,
     /// Where `$TMPDIR` is; never rewritten on restore, unlike the workspace note.
     TemporaryFiles,
@@ -72,6 +75,7 @@ impl ContextSectionKind {
             Self::Skills => "Skills",
             Self::Rules => "Rules",
             Self::CompactionPolicy => "Compaction policy",
+            Self::AllowedDirectories => "Allowed directories",
             Self::Workspace => "Workspace",
             Self::TemporaryFiles => "Temporary files",
             Self::Memory => "Memory lessons",
@@ -170,9 +174,12 @@ pub(crate) struct SystemInputs<'a> {
     /// First user message length, counted against the rules injection budget.
     pub(crate) prompt_len: usize,
     pub(crate) active_root: Option<&'a Path>,
+    /// One snapshot, so the section matches the list the run records as told.
+    pub(crate) allowed_directories: &'a [ToldDirectory],
 }
 
-/// Resolve the initial system message as ordered sections: catalog, skills, rules, compaction.
+/// Resolve the initial system message as ordered sections: catalog, skills, rules,
+/// compaction, allowed directories.
 ///
 /// Joining the non-empty sections with one blank line gives the exact system text.
 pub(crate) fn compose_system_sections(
@@ -199,6 +206,7 @@ pub(crate) fn compose_system_sections(
     let compaction = shared
         .compaction_configured
         .then(|| compaction_policy_text(&shared.compaction, classify(&model_id)));
+    let allowed = allowed_directories::section_text(inputs.allowed_directories);
     let estimated_history_bytes = u64::try_from(
         catalog_bytes
             + sections
@@ -207,6 +215,7 @@ pub(crate) fn compose_system_sections(
                 .map(|section| section.text.len())
                 .sum::<usize>()
             + compaction.as_ref().map_or(0, String::len)
+            + allowed.as_ref().map_or(0, String::len)
             + inputs.prompt_len,
     )
     .unwrap_or(u64::MAX);
@@ -228,6 +237,13 @@ pub(crate) fn compose_system_sections(
     if let Some(text) = compaction {
         sections.push(ContextSection::new(
             ContextSectionKind::CompactionPolicy,
+            ContextSource::Generated,
+            text,
+        ));
+    }
+    if let Some(text) = allowed {
+        sections.push(ContextSection::new(
+            ContextSectionKind::AllowedDirectories,
             ContextSource::Generated,
             text,
         ));

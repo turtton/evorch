@@ -23,6 +23,8 @@ pub(crate) struct RestoredState {
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
     pub(crate) trigger: Option<event_bus::AgentMessage>,
     pub(crate) turn_completed: bool,
+    /// Boxed so the restore continuations stay small.
+    pub(crate) allowed_directories: Box<crate::allowed_directories::ToldDirectories>,
 }
 
 impl RestoredState {
@@ -76,6 +78,7 @@ impl RestoredState {
             checkpoints,
             trigger: None,
             turn_completed,
+            allowed_directories: Box::new(descriptor.allowed_directories),
         })
     }
 }
@@ -150,6 +153,12 @@ pub struct RunRestoreDescriptor {
     /// Role chain pins at the last snapshot; restore seeds them back (ADR 0030).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub route_pins: Vec<crate::RoutePinRecord>,
+    /// Allowed directories last told to the run (ADR 0032); restore appends only changes.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::allowed_directories::ToldDirectories::is_unused"
+    )]
+    pub allowed_directories: crate::allowed_directories::ToldDirectories,
 }
 
 impl RunRestoreDescriptor {
@@ -413,6 +422,7 @@ fn write_snapshot(
             .shared
             .model
             .route_pins(&state.caller_run_id().to_string()),
+        allowed_directories: state.told_directories.clone(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
@@ -560,5 +570,34 @@ mod tests {
         assert_eq!(safe_context_end(&messages), 1);
         messages.push(result("b"));
         assert_eq!(safe_context_end(&messages), 4);
+    }
+
+    #[test]
+    fn told_allowed_directories_round_trip_and_stay_out_of_unused_snapshots() {
+        // Given: a descriptor written before allowed directories were told
+        let legacy = serde_json::json!({
+            "role": "worker", "name": null, "parent_run_id": null, "interactive": false,
+            "keep_alive": false, "category": null, "load_skills": [],
+            "model_preference": null, "restorable": true, "non_restorable_reason": null,
+        });
+        let mut descriptor: super::RunRestoreDescriptor = serde_json::from_value(legacy).unwrap();
+        // Then: it reads as told nothing and writes back without the field
+        assert!(descriptor.allowed_directories.is_unused());
+        assert!(
+            serde_json::to_value(&descriptor).unwrap()["allowed_directories"].is_null(),
+            "unused record is omitted"
+        );
+        // When: a run was told a directory
+        descriptor.allowed_directories =
+            crate::allowed_directories::ToldDirectories::started(vec![
+                crate::allowed_directories::ToldDirectory {
+                    path: "/shared".into(),
+                    access: crate::allowed_directories::DirectoryAccess::ReadWrite,
+                },
+            ]);
+        let json = serde_json::to_string(&descriptor).unwrap();
+        // Then: the told list survives the snapshot
+        let restored: super::RunRestoreDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.allowed_directories, descriptor.allowed_directories);
     }
 }
