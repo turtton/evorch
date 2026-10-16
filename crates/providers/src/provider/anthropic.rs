@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use serde::Serialize;
 
-use super::claude::ClaudeToolAdapter;
+use super::claude::{ClaudeReasoningControls, ClaudeToolAdapter, ClaudeWireProfile};
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
@@ -69,6 +69,8 @@ struct MessagesRequest {
     wire: crate::wire::anthropic::WireMessagesRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Value>,
+    #[serde(flatten)]
+    reasoning: Option<ClaudeReasoningControls>,
 }
 
 impl AnthropicClient {
@@ -96,9 +98,10 @@ impl AnthropicClient {
     }
 
     /// Enable Claude subscription Bearer authentication and stable CLI identity.
-    pub fn with_claude_oauth(mut self) -> Self {
+    pub fn with_claude_oauth(mut self) -> Result<Self, ProviderError> {
+        self.http_client = crate::http::build_claude_http_client()?;
         self.claude_oauth = true;
-        self
+        Ok(self)
     }
 
     /// Snapshot identity at construction; token refresh cannot rewrite sent metadata.
@@ -113,6 +116,29 @@ impl AnthropicClient {
         stream: bool,
     ) -> Result<(MessagesRequest, Option<ClaudeToolAdapter>), ProviderError> {
         let mut wire = to_wire_request(request, stream);
+        let reasoning = self
+            .claude_oauth
+            .then(|| {
+                ClaudeWireProfile.reasoning(
+                    &request.model,
+                    wire.max_tokens,
+                    request.reasoning_effort.as_deref(),
+                )
+            })
+            .transpose()?;
+        if self.claude_oauth
+            && (reasoning
+                .as_ref()
+                .is_some_and(ClaudeReasoningControls::is_enabled)
+                || request.model.starts_with("claude-opus-4-7"))
+        {
+            if wire.temperature.is_some_and(|value| value != 1.0) {
+                return Err(ProviderError::Request(
+                    "Claude thinking and Opus 4.7 require the default temperature".into(),
+                ));
+            }
+            wire.temperature = None;
+        }
         let adapter = self
             .claude_oauth
             .then(|| super::claude::shape_oauth_request(&mut wire))
@@ -127,25 +153,54 @@ impl AnthropicClient {
                 request.observation.as_ref().map(|o| o.run_id.as_str()),
             )
         });
-        Ok((MessagesRequest { wire, metadata }, adapter))
+        Ok((
+            MessagesRequest {
+                wire,
+                metadata,
+                reasoning,
+            },
+            adapter,
+        ))
     }
 
-    fn authenticated_request(&self, auth: &ProviderAuth) -> reqwest::RequestBuilder {
+    fn authenticated_request(
+        &self,
+        auth: &ProviderAuth,
+        request: &MessagesRequest,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let builder = self
             .http_client
             .post(self.messages_url())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
         if self.claude_oauth {
-            builder
+            let identity: serde_json::Value = serde_json::from_str(
+                request
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value["user_id"].as_str())
+                    .ok_or_else(|| {
+                        ProviderError::Request("Claude request identity missing".into())
+                    })?,
+            )
+            .map_err(|_| ProviderError::Request("Claude request identity invalid".into()))?;
+            let session_id = identity["session_id"]
+                .as_str()
+                .ok_or_else(|| ProviderError::Request("Claude session identity missing".into()))?;
+            let controls = request
+                .reasoning
+                .as_ref()
+                .ok_or_else(|| ProviderError::Request("Claude request profile missing".into()))?;
+            Ok(builder
                 .bearer_auth(&auth.api_key)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header("anthropic-beta", super::claude::CLAUDE_INFERENCE_BETAS)
-                .header("user-agent", super::claude::CLAUDE_USER_AGENT)
-                .header("x-app", "cli")
-                .header("anthropic-dangerous-direct-browser-access", "true")
+                .headers(ClaudeWireProfile.headers(session_id, controls.is_enabled())?)
+                .body(super::claude::serialize_request(
+                    &request.wire,
+                    request.metadata.as_ref(),
+                    controls,
+                )?))
         } else {
-            builder.header("x-api-key", &auth.api_key)
+            Ok(builder.header("x-api-key", &auth.api_key).json(request))
         }
     }
 
@@ -179,10 +234,12 @@ impl AnthropicClient {
                 .map(Duration::from_secs);
             ProviderError::RateLimited { retry_after }
         } else {
-            ProviderError::Http {
-                status,
-                body: "Claude request rejected".into(),
-            }
+            let body = super::claude::oauth::bounded_json(response)
+                .await
+                .ok()
+                .and_then(|value| super::claude::required_version_error(&value))
+                .unwrap_or_else(|| "Claude request rejected".into());
+            ProviderError::Http { status, body }
         }
     }
 }
@@ -204,8 +261,7 @@ impl ProviderClient for AnthropicClient {
             if self.claude_oauth {
                 builder = builder
                     .bearer_auth(&auth.api_key)
-                    .header("anthropic-beta", super::claude::CLAUDE_INFERENCE_BETAS)
-                    .header("user-agent", super::claude::CLAUDE_USER_AGENT);
+                    .headers(ClaudeWireProfile.headers(&self.claude_session_id, false)?);
             } else {
                 builder = builder.header("x-api-key", &auth.api_key);
             }
@@ -263,7 +319,7 @@ impl ProviderClient for AnthropicClient {
         ProviderCapabilities {
             streaming: true,
             tool_use: true,
-            reasoning: !self.claude_oauth,
+            reasoning: true,
         }
     }
 
@@ -286,8 +342,7 @@ impl ProviderClient for AnthropicClient {
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let request_builder = self
-            .authenticated_request(auth)
-            .json(&wire_request)
+            .authenticated_request(auth, &wire_request)?
             .timeout(self.timeout);
         let http_request = request_builder.build().map_err(map_request_error)?;
         observer.emit_started();
@@ -347,8 +402,7 @@ impl ProviderClient for AnthropicClient {
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let http_request = self
-            .authenticated_request(auth)
-            .json(&wire_request)
+            .authenticated_request(auth, &wire_request)?
             .build()
             .map_err(map_request_error)?;
         observer.emit_started();

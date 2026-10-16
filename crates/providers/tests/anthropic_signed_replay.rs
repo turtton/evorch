@@ -1,6 +1,7 @@
 //! Signed thinking must survive streaming, serialization, and tool-result replay.
 use futures_util::StreamExt;
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
+use mock_openai::claude_contract::claude_model_input;
 use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
 use providers::{ChatRequest, Message, ProviderAuth, ProviderClient, StreamEvent};
 use serde_json::{Value, json};
@@ -30,10 +31,10 @@ fn blocks(oauth: bool) -> Vec<Value> {
         json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu-1","content":[]}),
         json!({"type":"redacted_thinking","data":"opaque-redacted-data"}),
         json!({"type":"thinking","thinking":"Use the local tool.","signature":"opaque-signature-2"}),
-        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"Read"} else {"read"},
-            "input":if oauth {json!({"file_path":"report"})} else {json!({"path":"report"})},
+        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"_read"} else {"read"},
+            "input":json!({"path":"report"}),
             "caller":{"type":"direct"}}),
-        json!({"type":"tool_use","id":"toolu-2","name":if oauth {"mcp__evorch__inspect_run"} else {"inspect_run"},
+        json!({"type":"tool_use","id":"toolu-2","name":if oauth {"_mcp__evorch__inspect_run"} else {"inspect_run"},
             "input":{"run_id":"run-1","nested":{"file_path":"unchanged"}},"caller":{"type":"direct"}}),
     ]
 }
@@ -114,7 +115,7 @@ async fn exercise(streaming: bool, oauth: bool) {
     })
     .unwrap();
     if oauth {
-        client = client.with_claude_oauth();
+        client = client.with_claude_oauth().unwrap();
     }
     let auth = ProviderAuth::new("fixture-token");
     let mut request = input();
@@ -180,7 +181,17 @@ async fn exercise(streaming: bool, oauth: bool) {
             "the original block order, signatures, citations, and server results must be replayed verbatim"
         );
     }
-    for pair in bodies.windows(2) {
+    let model_inputs: Vec<Value> = captured
+        .iter()
+        .map(|request| {
+            if oauth {
+                claude_model_input(&request.body).unwrap()
+            } else {
+                serde_json::from_slice(&request.body).unwrap()
+            }
+        })
+        .collect();
+    for pair in model_inputs.windows(2) {
         assert_append_only(CacheProtocol::Anthropic, &pair[0], &pair[1]).unwrap();
     }
 }
@@ -217,7 +228,7 @@ async fn replaced_prefix_omits_old_signatures_and_reuses_new_ones() {
         })
         .unwrap();
         if oauth {
-            client = client.with_claude_oauth();
+            client = client.with_claude_oauth().unwrap();
         }
         let auth = ProviderAuth::new("fixture-token");
         let mut request = input();
@@ -258,7 +269,17 @@ async fn replaced_prefix_omits_old_signatures_and_reuses_new_ones() {
         }
         assert_eq!(bodies[2]["messages"][3]["content"][0], signed[0]);
         assert_eq!(bodies[2]["messages"][3]["content"][1], signed[1]);
-        assert_append_only(CacheProtocol::Anthropic, &bodies[1], &bodies[2]).unwrap();
+        let model_inputs: Vec<Value> = captured
+            .iter()
+            .map(|request| {
+                if oauth {
+                    claude_model_input(&request.body).unwrap()
+                } else {
+                    serde_json::from_slice(&request.body).unwrap()
+                }
+            })
+            .collect();
+        assert_append_only(CacheProtocol::Anthropic, &model_inputs[1], &model_inputs[2]).unwrap();
     }
 }
 

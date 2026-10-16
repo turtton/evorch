@@ -136,6 +136,10 @@ impl CodexQuotaClient {
     /// Returns `HttpTransport` if TLS/client setup fails.
     pub fn new(config: QuotaConfig, store: Arc<dyn CodexTokenStore>) -> Result<Self, QuotaError> {
         let http = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()

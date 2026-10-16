@@ -139,6 +139,10 @@ impl ModelCatalog {
 
     async fn fetch(dir: &Path, endpoint: &str, lock: std::fs::File) -> Result<Self, CatalogError> {
         let bytes = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             .build()?

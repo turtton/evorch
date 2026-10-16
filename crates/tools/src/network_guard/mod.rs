@@ -155,6 +155,10 @@ impl NetworkGuard {
             resolver: pinning.clone(),
         });
         let mut builder = Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(redirect::Policy::none())
             .dns_resolver(adapter)
             .no_proxy()

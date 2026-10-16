@@ -48,6 +48,10 @@ impl KimiQuotaClient {
         }
         url.set_path(&format!("{}/usages", url.path().trim_end_matches('/')));
         let http = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .user_agent(concat!("evorch/", env!("CARGO_PKG_VERSION")))

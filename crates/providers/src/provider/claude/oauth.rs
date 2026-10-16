@@ -79,6 +79,10 @@ impl ClaudeOAuthClient {
             return Err(ClaudeOAuthError::Configuration);
         }
         let http = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()

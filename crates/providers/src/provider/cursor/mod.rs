@@ -254,6 +254,10 @@ fn validate_endpoint(value: &str) -> Result<(), ProviderError> {
 }
 fn http_client(timeout: Option<std::time::Duration>) -> Result<reqwest::Client, ProviderError> {
     let mut builder = reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(5))
         .read_timeout(std::time::Duration::from_secs(90));

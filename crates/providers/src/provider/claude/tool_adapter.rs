@@ -15,12 +15,7 @@ mod tests;
 #[derive(Default)]
 pub(crate) struct ClaudeToolAdapter {
     canonical_names: BTreeMap<String, String>,
-    pending_inputs: BTreeMap<usize, StreamInput>,
-}
-
-struct StreamInput {
-    initial: Value,
-    partial_json: String,
+    initial_inputs: BTreeMap<usize, Value>,
 }
 
 impl ClaudeToolAdapter {
@@ -40,11 +35,8 @@ impl ClaudeToolAdapter {
                 _ => {}
             }
         }
-        // Keep the canonical tool order and its cache breakpoint unchanged.
+        // Keep schemas, descriptions, canonical order and cache breakpoints unchanged.
         for tool in &mut wire.tools {
-            if uses_file_path(&tool.name) {
-                swap_path_schema(&mut tool.input_schema);
-            }
             tool.name = wire_name(&tool.name);
         }
         for block in wire
@@ -53,14 +45,9 @@ impl ClaudeToolAdapter {
             .flat_map(|message| &mut message.content)
         {
             match block {
-                WireContentBlock::ToolUse { name, input, .. } => {
-                    if uses_file_path(name) {
-                        swap_path_keys(input);
-                    }
-                    *name = wire_name(name);
-                }
+                WireContentBlock::ToolUse { name, .. } => *name = wire_name(name),
                 WireContentBlock::Raw { block, .. } => {
-                    adapt_raw_tool(block, |name| Some(wire_name(name)), uses_file_path);
+                    adapt_raw_tool(block, |name| Some(wire_name(name)));
                 }
                 _ => {}
             }
@@ -81,31 +68,20 @@ impl ClaudeToolAdapter {
     pub(crate) fn restore_message(&self, message: &mut Message) {
         for block in &mut message.content {
             match block {
-                ContentBlock::ToolUse { name, input, .. } => {
+                ContentBlock::ToolUse { name, .. } => {
                     if let Some(canonical) = self.canonical_names.get(name) {
-                        if uses_file_path(canonical) {
-                            swap_path_keys(input);
-                        }
                         name.clone_from(canonical);
                     }
                 }
                 ContentBlock::Anthropic { block, .. } => {
-                    adapt_raw_tool(
-                        block,
-                        |name| self.canonical_names.get(name).cloned(),
-                        |name| {
-                            self.canonical_names
-                                .get(name)
-                                .is_some_and(|n| uses_file_path(n))
-                        },
-                    );
+                    adapt_raw_tool(block, |name| self.canonical_names.get(name).cloned());
                 }
                 _ => {}
             }
         }
     }
 
-    /// Only complete JSON can safely rename keys; expose names immediately and buffer arguments.
+    /// Restore names immediately and pass argument fragments through byte-for-byte.
     pub(crate) fn restore_events(
         &mut self,
         frame: &SseFrame,
@@ -115,6 +91,7 @@ impl ClaudeToolAdapter {
             serde_json::from_str(&frame.data).map_err(|_| ProviderError::InvalidSse {
                 detail: "invalid Claude stream frame".into(),
             })?;
+        let event_type = frame.event.as_deref().or_else(|| value["type"].as_str());
         for event in events.iter_mut() {
             if let StreamEvent::ToolCallDelta {
                 index,
@@ -124,45 +101,38 @@ impl ClaudeToolAdapter {
             } = event
             {
                 if let Some(name) = name {
-                    self.pending_inputs.remove(index);
+                    self.initial_inputs.remove(index);
+                    if event_type == Some("content_block_start")
+                        && let Some(input) = value["content_block"].get("input")
+                        && input.as_object().is_none_or(|object| !object.is_empty())
+                    {
+                        self.initial_inputs.insert(*index, input.clone());
+                    }
                     if let Some(canonical) = self.canonical_names.get(name) {
-                        if uses_file_path(canonical) {
-                            self.pending_inputs.insert(
-                                *index,
-                                StreamInput {
-                                    initial: value["content_block"]["input"].clone(),
-                                    partial_json: String::new(),
-                                },
-                            );
-                        }
                         name.clone_from(canonical);
                     }
-                } else if let Some(input) = self.pending_inputs.get_mut(index) {
-                    input.partial_json.push_str(arguments_delta);
-                    arguments_delta.clear();
+                } else if !arguments_delta.trim().is_empty() {
+                    self.initial_inputs.remove(index);
                 }
             }
         }
-        events.retain(|event| {
-            !matches!(event, StreamEvent::ToolCallDelta {
-            id: None, name: None, arguments_delta, ..
-        } if arguments_delta.is_empty())
-        });
-        match frame.event.as_deref().or_else(|| value["type"].as_str()) {
+        // A later input_json_delta replaces the initial input in the interpreter. Since the
+        // accumulator only appends, publish the fallback only after that possibility ends.
+        match event_type {
             Some("content_block_stop") => {
                 if let Some(index) = value["index"]
                     .as_u64()
                     .and_then(|i| usize::try_from(i).ok())
-                    && let Some(input) = self.pending_inputs.remove(&index)
+                    && let Some(input) = self.initial_inputs.remove(&index)
                 {
-                    events.push(input.finish(index));
+                    events.push(initial_input_event(index, input));
                 }
             }
             Some("message_stop") => {
                 events.extend(
-                    std::mem::take(&mut self.pending_inputs)
+                    std::mem::take(&mut self.initial_inputs)
                         .into_iter()
-                        .map(|(index, input)| input.finish(index)),
+                        .map(|(index, input)| initial_input_event(index, input)),
                 );
             }
             _ => {}
@@ -171,101 +141,41 @@ impl ClaudeToolAdapter {
     }
 }
 
-impl StreamInput {
-    fn finish(self, index: usize) -> StreamEvent {
-        let input = if self.partial_json.trim().is_empty() {
-            Ok(self.initial)
-        } else {
-            serde_json::from_str(&self.partial_json)
-        };
-        let arguments_delta = match input {
-            Ok(mut input) => {
-                swap_path_keys(&mut input);
-                input.to_string()
-            }
-            // Keep the original bytes for StreamAccumulator's malformed-call diagnostics.
-            Err(_) => self.partial_json,
-        };
-        StreamEvent::ToolCallDelta {
-            index,
-            id: None,
-            name: None,
-            arguments_delta,
-        }
+fn initial_input_event(index: usize, input: Value) -> StreamEvent {
+    StreamEvent::ToolCallDelta {
+        index,
+        id: None,
+        name: None,
+        arguments_delta: input.to_string(),
     }
-}
-
-fn uses_file_path(name: &str) -> bool {
-    matches!(name, "read" | "write")
 }
 
 fn wire_name(name: &str) -> String {
-    match name {
-        "read" => "Read".into(),
-        "write" => "Write".into(),
-        _ => {
-            let wire = format!("mcp__evorch__{name}");
-            if wire.len() <= 128
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-                && !name.is_empty()
-            {
-                wire
-            } else {
-                // A disjoint namespace prevents literal names from colliding with encoded names.
-                format!("mcp__evorch_h__{:x}", Sha256::digest(name.as_bytes()))
-            }
-        }
+    if matches!(name, "read" | "write" | "edit" | "grep" | "shell") {
+        return format!("_{name}");
+    }
+    let wire = format!("_mcp__evorch__{name}");
+    if wire.len() <= 128
+        && !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        wire
+    } else {
+        // Literal custom names always use the other namespace, including hash-like names.
+        format!("_mcp__evorch_h__{:x}", Sha256::digest(name.as_bytes()))
     }
 }
 
-fn adapt_raw_tool(
-    block: &mut Value,
-    rename: impl FnOnce(&str) -> Option<String>,
-    swap: impl FnOnce(&str) -> bool,
-) {
+fn adapt_raw_tool(block: &mut Value, rename: impl FnOnce(&str) -> Option<String>) {
     if block["type"] != "tool_use" {
         return;
     }
     let Some(name) = block["name"].as_str() else {
         return;
     };
-    let Some(renamed) = rename(name) else { return };
-    if swap(name)
-        && let Some(input) = block.get_mut("input")
-    {
-        swap_path_keys(input);
-    }
-    block["name"] = renamed.into();
-}
-
-/// Swapping both keys preserves existing aliases and conflicting values across replay.
-fn swap_path_keys(value: &mut Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    let path = object.remove("path");
-    let file_path = object.remove("file_path");
-    if let Some(path) = path {
-        object.insert("file_path".into(), path);
-    }
-    if let Some(file_path) = file_path {
-        object.insert("path".into(), file_path);
-    }
-}
-
-fn swap_path_schema(schema: &mut Value) {
-    if let Some(properties) = schema.get_mut("properties") {
-        swap_path_keys(properties);
-    }
-    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
-        for name in required {
-            match name.as_str() {
-                Some("path") => *name = "file_path".into(),
-                Some("file_path") => *name = "path".into(),
-                _ => {}
-            }
-        }
+    if let Some(renamed) = rename(name) {
+        block["name"] = renamed.into();
     }
 }

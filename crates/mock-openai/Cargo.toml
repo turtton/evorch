@@ -9,6 +9,8 @@ name = "mock_openai"
 
 [dependencies]
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 event-bus = { path = "../event-bus" }
