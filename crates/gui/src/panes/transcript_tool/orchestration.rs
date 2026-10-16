@@ -132,12 +132,12 @@ pub(super) fn header(
             header
         }
         "compact" => new(icons::ARROWS_IN, "Compact context"),
-        "ledger_append" => {
+        "working_note_write" => {
             let mut header = new(icons::NOTEBOOK, "Note");
             header.subject = str_arg("body").map(preview).unwrap_or_default();
             header
         }
-        "ledger_read" => new(icons::NOTEBOOK, "Read ledger"),
+        "working_note_read" => new(icons::NOTEBOOK, "Read ledger"),
         "get_goal" => new(icons::TARGET, "Read goal"),
         "submit_goal_check" => new(icons::CHECK_SQUARE, "Submit goal check"),
         "submit_goal_review" => new(icons::SEAL_CHECK, "Submit goal review"),

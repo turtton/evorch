@@ -15,7 +15,7 @@ commit pins CLI 2.1.280 and SDK 0.112.1; these older constants were not copied.
 | Surface | Subscription behavior |
 | --- | --- |
 | Authentication | Bearer token, `/messages?beta=true`, redirects disabled |
-| Identity | CLI User-Agent and system identity; Stainless headers; matching metadata/session header |
+| Identity | CLI User-Agent and system identity; Stainless headers; persistent installation seed and account-scoped device ID; matching metadata/session header |
 | Tools | OMP `_` prefix; evorch-specific tools have an inner MCP-style namespace |
 | Arguments and schemas | Original evorch definitions; no `path`/`file_path` translation |
 | System | Billing control block, CLI identity, original instructions |
@@ -23,14 +23,60 @@ commit pins CLI 2.1.280 and SDK 0.112.1; these older constants were not copied.
 | Caching | One-hour system/tool/message markers; original history retained |
 | Thinking | Explicit model-validated adaptive/budget controls and keep-all context management |
 | Compression | gzip, deflate, Brotli, and Zstandard accepted and decoded |
+| Transport | OAuth-only BoringSSL client, captured TLS ClientHello, HTTP/1 header casing/order, no hidden retries |
+| Correlation | Attempt UUIDs, request class, truthful prompt provenance, previous successful response IDs |
 
-The beta profile contains the shared OMP agent defaults and extended-cache TTL;
-effort is advertised when thinking is enabled. Optional OMP features such as
+The beta profile contains the common inference defaults and extended-cache TTL.
+Effort and thinking-display-updates are advertised only when their fields are
+sent; cache-diagnosis accompanies the diagnostics envelope. Optional OMP features such as
 fallback credits, fast mode, deferred tools, server compaction, and tool-search
 controls are not enabled by this adapter. No one-million-context beta is added.
-evorch keeps its own account/profile identity derivation and original tool
-definitions. The Rust HTTP/TLS client is retained; this is not a reproduction of
-the native CLI's TLS ClientHello.
+The adapter keeps original tool definitions. It does not advertise deferred
+tools, mid-conversation system changes, or thinking-binding controls that it
+does not implement.
+
+## Installation and request identity
+
+Application composition and GUI reload share `claude-installation-id` in the
+selected user configuration directory. The UUID seed is atomically published,
+survives process restarts, and does not change with token rotation, profile
+renaming, or endpoint changes. OMP's account-scoped SHA-256 derivation produces
+the device ID. Invalid existing state fails without silently rotating it.
+API-key clients never read or create this file. Library callers can inject the
+seed explicitly; otherwise they share a process-local seed.
+
+The first Messages call binds the account from the same token bundle used for
+authentication. Constructing a client before login or listing models does not
+freeze a missing account. Same-account token rotation preserves identity. A
+different account on a used client fails before refresh or inference HTTP and
+requires a new client and conversation, preserving the warm input and signed
+history contract. Correlation scopes also include the derived device identity.
+
+Each HTTP attempt gets a new client request UUID. Accepted human inputs supply
+a prompt UUID that stays fixed through tool calls and retries. Provenance and
+indices are sent only when known; restored or internally generated inputs are
+not relabeled as human requests. Response correlation is bounded and scoped to
+session and purpose. Only a successful parsed response or completed SSE message
+advances its `request-id` and `message.id`; failed or canceled attempts do not.
+Tool durations are omitted because this adapter does not have measured values.
+
+## TLS and HTTP reference
+
+The subscription client uses pinned `wreq` 0.16.1 with a dedicated BoringSSL
+profile. The reference Linux ClientHello is 1,504 bytes. Local comparison
+excludes only the random value, session ID, and key-share public keys, then
+compares every remaining byte. Header casing and order also follow the captured
+CLI request. The generic API client continues to use its existing reqwest path.
+
+Certificate and hostname checks stay enabled. `NODE_EXTRA_CA_CERTS` adds trusted
+certificates only to the subscription client; malformed configuration fails
+without exposing certificate contents or paths. Redirects and automatic retries
+are disabled. A connection can be reused after a complete response, while
+canceling an unfinished response drops its transport work.
+
+This introduces a Rust 1.99 requirement and CMake, Perl, Git, and bindgen build
+dependencies in Nix and CI. Reproducing a captured handshake does not prove
+every platform, TLS resumption behavior, or future service-side classification.
 
 ## Checksum reference
 
@@ -59,8 +105,9 @@ Billing is a request transport control envelope. The provider binds signed
 thinking to the stable shaped model input before adding that envelope. It never
 rewrites already-sent history to insert a new checksum.
 
-HTTP-boundary tests independently validate the billing suffix and final-byte
-checksum before separating the first control block from the model input. The
+HTTP-boundary tests independently validate the billing suffix, typed correlation
+fields, diagnostics, and final-byte checksum before separating those transport
+controls from the model input. The
 existing strict prefix assertions then compare instructions, settings, tools,
 schemas, and every prior message. They also reject deliberate mutations with
 valid recomputed checksums. The general Anthropic cache contract is unchanged.
@@ -68,6 +115,13 @@ valid recomputed checksums. The general Anthropic cache contract is unchanged.
 These tests protect input preservation. Synthetic cached tokens do not establish
 the service's cache hit rate, subscription eligibility, or usage-credit routing.
 Those remain service-side decisions and require live account validation.
+
+Anthropic's [current SDK and third-party app guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+states that those clients can draw from subscription limits. Its
+[usage-credit guidance](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans)
+describes paid overflow after included limits are reached and usage credits are
+enabled. This compatibility adapter does not guarantee billing eligibility or
+change the account's usage-credit settings.
 
 ## Updating the profile
 
@@ -77,12 +131,16 @@ Those remain service-side decisions and require live account validation.
    branch, use a locally trusted TLS mock and a CONNECT proxy that rejects every
    destination except `api.anthropic.com:443` and forwards it only to loopback.
 2. Compare CLI/SDK/runtime versions, headers, beta selection, body ordering,
-   cache markers, identity, model controls, and raw checksums. Print mode uses
-   SDK identity/entrypoint; distinguish those from the CLI profile.
+   cache markers, identity, model controls, and raw checksums. Capture an ordinary
+   interactive main request and a tool continuation. Distinguish auxiliary title
+   requests and print/SDK mode from the CLI main path.
 3. Update `profile.rs` and the independently derived checksum vectors together.
    Compare send, fragmented SSE, interleaved tools, signed thinking, replay,
    token rotation, and client recreation; verify API-key requests remain intact.
-4. Run provider tests, runtime subscription cache tests, and
+4. Compare the normalized raw ClientHello and HTTP header order. Validate trusted
+   and untrusted certificates, hostname mismatch, CONNECT proxy, pooling,
+   cancellation, redirects, and connection failure without automatic retry.
+5. Run provider tests, runtime subscription cache tests, and
    `scripts/check-cache-contracts.sh`. Preserve the general prefix checker and
    negative mutation cases. Complete Clippy and formatting checks before release.
 

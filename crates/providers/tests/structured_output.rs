@@ -82,7 +82,7 @@ async fn openai_and_compatible_send_strict_schema_only_when_configured() {
             send_with_and_without_schema(client.as_ref(), streaming).await;
         }
         let bodies = request_bodies(&server).await;
-        for pair in bodies.chunks_exact(2) {
+        for pair in bodies.as_chunks::<2>().0 {
             assert_eq!(
                 pair[1]["response_format"],
                 json!({
@@ -116,7 +116,7 @@ async fn codex_send_and_stream_send_text_format_only_when_configured() {
         send_with_and_without_schema(&client, streaming).await;
     }
     let bodies = request_bodies(&server).await;
-    for pair in bodies.chunks_exact(2) {
+    for pair in bodies.as_chunks::<2>().0 {
         assert_eq!(
             pair[1]["text"],
             json!({"format": {

@@ -8,18 +8,77 @@ const GOLDEN: &str = r#"{"model":"claude-test","messages":[{"role":"user","conte
 // routing fields are excluded too; similarly named schema properties remain.
 const NESTED_GOLDEN: &str = r#"{"model":"claude-test","max_tokens":1024,"messages":[{"role":"user","content":"Reply LOCAL_CAPTURE_OK."},{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"_read","input":{"model":"nested-model","max_tokens":7,"fallbacks":[["primary",{"nested":["]","\""]}]],"fallback_credit_token":"nested-token","keep":"literal cch=00000;"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.bef; cc_entrypoint=cli; cch=2b794;"},{"type":"text","text":"Keep instructions."}],"tools":[{"name":"_read","input_schema":{"type":"object","properties":{"model":{"type":"string"},"max_tokens":{"type":"integer"},"fallbacks":{"type":"array"},"fallback_credit_token":{"type":"string"}},"examples":[{"model":"example","max_tokens":9},{"max_tokens":11},{"fallbacks":[]},{"fallback_credit_token":"secret"}]}}],"fallbacks":["root-fallback"],"fallback_credit_token":"root-token","stream":true}"#;
 
-fn signed(mut request: Value) -> Vec<u8> {
+fn signed(request: Value) -> Vec<u8> {
+    signed_with_context(request, "")
+}
+
+fn signed_with_context(mut request: Value, context: &str) -> Vec<u8> {
     let suffix = version_suffix(first_user_text(&request));
-    request["system"][0]["text"] = json!(format!("{BILLING_START}{suffix}{BILLING_MIDDLE}00000;"));
+    request["system"][0]["text"] = json!(format!(
+        "{BILLING_START}{suffix}{BILLING_MIDDLE}00000;{context}"
+    ));
     let raw = serde_json::to_vec(&request).unwrap();
     let checksum = format!(
         "{:05x}",
         xxh64(&checksum_input(&raw).unwrap(), 0x4d65_9218_e32a_3268) & 0xfffff
     );
     request["system"][0]["text"] = json!(format!(
-        "{BILLING_START}{suffix}{BILLING_MIDDLE}{checksum};"
+        "{BILLING_START}{suffix}{BILLING_MIDDLE}{checksum};{context}"
     ));
     serde_json::to_vec(&request).unwrap()
+}
+
+#[test]
+fn native_context_golden_is_verified_before_only_transport_fields_are_removed() {
+    // Independently hashed with Bun 1.4.2; the newline belongs to the fixture file.
+    let raw = include_str!("context-golden.json").trim_end().as_bytes();
+    let model = claude_model_input(raw).unwrap();
+    assert_eq!(model, claude_model_input(GOLDEN.as_bytes()).unwrap());
+    let mut request: Value = serde_json::from_slice(raw).unwrap();
+    request["tools"][0]["input_schema"]["diagnostics"] =
+        json!({"previous_message_id":"nested-user-value"});
+    request["future_root_setting"] = json!("do not ignore");
+    let preserved = claude_model_input(&signed_with_context(
+        request.clone(),
+        " cc_prev_req=req_first;",
+    ))
+    .unwrap();
+    assert_eq!(preserved["tools"], request["tools"]);
+    assert_eq!(preserved["future_root_setting"], "do not ignore");
+    assert!(assert_append_only(CacheProtocol::Anthropic, &model, &preserved).is_err());
+}
+
+#[test]
+fn invalid_dynamic_controls_are_rejected_even_with_a_valid_checksum() {
+    let request: Value = serde_json::from_str(GOLDEN).unwrap();
+    for fields in [
+        " cc_prev_req=msg_wrong;",
+        " cc_prev_req=req_first; cc_prev_req=req_second;",
+        " cc_prompt_id=not-a-uuid;",
+        " cc_turn_origin=Human;",
+        " cc_turn_index=0;",
+        " cc_prompt_index=1;",
+        " cc_prompt_index=01; cc_turn_index=1;",
+        " cc_prompt_index=1; cc_turn_index=10000001;",
+        " cc_is_subagent=false;",
+        " cc_unrecognized=value;",
+        " cc_turn_origin=human; cc_prev_req=req_wrong_order;",
+    ] {
+        assert!(
+            claude_model_input(&signed_with_context(request.clone(), fields)).is_err(),
+            "{fields}"
+        );
+    }
+    for diagnostics in [
+        json!({}),
+        json!({"previous_message_id":"req_wrong"}),
+        json!({"previous_message_id":null,"unknown":true}),
+        json!({"previous_message_id":42}),
+    ] {
+        let mut invalid = request.clone();
+        invalid["diagnostics"] = diagnostics;
+        assert!(claude_model_input(&signed(invalid)).is_err());
+    }
 }
 
 #[test]

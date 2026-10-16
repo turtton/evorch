@@ -24,6 +24,7 @@ impl LoopState {
         }
         let children = runtime.active_goal_children(root);
         if !children.is_empty() {
+            self.begin_internal_input();
             self.context.push_user(&format!("[goal completion pending] Related agents can still change the outputs: {}. Wait for their completion or explicitly stop unneeded interactive agents before the final self-check. This does not expand the original request.", children.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")));
             self.publish_message_count();
             return true;
@@ -49,6 +50,7 @@ impl LoopState {
                     entry.snapshot.epoch
                 )
             };
+            self.begin_internal_input();
             self.context.push_user(&reminder);
             self.publish_message_count();
             return true;
@@ -139,6 +141,7 @@ impl LoopState {
         }
         if !runtime.active_goal_children(root).is_empty() {
             runtime.goal_tool_activity(root, "child_activity");
+            self.begin_internal_input();
             self.context.push_user("[goal completion pending] Related work changed during review. Settle the related agents, then verify the latest outputs again.");
             self.publish_message_count();
             return true;
@@ -182,6 +185,7 @@ impl LoopState {
             }
         };
         if let Some(next) = next {
+            self.begin_internal_input();
             self.context.push_user(&next);
             self.publish_message_count();
             true

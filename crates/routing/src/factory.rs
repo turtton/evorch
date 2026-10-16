@@ -1,5 +1,6 @@
 //! [`ProviderProfile`] から provider client を構築するファクトリを提供します。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,9 @@ use event_bus::EventBus;
 use providers::ProviderClient;
 use providers::error::ProviderError;
 use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
-use providers::provider::claude::{ClaudeClient, ClaudeTokenBundle, ClaudeTokenStore};
+use providers::provider::claude::{
+    ClaudeClient, ClaudeInstallationId, ClaudeTokenBundle, ClaudeTokenStore,
+};
 use providers::provider::codex::tokens::{CodexTokenStore, TokenBundle};
 use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::provider::cursor::{
@@ -182,6 +185,9 @@ pub struct FactoryOptions {
     pub request_timeout: Option<Duration>,
     /// Codex client version の上書き。`None` なら共有 resolver で一度だけ解決する。
     pub codex_client_version: Option<providers::CodexClientVersion>,
+    /// Claude subscription installation seed. API-key clients never access this path.
+    /// Library callers without a path share a process-local seed.
+    pub claude_installation_id_path: Option<PathBuf>,
 }
 
 /// プロファイルから対応する provider client を構築します。
@@ -302,6 +308,10 @@ fn build_claude(
     };
     let tokens = Arc::new(CredentialStoreClaudeTokenStore::new(store, account.clone()));
     let mut client = ClaudeClient::new(config, tokens).map_err(fail)?;
+    if let Some(path) = &options.claude_installation_id_path {
+        client =
+            client.with_installation_id(ClaudeInstallationId::load_or_create(path).map_err(fail)?);
+    }
     if let Some(base) = &options.auth_base_url_override {
         let oauth = providers::provider::claude::ClaudeOAuthConfig {
             token_url: format!("{}/v1/oauth/token", base.trim_end_matches('/')),

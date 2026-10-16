@@ -229,13 +229,14 @@ impl Respond for PromptCache {
 #[tokio::test]
 async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rotation() {
     let server = MockServer::start().await;
+    let betas = format!("{CLAUDE_INFERENCE_BETAS},cache-diagnosis-2026-04-07");
     Mock::given(method("POST"))
         .and(path("/messages"))
         .and(query_param("beta", "true"))
         .and(header("accept", "application/json"))
         .and(headers(
             "anthropic-beta",
-            CLAUDE_INFERENCE_BETAS.split(',').collect::<Vec<_>>(),
+            betas.split(',').collect::<Vec<_>>(),
         ))
         .respond_with(PromptCache::default())
         .expect(3)
@@ -445,7 +446,7 @@ async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_sta
     let subscription = claude_model_input(&captured[0].body).unwrap();
     assert_eq!(
         subscription["thinking"],
-        json!({"type":"adaptive","display":"omitted"})
+        json!({"type":"adaptive","display":"updates"})
     );
     assert_eq!(subscription["output_config"], json!({"effort":"high"}));
     assert_eq!(

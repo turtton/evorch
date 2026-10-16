@@ -61,6 +61,8 @@ impl LoopState {
             let already_in_history = self.has_user_answer(&question);
             self.answered_questions.insert(question.id.clone());
             if !already_in_history {
+                // The durable projection does not preserve whether a host or agent answered.
+                self.begin_internal_input();
                 self.context.push_user(&answer_message(&question));
                 received = true;
             }

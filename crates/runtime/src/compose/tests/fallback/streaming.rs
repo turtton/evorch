@@ -51,6 +51,12 @@ async fn streaming_falls_back_after_provider_retries_are_exhausted() {
     }
     let bus = EventBus::new(32);
     let invocation = AgentInvocationContext {
+        turn: Some(providers::RequestTurnContext {
+            origin: Some("human".into()),
+            prompt_index: Some(7),
+            turn_index: Some(7),
+            ..providers::RequestTurnContext::unattributed(false)
+        }),
         run_id: "session".into(),
         category: None,
         model_preference: None,
@@ -64,4 +70,9 @@ async fn streaming_falls_back_after_provider_retries_are_exhausted() {
     assert_eq!(result, Ok(response()));
     assert_eq!(requests[0].lock().unwrap().len(), 3);
     assert_eq!(requests[1].lock().unwrap().len(), 1);
+    for provider_requests in requests {
+        for request in provider_requests.lock().unwrap().iter() {
+            assert_eq!(request.observation.as_ref().unwrap().turn, invocation.turn);
+        }
+    }
 }

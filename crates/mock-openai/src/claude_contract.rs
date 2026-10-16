@@ -14,7 +14,7 @@ const BILLING_MIDDLE: &str = "; cc_entrypoint=cli; cch=";
 
 /// Validate subscription billing bytes and return the remaining model input.
 ///
-/// Only the verified first billing block is removed. Direct message cache
+/// Only the verified first billing block and known diagnostics envelope are removed. Direct message cache
 /// breakpoints with a one-hour TTL become ordinary ephemeral breakpoints so
 /// [`crate::cache_contract`] can compare their placement. Instructions, schemas,
 /// tool arguments, and all other message content remain intact.
@@ -37,15 +37,30 @@ pub fn claude_model_input(raw: &[u8]) -> Result<Value, String> {
     let rest = billing
         .strip_prefix(BILLING_START)
         .ok_or("unexpected billing version")?;
-    let (suffix, checksum) = rest
+    let (suffix, fields) = rest
         .split_once(BILLING_MIDDLE)
         .ok_or("invalid billing format")?;
-    let checksum = checksum.strip_suffix(';').ok_or("invalid billing ending")?;
+    let fields = fields.strip_suffix(';').ok_or("invalid billing ending")?;
+    let mut fields = fields.split("; ");
+    let checksum = fields.next().ok_or("missing checksum")?;
     if !lower_hex(suffix, 3) || !lower_hex(checksum, 5) {
         return Err("billing fingerprint/checksum must be lowercase hexadecimal".into());
     }
     if suffix != version_suffix(first_user_text(&request)) {
         return Err("billing version fingerprint does not match the first user text".into());
+    }
+    validate_billing_context(fields)?;
+    if let Some(diagnostics) = request.get("diagnostics") {
+        let object = diagnostics
+            .as_object()
+            .ok_or("diagnostics must be an object")?;
+        if object.len() != 1
+            || !object.get("previous_message_id").is_some_and(|id| {
+                id.is_null() || id.as_str().is_some_and(|id| service_id(id, "msg_"))
+            })
+        {
+            return Err("unexpected diagnostic controls".into());
+        }
     }
 
     let system_range = member_range(raw, "system")?;
@@ -59,7 +74,7 @@ pub fn claude_model_input(raw: &[u8]) -> Result<Value, String> {
     if raw.get(text_start..text_end) != Some(billing.as_bytes()) {
         return Err("billing text must be an unescaped wire string".into());
     }
-    let checksum_start = text_end - 6;
+    let checksum_start = text_start + BILLING_START.len() + suffix.len() + BILLING_MIDDLE.len();
     let mut placeholder = raw.to_vec();
     placeholder[checksum_start..checksum_start + 5].copy_from_slice(b"00000");
     let expected = format!(
@@ -71,6 +86,7 @@ pub fn claude_model_input(raw: &[u8]) -> Result<Value, String> {
     }
 
     request["system"].as_array_mut().unwrap().remove(0);
+    request.as_object_mut().unwrap().remove("diagnostics");
     if let Some(messages) = request["messages"].as_array_mut() {
         for message in messages {
             if let Some(blocks) = message["content"].as_array_mut() {
@@ -85,6 +101,69 @@ pub fn claude_model_input(raw: &[u8]) -> Result<Value, String> {
         }
     }
     Ok(request)
+}
+
+fn service_id(value: &str, prefix: &str) -> bool {
+    value.len() <= if prefix == "req_" { 40 } else { 200 }
+        && value.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+}
+
+fn validate_billing_context<'a>(fields: impl Iterator<Item = &'a str>) -> Result<(), String> {
+    let mut previous = None;
+    let mut indices = 0;
+    for field in fields {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or("invalid billing context field")?;
+        let (rank, valid) = match name {
+            "cc_is_subagent" => (0, value == "true"),
+            "cc_prev_req" => (1, service_id(value, "req_")),
+            "cc_prompt_id" => (2, uuid(value)),
+            "cc_turn_origin" => (
+                3,
+                (1..=32).contains(&value.len())
+                    && value
+                        .bytes()
+                        .next()
+                        .is_some_and(|byte| byte.is_ascii_lowercase())
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            ),
+            "cc_prompt_index" | "cc_turn_index" => {
+                indices += 1;
+                let minimum = u64::from(name == "cc_turn_index");
+                (
+                    if name == "cc_prompt_index" { 4 } else { 5 },
+                    value.parse::<u64>().is_ok_and(|index| {
+                        (minimum..=10_000_000).contains(&index) && index.to_string() == value
+                    }),
+                )
+            }
+            _ => return Err("unknown billing context field".into()),
+        };
+        if !valid || previous.is_some_and(|last| rank <= last) {
+            return Err("invalid or out-of-order billing context field".into());
+        }
+        previous = Some(rank);
+    }
+    if indices == 1 {
+        return Err("billing indices must be a pair".into());
+    }
+    Ok(())
+}
+
+fn uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 fn lower_hex(value: &str, length: usize) -> bool {

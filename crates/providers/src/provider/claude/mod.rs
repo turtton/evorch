@@ -1,13 +1,18 @@
 //! Claude subscription OAuth, token refresh and quota. API keys use AnthropicClient.
 
 mod fingerprint;
+mod identity;
 pub(super) mod oauth;
 mod profile;
 mod quota;
 mod request;
 mod tokens;
 mod tool_adapter;
+pub(super) mod transport;
+mod transport_context;
 
+pub use identity::{CLAUDE_INSTALLATION_ID_FILE, ClaudeInstallationId};
+pub(super) use identity::{process_installation_id, request_metadata};
 pub use oauth::{
     CLAUDE_CLIENT_ID, CLAUDE_SCOPE, ClaudeLoginRequest, ClaudeOAuthClient, ClaudeOAuthConfig,
     ClaudeOAuthError,
@@ -18,6 +23,7 @@ pub use quota::{ClaudeExtraUsage, ClaudeQuotaClient, ClaudeQuotaSnapshot, Claude
 pub(super) use request::serialize_request;
 pub use tokens::{ClaudeTokenBundle, ClaudeTokenStore, InMemoryClaudeTokenStore};
 pub(super) use tool_adapter::ClaudeToolAdapter;
+pub(super) use transport_context::{ClaudeRequestContext, ClaudeTransportContext};
 
 use super::anthropic::{AnthropicClient, AnthropicConfig};
 use crate::stream::DeltaStream;
@@ -26,9 +32,8 @@ use crate::{
     ChatRequest, ChatResponse, ProviderAuth, ProviderCapabilities, ProviderClient, ProviderError,
 };
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use std::{
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,6 +42,7 @@ pub struct ClaudeClient {
     inner: AnthropicClient,
     store: Arc<dyn ClaudeTokenStore>,
     oauth: ClaudeOAuthClient,
+    messages_account: OnceLock<Option<String>>,
 }
 
 impl ClaudeClient {
@@ -44,25 +50,23 @@ impl ClaudeClient {
         config: AnthropicConfig,
         store: Arc<dyn ClaudeTokenStore>,
     ) -> Result<Self, ProviderError> {
-        // A broken credential must not prevent composing other usable profiles.
-        // Authentication reports the stored-credential error when this client is used.
-        let account_id = store
-            .load()
-            .ok()
-            .flatten()
-            .and_then(|bundle| bundle.account_id);
         Ok(Self {
-            inner: AnthropicClient::new(config)?
-                .with_claude_oauth()?
-                .with_claude_account_id(account_id),
+            inner: AnthropicClient::new(config)?.with_claude_oauth()?,
             store,
             oauth: ClaudeOAuthClient::new(ClaudeOAuthConfig::default())
                 .map_err(provider_auth_error)?,
+            messages_account: OnceLock::new(),
         })
     }
 
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.inner = self.inner.with_profile(profile);
+        self
+    }
+
+    /// Use the application's persistent installation seed for subscription metadata.
+    pub fn with_installation_id(mut self, installation_id: ClaudeInstallationId) -> Self {
+        self.inner = self.inner.with_claude_installation_id(installation_id);
         self
     }
 
@@ -74,48 +78,36 @@ impl ClaudeClient {
     pub async fn access_token(&self) -> Result<ClaudeTokenBundle, ProviderError> {
         ensure_fresh(self.store.as_ref(), &self.oauth).await
     }
-}
 
-/// JSON identity follows omp's anthropic-identity.ts. No credential participates in it.
-/// Device identity is stable for a configured account/profile; session identity follows the run.
-pub(super) fn request_metadata(
-    account_id: Option<&str>,
-    profile: Option<&str>,
-    base_url: &str,
-    fallback_session: &str,
-    run_id: Option<&str>,
-) -> serde_json::Value {
-    let mut device_hash = Sha256::new();
-    for part in [
-        "evorch-claude-device-v1",
-        base_url,
-        profile.unwrap_or(""),
-        account_id.unwrap_or(""),
-    ] {
-        device_hash.update(part.as_bytes());
-        device_hash.update([0]);
+    fn messages_client(
+        &self,
+        bundle: &ClaudeTokenBundle,
+    ) -> Result<AnthropicClient, ProviderError> {
+        let account = account_identity(bundle).map(str::to_owned);
+        let bound = self.messages_account.get_or_init(|| account.clone());
+        if bound != &account {
+            return Err(account_changed());
+        }
+        Ok(self.inner.clone().with_claude_account_id(account))
     }
-    let device_id = device_hash
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let session_id = run_id.filter(|id| !id.is_empty()).map_or_else(
-        || fallback_session.into(),
-        |id| {
-            let hash = Sha256::digest(format!("evorch-claude-session-v1\0{id}"));
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&hash[..16]);
-            bytes[6] = (bytes[6] & 0x0f) | 0x40;
-            bytes[8] = (bytes[8] & 0x3f) | 0x80;
-            uuid::Uuid::from_bytes(bytes).to_string()
-        },
-    );
-    let mut identity = serde_json::json!({"device_id": device_id, "session_id": session_id});
-    if let Some(account_id) = account_id.filter(|id| !id.trim().is_empty()) {
-        identity["account_uuid"] = account_id.into();
+
+    async fn messages_auth(&self) -> Result<(AnthropicClient, ProviderAuth), ProviderError> {
+        let lock = self.store.refresh_lock();
+        let _guard = lock.lock().await;
+        let bundle = load_bundle(self.store.as_ref())?;
+        if self
+            .messages_account
+            .get()
+            .is_some_and(|bound| bound.as_deref() != account_identity(&bundle))
+        {
+            return Err(account_changed());
+        }
+        let bundle = freshen_bundle(self.store.as_ref(), &self.oauth, bundle).await?;
+        Ok((
+            self.messages_client(&bundle)?,
+            ProviderAuth::new(bundle.access_token),
+        ))
     }
-    serde_json::json!({"user_id":identity.to_string()})
 }
 
 #[async_trait]
@@ -128,20 +120,16 @@ impl ProviderClient for ClaudeClient {
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
-        let bundle = self.access_token().await?;
-        self.inner
-            .send(&ProviderAuth::new(bundle.access_token), request)
-            .await
+        let (client, auth) = self.messages_auth().await?;
+        client.send(&auth, request).await
     }
     async fn stream(
         &self,
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
-        let bundle = self.access_token().await?;
-        self.inner
-            .stream(&ProviderAuth::new(bundle.access_token), request)
-            .await
+        let (client, auth) = self.messages_auth().await?;
+        client.stream(&auth, request).await
     }
     async fn list_models(
         &self,
@@ -168,9 +156,31 @@ pub(super) async fn ensure_fresh_locked(
     store: &dyn ClaudeTokenStore,
     oauth: &ClaudeOAuthClient,
 ) -> Result<ClaudeTokenBundle, ProviderError> {
-    let bundle = store
+    freshen_bundle(store, oauth, load_bundle(store)?).await
+}
+
+fn account_identity(bundle: &ClaudeTokenBundle) -> Option<&str> {
+    bundle
+        .account_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn account_changed() -> ProviderError {
+    ProviderError::Request("Claude account changed; recreate the client and start a new run".into())
+}
+
+fn load_bundle(store: &dyn ClaudeTokenStore) -> Result<ClaudeTokenBundle, ProviderError> {
+    store
         .load()?
-        .ok_or_else(|| ProviderError::Request("Claude login required".into()))?;
+        .ok_or_else(|| ProviderError::Request("Claude login required".into()))
+}
+
+async fn freshen_bundle(
+    store: &dyn ClaudeTokenStore,
+    oauth: &ClaudeOAuthClient,
+    bundle: ClaudeTokenBundle,
+) -> Result<ClaudeTokenBundle, ProviderError> {
     if bundle.needs_refresh(unix_now()) {
         let refreshed = oauth.refresh(&bundle).await.map_err(provider_auth_error)?;
         store.save(&refreshed)?;

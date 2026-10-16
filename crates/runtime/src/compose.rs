@@ -132,6 +132,17 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             model_identity: ModelIdentity::Fixed,
         },
         ModelSource::Configured => {
+            if user_dir.is_none()
+                && input.config.providers.values().any(|profile| {
+                    profile.provider_type == config::ProviderTypeConfig::AnthropicSubscription
+                })
+            {
+                return Err(RoutingError::InvalidProfile {
+                    reason: "Claude installation identity requires a user configuration directory"
+                        .into(),
+                }
+                .into());
+            }
             let model = compose_routed_model(
                 input.config,
                 ComposeDeps {
@@ -139,7 +150,12 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                     event_bus: Some(Arc::clone(&input.bus)),
                     env: input.env,
                     catalog: ModelCatalog::new(),
-                    factory: FactoryOptions::default(),
+                    factory: FactoryOptions {
+                        claude_installation_id_path: user_dir.as_ref().map(|directory| {
+                            directory.join(providers::provider::claude::CLAUDE_INSTALLATION_ID_FILE)
+                        }),
+                        ..Default::default()
+                    },
                 },
             )?;
             let profiles = model.providers.keys().cloned().collect();
@@ -669,6 +685,7 @@ impl RoutedModel {
                     |settings| settings.service_tier,
                 ),
                 observation: Some(ObservationContext {
+                    turn: invocation.turn.clone(),
                     run_id: invocation.run_id.clone(),
                     purpose: invocation.purpose,
                 }),
@@ -872,6 +889,7 @@ impl AgentModel for RoutedModel {
             },
             output_schema: None,
             observation: Some(ObservationContext {
+                turn: invocation.turn.clone(),
                 run_id: invocation.run_id.clone(),
                 purpose: event_bus::RequestPurpose::Compaction,
             }),

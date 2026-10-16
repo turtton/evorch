@@ -73,7 +73,15 @@ impl AgentRuntime {
                 tracing::warn!(%run_id, %error, "assistant reference restore failed");
                 None
             });
+        let turn = crate::request_turn::initial(
+            parent.is_some(),
+            false,
+            false,
+            history_only,
+            restored.turn.as_ref(),
+        );
         let task = restored.attach_to(RunTask {
+            turn,
             run_id,
             role,
             prompt: String::new(),
@@ -178,6 +186,7 @@ mod review_tests {
                 &mut lock_runs(&runtime.shared.runs),
                 (run, None, Role::Worker, RunConfig::default(), run),
                 RestoredState {
+                    turn: None,
                     boundary_pending: false,
                     continuity: Default::default(),
                     pending_reference_id: None,

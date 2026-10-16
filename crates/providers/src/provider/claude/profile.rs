@@ -16,7 +16,7 @@ pub const CLAUDE_SYSTEM_IDENTITY: &str =
 pub const CLAUDE_INFERENCE_BETAS: &str = concat!(
     "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,",
     "thinking-token-count-2026-05-13,context-management-2025-06-27,",
-    "prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,",
+    "prompt-caching-scope-2026-01-05,",
     "extended-cache-ttl-2025-04-11"
 );
 
@@ -44,11 +44,15 @@ impl ClaudeReasoningControls {
 }
 
 impl ClaudeWireProfile {
+    pub fn requires_default_temperature(&self, model: &str) -> bool {
+        model_mode(model).is_some_and(|mode| mode.supports_xhigh() || mode.requires_thinking())
+    }
+
     /// Authentication is deliberately supplied by the caller, not this profile.
     pub fn headers(
         &self,
         session_id: &str,
-        thinking_enabled: bool,
+        controls: &ClaudeReasoningControls,
     ) -> Result<HeaderMap, ProviderError> {
         let mut headers = HeaderMap::new();
         for (name, value) in [
@@ -86,14 +90,28 @@ impl ClaudeWireProfile {
                 ProviderError::Request("Claude session identity is not a valid HTTP header".into())
             })?,
         );
-        let betas = if thinking_enabled {
-            format!("{CLAUDE_INFERENCE_BETAS},effort-2025-11-24")
-        } else {
-            CLAUDE_INFERENCE_BETAS.into()
-        };
+        let mut betas: Vec<_> = CLAUDE_INFERENCE_BETAS
+            .split(',')
+            .filter(|beta| *beta != "extended-cache-ttl-2025-04-11")
+            .collect();
+        if controls
+            .output_config
+            .as_ref()
+            .is_some_and(|value| value["effort"].is_string())
+        {
+            betas.push("effort-2025-11-24");
+        }
+        if controls
+            .thinking
+            .as_ref()
+            .is_some_and(|value| value["display"] == "updates")
+        {
+            betas.push("thinking-display-updates-2026-08-18");
+        }
+        betas.push("extended-cache-ttl-2025-04-11");
         headers.insert(
             "anthropic-beta",
-            HeaderValue::from_str(&betas).map_err(|_| {
+            HeaderValue::from_str(&betas.join(",")).map_err(|_| {
                 ProviderError::Request("Claude inference beta profile is invalid".into())
             })?,
         );
@@ -117,6 +135,11 @@ impl ClaudeWireProfile {
             ))
         })?;
         if effort == "none" {
+            if mode.requires_thinking() {
+                return Err(ProviderError::Request(format!(
+                    "Claude model {model} requires thinking; select low effort instead"
+                )));
+            }
             return Ok(ClaudeReasoningControls {
                 thinking: Some(json!({"type": "disabled"})),
                 ..Default::default()
@@ -126,7 +149,7 @@ impl ClaudeWireProfile {
             "low" => 1024,
             "medium" => 4096,
             "high" => 16384,
-            "xhigh" if mode == ModelMode::AdaptiveXhigh => 0,
+            "xhigh" if mode.supports_xhigh() => 0,
             "max" if mode.is_adaptive() => 0,
             _ => {
                 return Err(ProviderError::Request(format!(
@@ -135,7 +158,7 @@ impl ClaudeWireProfile {
             }
         };
         let thinking = if mode.is_adaptive() {
-            json!({"type": "adaptive", "display": "omitted"})
+            json!({"type": "adaptive", "display": "updates"})
         } else {
             if max_tokens <= 1024 {
                 return Err(ProviderError::Request(
@@ -158,6 +181,8 @@ impl ClaudeWireProfile {
 enum ModelMode {
     Adaptive,
     AdaptiveXhigh,
+    AdaptiveRequired,
+    AdaptiveRequiredXhigh,
     Manual,
     ManualEffort,
     ManualLegacy,
@@ -165,7 +190,21 @@ enum ModelMode {
 
 impl ModelMode {
     fn is_adaptive(self) -> bool {
-        matches!(self, Self::Adaptive | Self::AdaptiveXhigh)
+        matches!(
+            self,
+            Self::Adaptive
+                | Self::AdaptiveXhigh
+                | Self::AdaptiveRequired
+                | Self::AdaptiveRequiredXhigh
+        )
+    }
+
+    fn supports_xhigh(self) -> bool {
+        matches!(self, Self::AdaptiveXhigh | Self::AdaptiveRequiredXhigh)
+    }
+
+    fn requires_thinking(self) -> bool {
+        matches!(self, Self::AdaptiveRequired | Self::AdaptiveRequiredXhigh)
     }
 }
 
@@ -174,6 +213,17 @@ fn model_mode(model: &str) -> Option<ModelMode> {
         ("claude-sonnet-4-6", ModelMode::Adaptive),
         ("claude-opus-4-6", ModelMode::Adaptive),
         ("claude-opus-4-7", ModelMode::AdaptiveXhigh),
+        ("claude-opus-4-8", ModelMode::AdaptiveXhigh),
+        ("claude-opus-5", ModelMode::AdaptiveXhigh),
+        ("claude-sonnet-5", ModelMode::AdaptiveXhigh),
+        ("claude-haiku-5-5", ModelMode::AdaptiveXhigh),
+        ("claude-opus-5-5", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-sonnet-5-5", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-fable-5", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-fable-5-1", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-mythos-5", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-mythos-5-1", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-mythos-preview", ModelMode::AdaptiveRequired),
         ("claude-opus-4-5", ModelMode::ManualEffort),
         ("claude-sonnet-4-5", ModelMode::Manual),
         ("claude-haiku-4-5", ModelMode::Manual),

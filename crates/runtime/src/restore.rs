@@ -19,6 +19,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) turn: Option<providers::RequestTurnContext>,
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) continuity: crate::continuity::Continuity,
     pub(crate) pending_reference_id: Option<String>,
@@ -78,6 +79,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            turn: descriptor.turn,
             continuity: descriptor.continuity,
             pending_reference_id: descriptor.pending_reference_id,
             boundary_pending: descriptor.boundary_pending,
@@ -127,6 +129,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Explicit input provenance, never reconstructed by counting canonical history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<providers::RequestTurnContext>,
     #[serde(default)]
     pub boundary_pending: bool,
     #[serde(default)]
@@ -433,6 +438,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),
         pending_reference_id: runtime

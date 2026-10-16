@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::transport_context::{ClaudeDiagnostics, ClaudeRequestContext};
 use super::{ClaudeReasoningControls, fingerprint, profile::CLAUDE_CODE_VERSION};
 use crate::ProviderError;
 use crate::wire::anthropic::{
@@ -12,6 +13,7 @@ pub(crate) fn serialize_request(
     wire: &WireMessagesRequest,
     metadata: Option<&Value>,
     reasoning: &ClaudeReasoningControls,
+    context: Option<&ClaudeRequestContext>,
 ) -> Result<Vec<u8>, ProviderError> {
     let first_user_text = wire
         .messages
@@ -28,10 +30,14 @@ pub(crate) fn serialize_request(
         })
         .unwrap_or("");
     let mut system = wire.system.clone().unwrap_or_default();
+    let mut billing = fingerprint::billing_header(CLAUDE_CODE_VERSION, first_user_text);
+    if let Some(context) = context {
+        context.append_billing(&mut billing);
+    }
     system.insert(
         0,
         WireContentBlock::Text {
-            text: fingerprint::billing_header(CLAUDE_CODE_VERSION, first_user_text),
+            text: billing,
             cache_control: None,
         },
     );
@@ -53,6 +59,8 @@ pub(crate) fn serialize_request(
         context_management: Option<&'a Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         output_config: Option<&'a Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diagnostics: Option<ClaudeDiagnostics<'a>>,
         stream: bool,
     }
     let mut bytes = serde_json::to_vec(&Envelope {
@@ -66,6 +74,7 @@ pub(crate) fn serialize_request(
         thinking: reasoning.thinking.as_ref(),
         context_management: reasoning.context_management.as_ref(),
         output_config: reasoning.output_config.as_ref(),
+        diagnostics: context.map(ClaudeRequestContext::diagnostics),
         stream: wire.stream,
     })
     .map_err(|_| ProviderError::Request("Claude request serialization failed".into()))?;

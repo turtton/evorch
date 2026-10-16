@@ -73,6 +73,7 @@ fn summarizer(interval: u64, chunks: u32) -> ModelSummarizer {
     let settings = CompactionSettings::from(&config::CompactionConfig::default());
     assert_eq!(settings, CompactionSettings::default());
     ModelSummarizer {
+        turn: None,
         model: Arc::new(SlowStream {
             interval: Duration::from_secs(interval),
             chunks,

@@ -68,12 +68,14 @@ fn fixture_with_model(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        turn: providers::RequestTurnContext::unattributed(false),
         boundary_pending: false,
         continuity: Default::default(),
         benchmark: None,
         benchmark_checked: false,
         benchmark_replay: false,
         task: RunTask {
+            turn: providers::RequestTurnContext::unattributed(false),
             run_id: parent,
             role: Role::Orchestrator,
             prompt: "parent".into(),
@@ -312,6 +314,8 @@ async fn stopped_wait_keeps_awaited_child_and_preserves_wait_error_contract() {
 async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() {
     let (_, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(cancel_rx);
+    state.turn = crate::request_turn::initial(false, true, true, false, None);
+    let human_turn = state.turn.clone();
     let root = state.task.run_id;
     runtime.bind_thread_root("resume-race", root).unwrap();
     let goal = runtime
@@ -327,9 +331,15 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
     runtime
         .set_goal_checks_paused("resume-race", &goal.goal_id, false)
         .unwrap();
-    state.queue_user_message((crate::thread_goals::CHECKS_WAKE.into(), Vec::new(), false));
+    state.queue_user_message((
+        crate::thread_goals::CHECKS_WAKE.into(),
+        Vec::new(),
+        false,
+        None,
+    ));
     assert!(!state.flush_aside());
     assert!(state.goal_wake_pending);
+    assert_eq!(state.turn, human_turn, "a wake alone is not input");
     assert!(
         state.wait_for_input().await,
         "the root must check before parking"
@@ -339,6 +349,12 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
         event_bus::ThreadGoalPhase::Checking
     );
     assert!(!state.goal_wake_pending);
+    assert_ne!(state.turn.prompt_id, human_turn.prompt_id);
+    assert_eq!(state.turn.origin, None);
+    assert_eq!(
+        (state.turn.prompt_index, state.turn.turn_index),
+        (None, None)
+    );
     runtime.cancel(root).unwrap();
     runtime.wait(root).await.unwrap();
 }

@@ -63,28 +63,12 @@ fn http_client_builder(
     read_timeout: Duration,
 ) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read_timeout);
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
     builder
-}
-
-/// The CLI advertises all four encodings; keep other providers' negotiation stable.
-pub(crate) fn build_claude_http_client() -> Result<reqwest::Client, ProviderError> {
-    http_client_builder(None, READ_TIMEOUT)
-        .gzip(true)
-        .brotli(true)
-        .deflate(true)
-        .zstd(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(map_request_error)
 }
 
 /// エラーレスポンスを [`ProviderError`] へ変換する。

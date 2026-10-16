@@ -29,7 +29,7 @@
         fenixPkgs = fenix.packages.${system};
         rustToolchain = fenixPkgs.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-OATSZm98Es5kIFuqaba+UvkQtFsVgJEBMmS+t6od5/U=";
+          sha256 = "sha256-zm3dyIY2T414ZRR3EhLOvptzG6gta4WZUcawzMUWtqI=";
         };
         lefthookHooked = pkgs.writeShellScriptBin "lefthook" ''
           export TERM=dumb
@@ -53,7 +53,15 @@
           src = pkgs.lib.cleanSource ./.;
           cargoExtraArgs = "--workspace";
           strictDeps = true;
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.makeWrapper
+            pkgs.cmake
+            pkgs.perl
+            pkgs.git
+            pkgs.rustPlatform.bindgenHook
+          ];
+          dontUseCmakeConfigure = true;
           buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ];
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -166,6 +174,7 @@
           };
         };
         devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
             rustToolchain
@@ -174,6 +183,9 @@
             intent-system
             # GUI (evorch-gui / winit+wgpu) が dev shell から起動できるようにする動的ライブラリ群
             pkgs.pkg-config
+            pkgs.cmake
+            pkgs.perl
+            pkgs.git
             pkgs.wayland-protocols
           ] ++ guiLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)

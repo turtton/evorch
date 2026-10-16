@@ -166,6 +166,59 @@ fn configured_source_rejects_missing_providers() {
     ));
 }
 
+#[test]
+fn configured_claude_subscription_persists_identity_in_the_selected_user_directory() {
+    use providers::provider::claude::{CLAUDE_INSTALLATION_ID_FILE, ClaudeInstallationId};
+    let directory = tempfile::tempdir().unwrap();
+    let user_dir = directory.path().join("selected-user-config");
+    let mut config = configured();
+    let profile = config.providers.get_mut(PROFILE).unwrap();
+    profile.provider_type = ProviderTypeConfig::AnthropicSubscription;
+    profile.api_protocol = ApiProtocolConfig::AnthropicMessages;
+    profile.credential = CredentialRefConfig::Keyring {
+        service: "evorch".into(),
+        account: "claude".into(),
+    };
+    let mut input = composition(
+        &config,
+        Arc::new(EventBus::new(32)),
+        ModelSource::Configured,
+        None,
+    );
+    input.user_config_dir = Some(user_dir.clone());
+    compose_runtime(input).unwrap();
+    let seed_path = user_dir.join(CLAUDE_INSTALLATION_ID_FILE);
+    assert!(seed_path.is_file());
+    let seed = ClaudeInstallationId::load_or_create(&seed_path).unwrap();
+    let mut input = composition(
+        &config,
+        Arc::new(EventBus::new(32)),
+        ModelSource::Configured,
+        None,
+    );
+    input.user_config_dir = Some(user_dir);
+    compose_runtime(input).unwrap();
+    assert_eq!(
+        ClaudeInstallationId::load_or_create(&seed_path).unwrap(),
+        seed
+    );
+    let api_profile = config.providers.get_mut(PROFILE).unwrap();
+    api_profile.provider_type = ProviderTypeConfig::Anthropic;
+    api_profile.credential = CredentialRefConfig::Env {
+        var: KEY_ENV.into(),
+    };
+    let api_user_dir = directory.path().join("api-user-config");
+    let mut input = composition(
+        &config,
+        Arc::new(EventBus::new(32)),
+        ModelSource::Configured,
+        None,
+    );
+    input.user_config_dir = Some(api_user_dir.clone());
+    compose_runtime(input).unwrap();
+    assert!(!api_user_dir.exists());
+}
+
 // Given: 同じ Config/依存で runtime composition と routing composition を構築する
 // When: 全 runtime role の selected_model を比較する
 // Then: edge root と直接 adapter の選択結果が一致する

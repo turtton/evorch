@@ -72,6 +72,9 @@ impl RestoredState {
         // Interrupted calls belong to a batch after the boundary.
         descriptor.interrupted_tool_calls.clear();
         descriptor.pending_reference_id = None;
+        if end != messages.len() {
+            descriptor.turn = None;
+        }
         let mut truncated = record.clone();
         truncated.messages_json =
             serde_json::to_string(&messages[..end]).map_err(|error| corrupt(error.to_string()))?;

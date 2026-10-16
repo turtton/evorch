@@ -62,6 +62,7 @@ fn conversation(model: &str) -> Vec<ChatRequest> {
     }))
     .unwrap();
     request.observation = Some(ObservationContext {
+        turn: None,
         run_id: "stable-cache-prefix-conversation".into(),
         purpose: Default::default(),
     });

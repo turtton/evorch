@@ -5,6 +5,23 @@ use super::LoopState;
 const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 
 impl LoopState {
+    pub(crate) fn begin_internal_input(&mut self) {
+        self.turn = providers::RequestTurnContext::unattributed(self.task.parent.is_some());
+    }
+
+    pub(crate) fn accept_input_identity(&mut self, trusted_user: bool, prompt_id: Option<String>) {
+        if trusted_user && let Some(prompt_id) = prompt_id {
+            self.turn = crate::request_turn::human(
+                prompt_id,
+                self.task.parent.is_some(),
+                false,
+                Some(&self.turn),
+            );
+        } else {
+            self.begin_internal_input();
+        }
+    }
+
     pub(crate) fn has_pending_user_messages(&self) -> bool {
         !self.pending_user_messages.is_empty()
     }
@@ -20,7 +37,7 @@ impl LoopState {
         }
         // A trusted goal wake is a scheduling signal, not a new human request.
         // When already running, the normal Stop boundary will perform the check.
-        messages.retain(|(text, _, trusted_user)| {
+        messages.retain(|(text, _, trusted_user, _)| {
             if !trusted_user && text == crate::thread_goals::CHECKS_WAKE {
                 self.goal_wake_pending = true;
                 false
@@ -30,7 +47,8 @@ impl LoopState {
         });
         let received = !messages.is_empty();
         let count = messages.iter().filter(|message| message.2).count();
-        for (text, images, _) in messages {
+        for (text, images, trusted_user, prompt_id) in messages {
+            self.accept_input_identity(trusted_user, prompt_id);
             self.context.push_user(&text);
             if let Some(message) = self.context.messages.last_mut() {
                 message.content.extend(images.into_iter().map(|image| {
@@ -80,6 +98,7 @@ impl LoopState {
         if messages.is_empty() {
             return;
         }
+        self.begin_internal_input();
         for message in messages {
             self.context.push_user(&format_agent_message(&message));
         }

@@ -41,10 +41,6 @@ impl ClaudeQuotaClient {
             .unwrap_or(path);
         url.set_path(&format!("{root}/api/oauth/usage"));
         let http = reqwest::Client::builder()
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .build()

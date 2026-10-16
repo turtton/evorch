@@ -31,6 +31,7 @@ async fn cache_key_is_serialized_when_run_is_set_and_omitted_otherwise() {
     for run in [Some("run-cache-affinity"), None] {
         let mut input = request();
         input.observation = run.map(|id| providers::ObservationContext {
+            turn: None,
             run_id: id.into(),
             purpose: Default::default(),
         });

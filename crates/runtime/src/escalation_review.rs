@@ -405,6 +405,7 @@ impl QuickModelReviewer {
             },
         ];
         let invocation = AgentInvocationContext {
+            turn: None,
             run_id: run_id.to_owned(),
             category: Some(CategoryId::Quick.to_string()),
             model_preference: None,
@@ -504,6 +505,7 @@ impl QuickModelReviewer {
             },
         ];
         let invocation = AgentInvocationContext {
+            turn: None,
             run_id: run_id.to_owned(),
             category: Some(CategoryId::ToolExecution.to_string()),
             model_preference: None,
@@ -631,6 +633,7 @@ impl QuickModelReviewer {
             },
         ];
         let invocation = AgentInvocationContext {
+            turn: None,
             run_id: run_id.to_owned(),
             category: Some(CategoryId::ToolExecution.to_string()),
             model_preference: None,

@@ -46,6 +46,8 @@ pub struct AgentInvocationContext {
     pub category: Option<String>,
     /// 呼び出しの目的。provider 観測イベントへ写し、usage 集計で付随コストを区別する。
     pub purpose: event_bus::RequestPurpose,
+    /// Logical input identity; model retries must retain this context unchanged.
+    pub turn: Option<providers::RequestTurnContext>,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -325,6 +327,7 @@ mod tests {
         ];
 
         let invocation = AgentInvocationContext {
+            turn: None,
             category: None,
             run_id: "run-1".to_string(),
             model_preference: None,
