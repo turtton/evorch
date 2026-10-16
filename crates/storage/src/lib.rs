@@ -82,6 +82,6 @@ pub use error::StorageError;
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::StoredAgentMessage;
 pub use repo::event::StoredEvent;
-pub use review::{LineageEdge, ReviewEvidenceRow};
+pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextRecord, RunLedgerEntry};
 pub use writer::{Storage, StorageHandle, StorageStatistics};

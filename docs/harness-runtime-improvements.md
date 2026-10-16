@@ -4,6 +4,10 @@ Implementation branch: `codex/harness-reliability`. The operator approved the
 limited restore expansion and finalization correction on 2026-09-23. The accepted
 contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
 
+Working memory now uses a latest working note and explicit original-evidence
+access at context and escalation boundaries. See [Working notes](working-notes.md)
+for its persistence, approval-provenance, cache, and evaluation contracts.
+
 ## Execution and interaction
 
 - Runtime meta tools expose concrete JSON schemas. Schema acceptance and argument

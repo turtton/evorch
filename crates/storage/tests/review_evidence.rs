@@ -1,8 +1,8 @@
 //! Review evidence and lineage persistence through the single-writer boundary.
 
 use storage::{
-    Database, LineageEdge, ReviewEvidenceRow, RunContextRecord, Storage, StorageConfig,
-    StorageError,
+    AssistantReferenceRow, Database, LineageEdge, ReviewEvidenceRow, RunContextRecord, Storage,
+    StorageConfig, StorageError,
 };
 
 fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
@@ -14,6 +14,221 @@ fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
     let storage = Storage::open(config.clone()).unwrap();
     let database = Database::open(&config).unwrap();
     (dir, storage, database, config)
+}
+
+fn assistant_reference(id: &str) -> AssistantReferenceRow {
+    AssistantReferenceRow {
+        reference_id: id.into(),
+        source_run_id: "source".into(),
+        turn_end: 3,
+        text: "Shall I implement this plan?".into(),
+        consumed: false,
+        created_at_ns: 5,
+    }
+}
+
+#[test]
+fn assistant_references_are_durable_immutable_and_guarded() {
+    let (_dir, storage, database, config) = fixture();
+    let handle = storage.handle();
+    let row = assistant_reference("reference");
+    assert_eq!(handle.assistant_reference("missing").unwrap(), None);
+    handle.save_assistant_reference(&row).unwrap();
+    handle.save_assistant_reference(&row).unwrap();
+    let mut conflicting = row.clone();
+    conflicting.text = "A different plan".into();
+    assert_eq!(
+        handle.save_assistant_reference(&conflicting),
+        Err(StorageError::AssistantReferenceConflict)
+    );
+    assert_eq!(
+        database.assistant_reference("reference").unwrap(),
+        Some(row.clone())
+    );
+    for text in [
+        "x".repeat(256 * 1024 + 1),
+        "sk-test-evorch-9f8e7d6c5b4a3f2e1d".into(),
+    ] {
+        let mut invalid = assistant_reference("invalid");
+        invalid.text = text;
+        assert!(handle.save_assistant_reference(&invalid).is_err());
+        assert_eq!(database.assistant_reference("invalid").unwrap(), None);
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        let mut invalid = assistant_reference("invalid");
+        invalid.turn_end = usize::MAX;
+        assert!(handle.save_assistant_reference(&invalid).is_err());
+        assert_eq!(database.assistant_reference("invalid").unwrap(), None);
+    }
+    let mut consumed = assistant_reference("already-consumed");
+    consumed.consumed = true;
+    assert_eq!(
+        handle.save_assistant_reference(&consumed),
+        Err(StorageError::AssistantReferenceUnavailable)
+    );
+    assert_eq!(
+        database.assistant_reference("already-consumed").unwrap(),
+        None
+    );
+    assert!(
+        database
+            .persisted_run_ids()
+            .unwrap()
+            .contains(&"source".into())
+    );
+    storage.close();
+    assert_eq!(
+        Database::open(&config)
+            .unwrap()
+            .assistant_reference("reference")
+            .unwrap(),
+        Some(row)
+    );
+}
+
+#[test]
+fn reference_consumption_and_context_evidence_commit_or_rollback_together() {
+    let (_dir, storage, database, _config) = fixture();
+    let handle = storage.handle();
+    let reference = assistant_reference("reference");
+    handle.save_assistant_reference(&reference).unwrap();
+    let original = context();
+    handle.upsert_run_context(&original).unwrap();
+    let mut updated = original.clone();
+    updated.name = "approved plan".into();
+    let valid = evidence("approval", "child", "root", 10);
+    let mut invalid = valid.clone();
+    invalid.id = "invalid".into();
+    invalid.text = "x".repeat(256 * 1024 + 1);
+    let edges = [edge("child", "root")];
+    assert!(
+        handle
+            .upsert_run_context_with_evidence_and_reference_consumption(
+                &updated,
+                &[valid.clone(), invalid],
+                &edges,
+                Some("reference")
+            )
+            .is_err()
+    );
+    assert_eq!(database.run_context("child").unwrap(), Some(original));
+    assert!(
+        database
+            .review_evidence_for_target("child")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.review_lineage_edges("child").unwrap().is_empty());
+    assert_eq!(
+        handle.assistant_reference("reference").unwrap(),
+        Some(reference.clone())
+    );
+    handle
+        .upsert_run_context_with_evidence_and_reference_consumption(
+            &updated,
+            std::slice::from_ref(&valid),
+            &edges,
+            Some("reference"),
+        )
+        .unwrap();
+    let mut consumed = reference.clone();
+    consumed.consumed = true;
+    assert_eq!(
+        database.assistant_reference("reference").unwrap(),
+        Some(consumed.clone())
+    );
+    handle.save_assistant_reference(&reference).unwrap();
+    assert_eq!(
+        handle.assistant_reference("reference").unwrap(),
+        Some(consumed)
+    );
+    let mut retry = updated.clone();
+    retry.name = "must not overwrite".into();
+    for id in ["reference", "missing"] {
+        let extra = evidence(id, "child", "root", 20);
+        assert_eq!(
+            handle.upsert_run_context_with_evidence_and_reference_consumption(
+                &retry,
+                &[extra],
+                &[edge("child", "other")],
+                Some(id)
+            ),
+            Err(StorageError::AssistantReferenceUnavailable)
+        );
+        assert_eq!(
+            database.run_context("child").unwrap(),
+            Some(updated.clone())
+        );
+        assert_eq!(
+            database.review_evidence_for_target("child").unwrap(),
+            vec![valid.clone()]
+        );
+        assert_eq!(database.review_lineage_edges("child").unwrap(), edges);
+    }
+}
+
+#[test]
+fn append_only_evidence_consumes_reference_exactly_once_and_rolls_back_failures() {
+    let (_dir, storage, database, config) = fixture();
+    let handle = storage.handle();
+    let row = assistant_reference("reference");
+    handle.save_assistant_reference(&row).unwrap();
+    let valid = evidence("approval", "child", "root", 10);
+    let mut invalid = valid.clone();
+    invalid.text = "sk-test-evorch-9f8e7d6c5b4a3f2e1d".into();
+    let edges = [edge("child", "root")];
+    assert!(
+        handle
+            .append_review_evidence_with_reference_consumption(
+                &[invalid],
+                &edges,
+                Some("reference")
+            )
+            .is_err()
+    );
+    assert_eq!(
+        database.assistant_reference("reference").unwrap(),
+        Some(row)
+    );
+    assert!(
+        database
+            .review_evidence_for_target("child")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.review_lineage_edges("child").unwrap().is_empty());
+    handle
+        .append_review_evidence_with_reference_consumption(
+            std::slice::from_ref(&valid),
+            &edges,
+            Some("reference"),
+        )
+        .unwrap();
+    for id in ["reference", "missing"] {
+        assert_eq!(
+            handle.append_review_evidence_with_reference_consumption(
+                &[evidence(id, "child", "root", 20)],
+                &[edge("child", "other")],
+                Some(id)
+            ),
+            Err(StorageError::AssistantReferenceUnavailable)
+        );
+    }
+    assert_eq!(
+        database.review_evidence_for_target("child").unwrap(),
+        vec![valid]
+    );
+    assert_eq!(database.review_lineage_edges("child").unwrap(), edges);
+    storage.close();
+    assert!(
+        Database::open(&config)
+            .unwrap()
+            .assistant_reference("reference")
+            .unwrap()
+            .unwrap()
+            .consumed
+    );
 }
 
 fn evidence(id: &str, target: &str, root: &str, created_at_ns: i64) -> ReviewEvidenceRow {
@@ -360,6 +575,13 @@ fn suspended_writer_rejects_all_review_commands_without_mutation() {
         db_path: dir.path().join("suspended.db"),
         ..Default::default()
     };
+    let reference = assistant_reference("pending");
+    let storage = Storage::open(config.clone()).unwrap();
+    storage
+        .handle()
+        .save_assistant_reference(&reference)
+        .unwrap();
+    storage.close();
     config.hard_limits.max_db_bytes = 1;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
@@ -369,13 +591,34 @@ fn suspended_writer_rejects_all_review_commands_without_mutation() {
         handle.record_review_evidence(&rows),
         handle.record_review_lineage_edge(&edges),
         handle.upsert_run_context_with_evidence(&context(), &rows, &edges),
+        handle.save_assistant_reference(&assistant_reference("new")),
+        handle.append_review_evidence_with_reference_consumption(&rows, &edges, Some("pending")),
+        handle.upsert_run_context_with_evidence_and_reference_consumption(
+            &context(),
+            &rows,
+            &edges,
+            Some("pending"),
+        ),
     ] {
         assert!(
             matches!(result, Err(StorageError::Serialization(message)) if message.contains("writes suspended"))
         );
     }
     let database = Database::open(&config).unwrap();
-    assert!(database.persisted_run_ids().unwrap().is_empty());
+    assert_eq!(
+        database.assistant_reference("pending").unwrap(),
+        Some(reference)
+    );
+    assert_eq!(database.assistant_reference("new").unwrap(), None);
+    assert!(database.run_context("child").unwrap().is_none());
+    assert!(
+        database
+            .review_evidence_for_target("child")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.review_lineage_edges("child").unwrap().is_empty());
+    assert_eq!(database.persisted_run_ids().unwrap(), vec!["source"]);
 }
 
 #[test]

@@ -11,7 +11,7 @@ pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage
         let arrow = if expanded { "v" } else { ">" };
         if ui
             .add(
-                egui::Button::new(crate::theme::text::badge(format!("{arrow} Ledger")))
+                egui::Button::new(crate::theme::text::badge(format!("{arrow} Working note")))
                     .frame(false)
                     .wrap(),
             )
@@ -21,14 +21,32 @@ pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage
             ui.data_mut(|data| data.insert_temp(id, expanded));
         }
         if expanded {
-            for entry in entries {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("- seq {}: {}", entry.seq, entry.body))
-                            .color(palette().TEXT),
-                    )
-                    .wrap(),
-                );
+            let current = entries.last().expect("nonempty revisions");
+            ui.label(if current.body.is_empty() {
+                "Current note cleared".into()
+            } else {
+                format!("Current revision {}: {}", current.seq, current.body)
+            });
+            if entries.len() > 1 {
+                ui.collapsing("Previous revisions", |ui| {
+                    for entry in entries[..entries.len() - 1].iter().rev() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!(
+                                    "Revision {}: {}",
+                                    entry.seq,
+                                    if entry.body.is_empty() {
+                                        "(cleared)"
+                                    } else {
+                                        &entry.body
+                                    }
+                                ))
+                                .color(palette().TEXT),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
             }
         }
     });

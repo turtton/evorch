@@ -158,12 +158,12 @@ fn entries_survive_writer_close_and_reopen() {
 }
 
 #[test]
-fn empty_and_oversize_bodies_rejected() {
+fn oversize_bodies_rejected() {
     // Given: bodies outside the byte-length bounds, including multibyte text.
     let temp = TempDir::new().unwrap();
     let config = config(&temp);
     let storage = Storage::open(config.clone()).unwrap();
-    for body in [String::new(), "x".repeat(8193), "é".repeat(4097)] {
+    for body in ["x".repeat(8193), "é".repeat(4097)] {
         // When: an invalid body is appended.
         let result = storage.handle().append_run_ledger("a", &body);
         // Then: a typed length error is returned without inserting a row.
@@ -178,6 +178,39 @@ fn empty_and_oversize_bodies_rejected() {
             .run_ledger_all()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn latest_note_replaces_previous_body_and_empty_revision_clears_it() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let database = Database::open(&config).unwrap();
+    assert_eq!(handle.latest_run_ledger("a").unwrap(), None);
+    handle.append_run_ledger("a", "first note").unwrap();
+    let latest = handle.append_run_ledger("a", "replacement").unwrap();
+    handle.append_run_ledger("b", "unrelated").unwrap();
+    let note = database.latest_run_ledger("a").unwrap().unwrap();
+    assert_eq!(note.seq, latest);
+    assert_eq!(note.body, "replacement");
+    for body in ["x".repeat(8193), "sk-test-evorch-9f8e7d6c5b4a3f2e1d".into()] {
+        assert!(handle.append_run_ledger("a", &body).is_err());
+        assert_eq!(handle.latest_run_ledger("a").unwrap(), Some(note.clone()));
+    }
+    handle.append_run_ledger("a", "").unwrap();
+    assert_eq!(database.latest_run_ledger("a").unwrap().unwrap().body, "");
+    assert_eq!(database.run_ledger("a").unwrap().len(), 3);
+    storage.close();
+    assert_eq!(
+        Database::open(&config)
+            .unwrap()
+            .latest_run_ledger("a")
+            .unwrap()
+            .unwrap()
+            .body,
+        ""
     );
 }
 

@@ -52,6 +52,8 @@ pub(crate) enum CompactionError {
     TooSmall,
     #[error("compaction summary failed: {0}")]
     SummarizeFailed(String),
+    #[error("cannot prepare durable context boundary: {0}")]
+    PrepareFailed(String),
 }
 
 /// Resolve the identity of the next request, including an interactive override.
@@ -217,11 +219,12 @@ pub(crate) async fn compact_now(
             },
         }],
     };
-    let checkpoint = CompactionCheckpoint {
+    let mut checkpoint = CompactionCheckpoint {
         id: checkpoint_id.clone(),
         summary: summary_message,
         range: (plan.start, plan.end),
     };
+    attach_working_memory(state, &mut checkpoint.summary)?;
     let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))
         .saturating_add(state.estimated_tool_tokens());
     let still_above_threshold = estimated_after as f64 / window as f64 >= settings.threshold;
@@ -234,12 +237,12 @@ pub(crate) async fn compact_now(
         still_above_threshold,
     };
 
-    state.context.apply_checkpoint(checkpoint);
+    let mut prepared = state.context.clone();
+    prepared.apply_checkpoint(checkpoint);
+    install_prepared_context(state, prepared, true)?;
     // A compact tool may still have an outstanding ToolUse. Append the latest
     // procedure only at the next complete request boundary, after all results.
     state.todo_context_pending = true;
-    state.told_directories.rewrite_pending = true;
-    state.allowed_instructions.forget_history();
     state.todo_context_deferred = false;
     // Provider usage describes the pre-compaction input and cannot be reused.
     state.last_usage = None;
@@ -318,9 +321,14 @@ async fn summarize_range(
 /// A checkpoint the target cannot replay is re-summarized from the raw messages it
 /// covers, and a history above the target's window × threshold is compacted. Both
 /// replace history at an explicit boundary; the switch already discards the cache.
-pub(crate) async fn prepare_model_switch(state: &mut LoopState, selected: &str, resummarize: bool) {
+pub(crate) async fn prepare_model_switch(
+    state: &mut LoopState,
+    selected: &str,
+    resummarize: bool,
+) -> Result<(), CompactionError> {
+    let original_checkpoints = state.context.checkpoints().len();
     if resummarize {
-        resummarize_latest_checkpoint(state).await;
+        resummarize_latest_checkpoint(state).await?;
     }
     let settings = state.shared.compaction.clone();
     let (window, _) = policy::resolve_window(
@@ -334,14 +342,30 @@ pub(crate) async fn prepare_model_switch(state: &mut LoopState, selected: &str, 
         && let Err(error) = compact_now(state, CompactionReason::ModelSwitch).await
     {
         tracing::warn!(%error, selected, "compaction before the model switch could not proceed");
+        if matches!(error, CompactionError::PrepareFailed(_)) {
+            return Err(error);
+        }
     }
+    if state.context.checkpoints().len() == original_checkpoints {
+        let mut boundary = Message {
+            role: Role::User,
+            content: Vec::new(),
+        };
+        attach_working_memory(state, &mut boundary)?;
+        if !boundary.content.is_empty() {
+            let mut prepared = state.context.clone();
+            prepared.messages.push(boundary);
+            install_prepared_context(state, prepared, false)?;
+        }
+    }
+    Ok(())
 }
 
 /// Replaces the latest checkpoint's compaction block with a text summary of the raw
 /// messages it covers. The block itself is never read or forwarded.
-async fn resummarize_latest_checkpoint(state: &mut LoopState) {
+async fn resummarize_latest_checkpoint(state: &mut LoopState) -> Result<(), CompactionError> {
     let Some(latest) = state.context.latest_checkpoint() else {
-        return;
+        return Ok(());
     };
     if !latest
         .summary
@@ -349,7 +373,7 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) {
         .iter()
         .any(|block| matches!(block, ContentBlock::Compaction { .. }))
     {
-        return;
+        return Ok(());
     }
     let (start, end) = latest.range;
     state.activity(event_bus::RunActivity::Compaction);
@@ -377,12 +401,15 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) {
         state.budget.usage(usage);
     }
     let summary = enforce_max_bytes(&result.unwrap_or_default(), settings.max_summary_bytes);
+    if summary.is_empty() {
+        return Err(CompactionError::SummarizeFailed("empty re-summary".into()));
+    }
     let checkpoint_id = format!(
         "ckpt-{}-{}",
         state.caller_run_id(),
         state.compaction.checkpoint_seq
     );
-    let checkpoint = CompactionCheckpoint {
+    let mut checkpoint = CompactionCheckpoint {
         id: checkpoint_id.clone(),
         summary: Message {
             role: Role::User,
@@ -392,12 +419,13 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) {
         },
         range: (start, end),
     };
+    attach_working_memory(state, &mut checkpoint.summary)?;
     let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))
         .saturating_add(state.estimated_tool_tokens());
-    state.context.apply_checkpoint(checkpoint);
+    let mut prepared = state.context.clone();
+    prepared.apply_checkpoint(checkpoint);
+    install_prepared_context(state, prepared, true)?;
     state.todo_context_pending = true;
-    state.told_directories.rewrite_pending = true;
-    state.allowed_instructions.forget_history();
     state.todo_context_deferred = false;
     // Provider usage describes the replaced history and cannot be reused.
     state.last_usage = None;
@@ -420,6 +448,47 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) {
             checkpoint_id,
             summary,
         }));
+    Ok(())
+}
+
+fn install_prepared_context(
+    state: &mut LoopState,
+    prepared: crate::AgentContext,
+    replaced_history: bool,
+) -> Result<(), CompactionError> {
+    let old_directories = state.told_directories.clone();
+    let old_instructions = state.allowed_instructions.clone();
+    let old_pending = state.boundary_pending;
+    if replaced_history {
+        state.told_directories.rewrite_pending = true;
+        state.allowed_instructions.forget_history();
+    }
+    state.boundary_pending = true;
+    if let Err(error) = crate::restore::persist_prepared_context(state, &prepared) {
+        state.told_directories = old_directories;
+        state.allowed_instructions = old_instructions;
+        state.boundary_pending = old_pending;
+        return Err(CompactionError::PrepareFailed(error.to_string()));
+    }
+    state.context = prepared;
+    Ok(())
+}
+
+fn attach_working_memory(state: &LoopState, message: &mut Message) -> Result<(), CompactionError> {
+    let note = match state.runtime() {
+        Some(runtime) => state
+            .continuity
+            .latest_note(&runtime, state.caller_run_id())
+            .map_err(|error| CompactionError::PrepareFailed(error.to_string()))?,
+        None => state.continuity.inherited_note.clone(),
+    };
+    message.content.extend(
+        state
+            .continuity
+            .blocks(note.as_ref())
+            .map_err(|error| CompactionError::PrepareFailed(error.to_string()))?,
+    );
+    Ok(())
 }
 
 /// Guard skips (cooldown, below threshold, ...) are routine and not reported; only an

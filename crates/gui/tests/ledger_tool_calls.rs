@@ -155,19 +155,20 @@ async fn ledger_calls_render_as_tools_and_survive_history_replay() {
     };
     let storage = Storage::open(config.clone()).unwrap();
     let calls = [
-        ("ledger_read", json!({})),
-        ("ledger_append", json!({"body":"durable decision"})),
-        ("ledger_read", json!({})),
+        ("working_note_read", json!({})),
+        ("working_note_write", json!({"body":"durable decision"})),
+        ("working_note_read", json!({})),
+        ("history_read", json!({"limit":1})),
     ];
     // When: the actual runtime dispatches the ledger meta operations.
     let (run, events) = execute(&calls, Some((&config, &storage))).await;
-    let registry = assert_calls(&run, &events, &calls, &[false; 3]);
+    let registry = assert_calls(&run, &events, &calls, &[false; 4]);
     let entries = tools(registry.thread());
     for ((entry, (name, input)), output) in
         entries
             .iter()
             .zip(&calls)
-            .zip(["[]", "seq", "durable decision"])
+            .zip(["null", "revision", "durable decision", "source_run_id"])
     {
         assert_card(entry, name, input, false, output);
     }
@@ -197,18 +198,20 @@ async fn ledger_calls_render_as_tools_and_survive_history_replay() {
 #[tokio::test]
 async fn missing_store_and_rejected_ledger_arguments_render_failed_tools() {
     let calls = [
-        ("ledger_append", json!({"body":"decision"})),
-        ("ledger_read", json!({})),
-        ("ledger_append", json!({})),
-        ("ledger_read", json!({"unexpected":true})),
+        ("working_note_write", json!({"body":"decision"})),
+        ("working_note_read", json!({})),
+        ("working_note_write", json!({})),
+        ("working_note_read", json!({"unexpected":true})),
+        ("history_read", json!({"source":"unrelated-run"})),
     ];
     let (run, events) = execute(&calls, None).await;
-    let registry = assert_calls(&run, &events, &calls, &[true; 4]);
+    let registry = assert_calls(&run, &events, &calls, &[true; 5]);
     let expected_errors = [
         "run_store_unavailable",
         "run_store_unavailable",
         "ツールの引数が不正です",
         "ツールの引数が不正です",
+        "history_source_denied",
     ];
     for ((entry, (name, input)), expected) in tools(registry.thread())
         .into_iter()
@@ -227,7 +230,7 @@ async fn storage_rejection_renders_failed_append_without_creating_a_memo() {
         ..Default::default()
     };
     let storage = Storage::open(config.clone()).unwrap();
-    let calls = [("ledger_append", json!({"body":""}))];
+    let calls = [("working_note_write", json!({"body":"x".repeat(8193)}))];
     let (run, events) = execute(&calls, Some((&config, &storage))).await;
     let registry = assert_calls(&run, &events, &calls, &[true]);
     assert_card(

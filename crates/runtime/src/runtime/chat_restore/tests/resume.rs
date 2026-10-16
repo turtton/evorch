@@ -252,6 +252,8 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
         "worker memo",
         &RunConfig::default(),
         false,
+        &Default::default(),
+        None,
     )
     .unwrap();
     let before = record(&fixture, target);
@@ -298,7 +300,7 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
         serde_json::json!([
             {"target_run_id": source.to_string(), "text": "trusted original"},
             {"target_run_id": target.to_string(), "text": "real followup",
-                "reference_context": {"text": "done", "source_run_id": target.to_string(), "turn_end": 0}},
+                "reference_context": {"text": "done", "source_run_id": target.to_string(), "turn_end": 2}},
             {"target_run_id": target.to_string(), "text": "yes, publish",
                 "in_reply_to": {"id": question.id, "title": question.title}}
         ])
@@ -326,6 +328,51 @@ async fn fresh_runtime_legacy_history_resumes_without_review_authority() {
     wait_for_waiting(&runtime, run).await;
     let review = runtime.shared.review_runs.lock().unwrap()[&run].clone();
     assert!(review.requests().0.is_empty());
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn consumed_reference_in_a_stale_snapshot_is_not_restored() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let run = runtime
+        .delegate_chat(
+            "stale-reference",
+            Role::Worker,
+            "original".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    runtime.wait(run).await.unwrap();
+    let record = record(&fixture, run);
+    let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    let reference_id = descriptor.pending_reference_id.unwrap();
+    fixture
+        .storage
+        .handle()
+        .append_review_evidence_with_reference_consumption(&[], &[], Some(&reference_id))
+        .unwrap();
+    runtime.resume_chat(run, RunConfig::default()).unwrap();
+    wait_for_waiting(runtime, run).await;
+    assert!(runtime.peek_pending_reference(run).unwrap().is_none());
+    runtime
+        .send_message(run, "another response".into())
+        .unwrap();
+    let rows = runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .review_evidence_for_lineage(&[run.to_string()])
+        .unwrap();
+    assert!(
+        rows.iter()
+            .find(|row| row.text == "another response")
+            .unwrap()
+            .reference_context
+            .is_none()
+    );
     runtime.stop(run, StopScope::SelfOnly).unwrap();
     runtime.wait(run).await.unwrap();
 }

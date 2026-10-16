@@ -25,7 +25,13 @@ fn additional_roles_have_least_privilege_capabilities() {
             capabilities.allowed_tools,
             tools
                 .into_iter()
-                .chain(["ledger_append", "ledger_read", "ask_user", "user_answers"])
+                .chain([
+                    "working_note_write",
+                    "working_note_read",
+                    "history_read",
+                    "ask_user",
+                    "user_answers"
+                ])
                 .map(String::from)
                 .collect()
         );
@@ -34,7 +40,7 @@ fn additional_roles_have_least_privilege_capabilities() {
 }
 
 #[test]
-fn every_role_authorizes_ledger_meta_ops() {
+fn every_role_authorizes_scoped_memory_meta_ops() {
     // Given: all roles, including read-only roles.
     for role in [
         Role::Orchestrator,
@@ -47,8 +53,14 @@ fn every_role_authorizes_ledger_meta_ops() {
         Role::MultimodalLooker,
     ] {
         let capabilities = role.capabilities();
-        // When / Then: both self-scoped operations are authorized.
-        for op in ["ledger_append", "ledger_read", "ask_user", "user_answers"] {
+        // When / Then: self-scoped memory and question operations are authorized.
+        for op in [
+            "working_note_write",
+            "working_note_read",
+            "history_read",
+            "ask_user",
+            "user_answers",
+        ] {
             assert_eq!(
                 capabilities.check_tool(role.name(), op),
                 agents::CapabilityDecision::Allowed

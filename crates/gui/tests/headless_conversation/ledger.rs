@@ -20,17 +20,60 @@ fn selected_run_ledger_is_visible_without_transcript_messages() {
     let mut gui = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
     gui.run();
     // When: expanding the selected run's ledger through the GUI.
-    gui.click_label("> Ledger");
+    gui.click_label("> Working note");
     gui.run();
     // Then: only the selected run's entry is visible.
-    assert!(gui.has_label("- seq 1: Selected entry"));
-    assert!(!gui.has_label("- seq 1: Other entry"));
+    assert!(gui.has_label("Current revision 1: Selected entry"));
+    assert!(!gui.has_label("Current revision 1: Other entry"));
     if let Some(directory) = std::env::var_os("LEDGER_EVIDENCE_DIR") {
         gui.capture()
             .unwrap()
             .save_png(&std::path::PathBuf::from(directory).join("ledger-workbench.png"))
             .unwrap();
     }
+}
+
+#[test]
+fn working_note_shows_current_revision_and_keeps_cleared_history_separate() {
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
+    state.apply_events(
+        [(1, "Superseded finding"), (2, "Current finding")].map(|(seq, body)| {
+            Event::new(LedgerEvent::RunLedgerAppended {
+                run_id: "selected".into(),
+                seq,
+                body: body.into(),
+            })
+        }),
+    );
+    state.drill_down("selected");
+    let mut gui = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    gui.run();
+    gui.click_label("> Working note");
+    gui.run();
+    assert!(gui.has_label("Current revision 2: Current finding"));
+    assert!(!gui.has_label("Revision 1: Superseded finding"));
+    gui.state_mut()
+        .apply_events([Event::new(LedgerEvent::RunLedgerAppended {
+            run_id: "selected".into(),
+            seq: 3,
+            body: String::new(),
+        })]);
+    gui.run();
+    assert!(gui.has_label("Current note cleared"));
+    assert!(!gui.has_label("Current revision 2: Current finding"));
+    gui.click_label("Previous revisions");
+    gui.run();
+    assert!(gui.has_label("Revision 2: Current finding"));
+    assert!(gui.has_label("Revision 1: Superseded finding"));
+    gui.state_mut()
+        .apply_events([Event::new(LedgerEvent::RunLedgerAppended {
+            run_id: "selected".into(),
+            seq: 4,
+            body: "New finding".into(),
+        })]);
+    gui.run();
+    assert!(gui.has_label("Current revision 4: New finding"));
+    assert!(gui.has_label("Revision 3: (cleared)"));
 }
 
 #[test]

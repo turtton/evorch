@@ -43,7 +43,7 @@ prefix checks in `cache_preservation_e2e`.
 ## 2026-10-08 amendment: `/continue` resumes without a new message
 
 `/continue` uses `AgentRuntime::resume_chat` to resume the saved turn. It does not
-append a continuation prompt, an empty user message, the run ledger, or newly
+append a continuation prompt, an empty user message, a working note, or newly
 captured memory. Saved instructions, history and compaction checkpoints remain
 unchanged. Missing tool outcomes still append the recovery notices described
 above; old operations and shell jobs are not automatically replayed.
@@ -59,7 +59,7 @@ resume operation does not change the trusted goal request. Sending an actual new
 message continues to use `continue_goal` with its normal input behavior.
 
 Regression coverage includes identical wire input on unfinished resume (including
-compacted history), no ledger injection, completed-turn waiting followed by a real
+compacted history), no working-note injection, completed-turn waiting followed by a real
 follow-up, restart with the saved role, and outcome-unknown recovery notifications.
 
 ## 承認済みの範囲

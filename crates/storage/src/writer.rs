@@ -47,15 +47,18 @@ enum Command {
     AttachImprovementDraft(String, String, ReplyTx<bool>),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
     AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
+    LatestRunLedger(String, ReplyTx<Option<crate::RunLedgerEntry>>),
+    SaveAssistantReference(crate::AssistantReferenceRow, ReplyTx),
+    AssistantReference(String, ReplyTx<Option<crate::AssistantReferenceRow>>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
     AnswerUserQuestion(String, String, ReplyTx),
     AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
     UpsertRunContext(crate::RunContextRecord, ReplyTx),
-    RecordReviewEvidence(Vec<crate::ReviewEvidenceRow>, ReplyTx),
     RecordReviewEvidenceWithEdges(
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
+        Option<String>,
         ReplyTx,
     ),
     RecordReviewLineageEdge(Vec<crate::LineageEdge>, ReplyTx),
@@ -63,6 +66,7 @@ enum Command {
         crate::RunContextRecord,
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
+        Option<String>,
         ReplyTx,
     ),
     InvalidateRunContext(String, ReplyTx),
@@ -220,7 +224,7 @@ impl StorageHandle {
         })
     }
 
-    /// Append a guarded, 1..=8192 byte body and return its global sequence number.
+    /// Append a complete, guarded note revision of up to 8192 bytes; empty clears it.
     ///
     /// # Errors
     /// Returns an error for invalid bodies, suspended writes, SQLite failure or a closed writer.
@@ -230,6 +234,39 @@ impl StorageHandle {
             .send(Command::AppendRunLedger(run_id.into(), body.into(), reply))
             .map_err(|_| StorageError::WriterClosed)?;
         result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    /// Read the latest complete note revision after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn latest_run_ledger(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::RunLedgerEntry>, StorageError> {
+        self.request(|reply| Command::LatestRunLedger(run_id.into(), reply))
+    }
+
+    /// Save an immutable assistant reference; identical retries preserve consumption.
+    ///
+    /// # Errors
+    /// Rejects conflicting IDs, invalid text, suspended writes or persistence failure.
+    pub fn save_assistant_reference(
+        &self,
+        row: &crate::AssistantReferenceRow,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::SaveAssistantReference(row.clone(), reply))
+    }
+
+    /// Resolve a durable assistant reference, including its consumed state.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn assistant_reference(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::AssistantReferenceRow>, StorageError> {
+        self.request(|reply| Command::AssistantReference(id.into(), reply))
     }
 
     /// Replace the stored snapshot for a run; the last write wins.
@@ -248,7 +285,7 @@ impl StorageHandle {
         &self,
         rows: &[crate::ReviewEvidenceRow],
     ) -> Result<(), StorageError> {
-        self.request(|reply| Command::RecordReviewEvidence(rows.to_vec(), reply))
+        self.append_review_evidence_with_reference_consumption(rows, &[], None)
     }
 
     /// Atomically persist evidence and lineage without requiring a run snapshot.
@@ -260,8 +297,26 @@ impl StorageHandle {
         rows: &[crate::ReviewEvidenceRow],
         edges: &[crate::LineageEdge],
     ) -> Result<(), StorageError> {
+        self.append_review_evidence_with_reference_consumption(rows, edges, None)
+    }
+
+    /// Atomically append evidence and lineage, consuming an optional approval once.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, invalid evidence, suspended writes or persistence failure.
+    pub fn append_review_evidence_with_reference_consumption(
+        &self,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+    ) -> Result<(), StorageError> {
         self.request(|reply| {
-            Command::RecordReviewEvidenceWithEdges(rows.to_vec(), edges.to_vec(), reply)
+            Command::RecordReviewEvidenceWithEdges(
+                rows.to_vec(),
+                edges.to_vec(),
+                consumed_reference_id.map(String::from),
+                reply,
+            )
         })
     }
 
@@ -286,11 +341,26 @@ impl StorageHandle {
         rows: &[crate::ReviewEvidenceRow],
         edges: &[crate::LineageEdge],
     ) -> Result<(), StorageError> {
+        self.upsert_run_context_with_evidence_and_reference_consumption(record, rows, edges, None)
+    }
+
+    /// Atomically replace context and append evidence and lineage, consuming an approval once.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, invalid snapshots or evidence, suspended writes or persistence failure.
+    pub fn upsert_run_context_with_evidence_and_reference_consumption(
+        &self,
+        record: &crate::RunContextRecord,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+    ) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::UpsertRunContextWithEvidence(
                 record.clone(),
                 rows.to_vec(),
                 edges.to_vec(),
+                consumed_reference_id.map(String::from),
                 reply,
             )
         })

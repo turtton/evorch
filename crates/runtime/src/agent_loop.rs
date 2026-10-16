@@ -6,6 +6,8 @@
 mod benchmark;
 mod budget;
 #[cfg(test)]
+mod continuity_tests;
+#[cfg(test)]
 mod delegate_cleanup_tests;
 mod durable;
 mod finalization;
@@ -66,6 +68,8 @@ pub(crate) enum RunStart {
 
 /// 終端済み run から新規 root run への引き継ぎ。
 pub(crate) struct RunHandoff {
+    pub(crate) continuity: crate::continuity::Continuity,
+    pub(crate) pending_reference_id: Option<String>,
     pub(crate) source_run_id: RunId,
     pub(crate) restored: Option<crate::restore::RestoredState>,
 }
@@ -104,6 +108,8 @@ pub(crate) struct LoopShared {
 const MAX_MODEL_SWITCHES: u32 = 16;
 
 pub(crate) struct LoopState {
+    pub(crate) boundary_pending: bool,
+    pub(crate) continuity: crate::continuity::Continuity,
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
     benchmark_checked: bool,
     benchmark_replay: bool,
@@ -194,6 +200,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
+    let continuity = restored
+        .as_ref()
+        .map(|state| state.continuity.clone())
+        .or_else(|| {
+            task.handoff
+                .as_ref()
+                .map(|handoff| handoff.continuity.clone())
+        })
+        .unwrap_or_default();
     let told_directories = restored
         .as_ref()
         .map(|restored| (*restored.allowed_directories).clone())
@@ -203,10 +218,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         .map(|restored| (*restored.allowed_instructions).clone())
         .unwrap_or_default();
     let history_only = task.start == RunStart::Resume;
+    let boundary_pending = restored
+        .as_ref()
+        .is_some_and(|state| state.boundary_pending)
+        || task.handoff.is_some();
     // An interrupted provider request retries its exact saved input. Restore
     // procedure context only after that response, or a new compaction boundary.
     // A pending handoff seed has never reached its provider and needs it now.
     let todo_context_deferred = history_only
+        && !boundary_pending
         && task.handoff.is_none()
         && restored.as_ref().is_some_and(|state| !state.turn_completed);
     let completed_turn_end = restored.as_ref().and_then(|restored| {
@@ -228,28 +248,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.messages,
                     restored.checkpoints,
                 );
-                if !history_only
-                    && let Some(runtime) = shared.upgrade()
-                    && let Some(store) = runtime.run_store.get()
-                {
-                    match store.ledger_entries(task.run_id) {
-                        Ok(entries) => {
-                            if !entries.is_empty() {
-                                let mut text = String::from("[run-ledger]");
-                                for entry in entries {
-                                    text.push_str(&format!(
-                                        "\n- seq {}: {}",
-                                        entry.seq, entry.body
-                                    ));
-                                }
-                                context.push_user(&text);
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(run_id = %task.run_id, %error, "restored run ledger read failed")
-                        }
-                    }
-                }
                 match restored.trigger {
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
                     None if !history_only => {
@@ -273,6 +271,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState {
+        boundary_pending,
+        continuity,
         benchmark,
         benchmark_checked: benchmark_replay,
         benchmark_replay,
@@ -541,6 +541,24 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     );
             }
         }
+        if state.task.handoff.is_some() && !is_restored {
+            match state
+                .continuity
+                .blocks(state.continuity.inherited_note.as_ref())
+            {
+                Ok(content) if !content.is_empty() => {
+                    state.context.messages.push(providers::Message {
+                        role: providers::Role::User,
+                        content,
+                    })
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    state.finish_error(error.to_string());
+                    return;
+                }
+            }
+        }
         if let Some(root) = &active_root
             && !benchmark_replay
             && !history_only
@@ -566,7 +584,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         if state.transition(AgentRunPhase::Running, None).is_err() {
             return;
         }
-        state.save_checkpoint();
+        if let Err(error) = crate::restore::persist_checkpoint(&state) {
+            state.finish_error(format!("Cannot persist prepared context: {error}"));
+            return;
+        }
         if completed_turn_end.is_some() && !state.wait_for_input().await {
             return;
         }
@@ -719,7 +740,7 @@ impl LoopState {
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
             let requested_gen = *self.channels.compact_rx.borrow();
-            if requested_gen > self.compaction.last_handled_gen {
+            if !self.todo_context_deferred && requested_gen > self.compaction.last_handled_gen {
                 if self.benchmark.is_some() {
                     self.finish_error(
                         "benchmark unsupported: selected leaf requested manual compaction".into(),
@@ -730,7 +751,7 @@ impl LoopState {
                 if let Err(error) = compaction::compact_now(self, CompactionReason::Manual).await {
                     tracing::warn!(%error, "manual compaction failed");
                 }
-            } else {
+            } else if !self.todo_context_deferred {
                 let visible = self.context.visible_messages();
                 let estimated = self.estimated_context_tokens(&visible);
                 let (window, _) = self.resolved_context_window();
@@ -775,7 +796,7 @@ impl LoopState {
             let mut estimated = self.estimated_context_tokens(&visible_messages);
             // A cooldown or the post-compaction latch must not terminate a run
             // when one more compaction can still make the next request fit.
-            while estimated >= window {
+            while estimated >= window && !self.todo_context_deferred {
                 if self.benchmark.is_some() {
                     self.finish_error(
                         "benchmark unsupported: selected leaf requires context compaction".into(),
@@ -802,6 +823,14 @@ impl LoopState {
             if estimated >= window {
                 self.finish_error(format!("ContextWindowExhausted: compaction could not reduce the projected context ({estimated} tokens) below model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
+            }
+            if self.boundary_pending {
+                self.boundary_pending = false;
+                if let Err(error) = crate::restore::persist_checkpoint(self) {
+                    self.boundary_pending = true;
+                    self.finish_error(format!("Cannot persist prepared provider input: {error}"));
+                    return;
+                }
             }
             self.publish_context(&visible_messages, estimated, window);
             if let Some(runtime) = self.runtime()
@@ -854,7 +883,12 @@ impl LoopState {
                 }) if self.model_switches < MAX_MODEL_SWITCHES => {
                     // The router already moved the pin; prepare the history and send again.
                     self.model_switches += 1;
-                    compaction::prepare_model_switch(self, &selected, resummarize).await;
+                    if let Err(error) =
+                        compaction::prepare_model_switch(self, &selected, resummarize).await
+                    {
+                        self.finish_error(error.to_string());
+                        return;
+                    }
                     continue;
                 }
                 Err(error) => {
@@ -928,10 +962,15 @@ impl LoopState {
                 .then_some(self.context.messages.len());
             if self.completed_turn_end.is_some()
                 && let Some(runtime) = self.runtime()
-                && let Err(error) =
-                    runtime.capture_pending_reference(self.task.run_id, text.clone())
+                && let Err(error) = runtime.capture_pending_reference_at(
+                    self.task.run_id,
+                    text.clone(),
+                    self.context.messages.len(),
+                )
             {
-                tracing::warn!(run_id = %self.task.run_id, %error, "assistant reference capture failed");
+                self.completed_turn_end = None;
+                self.finish_error(format!("Cannot persist assistant explanation: {error}"));
+                return;
             }
             self.shared
                 .bus

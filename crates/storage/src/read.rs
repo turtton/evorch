@@ -122,14 +122,14 @@ impl Database {
         crate::repo::review_lineage::ancestors(&self.conn, run_id)
     }
 
-    /// Every run ID reserved by contexts, ledgers, questions, evidence or lineage edges.
+    /// Every run ID reserved by contexts, notes, questions, evidence or assistant references.
     ///
     /// # Errors
     /// Returns an error for unreadable rows.
     pub fn persisted_run_ids(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self
             .conn
-            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges")?;
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges UNION SELECT source_run_id FROM assistant_references")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(ids.collect::<Result<_, _>>()?)
     }
@@ -140,6 +140,25 @@ impl Database {
     /// Returns an error if SQLite access or row decoding fails.
     pub fn run_ledger(&self, run_id: &str) -> Result<Vec<RunLedgerEntry>, StorageError> {
         run_ledger::list_by_run(&self.conn, run_id)
+    }
+
+    /// Return the latest complete note revision, including an explicit empty clear.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn latest_run_ledger(&self, run_id: &str) -> Result<Option<RunLedgerEntry>, StorageError> {
+        run_ledger::latest(&self.conn, run_id)
+    }
+
+    /// Resolve a durable assistant reference, including its consumed state.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn assistant_reference(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::AssistantReferenceRow>, StorageError> {
+        crate::repo::assistant_reference::get(&self.conn, id)
     }
 
     /// Return all ledger entries in global sequence order.

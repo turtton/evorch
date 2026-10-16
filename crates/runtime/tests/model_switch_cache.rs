@@ -61,14 +61,21 @@ fn chat_requests(mock: &StreamingMockOpenAi) -> Vec<Value> {
         .collect()
 }
 
-#[tokio::test]
-async fn fallback_to_a_smaller_window_compacts_once_then_preserves_the_new_prefix() {
+async fn switch_preserves_current_note_and_new_prefix(compacts: bool) {
     let review_storage = support::ReviewStorage::new();
     // Given: a worker chain whose primary answers two turns and then fails, and a
     // fallback whose 40K window cannot hold the accumulated history.
     let old_reply = "old analysis that can be summarized ".repeat(3_000);
     let primary = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![
+            ScriptedResponse::tool_call(
+                "note",
+                PRIMARY_MODEL,
+                0,
+                "note",
+                "working_note_write",
+                [json!({"body":"Switch finding with original evidence references"}).to_string()],
+            ),
             read(PRIMARY_MODEL, 0),
             ScriptedResponse::text_stream("reply", PRIMARY_MODEL, [old_reply.as_str()]),
         ],
@@ -98,7 +105,7 @@ default_model = "{PRIMARY_MODEL}"
 type = "openai-compatible"
 base_url = "{small}"
 api_key_env = "{KEY_ENV}"
-models = [{{ id = "{SMALL_MODEL}", enabled = true, metadata_source = "manual", context_window = 40000 }}]
+models = [{{ id = "{SMALL_MODEL}", enabled = true, metadata_source = "manual", context_window = {target_window} }}]
 default_model = "{SMALL_MODEL}"
 [[routing.routes.primary]]
 profile = "primary"
@@ -115,6 +122,7 @@ summarizer = "structural"
 "#,
             primary = primary.base_url(),
             small = small.base_url(),
+            target_window = if compacts { 40_000 } else { 1_000_000 },
         ),
     )
     .unwrap();
@@ -126,6 +134,11 @@ summarizer = "structural"
     })
     .unwrap();
     let bus = Arc::new(EventBus::new(1024));
+    let storage_config = storage::StorageConfig {
+        db_path: directory.path().join("switch-notes.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
     let mut receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(Read)).unwrap();
@@ -143,6 +156,7 @@ summarizer = "structural"
     })
     .unwrap()
     .runtime
+    .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap())
     .with_compaction(config.compaction.clone());
     // The run was told an allowed directory, which the boundary must restate (ADR 0032).
     let root = directory.path().canonicalize().unwrap();
@@ -188,23 +202,46 @@ summarizer = "structural"
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(checkpoints.len(), 1, "{checkpoints:?}");
-    let (reason, checkpoint_id) = &checkpoints[0];
-    assert_eq!(*reason, CompactionReason::ModelSwitch);
+    assert_eq!(checkpoints.len(), usize::from(compacts), "{checkpoints:?}");
     let before = chat_requests(&primary);
     let after = chat_requests(&small);
     assert_eq!(after.len(), 2);
     // Apart from the model, the switch is an ordinary compaction transition.
     let mut last_primary = before.last().unwrap().clone();
     last_primary["model"] = json!(SMALL_MODEL);
-    assert_compaction_transition(
-        CacheProtocol::OpenAi,
-        &last_primary,
-        &after[0],
-        checkpoint_id,
-    )
-    .unwrap();
+    if compacts {
+        let (reason, checkpoint_id) = &checkpoints[0];
+        assert_eq!(*reason, CompactionReason::ModelSwitch);
+        assert_compaction_transition(
+            CacheProtocol::OpenAi,
+            &last_primary,
+            &after[0],
+            checkpoint_id,
+        )
+        .unwrap();
+    } else {
+        assert_append_only(CacheProtocol::OpenAi, &last_primary, &after[0]).unwrap();
+    }
     assert_append_only(CacheProtocol::OpenAi, &after[0], &after[1]).unwrap();
+    let note_blocks = |request: &Value| {
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| {
+                message["role"] == "user"
+                    && message["content"].to_string().contains("[working-note]")
+            })
+            .count()
+    };
+    assert_eq!(note_blocks(before.last().unwrap()), 0);
+    assert_eq!(note_blocks(&after[0]), 1);
+    assert_eq!(note_blocks(&after[1]), 1);
+    assert!(
+        after[0]["messages"]
+            .to_string()
+            .contains("Switch finding with original evidence references")
+    );
     let listed = format!("* {} (read-write)", shared.display());
     let restatements = |request: &Value| {
         request["messages"]
@@ -225,8 +262,8 @@ summarizer = "structural"
             .contains(&listed)
     );
     assert_eq!(restatements(before.last().unwrap()), 0);
-    assert_eq!(restatements(&after[0]), 1, "restated at the switch");
-    assert_eq!(restatements(&after[1]), 1);
+    assert_eq!(restatements(&after[0]), usize::from(compacts));
+    assert_eq!(restatements(&after[1]), usize::from(compacts));
     let usage = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -246,4 +283,14 @@ summarizer = "structural"
         "the new prefix is reused: {usage:?}"
     );
     assert_eq!(primary.remaining_scripts() + small.remaining_scripts(), 0);
+}
+
+#[tokio::test]
+async fn fallback_to_a_smaller_window_compacts_once_then_preserves_the_new_prefix() {
+    switch_preserves_current_note_and_new_prefix(true).await;
+}
+
+#[tokio::test]
+async fn fallback_without_compaction_presents_current_note_then_preserves_the_new_prefix() {
+    switch_preserves_current_note_and_new_prefix(false).await;
 }

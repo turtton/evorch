@@ -1,5 +1,33 @@
 //! Durable user evidence and explicit review lineage.
 
+/// An immutable assistant turn reference whose approval can be consumed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantReferenceRow {
+    pub reference_id: String,
+    pub source_run_id: String,
+    pub turn_end: usize,
+    pub text: String,
+    pub consumed: bool,
+    pub created_at_ns: i64,
+}
+
+impl AssistantReferenceRow {
+    /// Validate the complete assistant text without redaction or truncation.
+    ///
+    /// # Errors
+    /// Rejects oversized or secret-bearing text and indices outside SQLite's range.
+    pub fn validate(&self) -> Result<(), crate::StorageError> {
+        i64::try_from(self.turn_end)
+            .map_err(|_| crate::StorageError::OutOfRange("assistant reference turn end"))?;
+        if self.text.len() > 256 * 1024 {
+            return Err(crate::StorageError::Serialization(
+                "assistant reference text exceeds 256 KiB".into(),
+            ));
+        }
+        crate::entity::SecretGuard::from_env().check_text("assistant_reference", "text", &self.text)
+    }
+}
+
 /// Immutable evidence supplied by the host or user for a review target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewEvidenceRow {

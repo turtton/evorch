@@ -84,7 +84,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "DROP TABLE review_evidence; DROP TABLE review_lineage_edges;
+        "DROP TABLE assistant_references; DROP TABLE review_evidence; DROP TABLE review_lineage_edges;
          DROP TABLE usage_requests; DROP TABLE usage_run_threads; DROP TABLE usage_daily;
          DROP INDEX idx_memory_entries_scope_status;
          ALTER TABLE memory_entries DROP COLUMN scope; ALTER TABLE memory_ledger DROP COLUMN scope;

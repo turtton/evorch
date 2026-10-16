@@ -38,11 +38,15 @@ pub(super) fn append(
                 .shared
                 .bus
                 .emit(Event::new(LedgerEvent::RunLedgerAppended {
-                    run_id,
+                    run_id: run_id.clone(),
                     seq,
                     body: args.body,
                 }));
-            serialize(&json!({ "seq": seq }))
+            match store.handle.latest_run_ledger(&run_id) {
+                Ok(Some(entry)) => serialize(&crate::continuity::WorkingNote::from(entry)),
+                Ok(None) => error("working note disappeared after write"),
+                Err(error_) => error(error_.to_string()),
+            }
         }
         Err(storage_error) => {
             error(json!(LedgerError::StorageFailure(storage_error.to_string())).to_string())
@@ -58,22 +62,11 @@ pub(super) fn read(
     if let Err(message) = parse::<EmptyArgs>(input) {
         return error(message);
     }
-    let Some(store) = runtime.shared.run_store.get() else {
+    let Some(_store) = runtime.shared.run_store.get() else {
         return error(json!(LedgerError::RunStoreUnavailable).to_string());
     };
-    match store.ledger_entries(state.caller_run_id()) {
-        Ok(entries) => serialize(
-            &entries
-                .iter()
-                .map(|entry| {
-                    json!({
-                        "seq": entry.seq,
-                        "body": entry.body,
-                        "created_at_ns": entry.created_at_ns,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
+    match state.continuity.latest_note(runtime, state.caller_run_id()) {
+        Ok(note) => serialize(&note),
         Err(storage_error) => {
             error(json!(LedgerError::StorageFailure(storage_error.to_string())).to_string())
         }

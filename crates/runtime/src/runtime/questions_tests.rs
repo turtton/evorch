@@ -261,13 +261,21 @@ async fn unresolved_lineage_and_suspended_writes_reject_answers_and_trusted_send
     // An internal live run needs no initial evidence write.
     let run = live.delegate_background(Role::Worker, "internal".into(), RunConfig::default());
     let review = live.shared.review_runs.lock().unwrap()[&run].clone();
+    assert!(
+        live.capture_pending_reference(run, "reference".into())
+            .is_err()
+    );
+    assert!(live.peek_pending_reference(run).unwrap().is_none());
     let before = review.stamp();
-    live.capture_pending_reference(run, "reference".into())
-        .unwrap();
+    let requests_before = review.requests().0;
+    assert!(!before.synced);
     assert!(live.send_message(run, "yes".into()).is_err());
-    assert_eq!(review.stamp(), before);
+    let after = review.stamp();
+    assert!(!after.synced);
+    assert!(after.revision > before.revision);
+    assert_eq!(review.requests().0, requests_before);
     assert_eq!(live.follow_up_status(run).unwrap().pending, 0);
-    assert!(live.peek_pending_reference(run).unwrap().is_some());
+    assert!(live.peek_pending_reference(run).unwrap().is_none());
     live.cancel(run).unwrap();
 }
 

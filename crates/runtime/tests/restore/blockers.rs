@@ -39,7 +39,7 @@ async fn fresh_run_after_restart_preserves_snapshot_and_ledger() {
 
 #[tokio::test]
 async fn ledger_only_run_id_is_reserved_after_restart() {
-    // Given: a run persists its ledger, but its first terminal snapshot fails.
+    // Given: the writer closes after a note is saved, before the run's first checkpoint.
     let (_dir, config, storage, database) = storage_fixture();
     let (first, _) = runtime_with(model());
     let first = first.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
@@ -49,7 +49,8 @@ async fn ledger_only_run_id_is_reserved_after_restart() {
         .append_run_ledger(&old.to_string(), "decision")
         .unwrap();
     storage.close();
-    assert_eq!(terminal(&first, old).await, AgentRunPhase::Done);
+    // Unsaved provider input is rejected; the note still reserves the original ID.
+    assert_eq!(terminal(&first, old).await, AgentRunPhase::Error);
     assert!(database.run_context(&old.to_string()).unwrap().is_none());
     let ledger = database.run_ledger(&old.to_string()).unwrap();
     drop(first);

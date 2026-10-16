@@ -112,11 +112,14 @@ define_meta_ops! {
     Escalate => "escalate" => specs::escalate => |state, runtime, input| {
         escalation::escalate(state, runtime, input).await
     },
-    LedgerAppend => "ledger_append" => specs::ledger_append => |state, runtime, input| {
+    WorkingNoteWrite => "working_note_write" => specs::working_note_write => |state, runtime, input| {
         ledger::append(state, runtime, input)
     },
-    LedgerRead => "ledger_read" => specs::ledger_read => |state, runtime, input| {
+    WorkingNoteRead => "working_note_read" => specs::working_note_read => |state, runtime, input| {
         ledger::read(state, runtime, input)
+    },
+    HistoryRead => "history_read" => specs::history_read => |state, runtime, input| {
+        super::history::read(state, input)
     },
     AskUser => "ask_user" => specs::ask_user => |state, runtime, input| {
         questions::ask_user(state, runtime, input)
