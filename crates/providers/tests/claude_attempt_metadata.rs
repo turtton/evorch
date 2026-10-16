@@ -21,7 +21,7 @@ fn input() -> ChatRequest {
     }))
     .unwrap();
     request.observation = Some(ObservationContext {
-        run_id: "session-one".into(),
+        run_id: "child % 東京\r\nid".into(),
         purpose: RequestPurpose::Agent,
         turn: Some(RequestTurnContext {
             prompt_id: "33333333-3333-4333-8333-333333333333".into(),
@@ -29,6 +29,7 @@ fn input() -> ChatRequest {
             prompt_index: Some(1),
             turn_index: Some(1),
             is_subagent: false,
+            parent_subagent_id: Some("parent %\r\n😀".into()),
         }),
     });
     request
@@ -75,7 +76,7 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
                 _ => json_response("req_last", "msg_last"),
             },
         )
-        .expect(5)
+        .expect(7)
         .mount(&server)
         .await;
     let client = client(&server);
@@ -95,6 +96,13 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
     client.send(&auth, &input).await.unwrap();
     let observation = input.observation.as_mut().unwrap();
     observation.turn.as_mut().unwrap().is_subagent = true;
+    observation.turn.as_mut().unwrap().parent_subagent_id = None;
+    client.send(&auth, &input).await.unwrap();
+    input.observation.as_mut().unwrap().purpose = RequestPurpose::Compaction;
+    client.send(&auth, &input).await.unwrap();
+    let observation = input.observation.as_mut().unwrap();
+    observation.purpose = RequestPurpose::Agent;
+    observation.turn.as_mut().unwrap().parent_subagent_id = Some("parent %\r\n😀".into());
     client.send(&auth, &input).await.unwrap();
     input.observation.as_mut().unwrap().purpose = RequestPurpose::Compaction;
     client.send(&auth, &input).await.unwrap();
@@ -111,14 +119,16 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
                 json!("msg_send"),
                 json!("msg_stream"),
                 json!("msg_last"),
-                Value::Null
+                Value::Null,
+                json!("msg_last"),
+                json!("msg_last")
             ][index]
         );
         match index {
             0 => assert!(!billing.contains("cc_prev_req=")),
             1 => assert!(billing.contains("cc_prev_req=req_send;")),
             2 => assert!(billing.contains("cc_prev_req=req_stream;")),
-            3 => assert!(billing.contains("cc_prev_req=req_last;")),
+            3 | 5 | 6 => assert!(billing.contains("cc_prev_req=req_last;")),
             _ => assert!(!billing.contains("cc_prev_req=")),
         }
         assert!(billing.contains("cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"));
@@ -129,8 +139,38 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
         );
         assert_eq!(
             request.headers["x-claude-code-request-class"],
-            ["main", "main", "main", "subagent", "compaction"][index]
+            [
+                "main",
+                "main",
+                "main",
+                "subagent",
+                "compaction",
+                "subagent",
+                "compaction"
+            ][index]
         );
+        if index >= 3 {
+            assert_eq!(
+                request.headers["x-claude-code-agent-id"],
+                "child %25 %E6%9D%B1%E4%BA%AC%0D%0Aid"
+            );
+        } else {
+            assert!(request.headers.get("x-claude-code-agent-id").is_none());
+        }
+        if index >= 5 {
+            assert_eq!(
+                request.headers["x-claude-code-parent-agent-id"],
+                "parent %25%0D%0A%F0%9F%98%80"
+            );
+        } else {
+            assert!(
+                request
+                    .headers
+                    .get("x-claude-code-parent-agent-id")
+                    .is_none()
+            );
+        }
+        assert!(request.headers.get("x-claude-code-agent-type").is_none());
         let request_id = request.headers["x-client-request-id"].to_str().unwrap();
         assert!(uuid::Uuid::parse_str(request_id).is_ok());
         assert!(ids.insert(request_id));

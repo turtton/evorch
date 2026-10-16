@@ -55,6 +55,7 @@ pub(crate) struct RunTask {
     pub(crate) start: RunStart,
     pub(crate) config: RunConfig,
     pub(crate) parent: Option<RunId>,
+    pub(crate) ancestry: crate::request_turn::RequestAncestry,
     pub(crate) mailbox: Arc<RunMailbox>,
     pub(crate) handoff: Option<RunHandoff>,
     pub(crate) restored: Option<crate::restore::RestoredState>,

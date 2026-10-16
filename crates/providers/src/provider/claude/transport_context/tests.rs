@@ -103,8 +103,10 @@ fn prompt_provenance_is_validated_and_used_consistently() {
         prompt_index: Some(1),
         turn_index: Some(2),
         is_subagent: true,
+        parent_subagent_id: Some("parent %\r\n😀".into()),
     };
     let mut input = observation(RequestPurpose::Agent);
+    input.run_id = "child % 東京\r\nid".into();
     input.turn = Some(turn.clone());
     state
         .begin("one", "device", None)
@@ -125,6 +127,15 @@ fn prompt_provenance_is_validated_and_used_consistently() {
     assert!(headers.get("x-claude-code-prev-tool-durations").is_none());
     assert_eq!(headers["x-claude-code-prompt-id"], turn.prompt_id);
     assert_eq!(headers["x-claude-code-request-class"], "subagent");
+    assert_eq!(
+        headers["x-claude-code-agent-id"],
+        "child %25 %E6%9D%B1%E4%BA%AC%0D%0Aid"
+    );
+    assert_eq!(
+        headers["x-claude-code-parent-agent-id"],
+        "parent %25%0D%0A%F0%9F%98%80"
+    );
+    assert!(headers.get("x-claude-code-agent-type").is_none());
     for (purpose, expected) in [
         (RequestPurpose::Compaction, "compaction"),
         (RequestPurpose::Routing, "auxiliary"),
@@ -147,6 +158,32 @@ fn prompt_provenance_is_validated_and_used_consistently() {
         serde_json::to_value(context.diagnostics()).unwrap(),
         serde_json::json!({"previous_message_id":"msg_first"})
     );
+    for (run, parent, child, expected_agent, expected_parent) in [
+        ("agent", Some("parent"), false, None, None),
+        ("", Some("parent"), true, None, Some("parent")),
+        ("agent", None, true, Some("agent"), None),
+        ("", Some(""), true, None, None),
+    ] {
+        let mut scoped = input.clone();
+        scoped.run_id = run.into();
+        scoped.turn.as_mut().unwrap().parent_subagent_id = parent.map(str::to_owned);
+        scoped.turn.as_mut().unwrap().is_subagent = child;
+        let scoped = state.begin("one", "device", Some(&scoped)).unwrap();
+        let mut headers = HeaderMap::new();
+        scoped.apply_headers(&mut headers).unwrap();
+        assert_eq!(
+            headers
+                .get("x-claude-code-agent-id")
+                .map(|value| value.to_str().unwrap()),
+            expected_agent
+        );
+        assert_eq!(
+            headers
+                .get("x-claude-code-parent-agent-id")
+                .map(|value| value.to_str().unwrap()),
+            expected_parent
+        );
+    }
     for invalid in [
         RequestTurnContext {
             prompt_id: "unsafe; injected=1".into(),

@@ -208,7 +208,8 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
                 origin: Some("human".into()),
                 prompt_index: Some(7),
                 turn_index: Some(7),
-                ..providers::RequestTurnContext::unattributed(false)
+                parent_subagent_id: Some("parent-run".into()),
+                ..providers::RequestTurnContext::unattributed(true)
             }),
             run_id: "session".into(),
             category: None,

@@ -194,6 +194,9 @@ pub struct RequestTurnContext {
     pub turn_index: Option<u64>,
     /// Whether the executing run has a parent, independent of message role.
     pub is_subagent: bool,
+    /// Known parent subagent, excluding a root parent; rebound on logical input resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<String>,
 }
 
 impl RequestTurnContext {
@@ -205,6 +208,7 @@ impl RequestTurnContext {
             prompt_index: None,
             turn_index: None,
             is_subagent,
+            parent_subagent_id: None,
         }
     }
 }

@@ -95,6 +95,20 @@ impl AgentRuntime {
                     &message,
                 )?;
             }
+            // Optional ancestry is read before runs is held; bind it to the exact parent ID.
+            let durable_parent = parent
+                .filter(|parent| !lock_runs(&self.shared.runs).contains_key(parent))
+                .and_then(|parent| {
+                    store
+                        .restore_parent(parent)
+                        .ok()
+                        .flatten()
+                        .and_then(|grandparent| match grandparent {
+                            None => Some((parent, false)),
+                            Some(id) if id.parse::<RunId>().is_ok() => Some((parent, true)),
+                            _ => None,
+                        })
+                });
             let mut record = store
                 .restore_record(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
@@ -177,6 +191,7 @@ impl AgentRuntime {
                 (recipient, parent, role, config, sender),
                 restored,
                 &message,
+                durable_parent,
             );
             return Ok((
                 message.message_id.clone(),

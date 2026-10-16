@@ -29,7 +29,8 @@ async fn api_key_messages_wire_is_unchanged_by_runtime_turn_provenance() {
         origin: Some("human".into()),
         prompt_index: Some(1),
         turn_index: Some(1),
-        ..RequestTurnContext::unattributed(false)
+        parent_subagent_id: Some("parent-private".into()),
+        ..RequestTurnContext::unattributed(true)
     });
     assert_eq!(serde_json::to_vec(&request).unwrap(), canonical);
     client
@@ -41,4 +42,11 @@ async fn api_key_messages_wire_is_unchanged_by_runtime_turn_provenance() {
     let body: serde_json::Value = sent[1].body_json().unwrap();
     assert!(body.get("metadata").is_none());
     assert!(body.get("observation").is_none());
+    for name in [
+        "x-claude-code-agent-id",
+        "x-claude-code-parent-agent-id",
+        "x-claude-code-agent-type",
+    ] {
+        assert!(sent[1].headers.get(name).is_none());
+    }
 }

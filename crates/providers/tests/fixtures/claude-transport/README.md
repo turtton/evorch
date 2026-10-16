@@ -16,3 +16,10 @@ parser before comparing the entire record.
 wire order, preserving spelling and case. Per-attempt prompt/request identifiers
 are excluded because this fixture covers the shared transport headers. Values,
 request bodies, credentials, and account identifiers are not included.
+
+`native-2.1.295-child-headers.json` comes from a separate interactive capture
+that invoked an Agent and then an Agent inside that child. A first-level child
+sends its agent ID; the nested child also sends its parent's agent ID. Root
+requests send neither. The fixture includes per-attempt header names, but omits
+`x-claude-code-agent-type`: that value names a native agent catalog entry, which
+evorch does not claim. It contains no header values or request bodies.

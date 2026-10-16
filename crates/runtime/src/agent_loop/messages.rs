@@ -6,17 +6,13 @@ const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 
 impl LoopState {
     pub(crate) fn begin_internal_input(&mut self) {
-        self.turn = providers::RequestTurnContext::unattributed(self.task.parent.is_some());
+        self.turn = crate::request_turn::internal(self.task.ancestry);
     }
 
     pub(crate) fn accept_input_identity(&mut self, trusted_user: bool, prompt_id: Option<String>) {
         if trusted_user && let Some(prompt_id) = prompt_id {
-            self.turn = crate::request_turn::human(
-                prompt_id,
-                self.task.parent.is_some(),
-                false,
-                Some(&self.turn),
-            );
+            self.turn =
+                crate::request_turn::human(prompt_id, self.task.ancestry, false, Some(&self.turn));
         } else {
             self.begin_internal_input();
         }

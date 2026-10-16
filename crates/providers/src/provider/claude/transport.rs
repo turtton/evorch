@@ -133,6 +133,8 @@ fn original_headers() -> OrigHeaderMap {
         "anthropic-dangerous-direct-browser-access",
         "anthropic-version",
         "x-app",
+        "x-claude-code-agent-id",
+        "x-claude-code-parent-agent-id",
         "x-claude-code-prev-tool-durations",
         "x-claude-code-prompt-id",
         "x-claude-code-request-class",

@@ -43,6 +43,7 @@ pub(crate) struct ClaudeRequestContext {
     generation: u64,
     request_id: String,
     turn: Option<RequestTurnContext>,
+    agent_id: Option<String>,
     previous_request_id: Option<String>,
     previous_message_id: Option<String>,
 }
@@ -99,6 +100,11 @@ impl ClaudeTransportContext {
             generation,
             request_id,
             turn: turn.cloned(),
+            agent_id: turn
+                .filter(|turn| turn.is_subagent)
+                .and(observation)
+                .map(|observation| observation.run_id.clone())
+                .filter(|id| !id.is_empty()),
             previous_request_id: previous.request_id.clone(),
             previous_message_id: previous.message_id.clone(),
         })
@@ -125,6 +131,19 @@ impl ClaudeRequestContext {
             }),
         );
         if let Some(turn) = &self.turn {
+            if turn.is_subagent {
+                for (name, id) in [
+                    ("x-claude-code-agent-id", self.agent_id.as_deref()),
+                    (
+                        "x-claude-code-parent-agent-id",
+                        turn.parent_subagent_id.as_deref(),
+                    ),
+                ] {
+                    if let Some(id) = id.filter(|id| !id.is_empty()) {
+                        headers.insert(name, agent_id_header(id)?);
+                    }
+                }
+            }
             headers.insert(
                 "x-claude-code-prompt-id",
                 HeaderValue::from_str(&turn.prompt_id).expect("validated UUID is a header value"),
@@ -198,6 +217,22 @@ impl ClaudeRequestContext {
                 .map(str::to_owned);
         }
     }
+}
+
+fn agent_id_header(value: &str) -> Result<HeaderValue, ProviderError> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte == b'%' || !(b' '..=b'~').contains(&byte) {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 15)]));
+        } else {
+            encoded.push(char::from(byte));
+        }
+    }
+    HeaderValue::from_str(&encoded)
+        .map_err(|_| ProviderError::Request("Claude agent identity header invalid".into()))
 }
 
 fn validate_turn(turn: &RequestTurnContext) -> Result<(), ProviderError> {

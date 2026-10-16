@@ -47,6 +47,9 @@
           pkgs.libxi
           pkgs.libxrandr
         ];
+        runtimeLibraries = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          pkgs.stdenv.cc.cc.lib
+        ];
         commonArgs = {
           pname = "evorch";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
@@ -69,6 +72,9 @@
           inherit cargoArtifacts;
           cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
+          preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          '';
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
           cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             "--skip=pty::tests::pty_drop_terminates_child"
@@ -139,11 +145,33 @@
           inherit cargoArtifacts;
           cargoExtraArgs = "-p evorch -p gui";
           doCheck = false;
+          nativeBuildInputs = commonArgs.nativeBuildInputs
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+          # BoringSSL's C++ runtime must remain resolvable outside the build shell.
+          buildInputs = commonArgs.buildInputs ++ runtimeLibraries;
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
             wrapProgram "$out/bin/evorch-gui" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+          '';
+          doInstallCheck = true;
+          installCheckPhase = ''
+            runHook preInstallCheck
+            # The existing parser returns 1 when printing usage, including --help.
+            helpStatus=0
+            env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS "$out/bin/evorch" --help \
+              > evorch-help.txt 2>&1 || helpStatus=$?
+            cat evorch-help.txt
+            test "$helpStatus" -eq 1
+            grep -q '^usage: evorch ' evorch-help.txt
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              for binary in evorch .evorch-gui-wrapped headless_capture native_qa_window; do
+                env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
+                  ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/$binary"
+              done
+            ''}
+            runHook postInstallCheck
           '';
           meta.mainProgram = "evorch-gui";
         });
@@ -187,12 +215,12 @@
             pkgs.perl
             pkgs.git
             pkgs.wayland-protocols
-          ] ++ guiLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          ] ++ guiLibraries ++ runtimeLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)
             pkgs.mold
           ];
           shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath guiLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (guiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}

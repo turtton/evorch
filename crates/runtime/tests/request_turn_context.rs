@@ -110,6 +110,10 @@ async fn human_boundaries_tool_rounds_and_agent_inputs_have_distinct_provenance(
         support::tool_response("read-1", "read", serde_json::json!({"path":path})),
         stop(),
         stop(),
+        support::tool_response("read-child", "read", serde_json::json!({"path":path})),
+        stop(),
+        stop(),
+        stop(),
         stop(),
         stop(),
         stop(),
@@ -138,6 +142,7 @@ async fn human_boundaries_tool_rounds_and_agent_inputs_have_distinct_provenance(
             (Some("human"), Some(1), Some(1))
         );
         assert!(!first.is_subagent);
+        assert_eq!(first.parent_subagent_id, None);
         assert!(
             observed[1]
                 .1
@@ -164,6 +169,12 @@ async fn human_boundaries_tool_rounds_and_agent_inputs_have_distinct_provenance(
     let delegated = turn(&model.observed.lock().unwrap(), 3);
     assert_unknown(&delegated);
     assert!(delegated.is_subagent);
+    assert_eq!(delegated.parent_subagent_id, None);
+    assert_eq!(delegated, turn(&model.observed.lock().unwrap(), 4));
+    assert_eq!(
+        model.observed.lock().unwrap()[4].0.run_id,
+        child.to_string()
+    );
     runtime
         .send_agent_message(
             child,
@@ -174,17 +185,49 @@ async fn human_boundaries_tool_rounds_and_agent_inputs_have_distinct_provenance(
         )
         .unwrap();
     waiting(&mut events, root).await;
-    let agent_input = turn(&model.observed.lock().unwrap(), 4);
+    let agent_input = turn(&model.observed.lock().unwrap(), 5);
     assert_unknown(&agent_input);
     assert!(!agent_input.is_subagent);
+    assert_eq!(agent_input.parent_subagent_id, None);
     assert_ne!(agent_input.prompt_id, second.prompt_id);
     runtime
         .send_message(root, "human after unknown input".into())
         .unwrap();
     waiting(&mut events, root).await;
-    let later = turn(&model.observed.lock().unwrap(), 5);
+    let later = turn(&model.observed.lock().unwrap(), 6);
     assert_eq!(later.origin.as_deref(), Some("human"));
     assert_eq!((later.prompt_index, later.turn_index), (None, None));
+    runtime
+        .send_agent_message(
+            root,
+            child,
+            AgentMessageKind::Send,
+            "child internal input",
+            None,
+        )
+        .unwrap();
+    waiting(&mut events, child).await;
+    let child_internal = turn(&model.observed.lock().unwrap(), 7);
+    assert_unknown(&child_internal);
+    assert_eq!(child_internal.parent_subagent_id, None);
+    assert!(child_internal.is_subagent);
+    runtime
+        .send_message(child, "child human input".into())
+        .unwrap();
+    waiting(&mut events, child).await;
+    let child_human = turn(&model.observed.lock().unwrap(), 8);
+    assert_eq!(child_human.origin.as_deref(), Some("human"));
+    assert_eq!(child_human.parent_subagent_id, None);
+    assert!(child_human.is_subagent);
+    let grandchild = runtime
+        .delegate_background_as_child(child, Role::Worker, "nested agent task", interactive())
+        .unwrap();
+    waiting(&mut events, grandchild).await;
+    let nested = turn(&model.observed.lock().unwrap(), 9);
+    assert!(nested.is_subagent);
+    assert_eq!(nested.parent_subagent_id, Some(child.to_string()));
+    runtime.cancel(grandchild).unwrap();
+    runtime.wait(grandchild).await.unwrap();
     runtime.cancel(child).unwrap();
     runtime.wait(child).await.unwrap();
     runtime.cancel(root).unwrap();
@@ -292,6 +335,9 @@ async fn resuming_an_unfinished_request_retains_its_saved_prompt_identity() {
         serde_json::from_str(&record.config_json).unwrap();
     // An interrupted provider has the exact sent input but no retained assistant reply.
     descriptor.completed_turn_end = None;
+    // Saved prompt provenance survives, but current task ownership must replace stale ancestry.
+    descriptor.turn.as_mut().unwrap().parent_subagent_id = Some("stale-parent".into());
+    descriptor.turn.as_mut().unwrap().is_subagent = true;
     record.config_json = serde_json::to_string(&descriptor).unwrap();
     record.messages_json = serde_json::to_string(&sent).unwrap();
     record.terminal_phase = "Checkpoint".into();

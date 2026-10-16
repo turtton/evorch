@@ -45,6 +45,11 @@ the device ID. Invalid existing state fails without silently rotating it.
 API-key clients never read or create this file. Library callers can inject the
 seed explicitly; otherwise they share a process-local seed.
 
+Provider session IDs follow [OMP's per-agent session mapping](https://github.com/can1357/oh-my-pi/blob/470b7efb67673960d37e3e64584669e6e9caad1c/packages/coding-agent/src/session/session-metadata.ts):
+each independent evorch run has a stable session. The native CLI instead shares
+its session with in-process subagents. Metadata and the session header always
+carry the same ID; evorch retains its run-specific cache affinity.
+
 The first Messages call binds the account from the same token bundle used for
 authentication. Constructing a client before login or listing models does not
 freeze a missing account. Same-account token rotation preserves identity. A
@@ -62,6 +67,14 @@ Tool durations are omitted because this adapter does not have measured values.
 Request classes follow the inspected CLI's classification: agent requests use
 `main` or `subagent`, compaction uses `compaction` even inside a child run, and
 other purposes use `auxiliary`.
+Known child runs send their actual run ID in `x-claude-code-agent-id`, including
+compaction. `x-claude-code-parent-agent-id` is sent only when the parent is itself
+a known subagent. Root requests omit both, and first-level children omit the parent
+header. IDs retain printable ASCII while percent signs,
+control characters and non-ASCII UTF-8 bytes use uppercase percent encoding.
+Resuming a saved input preserves its prompt identity and counts while rebinding
+ancestry to the current task. Agent type is omitted because this adapter has no
+verified native agent catalogue mapping.
 
 ## TLS and HTTP reference
 
@@ -78,7 +91,10 @@ are disabled. A connection can be reused after a complete response, while
 canceling an unfinished response drops its transport work.
 
 This introduces a Rust 1.99 requirement and CMake, Perl, Git, and bindgen build
-dependencies in Nix and CI. Reproducing a captured handshake does not prove
+dependencies in Nix and CI. Linux packages retain the matching C++ runtime and
+verify CLI startup and all shipped ELF dependencies without `LD_LIBRARY_PATH`;
+the development shell and Nix test runner provide that runtime separately.
+Reproducing a captured handshake does not prove
 every platform, TLS resumption behavior, or future service-side classification.
 
 ## Checksum reference

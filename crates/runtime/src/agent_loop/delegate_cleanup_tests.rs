@@ -75,6 +75,7 @@ fn fixture_with_model(
         benchmark_checked: false,
         benchmark_replay: false,
         task: RunTask {
+            ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),
             run_id: parent,
             role: Role::Orchestrator,
@@ -314,7 +315,7 @@ async fn stopped_wait_keeps_awaited_child_and_preserves_wait_error_contract() {
 async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() {
     let (_, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(cancel_rx);
-    state.turn = crate::request_turn::initial(false, true, true, false, None);
+    state.turn = crate::request_turn::initial(Default::default(), true, true, false, None);
     let human_turn = state.turn.clone();
     let root = state.task.run_id;
     runtime.bind_thread_root("resume-race", root).unwrap();

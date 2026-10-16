@@ -55,7 +55,8 @@ async fn streaming_falls_back_after_provider_retries_are_exhausted() {
             origin: Some("human".into()),
             prompt_index: Some(7),
             turn_index: Some(7),
-            ..providers::RequestTurnContext::unattributed(false)
+            parent_subagent_id: Some("parent-run".into()),
+            ..providers::RequestTurnContext::unattributed(true)
         }),
         run_id: "session".into(),
         category: None,

@@ -1205,8 +1205,16 @@ impl AgentRuntime {
             RunContinuation::Restored(restored) => (None, Some(restored)),
             RunContinuation::Resume { restored, handoff } => (handoff, Some(*restored)),
         };
+        let ancestry = crate::request_turn::RequestAncestry::new(
+            parent,
+            parent.is_some_and(|parent| {
+                lock_runs(&self.shared.runs)
+                    .get(&parent)
+                    .is_some_and(|entry| entry.parent.is_some())
+            }),
+        );
         let turn = crate::request_turn::initial(
-            parent.is_some(),
+            ancestry,
             !history_only && review_seed.is_some(),
             restored.is_none() && handoff.is_none(),
             history_only,
@@ -1356,6 +1364,7 @@ impl AgentRuntime {
             }
         };
         let task = RunTask {
+            ancestry,
             turn,
             run_id,
             role,

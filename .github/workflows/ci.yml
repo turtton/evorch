@@ -148,8 +148,8 @@ jobs:
           attic use home
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-      # Package builds validate sandbox-specific build dependencies; doCheck is false.
-      - name: Build flake package in the Nix sandbox
+      # The package also checks CLI startup and ELF linkage after runtime fixup.
+      - name: Build and smoke-test flake package in the Nix sandbox
         run: |
           # 複数 installable を一度に build すると out-link 命名が不定になるため
           # out-link を明示する。

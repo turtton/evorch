@@ -34,17 +34,20 @@ fn assert_native_request_shape(hello: Vec<u8>, requests: &[Vec<u8>]) {
     ))
     .unwrap();
     for raw in requests {
-        let text = std::str::from_utf8(raw).unwrap();
-        let headers: Vec<_> = text
-            .split("\r\n\r\n")
-            .next()
-            .unwrap()
-            .lines()
-            .skip(1)
-            .map(|l| l.split_once(':').unwrap().0)
-            .collect();
-        assert_eq!(headers, expected_headers);
+        assert_eq!(header_names(raw), expected_headers);
     }
+}
+
+fn header_names(raw: &[u8]) -> Vec<&str> {
+    std::str::from_utf8(raw)
+        .unwrap()
+        .split("\r\n\r\n")
+        .next()
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|line| line.split_once(':').unwrap().0)
+        .collect()
 }
 
 #[tokio::test]
@@ -55,7 +58,7 @@ async fn native_client_hello_and_http_header_order_match_and_connection_is_reuse
     let task = tokio::spawn(async move {
         let (mut stream, hello) = server.accept().await.unwrap();
         let mut requests = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             requests.push(read_request(&mut stream).await);
             send_response(
                 &mut stream,
@@ -67,20 +70,44 @@ async fn native_client_hello_and_http_header_order_match_and_connection_is_reuse
         let captured = hello.lock().unwrap().clone();
         (captured, requests)
     });
-    for _ in 0..2 {
-        assert_eq!(
-            post(&transport, &url)
-                .send()
-                .await
-                .unwrap()
-                .bytes()
-                .await
-                .unwrap(),
-            "{}"
-        );
+    for index in 0..3 {
+        let mut request = post(&transport, &url);
+        if index > 0 {
+            let observation = crate::ObservationContext {
+                run_id: if index == 1 { "child" } else { "nested" }.into(),
+                turn: Some(crate::RequestTurnContext {
+                    parent_subagent_id: (index == 2).then(|| "child".into()),
+                    ..crate::RequestTurnContext::unattributed(true)
+                }),
+                ..Default::default()
+            };
+            let context = crate::provider::claude::ClaudeTransportContext::default()
+                .begin(
+                    "33333333-3333-4333-8333-333333333333",
+                    "device",
+                    Some(&observation),
+                )
+                .unwrap();
+            let mut headers = ClaudeWireProfile
+                .headers(
+                    "33333333-3333-4333-8333-333333333333",
+                    &ClaudeReasoningControls::default(),
+                )
+                .unwrap();
+            context.apply_headers(&mut headers).unwrap();
+            request = request.headers(headers);
+        }
+        assert_eq!(request.send().await.unwrap().bytes().await.unwrap(), "{}");
     }
     let (hello, requests) = task.await.unwrap();
-    assert_native_request_shape(hello, &requests);
+    assert_native_request_shape(hello, &requests[..1]);
+    let child_headers: std::collections::HashMap<String, Vec<String>> =
+        serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/claude-transport/native-2.1.295-child-headers.json"
+        ))
+        .unwrap();
+    assert_eq!(header_names(&requests[1]), child_headers["first_level"]);
+    assert_eq!(header_names(&requests[2]), child_headers["nested"]);
 }
 
 #[tokio::test]
