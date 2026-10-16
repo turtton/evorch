@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use serde::Serialize;
 
+use super::claude::ClaudeToolAdapter;
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
@@ -106,11 +107,16 @@ impl AnthropicClient {
         self
     }
 
-    fn wire_request(&self, request: &ChatRequest, stream: bool) -> MessagesRequest {
+    fn wire_request(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<(MessagesRequest, Option<ClaudeToolAdapter>), ProviderError> {
         let mut wire = to_wire_request(request, stream);
-        if self.claude_oauth {
-            super::claude::shape_oauth_request(&mut wire);
-        }
+        let adapter = self
+            .claude_oauth
+            .then(|| super::claude::shape_oauth_request(&mut wire))
+            .transpose()?;
         discard_unbound_thinking(&mut wire);
         let metadata = self.claude_oauth.then(|| {
             super::claude::request_metadata(
@@ -121,7 +127,7 @@ impl AnthropicClient {
                 request.observation.as_ref().map(|o| o.run_id.as_str()),
             )
         });
-        MessagesRequest { wire, metadata }
+        Ok((MessagesRequest { wire, metadata }, adapter))
     }
 
     fn authenticated_request(&self, auth: &ProviderAuth) -> reqwest::RequestBuilder {
@@ -266,7 +272,7 @@ impl ProviderClient for AnthropicClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
-        let wire_request = self.wire_request(request, false);
+        let (wire_request, tool_adapter) = self.wire_request(request, false)?;
         let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
@@ -313,8 +319,8 @@ impl ProviderClient for AnthropicClient {
             })?;
         let mut response = from_wire_response(wire);
         bind_response(&mut response.message, &response_prefix);
-        if self.claude_oauth {
-            super::claude::restore_response_tool_names(&mut response);
+        if let Some(adapter) = tool_adapter {
+            adapter.restore_message(&mut response.message);
         }
         UsageEmitter::new(self.event_bus.clone(), self.provider_label())
             .emit_usage(&request.model, &response.usage);
@@ -327,7 +333,7 @@ impl ProviderClient for AnthropicClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
-        let wire_request = self.wire_request(request, true);
+        let (wire_request, tool_adapter) = self.wire_request(request, true)?;
         let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
@@ -363,7 +369,7 @@ impl ProviderClient for AnthropicClient {
             response.bytes_stream(),
             AnthropicInterpreterAdapter {
                 inner: AnthropicStreamInterpreter::new(),
-                claude_oauth: self.claude_oauth,
+                tool_adapter,
                 response_prefix,
             },
             UsageEmitter::new(self.event_bus.clone(), self.provider_label()),
@@ -375,7 +381,7 @@ impl ProviderClient for AnthropicClient {
 
 struct AnthropicInterpreterAdapter {
     inner: AnthropicStreamInterpreter,
-    claude_oauth: bool,
+    tool_adapter: Option<ClaudeToolAdapter>,
     response_prefix: String,
 }
 
@@ -404,7 +410,7 @@ fn claude_model_alias(id: &str) -> Option<&str> {
 impl WireStreamInterpreter for AnthropicInterpreterAdapter {
     fn interpret(&mut self, frame: SseFrame) -> Result<FrameInterpretation, ProviderError> {
         let mut events = self.inner.interpret(&frame).map_err(|error| {
-            if self.claude_oauth {
+            if self.tool_adapter.is_some() {
                 match error {
                     ProviderError::Http { status, .. } => ProviderError::Http {
                         status,
@@ -422,10 +428,8 @@ impl WireStreamInterpreter for AnthropicInterpreterAdapter {
             }
         })?;
         let completion = self.inner.is_done().then(|| self.inner.take_result());
-        if self.claude_oauth {
-            for event in &mut events {
-                super::claude::restore_event_tool_names(event);
-            }
+        if let Some(adapter) = &mut self.tool_adapter {
+            adapter.restore_events(&frame, &mut events)?;
         }
         Ok(FrameInterpretation { events, completion })
     }
@@ -437,8 +441,8 @@ impl WireStreamInterpreter for AnthropicInterpreterAdapter {
     fn take_message(&mut self) -> Option<Message> {
         let mut message = self.inner.take_message();
         bind_response(&mut message, &self.response_prefix);
-        if self.claude_oauth {
-            super::claude::restore_message_tool_names(&mut message);
+        if let Some(adapter) = &self.tool_adapter {
+            adapter.restore_message(&mut message);
         }
         Some(message)
     }

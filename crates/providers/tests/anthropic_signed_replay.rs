@@ -14,7 +14,10 @@ fn input() -> ChatRequest {
             {"role":"system","content":[{"type":"text","text":"Stable instructions"}]},
             {"role":"user","content":[{"type":"text","text":"Read the report"}]}
         ],
-        "tools":[{"name":"read","description":"Read report","input_schema":{"type":"object"}}]
+        "tools":[
+            {"name":"read","description":"Read report","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+            {"name":"inspect_run","description":"Inspect a run","input_schema":{"type":"object","properties":{"run_id":{"type":"string"}}}}
+        ]
     }))
     .unwrap()
 }
@@ -27,7 +30,11 @@ fn blocks(oauth: bool) -> Vec<Value> {
         json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu-1","content":[]}),
         json!({"type":"redacted_thinking","data":"opaque-redacted-data"}),
         json!({"type":"thinking","thinking":"Use the local tool.","signature":"opaque-signature-2"}),
-        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"_read"} else {"read"},"input":{"path":"report"}}),
+        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"Read"} else {"read"},
+            "input":if oauth {json!({"file_path":"report"})} else {json!({"path":"report"})},
+            "caller":{"type":"direct"}}),
+        json!({"type":"tool_use","id":"toolu-2","name":if oauth {"mcp__evorch__inspect_run"} else {"inspect_run"},
+            "input":{"run_id":"run-1","nested":{"file_path":"unchanged"}},"caller":{"type":"direct"}}),
     ]
 }
 
@@ -127,7 +134,7 @@ async fn exercise(streaming: bool, oauth: bool) {
                 .iter()
                 .filter(|event| matches!(event, StreamEvent::ToolCallDelta { name: Some(_), .. }))
                 .count(),
-            1,
+            2,
             "server-side tools must not become local calls"
         );
         match events.into_iter().last().unwrap() {
@@ -137,11 +144,22 @@ async fn exercise(streaming: bool, oauth: bool) {
     } else {
         client.send(&auth, &request).await.unwrap()
     };
+    assert!(response.message.content.iter().any(|block| matches!(
+        block, providers::ContentBlock::ToolUse { name, input, .. }
+            if name == "read" && input == &json!({"path":"report"})
+    )));
+    assert!(response.message.content.iter().any(|block| matches!(
+        block, providers::ContentBlock::ToolUse { name, input, .. }
+            if name == "inspect_run" && input == &json!({"run_id":"run-1","nested":{"file_path":"unchanged"}})
+    )));
     // Reconstruct canonical history as a persisted snapshot would.
     let restored: Message =
         serde_json::from_str(&serde_json::to_string(&response.message).unwrap()).unwrap();
     request.messages.push(restored);
-    request.messages.push(serde_json::from_value(json!({"role":"user","content":[{"type":"tool_result","tool_call_id":"toolu-1","content":[{"type":"text","text":"report contents"}],"is_error":false}]})).unwrap());
+    request.messages.push(serde_json::from_value(json!({"role":"user","content":[
+        {"type":"tool_result","tool_call_id":"toolu-1","content":[{"type":"text","text":"report contents"}],"is_error":false},
+        {"type":"tool_result","tool_call_id":"toolu-2","content":[{"type":"text","text":"run details"}],"is_error":false}
+    ]})).unwrap());
     client.send(&auth, &request).await.unwrap();
     request.messages.push(
         serde_json::from_value(

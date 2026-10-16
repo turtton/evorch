@@ -52,12 +52,27 @@ impl Respond for ClaudeEndpoint {
             .unwrap_or(0) as u64;
         let total = prompt.len() as u64;
         let index = oracle.requests.len();
-        let tool_name = body["tools"][0]["name"].as_str().unwrap().to_owned();
+        let oauth = request.headers.contains_key("authorization");
+        let tool_name = match (index, oauth) {
+            (0, true) => "Read",
+            (0, false) => "read",
+            (_, true) => "mcp__evorch__inspect_run",
+            (_, false) => "inspect_run",
+        };
+        let tool_input = if index == 0 {
+            if oauth {
+                json!({"file_path":"report.txt","offset":1,"limit":20})
+            } else {
+                json!({"path":"report.txt","offset":1,"limit":20})
+            }
+        } else {
+            json!({"run_id":"run-1","path":"custom-path"})
+        };
         oracle.requests.push(body);
         oracle.prompts.push(prompt);
         oracle.cached.push(cached);
         let block = if index < 2 {
-            json!({"type":"tool_use", "id":format!("call-{index}"), "name":tool_name, "input":{"index":index}})
+            json!({"type":"tool_use", "id":format!("call-{index}"), "name":tool_name, "input":tool_input})
         } else {
             json!({"type":"text", "text":"done"})
         };
@@ -196,11 +211,18 @@ async fn exercise(oauth: bool) {
         }),
         ..Default::default()
     };
-    let tools = vec![ToolSpec {
-        name: "read".into(),
-        description: "Read content".into(),
-        input_schema: json!({"type":"object","properties":{"index":{"type":"integer"}}}),
-    }];
+    let tools = vec![
+        ToolSpec {
+            name: "read".into(),
+            description: "Read a bounded UTF-8 file range".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "inspect_run".into(),
+            description: "Inspect a run".into(),
+            input_schema: json!({"type":"object","properties":{"run_id":{"type":"string"},"path":{"type":"string"}},"required":["run_id"]}),
+        },
+    ];
     let mut messages = vec![
         Message {
             role: MessageRole::System,
@@ -222,13 +244,18 @@ async fn exercise(oauth: bool) {
             .await
             .unwrap();
         if index < 2 {
-            assert!(
-                response
-                    .message
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            );
+            let (expected_name, expected_input) = if index == 0 {
+                ("read", json!({"path":"report.txt","offset":1,"limit":20}))
+            } else {
+                (
+                    "inspect_run",
+                    json!({"run_id":"run-1","path":"custom-path"}),
+                )
+            };
+            assert!(response.message.content.iter().any(|block| matches!(
+                block, ContentBlock::ToolUse { name, input, .. }
+                    if name == expected_name && input == &expected_input
+            )));
             messages.push(Message {
                 role: MessageRole::Assistant,
                 content: response.message.content.clone(),
@@ -275,6 +302,28 @@ async fn exercise(oauth: bool) {
         );
         assert_eq!(blocks[2]["type"], "tool_use");
         assert_eq!(blocks[2]["id"], format!("call-{turn}"));
+        let expected_name = match (turn, oauth) {
+            (0, true) => "Read",
+            (0, false) => "read",
+            (_, true) => "mcp__evorch__inspect_run",
+            (_, false) => "inspect_run",
+        };
+        assert_eq!(blocks[2]["name"], expected_name);
+        if turn == 0 {
+            assert_eq!(
+                blocks[2]["input"],
+                if oauth {
+                    json!({"file_path":"report.txt","offset":1,"limit":20})
+                } else {
+                    json!({"path":"report.txt","offset":1,"limit":20})
+                }
+            );
+        } else {
+            assert_eq!(
+                blocks[2]["input"],
+                json!({"run_id":"run-1","path":"custom-path"})
+            );
+        }
     }
 }
 

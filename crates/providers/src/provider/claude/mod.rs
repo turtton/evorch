@@ -3,6 +3,7 @@
 pub(super) mod oauth;
 mod quota;
 mod tokens;
+mod tool_adapter;
 
 pub use oauth::{
     CLAUDE_CLIENT_ID, CLAUDE_SCOPE, ClaudeLoginRequest, ClaudeOAuthClient, ClaudeOAuthConfig,
@@ -10,13 +11,13 @@ pub use oauth::{
 };
 pub use quota::{ClaudeExtraUsage, ClaudeQuotaClient, ClaudeQuotaSnapshot, ClaudeQuotaWindow};
 pub use tokens::{ClaudeTokenBundle, ClaudeTokenStore, InMemoryClaudeTokenStore};
+pub(super) use tool_adapter::ClaudeToolAdapter;
 
 use super::anthropic::{AnthropicClient, AnthropicConfig};
 use crate::stream::DeltaStream;
 use crate::wire::anthropic::{WireContentBlock, WireMessagesRequest};
 use crate::{
-    ChatRequest, ChatResponse, ContentBlock, ProviderAuth, ProviderCapabilities, ProviderClient,
-    ProviderError, StreamEvent,
+    ChatRequest, ChatResponse, ProviderAuth, ProviderCapabilities, ProviderClient, ProviderError,
 };
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -215,18 +216,10 @@ pub(super) fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn prefix_tool(name: &str) -> String {
-    if matches!(
-        name,
-        "web_search" | "code_execution" | "text_editor" | "computer"
-    ) {
-        name.into()
-    } else {
-        format!("_{name}")
-    }
-}
-
-pub(super) fn shape_oauth_request(wire: &mut WireMessagesRequest) {
+pub(super) fn shape_oauth_request(
+    wire: &mut WireMessagesRequest,
+) -> Result<ClaudeToolAdapter, ProviderError> {
+    let adapter = ClaudeToolAdapter::shape_request(wire)?;
     let system = wire.system.get_or_insert_with(Vec::new);
     system.insert(
         0,
@@ -235,54 +228,5 @@ pub(super) fn shape_oauth_request(wire: &mut WireMessagesRequest) {
             cache_control: None,
         },
     );
-    for tool in &mut wire.tools {
-        tool.name = prefix_tool(&tool.name);
-    }
-    for message in &mut wire.messages {
-        for block in &mut message.content {
-            if let WireContentBlock::ToolUse { name, .. } = block {
-                *name = prefix_tool(name);
-            }
-            if let WireContentBlock::Raw { block, .. } = block
-                && block["type"] == "tool_use"
-                && let Some(name) = block["name"].as_str()
-            {
-                block["name"] = serde_json::Value::String(prefix_tool(name));
-            }
-        }
-    }
-}
-
-pub(super) fn restore_response_tool_names(response: &mut ChatResponse) {
-    restore_message_tool_names(&mut response.message);
-}
-
-pub(super) fn restore_message_tool_names(message: &mut crate::message::Message) {
-    for block in &mut message.content {
-        if let ContentBlock::ToolUse { name, .. } = block {
-            strip_tool_prefix(name);
-        }
-        if let ContentBlock::Anthropic { block, .. } = block
-            && block["type"] == "tool_use"
-            && let Some(name) = block["name"].as_str()
-        {
-            let mut name = name.to_owned();
-            strip_tool_prefix(&mut name);
-            block["name"] = serde_json::Value::String(name);
-        }
-    }
-}
-fn strip_tool_prefix(name: &mut String) {
-    if let Some(unprefixed) = name.strip_prefix('_') {
-        *name = unprefixed.into();
-    }
-}
-pub(super) fn restore_event_tool_names(event: &mut StreamEvent) {
-    match event {
-        StreamEvent::ToolCallDelta {
-            name: Some(name), ..
-        } => strip_tool_prefix(name),
-        StreamEvent::Completed { response } => restore_response_tool_names(response),
-        _ => {}
-    }
+    Ok(adapter)
 }

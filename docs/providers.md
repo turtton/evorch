@@ -34,6 +34,17 @@ the previous snapshot marked stale and does not interrupt chat.
 Claude API keys do not provide the Claude Pro/Max subscription quota endpoint.
 The normal request usage and cost views remain available for API-key profiles.
 
+Claude subscription requests expose `read` and `write` as `Read` and `Write`,
+using `file_path` in place of `path`. Their descriptions, bounded file reads,
+and evorch permission arguments still describe the actual host behavior.
+Other tools, including `shell`, `edit`, `grep`, and runtime controls, use
+`mcp__evorch__<name>` names with their original schemas. These names are a
+provider presentation convention; execution stays in evorch. Names that cannot
+fit Anthropic's tool-name constraints use a deterministic hashed MCP name.
+Responses and saved tool-call history are translated at the provider boundary,
+so internal names, execution, and approval checks use the original tools.
+Claude API-key profiles retain their original tool names and argument schemas.
+
 ## Transient overload recovery
 
 Streaming chat requests retry `server_is_overloaded` failures even when Codex

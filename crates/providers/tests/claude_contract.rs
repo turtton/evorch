@@ -36,7 +36,9 @@ fn request() -> ChatRequest {
         "messages": [{"role":"system", "content":[{"type":"text", "text":"stable instructions".repeat(100)}]},
             {"role":"user", "content":[{"type":"text", "text":"Read 東京 report"}]}],
         "observation": {"run_id":"claude-cache-run"},
-        "tools": [{"name":"read", "description":"Read report", "input_schema":{"type":"object"}},
+        "tools": [{"name":"read", "description":"Read report", "input_schema":{"type":"object",
+            "properties":{"path":{"type":"string"},"byte_offset":{"type":"integer","minimum":0}},
+            "required":["path"],"additionalProperties":false}},
             {"name":"search", "description":"Search", "input_schema":{"type":"object"}}] })).unwrap()
 }
 fn config(server: &MockServer) -> AnthropicConfig {
@@ -305,8 +307,17 @@ async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rot
             .all(|body| !body.to_string().contains("access-secret")
                 && !body.to_string().contains("new-access"))
     );
-    assert_eq!(bodies[0]["tools"][0]["name"], "_read");
-    assert_eq!(bodies[1]["messages"][1]["content"][0]["name"], "_read");
+    assert_eq!(bodies[0]["tools"][0]["name"], "Read");
+    assert_eq!(
+        bodies[0]["tools"][0]["input_schema"]["required"],
+        json!(["file_path"])
+    );
+    assert_eq!(bodies[0]["tools"][1]["name"], "mcp__evorch__search");
+    assert_eq!(bodies[1]["messages"][1]["content"][0]["name"], "Read");
+    assert_eq!(
+        bodies[1]["messages"][1]["content"][0]["input"],
+        json!({"file_path":"report"})
+    );
     assert!(!requests[0].headers.contains_key("x-api-key"));
     assert_eq!(requests[0].headers["authorization"], "Bearer access-secret");
     assert_eq!(requests[1].headers["authorization"], "Bearer new-access");
@@ -316,7 +327,7 @@ async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rot
 async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_controls() {
     let server = MockServer::start().await;
     let sse = include_str!("fixtures/anthropic/stream_tool_use.sse")
-        .replace("get_weather", "_get_weather");
+        .replace("get_weather", "mcp__evorch__get_weather");
     Mock::given(method("POST"))
         .and(path("/messages"))
         .and(header("authorization", "Bearer access-secret"))
@@ -333,12 +344,14 @@ async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_con
     let client = ClaudeClient::new(config(&server), store).unwrap();
     assert!(!client.capabilities().reasoning);
     let auth = ProviderAuth::new("unused");
-    let events: Vec<_> = client
-        .stream(&auth, &request())
-        .await
-        .unwrap()
-        .collect()
-        .await;
+    let mut input = request();
+    input.tools.push(
+        serde_json::from_value(json!({
+            "name":"get_weather", "description":"Weather", "input_schema":{"type":"object"}
+        }))
+        .unwrap(),
+    );
+    let events: Vec<_> = client.stream(&auth, &input).await.unwrap().collect().await;
     let events: Vec<_> = events.into_iter().collect::<Result<_, _>>().unwrap();
     assert!(events.iter().any(
         |e| matches!(e, StreamEvent::ToolCallDelta { name:Some(name), .. } if name == "get_weather")
@@ -352,6 +365,201 @@ async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_con
         client.send(&auth, &input).await,
         Err(providers::ProviderError::Request(_))
     ));
+}
+
+#[tokio::test]
+async fn subscription_tool_surface_roundtrips_without_changing_api_key_requests() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(|request: &Request| {
+            let oauth = request.headers.contains_key("authorization");
+            ResponseTemplate::new(200).set_body_json(json!({
+                "role":"assistant", "stop_reason":"tool_use",
+                "content":[
+                    {"type":"tool_use","id":"read-call", "name":if oauth {"Read"} else {"read"},
+                        "input":if oauth {json!({"file_path":"report","byte_offset":7})} else {json!({"path":"report","byte_offset":7})}},
+                    {"type":"tool_use","id":"write-call", "name":if oauth {"Write"} else {"write"},
+                        "input":if oauth {json!({"file_path":"output","content":"file_path stays in text"})} else {json!({"path":"output","content":"file_path stays in text"})}},
+                    {"type":"tool_use","id":"custom-call", "name":if oauth {"mcp__evorch__inspect_run"} else {"inspect_run"},
+                        "input":{"path":"canonical-custom-path","nested":{"file_path":"unchanged"}}}
+                ], "usage":{"input_tokens":10,"output_tokens":5}
+            }))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut input = request();
+    input.tools.extend(serde_json::from_value::<Vec<providers::ToolSpec>>(json!([
+        {"name":"write","description":"Write content","input_schema":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}},
+        {"name":"inspect_run","description":"Inspect run","input_schema":{"type":"object","properties":{"path":{"type":"string"},"nested":{"type":"object","properties":{"file_path":{"type":"string"}}}}}},
+        {"name":"Read","description":"A custom tool named Read","input_schema":{"type":"object"}},
+        {"name":"mcp__evorch__inspect_run","description":"An existing MCP-looking tool","input_schema":{"type":"object"}}
+    ])).unwrap());
+    let original = serde_json::to_value(&input).unwrap();
+    let auth = ProviderAuth::new("fixture-key");
+    let oauth = AnthropicClient::new(config(&server))
+        .unwrap()
+        .with_claude_oauth();
+    let api = AnthropicClient::new(config(&server)).unwrap();
+    let oauth_response = oauth.send(&auth, &input).await.unwrap();
+    let api_response = api.send(&auth, &input).await.unwrap();
+    assert_eq!(oauth_response.message, api_response.message);
+    assert_eq!(serde_json::to_value(&input).unwrap(), original);
+    let captured = server.received_requests().await.unwrap();
+    let oauth_body: Value = serde_json::from_slice(&captured[0].body).unwrap();
+    let api_body: Value = serde_json::from_slice(&captured[1].body).unwrap();
+    for tool in &input.tools {
+        let api_tool = api_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["name"] == tool.name)
+            .unwrap();
+        assert_eq!(api_tool["input_schema"], tool.input_schema);
+        assert_eq!(api_tool["description"], tool.description);
+    }
+    for (canonical, wire) in [
+        ("read", "Read"),
+        ("write", "Write"),
+        ("search", "mcp__evorch__search"),
+        ("inspect_run", "mcp__evorch__inspect_run"),
+        ("Read", "mcp__evorch__Read"),
+        (
+            "mcp__evorch__inspect_run",
+            "mcp__evorch__mcp__evorch__inspect_run",
+        ),
+    ] {
+        let tool = oauth_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == wire)
+            .unwrap();
+        let source = input
+            .tools
+            .iter()
+            .find(|tool| tool.name == canonical)
+            .unwrap();
+        if canonical == "read" || canonical == "write" {
+            assert_eq!(
+                tool["input_schema"]["properties"]["file_path"],
+                source.input_schema["properties"]["path"]
+            );
+            assert!(tool["input_schema"]["properties"].get("path").is_none());
+            assert_eq!(tool["input_schema"]["required"][0], "file_path");
+        } else {
+            assert_eq!(tool["input_schema"], source.input_schema);
+        }
+    }
+    assert_eq!(oauth_body["messages"], api_body["messages"]);
+    assert_eq!(
+        api_body["system"][0]["text"],
+        "stable instructions".repeat(100)
+    );
+    assert!(api_body.get("metadata").is_none());
+    assert!(!captured[1].headers.contains_key("authorization"));
+    assert_eq!(captured[1].headers["x-api-key"], "fixture-key");
+}
+
+#[tokio::test]
+async fn subscription_stream_deltas_and_completion_agree_on_canonical_arguments() {
+    let server = MockServer::start().await;
+    let events = [
+        json!({"type":"message_start","message":{"role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"read-call","name":"Read","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_"}}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"write-call","name":"Write","input":{"file_path":"output","content":"file_path stays in text 東京"}}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"custom-call","name":"mcp__evorch__inspect_run","input":{}}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"custom-path\","}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"path\":\"report\",\"byte_offset\":0}"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"nested\":{\"file_path\":\"unchanged\"}}"}}),
+        json!({"type":"content_block_stop","index":2}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}),
+        json!({"type":"message_stop"}),
+    ];
+    let sse = events
+        .into_iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect::<String>();
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut input = request();
+    input.tools.extend(
+        serde_json::from_value::<Vec<providers::ToolSpec>>(json!([
+            {"name":"write","description":"Write","input_schema":{"type":"object"}},
+            {"name":"inspect_run","description":"Inspect","input_schema":{"type":"object"}}
+        ]))
+        .unwrap(),
+    );
+    let client = AnthropicClient::new(config(&server))
+        .unwrap()
+        .with_claude_oauth();
+    let events = client
+        .stream(&ProviderAuth::new("fixture-token"), &input)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut accumulator = providers::StreamAccumulator::default();
+    for event in &events {
+        accumulator.feed(event);
+    }
+    assert!(accumulator.malformed_tool_calls().is_empty());
+    let Some(StreamEvent::Completed { response }) = events.last() else {
+        panic!("missing completion");
+    };
+    let deltas = accumulator.finish(response.usage, response.finish_reason.clone());
+    let calls = |message: &providers::Message| {
+        message
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let providers::ContentBlock::ToolUse { id, name, input } = block {
+                    Some((id.clone(), name.clone(), input.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        (
+            "read-call".into(),
+            "read".into(),
+            json!({"path":"report","byte_offset":0}),
+        ),
+        (
+            "write-call".into(),
+            "write".into(),
+            json!({"path":"output","content":"file_path stays in text 東京"}),
+        ),
+        (
+            "custom-call".into(),
+            "inspect_run".into(),
+            json!({"path":"custom-path","nested":{"file_path":"unchanged"}}),
+        ),
+    ];
+    assert_eq!(calls(&deltas.message), expected);
+    assert_eq!(calls(&response.message), expected);
 }
 
 #[tokio::test]
