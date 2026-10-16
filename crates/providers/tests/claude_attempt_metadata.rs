@@ -75,12 +75,12 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
                 _ => json_response("req_last", "msg_last"),
             },
         )
-        .expect(3)
+        .expect(5)
         .mount(&server)
         .await;
     let client = client(&server);
     let auth = ProviderAuth::new("dummy-token");
-    let input = input();
+    let mut input = input();
     client.send(&auth, &input).await.unwrap();
     let events = client
         .stream(&auth, &input)
@@ -93,27 +93,44 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
         Some(Ok(providers::StreamEvent::Completed { .. }))
     ));
     client.send(&auth, &input).await.unwrap();
+    let observation = input.observation.as_mut().unwrap();
+    observation.turn.as_mut().unwrap().is_subagent = true;
+    client.send(&auth, &input).await.unwrap();
+    input.observation.as_mut().unwrap().purpose = RequestPurpose::Compaction;
+    client.send(&auth, &input).await.unwrap();
     let requests = server.received_requests().await.unwrap();
     let mut ids = std::collections::HashSet::new();
+    let mut expected_model = None;
     for (index, request) in requests.iter().enumerate() {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         let billing = body["system"][0]["text"].as_str().unwrap();
         assert_eq!(
             body["diagnostics"]["previous_message_id"],
-            [Value::Null, json!("msg_send"), json!("msg_stream")][index]
+            [
+                Value::Null,
+                json!("msg_send"),
+                json!("msg_stream"),
+                json!("msg_last"),
+                Value::Null
+            ][index]
         );
         match index {
             0 => assert!(!billing.contains("cc_prev_req=")),
             1 => assert!(billing.contains("cc_prev_req=req_send;")),
-            _ => assert!(billing.contains("cc_prev_req=req_stream;")),
+            2 => assert!(billing.contains("cc_prev_req=req_stream;")),
+            3 => assert!(billing.contains("cc_prev_req=req_last;")),
+            _ => assert!(!billing.contains("cc_prev_req=")),
         }
         assert!(billing.contains("cc_prompt_id=33333333-3333-4333-8333-333333333333; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"));
-        assert!(!billing.contains("cc_is_subagent="));
+        assert_eq!(billing.contains("cc_is_subagent=true;"), index >= 3);
         assert_eq!(
             request.headers["x-claude-code-prompt-id"],
             "33333333-3333-4333-8333-333333333333"
         );
-        assert_eq!(request.headers["x-claude-code-request-class"], "main");
+        assert_eq!(
+            request.headers["x-claude-code-request-class"],
+            ["main", "main", "main", "subagent", "compaction"][index]
+        );
         let request_id = request.headers["x-client-request-id"].to_str().unwrap();
         assert!(uuid::Uuid::parse_str(request_id).is_ok());
         assert!(ids.insert(request_id));
@@ -123,12 +140,18 @@ async fn successful_send_stream_send_chain_uses_provider_ids_without_changing_mo
                 .unwrap()
                 .ends_with("cache-diagnosis-2026-04-07")
         );
-        let model = mock_openai::claude_contract::claude_model_input(&request.body).unwrap();
+        let mut model = mock_openai::claude_contract::claude_model_input(&request.body).unwrap();
         assert!(model.get("diagnostics").is_none());
         assert_eq!(
             model["messages"][0]["content"][0]["text"],
             "Reply LOCAL_CAPTURE_OK."
         );
+        model.as_object_mut().unwrap().remove("stream");
+        if let Some(expected) = &expected_model {
+            assert_eq!(&model, expected);
+        } else {
+            expected_model = Some(model);
+        }
     }
 }
 

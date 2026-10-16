@@ -114,6 +114,11 @@ impl ClaudeRequestContext {
         headers.insert(
             "x-claude-code-request-class",
             HeaderValue::from_static(match self.scope.purpose {
+                RequestPurpose::Agent
+                    if self.turn.as_ref().is_some_and(|turn| turn.is_subagent) =>
+                {
+                    "subagent"
+                }
                 RequestPurpose::Agent => "main",
                 RequestPurpose::Compaction => "compaction",
                 _ => "auxiliary",

@@ -124,6 +124,19 @@ fn prompt_provenance_is_validated_and_used_consistently() {
     );
     assert!(headers.get("x-claude-code-prev-tool-durations").is_none());
     assert_eq!(headers["x-claude-code-prompt-id"], turn.prompt_id);
+    assert_eq!(headers["x-claude-code-request-class"], "subagent");
+    for (purpose, expected) in [
+        (RequestPurpose::Compaction, "compaction"),
+        (RequestPurpose::Routing, "auxiliary"),
+    ] {
+        input.purpose = purpose;
+        state
+            .begin("one", "device", Some(&input))
+            .unwrap()
+            .apply_headers(&mut headers)
+            .unwrap();
+        assert_eq!(headers["x-claude-code-request-class"], expected);
+    }
     let mut billing = "cch=00000;".to_string();
     context.append_billing(&mut billing);
     assert_eq!(

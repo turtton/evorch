@@ -59,6 +59,9 @@ not relabeled as human requests. Response correlation is bounded and scoped to
 session and purpose. Only a successful parsed response or completed SSE message
 advances its `request-id` and `message.id`; failed or canceled attempts do not.
 Tool durations are omitted because this adapter does not have measured values.
+Request classes follow the inspected CLI's classification: agent requests use
+`main` or `subagent`, compaction uses `compaction` even inside a child run, and
+other purposes use `auxiliary`.
 
 ## TLS and HTTP reference
 
@@ -133,7 +136,8 @@ change the account's usage-credit settings.
 2. Compare CLI/SDK/runtime versions, headers, beta selection, body ordering,
    cache markers, identity, model controls, and raw checksums. Capture an ordinary
    interactive main request and a tool continuation. Distinguish auxiliary title
-   requests and print/SDK mode from the CLI main path.
+   requests and print/SDK mode from the CLI main path. Check child-agent request
+   classification and the compaction override as separate cases.
 3. Update `profile.rs` and the independently derived checksum vectors together.
    Compare send, fragmented SSE, interleaved tools, signed thinking, replay,
    token rotation, and client recreation; verify API-key requests remain intact.
