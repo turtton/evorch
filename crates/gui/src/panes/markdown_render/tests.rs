@@ -4,6 +4,7 @@ use egui_kittest::{Harness, kittest::Queryable};
 use super::render_markdown;
 use crate::theme::tokens::palette;
 
+mod link_menu;
 mod nested;
 
 fn assert_narrow_content(source: String, prose: bool) {

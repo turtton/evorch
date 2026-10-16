@@ -33,6 +33,8 @@ pub struct CommonMarkOptions<'f> {
     pub mutable: bool,
     pub math_fn: Option<&'f crate::RenderMathFn>,
     pub html_fn: Option<&'f crate::RenderHtmlFn>,
+    /// Context menu shown when a hyperlink is secondary-clicked
+    pub link_menu_fn: Option<&'f crate::RenderLinkMenuFn>,
     /// Whether to enable scrolling to headings by their ID.
     /// To give a heading an ID, use the syntax `# Heading {#myheadingid}`. Then links to `#myheadingid` e.g. `[click me!](#myheadingid)` will scroll to that heading.
     pub enable_scroll_to_heading: bool,
@@ -79,6 +81,7 @@ impl Default for CommonMarkOptions<'_> {
             mutable: false,
             math_fn: None,
             html_fn: None,
+            link_menu_fn: None,
             enable_scroll_to_heading: false,
         }
     }
@@ -236,7 +239,10 @@ impl Link {
                 scroll_to_heading.replace(stripped.to_string());
             };
         } else {
-            ui.hyperlink_to(layout_job, destination);
+            let response = ui.hyperlink_to(layout_job, &destination);
+            if let Some(link_menu_fn) = options.link_menu_fn {
+                response.context_menu(|ui| link_menu_fn(ui, &destination));
+            }
         }
     }
 }

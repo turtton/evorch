@@ -77,6 +77,7 @@ use egui::{self, Id};
 mod parsers;
 
 pub use egui_commonmark_backend::RenderHtmlFn;
+pub use egui_commonmark_backend::RenderLinkMenuFn;
 pub use egui_commonmark_backend::RenderMathFn;
 pub use egui_commonmark_backend::alerts::{Alert, AlertBundle};
 pub use egui_commonmark_backend::misc::CommonMarkCache;
@@ -222,6 +223,13 @@ impl<'f> CommonMarkViewer<'f> {
     /// of html blocks. Nodes are included in the provided text
     pub fn render_html_fn(mut self, func: Option<&'f RenderHtmlFn>) -> Self {
         self.options.html_fn = func;
+        self
+    }
+
+    /// Shows a context menu when a hyperlink is secondary-clicked. The function
+    /// receives the menu ui and the link destination.
+    pub fn link_menu_fn(mut self, func: Option<&'f RenderLinkMenuFn>) -> Self {
+        self.options.link_menu_fn = func;
         self
     }
 

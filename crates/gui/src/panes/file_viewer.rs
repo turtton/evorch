@@ -451,14 +451,68 @@ pub(crate) fn local_image_ui(ui: &mut egui::Ui, path: &Path) {
     }
 }
 
-pub fn file_viewer_pane(ui: &mut egui::Ui, path: &Path) {
-    file_viewer(ui, path, RELOAD_POLL_INTERVAL);
+fn relative_path(path: &Path, root: Option<&Path>) -> Option<PathBuf> {
+    let root = root?;
+    let relative = match path.strip_prefix(root) {
+        Ok(relative) => relative.to_path_buf(),
+        // Link targets are canonicalized; the project root may not be.
+        Err(_) => path
+            .strip_prefix(root.canonicalize().ok()?)
+            .ok()?
+            .to_path_buf(),
+    };
+    (!relative.as_os_str().is_empty()).then_some(relative)
 }
 
-fn file_viewer(ui: &mut egui::Ui, path: &Path, reload_poll: Duration) {
+pub(crate) fn copy_path_items(ui: &mut egui::Ui, path: &Path, root: Option<&Path>) {
+    let relative = relative_path(path, root);
+    if ui
+        .add_enabled(relative.is_some(), egui::Button::new("Copy relative path"))
+        .clicked()
+    {
+        if let Some(relative) = relative {
+            ui.ctx().copy_text(relative.display().to_string());
+        }
+        ui.close();
+    }
+    if ui.button("Copy absolute path").clicked() {
+        ui.ctx().copy_text(path.display().to_string());
+        ui.close();
+    }
+}
+
+pub fn file_viewer_pane(ui: &mut egui::Ui, path: &Path, root: Option<&Path>) {
+    file_viewer(ui, path, root, RELOAD_POLL_INTERVAL);
+}
+
+fn path_header(ui: &mut egui::Ui, path: &Path, root: Option<&Path>) {
+    let absolute = path.display().to_string();
+    ui.horizontal(|ui| {
+        match relative_path(path, root) {
+            Some(relative) => {
+                crate::theme::widgets::copy_id_button(
+                    ui,
+                    "Copy relative path",
+                    &relative.display().to_string(),
+                );
+            }
+            None => {
+                crate::theme::widgets::copy_id_button(ui, "Copy absolute path", &absolute);
+            }
+        }
+        ui.add(
+            egui::Label::new(absolute.as_str())
+                .truncate()
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_text(absolute.as_str())
+        .context_menu(|ui| copy_path_items(ui, path, root));
+    });
+}
+
+fn file_viewer(ui: &mut egui::Ui, path: &Path, root: Option<&Path>, reload_poll: Duration) {
     ui.push_id(path, |ui| {
-        ui.add(egui::Label::new(path.display().to_string()).truncate())
-            .on_hover_text(path.display().to_string());
+        path_header(ui, path, root);
         ui.separator();
         let loaded = cached_file(ui.ctx(), path).slot.get();
         if let Some(loaded) = &loaded {
@@ -541,6 +595,7 @@ fn file_viewer(ui: &mut egui::Ui, path: &Path, reload_poll: Duration) {
                                 &text,
                                 "file-markdown",
                                 path.parent(),
+                                root,
                             );
                         });
                 }

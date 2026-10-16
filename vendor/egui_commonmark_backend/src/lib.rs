@@ -33,3 +33,5 @@ pub use syntect;
 pub type RenderMathFn = dyn Fn(&mut egui::Ui, &str, bool);
 /// Takes [`egui::Ui`] and the html text to be rendered/used
 pub type RenderHtmlFn = dyn Fn(&mut egui::Ui, &str);
+/// Takes [`egui::Ui`] of a link's context menu and the link destination
+pub type RenderLinkMenuFn = dyn Fn(&mut egui::Ui, &str);

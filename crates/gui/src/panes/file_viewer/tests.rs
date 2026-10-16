@@ -105,7 +105,7 @@ fn source_preview_highlights_keywords_and_markdown_renders_local_images() {
     image::RgbImage::new(4, 3)
         .save(dir.path().join("picture.png"))
         .unwrap();
-    let mut harness = Harness::new_ui(move |ui| file_viewer_pane(ui, &markdown));
+    let mut harness = Harness::new_ui(move |ui| file_viewer_pane(ui, &markdown, None));
     for _ in 0..100 {
         harness.run_steps(1);
         if image_shapes(&harness) >= 2 {
@@ -173,7 +173,7 @@ fn preview_reloads_on_disk_changes_without_flashing_to_loading() {
     std::fs::write(&path, "first version\n").unwrap();
     let viewed = path.clone();
     // A zero poll interval checks the file on every frame.
-    let mut harness = Harness::new_ui(move |ui| file_viewer(ui, &viewed, Duration::ZERO));
+    let mut harness = Harness::new_ui(move |ui| file_viewer(ui, &viewed, None, Duration::ZERO));
 
     // Given: the preview shows the file's current content.
     harness.step();
@@ -220,4 +220,42 @@ fn preview_reloads_on_disk_changes_without_flashing_to_loading() {
     harness.step();
     harness.step();
     assert!(harness.query_by_label("restored").is_some());
+}
+
+#[test]
+fn header_copies_repo_relative_path_and_offers_absolute_path_on_right_click() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    // Given: a project file open in the viewer.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    let path = root.join("src/lib.rs");
+    std::fs::write(&path, "pub fn lib() {}\n").unwrap();
+    let absolute = path.display().to_string();
+    let (viewed, project) = (path.clone(), root.clone());
+    let mut harness = Harness::new_ui(move |ui| file_viewer_pane(ui, &viewed, Some(&project)));
+    harness.run_steps(2);
+    let copied = |harness: &Harness<'_>| {
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+    };
+
+    // When / Then: the header button copies the repo-relative path.
+    harness.get_by_label("Copy relative path").click();
+    harness.step();
+    assert_eq!(copied(&harness).as_deref(), Some("src/lib.rs"));
+
+    // When / Then: the path label's menu also copies the absolute path.
+    harness.get_by_label(&absolute).click_secondary();
+    harness.run();
+    harness.get_by_label("Copy absolute path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some(absolute));
 }
