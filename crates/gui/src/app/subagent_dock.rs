@@ -208,10 +208,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             self.panels.remove(&panel.id);
             self.open_subagent_pane(run_id);
-            if matches!(panel.kind, PanelKind::ParkedAgentTranscript(_)) {
-                if let Some(restored) = self.panels.get_mut(&panel.id) {
+            let parked = matches!(panel.kind, PanelKind::ParkedAgentTranscript(_));
+            if let Some(restored) = self.panels.get_mut(&panel.id) {
+                restored.title.clone_from(&panel.title);
+                if parked {
                     restored.kind = panel.kind;
                 }
+            }
+            if parked {
                 self.park_completed_subagent(run_id);
             }
         }

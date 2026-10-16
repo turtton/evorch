@@ -84,18 +84,26 @@ impl Fixture {
 }
 
 #[test]
-fn agents_rows_show_provider_tool_and_tokens_from_events() {
-    // Given: one running agent and correlated provider, usage, and tool events.
+fn agents_rows_show_profile_tool_and_tokens_from_events() {
+    // Given: one running agent and correlated provider, usage, and tool events,
+    // routed through the user's "work-claude" provider profile.
     let mut fixture = Fixture::new(vec![summary(1, "worker-one", "worker")]);
-    fixture.emit(request_started("run-1", "anthropic", "claude"));
+    fixture.emit(request_started(
+        "run-1",
+        "anthropic",
+        Some("work-claude"),
+        "claude",
+    ));
     fixture.emit(request_completed("run-1", 120, 34));
     fixture.emit(tool_started("run-1", "read", "call-1"));
 
     // When: the Agents pane renders the latest telemetry row.
     fixture.workbench.run();
 
-    // Then: every event-derived value is visible without substituting task metadata.
-    for label in ["claude · anthropic", "read", "input 120", "output 34"] {
+    // Then: every event-derived value is visible without substituting task metadata,
+    // and the provider reads as the profile name rather than its kind.
+    assert_eq!(fixture.workbench.count_labels("claude · anthropic"), 0);
+    for label in ["claude · work-claude", "read", "input 120", "output 34"] {
         assert!(
             fixture.workbench.count_labels(label) >= 1,
             "missing label: {label}"
@@ -141,8 +149,9 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
     fixture.emit(tool_started("run-2", "review-two", "call-two"));
     fixture.emit(delivered("run-2", "run-1", "run-two handoff"));
 
-    // When: run-2 is selected from the Agents table.
-    fixture.workbench.click_label("run-2");
+    // When: run-2 is selected by its agent name in the Agents table.
+    assert!(!fixture.workbench.has_label("run-2"));
+    fixture.workbench.click_label("reviewer-two");
     fixture.workbench.step();
     fixture.workbench.run();
 
@@ -151,17 +160,16 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
         fixture.workbench.state().focus(),
         &ConversationFocus::Agent("run-2".into())
     );
-    assert!(
-        fixture
-            .workbench
-            .has_label("run-2 / reviewer-two / reviewer")
-    );
+    assert!(fixture.workbench.has_label("reviewer-two / reviewer"));
     assert!(
         fixture.workbench.count_labels("review-two") >= 1,
         "run-2 transcript should show its current tool"
     );
     assert!(
-        fixture.workbench.count_labels("-> run-1: run-two handoff") >= 1,
+        fixture
+            .workbench
+            .count_labels("→ worker-one (worker): run-two handoff")
+            >= 1,
         "run-2 transcript should show the outgoing handoff"
     );
 
@@ -263,7 +271,11 @@ fn three_transcript_panes_do_not_mix_run_events() {
             messages: &["two-to-three"],
         },
     );
-    assert!(fixture.workbench.has_label("<- run-2: two-to-three"));
+    assert!(
+        fixture
+            .workbench
+            .has_label("← worker (worker): two-to-three")
+    );
     assert!(!fixture.workbench.has_label("one-to-two"));
 }
 
@@ -301,7 +313,7 @@ fn runless_delta_never_reaches_sole_running_run_pane() {
     pane.run();
 
     // Then: the run pane stays empty and neither transcript retains the delta.
-    assert!(pane.query_by_label("no events for run-1").is_some());
+    assert!(pane.query_by_label("No events yet").is_some());
     assert!(pane.query_by_label("sole run response").is_none());
     assert!(
         fixture
@@ -484,11 +496,11 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
     }
 }
 
-fn request_started(run_id: &str, provider: &str, model: &str) -> Event {
+fn request_started(run_id: &str, provider: &str, profile: Option<&str>, model: &str) -> Event {
     Event::new(ProviderEvent::RequestStarted {
         request_id: format!("request-{run_id}"),
         provider: provider.into(),
-        profile: None,
+        profile: profile.map(str::to_owned),
         protocol: "fixture".into(),
         model: model.into(),
         streaming: true,

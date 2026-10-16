@@ -211,7 +211,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     assert!(ui.has_label("Which output format?"));
     ui.click_label("JSON");
     ui.run();
-    ui.click_label("回答を送信");
+    ui.click_label("Send answer");
     ui.run();
     let run = root.parse::<RunId>().unwrap();
     assert_eq!(rt.block_on(runtime.wait(run)).unwrap(), AgentRunPhase::Done);

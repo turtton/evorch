@@ -28,6 +28,10 @@ fn snapshot() -> KimiQuotaSnapshot {
     }
 }
 
+fn now() -> chrono::DateTime<chrono::Utc> {
+    "2026-09-30T06:30:00Z".parse().unwrap()
+}
+
 #[test]
 fn kimi_footer_uses_bars_and_preserves_last_good_quota_on_failure() {
     let mut state = QuotaState::default();
@@ -40,7 +44,7 @@ fn kimi_footer_uses_bars_and_preserves_last_good_quota_on_failure() {
                 style.interaction.tooltip_delay = 0.0;
                 style.interaction.show_tooltips_only_when_still = false;
             });
-            ui.horizontal(|ui| gui::panes::quota_footer::kimi_quota_footer(ui, &state));
+            ui.horizontal(|ui| gui::panes::quota_footer::kimi_quota_footer(ui, &state, now()));
         });
     harness.run();
     harness.get_by_label("Kimi · 75% wk · stale");
@@ -48,7 +52,9 @@ fn kimi_footer_uses_bars_and_preserves_last_good_quota_on_failure() {
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
     bar.hover();
     harness.run_steps(3);
-    harness.get_by_label("wk: 75.0% remaining · 25.0% used · resets 2026-10-01 12:00 UTC");
+    harness.get_by_label(
+        "wk: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
+    );
     harness.get_by_label("Stale · quota refresh failed");
 }
 
@@ -139,7 +145,9 @@ fn subscriptions_harness(state: KimiQuotaState) -> Harness<'static> {
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .build_ui(move |ui| {
-            ui.horizontal(|ui| gui::panes::quota_footer::kimi_quota_footer(ui, &state.state));
+            ui.horizontal(|ui| {
+                gui::panes::quota_footer::kimi_quota_footer(ui, &state.state, now())
+            });
         })
 }
 
@@ -176,8 +184,12 @@ fn multiple_kimi_subscriptions_show_first_usage_and_switch_from_details() {
     for profile in ["personal", "work", "unavailable"] {
         harness.get_by_label(&format!("{profile} · Kimi"));
     }
-    harness.get_by_label("wk: 75.0% remaining · 25.0% used · resets 2026-10-01 12:00 UTC");
-    harness.get_by_label("wk: 20.0% remaining · 80.0% used · resets 2026-10-01 12:00 UTC");
+    harness.get_by_label(
+        "wk: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
+    );
+    harness.get_by_label(
+        "wk: 20.0% remaining · 80.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
+    );
     harness.get_by_label("Stale · quota refresh failed");
     harness.get_by_label("Quota error: quota request timed out");
     harness.get_by_label("Kimi · unavailable");

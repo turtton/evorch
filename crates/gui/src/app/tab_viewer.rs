@@ -181,34 +181,22 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 if panel.kind == PanelKind::SubagentRegion {
                     return format!("Subagents({})", self.subagent_count());
                 }
-                let owner = match panel.kind {
-                    PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_) => {
-                        panel.target.as_ref().and_then(|run| {
-                            self.sidebar
-                                .threads
-                                .iter()
-                                .find(|thread| thread.run_ids.contains(run))
-                        })
-                    }
-                    PanelKind::Agent
-                    | PanelKind::AgentTranscript
-                    | PanelKind::SubagentRegion
-                    | PanelKind::Sidebar
-                    | PanelKind::Agents
-                    | PanelKind::Notifications
-                    | PanelKind::FileViewer
-                    | PanelKind::Diff
-                    | PanelKind::Terminal
-                    | PanelKind::Tasks
-                    | PanelKind::Memory
-                    | PanelKind::Arena
-                    | PanelKind::Usage
-                    | PanelKind::ContextInspector
-                    | PanelKind::ShellJobs => None,
-                };
-                match owner {
-                    Some(thread) => format!("{} · {}", panel.title, thread.id),
-                    None => panel.title.clone(),
+                let agent = panel.target.as_deref().and_then(|run| {
+                    self.tasks
+                        .rows()
+                        .iter()
+                        .find(|row| row.run_id.to_string() == run)
+                        .map(|row| row.name.as_str())
+                        .filter(|name| !name.trim().is_empty())
+                });
+                // Subagent tabs only show beside their owner thread, so they need no
+                // thread suffix; they read by agent name once its run is known.
+                match (panel.kind, agent) {
+                    (
+                        PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_),
+                        Some(name),
+                    ) => format!("Transcript: {name}"),
+                    _ => panel.title.clone(),
                 }
             })
             .unwrap_or_else(|| tab.to_string());
@@ -306,11 +294,28 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     })
                     .map(|thread| thread.id.clone())
                     .collect();
+                // Subagent runs are bound to their parent's thread, so an
+                // approval waiting in a child run marks the owning thread.
+                let approval_threads = self
+                    .sidebar
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        self.pending_approvals.items().any(|approval| {
+                            approval
+                                .run_id
+                                .as_ref()
+                                .is_some_and(|run| thread.run_ids.contains(run))
+                        })
+                    })
+                    .map(|thread| thread.id.clone())
+                    .collect();
                 if let Some(action) = sidebar_pane(
                     ui,
                     self.sidebar,
                     self.phases,
                     &question_threads,
+                    &approval_threads,
                     self.unread_threads,
                 ) {
                     *self.sidebar_action = Some(action);
@@ -336,8 +341,14 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 agent_transcript_pane_with_repo_root(
                     ui,
                     run_id,
+                    crate::model::tasks::run_display_name(
+                        self.tasks.rows(),
+                        &self.sidebar.threads,
+                        run_id,
+                    ),
                     self.transcripts.run(run_id),
                     self.repo_root,
+                    self.tasks.rows(),
                 );
             }
             PanelKind::FileViewer => {

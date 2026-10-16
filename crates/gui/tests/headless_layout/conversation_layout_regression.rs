@@ -76,37 +76,33 @@ fn narrow_conversation_keeps_message_input_and_send_inside_its_width() {
 }
 
 #[test]
-fn sandbox_review_ids_are_hidden_until_expanded_for_both_verdicts() {
-    for (severity, verdict) in [
-        (DiagnosticSeverity::Info, "approved"),
-        (DiagnosticSeverity::Warning, "denied: prohibited command"),
+fn standalone_sandbox_review_keeps_ids_behind_a_copy_button() {
+    for (severity, verdict, label) in [
+        (
+            DiagnosticSeverity::Info,
+            "approved",
+            "Sandbox escape reviewed: approved",
+        ),
+        (
+            DiagnosticSeverity::Warning,
+            "denied: prohibited command",
+            "Sandbox escape reviewed: denied: prohibited command",
+        ),
     ] {
+        // Given: a review whose shell call is not in the transcript.
         let mut model = TranscriptModel::new();
-        model.apply(&Event::new(DiagnosticEvent {
-            source: "sandbox".into(),
-            severity,
-            code: "escalation_review".into(),
-            detail: verdict.into(),
-            run_id: Some("run-93".into()),
-            call_id: Some("call-secret".into()),
-            thread_id: None,
-        }));
-        let label = format!(
-            "[{}] sandbox (escalation_review): {verdict}",
-            severity.as_str()
-        );
-        let mut harness = Harness::builder()
+        model.apply(&sandbox_review(severity, verdict, Some("run-93")));
+        // When: the transcript renders.
+        let harness = Harness::builder()
             .with_size(egui::vec2(700.0, 300.0))
             .build_ui(|ui| {
                 gui::panes::agent::transcript_body(ui, &model);
             });
-        harness.run_steps(2);
-        assert!(harness.query_by_label("run_id: run-93").is_none());
-        assert!(harness.query_by_label("call_id: call-secret").is_none());
-        harness.get_by_label(&label).click();
-        harness.run_steps(3);
-        harness.get_by_label("run_id: run-93");
-        harness.get_by_label("call_id: call-secret");
+        // Then: the verdict reads as prose and the IDs are only copyable.
+        harness.get_by_label(label);
+        harness.get_by_label("Copy tool call ID");
+        assert!(harness.query_by_label_contains("call-secret").is_none());
+        assert!(harness.query_by_label_contains("run-93").is_none());
     }
 }
 
@@ -156,41 +152,38 @@ fn sandbox_review_and_following_reply_wrap_inside_narrow_transcript() {
                 ),
             ),
         ] {
-            // Given: a review precedes the reported single-line reply.
-            let mut model = TranscriptModel::new();
-            let run_id = format!("run-{}", "long-id".repeat(30));
-            model.apply(&sandbox_review(severity, &verdict, Some(&run_id)));
-            model.push_message(REPORTED_REPLY);
-            let label = format!(
-                "[{}] sandbox (escalation_review): {verdict}",
-                severity.as_str()
-            );
-            // The wider screen must not hide a layout overflow behind clipping.
-            let mut harness = Harness::builder()
-                .with_size(egui::vec2(1200.0, 1600.0))
-                .build_ui(|ui| {
-                    gui::theme::install(ui.ctx());
-                    ui.set_width(width);
-                    let right = ui.max_rect().right();
-                    gui::panes::agent::transcript_body(ui, &model);
-                    assert!(ui.min_rect().right() <= right + 1.0, "transcript overflow");
-                });
-            harness.run_steps(4);
-            let bounds = Rect::from_min_size(egui::pos2(8.0, 0.0), egui::vec2(width, 1600.0));
-            assert_wrapped_inside(&harness, "各ロール", bounds);
-            if severity == DiagnosticSeverity::Warning {
-                assert_wrapped_inside(&harness, "長い審査理由", bounds);
+            for in_card in [false, true] {
+                // Given: a review, standalone or inside its shell card, precedes the reply.
+                let mut model = TranscriptModel::new();
+                let run_id = format!("run-{}", "long-id".repeat(30));
+                if in_card {
+                    model.apply(&Event::new(event_bus::ToolEvent::ToolStarted {
+                        tool_name: "shell".into(),
+                        call_id: "call-secret".into(),
+                        input: Some(serde_json::json!({"command": "curl example.com"})),
+                        run_id: Some(run_id.clone()),
+                    }));
+                }
+                model.apply(&sandbox_review(severity, &verdict, Some(&run_id)));
+                model.push_message(REPORTED_REPLY);
+                // The wider screen must not hide a layout overflow behind clipping.
+                let mut harness = Harness::builder()
+                    .with_size(egui::vec2(1200.0, 1600.0))
+                    .build_ui(|ui| {
+                        gui::theme::install(ui.ctx());
+                        ui.set_width(width);
+                        let right = ui.max_rect().right();
+                        gui::panes::agent::transcript_body(ui, &model);
+                        assert!(ui.min_rect().right() <= right + 1.0, "transcript overflow");
+                    });
+                harness.run_steps(4);
+                let bounds = Rect::from_min_size(egui::pos2(8.0, 0.0), egui::vec2(width, 1600.0));
+                assert_wrapped_inside(&harness, "各ロール", bounds);
+                if severity == DiagnosticSeverity::Warning {
+                    assert_wrapped_inside(&harness, "長い審査理由", bounds);
+                }
+                assert!(harness.query_by_label_contains("long-id").is_none());
             }
-            // When: expanding and collapsing IDs by clicking the verdict.
-            harness.get_by_label(&label).click();
-            harness.run_steps(4);
-            harness.get_by_label("call_id: call-secret");
-            assert_wrapped_inside(&harness, &format!("run_id: {run_id}"), bounds);
-            assert_wrapped_inside(&harness, "各ロール", bounds);
-            harness.get_by_label(&label).click();
-            harness.run_steps(4);
-            assert!(harness.query_by_label("call_id: call-secret").is_none());
-            assert_wrapped_inside(&harness, "各ロール", bounds);
         }
     }
 }

@@ -1,15 +1,7 @@
 use super::{CacheReuseSummary, TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
 use std::time::{Duration, Instant};
 
-/// Latency such as TTFT: milliseconds below one second, seconds from there
-/// (`840ms`, `1.2s`) so four-digit millisecond counts stay readable.
-pub fn latency_label(ms: f64) -> String {
-    if ms.round() < 1_000.0 {
-        format!("{ms:.0}ms")
-    } else {
-        format!("{:.1}s", ms / 1_000.0)
-    }
-}
+pub use crate::format::latency as latency_label;
 
 fn duration_label(duration: Duration) -> String {
     latency_label(duration.as_secs_f64() * 1_000.0)

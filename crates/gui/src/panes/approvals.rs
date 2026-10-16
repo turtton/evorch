@@ -1,7 +1,8 @@
 use egui::{RichText, Ui};
 
-use crate::model::{pending_approvals::PendingApproval, scoped_call::parse_scoped_call_id};
-use crate::theme::tokens::{FONT_MONO, SP_2, palette};
+use crate::model::pending_approvals::PendingApproval;
+use crate::theme::tokens::{FONT_MONO, FONT_SMALL, SP_2, palette};
+use crate::theme::widgets::copy_id_button;
 
 use super::requests::{RequestAction, request_card};
 
@@ -11,30 +12,20 @@ use super::requests::{RequestAction, request_card};
 pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestAction> {
     let mut action = None;
     ui.push_id(("approval", &item.call_id), |ui| {
-        request_card(ui, "ツールの承認待ち", |ui| {
+        request_card(ui, "Tool approval needed", |ui| {
             ui.add(egui::Label::new(RichText::new(&item.tool_name).strong()).wrap());
-            let original = parse_scoped_call_id(&item.call_id)
-                .map(|(_, call, _)| call)
-                .unwrap_or_else(|| item.call_id.clone());
-            let call = if original.is_empty() {
-                "—"
-            } else {
-                &original
-            };
-            let attempt = item.attempt.map_or_else(|| "—".into(), |n| n.to_string());
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "{} · {call} · attempt {attempt}",
-                        item.run_id.as_deref().unwrap_or("—")
-                    ))
-                    .monospace()
-                    .size(FONT_MONO)
-                    .color(palette().TEXT_MUTED),
-                )
-                .wrap(),
-            )
-            .on_hover_text(&item.call_id);
+            ui.horizontal_wrapped(|ui| {
+                if let Some(attempt) = item.attempt {
+                    ui.label(
+                        RichText::new(format!("Attempt {attempt}"))
+                            .size(FONT_SMALL)
+                            .color(palette().TEXT_MUTED),
+                    );
+                }
+                if let Some(run_id) = item.run_id.as_deref() {
+                    copy_id_button(ui, "Copy run ID", run_id);
+                }
+            });
             match item.input.as_ref() {
                 Some(input) => {
                     let primary = primary_key(input);
@@ -58,7 +49,7 @@ pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestActio
                     }
                 }
                 None => {
-                    ui.label("引数情報なし");
+                    ui.label("No arguments");
                 }
             }
             ui.horizontal_wrapped(|ui| {

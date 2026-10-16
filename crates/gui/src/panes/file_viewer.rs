@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime};
 
 use egui::{ColorImage, TextureHandle};
 use egui_extras::syntax_highlighting::{CodeTheme, highlight};
 
+const RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_SIDE: u32 = 8192;
@@ -135,14 +136,63 @@ enum LoadedFile {
 
 type LoadResult = Result<LoadedFile, String>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = path.metadata().ok()?;
+    Some(FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
+#[derive(Clone)]
+struct Loaded {
+    result: LoadResult,
+    // Taken before reading, so a write racing the read still differs next poll.
+    stamp: Option<FileStamp>,
+}
+
+#[derive(Default)]
+struct LoadSlot {
+    loaded: Mutex<Option<Loaded>>,
+    ready: Condvar,
+}
+
+impl LoadSlot {
+    fn get(&self) -> Option<Loaded> {
+        self.loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn result(&self) -> Option<LoadResult> {
+        self.get().map(|loaded| loaded.result)
+    }
+}
+
 #[derive(Clone)]
 struct FileCache {
-    result: Arc<Mutex<Option<LoadResult>>>,
+    slot: Arc<LoadSlot>,
     texture: Option<TextureHandle>,
+}
+
+#[derive(Clone, Default)]
+struct ReloadWatch {
+    next_check: f64,
+    next: Option<FileCache>,
 }
 
 fn cache_id(path: &Path) -> egui::Id {
     egui::Id::new(("file-preview-cache", path))
+}
+fn watch_id(path: &Path) -> egui::Id {
+    egui::Id::new(("file-preview-watch", path))
 }
 fn line_id(path: &Path) -> egui::Id {
     egui::Id::new(("file-preview-line", path))
@@ -158,23 +208,16 @@ pub(crate) fn forget_file(ctx: &egui::Context, path: &Path) {
     let cache = ctx.data_mut(|data| {
         let cache = data.get_temp::<FileCache>(cache_id(path));
         data.remove::<FileCache>(cache_id(path));
+        data.remove::<ReloadWatch>(watch_id(path));
         cache
     });
-    if let Some(cache) = cache {
-        let loaded = cache
-            .result
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        if let Some(Ok(LoadedFile::Text(source))) = loaded {
-            for event in pulldown_cmark::Parser::new(&source) {
-                if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) =
-                    event
-                    && let Some(link) = resolve_file_link(&dest_url, path.parent())
-                    && let Some(uri) = image_uri(&link.path)
-                {
-                    ctx.forget_image(&uri);
-                }
+    if let Some(Ok(LoadedFile::Text(source))) = cache.and_then(|cache| cache.slot.result()) {
+        for event in pulldown_cmark::Parser::new(&source) {
+            if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) = event
+                && let Some(link) = resolve_file_link(&dest_url, path.parent())
+                && let Some(uri) = image_uri(&link.path)
+            {
+                ctx.forget_image(&uri);
             }
         }
     }
@@ -194,18 +237,47 @@ fn cached_file(ctx: &egui::Context, path: &Path) -> FileCache {
 
 fn start_file_load(ctx: &egui::Context, path: &Path) -> FileCache {
     let cache = FileCache {
-        result: Arc::new(Mutex::new(None)),
+        slot: Arc::default(),
         texture: None,
     };
-    let result = cache.result.clone();
+    let slot = cache.slot.clone();
     let path_owned = path.to_path_buf();
     let ctx_owned = ctx.clone();
     std::thread::spawn(move || {
-        let loaded = load_file(&path_owned);
-        *result.lock().unwrap_or_else(|error| error.into_inner()) = Some(loaded);
+        let stamp = file_stamp(&path_owned);
+        let result = load_file(&path_owned);
+        *slot
+            .loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Loaded { result, stamp });
+        slot.ready.notify_all();
         ctx_owned.request_repaint();
     });
     cache
+}
+
+/// Swaps in a changed file once its new version has loaded, so the current
+/// content never flashes back to a loading state. One metadata call per poll
+/// keeps the UI-thread check cheap; the read itself stays in the background.
+fn reload_if_changed(ui: &egui::Ui, path: &Path, shown: Option<FileStamp>, poll: Duration) {
+    let ctx = ui.ctx();
+    let id = watch_id(path);
+    let mut watch = ctx
+        .data_mut(|data| data.get_temp::<ReloadWatch>(id))
+        .unwrap_or_default();
+    let now = ui.input(|input| input.time);
+    if let Some(next) = watch.next.take_if(|next| next.slot.get().is_some()) {
+        forget_file(ctx, path);
+        ctx.data_mut(|data| data.insert_temp(cache_id(path), next));
+        ctx.request_repaint();
+    } else if watch.next.is_none() && now >= watch.next_check {
+        watch.next_check = now + poll.as_secs_f64();
+        if file_stamp(path) != shown {
+            watch.next = Some(start_file_load(ctx, path));
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(id, watch));
+    ctx.request_repaint_after(poll);
 }
 
 const IMAGE_SCHEME: &str = "evorch-preview://";
@@ -246,21 +318,14 @@ impl egui::load::ImageLoader for LocalImageLoader {
         let path = url::Url::parse(file_uri)
             .ok()
             .and_then(|url| url.to_file_path().ok())
-            .ok_or_else(|| LoadError::Loading("画像のパスが無効です。".into()))?;
+            .ok_or_else(|| LoadError::Loading("Invalid image path.".into()))?;
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         let file = cache
             .entry(uri.to_owned())
             .or_insert_with(|| start_file_load(ctx, &path));
-        match file
-            .result
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-        {
+        match file.slot.result() {
             Some(Ok(LoadedFile::Image(image))) => Ok(ImagePoll::Ready { image }),
-            Some(Ok(LoadedFile::Text(_))) => {
-                Err(LoadError::Loading("画像形式ではありません。".into()))
-            }
+            Some(Ok(LoadedFile::Text(_))) => Err(LoadError::Loading("Not an image file.".into())),
             Some(Err(error)) => Err(LoadError::Loading(error)),
             None => Ok(ImagePoll::Pending { size: None }),
         }
@@ -285,18 +350,11 @@ impl egui::load::ImageLoader for LocalImageLoader {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .values()
-            .map(|file| {
-                match file
-                    .result
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .as_ref()
-                {
-                    Some(Ok(LoadedFile::Image(image))) => image.pixels.len() * 4,
-                    Some(Ok(LoadedFile::Text(text))) => text.len(),
-                    Some(Err(error)) => error.len(),
-                    None => 0,
-                }
+            .map(|file| match file.slot.result() {
+                Some(Ok(LoadedFile::Image(image))) => image.pixels.len() * 4,
+                Some(Ok(LoadedFile::Text(text))) => text.len(),
+                Some(Err(error)) => error.len(),
+                None => 0,
             })
             .sum()
     }
@@ -305,29 +363,31 @@ impl egui::load::ImageLoader for LocalImageLoader {
 fn load_file(path: &Path) -> LoadResult {
     let metadata = path
         .metadata()
-        .map_err(|error| format!("ファイルを開けません: {error}"))?;
+        .map_err(|error| format!("Cannot open file: {error}"))?;
     if !metadata.is_file() {
-        return Err("通常のファイルを選択してください。".into());
+        return Err("Select a regular file.".into());
     }
     if metadata.len() > MAX_FILE_BYTES {
-        return Err("32 MiB を超えるファイルは表示できません。".into());
+        return Err("Files larger than 32 MiB cannot be previewed.".into());
     }
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|error| format!("ファイルを読み込めません: {error}"))?;
+        .map_err(|error| format!("Cannot read file: {error}"))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("32 MiB を超えるファイルは表示できません。".into());
+        return Err("Files larger than 32 MiB cannot be previewed.".into());
     }
     if let Ok(format) = image::guess_format(&bytes) {
         let dimensions = image::ImageReader::with_format(Cursor::new(&bytes), format)
             .into_dimensions()
-            .map_err(|error| format!("画像を読み込めません: {error}"))?;
+            .map_err(|error| format!("Cannot read image: {error}"))?;
         if dimensions.0 > MAX_IMAGE_SIDE
             || dimensions.1 > MAX_IMAGE_SIDE
             || u64::from(dimensions.0) * u64::from(dimensions.1) > MAX_IMAGE_PIXELS
         {
-            return Err("画像は一辺 8192 px、合計 16 メガピクセルまで表示できます。".into());
+            return Err(
+                "Images are previewed up to 8192 px per side and 16 megapixels in total.".into(),
+            );
         }
         let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
         let mut limits = image::Limits::default();
@@ -337,7 +397,7 @@ fn load_file(path: &Path) -> LoadResult {
         reader.limits(limits);
         let image = reader
             .decode()
-            .map_err(|error| format!("画像を読み込めません: {error}"))?
+            .map_err(|error| format!("Cannot read image: {error}"))?
             .to_rgba8();
         return Ok(LoadedFile::Image(Arc::new(
             ColorImage::from_rgba_unmultiplied(
@@ -347,24 +407,20 @@ fn load_file(path: &Path) -> LoadResult {
         )));
     }
     if bytes.len() > MAX_TEXT_BYTES {
-        return Err("テキストは 2 MiB まで表示できます。".into());
+        return Err("Text is previewed up to 2 MiB.".into());
     }
     if bytes.contains(&0) {
-        return Err("このバイナリ形式はプレビューできません。".into());
+        return Err("This binary format cannot be previewed.".into());
     }
     let text = String::from_utf8(bytes)
-        .map_err(|_| "UTF-8 以外のテキスト、または未対応のバイナリ形式です。".to_owned())?;
+        .map_err(|_| "Not UTF-8 text, or an unsupported binary format.".to_owned())?;
     Ok(LoadedFile::Text(text.into()))
 }
 
 /// Local Markdown images use the same bounded loader as standalone previews.
 pub(crate) fn local_image_ui(ui: &mut egui::Ui, path: &Path) {
     let mut cache = cached_file(ui.ctx(), path);
-    let loaded = cache
-        .result
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
+    let loaded = cache.slot.result();
     match loaded {
         Some(Ok(LoadedFile::Image(image))) => {
             let texture = cache.texture.get_or_insert_with(|| {
@@ -383,37 +439,34 @@ pub(crate) fn local_image_ui(ui: &mut egui::Ui, path: &Path) {
                 .data_mut(|data| data.insert_temp(cache_id(path), cache));
         }
         Some(Ok(LoadedFile::Text(_))) => {
-            ui.label("画像形式ではありません。");
+            ui.label("Not an image file.");
         }
         Some(Err(error)) => {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         None => {
-            ui.label("画像を読み込み中…");
+            ui.label("Loading image…");
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
     }
 }
 
 pub fn file_viewer_pane(ui: &mut egui::Ui, path: &Path) {
+    file_viewer(ui, path, RELOAD_POLL_INTERVAL);
+}
+
+fn file_viewer(ui: &mut egui::Ui, path: &Path, reload_poll: Duration) {
     ui.push_id(path, |ui| {
-        ui.horizontal(|ui| {
-            if ui.small_button("再読み込み").clicked() {
-                forget_file(ui.ctx(), path);
-            }
-            ui.add(egui::Label::new(path.display().to_string()).truncate())
-                .on_hover_text(path.display().to_string());
-        });
+        ui.add(egui::Label::new(path.display().to_string()).truncate())
+            .on_hover_text(path.display().to_string());
         ui.separator();
-        let cache = cached_file(ui.ctx(), path);
-        let loaded = cache
-            .result
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        match loaded {
+        let loaded = cached_file(ui.ctx(), path).slot.get();
+        if let Some(loaded) = &loaded {
+            reload_if_changed(ui, path, loaded.stamp, reload_poll);
+        }
+        match loaded.map(|loaded| loaded.result) {
             None => {
-                ui.label("ファイルを読み込み中…");
+                ui.label("Loading file…");
                 ui.ctx().request_repaint_after(Duration::from_millis(50));
             }
             Some(Err(error)) => {
@@ -444,8 +497,8 @@ pub fn file_viewer_pane(ui: &mut egui::Ui, path: &Path) {
                 }
                 if is_markdown {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut source, false, "プレビュー");
-                        ui.selectable_value(&mut source, true, "ソース");
+                        ui.selectable_value(&mut source, false, "Preview");
+                        ui.selectable_value(&mut source, true, "Source");
                     });
                 }
                 ui.ctx()

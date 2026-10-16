@@ -48,6 +48,7 @@ pub fn tool_header(
     output: Option<&str>,
     is_error: bool,
     repo_root: Option<&Path>,
+    agents: &[crate::model::tasks::TaskRow],
 ) -> ToolHeader {
     // Error text is not a diff or match list; only shell exit codes stay.
     let result = output.filter(|_| !is_error);
@@ -152,7 +153,8 @@ pub fn tool_header(
                 });
             header
         }
-        _ => header(icons::WRENCH, tool_name),
+        _ => super::orchestration::header(tool_name, input, agents)
+            .unwrap_or_else(|| header(icons::WRENCH, tool_name)),
     }
 }
 
@@ -287,7 +289,7 @@ fn failed_exit_code(output: &str) -> Option<String> {
     (code != 0).then(|| format!("exit {code}"))
 }
 
-fn one_line(text: &str) -> String {
+pub(super) fn one_line(text: &str) -> String {
     let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = joined.chars();
     let mut bounded: String = chars.by_ref().take(MAX_SUBJECT_CHARS).collect();
@@ -322,7 +324,14 @@ mod tests {
     use serde_json::json;
 
     fn header(tool: &str, input: serde_json::Value, output: Option<&str>) -> ToolHeader {
-        tool_header(tool, Some(&input), output, false, Some(Path::new("/repo")))
+        tool_header(
+            tool,
+            Some(&input),
+            output,
+            false,
+            Some(Path::new("/repo")),
+            &[],
+        )
     }
 
     #[test]
@@ -411,7 +420,7 @@ mod tests {
         ] {
             assert_eq!(header("read", input, output).meta.as_deref(), expected);
         }
-        let failed = tool_header("read", None, Some("not found"), true, None);
+        let failed = tool_header("read", None, Some("not found"), true, None, &[]);
         assert_eq!(failed.meta, None);
     }
 

@@ -2,7 +2,7 @@ use egui::Ui;
 use workspace_ui::ThreadRunPhase;
 
 use crate::theme::tokens::{
-    FONT_BADGE, FONT_SMALL, R_SM, SP_1, STATUS_STROKE, palette, phase_color,
+    FONT_BADGE, FONT_SMALL, R_SM, SP_1, STATUS_STROKE, palette, phase_color, phase_label,
 };
 use crate::theme::widgets::badge;
 
@@ -16,16 +16,7 @@ pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
         Some(phase) => crate::theme::widgets::status_dot(ui, phase_color(phase)),
         None => crate::theme::widgets::status_dot(ui, palette().TEXT_MUTED),
     };
-    let label = match phase {
-        Some(ThreadRunPhase::Running) => "Running",
-        Some(ThreadRunPhase::Pending) => "Pending",
-        Some(ThreadRunPhase::Waiting) => "Waiting for input",
-        Some(ThreadRunPhase::Done) => "Done",
-        Some(ThreadRunPhase::Error) => "Error",
-        Some(ThreadRunPhase::Stopped) => "Stopped (resumable)",
-        None => "Idle",
-    };
-    response.on_hover_text(label);
+    response.on_hover_text(phase.map_or("Idle", phase_label));
 }
 
 pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
@@ -33,14 +24,7 @@ pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
 }
 
 pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool) {
-    let label = match phase {
-        ThreadRunPhase::Running => "running",
-        ThreadRunPhase::Waiting => "waiting (input)",
-        ThreadRunPhase::Pending => "pending",
-        ThreadRunPhase::Done => "done",
-        ThreadRunPhase::Error => "error",
-        ThreadRunPhase::Stopped => "stopped (resumable)",
-    };
+    let label = phase_label(phase);
     ui.horizontal(|ui| match phase {
         ThreadRunPhase::Running => phase_circle(ui, Some(phase)),
         ThreadRunPhase::Pending => {
@@ -50,13 +34,7 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
         | ThreadRunPhase::Waiting
         | ThreadRunPhase::Done
         | ThreadRunPhase::Error => {
-            let accent = match phase {
-                ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
-                    phase_color(phase)
-                }
-                ThreadRunPhase::Stopped => phase_color(phase),
-                ThreadRunPhase::Waiting | ThreadRunPhase::Done => palette().INFO,
-            };
+            let accent = phase_color(phase);
             egui::Frame::new()
                 .fill(if unread {
                     accent
@@ -114,17 +92,27 @@ mod tests {
             .iter()
             .filter(|shape| {
                 matches!(&shape.shape, Shape::Rect(rect)
-if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == palette().INFO)
+                    if rect.fill == palette().SURFACE_RAISED
+                        || PHASES.iter().any(|phase| rect.fill == phase_color(*phase)))
             })
             .count()
     }
+
+    const PHASES: [ThreadRunPhase; 6] = [
+        ThreadRunPhase::Pending,
+        ThreadRunPhase::Running,
+        ThreadRunPhase::Waiting,
+        ThreadRunPhase::Done,
+        ThreadRunPhase::Error,
+        ThreadRunPhase::Stopped,
+    ];
 
     #[test]
     fn phase_indicator_running_shows_spinner_without_badge() {
         // Given / When
         let harness = harness(Some(ThreadRunPhase::Running));
         // Then
-        assert!(harness.query_by_label("running").is_none());
+        assert!(harness.query_by_label("Running").is_none());
         assert_eq!(spinner_count(&harness), 1);
         assert_eq!(pill_count(&harness), 0);
     }
@@ -134,7 +122,7 @@ if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == p
         // Given / When
         let harness = harness(Some(ThreadRunPhase::Waiting));
         // Then
-        assert!(harness.query_by_label("waiting (input)").is_some());
+        assert!(harness.query_by_label("Waiting for input").is_some());
         assert_eq!(spinner_count(&harness), 0);
         assert_eq!(pill_count(&harness), 1);
     }
@@ -142,10 +130,35 @@ if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == p
     #[test]
     fn stopped_badge_is_resumable_and_warning_not_error() {
         let harness = harness(Some(ThreadRunPhase::Stopped));
-        harness.get_by_label("stopped (resumable)");
+        harness.get_by_label("Stopped (resumable)");
         assert_eq!(spinner_count(&harness), 0);
         assert_eq!(phase_color(ThreadRunPhase::Stopped), palette().WARNING_FG);
         assert_ne!(phase_color(ThreadRunPhase::Stopped), palette().ERROR_FG);
+    }
+
+    #[test]
+    fn badges_use_the_shared_phase_label_and_color() {
+        // Given: every phase that renders a badge rather than the spinner.
+        for phase in PHASES.into_iter().filter(|p| *p != ThreadRunPhase::Running) {
+            // When: the unread indicator renders.
+            let harness = harness(Some(phase));
+            // Then: its text and accent match phase_label / phase_color, so the
+            // badge cannot drift from rows, tooltips and the sidebar dot.
+            harness.get_by_label(phase_label(phase));
+            let accent = if phase == ThreadRunPhase::Pending {
+                palette().SURFACE_RAISED
+            } else {
+                phase_color(phase)
+            };
+            assert!(
+                harness
+                    .output()
+                    .shapes
+                    .iter()
+                    .any(|shape| matches!(&shape.shape, Shape::Rect(rect) if rect.fill == accent)),
+                "{phase:?} badge fill"
+            );
+        }
     }
 
     #[test]
@@ -162,15 +175,5 @@ if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == p
                 .iter()
                 .any(|shape| matches!(shape.shape, Shape::Text(_)))
         );
-    }
-
-    #[test]
-    fn phase_indicator_done_shows_done_badge() {
-        // Given / When
-        let harness = harness(Some(ThreadRunPhase::Done));
-        // Then
-        assert!(harness.query_by_label("done").is_some());
-        assert_eq!(spinner_count(&harness), 0);
-        assert_eq!(pill_count(&harness), 1);
     }
 }

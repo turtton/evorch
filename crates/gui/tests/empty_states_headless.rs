@@ -98,13 +98,14 @@ fn agent_focus_header_keeps_identity_label_and_return_button() {
         .with_sidebar(sidebar);
     let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
     harness.run();
-    harness.click_label("run-2");
+    harness.click_label("implementer");
     harness.run();
     assert_eq!(
         harness.state().focus(),
         &ConversationFocus::Agent("run-2".into())
     );
-    assert!(harness.has_label("run-2 / implementer / worker"));
+    assert!(harness.has_label("implementer / worker"));
+    assert!(harness.has_label("Copy run ID"));
 
     harness.click_label("← Thread");
     harness.run();
@@ -258,7 +259,7 @@ fn empty_agent_transcript_explains_event_delivery() {
             gui::panes::agent_transcript::agent_transcript_pane(ui, "run-1", transcript);
         });
         // Then: run identity and event-delivery guidance are exposed.
-        assert!(harness.query_by_label("no events for run-1").is_some());
+        assert!(harness.query_by_label("No events yet").is_some());
         assert!(
             harness
                 .query_by_label("Messages and tool activity will appear as this agent runs.")

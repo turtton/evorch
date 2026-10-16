@@ -241,9 +241,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .flatten()
             },
         );
-        self.notifications.apply_event(event, |call_id| {
-            self.transcripts.run_for_call(call_id).map(str::to_owned)
-        });
+        self.notifications.apply_event_named(
+            event,
+            |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
+            |run_id| {
+                crate::model::tasks::run_display_name(
+                    self.tasks.rows(),
+                    &self.sidebar.threads,
+                    run_id,
+                )
+                .map(str::to_owned)
+            },
+        );
         self.ledger.apply(event);
         self.tasks.apply_event(event);
         self.durable_tasks.apply_event(event);
@@ -262,8 +271,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.prepare_escalation_thread(source_run_id, new_run_id);
                 }
             }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id, agent_name, ..
+            }) => {
                 self.open_subagent_pane(run_id);
+                if let Some(panel) = self
+                    .panels
+                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
+                    && !agent_name.trim().is_empty()
+                {
+                    panel.title = format!("Transcript: {agent_name}");
+                }
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));

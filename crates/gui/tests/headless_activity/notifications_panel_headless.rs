@@ -148,7 +148,7 @@ fn question_notification_opens_owning_thread_and_conversation() {
             Some(ThreadId::new("one"))
         );
         assert!(harness.query_by_label("Which format?").is_some());
-        assert!(harness.query_by_label("回答を送信").is_some());
+        assert!(harness.query_by_label("Send answer").is_some());
     }
 }
 
@@ -201,9 +201,7 @@ fn panel_ack_clears_unread_when_displayed_and_focused() {
     harness.run_steps(3);
     // Then: its notification is acknowledged.
     assert_eq!(harness.state().notifications().unread_count(), 0);
-    harness
-        .get_by_label("Run notification-run completed")
-        .click();
+    harness.get_by_label("Agent run completed").click();
     harness.run_steps(3);
     assert!(
         harness

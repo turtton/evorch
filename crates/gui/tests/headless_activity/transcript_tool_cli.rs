@@ -12,6 +12,7 @@ fn harness(tool: &str, input: serde_json::Value, output: &str) -> Harness<'stati
         detail: None,
         is_error: false,
         status: ToolStatus::Succeeded,
+        reviews: Vec::new(),
     };
     let mut harness = Harness::new_ui(move |ui| {
         gui::theme::install(ui.ctx());

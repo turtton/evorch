@@ -1,11 +1,16 @@
 use event_bus::{AgentMessageKind, CompactionReason, Event};
 
+use super::scoped_call::parse_scoped_call_id;
+
 mod branch;
 mod compaction;
 mod diagnostics;
 mod lifecycle;
+mod reviews;
 pub mod shell_jobs;
 mod thinking;
+
+pub use reviews::ToolReview;
 
 #[cfg(test)]
 mod tool_tests;
@@ -72,6 +77,7 @@ pub enum TranscriptEntry {
         detail: Option<serde_json::Value>,
         is_error: bool,
         status: ToolStatus,
+        reviews: Vec<ToolReview>,
     },
     AgentMessage {
         direction: MessageDirection,
@@ -107,6 +113,9 @@ pub struct TranscriptModel {
     completed_messages: std::collections::BTreeMap<String, event_bus::EventMeta>,
     agent_names: std::collections::BTreeMap<String, String>,
     shell_jobs: shell_jobs::ShellJobs,
+    pending_reviews: std::collections::BTreeMap<(Option<String>, String), Vec<ToolReview>>,
+    /// Approval IDs that interrupted an already running call.
+    approvals_while_running: std::collections::BTreeSet<String>,
 }
 
 impl Default for TranscriptModel {
@@ -132,6 +141,8 @@ impl TranscriptModel {
             completed_messages: std::collections::BTreeMap::new(),
             agent_names: std::collections::BTreeMap::new(),
             shell_jobs: shell_jobs::ShellJobs::default(),
+            pending_reviews: std::collections::BTreeMap::new(),
+            approvals_while_running: std::collections::BTreeSet::new(),
         }
     }
 
@@ -192,11 +203,17 @@ impl TranscriptModel {
             detail: None,
             is_error: false,
             status,
+            reviews: Vec::new(),
         });
     }
 
     pub fn apply(&mut self, event: &Event) {
         self.finish_thinking(event);
+        if let event_bus::EventKind::Diagnostic(diagnostic) = &event.kind
+            && self.apply_review(diagnostic)
+        {
+            return;
+        }
         if let Some(entry) = diagnostics::entry(&event.kind) {
             self.push(entry);
             return;
@@ -204,18 +221,18 @@ impl TranscriptModel {
         match &event.kind {
             event_bus::EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) => {
                 self.push(TranscriptEntry::Notice {text:match &question.answer {
-                    Some(answer)=>format!("Answer [{}]: {}",question.id,answer),
-                    None=>format!("Question [{}]: {}",question.id,question.title),
+                    Some(answer)=>format!("Answer: {answer}"),
+                    None=>format!("Question: {}",question.title),
                 }});
             }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
                 run_id, parent_run_id: Some(_), agent_name, ..
             }) => {
                 self.agent_names.insert(run_id.clone(), agent_name.clone());
-                self.push_notice(format!("subagent {agent_name} ({run_id}) started"));
+                self.push_notice(format!("subagent {agent_name} started"));
             }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
-                run_id, agent_name, prompt, ..
+                agent_name, prompt, ..
             }) => {
                 let first_instruction = self.entries.iter().find_map(|entry| match entry {
                     TranscriptEntry::UserMessage { text } => Some(text),
@@ -224,7 +241,7 @@ impl TranscriptModel {
                 if first_instruction != Some(prompt) {
                     let only_start_notice = matches!(self.entries.as_slice(),
                         [TranscriptEntry::Notice { text }]
-                            if text == &format!("subagent {agent_name} ({run_id}) started"));
+                            if text == &format!("subagent {agent_name} started"));
                     self.push_user_message(prompt.clone());
                     // The spawn notice arrives first, but the run's instruction leads its transcript.
                     if only_start_notice && self.entries.len() == 2 {
@@ -285,16 +302,7 @@ impl TranscriptModel {
                 // Older ledgers have no completion events. Tool execution still
                 // closes the preceding response before the next answer streams.
                 self.streaming_messages.remove(run_id);
-                self.push(TranscriptEntry::Tool {
-                    run_id: run_id.clone(),
-                    tool_name: tool_name.clone(),
-                    call_id: call_id.clone(),
-                    input: input.clone(),
-                    output: None,
-                    detail: None,
-                    is_error: false,
-                    status: ToolStatus::Running,
-                });
+                self.start_tool(run_id.as_deref(), tool_name, call_id, input.as_ref());
             }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
@@ -358,14 +366,15 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
                 tool_name,
                 call_id,
-                ..
-            }) => self.update_tool(call_id, tool_name, ToolStatus::AwaitingApproval),
+                input,
+            }) => self.update_tool(call_id, tool_name, input.as_ref(), ToolStatus::AwaitingApproval),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
                 call_id,
                 approved,
             }) => self.update_tool(
                 call_id,
                 "",
+                None,
                 if *approved {
                     ToolStatus::Approved
                 } else {
@@ -381,6 +390,7 @@ impl TranscriptModel {
             }) => self.update_tool(
                 call_id,
                 tool_name,
+                None,
                 ToolStatus::Denied {
                     reason: reason.clone(),
                 },
@@ -542,17 +552,103 @@ impl TranscriptModel {
         }
     }
 
-    fn update_tool(&mut self, call_id: &str, tool_name: &str, status: ToolStatus) {
-        if let Some(entry) = self.find_tool_mut(call_id) {
-            if let TranscriptEntry::Tool {
-                status: current, ..
-            } = entry
-            {
-                *current = status;
+    /// Starts a call, continuing the card an earlier approval request opened.
+    fn start_tool(
+        &mut self,
+        run_id: Option<&str>,
+        tool_name: &str,
+        call_id: &str,
+        input: Option<&serde_json::Value>,
+    ) {
+        let pending = self.take_pending_reviews(run_id, call_id);
+        if let Some(TranscriptEntry::Tool {
+            tool_name: name,
+            input: current_input,
+            output: None,
+            status: status @ (ToolStatus::AwaitingApproval | ToolStatus::Approved),
+            reviews,
+            ..
+        }) = self.find_scoped_tool_mut(call_id, run_id)
+        {
+            tool_name.clone_into(name);
+            if input.is_some() {
+                *current_input = input.cloned();
             }
-        } else {
-            self.push_tool(tool_name, call_id, status);
+            *status = ToolStatus::Running;
+            reviews.extend(pending);
+            return;
         }
+        self.push(TranscriptEntry::Tool {
+            run_id: run_id.map(str::to_owned),
+            tool_name: tool_name.to_owned(),
+            call_id: call_id.to_owned(),
+            input: input.cloned(),
+            output: None,
+            detail: None,
+            is_error: false,
+            status: ToolStatus::Running,
+            reviews: pending,
+        });
+    }
+
+    /// Applies an approval status. A run-scoped approval ID (`run:call[:attempt]`)
+    /// resolves to that run's original call, so one call keeps one card.
+    fn update_tool(
+        &mut self,
+        approval_id: &str,
+        tool_name: &str,
+        input: Option<&serde_json::Value>,
+        status: ToolStatus,
+    ) {
+        let (run_id, call_id) = match parse_scoped_call_id(approval_id) {
+            Some((run, call, _)) => (Some(run), call),
+            None => (None, approval_id.to_owned()),
+        };
+        let scoped = run_id
+            .as_deref()
+            .and_then(|run| self.scoped_tool_index(&call_id, Some(run)));
+        let index = scoped.or_else(|| {
+            self.entries.iter().position(
+                |entry| matches!(entry, TranscriptEntry::Tool { call_id: id, .. } if id == approval_id),
+            )
+        });
+        let Some(index) = index else {
+            let reviews = self.take_pending_reviews(run_id.as_deref(), &call_id);
+            self.push(TranscriptEntry::Tool {
+                run_id,
+                tool_name: tool_name.to_owned(),
+                call_id,
+                input: input.cloned(),
+                output: None,
+                detail: None,
+                is_error: false,
+                status,
+                reviews,
+            });
+            return;
+        };
+        let TranscriptEntry::Tool {
+            status: current, ..
+        } = &mut self.entries[index]
+        else {
+            unreachable!("index points at a tool entry");
+        };
+        *current = match status {
+            ToolStatus::AwaitingApproval => {
+                if *current == ToolStatus::Running {
+                    self.approvals_while_running.insert(approval_id.to_owned());
+                }
+                status
+            }
+            // An approval during execution lets the running call continue.
+            ToolStatus::Approved if self.approvals_while_running.remove(approval_id) => {
+                ToolStatus::Running
+            }
+            status => {
+                self.approvals_while_running.remove(approval_id);
+                status
+            }
+        };
     }
 
     fn update_scoped_tool(
@@ -577,8 +673,15 @@ impl TranscriptModel {
                 detail: None,
                 is_error: false,
                 status,
+                reviews: Vec::new(),
             });
         }
+    }
+
+    fn scoped_tool_index(&self, call_id: &str, run: Option<&str>) -> Option<usize> {
+        self.entries.iter().rposition(|entry| matches!(entry,
+            TranscriptEntry::Tool { call_id: id, run_id, .. } if id == call_id && run_id.as_deref() == run
+        ))
     }
 
     fn find_scoped_tool_mut(
@@ -586,15 +689,8 @@ impl TranscriptModel {
         call_id: &str,
         run: Option<&str>,
     ) -> Option<&mut TranscriptEntry> {
-        self.entries.iter_mut().rev().find(|entry| matches!(entry,
-            TranscriptEntry::Tool { call_id: id, run_id, .. } if id == call_id && run_id.as_deref() == run
-        ))
-    }
-
-    fn find_tool_mut(&mut self, call_id: &str) -> Option<&mut TranscriptEntry> {
-        self.entries.iter_mut().find(
-            |entry| matches!(entry, TranscriptEntry::Tool { call_id: id, .. } if id == call_id),
-        )
+        let index = self.scoped_tool_index(call_id, run)?;
+        self.entries.get_mut(index)
     }
 
     pub(crate) fn push(&mut self, entry: TranscriptEntry) {
@@ -784,7 +880,8 @@ mod tests {
                 output: None,
                 detail: None,
                 is_error: false,
-                status: ToolStatus::Succeeded
+                status: ToolStatus::Succeeded,
+                reviews: Vec::new(),
             }
         );
     }

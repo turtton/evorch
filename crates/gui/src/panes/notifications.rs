@@ -1,9 +1,12 @@
 use egui::{RichText, Ui};
 use event_bus::AgentRunPhase;
-use workspace_ui::ThreadId;
+use workspace_ui::{ThreadId, ThreadRunPhase};
 
 use crate::model::notifications::{NotificationKind, NotificationsModel};
-use crate::theme::tokens::{FONT_BADGE, R_SM, STATUS_STROKE, palette};
+use crate::theme::tokens::{
+    CANCELLED_LABEL, FONT_BADGE, R_SM, STATUS_STROKE, attention_color, cancelled_color, palette,
+    phase_color, phase_label,
+};
 use crate::theme::widgets::empty_state;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,16 +36,16 @@ pub fn notifications_pane(
             let revision = model.revision(notification.id);
             let unread = model.is_unread(notification.id);
             let (label, accent) = match &notification.kind {
-                NotificationKind::QuestionPending { .. } => ("question", palette().INFO),
-                NotificationKind::RunStopped => ("stopped (resumable)", palette().WARNING_FG),
-                NotificationKind::RunCompleted => ("completed", palette().SUCCESS),
+                NotificationKind::QuestionPending { .. } => ("Question", attention_color()),
+                NotificationKind::ApprovalPending { .. } => ("Approval", attention_color()),
+                NotificationKind::RunStopped => terminal(ThreadRunPhase::Stopped),
+                NotificationKind::RunCompleted => terminal(ThreadRunPhase::Done),
                 NotificationKind::RunFailed { reason }
                     if AgentRunPhase::Error.is_cancellation(reason.as_deref()) =>
                 {
-                    ("cancelled", palette().TEXT_MUTED)
+                    (CANCELLED_LABEL, cancelled_color())
                 }
-                NotificationKind::RunFailed { .. } => ("failed", palette().ERROR),
-                NotificationKind::ApprovalPending { .. } => ("approval", palette().INFO),
+                NotificationKind::RunFailed { .. } => terminal(ThreadRunPhase::Error),
             };
             let row = ui
                 .push_id(notification.id, |ui| {
@@ -126,4 +129,8 @@ pub fn notifications_pane(
         }
     }
     action
+}
+
+fn terminal(phase: ThreadRunPhase) -> (&'static str, egui::Color32) {
+    (phase_label(phase), phase_color(phase))
 }

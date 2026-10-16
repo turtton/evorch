@@ -33,10 +33,10 @@ fn displays_two_scoped_requests_when_demo_is_populated() -> Result<(), Box<dyn s
     for label in [
         "shell",
         "write",
-        "run-2 · call-1 · attempt 17",
-        "run-3 · call-2 · attempt 18",
+        "Attempt 17",
+        "Attempt 18",
         "rm -rf /tmp/build",
-        "引数情報なし",
+        "No arguments",
     ] {
         assert!(workbench.count_labels(label) > 0, "missing {label}");
     }

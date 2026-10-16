@@ -61,6 +61,14 @@ fn status_fixture(
     has_question: bool,
     width: f32,
 ) -> Harness<'static, Option<SidebarAction>> {
+    attention_fixture(phase, (has_question, false), width)
+}
+
+fn attention_fixture(
+    phase: Option<ThreadRunPhase>,
+    (has_question, has_approval): (bool, bool),
+    width: f32,
+) -> Harness<'static, Option<SidebarAction>> {
     let root = tempfile::tempdir().unwrap();
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
@@ -70,11 +78,15 @@ fn status_fixture(
     sidebar.select_project(&project).unwrap();
     let mut thread = ThreadRecord::new(ThreadId::new("status"), project, "Status thread");
     thread.run_ids.push("run-status".into());
-    let questions = if has_question {
-        BTreeSet::from([thread.id.clone()])
-    } else {
-        BTreeSet::new()
+    let flagged = |flag: bool| {
+        if flag {
+            BTreeSet::from([thread.id.clone()])
+        } else {
+            BTreeSet::new()
+        }
     };
+    let questions = flagged(has_question);
+    let approvals = flagged(has_approval);
     sidebar.threads.push(thread);
     let phases = phase
         .map(|phase| BTreeMap::from([("run-status".into(), phase)]))
@@ -85,9 +97,14 @@ fn status_fixture(
             move |ui, action| {
                 let _keep_root = &root;
                 gui::theme::install(ui.ctx());
-                if let Some(next) =
-                    sidebar_pane(ui, &sidebar, &phases, &questions, &Default::default())
-                {
+                if let Some(next) = sidebar_pane(
+                    ui,
+                    &sidebar,
+                    &phases,
+                    &questions,
+                    &approvals,
+                    &Default::default(),
+                ) {
                     *action = Some(next);
                 }
             },
@@ -124,7 +141,7 @@ fn thread_status_icons_follow_state_and_question_priority() {
             );
             assert_eq!(harness.query_by_label(QUESTION_LABEL).is_some(), question);
             assert_eq!(
-                harness.query_by_label("Thread status: Error").is_some(),
+                harness.query_by_label("Thread status: Failed").is_some(),
                 error
             );
             assert!(harness.query_by_label("?").is_none());
@@ -180,7 +197,7 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
         for (phase, question, label) in [
             (ThreadRunPhase::Running, false, "Thread status: Running"),
             (ThreadRunPhase::Waiting, true, QUESTION_LABEL),
-            (ThreadRunPhase::Error, false, "Thread status: Error"),
+            (ThreadRunPhase::Error, false, "Thread status: Failed"),
         ] {
             let mut harness = status_fixture(Some(phase), question, width);
             let title = harness.get_by_label("Status thread").rect();
@@ -216,7 +233,7 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
         for (phase, status) in [
             (ThreadRunPhase::Pending, "Thread status: Running"),
             (ThreadRunPhase::Running, "Thread status: Running"),
-            (ThreadRunPhase::Error, "Thread status: Error"),
+            (ThreadRunPhase::Error, "Thread status: Failed"),
         ] {
             let mut harness = status_fixture(Some(phase), true, width);
             let title = harness.get_by_label("Status thread").rect();
@@ -309,7 +326,7 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     assert!(saved.threads.iter().all(|thread| thread.archived));
     assert!(saved.active_thread.is_none());
 
-    gui.click_label("アーカイブ済み (3)");
+    gui.click_label("Archived (3)");
     gui.run();
     assert!(gui.has_label("Expand children of root"));
     assert!(!gui.has_label("↳ Child"));
@@ -440,7 +457,7 @@ fn orphaned_and_cyclic_threads_are_reachable_in_both_sections() {
         let mut gui = HeadlessWorkbench::new(state, [1600.0, 900.0]);
         gui.run();
         if archived {
-            gui.click_label("アーカイブ済み (3)");
+            gui.click_label("Archived (3)");
             gui.run();
         }
         for label in ["↳ Orphan", "↳ Cycle A", "↳ Cycle B"] {
@@ -448,5 +465,73 @@ fn orphaned_and_cyclic_threads_are_reachable_in_both_sections() {
         }
         assert!(!gui.has_label("Archive"));
         assert!(!gui.has_label("Restore"));
+    }
+}
+
+const APPROVAL_LABEL: &str = "Approval needed: a tool call is waiting";
+
+#[test]
+fn pending_approval_marks_the_thread_distinctly_from_questions() {
+    let warning_glyphs = |harness: &Harness<'_, Option<SidebarAction>>| {
+        harness
+            .output()
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, Shape::Text(text)
+                    if text.galley.text() == gui::theme::icons::SHIELD_WARNING)
+            })
+            .count()
+    };
+    let dots = |harness: &Harness<'_, Option<SidebarAction>>| {
+        harness
+            .output()
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, Shape::Circle(circle)
+                    if circle.fill == palette().WARNING_FG)
+            })
+            .count()
+    };
+    // Given: a waiting thread with only a pending approval.
+    let harness = attention_fixture(Some(ThreadRunPhase::Waiting), (false, true), 600.0);
+    // Then: it gets the amber attention dot with approval-specific text.
+    assert!(harness.query_by_label(APPROVAL_LABEL).is_some());
+    assert!(harness.query_by_label(QUESTION_LABEL).is_none());
+    assert_eq!((dots(&harness), warning_glyphs(&harness)), (1, 0));
+
+    // Given: the same thread with both a question and an approval.
+    let harness = attention_fixture(Some(ThreadRunPhase::Waiting), (true, true), 600.0);
+    // Then: the question keeps the dot and the approval uses its own glyph.
+    assert!(harness.query_by_label(APPROVAL_LABEL).is_some());
+    assert!(harness.query_by_label(QUESTION_LABEL).is_some());
+    assert_eq!((dots(&harness), warning_glyphs(&harness)), (1, 1));
+}
+
+#[test]
+fn thread_context_menu_copies_the_full_thread_id_and_title() {
+    for (item, expected) in [
+        ("Copy thread ID", "status"),
+        ("Copy thread title", "Status thread"),
+    ] {
+        // Given: a thread row.
+        let mut harness = status_fixture(None, false, 600.0);
+        // When: the row is right-clicked and a copy item is chosen.
+        harness.get_by_label("Status thread").click_secondary();
+        harness.run_steps(2);
+        harness.get_by_label(item).click();
+        harness.run_steps(1);
+        // Then: the clipboard receives the value, the menu closes and the
+        // right-click did not switch threads.
+        assert!(
+            harness.output().platform_output.commands.iter().any(
+                |command| matches!(command, egui::OutputCommand::CopyText(text) if text == expected)
+            ),
+            "{item}"
+        );
+        harness.run_steps(2);
+        assert!(harness.query_by_label(item).is_none(), "{item} menu closed");
+        assert_eq!(harness.state(), &None);
     }
 }

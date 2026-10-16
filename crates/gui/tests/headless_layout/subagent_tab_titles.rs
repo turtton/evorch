@@ -80,7 +80,7 @@ fn has_tab_title(painted: &[&str], title: &str) -> bool {
 }
 
 #[test]
-fn started_tab_uses_owner_id_only_when_owner_thread_is_selected() {
+fn started_tab_reads_by_agent_name_only_when_owner_thread_is_selected() {
     let mut state = state();
     state.apply_events([started()]);
 
@@ -98,13 +98,10 @@ fn started_tab_uses_owner_id_only_when_owner_thread_is_selected() {
         .unwrap();
     harness.run_steps(3);
     let text = painted_text(&harness);
-    assert!(
-        text.iter()
-            .any(|title| title.contains("worker-1") && title.contains("owner")),
-        "{text:?}"
-    );
+    assert!(has_tab_title(&text, "Transcript: worker-1"), "{text:?}");
     assert!(!text.iter().any(|title| {
-        title.contains("worker-1") && (title.contains("fix-login") || title.contains("other-work"))
+        title.contains("Transcript: worker-1")
+            && (title.contains("owner") || title.contains("fix-login"))
     }));
 }
 
@@ -128,11 +125,10 @@ fn parked_tab_keeps_owner_and_subagent_count_after_workspace_reload() {
         .with_sidebar(sidebar);
     restored.switch_thread(ThreadId::new("owner")).unwrap();
     let harness = render(restored);
-    // The parked tab carries the owner ID; the region has its run count without an owner suffix.
+    // The parked tab survives the reload; the region keeps its run count without an owner suffix.
     let text = painted_text(&harness);
     assert!(
-        text.iter()
-            .any(|title| title.contains("worker-1") && title.contains("owner")),
+        text.iter().any(|title| title.contains("worker-1")),
         "{text:?}"
     );
     assert!(has_tab_title(&text, "Subagents(1)"));

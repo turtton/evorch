@@ -163,21 +163,21 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
         h.run();
         h.click_label("Queue");
         h.run();
-        assert!(h.has_label("配送待ち 1件 — agent には未反映（通常は回答完了後に配送）"));
+        assert!(h.has_label("1 message queued — not yet seen by the agent (usually delivered once it finishes answering)"));
         assert_eq!(runtime.follow_up_status(run).unwrap().pending, 1);
         h.state_mut()
             .switch_thread(ThreadId::new("thread-2"))
             .unwrap();
         h.run();
-        assert!(!h.has_label("次のターンで届ける"));
+        assert!(!h.has_label("Deliver next turn"));
         h.state_mut()
             .switch_thread(ThreadId::new("thread-1"))
             .unwrap();
         h.run();
-        h.click_label("次のターンで届ける");
+        h.click_label("Deliver next turn");
         h.run();
         assert!(runtime.follow_up_status(run).unwrap().next_turn_requested);
-        assert!(h.has_label("配送待ち 1件 — 現在の応答・ツール完了後、次のターンで反映"));
+        assert!(h.has_label("1 message queued — delivered on the next turn, after the current response and tools finish"));
         assert_eq!(model.calls.load(Ordering::SeqCst), 1);
         model.release[0].notify_one();
         rt.block_on(async {
@@ -186,7 +186,7 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
                 .unwrap();
         });
         h.run();
-        assert!(!h.has_label("次のターンで届ける"));
+        assert!(!h.has_label("Deliver next turn"));
         assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
         let messages = model.messages.lock().unwrap();
         assert!(

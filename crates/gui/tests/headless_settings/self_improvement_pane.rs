@@ -80,7 +80,7 @@ fn persisted_candidates_filter_review_dismiss_and_refresh_on_project_change() {
     harness.get_by_label("Evidence").click();
     harness.run();
     harness.get_by_label("Repeated tool calls");
-    harness.get_by_label("Run: run-42");
+    harness.get_by_label("Copy run ID");
     harness.get_by_label("Mark reviewed").click();
     harness.run();
     let db = Database::open(&config).unwrap();
@@ -365,6 +365,6 @@ fn folded_duplicates_show_their_count_and_recent_runs() {
     harness.get_by_label_contains("Seen 3 times, last ");
     harness.get_by_label("Evidence").click();
     harness.run();
-    harness.get_by_label("Run: run-42");
+    harness.get_by_label("Copy run ID");
     harness.get_by_label("Recent runs: run-42, run-43, run-44");
 }

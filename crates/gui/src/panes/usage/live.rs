@@ -22,6 +22,7 @@ struct QuotaRow {
     subscription: String,
     window: String,
     resets_in: String,
+    resets_at: chrono::DateTime<chrono::Utc>,
     efficiency: QuotaEfficiency,
 }
 
@@ -41,8 +42,9 @@ impl LiveData {
         mode: CostMode,
         window_minutes: i64,
         quota: &QuotaState,
+        wall_clock: std::time::SystemTime,
     ) -> Self {
-        let now = storage::system_time_to_ns(std::time::SystemTime::now()).unwrap_or_default();
+        let now = storage::system_time_to_ns(wall_clock).unwrap_or_default();
         let mut costs = CostCalculator::new(pricing, mode);
         let facts = &dataset.facts;
         let minute = 60_000_000_000_i64;
@@ -100,15 +102,14 @@ impl LiveData {
                     reset_ns.saturating_sub(length),
                     now + 1,
                 );
-                let remaining_minutes = (reset_ns - now).max(0) / minute;
                 quotas.push(QuotaRow {
                     subscription: subscription.to_owned(),
                     window: window.duration_label(),
-                    resets_in: if remaining_minutes >= 120 {
-                        format!("resets in {}h", remaining_minutes / 60)
-                    } else {
-                        format!("resets in {remaining_minutes}m")
-                    },
+                    resets_in: format!(
+                        "resets {}",
+                        crate::format::time_until(window.resets_at, wall_clock.into())
+                    ),
+                    resets_at: window.resets_at,
                     efficiency: QuotaEfficiency {
                         used_percent: window.used_percent,
                         totals,
@@ -292,7 +293,8 @@ impl LiveData {
                 for row in &self.quotas {
                     let efficiency = &row.efficiency;
                     ui.label(&row.subscription);
-                    ui.label(format!("{} · {}", row.window, row.resets_in));
+                    ui.label(format!("{} · {}", row.window, row.resets_in))
+                        .on_hover_text(crate::format::utc_timestamp(row.resets_at));
                     ui.label(format!("{:.0}%", efficiency.used_percent));
                     ui.label(compact_tokens(efficiency.totals.total_tokens()));
                     ui.label(format_cost(&efficiency.totals));
@@ -405,6 +407,7 @@ mod tests {
             CostMode::Recorded,
             60,
             &quota,
+            now,
         );
 
         // Then: only the in-window Codex request counts, scaled by 25%.
@@ -415,5 +418,6 @@ mod tests {
         assert_eq!(efficiency.tokens_per_percent(), 400.0);
         assert_eq!(efficiency.cost_per_percent(), 0.02);
         assert_eq!(data.quotas[0].window, "5h");
+        assert_eq!(data.quotas[0].resets_in, "resets in 1h");
     }
 }

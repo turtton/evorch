@@ -41,6 +41,17 @@ pub struct NotificationsModel {
 
 impl NotificationsModel {
     pub fn apply_event(&mut self, event: &Event, resolve_run: impl Fn(&str) -> Option<String>) {
+        self.apply_event_named(event, resolve_run, |_| None);
+    }
+
+    /// Like [`Self::apply_event`]; `run_name` names runs in summaries (agent name
+    /// or thread title), which otherwise read as an unnamed agent run.
+    pub fn apply_event_named(
+        &mut self,
+        event: &Event,
+        resolve_run: impl Fn(&str) -> Option<String>,
+        run_name: impl Fn(&str) -> Option<String>,
+    ) {
         let (kind, run_id, summary) = match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
                 if question.answer.is_none() && question.run_id == question.root_run_id =>
@@ -68,23 +79,24 @@ impl NotificationsModel {
                 reason,
                 ..
             }) => {
+                let who = || run_name(run_id).unwrap_or_else(|| "Agent run".to_owned());
                 let (kind, summary) = match to {
                     AgentRunPhase::Stopped => (
                         NotificationKind::RunStopped,
-                        format!("Run {run_id} stopped (resumable)"),
+                        format!("{} stopped (resumable)", who()),
                     ),
                     AgentRunPhase::Done => (
                         NotificationKind::RunCompleted,
-                        format!("Run {run_id} completed"),
+                        format!("{} completed", who()),
                     ),
                     AgentRunPhase::Error => (
                         NotificationKind::RunFailed {
                             reason: reason.clone(),
                         },
                         match reason.as_deref() {
-                            Some(event_bus::CANCELLED_REASON) => format!("Run {run_id} cancelled"),
-                            Some(reason) => format!("Run {run_id} failed: {reason}"),
-                            None => format!("Run {run_id} failed"),
+                            Some(event_bus::CANCELLED_REASON) => format!("{} cancelled", who()),
+                            Some(reason) => format!("{} failed: {reason}", who()),
+                            None => format!("{} failed", who()),
                         },
                     ),
                     AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
@@ -274,9 +286,45 @@ mod tests {
         let item = model.items().next().unwrap();
         assert_eq!(item.kind, NotificationKind::RunCompleted);
         assert_eq!(item.run_id.as_deref(), Some("run-3"));
-        assert_eq!(item.summary, "Run run-3 completed");
+        assert_eq!(item.summary, "Agent run completed");
         assert_eq!(model.items().count(), 1);
         assert!(model.is_unread(item.id));
+    }
+
+    #[test]
+    fn terminal_summaries_name_the_run_without_exposing_its_id() {
+        for (to, reason, expected) in [
+            (AgentRunPhase::Done, None, "reviewer-two completed"),
+            (
+                AgentRunPhase::Stopped,
+                None,
+                "reviewer-two stopped (resumable)",
+            ),
+            (
+                AgentRunPhase::Error,
+                Some("cancelled"),
+                "reviewer-two cancelled",
+            ),
+            (
+                AgentRunPhase::Error,
+                Some("boom"),
+                "reviewer-two failed: boom",
+            ),
+        ] {
+            // Given: a resolver that knows the run's agent name.
+            let mut model = NotificationsModel::default();
+            // When: the run reaches a terminal phase.
+            model.apply_event_named(
+                &transition(to, reason),
+                |_| None,
+                |run| (run == "run-3").then(|| "reviewer-two".to_owned()),
+            );
+            // Then: the summary reads by name and the ID stays only as the target.
+            let item = model.items().next().unwrap();
+            assert_eq!(item.summary, expected);
+            assert!(!item.summary.contains("run-3"));
+            assert_eq!(item.run_id.as_deref(), Some("run-3"));
+        }
     }
     #[test]
     fn error_event_pushes_unread_notification_with_reason() {

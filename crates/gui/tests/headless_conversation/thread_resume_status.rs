@@ -66,7 +66,7 @@ fn assert_status(harness: &mut HeadlessWorkbench<DemoSource>, phase: AgentRunPha
     harness.step();
     harness.step();
     assert_eq!(
-        harness.has_label("Thread status: Error"),
+        harness.has_label("Thread status: Failed"),
         phase == AgentRunPhase::Error
     );
     assert_eq!(

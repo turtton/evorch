@@ -13,14 +13,14 @@ pub(super) fn row(
     let mut action = None;
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(sandbox.enabled, |ui| {
-            let label = match sandbox.mode {
-                config::EscalationApproval::Auto => "Sandbox: auto",
-                config::EscalationApproval::User => "Sandbox: user",
-                config::EscalationApproval::Off => "Sandbox: off",
-            };
-            let response = ui.button(label);
+            let (mode, explanation) = sandbox_mode(sandbox.mode, sandbox.escalate_to_user_on_deny);
+            let label = format!("Sandbox: {mode}");
+            // The shield stands in for the "Sandbox:" prefix to keep the row narrow.
+            let response = ui
+                .button(icons::with_icon(icons::SHIELD, mode))
+                .on_hover_text(format!("{explanation}\nClick to change sandbox settings."));
             response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, sandbox.enabled, label)
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, sandbox.enabled, &label)
             });
             if response.clicked() {
                 action = Some(ComposerAction::OpenSandboxSettings);
@@ -36,8 +36,8 @@ pub(super) fn row(
                 !role_locked,
                 egui::Button::new(icons::with_icon(icon, role.label())),
             )
-            .on_hover_text("送信先の role を切替")
-            .on_disabled_hover_text("このスレッドで固定");
+            .on_hover_text("Switch the role that receives your message")
+            .on_disabled_hover_text("Locked for this thread");
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, !role_locked, &label)
         });
@@ -47,17 +47,32 @@ pub(super) fn row(
         if let Some(preference) = model_picker(ui, picker.0, picker.1) {
             action = Some(ComposerAction::ModelPreference(preference));
         }
-        // Keep the composer usable at narrow widths; expose the full settings
-        // name to accessibility and in the tooltip, not as a wide inline button.
-        let response = ui
-            .button("Drafts")
-            .on_hover_text("Self-improvement settings (default off)");
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Self-improvement settings")
-        });
-        if response.clicked() {
-            action = Some(ComposerAction::OpenSelfImprovementSettings);
-        }
     });
     action
+}
+
+/// Short name and explanation of a `sandbox.escalation_approval` mode, which
+/// decides requests to run shell commands or access files outside the sandbox.
+pub(crate) fn sandbox_mode(
+    mode: config::EscalationApproval,
+    escalate_to_user_on_deny: bool,
+) -> (&'static str, &'static str) {
+    match mode {
+        config::EscalationApproval::Auto if escalate_to_user_on_deny => (
+            "auto review",
+            "A reviewer model approves or denies requests to run commands or access files outside the sandbox. Requests it denies come to you for approval.",
+        ),
+        config::EscalationApproval::Auto => (
+            "auto review",
+            "A reviewer model approves or denies requests to run commands or access files outside the sandbox. Requests it denies are rejected.",
+        ),
+        config::EscalationApproval::User => (
+            "ask me",
+            "You approve or deny each request to run commands or access files outside the sandbox.",
+        ),
+        config::EscalationApproval::Off => (
+            "always deny",
+            "Requests to run commands or access files outside the sandbox are always denied. The sandbox itself stays on.",
+        ),
+    }
 }

@@ -551,6 +551,7 @@ mod tests {
                 detail: None,
                 is_error: false,
                 status: ToolStatus::Succeeded,
+                reviews: Vec::new(),
             }]
         );
     }
@@ -654,6 +655,7 @@ mod tests {
                     detail: None,
                     is_error: false,
                     status: ToolStatus::Running,
+                    reviews: Vec::new(),
                 }]
             );
         }

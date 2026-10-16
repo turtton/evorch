@@ -1,10 +1,11 @@
 use super::{AgentIdentity, AgentPaneAction, ConversationContext};
+use crate::format::{duration, usd};
 use crate::panes::agents::AgentsAction;
 use crate::theme::{
     icons,
     text::{h3, muted},
     tokens::*,
-    widgets::{fill_label, ghost, icon_text, metric, metric_detailed},
+    widgets::{copy_id_button, fill_label, ghost, icon_text, metric, metric_detailed},
 };
 
 pub(super) fn header_strip(
@@ -32,14 +33,12 @@ pub(super) fn header_strip(
                         *action = Some(AgentPaneAction::Agents(AgentsAction::ReturnToThread));
                     }
                     let label = match (identity.name, identity.role) {
-                        (Some(name), Some(role)) => {
-                            format!("{} / {name} / {role}", identity.run_id)
-                        }
-                        (Some(name), None) => format!("{} / {name}", identity.run_id),
-                        (None, Some(role)) => format!("{} / {role}", identity.run_id),
+                        (Some(name), Some(role)) => format!("{name} / {role}"),
+                        (Some(label), None) | (None, Some(label)) => label.to_owned(),
                         (None, None) => identity.run_id.to_owned(),
                     };
                     ui.label(h3(label));
+                    copy_id_button(ui, "Copy run ID", identity.run_id);
                 });
             } else if let Some(title) = ctx.active_thread_title {
                 ui.horizontal(|ui| {
@@ -51,7 +50,7 @@ pub(super) fn header_strip(
                     info.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "ℹ")
                     });
-                    if info.on_hover_text("実行の診断").clicked() {
+                    if info.on_hover_text("Run diagnostics").clicked() {
                         *action = Some(AgentPaneAction::OpenDiagnostics);
                     }
                     let context = ui.add(
@@ -74,8 +73,8 @@ pub(super) fn header_strip(
                     });
                 });
                 if let Some(cost) = ctx.thread_metrics.and_then(|metrics| metrics.cost) {
-                    ui.label(muted(format!("Total cost ${cost:.3}")))
-                        .on_hover_text("Main agent and subagents");
+                    ui.label(muted(format!("Total cost (incl. subagents) {}", usd(cost))))
+                        .on_hover_text("Main agent and all of its subagents in this thread");
                 }
             }
             if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty())
@@ -83,7 +82,7 @@ pub(super) fn header_strip(
                 ui.horizontal_wrapped(|ui| {
                     if let Some(parent) = ctx.parent_thread
                         && ui
-                            .small_button(format!("← 親 thread: {}", parent.title))
+                            .small_button(format!("← Parent thread: {}", parent.title))
                             .clicked()
                     {
                         *action = Some(AgentPaneAction::Sidebar(
@@ -92,7 +91,7 @@ pub(super) fn header_strip(
                     }
                     for child in &ctx.child_threads {
                         if ui
-                            .small_button(format!("↳ 子 thread: {}", child.title))
+                            .small_button(format!("↳ Child thread: {}", child.title))
                             .clicked()
                         {
                             *action = Some(AgentPaneAction::Sidebar(
@@ -114,25 +113,20 @@ pub(super) fn header_strip(
     ui.add_space(SP_1);
 }
 
-pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
+/// `agent_focused` marks a focused subagent, whose cost includes its own
+/// subagents; the thread view shows the main agent's runs only.
+pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>, agent_focused: bool) {
     let metrics = ctx.thread_metrics.unwrap_or_default();
-    let seconds = metrics.wall_time.as_secs();
-    let wall = if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
-    };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
-        metric(
-            ui,
-            &metrics
-                .conversation_cost
-                .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-        );
+        let cost = metrics.conversation_cost.map_or_else(|| "$—".into(), usd);
+        let scope = if agent_focused {
+            "This agent's cost (incl. its subagents)"
+        } else {
+            "Main agent cost (excludes subagents)"
+        };
+        metric_detailed(ui, &cost, &format!("{scope}: {cost}"), false);
         metric_detailed(
             ui,
             &metrics.cache_label(),
@@ -143,7 +137,7 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
             metrics.ttft_label(),
             metrics.tok_s_label(),
             metrics.context_label(),
-            format!("wall {wall}"),
+            format!("wall {}", duration(metrics.wall_time)),
         ] {
             metric(ui, &segment);
         }

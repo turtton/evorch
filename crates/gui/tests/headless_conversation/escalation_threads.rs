@@ -355,7 +355,7 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
     );
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
     gui.run();
-    gui.click_label("↳ 子 thread: Orchestrator · Worker task");
+    gui.click_label("↳ Child thread: Orchestrator · Worker task");
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,
@@ -367,7 +367,7 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
         gui.state().composer().role,
         gui::model::composer::ComposerRole::Orchestrator
     );
-    gui.click_label("← 親 thread: Worker task");
+    gui.click_label("← Parent thread: Worker task");
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,
@@ -509,7 +509,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
     gui.run();
     assert!(gui.has_label(
-        "Subagent question from run-3 reached orchestrator [run-3]: Subagent asks orchestrator"
+        "Subagent question from child worker reached orchestrator: Subagent asks orchestrator"
     ));
     assert!(!gui.has_label("Subagent asks orchestrator"));
     assert!(gui.has_label("Orchestrator asks user"));
@@ -528,7 +528,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
             },
         })]);
     gui.run();
-    assert!(gui.has_label("Answer sent to subagent run-3 [run-3]: Use the existing API"));
+    assert!(gui.has_label("Answer sent to subagent child worker: Use the existing API"));
     gui.state_mut()
         .switch_thread(ThreadId::new("parent"))
         .unwrap();

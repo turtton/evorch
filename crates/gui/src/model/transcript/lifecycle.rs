@@ -7,15 +7,17 @@ impl TranscriptModel {
         if let EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) = &event.kind
             && question.run_id != question.root_run_id
         {
-            let text = match &question.answer {
-                Some(answer) => format!(
-                    "Answer sent to subagent {} [{}]: {}",
-                    question.run_id, question.id, answer
+            let name = self.agent_names.get(&question.run_id);
+            let text = match (&question.answer, name) {
+                (Some(answer), Some(name)) => format!("Answer sent to subagent {name}: {answer}"),
+                (Some(answer), None) => format!("Answer sent to a subagent: {answer}"),
+                (None, Some(name)) => format!(
+                    "Subagent question from {name} reached orchestrator: {}",
+                    question.title
                 ),
-                None => format!(
-                    "Subagent question from {} reached orchestrator [{}]: {}",
-                    question.run_id, question.id, question.title
-                ),
+                (None, None) => {
+                    format!("Subagent question reached orchestrator: {}", question.title)
+                }
             };
             self.push_notice(text);
         } else if child_terminal {
@@ -53,12 +55,10 @@ impl TranscriptModel {
             }) => (run_id, "stopped (resumable)"),
             _ => return None,
         };
-        let name = self
-            .agent_names
-            .get(run_id)
-            .map_or("unknown", String::as_str);
-        Some(TranscriptEntry::Notice {
-            text: format!("subagent {name} ({run_id}) {state}"),
-        })
+        let text = match self.agent_names.get(run_id) {
+            Some(name) => format!("subagent {name} {state}"),
+            None => format!("a subagent {state}"),
+        };
+        Some(TranscriptEntry::Notice { text })
     }
 }

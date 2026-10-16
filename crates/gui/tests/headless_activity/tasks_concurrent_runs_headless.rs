@@ -63,9 +63,9 @@ fn agents_pane_lists_multiple_concurrent_run_states() {
     for (name, phase) in [
         ("pending-run", "Pending"),
         ("running-run", "Running"),
-        ("waiting-run", "Waiting"),
+        ("waiting-run", "Waiting for input"),
         ("done-run", "Done"),
-        ("error-run", "Error"),
+        ("error-run", "Failed"),
     ] {
         assert!(harness.query_by_label(name).is_some(), "missing run {name}");
         assert!(

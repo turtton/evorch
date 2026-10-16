@@ -126,6 +126,19 @@ pub fn icon_button(ui: &mut Ui, icon: &str, label: &str) -> Response {
     icon_button_rich(ui, icon_text(icon), label)
 }
 
+/// Copies `value` on click; the tooltip shows the full ID and the accessible
+/// name stays `label`.
+pub fn copy_id_button(ui: &mut Ui, label: &str, value: &str) -> Response {
+    let side = ROW_DENSE - SP_1;
+    let response = ui.add(ghost(icon_text(icons::COPY)).min_size(egui::vec2(side, side)));
+    accessible(&response, label);
+    let response = response.on_hover_text(format!("{label}\n{value}"));
+    if response.clicked() {
+        ui.ctx().copy_text(value.to_owned());
+    }
+    response
+}
+
 pub fn icon_button_rich(ui: &mut Ui, icon: RichText, label: &str) -> Response {
     let side = ROW_DENSE - SP_1;
     labeled(ui.add(ghost(icon).min_size(egui::vec2(side, side))), label)
@@ -306,5 +319,24 @@ mod tests {
             (icons::LIGHTNING, "— tok/s", "Output throughput")
         );
         assert_eq!(metric_parts("wall 12s"), (icons::CLOCK, "12s", "Wall time"));
+    }
+
+    #[test]
+    fn copy_id_button_names_its_action_and_copies_the_hidden_value() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        // Given: an ID rendered only as a copy button.
+        let mut harness = Harness::new_ui(|ui| {
+            super::copy_id_button(ui, "Copy run ID", "run-42");
+        });
+        harness.run();
+        // Then: the action, not the raw value, is its accessible name.
+        assert!(harness.query_by_label("run-42").is_none());
+        // When: activated.
+        harness.get_by_label("Copy run ID").click();
+        harness.step();
+        // Then: the full value reaches the clipboard.
+        assert!(harness.output().platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "run-42")
+        ));
     }
 }

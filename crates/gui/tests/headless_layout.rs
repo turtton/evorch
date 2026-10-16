@@ -5,6 +5,8 @@
 mod additional_roles;
 #[path = "headless_layout/approvals_layout_headless.rs"]
 mod approvals_layout_headless;
+#[path = "headless_layout/composer_band_layout.rs"]
+mod composer_band_layout;
 #[path = "headless_layout/conversation_header_controls.rs"]
 mod conversation_header_controls;
 #[path = "headless_layout/conversation_layout_regression.rs"]

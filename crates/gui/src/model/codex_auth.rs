@@ -248,13 +248,12 @@ pub fn format_expiry(now_unix: u64, expires_at_unix: u64) -> String {
     if expires_at_unix <= now_unix {
         return "Access token expired; it is refreshed automatically on the next request".into();
     }
-    let minutes = (expires_at_unix - now_unix) / 60;
-    let hours = minutes / 60;
-    if hours > 0 {
-        format!("Access token expires in {hours}h {}m", minutes % 60)
-    } else {
-        format!("Access token expires in {minutes}m")
-    }
+    format!(
+        "Access token expires in {}",
+        crate::format::duration(std::time::Duration::from_secs(
+            (expires_at_unix - now_unix) / 60 * 60
+        ))
+    )
 }
 
 #[cfg(test)]

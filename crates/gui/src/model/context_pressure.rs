@@ -29,11 +29,11 @@ impl TelemetryRow {
         if let Some(c) = &self.context_composition {
             text.push_str(&format!("\nLatest context estimate: {} / {}\nInstructions: {} · tool definitions: {}\nConversation: {} · tool outputs: {}\nEstimation: serialized UTF-8 bytes / 4",c.projected_tokens,c.window_tokens,c.instructions,c.tool_definitions,c.conversation,c.tool_outputs));
         }
-        if let Some(at) = self
-            .last_checkpoint
-            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        {
-            text.push_str(&format!("\nLast saved checkpoint: Unix {}", at.as_secs()));
+        if let Some(at) = self.last_checkpoint {
+            text.push_str(&format!(
+                "\nLast saved checkpoint: {}",
+                crate::format::time_since(at, std::time::SystemTime::now())
+            ));
         }
         if let Some(reason) = &self.checkpoint_failure {
             text.push_str(&format!("\nCheckpoint save failed: {reason}"));
@@ -74,7 +74,11 @@ impl TelemetryRow {
     }
 
     pub fn tokens_label(&self) -> String {
-        let tokens = format!("{} / {}", self.usage.input, self.usage.output);
+        let tokens = format!(
+            "{} / {}",
+            crate::format::compact_count(self.usage.input),
+            crate::format::compact_count(self.usage.output)
+        );
         match self.context_pressure_label() {
             Some(pressure) => format!("{tokens} ({pressure})"),
             None => tokens,

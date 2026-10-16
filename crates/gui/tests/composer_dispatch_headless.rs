@@ -317,8 +317,8 @@ fn stopped_parent_with_live_child_keeps_banner_and_dispatches_stop_then_discard(
             running_children: 1,
         });
     harness.run();
-    assert!(harness.has_label("子agent 1件は実行中 — もう一度押すと全停止"));
-    harness.click_label("全停止");
+    assert!(harness.has_label("1 subagent still running — press Stop all to stop them"));
+    harness.click_label("Stop all");
     harness.run();
     assert_eq!(
         harness.state().issued().last(),
@@ -334,9 +334,9 @@ fn stopped_parent_with_live_child_keeps_banner_and_dispatches_stop_then_discard(
             running_children: 0,
         });
     harness.run();
-    assert!(harness.has_label("停止中（再開可能）— /continue またはメッセージ送信で再開"));
+    assert!(harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
     assert!(harness.has_label("Send"));
-    harness.click_label("破棄");
+    harness.click_label("Discard");
     harness.run();
     assert_eq!(
         harness.state().issued().last(),

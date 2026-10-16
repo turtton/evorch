@@ -447,6 +447,7 @@ impl UsagePane {
                 self.cost_mode,
                 self.live.window_minutes,
                 quota,
+                std::time::SystemTime::now(),
             );
             self.live.view = Some((key, data));
         }
@@ -755,27 +756,10 @@ pub fn key_label(dimension: UsageDimension, key: &str, sidebar: &SidebarState) -
     }
 }
 
-/// Token count with K/M/B suffixes.
-pub fn compact_tokens(value: u64) -> String {
-    let value = value as f64;
-    if value >= 1e9 {
-        format!("{:.2}B", value / 1e9)
-    } else if value >= 1e6 {
-        format!("{:.2}M", value / 1e6)
-    } else if value >= 1e3 {
-        format!("{:.1}K", value / 1e3)
-    } else {
-        format!("{value:.0}")
-    }
-}
+pub use crate::format::compact_count as compact_tokens;
 
 /// USD with a `*` when part of the usage has no known price.
 pub fn format_cost(totals: &UsageTotals) -> String {
     let marker = if totals.unpriced { "*" } else { "" };
-    let cost = totals.cost;
-    if cost > 0.0 && cost < 0.01 {
-        format!("${cost:.4}{marker}")
-    } else {
-        format!("${cost:.2}{marker}")
-    }
+    format!("{}{marker}", crate::format::usd(totals.cost))
 }

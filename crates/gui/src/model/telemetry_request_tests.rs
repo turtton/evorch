@@ -431,3 +431,36 @@ fn summarized_reasoning_without_visible_output_timing_is_not_rated() {
     assert_eq!(metrics.tok_s, None);
     assert_eq!(metrics.average_tok_s, None);
 }
+
+#[test]
+fn provider_label_prefers_the_routing_profile_and_tokens_stay_compact() {
+    let request = |profile: Option<&str>| {
+        Event::new(ProviderEvent::RequestStarted {
+            request_id: "request-run".into(),
+            provider: "openai-codex".into(),
+            profile: profile.map(str::to_owned),
+            protocol: "fixture".into(),
+            model: "gpt-6-astra".into(),
+            streaming: true,
+            run_id: Some("run".into()),
+        })
+    };
+    let mut telemetry = TelemetryOverlay::new();
+    // Given: a request routed through the user's named provider profile.
+    telemetry.apply_event(&request(Some("work-codex")));
+    // Then: the profile, not the provider kind, labels the row.
+    let row = telemetry.row("run").unwrap();
+    assert_eq!(row.provider_label(), Some("work-codex"));
+    assert_eq!(row.provider.as_deref(), Some("openai-codex"));
+    // When: a later request has no profile, the kind is the fallback.
+    telemetry.apply_event(&request(None));
+    assert_eq!(
+        telemetry.row("run").unwrap().provider_label(),
+        Some("openai-codex")
+    );
+    // And: cumulative tokens use the shared compact count format.
+    for event in observed("run", 1_234_567, 0, 8_901, 100) {
+        telemetry.apply_event(&event);
+    }
+    assert_eq!(telemetry.row("run").unwrap().tokens_label(), "1.23M / 8.9K");
+}

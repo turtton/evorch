@@ -4,21 +4,24 @@ use egui::Color32;
 use workspace_ui::ThreadRunPhase;
 
 use crate::model::composer::ComposerModel;
-use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
+use crate::model::transcript::{TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
-use crate::panes::composer::{ComposerAction, composer_strip};
+use crate::panes::composer::ComposerAction;
 use crate::panes::sidebar::SidebarAction;
 use crate::theme::icons::{self, with_icon};
 use crate::theme::text::medium;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
+mod agent_message;
+mod compaction;
 mod goal;
 pub use goal::GoalAction;
 mod branch;
 pub use branch::BranchContext;
+mod composer_panel;
 mod header;
-use header::{header_strip, status_strip};
+use header::header_strip;
 mod sandbox_review;
 mod thinking;
 
@@ -88,69 +91,14 @@ pub fn agent_pane_with_repo_root(
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
-        let composer_id = ui.id().with("composer-height");
-        let previous_height = ui
-            .data(|data| data.get_temp::<f32>(composer_id))
-            .unwrap_or(COMPOSER_MIN_HEIGHT);
-        let lines = composer.input.split('\n').count().max(1);
-        let line_height = ui.text_style_height(&egui::TextStyle::Body);
-        let input_height = (lines as f32 * line_height + 2.0 * SP_2)
-            .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
-        let extra = input_height - (COMPOSER_MIN_HEIGHT - 2.0 * SP_2);
-        let previous_extra = ui.data(|data| {
-            data.get_temp::<f32>(composer_id.with("lines"))
-                .unwrap_or(0.0)
-        });
-        // Carry forward the measured chrome/attachments, but replace the old
-        // input height so deleting lines shrinks the composer too.
-        let composer_height = (previous_height - previous_extra + extra)
-            .max(COMPOSER_MIN_HEIGHT)
-            .min((ui.available_height() - ROW_COMPACT).max(COMPOSER_MIN_HEIGHT));
-        ui.data_mut(|data| data.insert_temp(composer_id.with("lines"), extra));
-        egui::Panel::bottom(ui.id().with("composer"))
-            .exact_size(composer_height)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                let strip = ui.scope(|ui| {
-                    let vertical_spacing = ui.spacing().item_spacing.y;
-                    if ctx.goal.is_some() || ctx.todo.is_some() {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        if let Some(goal_action) = goal::progress_strip(ui, ctx.goal, ctx.todo) {
-                            action = Some(AgentPaneAction::Goal(goal_action));
-                        }
-                    }
-                    let result = ui
-                        .push_id("composer-strip", |ui| {
-                            composer_strip(
-                                ui,
-                                composer,
-                                ctx.model_picker,
-                                picker_state,
-                                ctx.phase,
-                                ctx.sandbox_picker,
-                            )
-                        })
-                        .inner;
-                    ui.spacing_mut().item_spacing.y = vertical_spacing;
-                    status_strip(ui, &ctx);
-                    result
-                });
-                let height = strip.response.rect.height();
-                ui.data_mut(|data| data.insert_temp(composer_id, height));
-                if (height - composer_height).abs() > 0.5 {
-                    ui.ctx().request_repaint();
-                }
-                if let Some(composer_action) = strip.inner {
-                    action = Some(match composer_action {
-                        ComposerAction::ModelPreference(preference) => {
-                            AgentPaneAction::ModelPreference(preference)
-                        }
-                        other => AgentPaneAction::Composer(other),
-                    });
-                }
-            });
+        composer_panel::composer_panel(
+            ui,
+            &ctx,
+            composer,
+            picker_state,
+            identity.is_some(),
+            &mut action,
+        );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -243,7 +191,24 @@ pub fn transcript_body_with_repo_root(
     model: &TranscriptModel,
     repo_root: Option<&std::path::Path>,
 ) {
-    run_detail_body(ui, model, (None, &[]), repo_root, None, (None, &mut None));
+    transcript_body_with_agents(ui, model, repo_root, &[]);
+}
+
+/// A run transcript whose run IDs resolve to the names in `agents`.
+pub fn transcript_body_with_agents(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    repo_root: Option<&std::path::Path>,
+    agents: &[crate::model::tasks::TaskRow],
+) {
+    run_detail_body(
+        ui,
+        model,
+        (None, agents),
+        repo_root,
+        None,
+        (None, &mut None),
+    );
 }
 
 fn run_detail_body(
@@ -310,6 +275,7 @@ fn run_detail_body(
                             repo_root,
                             jobs: model.shell_jobs(),
                             latest_for_job,
+                            agents: task_rows,
                         },
                     );
                     continue;
@@ -328,6 +294,16 @@ fn run_detail_body(
                     if let Some(branch) = branch {
                         branch::edit_button(ui, model, entry_id, branch);
                     }
+                    continue;
+                }
+                if let TranscriptEntry::AgentMessage {
+                    direction,
+                    peer_run_id,
+                    content,
+                    ..
+                } = entry
+                {
+                    agent_message::show(ui, *direction, peer_run_id, content, task_rows);
                     continue;
                 }
                 if let Some((icon, color)) = event_icon(entry) {
@@ -365,19 +341,12 @@ fn run_detail_body(
                         );
                         return;
                     }
-                    if let TranscriptEntry::SandboxReview {
-                        text,
-                        run_id,
-                        call_id,
-                    } = entry
-                    {
-                        sandbox_review::show(
-                            ui,
-                            pane_id.with(("sandbox-review", model.visible_entry_id(entry_idx))),
-                            text,
-                            run_id.as_deref(),
-                            call_id.as_deref(),
-                        );
+                    if let TranscriptEntry::SandboxReview { text, call_id, .. } = entry {
+                        sandbox_review::show(ui, text, call_id.as_deref());
+                        return;
+                    }
+                    if let TranscriptEntry::Compaction { .. } = entry {
+                        compaction::show(ui, pane_id.with(("compaction", entry_id)), entry);
                         return;
                     }
                     if let TranscriptEntry::Reasoning { text, run_id } = entry {
@@ -409,11 +378,8 @@ fn run_detail_body(
 fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
     match entry {
         TranscriptEntry::Notice { .. } => Some((icons::INFO, palette().TEXT_MUTED)),
-        TranscriptEntry::AgentMessage { direction, .. } => Some(match direction {
-            MessageDirection::Incoming => (icons::ARROW_BEND_DOWN_RIGHT, palette().SUCCESS),
-            MessageDirection::Outgoing => (icons::PAPER_PLANE_RIGHT, palette().WARNING_FG),
-        }),
-        TranscriptEntry::Error { .. }
+        TranscriptEntry::AgentMessage { .. }
+        | TranscriptEntry::Error { .. }
         | TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::SandboxReview { .. }
         | TranscriptEntry::Compaction { .. }
@@ -519,27 +485,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
         TranscriptEntry::Reasoning { text, .. } => text.clone(),
-        TranscriptEntry::Compaction {
-            reason,
-            threshold,
-            context_window_tokens,
-            estimated_tokens_before,
-            estimated_tokens_after,
-            compacted_range_start,
-            compacted_range_end,
-            checkpoint_id,
-            summary,
-        } => {
-            let reason = match reason {
-                event_bus::CompactionReason::Automatic => "automatic",
-                event_bus::CompactionReason::Manual => "manual",
-                event_bus::CompactionReason::Agent => "agent",
-                event_bus::CompactionReason::ModelSwitch => "model switch",
-            };
-            format!(
-                "Compaction ({reason}): {estimated_tokens_before} → {estimated_tokens_after} tokens\nrange {compacted_range_start}..{compacted_range_end}; threshold {threshold}; context window {context_window_tokens}\ncheckpoint {checkpoint_id}\n{summary}"
-            )
-        }
+        TranscriptEntry::Compaction { .. } => compaction::summary(entry).unwrap_or_default(),
         TranscriptEntry::Tool {
             tool_name,
             call_id,
@@ -551,13 +497,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             peer_run_id,
             content,
             ..
-        } => {
-            let prefix = match direction {
-                MessageDirection::Incoming => "<-",
-                MessageDirection::Outgoing => "->",
-            };
-            format!("{prefix} {peer_run_id}: {content}")
-        }
+        } => agent_message::label(*direction, peer_run_id, content, &[]),
         TranscriptEntry::TurnEnd {
             run_id,
             context_len,
@@ -672,10 +612,10 @@ mod tests {
     #[test]
     fn thread_header_omits_phase_pill() {
         for (phase, label) in [
-            (ThreadRunPhase::Running, "running"),
-            (ThreadRunPhase::Waiting, "waiting (input)"),
-            (ThreadRunPhase::Done, "done"),
-            (ThreadRunPhase::Stopped, "stopped (resumable)"),
+            (ThreadRunPhase::Running, "Running"),
+            (ThreadRunPhase::Waiting, "Waiting for input"),
+            (ThreadRunPhase::Done, "Done"),
+            (ThreadRunPhase::Stopped, "Stopped (resumable)"),
         ] {
             let mut harness = Harness::builder()
                 .with_size(egui::vec2(400.0, 80.0))

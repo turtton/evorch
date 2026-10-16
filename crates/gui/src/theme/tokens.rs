@@ -205,6 +205,41 @@ pub fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
     }
 }
 
+/// The one status vocabulary shared by badges, rows, tooltips and notifications.
+pub fn phase_label(phase: ThreadRunPhase) -> &'static str {
+    match phase {
+        ThreadRunPhase::Pending => "Pending",
+        ThreadRunPhase::Running => "Running",
+        ThreadRunPhase::Waiting => "Waiting for input",
+        ThreadRunPhase::Done => "Done",
+        ThreadRunPhase::Error => "Failed",
+        ThreadRunPhase::Stopped => "Stopped (resumable)",
+    }
+}
+
+pub fn agent_phase_label(phase: AgentRunPhase) -> &'static str {
+    phase_label(match phase {
+        AgentRunPhase::Pending => ThreadRunPhase::Pending,
+        AgentRunPhase::Running => ThreadRunPhase::Running,
+        AgentRunPhase::Waiting => ThreadRunPhase::Waiting,
+        AgentRunPhase::Done => ThreadRunPhase::Done,
+        AgentRunPhase::Error => ThreadRunPhase::Error,
+        AgentRunPhase::Stopped => ThreadRunPhase::Stopped,
+    })
+}
+
+/// A run its owner cancelled ends in `Error` on the wire but is not a failure.
+pub const CANCELLED_LABEL: &str = "Cancelled";
+
+pub fn cancelled_color() -> Color32 {
+    palette().TEXT_MUTED
+}
+
+/// Pending questions and approvals: anything waiting on the user's decision.
+pub fn attention_color() -> Color32 {
+    palette().WARNING_FG
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +335,30 @@ mod tests {
         );
         assert_eq!(agent_phase_color(AgentRunPhase::Running), palette().RUNNING);
         assert_eq!(agent_phase_color(AgentRunPhase::Waiting), palette().WAITING);
+    }
+
+    #[test]
+    fn agent_and_thread_phases_share_one_label_and_color() {
+        let pairs = [
+            (AgentRunPhase::Pending, ThreadRunPhase::Pending),
+            (AgentRunPhase::Running, ThreadRunPhase::Running),
+            (AgentRunPhase::Waiting, ThreadRunPhase::Waiting),
+            (AgentRunPhase::Done, ThreadRunPhase::Done),
+            (AgentRunPhase::Error, ThreadRunPhase::Error),
+            (AgentRunPhase::Stopped, ThreadRunPhase::Stopped),
+        ];
+        for (agent, thread) in pairs {
+            assert_eq!(agent_phase_label(agent), phase_label(thread));
+            assert_eq!(agent_phase_color(agent), phase_color(thread));
+        }
+        let labels: std::collections::HashSet<_> = pairs
+            .iter()
+            .map(|(_, thread)| phase_label(*thread))
+            .chain([CANCELLED_LABEL])
+            .collect();
+        assert_eq!(labels.len(), pairs.len() + 1);
+        assert_eq!(phase_label(ThreadRunPhase::Error), "Failed");
+        assert_eq!(attention_color(), palette().WARNING_FG);
     }
 
     #[test]

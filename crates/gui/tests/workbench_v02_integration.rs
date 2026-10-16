@@ -412,6 +412,7 @@ fn v02_end_to_end_chained_scenario() {
         fixture.workbench.state().thread_phases().get("run-2"),
         Some(&ThreadRunPhase::Running)
     );
+    // Without a routing profile the provider kind is the fallback label.
     for label in ["claude · anthropic", "tool-run-2", "input 120", "output 34"] {
         assert!(
             fixture.workbench.count_labels(label) >= 1,
@@ -419,8 +420,8 @@ fn v02_end_to_end_chained_scenario() {
         );
     }
 
-    // When: run-2 is drilled into from the agents table.
-    fixture.workbench.click_label("run-2");
+    // When: run-2 is drilled into by its agent name from the agents table.
+    fixture.workbench.click_label("implementer");
     fixture.workbench.step();
     fixture.workbench.run();
 
@@ -445,7 +446,7 @@ fn v02_end_to_end_chained_scenario() {
             .active,
         path.tab
     );
-    assert_eq!(fixture.workbench.count_labels("Transcript: run-2"), 1);
+    assert_eq!(fixture.workbench.count_labels("Transcript: implementer"), 1);
     assert!(
         fixture.workbench.count_labels("tool-run-2") >= 1,
         "run-2 transcript should show its current tool"
@@ -499,8 +500,12 @@ fn v02_end_to_end_chained_scenario() {
             agent_messages: &["two-to-three"],
         },
     );
-    assert!(fixture.workbench.has_label("Transcript: run-3"));
-    assert!(fixture.workbench.has_label("<- run-2: two-to-three"));
+    assert!(fixture.workbench.has_label("Transcript: reviewer"));
+    assert!(
+        fixture
+            .workbench
+            .has_label("← implementer (worker): two-to-three")
+    );
     assert!(!fixture.workbench.has_label("one-to-two"));
 
     // When: a working tree diff is requested and polled to completion.

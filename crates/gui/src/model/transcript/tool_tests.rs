@@ -40,6 +40,7 @@ fn tool_started_stores_input_and_running_status() {
             detail: None,
             is_error: false,
             status: ToolStatus::Running,
+            reviews: Vec::new(),
         }]
     );
 }
@@ -66,6 +67,7 @@ fn tool_completed_updates_output_detail_and_status() {
                 detail: Some(json!({"bytes": 13})),
                 is_error: false,
                 status: ToolStatus::Succeeded,
+                reviews: Vec::new(),
             },
             other
         ]
@@ -104,6 +106,7 @@ fn tool_completed_without_prior_started_creates_entry() {
             detail: Some(json!({"bytes": 13})),
             is_error: false,
             status: ToolStatus::Succeeded,
+            reviews: Vec::new(),
         }]
     );
 }

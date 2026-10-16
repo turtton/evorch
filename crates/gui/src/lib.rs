@@ -10,6 +10,7 @@ pub mod dock;
 pub mod events;
 pub mod evidence;
 pub mod fixture;
+pub mod format;
 pub mod headless;
 pub mod keymap;
 pub mod logging;

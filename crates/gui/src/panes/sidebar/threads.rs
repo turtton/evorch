@@ -72,7 +72,7 @@ pub(super) fn render(
     if !archived.is_empty() {
         // Nested under the project row, level with its thread titles.
         ui.indent(("archived-threads-indent", &project.id), |ui| {
-            egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
+            egui::CollapsingHeader::new(format!("Archived ({})", archived.len()))
                 .id_salt(("archived-threads", &project.id))
                 .show(ui, |ui| {
                     render_tree(ui, sidebar, &archived, indicators, true, action);
@@ -84,8 +84,17 @@ pub(super) fn render(
 pub(super) struct ThreadIndicators<'a> {
     pub phases: &'a BTreeMap<String, ThreadRunPhase>,
     pub question_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+    /// Threads with a tool call, including a subagent's, awaiting approval.
+    pub approval_threads: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads whose finished work has not been opened since it finished.
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Attention {
+    question: bool,
+    approval: bool,
+    unread: bool,
 }
 
 fn render_tree(
@@ -173,10 +182,11 @@ fn render_tree(
                         ui,
                         (thread, display_root),
                         state,
-                        (
-                            indicators.question_threads.contains(&thread.id),
-                            indicators.unread_threads.contains(&thread.id),
-                        ),
+                        Attention {
+                            question: indicators.question_threads.contains(&thread.id),
+                            approval: indicators.approval_threads.contains(&thread.id),
+                            unread: indicators.unread_threads.contains(&thread.id),
+                        },
                         family_running,
                         action,
                     );
@@ -207,14 +217,14 @@ fn active_row(
     ui: &mut Ui,
     (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
-    (has_question, unread): (bool, bool),
+    attention: Attention,
     family_running: bool,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         // Runtime/question indicators stay at the trailing edge.
         ui.spacing_mut().item_spacing.x = SP_1;
-        thread_status_icon(ui, state, has_question, unread);
+        thread_status_icon(ui, state, attention);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
         if display_root {
@@ -229,7 +239,7 @@ fn active_row(
                     can_archive,
                     ghost(icon_text(icons::ARCHIVE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
                 )
-                .on_hover_text("アーカイブ")
+                .on_hover_text("Archive")
                 .on_disabled_hover_text(disabled_reason);
             archive.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
@@ -286,7 +296,7 @@ fn restore_button(ui: &mut Ui) -> egui::Response {
         ghost(icon_text(icons::ARROW_U_UP_LEFT)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restore"));
-    response.on_hover_text("アーカイブを解除")
+    response.on_hover_text("Restore from archive")
 }
 
 fn thread_title(
@@ -302,10 +312,18 @@ fn thread_title(
         let label = format!("↳ {}", thread.title);
         title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     }
-    if title
-        .on_hover_text(format!("thread ID: {}", thread.id))
-        .clicked()
-    {
+    let title = title.on_hover_text(format!("thread ID: {}", thread.id));
+    title.context_menu(|ui| {
+        if ui.button("Copy thread ID").clicked() {
+            ui.ctx().copy_text(thread.id.to_string());
+            ui.close();
+        }
+        if ui.button("Copy thread title").clicked() {
+            ui.ctx().copy_text(thread.title.to_string());
+            ui.close();
+        }
+    });
+    if title.clicked() {
         *action = Some(SidebarAction::SwitchThread(thread.id.clone()));
     }
 }
@@ -355,10 +373,12 @@ fn nested_threads<'a>(
     output
 }
 
-fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool, unread: bool) {
-    // Runtime status retains the display aggregation; questions are independent
-    // and must remain visible alongside either the spinner or the error icon.
-    // An unread report takes the spinner's slot once the work has finished.
+fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
+    // Runtime status retains the display aggregation; questions and approvals
+    // are independent and must remain visible alongside either the spinner or
+    // the error icon. An unread report takes the spinner's slot once the work
+    // has finished.
+    let unread = attention.unread;
     let status = if matches!(state, ThreadState::Running) {
         Some((
             ui.add(
@@ -377,7 +397,7 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool, unrea
             )
             .sense(Sense::hover()),
         );
-        Some((response, "Thread status: Error"))
+        Some((response, "Thread status: Failed"))
     } else if unread {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
@@ -393,17 +413,40 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool, unrea
         });
         response.on_hover_text(label);
     }
-    if has_question {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), SP_1, palette().WARNING_FG);
-        let label = "Answer needed: this thread has an unanswered question";
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
-        });
-        response.on_hover_text(label);
+    if attention.question {
+        attention_dot(ui, "Answer needed: this thread has an unanswered question");
     }
+    if attention.approval {
+        let label = "Approval needed: a tool call is waiting";
+        if attention.question {
+            // Two identical dots would be indistinguishable, so an approval
+            // beside a question uses its own glyph.
+            let response = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(icons::SHIELD_WARNING)
+                        .size(FONT_SMALL + 2.0)
+                        .color(palette().WARNING_FG),
+                )
+                .sense(Sense::hover()),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
+            });
+            response.on_hover_text(label);
+        } else {
+            attention_dot(ui, label);
+        }
+    }
+}
+
+fn attention_dot(ui: &mut Ui, label: &str) {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), SP_1, palette().WARNING_FG);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
+    response.on_hover_text(label);
 }
 
 #[cfg(test)]
@@ -413,7 +456,7 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable};
     use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};
 
-    use super::{active_row, family_has_running_runs, nested_threads, thread_family};
+    use super::{Attention, active_row, family_has_running_runs, nested_threads, thread_family};
     use crate::panes::sidebar::SidebarAction;
 
     #[test]
@@ -432,7 +475,7 @@ mod tests {
                                 ui,
                                 (&thread, true),
                                 ThreadState::Running,
-                                (false, false),
+                                Attention::default(),
                                 true,
                                 action,
                             );

@@ -407,58 +407,82 @@ fn procedure_replay_preserves_transfer_clear_and_current_sidebar_authority() {
     assert!(!workbench.has_label("Show procedure details"));
 }
 
+type PaneState = (
+    gui::model::composer::ComposerModel,
+    gui::model::model_picker::ModelPickerState,
+);
+
+fn band_harness(
+    goal: Option<ThreadGoalSnapshot>,
+    todo: event_bus::ThreadTodoSnapshot,
+    width: f32,
+) -> egui_kittest::Harness<'static, PaneState> {
+    let model = gui::model::transcript::TranscriptModel::new();
+    egui_kittest::Harness::builder()
+        .with_size(egui::vec2(width, 600.0))
+        .build_ui_state(
+            move |ui, state: &mut PaneState| {
+                gui::theme::install(ui.ctx());
+                gui::panes::agent::agent_pane(
+                    ui,
+                    &model,
+                    None,
+                    gui::panes::agent::ConversationContext {
+                        goal: goal.as_ref(),
+                        todo: Some(&todo),
+                        requests: None,
+                        task_rows: &[],
+                        phase_unread: false,
+                        has_project: true,
+                        active_thread_title: Some("A"),
+                        parent_thread: None,
+                        child_threads: Vec::new(),
+                        thread_metrics: None,
+                        phase: None,
+                        next_thread_title: String::new(),
+                        model_picker: gui::panes::model_picker::ModelPickerContext {
+                            profiles: &[],
+                            preference: None,
+                            default_model: None,
+                            enabled: false,
+                        },
+                        sandbox_picker: Default::default(),
+                        branch: None,
+                    },
+                    &mut state.0,
+                    &mut state.1,
+                );
+            },
+            PaneState::default(),
+        )
+}
+
+/// Colors of every painted text run whose content equals `text`.
+fn painted_colors(
+    harness: &egui_kittest::Harness<'_, PaneState>,
+    text: &str,
+) -> Vec<egui::Color32> {
+    harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(shape) if shape.galley.text() == text => {
+                Some(shape.galley.job.sections[0].format.color)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn narrow_band_retains_controls_and_parallel_count() {
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::kittest::Queryable;
     let goal = goal("A");
     let mut snapshot = todo("A", 1);
     snapshot.items[2].status = event_bus::ThreadTodoStatus::InProgress;
-    let model = gui::model::transcript::TranscriptModel::new();
     for width in [240.0, 329.0, 480.0] {
-        let mut harness = Harness::builder()
-            .with_size(egui::vec2(width, 600.0))
-            .build_ui_state(
-                |ui,
-                 state: &mut (
-                    gui::model::composer::ComposerModel,
-                    gui::model::model_picker::ModelPickerState,
-                )| {
-                    gui::theme::install(ui.ctx());
-                    gui::panes::agent::agent_pane(
-                        ui,
-                        &model,
-                        None,
-                        gui::panes::agent::ConversationContext {
-                            goal: Some(&goal),
-                            todo: Some(&snapshot),
-                            requests: None,
-                            task_rows: &[],
-                            phase_unread: false,
-                            has_project: true,
-                            active_thread_title: Some("A"),
-                            parent_thread: None,
-                            child_threads: Vec::new(),
-                            thread_metrics: None,
-                            phase: None,
-                            next_thread_title: String::new(),
-                            model_picker: gui::panes::model_picker::ModelPickerContext {
-                                profiles: &[],
-                                preference: None,
-                                default_model: None,
-                                enabled: false,
-                            },
-                            sandbox_picker: Default::default(),
-                            branch: None,
-                        },
-                        &mut state.0,
-                        &mut state.1,
-                    );
-                },
-                (
-                    gui::model::composer::ComposerModel::default(),
-                    gui::model::model_picker::ModelPickerState::default(),
-                ),
-            );
+        let mut harness = band_harness(Some(goal.clone()), snapshot.clone(), width);
         harness.run_steps(16);
         for label in [
             "Show goal details",
@@ -476,6 +500,54 @@ fn narrow_band_retains_controls_and_parallel_count() {
         }
         assert!(harness.query_by_label("Procedures: Analyze the captured observations and determine the cause · +1 in progress").is_some());
     }
+}
+
+#[test]
+fn only_in_progress_procedures_read_as_normal_text_with_a_distinct_icon() {
+    use egui_kittest::kittest::Queryable;
+    use gui::theme::{icons, tokens::palette};
+    let mut harness = band_harness(None, todo("A", 1), 800.0);
+    harness.run();
+    harness.get_by_label("Show procedure details").click();
+    harness.run();
+    let current = "Analyze the captured observations and determine the cause";
+    let colors = painted_colors(&harness, current);
+    assert_eq!(colors.len(), 2, "summary title and detail row");
+    assert!(
+        colors.iter().all(|color| *color == palette().TEXT),
+        "{colors:?}"
+    );
+    for done_or_waiting in ["Collect observations", "Repeat measurements"] {
+        assert_eq!(
+            painted_colors(&harness, done_or_waiting),
+            vec![palette().TEXT_MUTED]
+        );
+    }
+    assert_eq!(
+        painted_colors(&harness, icons::CIRCLE_HALF).len(),
+        2,
+        "band and row icon"
+    );
+    assert_eq!(
+        painted_colors(&harness, icons::CIRCLE),
+        vec![palette().TEXT_MUTED]
+    );
+    for status in ["In progress", "Pending", "Completed"] {
+        assert!(
+            harness.query_all_by_label(status).next().is_some(),
+            "{status}"
+        );
+    }
+
+    let mut waiting = todo("A", 2);
+    waiting.items[1].status = event_bus::ThreadTodoStatus::Pending;
+    let mut harness = band_harness(None, waiting, 800.0);
+    harness.run();
+    assert!(harness.query_by_label("Procedures pending").is_some());
+    assert_eq!(
+        painted_colors(&harness, current),
+        vec![palette().TEXT_MUTED]
+    );
 }
 
 #[test]

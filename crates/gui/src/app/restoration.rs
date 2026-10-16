@@ -105,7 +105,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_status = None;
         }
         let mut open = true;
-        egui::Window::new("実行の診断")
+        egui::Window::new("Run diagnostics")
             .id(egui::Id::new("restore-diagnostics"))
             .open(&mut open)
             .show(ctx, |ui| {
@@ -121,7 +121,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             }
                         }
                     });
-                if ui.button("更新").clicked() {
+                if ui.button("Refresh").clicked() {
                     self.restore_status = None;
                 }
                 if self.restore_status.is_none() && !self.diagnostics_run.is_empty() {
@@ -129,33 +129,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         Some(self.sink.restore_diagnostics(&self.diagnostics_run));
                 }
                 if let Some(row) = self.telemetry.row(&self.diagnostics_run) {
-                    ui.label(format!("現在: {}", row.activity_label()));
+                    ui.label(format!("Current: {}", row.activity_label()));
                     ui.label(row.diagnostics_label());
                 }
                 match &self.restore_status {
                     Some(Ok(Some(status))) => {
                         ui.separator();
-                        let saved = u64::try_from(status.last_successful_checkpoint_at_ns)
-                            .ok()
-                            .and_then(|ns| {
-                                std::time::UNIX_EPOCH
-                                    .checked_add(std::time::Duration::from_nanos(ns))
-                            });
-                        let age = saved.and_then(|at| at.elapsed().ok());
-                        ui.label(match age {
-                            Some(age) => format!("最終保存: {} 秒前", age.as_secs()),
-                            None => "最終保存: 時刻を確認できません".into(),
-                        });
+                        let (saved, absolute) = last_saved(
+                            status.last_successful_checkpoint_at_ns,
+                            std::time::SystemTime::now(),
+                        );
+                        let response = ui.label(saved);
+                        if let Some(absolute) = absolute {
+                            response.on_hover_text(absolute);
+                        }
                         ui.label(format!(
                             "{} messages / {} compacted checkpoints",
                             status.message_count, status.compaction_checkpoint_count
                         ));
                         ui.label(if status.disk_restorable {
-                            "保存済み履歴から復元できます"
+                            "Restorable from saved history"
                         } else if status.history_available_with_current_authority {
-                            "現在の権限・設定を再発行すれば履歴を利用できます"
+                            "History is usable once current authority and settings are reissued"
                         } else {
-                            "復元には状態の確認が必要です"
+                            "Restoring requires checking the run state"
                         });
                         if let Some(reason) = &status.refusal_reason {
                             ui.label(reason);
@@ -163,11 +160,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         if status.history_available_with_current_authority
                             && !status.interrupted_tool_calls.is_empty()
                         {
-                            ui.label("未取得の実行結果はエラーとして引き継ぎ、会話を続けられます。旧処理は自動再実行しません。");
+                            ui.label("Missing tool results carry over as errors so the conversation can continue. Earlier calls are not re-run automatically.");
                         }
                         for call in &status.interrupted_tool_calls {
                             ui.label(format!(
-                                "未確認の実行: {} ({})",
+                                "Unconfirmed tool call: {} ({})",
                                 call.tool_name, call.call_id
                             ));
                         }
@@ -176,13 +173,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         }
                     }
                     Some(Ok(None)) => {
-                        ui.label("保存済みチェックポイントがありません");
+                        ui.label("No saved checkpoint");
                     }
                     Some(Err(error)) => {
                         ui.label(error);
                     }
                     None => {
-                        ui.label("実行を選択してください");
+                        ui.label("Select a run");
                     }
                 }
             });
@@ -190,10 +187,37 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 }
 
+fn last_saved(at_ns: i64, now: std::time::SystemTime) -> (String, Option<String>) {
+    let Some(saved) = u64::try_from(at_ns)
+        .ok()
+        .and_then(|ns| std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(ns)))
+    else {
+        return ("Last saved: time unavailable".into(), None);
+    };
+    (
+        format!("Last saved {}", crate::format::time_since(saved, now)),
+        Some(crate::format::utc_timestamp(saved.into())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixture::DemoSource;
+
+    #[test]
+    fn last_saved_checkpoint_reads_as_relative_time_with_absolute_tooltip() {
+        let saved_ns = 1_760_000_000_000_000_000;
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000 + 312);
+        assert_eq!(
+            last_saved(saved_ns, now),
+            (
+                "Last saved 5m 12s ago".into(),
+                Some("2025-10-09 08:53 UTC".into())
+            )
+        );
+        assert_eq!(last_saved(-1, now).0, "Last saved: time unavailable");
+    }
 
     #[test]
     fn relevant_events_expire_cached_restore_status_without_polling() {

@@ -5,12 +5,16 @@ use crate::panes::agents_columns::fit_columns;
 use crate::theme::icons;
 use crate::theme::text::{muted, semibold};
 use crate::theme::tokens::{
-    CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color, palette,
+    CANCELLED_LABEL, CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color,
+    agent_phase_label, cancelled_color, palette,
 };
 use crate::theme::widgets::{
-    empty_state, ghost, halo_dot, metric, metric_detailed, pane_root, soft_frame, status_dot,
+    copy_id_button, empty_state, ghost, halo_dot, metric, metric_detailed, pane_root, soft_frame,
+    status_dot,
 };
 use egui::{Align, Button, Label, Layout};
+
+const DRILL_DOWN_HINT: &str = "Show this run in Conversation";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsAction {
@@ -68,28 +72,7 @@ pub fn agents_pane<S: AgentRunSource>(
                 render_data_row(ui, &widths, row, row_telemetry, &mut action);
                 ui.push_id(&run_id, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        for task in durable_tasks.tasks_for_run(&run_id) {
-                            if ui
-                                .link(format!("Task: {}", task.id))
-                                .on_hover_text(&task.title)
-                                .clicked()
-                            {
-                                action = Some(AgentsAction::OpenTask(task.id.clone()));
-                            }
-                        }
-                        for (coordinator, team_tasks) in &teams {
-                            for task in team_tasks {
-                                if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
-                                    if lease.owner_id == run_id)
-                                    && ui.link(format!("Team task: {}", task.spec.id)).clicked()
-                                {
-                                    action = Some(AgentsAction::OpenTask(format!(
-                                        "team:{coordinator}:{}",
-                                        task.spec.id
-                                    )));
-                                }
-                            }
-                        }
+                        task_links(ui, durable_tasks, &teams, &run_id, &mut action);
                     });
                 });
                 if let Some(value) = row_telemetry {
@@ -115,12 +98,12 @@ pub fn agents_pane<S: AgentRunSource>(
                         }
                         if let Some(ttft) = value.average_ttft_ms() {
                             ui.label(muted(format!(
-                                "TTFT {:.1}s",
-                                std::time::Duration::from_millis(ttft).as_secs_f64()
+                                "TTFT {}",
+                                crate::format::latency(ttft as f64)
                             )));
                         }
                         if let Some(elapsed) = value.elapsed_at(now) {
-                            ui.label(muted(format!("Δ {:.1}s", elapsed.as_secs_f64())));
+                            ui.label(muted(format!("Δ {}", crate::format::elapsed(elapsed))));
                         }
                     });
                     if value.request_started_at.is_some() && value.request_duration.is_none() {
@@ -154,19 +137,18 @@ fn column_widths<S: AgentRunSource>(
     }
     natural[1] = text_width("Open pane") + 2.0 * button_pad_x;
 
+    natural[0] = natural[0].max(ROW_DENSE);
     for row in tasks.rows() {
         let run_id = row.run_id.to_string();
-        natural[0] = natural[0].max(text_width(&run_id) + 2.0 * button_pad_x);
-        natural[2] = natural[2].max(text_width(&row.name) + CELL_PAD_X);
+        natural[2] = natural[2].max(text_width(&row.name) + 2.0 * button_pad_x);
         natural[3] = natural[3].max(text_width(&row.role) + CELL_PAD_X);
-        let status = format!("{:?}", row.status);
-        natural[4] = natural[4].max(text_width(&status) + DOT_SIZE + SP_1);
+        natural[4] = natural[4].max(text_width(status_label(row)) + DOT_SIZE + SP_1);
 
         if let Some(value) = telemetry.row(&run_id) {
             natural[5] = natural[5]
                 .max(text_width(value.model.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
             natural[6] = natural[6]
-                .max(text_width(value.provider.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
+                .max(text_width(value.provider_label().unwrap_or("unknown")) + CELL_PAD_X);
             natural[7] = natural[7].max(text_width(&value.activity_label()) + CELL_PAD_X);
             let usage = value.tokens_label();
             natural[8] = natural[8].max(text_width(&usage) + CELL_PAD_X);
@@ -204,10 +186,16 @@ fn render_data_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
 
-        ui.add_sized(
-            [widths[2], ROW_DENSE],
-            Label::new(egui::RichText::new(&row.name).color(palette().TEXT)).truncate(),
-        );
+        if ui
+            .add_sized(
+                [widths[2], ROW_DENSE],
+                Button::new(egui::RichText::new(&row.name).color(palette().TEXT)).truncate(),
+            )
+            .on_hover_text(DRILL_DOWN_HINT)
+            .clicked()
+        {
+            *action = Some(AgentsAction::DrillDown(run_id.clone()));
+        }
         ui.allocate_ui_with_layout(
             egui::vec2(widths[4], ROW_DENSE),
             Layout::left_to_right(Align::Center),
@@ -216,12 +204,13 @@ fn render_data_row(
                 ui.add(Label::new(status_label(row)).truncate());
             },
         );
-        if ui
-            .add_sized([widths[0], ROW_DENSE], Button::new(&run_id).truncate())
-            .clicked()
-        {
-            *action = Some(AgentsAction::DrillDown(run_id.clone()));
-        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(widths[0], ROW_DENSE),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                copy_id_button(ui, "Copy run ID", &run_id);
+            },
+        );
         if ui
             .add_sized([widths[1], ROW_DENSE], Button::new("Open pane").truncate())
             .clicked()
@@ -237,9 +226,12 @@ fn render_data_row(
             .unwrap_or("unknown");
         ui.add_sized([widths[5], ROW_DENSE], Label::new(model).truncate());
         let provider = row_telemetry
-            .and_then(|value| value.provider.as_deref())
+            .and_then(TelemetryRow::provider_label)
             .unwrap_or("unknown");
-        ui.add_sized([widths[6], ROW_DENSE], Label::new(provider).truncate());
+        let response = ui.add_sized([widths[6], ROW_DENSE], Label::new(provider).truncate());
+        if let Some(kind) = row_telemetry.and_then(|value| value.provider.as_deref()) {
+            response.on_hover_text(format!("Provider: {kind}"));
+        }
         let current_tool = row_telemetry
             .map(|value| value.activity_label())
             .unwrap_or_else(|| "unknown".into());
@@ -292,57 +284,58 @@ pub fn subagents_pane<S: AgentRunSource>(
                                     status_color(row),
                                     row.status == event_bus::AgentRunPhase::Running,
                                 );
-                                ui.label(semibold(&row.name).color(palette().TEXT));
-                                ui.label(muted(format!("{} · {}", role_label(row), status_label(row))));
-                                let value = telemetry.row(&run_id);
-                                let model = value
-                                    .and_then(|value| value.model.as_deref())
-                                    .unwrap_or_else(|| if row.model.is_empty() { "unknown" } else { &row.model });
-                                let provider = value
-                                    .and_then(|value| value.provider.as_deref())
-                                    .or_else(|| row.model.split_once('/').map(|(provider, _)| provider))
-                                    .unwrap_or("unknown");
-                                ui.label(muted(format!("{model} · {provider}")));
-                            });
-                            ui.horizontal_wrapped(|ui| {
                                 if ui
-                                    .link(&run_id)
-                                    .on_hover_text("Show this run in Conversation")
+                                    .add(egui::Link::new(semibold(&row.name).color(palette().TEXT)))
+                                    .on_hover_text(DRILL_DOWN_HINT)
                                     .clicked()
                                 {
                                     action = Some(AgentsAction::DrillDown(run_id.clone()));
                                 }
+                                copy_id_button(ui, "Copy run ID", &run_id);
+                                ui.label(muted(format!(
+                                    "{} · {}",
+                                    role_label(row),
+                                    status_label(row)
+                                )));
+                                let value = telemetry.row(&run_id);
+                                let model = value
+                                    .and_then(|value| value.model.as_deref())
+                                    .unwrap_or_else(|| {
+                                        if row.model.is_empty() {
+                                            "unknown"
+                                        } else {
+                                            &row.model
+                                        }
+                                    });
+                                let provider = value
+                                    .and_then(TelemetryRow::provider_label)
+                                    .or_else(|| {
+                                        row.model.split_once('/').map(|(provider, _)| provider)
+                                    })
+                                    .unwrap_or("unknown");
+                                let response = ui.label(muted(format!("{model} · {provider}")));
+                                if let Some(kind) =
+                                    value.and_then(|value| value.provider.as_deref())
+                                {
+                                    response.on_hover_text(format!("Provider: {kind}"));
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
                                 let open = ui.add(ghost(muted(icons::with_icon(
                                     icons::ARROW_SQUARE_OUT,
                                     "Open pane",
                                 ))));
                                 open.widget_info(|| {
-                                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open pane")
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        "Open pane",
+                                    )
                                 });
                                 if open.clicked() {
                                     action = Some(AgentsAction::OpenPane(run_id.clone()));
                                 }
-                                for task in durable_tasks.tasks_for_run(&run_id) {
-                                    if ui
-                                        .link(format!("Task: {}", task.id))
-                                        .on_hover_text(&task.title)
-                                        .clicked()
-                                    {
-                                        action = Some(AgentsAction::OpenTask(task.id.clone()));
-                                    }
-                                }
-                                for (coordinator, team_tasks) in &teams {
-                                    for task in team_tasks {
-                                        if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
-                                            if lease.owner_id == run_id)
-                                            && ui.link(format!("Team task: {}", task.spec.id)).clicked()
-                                        {
-                                            action = Some(AgentsAction::OpenTask(format!(
-                                                "team:{coordinator}:{}", task.spec.id
-                                            )));
-                                        }
-                                    }
-                                }
+                                task_links(ui, durable_tasks, &teams, &run_id, &mut action);
                                 if stop_run_button(ui, &run_id, row.status) {
                                     action = Some(AgentsAction::StopRun(run_id.clone()));
                                 }
@@ -412,18 +405,50 @@ fn stop_run_button(ui: &mut egui::Ui, run_id: &str, phase: event_bus::AgentRunPh
     false
 }
 
-/// A run its owner cancelled ends in `Error` on the wire but is not a failure.
-fn status_label(row: &TaskRow) -> String {
+/// Tasks read by name: durable tasks by title (seeded with the orchestrator's
+/// short task slug), team tasks by their author-chosen ID.
+fn task_links(
+    ui: &mut egui::Ui,
+    durable_tasks: &DurableTasksModel,
+    teams: &[(runtime::RunId, Vec<runtime::team::TeamTask>)],
+    run_id: &str,
+    action: &mut Option<AgentsAction>,
+) {
+    for task in durable_tasks.tasks_for_run(run_id) {
+        if ui
+            .link(format!("Task: {}", task.title))
+            .on_hover_text("Open in Tasks")
+            .clicked()
+        {
+            *action = Some(AgentsAction::OpenTask(task.id.clone()));
+        }
+    }
+    for (coordinator, team_tasks) in teams {
+        for task in team_tasks {
+            if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
+                if lease.owner_id == run_id)
+                && ui.link(format!("Team task: {}", task.spec.id)).clicked()
+            {
+                *action = Some(AgentsAction::OpenTask(format!(
+                    "team:{coordinator}:{}",
+                    task.spec.id
+                )));
+            }
+        }
+    }
+}
+
+fn status_label(row: &TaskRow) -> &'static str {
     if row.cancelled {
-        "Cancelled".to_owned()
+        CANCELLED_LABEL
     } else {
-        format!("{:?}", row.status)
+        agent_phase_label(row.status)
     }
 }
 
 fn status_color(row: &TaskRow) -> egui::Color32 {
     if row.cancelled {
-        palette().TEXT_MUTED
+        cancelled_color()
     } else {
         agent_phase_color(row.status)
     }
@@ -644,6 +669,28 @@ mod stop_tests {
     }
 
     #[test]
+    fn subagent_card_drills_in_by_name_and_keeps_run_id_behind_copy() {
+        // Given: one live delegated run.
+        let mut h = harness(&[AgentRunPhase::Running]);
+        frame_at(&mut h, 0.0);
+        // Then: the card reads by agent name and shared status, not by run ID.
+        assert!(h.query_by_label("run-2").is_none());
+        h.get_by_label("worker · Running");
+        // When: the name is clicked.
+        h.get_by_label("Agent 2").click();
+        frame_at(&mut h, 0.0);
+        // Then: it drills into the run, exactly as the old run-ID link did.
+        assert_eq!(h.state().1, [AgentsAction::DrillDown("run-2".into())]);
+        // When: the copy button is clicked.
+        h.get_by_label("Copy run ID").click();
+        frame_at(&mut h, 0.0);
+        // Then: the full run ID reaches the clipboard.
+        assert!(h.output().platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "run-2")
+        ));
+    }
+
+    #[test]
     fn parent_cancelled_child_reads_cancelled_not_error() {
         let mut h = harness(&[AgentRunPhase::Error, AgentRunPhase::Error]);
         for (run_id, reason) in [("run-2", "cancelled"), ("run-3", "boom")] {
@@ -658,6 +705,6 @@ mod stop_tests {
         }
         frame_at(&mut h, 1.0);
         h.get_by_label("worker · Cancelled");
-        h.get_by_label("worker · Error");
+        h.get_by_label("worker · Failed");
     }
 }

@@ -169,6 +169,7 @@ impl SelfImprovementPane {
             self.entries.len()
         )));
         let mut action = None;
+        let wall_clock = std::time::SystemTime::now();
         egui::ScrollArea::vertical()
             .id_salt("self_improvement_results")
             .show(ui, |ui| {
@@ -193,7 +194,9 @@ impl SelfImprovementPane {
                             });
                             response.on_hover_text(format!("Status: {status}"));
                             ui.monospace(&entry.id);
-                            ui.monospace(format_created_at(entry.created_at_ns));
+                            let (created, absolute) = timestamp(entry.created_at_ns, wall_clock);
+                            ui.label(crate::theme::text::muted(created))
+                                .on_hover_text(absolute);
                         });
                         ui.horizontal_wrapped(|ui| {
                             for badge in
@@ -204,16 +207,24 @@ impl SelfImprovementPane {
                         });
                         ui.label(&entry.title);
                         if entry.occurrences > 1 {
+                            let (seen, absolute) = timestamp(entry.last_seen_at_ns, wall_clock);
                             ui.label(crate::theme::text::muted(format!(
-                                "Seen {} times, last {}",
-                                entry.occurrences,
-                                format_created_at(entry.last_seen_at_ns)
-                            )));
+                                "Seen {} times, last {seen}",
+                                entry.occurrences
+                            )))
+                            .on_hover_text(absolute);
                         }
                         ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
                             ui.monospace(&entry.evidence);
                             if let Some(run_id) = &entry.run_id {
-                                ui.monospace(format!("Run: {run_id}"));
+                                ui.horizontal(|ui| {
+                                    ui.label(crate::theme::text::muted("Run"));
+                                    crate::theme::widgets::copy_id_button(
+                                        ui,
+                                        "Copy run ID",
+                                        run_id,
+                                    );
+                                });
                             }
                             if entry.recent_run_ids.len() > 1 {
                                 ui.monospace(format!(
@@ -309,56 +320,17 @@ fn read_draft(root: &Path, relative: &str) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// UTC, second precision, RFC3339-style. Storage timestamps fit signed i64
-/// nanoseconds (1970–2262); reject out-of-range metadata before conversion.
-fn format_created_at(ns: u64) -> String {
+/// Relative age for the label and absolute UTC time for its tooltip. Storage
+/// timestamps fit signed i64 nanoseconds (1970–2262); reject out-of-range
+/// metadata before conversion.
+fn timestamp(ns: u64, now: std::time::SystemTime) -> (String, String) {
     let Ok(ns) = i64::try_from(ns) else {
-        return "Unknown creation time".into();
+        return ("unknown time".into(), "Unknown creation time".into());
     };
-    let seconds = storage::ns_to_system_time(ns)
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut days = seconds / 86_400;
-    let mut year = 1970_u64;
-    let leap = |year: u64| {
-        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-    };
-    loop {
-        let length = if leap(year) { 366 } else { 365 };
-        if days < length {
-            break;
-        }
-        days -= length;
-        year += 1;
-    }
-    let mut month = 1;
-    for length in [
-        31,
-        if leap(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ] {
-        if days < length {
-            break;
-        }
-        days -= length;
-        month += 1;
-    }
-    format!(
-        "{year:04}-{month:02}-{:02}T{:02}:{:02}:{:02}Z",
-        days + 1,
-        seconds / 3600 % 24,
-        seconds / 60 % 60,
-        seconds % 60
+    let at = storage::ns_to_system_time(ns);
+    (
+        crate::format::time_since(at, now),
+        crate::format::utc_timestamp(at.into()),
     )
 }
 
@@ -367,16 +339,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamps_use_utc_and_handle_leap_days() {
-        assert_eq!(format_created_at(0), "1970-01-01T00:00:00Z");
+    fn timestamps_read_as_relative_age_with_absolute_utc_tooltip() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(951_827_696 + 3_742);
         assert_eq!(
-            format_created_at(951_827_696_000_000_000),
-            "2000-02-29T12:34:56Z"
+            timestamp(951_827_696_000_000_000, now),
+            ("1h 2m ago".into(), "2000-02-29 12:34 UTC".into())
         );
-        assert_eq!(
-            format_created_at(4_107_542_400_000_000_000),
-            "2100-03-01T00:00:00Z"
-        );
+        assert_eq!(timestamp(u64::MAX, now).1, "Unknown creation time");
     }
 
     #[test]
