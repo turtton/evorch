@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code Compatibility"
+  short_description: "Claude Code の隔離解析・通信差分検証と追従手順の改善"
+  default_prompt: "$claude-code-compatibility を使って Claude Code の新バージョンと evorch のサブスク通信を比較し、追従と skill の改善を行ってください。"
