@@ -338,6 +338,7 @@ fn run_detail_body(
                             text,
                             &format!("msg-{entry_idx}"),
                             repo_root,
+                            repo_root,
                         );
                         return;
                     }

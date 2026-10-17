@@ -353,7 +353,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::FileViewer => {
                 if let Some(path) = panel.target.as_deref() {
-                    file_viewer_pane(ui, Path::new(path));
+                    file_viewer_pane(ui, Path::new(path), self.repo_root);
                 }
             }
             PanelKind::Diff => {

@@ -16,13 +16,24 @@ enum Block {
 }
 
 pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
-    render_markdown_with_base(ui, source, id_salt, None);
+    render_markdown_with_base(ui, source, id_salt, None, None);
 }
 
-pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base: Option<&Path>) {
+/// `base` resolves relative links; `root` anchors the paths their menus copy.
+pub fn render_markdown_with_base(
+    ui: &mut Ui,
+    source: &str,
+    id_salt: &str,
+    base: Option<&Path>,
+    root: Option<&Path>,
+) {
     super::file_viewer::install_image_loader(ui.ctx());
     let source = prepare_local_images(source, base);
     let source = source.as_str();
+    let (link_base, link_root) = (base.map(Path::to_path_buf), root.map(Path::to_path_buf));
+    let link_menu = move |ui: &mut Ui, destination: &str| {
+        show_link_menu(ui, destination, link_base.as_deref(), link_root.as_deref());
+    };
     ui.push_id(id_salt, |ui| {
         let color = ui.visuals().override_text_color.unwrap_or(palette().TEXT);
         ui.visuals_mut().widgets.noninteractive.fg_stroke.color = color;
@@ -101,12 +112,20 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
             }
         }
         markdown.push_str(&source[start..]);
+        let table_link_menu = link_menu.clone();
         CommonMarkViewer::new()
+            .link_menu_fn(Some(&link_menu))
             .render_html_fn(Some(&move |ui, html| {
                 if let Some((id, Block::Table(table))) =
                     blocks.iter().find(|(id, _)| html.trim() == id)
                 {
-                    table::show(ui, id, table, ui.available_width().min(width));
+                    table::show(
+                        ui,
+                        id,
+                        table,
+                        ui.available_width().min(width),
+                        &table_link_menu,
+                    );
                     ui.end_row();
                 } else if let Some((id, Block::Code(block))) =
                     blocks.iter().find(|(id, _)| html.trim() == id)
@@ -155,6 +174,25 @@ pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base:
             }))
             .show(ui, &mut cache, &markdown);
     });
+}
+
+fn show_link_menu(ui: &mut Ui, destination: &str, base: Option<&Path>, root: Option<&Path>) {
+    if let Some(link) = super::file_viewer::resolve_file_link(destination, base) {
+        if ui.button("Open").clicked() {
+            ui.ctx().open_url(egui::OpenUrl::same_tab(destination));
+            ui.close();
+        }
+        super::file_viewer::copy_path_items(ui, &link.path, root);
+        return;
+    }
+    if ui.button("Open in browser").clicked() {
+        ui.ctx().open_url(egui::OpenUrl::same_tab(destination));
+        ui.close();
+    }
+    if ui.button("Copy URL").clicked() {
+        ui.ctx().copy_text(destination.to_owned());
+        ui.close();
+    }
 }
 
 fn prepare_local_images(source: &str, base: Option<&Path>) -> String {

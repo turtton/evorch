@@ -6,7 +6,7 @@
 //! a readable minimum fall back to a local horizontal scroller.
 
 use egui::{Align, Layout, Stroke, Ui, epaint::RectShape};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer, RenderLinkMenuFn};
 
 use crate::theme::tokens::{SP_1, SP_2, palette};
 
@@ -87,7 +87,13 @@ pub(super) fn fit_columns(natural: &[f32], available: f32) -> Vec<f32> {
         .collect()
 }
 
-pub(super) fn show(ui: &mut Ui, id_salt: &str, table: &Table, width: f32) {
+pub(super) fn show(
+    ui: &mut Ui,
+    id_salt: &str,
+    table: &Table,
+    width: f32,
+    link_menu: &RenderLinkMenuFn,
+) {
     let columns = table.columns();
     if columns == 0 {
         return;
@@ -118,7 +124,7 @@ pub(super) fn show(ui: &mut Ui, id_salt: &str, table: &Table, width: f32) {
                 .horizontal_top(|ui| {
                     for (column, column_width) in widths.iter().enumerate() {
                         let cell = row.get(column).map_or("", String::as_str);
-                        show_cell(ui, cell, *column_width, index == 0);
+                        show_cell(ui, cell, *column_width, index == 0, link_menu);
                     }
                 })
                 .response;
@@ -160,7 +166,7 @@ pub(super) fn show(ui: &mut Ui, id_salt: &str, table: &Table, width: f32) {
     }
 }
 
-fn show_cell(ui: &mut Ui, source: &str, width: f32, header: bool) {
+fn show_cell(ui: &mut Ui, source: &str, width: f32, header: bool, link_menu: &RenderLinkMenuFn) {
     ui.allocate_ui_with_layout(egui::vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
         egui::Frame::new()
@@ -171,7 +177,11 @@ fn show_cell(ui: &mut Ui, source: &str, width: f32, header: bool) {
                 if header {
                     ui.visuals_mut().override_text_color = Some(palette().TEXT);
                 }
-                CommonMarkViewer::new().show(ui, &mut CommonMarkCache::default(), source);
+                CommonMarkViewer::new().link_menu_fn(Some(link_menu)).show(
+                    ui,
+                    &mut CommonMarkCache::default(),
+                    source,
+                );
             });
     });
 }
