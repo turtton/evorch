@@ -13,6 +13,7 @@ async fn fast_model_routes_base_id_and_preserves_tools() {
     model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "fast".into(),
                 model_preference: None,
@@ -41,6 +42,7 @@ async fn fast_explicit_preference_strips_marker() {
     model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "fast-preference".into(),
                 model_preference: Some(crate::ModelPreference {

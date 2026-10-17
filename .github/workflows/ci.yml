@@ -40,12 +40,12 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: 1.97.0
+          toolchain: 1.99.0
           components: rustfmt,clippy
-      - name: Install mold linker and ripgrep
+      - name: Install linker, search, and Claude transport build dependencies
         # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
         # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
-        run: sudo apt-get update && sudo apt-get install -y mold ripgrep
+        run: sudo apt-get update && sudo apt-get install -y mold ripgrep cmake clang libclang-dev ninja-build perl git
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
       # Keep CARGO_TARGET_DIR scoped to Cargo steps below: the cache action's
@@ -148,8 +148,8 @@ jobs:
           attic use home
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-      # Package builds validate sandbox-specific build dependencies; doCheck is false.
-      - name: Build flake package in the Nix sandbox
+      # The package also checks CLI startup and ELF linkage after runtime fixup.
+      - name: Build and smoke-test flake package in the Nix sandbox
         run: |
           # 複数 installable を一度に build すると out-link 命名が不定になるため
           # out-link を明示する。
@@ -187,13 +187,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: 1.97.0
+          toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install headless rendering and isolated X11/Wayland deps
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - uses: taiki-e/install-action@v2
@@ -256,13 +256,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: 1.97.0
+          toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install linker and Claude transport build dependencies
+        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
       - name: Locate Chrome/Chromium executable
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"

@@ -97,10 +97,42 @@ pub enum WireContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheControl {
     Ephemeral,
+    EphemeralHour,
+}
+
+impl Serialize for CacheControl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let hourly = matches!(self, Self::EphemeralHour);
+        let mut value = serializer.serialize_struct("CacheControl", if hourly { 2 } else { 1 })?;
+        value.serialize_field("type", "ephemeral")?;
+        if hourly {
+            value.serialize_field("ttl", "1h")?;
+        }
+        value.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CacheControl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Marker {
+            #[serde(rename = "type")]
+            kind: String,
+            ttl: Option<String>,
+        }
+        let marker = Marker::deserialize(deserializer)?;
+        match (marker.kind.as_str(), marker.ttl.as_deref()) {
+            ("ephemeral", None | Some("5m")) => Ok(Self::Ephemeral),
+            ("ephemeral", Some("1h")) => Ok(Self::EphemeralHour),
+            _ => Err(serde::de::Error::custom(
+                "unsupported Anthropic cache marker",
+            )),
+        }
+    }
 }
 
 impl WireContentBlock {

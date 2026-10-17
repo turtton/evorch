@@ -99,6 +99,7 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
         }
         for category in [None, Some("quick")] {
             let invocation = AgentInvocationContext {
+                turn: None,
                 run_id: "missing-route".into(),
                 category: category.map(str::to_owned),
                 model_preference: None,
@@ -126,6 +127,7 @@ async fn admission_reports_the_missing_logical_route_and_invocation_context() {
         let error = model
             .admit(
                 &AgentInvocationContext {
+                    turn: None,
                     run_id: "missing-admission-route".into(),
                     category: category.map(str::to_owned),
                     model_preference: None,
@@ -163,6 +165,7 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
         let error = model
             .complete(
                 &AgentInvocationContext {
+                    turn: None,
                     run_id: "unavailable-route-candidate".into(),
                     category: category.map(str::to_owned),
                     model_preference: None,
@@ -212,6 +215,7 @@ async fn explicit_model_preference_remains_authoritative_without_routes() {
     model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 run_id: "preferred-without-route".into(),
                 category: Some("quick".into()),
                 model_preference: Some(ModelPreference {

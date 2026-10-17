@@ -77,7 +77,9 @@ impl ReqwestModelsDevFetcher {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .build()
+                .expect("default model catalog HTTP client"),
         }
     }
 }

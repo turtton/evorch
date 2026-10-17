@@ -1,16 +1,18 @@
 use super::*;
 
-struct CompletingModel;
+#[derive(Default)]
+struct CompletingModel(std::sync::Mutex<Vec<crate::AgentInvocationContext>>);
 
 #[async_trait::async_trait]
 impl AgentModel for CompletingModel {
     async fn complete(
         &self,
-        _: &crate::AgentInvocationContext,
+        invocation: &crate::AgentInvocationContext,
         _: Role,
         _: &[providers::Message],
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
+        self.0.lock().unwrap().push(invocation.clone());
         Ok(providers::ChatResponse {
             message: providers::Message {
                 role: providers::Role::Assistant,
@@ -43,7 +45,7 @@ async fn live_delivery_restores_when_mailbox_closed_before_push() {
             Arc::clone(&bus),
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
         ));
-        let runtime = AgentRuntime::new(bus, executor, Arc::new(CompletingModel))
+        let runtime = AgentRuntime::new(bus, executor, Arc::new(CompletingModel::default()))
             .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
         let parent =
             runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
@@ -80,7 +82,7 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
     let runtime = AgentRuntime::new(
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
-        Arc::new(CompletingModel),
+        Arc::new(CompletingModel::default()),
     )
     .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     let parent =
@@ -121,4 +123,59 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
         AgentRunPhase::Done
     );
     assert!(events.drain_pending_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent() {
+    for nested in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: directory.path().join("ancestry.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let make_runtime = |model: Arc<CompletingModel>| {
+            let bus = Arc::new(EventBus::new(128));
+            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+                .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap())
+        };
+        let original = make_runtime(Arc::new(CompletingModel::default()));
+        let root =
+            original.delegate_background(Role::Orchestrator, "root".into(), RunConfig::default());
+        original.wait(root).await.unwrap();
+        let child = original
+            .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+            .unwrap();
+        original.wait(child).await.unwrap();
+        let recipient = if nested {
+            let grandchild = original
+                .delegate_background_as_child(child, Role::Worker, "nested", RunConfig::default())
+                .unwrap();
+            original.wait(grandchild).await.unwrap();
+            grandchild
+        } else {
+            child
+        };
+        drop(original);
+        let model = Arc::new(CompletingModel::default());
+        let runtime = make_runtime(model.clone());
+        // A live descendant may contact its durable parent without restoring the ancestors first.
+        let sender = runtime.reserve_run_id();
+        runtime.spawn_reserved(
+            sender,
+            Some(recipient),
+            Role::Worker,
+            "sender",
+            RunConfig::default(),
+        );
+        runtime.wait(sender).await.unwrap();
+        runtime
+            .send_agent_message(sender, recipient, AgentMessageKind::Send, "resume", None)
+            .unwrap();
+        runtime.wait(recipient).await.unwrap();
+        let observed = model.0.lock().unwrap();
+        let turn = observed.last().unwrap().turn.as_ref().unwrap();
+        assert!(turn.is_subagent);
+        assert_eq!(turn.parent_subagent_id, nested.then(|| child.to_string()));
+    }
 }

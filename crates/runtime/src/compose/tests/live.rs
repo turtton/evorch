@@ -11,6 +11,7 @@ async fn switchable_model_delegates_to_replaced_model() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "switch".into(),
                 model_preference: None,
@@ -36,6 +37,7 @@ async fn unconfigured_model_reports_settings_guidance() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "empty".into(),
                 model_preference: None,

@@ -44,6 +44,7 @@ pub(crate) trait Summarizer: Send + Sync {
 pub(crate) struct StructuralSummarizer;
 
 pub(crate) struct ModelSummarizer {
+    pub(crate) turn: Option<providers::RequestTurnContext>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) role: Role,
     pub(crate) run_id: String,
@@ -147,6 +148,7 @@ impl ModelSummarizer {
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
+            turn: self.turn.clone(),
             category: self.category.clone(),
             model_preference: self.model_preference.clone(),
             run_id: self.run_id.clone(),
@@ -693,6 +695,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model: model.clone(),
             role: Role::Worker,
             run_id: "run-summary-7".to_string(),
@@ -761,6 +764,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model: model.clone(),
             role: Role::Worker,
             run_id: "run-summary-goal".to_string(),
@@ -807,6 +811,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model,
             role: Role::Orchestrator,
             run_id: "run-summary-8".to_string(),
@@ -846,6 +851,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model,
             role: Role::Worker,
             run_id: "run-summary-length".to_string(),
@@ -888,6 +894,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model,
             role: Role::Worker,
             run_id: "run-summary-filter".to_string(),
@@ -940,6 +947,7 @@ mod tests {
             observed: Mutex::new(Vec::new()),
         });
         let summarizer = ModelSummarizer {
+            turn: None,
             model,
             role: Role::Worker,
             run_id: "run-summary-empty".to_string(),
@@ -988,6 +996,7 @@ mod tests {
                 observed: Mutex::new(Vec::new()),
             });
             let summarizer = ModelSummarizer {
+                turn: None,
                 model,
                 role: Role::Worker,
                 run_id: "run-summary-abnormal".to_string(),

@@ -1,41 +1,48 @@
 //! Claude subscription OAuth, token refresh and quota. API keys use AnthropicClient.
 
+mod fingerprint;
+mod identity;
 pub(super) mod oauth;
+mod profile;
 mod quota;
+mod request;
 mod tokens;
+mod tool_adapter;
+pub(super) mod transport;
+mod transport_context;
 
+pub use identity::{CLAUDE_INSTALLATION_ID_FILE, ClaudeInstallationId};
+pub(super) use identity::{process_installation_id, request_metadata};
 pub use oauth::{
     CLAUDE_CLIENT_ID, CLAUDE_SCOPE, ClaudeLoginRequest, ClaudeOAuthClient, ClaudeOAuthConfig,
     ClaudeOAuthError,
 };
+pub use profile::{CLAUDE_INFERENCE_BETAS, CLAUDE_SYSTEM_IDENTITY, CLAUDE_USER_AGENT};
+pub(super) use profile::{ClaudeReasoningControls, ClaudeWireProfile};
 pub use quota::{ClaudeExtraUsage, ClaudeQuotaClient, ClaudeQuotaSnapshot, ClaudeQuotaWindow};
+pub(super) use request::serialize_request;
 pub use tokens::{ClaudeTokenBundle, ClaudeTokenStore, InMemoryClaudeTokenStore};
+pub(super) use tool_adapter::ClaudeToolAdapter;
+pub(super) use transport_context::{ClaudeRequestContext, ClaudeTransportContext};
 
 use super::anthropic::{AnthropicClient, AnthropicConfig};
 use crate::stream::DeltaStream;
 use crate::wire::anthropic::{WireContentBlock, WireMessagesRequest};
 use crate::{
-    ChatRequest, ChatResponse, ContentBlock, ProviderAuth, ProviderCapabilities, ProviderClient,
-    ProviderError, StreamEvent,
+    ChatRequest, ChatResponse, ProviderAuth, ProviderCapabilities, ProviderClient, ProviderError,
 };
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use std::{
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-
-pub const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.280 (external, cli)";
-pub const CLAUDE_INFERENCE_BETAS: &str =
-    "claude-code-20250219,oauth-2025-04-20,prompt-caching-scope-2026-01-05";
-pub const CLAUDE_SYSTEM_IDENTITY: &str =
-    "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Account-scoped subscription client. The token store owns all persistence.
 pub struct ClaudeClient {
     inner: AnthropicClient,
     store: Arc<dyn ClaudeTokenStore>,
     oauth: ClaudeOAuthClient,
+    messages_account: OnceLock<Option<String>>,
 }
 
 impl ClaudeClient {
@@ -43,25 +50,23 @@ impl ClaudeClient {
         config: AnthropicConfig,
         store: Arc<dyn ClaudeTokenStore>,
     ) -> Result<Self, ProviderError> {
-        // A broken credential must not prevent composing other usable profiles.
-        // Authentication reports the stored-credential error when this client is used.
-        let account_id = store
-            .load()
-            .ok()
-            .flatten()
-            .and_then(|bundle| bundle.account_id);
         Ok(Self {
-            inner: AnthropicClient::new(config)?
-                .with_claude_oauth()
-                .with_claude_account_id(account_id),
+            inner: AnthropicClient::new(config)?.with_claude_oauth()?,
             store,
             oauth: ClaudeOAuthClient::new(ClaudeOAuthConfig::default())
                 .map_err(provider_auth_error)?,
+            messages_account: OnceLock::new(),
         })
     }
 
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.inner = self.inner.with_profile(profile);
+        self
+    }
+
+    /// Use the application's persistent installation seed for subscription metadata.
+    pub fn with_installation_id(mut self, installation_id: ClaudeInstallationId) -> Self {
+        self.inner = self.inner.with_claude_installation_id(installation_id);
         self
     }
 
@@ -73,48 +78,36 @@ impl ClaudeClient {
     pub async fn access_token(&self) -> Result<ClaudeTokenBundle, ProviderError> {
         ensure_fresh(self.store.as_ref(), &self.oauth).await
     }
-}
 
-/// JSON identity follows omp's anthropic-identity.ts. No credential participates in it.
-/// Device identity is stable for a configured account/profile; session identity follows the run.
-pub(super) fn request_metadata(
-    account_id: Option<&str>,
-    profile: Option<&str>,
-    base_url: &str,
-    fallback_session: &str,
-    run_id: Option<&str>,
-) -> serde_json::Value {
-    let mut device_hash = Sha256::new();
-    for part in [
-        "evorch-claude-device-v1",
-        base_url,
-        profile.unwrap_or(""),
-        account_id.unwrap_or(""),
-    ] {
-        device_hash.update(part.as_bytes());
-        device_hash.update([0]);
+    fn messages_client(
+        &self,
+        bundle: &ClaudeTokenBundle,
+    ) -> Result<AnthropicClient, ProviderError> {
+        let account = account_identity(bundle).map(str::to_owned);
+        let bound = self.messages_account.get_or_init(|| account.clone());
+        if bound != &account {
+            return Err(account_changed());
+        }
+        Ok(self.inner.clone().with_claude_account_id(account))
     }
-    let device_id = device_hash
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let session_id = run_id.filter(|id| !id.is_empty()).map_or_else(
-        || fallback_session.into(),
-        |id| {
-            let hash = Sha256::digest(format!("evorch-claude-session-v1\0{id}"));
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&hash[..16]);
-            bytes[6] = (bytes[6] & 0x0f) | 0x40;
-            bytes[8] = (bytes[8] & 0x3f) | 0x80;
-            uuid::Uuid::from_bytes(bytes).to_string()
-        },
-    );
-    let mut identity = serde_json::json!({"device_id": device_id, "session_id": session_id});
-    if let Some(account_id) = account_id.filter(|id| !id.trim().is_empty()) {
-        identity["account_uuid"] = account_id.into();
+
+    async fn messages_auth(&self) -> Result<(AnthropicClient, ProviderAuth), ProviderError> {
+        let lock = self.store.refresh_lock();
+        let _guard = lock.lock().await;
+        let bundle = load_bundle(self.store.as_ref())?;
+        if self
+            .messages_account
+            .get()
+            .is_some_and(|bound| bound.as_deref() != account_identity(&bundle))
+        {
+            return Err(account_changed());
+        }
+        let bundle = freshen_bundle(self.store.as_ref(), &self.oauth, bundle).await?;
+        Ok((
+            self.messages_client(&bundle)?,
+            ProviderAuth::new(bundle.access_token),
+        ))
     }
-    serde_json::json!({"user_id":identity.to_string()})
 }
 
 #[async_trait]
@@ -127,22 +120,16 @@ impl ProviderClient for ClaudeClient {
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
-        reject_reasoning_controls(request)?;
-        let bundle = self.access_token().await?;
-        self.inner
-            .send(&ProviderAuth::new(bundle.access_token), request)
-            .await
+        let (client, auth) = self.messages_auth().await?;
+        client.send(&auth, request).await
     }
     async fn stream(
         &self,
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
-        reject_reasoning_controls(request)?;
-        let bundle = self.access_token().await?;
-        self.inner
-            .stream(&ProviderAuth::new(bundle.access_token), request)
-            .await
+        let (client, auth) = self.messages_auth().await?;
+        client.stream(&auth, request).await
     }
     async fn list_models(
         &self,
@@ -152,16 +139,6 @@ impl ProviderClient for ClaudeClient {
         self.inner
             .list_models(&ProviderAuth::new(bundle.access_token))
             .await
-    }
-}
-
-fn reject_reasoning_controls(request: &ChatRequest) -> Result<(), ProviderError> {
-    if request.reasoning_effort.is_some() {
-        Err(ProviderError::Request(
-            "Claude OAuth reasoning controls are not configured".into(),
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -179,9 +156,31 @@ pub(super) async fn ensure_fresh_locked(
     store: &dyn ClaudeTokenStore,
     oauth: &ClaudeOAuthClient,
 ) -> Result<ClaudeTokenBundle, ProviderError> {
-    let bundle = store
+    freshen_bundle(store, oauth, load_bundle(store)?).await
+}
+
+fn account_identity(bundle: &ClaudeTokenBundle) -> Option<&str> {
+    bundle
+        .account_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn account_changed() -> ProviderError {
+    ProviderError::Request("Claude account changed; recreate the client and start a new run".into())
+}
+
+fn load_bundle(store: &dyn ClaudeTokenStore) -> Result<ClaudeTokenBundle, ProviderError> {
+    store
         .load()?
-        .ok_or_else(|| ProviderError::Request("Claude login required".into()))?;
+        .ok_or_else(|| ProviderError::Request("Claude login required".into()))
+}
+
+async fn freshen_bundle(
+    store: &dyn ClaudeTokenStore,
+    oauth: &ClaudeOAuthClient,
+    bundle: ClaudeTokenBundle,
+) -> Result<ClaudeTokenBundle, ProviderError> {
     if bundle.needs_refresh(unix_now()) {
         let refreshed = oauth.refresh(&bundle).await.map_err(provider_auth_error)?;
         store.save(&refreshed)?;
@@ -215,74 +214,70 @@ pub(super) fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn prefix_tool(name: &str) -> String {
-    if matches!(
-        name,
-        "web_search" | "code_execution" | "text_editor" | "computer"
-    ) {
-        name.into()
-    } else {
-        format!("_{name}")
+pub(super) fn required_version_error(value: &serde_json::Value) -> Option<String> {
+    let error = value.get("error").unwrap_or(value);
+    let message = error.get("message")?.as_str()?;
+    let code = "claude_code_version_too_old";
+    if error.get("code").and_then(serde_json::Value::as_str) != Some(code)
+        && error.get("type").and_then(serde_json::Value::as_str) != Some(code)
+        && !message.contains(code)
+    {
+        return None;
     }
+    let lower = message.to_ascii_lowercase();
+    let (_, tail) = lower.split_once("version ")?;
+    let (version, _) = tail.split_once(" or newer is required")?;
+    let parts = version.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty() || part.len() > 10 || !part.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    Some(format!(
+        "Claude compatibility profile needs an update: Claude Code {version} or newer is required"
+    ))
 }
 
-pub(super) fn shape_oauth_request(wire: &mut WireMessagesRequest) {
+pub(super) fn shape_oauth_request(
+    wire: &mut WireMessagesRequest,
+) -> Result<ClaudeToolAdapter, ProviderError> {
+    let adapter = ClaudeToolAdapter::shape_request(wire)?;
     let system = wire.system.get_or_insert_with(Vec::new);
     system.insert(
         0,
         WireContentBlock::Text {
             text: CLAUDE_SYSTEM_IDENTITY.into(),
-            cache_control: None,
+            cache_control: Some(crate::wire::anthropic::CacheControl::Ephemeral),
         },
     );
     for tool in &mut wire.tools {
-        tool.name = prefix_tool(&tool.name);
+        if tool.cache_control.is_some() {
+            tool.cache_control = Some(crate::wire::anthropic::CacheControl::EphemeralHour);
+        }
     }
-    for message in &mut wire.messages {
-        for block in &mut message.content {
-            if let WireContentBlock::ToolUse { name, .. } = block {
-                *name = prefix_tool(name);
+    for block in system
+        .iter_mut()
+        .chain(wire.messages.iter_mut().flat_map(|m| &mut m.content))
+    {
+        use crate::wire::anthropic::CacheControl;
+        match block {
+            WireContentBlock::Text { cache_control, .. }
+            | WireContentBlock::Image { cache_control, .. }
+            | WireContentBlock::ToolUse { cache_control, .. }
+            | WireContentBlock::ToolResult { cache_control, .. } => {
+                if cache_control.is_some() {
+                    *cache_control = Some(CacheControl::EphemeralHour);
+                }
             }
-            if let WireContentBlock::Raw { block, .. } = block
-                && block["type"] == "tool_use"
-                && let Some(name) = block["name"].as_str()
-            {
-                block["name"] = serde_json::Value::String(prefix_tool(name));
+            WireContentBlock::Raw { block, .. } => {
+                if block.get("cache_control").is_some() {
+                    block["cache_control"] = serde_json::json!({"type":"ephemeral", "ttl":"1h"});
+                }
             }
+            WireContentBlock::Thinking { .. } => {}
         }
     }
-}
-
-pub(super) fn restore_response_tool_names(response: &mut ChatResponse) {
-    restore_message_tool_names(&mut response.message);
-}
-
-pub(super) fn restore_message_tool_names(message: &mut crate::message::Message) {
-    for block in &mut message.content {
-        if let ContentBlock::ToolUse { name, .. } = block {
-            strip_tool_prefix(name);
-        }
-        if let ContentBlock::Anthropic { block, .. } = block
-            && block["type"] == "tool_use"
-            && let Some(name) = block["name"].as_str()
-        {
-            let mut name = name.to_owned();
-            strip_tool_prefix(&mut name);
-            block["name"] = serde_json::Value::String(name);
-        }
-    }
-}
-fn strip_tool_prefix(name: &mut String) {
-    if let Some(unprefixed) = name.strip_prefix('_') {
-        *name = unprefixed.into();
-    }
-}
-pub(super) fn restore_event_tool_names(event: &mut StreamEvent) {
-    match event {
-        StreamEvent::ToolCallDelta {
-            name: Some(name), ..
-        } => strip_tool_prefix(name),
-        StreamEvent::Completed { response } => restore_response_tool_names(response),
-        _ => {}
-    }
+    Ok(adapter)
 }

@@ -178,6 +178,7 @@ impl AgentRuntime {
             (child, Some(caller), role, config, caller),
             restored,
             &trigger,
+            None,
         );
         Ok(None)
     }

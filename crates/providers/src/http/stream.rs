@@ -21,8 +21,8 @@ use crate::observe::AttemptObserver;
 use crate::sse::{SseFrame, SseParseError, SseParser};
 use crate::stream::{DeltaStream, StreamAccumulator, StreamEvent};
 
-/// reqwest が返すレスポンス本文のバイトストリーム。
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+/// Transport errors are classified before the shared SSE interpreter sees them.
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ProviderError>> + Send>>;
 
 /// 1 フレーム (または終端) の wire 解釈結果。
 #[derive(Debug, Default)]
@@ -271,6 +271,26 @@ pub(crate) fn adapt_sse_stream<I>(
 where
     I: WireStreamInterpreter + 'static,
 {
+    adapt_sse_stream_with_errors(
+        byte_stream.map(|chunk| chunk.map_err(map_request_error)),
+        interpreter,
+        usage,
+        model,
+        observer,
+    )
+}
+
+/// Accept another HTTP transport without duplicating SSE completion/usage ownership.
+pub(crate) fn adapt_sse_stream_with_errors<I>(
+    byte_stream: impl Stream<Item = Result<Bytes, ProviderError>> + Send + 'static,
+    interpreter: I,
+    usage: UsageEmitter,
+    model: String,
+    observer: AttemptObserver,
+) -> DeltaStream
+where
+    I: WireStreamInterpreter + 'static,
+{
     let byte_stream: ByteStream = Box::pin(byte_stream);
     Box::pin(futures_util::stream::unfold(
         (
@@ -287,7 +307,7 @@ where
                 }
                 match byte_stream.next().await {
                     Some(Ok(chunk)) => pump.push_chunk(&chunk),
-                    Some(Err(err)) => pump.push_transport_error(map_request_error(err)),
+                    Some(Err(err)) => pump.push_transport_error(err),
                     None => pump.finish_tail(),
                 }
             }

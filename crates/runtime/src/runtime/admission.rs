@@ -165,6 +165,7 @@ impl AgentRuntime {
                     }
             );
             let invocation = crate::AgentInvocationContext {
+                turn: None,
                 run_id: run_id.to_string(),
                 model_preference: config.model_preference.clone(),
                 category: config.category.clone(),

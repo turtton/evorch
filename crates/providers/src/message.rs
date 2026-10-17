@@ -176,6 +176,41 @@ pub struct ObservationContext {
     /// 呼び出しの目的。usage 集計で本処理と付随コストを区別する。
     #[serde(default)]
     pub purpose: event_bus::RequestPurpose,
+    /// Prompt provenance carried outside canonical messages and provider model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<RequestTurnContext>,
+}
+
+/// Runtime-attested logical input, retained across its tool rounds and retries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestTurnContext {
+    /// UUIDv4 assigned when this logical input was accepted.
+    pub prompt_id: String,
+    /// Attested input source; absent when only canonical history is available.
+    pub origin: Option<String>,
+    /// Known one-based human prompt position; never inferred by counting messages.
+    pub prompt_index: Option<u64>,
+    /// Known logical turn position, independent of tool rounds and HTTP attempts.
+    pub turn_index: Option<u64>,
+    /// Whether the executing run has a parent, independent of message role.
+    pub is_subagent: bool,
+    /// Known parent subagent, excluding a root parent; rebound on logical input resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<String>,
+}
+
+impl RequestTurnContext {
+    /// Assign an opaque input identity without inferring its source or history position.
+    pub fn unattributed(is_subagent: bool) -> Self {
+        Self {
+            prompt_id: uuid::Uuid::new_v4().to_string(),
+            origin: None,
+            prompt_index: None,
+            turn_index: None,
+            is_subagent,
+            parent_subagent_id: None,
+        }
+    }
 }
 
 /// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。

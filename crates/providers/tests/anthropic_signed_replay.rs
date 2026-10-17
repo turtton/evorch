@@ -1,6 +1,7 @@
 //! Signed thinking must survive streaming, serialization, and tool-result replay.
 use futures_util::StreamExt;
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
+use mock_openai::claude_contract::claude_model_input;
 use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
 use providers::{ChatRequest, Message, ProviderAuth, ProviderClient, StreamEvent};
 use serde_json::{Value, json};
@@ -14,7 +15,10 @@ fn input() -> ChatRequest {
             {"role":"system","content":[{"type":"text","text":"Stable instructions"}]},
             {"role":"user","content":[{"type":"text","text":"Read the report"}]}
         ],
-        "tools":[{"name":"read","description":"Read report","input_schema":{"type":"object"}}]
+        "tools":[
+            {"name":"read","description":"Read report","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+            {"name":"inspect_run","description":"Inspect a run","input_schema":{"type":"object","properties":{"run_id":{"type":"string"}}}}
+        ]
     }))
     .unwrap()
 }
@@ -27,7 +31,11 @@ fn blocks(oauth: bool) -> Vec<Value> {
         json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu-1","content":[]}),
         json!({"type":"redacted_thinking","data":"opaque-redacted-data"}),
         json!({"type":"thinking","thinking":"Use the local tool.","signature":"opaque-signature-2"}),
-        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"_read"} else {"read"},"input":{"path":"report"}}),
+        json!({"type":"tool_use","id":"toolu-1","name":if oauth {"_read"} else {"read"},
+            "input":json!({"path":"report"}),
+            "caller":{"type":"direct"}}),
+        json!({"type":"tool_use","id":"toolu-2","name":if oauth {"_mcp__evorch__inspect_run"} else {"inspect_run"},
+            "input":{"run_id":"run-1","nested":{"file_path":"unchanged"}},"caller":{"type":"direct"}}),
     ]
 }
 
@@ -107,7 +115,7 @@ async fn exercise(streaming: bool, oauth: bool) {
     })
     .unwrap();
     if oauth {
-        client = client.with_claude_oauth();
+        client = client.with_claude_oauth().unwrap();
     }
     let auth = ProviderAuth::new("fixture-token");
     let mut request = input();
@@ -127,7 +135,7 @@ async fn exercise(streaming: bool, oauth: bool) {
                 .iter()
                 .filter(|event| matches!(event, StreamEvent::ToolCallDelta { name: Some(_), .. }))
                 .count(),
-            1,
+            2,
             "server-side tools must not become local calls"
         );
         match events.into_iter().last().unwrap() {
@@ -137,11 +145,22 @@ async fn exercise(streaming: bool, oauth: bool) {
     } else {
         client.send(&auth, &request).await.unwrap()
     };
+    assert!(response.message.content.iter().any(|block| matches!(
+        block, providers::ContentBlock::ToolUse { name, input, .. }
+            if name == "read" && input == &json!({"path":"report"})
+    )));
+    assert!(response.message.content.iter().any(|block| matches!(
+        block, providers::ContentBlock::ToolUse { name, input, .. }
+            if name == "inspect_run" && input == &json!({"run_id":"run-1","nested":{"file_path":"unchanged"}})
+    )));
     // Reconstruct canonical history as a persisted snapshot would.
     let restored: Message =
         serde_json::from_str(&serde_json::to_string(&response.message).unwrap()).unwrap();
     request.messages.push(restored);
-    request.messages.push(serde_json::from_value(json!({"role":"user","content":[{"type":"tool_result","tool_call_id":"toolu-1","content":[{"type":"text","text":"report contents"}],"is_error":false}]})).unwrap());
+    request.messages.push(serde_json::from_value(json!({"role":"user","content":[
+        {"type":"tool_result","tool_call_id":"toolu-1","content":[{"type":"text","text":"report contents"}],"is_error":false},
+        {"type":"tool_result","tool_call_id":"toolu-2","content":[{"type":"text","text":"run details"}],"is_error":false}
+    ]})).unwrap());
     client.send(&auth, &request).await.unwrap();
     request.messages.push(
         serde_json::from_value(
@@ -162,7 +181,17 @@ async fn exercise(streaming: bool, oauth: bool) {
             "the original block order, signatures, citations, and server results must be replayed verbatim"
         );
     }
-    for pair in bodies.windows(2) {
+    let model_inputs: Vec<Value> = captured
+        .iter()
+        .map(|request| {
+            if oauth {
+                claude_model_input(&request.body).unwrap()
+            } else {
+                serde_json::from_slice(&request.body).unwrap()
+            }
+        })
+        .collect();
+    for pair in model_inputs.windows(2) {
         assert_append_only(CacheProtocol::Anthropic, &pair[0], &pair[1]).unwrap();
     }
 }
@@ -199,7 +228,7 @@ async fn replaced_prefix_omits_old_signatures_and_reuses_new_ones() {
         })
         .unwrap();
         if oauth {
-            client = client.with_claude_oauth();
+            client = client.with_claude_oauth().unwrap();
         }
         let auth = ProviderAuth::new("fixture-token");
         let mut request = input();
@@ -240,7 +269,17 @@ async fn replaced_prefix_omits_old_signatures_and_reuses_new_ones() {
         }
         assert_eq!(bodies[2]["messages"][3]["content"][0], signed[0]);
         assert_eq!(bodies[2]["messages"][3]["content"][1], signed[1]);
-        assert_append_only(CacheProtocol::Anthropic, &bodies[1], &bodies[2]).unwrap();
+        let model_inputs: Vec<Value> = captured
+            .iter()
+            .map(|request| {
+                if oauth {
+                    claude_model_input(&request.body).unwrap()
+                } else {
+                    serde_json::from_slice(&request.body).unwrap()
+                }
+            })
+            .collect();
+        assert_append_only(CacheProtocol::Anthropic, &model_inputs[1], &model_inputs[2]).unwrap();
     }
 }
 

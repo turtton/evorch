@@ -116,6 +116,7 @@ pub(crate) async fn reclassify(model: &Arc<dyn AgentModel>, message: &str) -> Re
         }],
     };
     let invocation = AgentInvocationContext {
+        turn: None,
         category: None,
         model_preference: None,
         run_id: ENTRY_INVOCATION_RUN_ID.to_string(),

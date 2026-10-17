@@ -14,6 +14,21 @@ pub fn compose_production_model(
     config: &config::Config,
     context: &ProductionModel,
 ) -> Result<Arc<RoutedModel>, CompositionError> {
+    let user_dir = context
+        .load_options
+        .user_config_dir
+        .clone()
+        .or_else(config::user_config_dir);
+    if user_dir.is_none()
+        && config.providers.values().any(|profile| {
+            profile.provider_type == config::ProviderTypeConfig::AnthropicSubscription
+        })
+    {
+        return Err(routing::RoutingError::InvalidProfile {
+            reason: "Claude installation identity requires a user configuration directory".into(),
+        }
+        .into());
+    }
     compose_routed_model(
         config,
         routing::ComposeDeps {
@@ -21,7 +36,12 @@ pub fn compose_production_model(
             event_bus: Some(context.bus.clone()),
             env: context.env.clone(),
             catalog: model::ModelCatalog::new(),
-            factory: routing::factory::FactoryOptions::default(),
+            factory: routing::factory::FactoryOptions {
+                claude_installation_id_path: user_dir.map(|directory| {
+                    directory.join(providers::provider::claude::CLAUDE_INSTALLATION_ID_FILE)
+                }),
+                ..Default::default()
+            },
         },
     )
 }
@@ -137,3 +157,6 @@ pub fn reload_models(
     }
     projects.map_or(Ok(()), ProjectModels::reload_all)
 }
+
+#[cfg(test)]
+mod tests;

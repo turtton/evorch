@@ -48,6 +48,7 @@ fn request(model: &str) -> ChatRequest {
 fn request_with_context(model: &str, run_id: &str) -> ChatRequest {
     let mut request = request(model);
     request.observation = Some(ObservationContext {
+        turn: None,
         run_id: run_id.to_string(),
         purpose: Default::default(),
     });

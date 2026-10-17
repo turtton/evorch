@@ -123,8 +123,8 @@ target. The acceptance tests in `tests/clamp.rs` exercise in-range values,
 boundaries, negative and extreme values, and rejection of reversed intervals.
 The unmodified fixture is expected to fail one acceptance test.
 
-The verifier is `cargo test --offline`. The example pins Rust 1.97.0, matching
-the repository; install that toolchain before running it because the isolated
+The verifier is `cargo test --offline`. The example independently pins Rust
+1.97.0; install that toolchain before running it because the isolated
 shell cannot download a missing toolchain. Keep the original acceptance tests
 protected during evaluation so a candidate cannot obtain a passing result by
 changing the test expectations. Verification uses a fresh original fixture with

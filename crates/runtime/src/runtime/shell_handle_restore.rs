@@ -94,6 +94,7 @@ mod tests {
     #[test]
     fn compaction_summaries_outside_raw_messages_are_reserved_too() {
         let restored = crate::restore::RestoredState {
+            turn: None,
             boundary_pending: false,
             continuity: Default::default(),
             pending_reference_id: None,

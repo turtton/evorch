@@ -34,6 +34,21 @@ the previous snapshot marked stale and does not interrupt chat.
 Claude API keys do not provide the Claude Pro/Max subscription quota endpoint.
 The normal request usage and cost views remain available for API-key profiles.
 
+Claude subscription requests use OMP's custom-tool prefix: `read`, `write`,
+`edit`, `grep`, and `shell` appear as `_read`, `_write`, `_edit`, `_grep`, and
+`_shell`. Other evorch tools use `_mcp__evorch__<name>` with their original
+schemas. Argument names and descriptions retain the actual host behavior.
+These names are a
+provider presentation convention; execution stays in evorch. Names that cannot
+fit Anthropic's tool-name constraints use a deterministic hashed MCP name.
+Responses and saved tool-call history are translated at the provider boundary,
+so internal names, execution, and approval checks use the original tools.
+Claude API-key profiles retain their original tool names and argument schemas.
+The subscription transport uses a pinned Claude Code compatibility profile for
+headers, identity, billing checksums, and one-hour cache markers. See
+[Claude compatibility maintenance](claude-compatibility.md) for the reference
+versions, validation, and differences from OMP.
+
 ## Transient overload recovery
 
 Streaming chat requests retry `server_is_overloaded` failures even when Codex
@@ -88,8 +103,10 @@ Choose Cursor's thinking, effort, and fast variants from the refreshed model
 list; the selected variant determines these settings.
 
 Claude supports text and tool calls, and preserves signed thinking returned by
-the provider across tool continuations and saved history. Explicit reasoning
-controls are currently unavailable. See the [Anthropic stream contract](anthropic-stream-events.md)
+the provider across tool continuations and saved history. Subscription profiles
+support model-validated reasoning effort, including adaptive thinking on
+Sonnet 4.6 and Opus 4.6/4.7; unsupported model/effort combinations fail before
+inference. See the [Anthropic stream contract](anthropic-stream-events.md)
 for supported events and signature replay boundaries. Cursor does not expose
 temperature, output-token limits, or service-tier controls.
 

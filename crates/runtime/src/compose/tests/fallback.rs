@@ -196,7 +196,7 @@ async fn fallback_repins_affinity_and_preserves_request_when_primary_fails() {
 async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
     for streaming in [false, true] {
         // Given: the runtime bus receives each fallback exactly once.
-        let (mut model, _) = fixture(vec![
+        let (mut model, requests) = fixture(vec![
             Some(ProviderError::RateLimited { retry_after: None }),
             None,
         ]);
@@ -204,6 +204,13 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
         let mut rx = bus.subscribe();
         model.event_bus = Some(bus.clone());
         let invocation = AgentInvocationContext {
+            turn: Some(providers::RequestTurnContext {
+                origin: Some("human".into()),
+                prompt_index: Some(7),
+                turn_index: Some(7),
+                parent_subagent_id: Some("parent-run".into()),
+                ..providers::RequestTurnContext::unattributed(true)
+            }),
             run_id: "session".into(),
             category: None,
             model_preference: None,
@@ -223,19 +230,18 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
             .await;
         // Then
         assert_eq!(result, Ok(response()));
-        let cooldown = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("cooldown event")
-            .unwrap();
+        for provider_requests in requests {
+            for request in provider_requests.lock().unwrap().iter() {
+                assert_eq!(request.observation.as_ref().unwrap().turn, invocation.turn);
+            }
+        }
+        let cooldown = rx.recv().await.unwrap();
         assert!(
             matches!(cooldown.kind, EventKind::Provider(ProviderEvent::CooldownStarted {
             profile, model, ..
         }) if profile == "profile-0" && model.as_deref() == Some("model-0"))
         );
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("fallback event")
-            .unwrap();
+        let event = rx.recv().await.unwrap();
         assert!(
             matches!(event.kind, EventKind::Provider(ProviderEvent::FallbackTriggered {
             from_provider, from_model, to_provider, to_model, session_id, ..
@@ -318,6 +324,7 @@ async fn explicit_preference_never_falls_back_on_timeout() {
     // Given
     let (model, requests) = fixture(vec![Some(ProviderError::Timeout), None]);
     let invocation = AgentInvocationContext {
+        turn: None,
         run_id: "session".into(),
         category: None,
         model_preference: Some(crate::ModelPreference {
@@ -344,6 +351,7 @@ async fn explicit_preference_never_falls_back_on_http_400() {
         None,
     ]);
     let invocation = AgentInvocationContext {
+        turn: None,
         run_id: "session".into(),
         category: None,
         model_preference: Some(crate::ModelPreference {

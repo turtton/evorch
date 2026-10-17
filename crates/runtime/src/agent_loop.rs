@@ -55,9 +55,11 @@ pub(crate) struct RunTask {
     pub(crate) start: RunStart,
     pub(crate) config: RunConfig,
     pub(crate) parent: Option<RunId>,
+    pub(crate) ancestry: crate::request_turn::RequestAncestry,
     pub(crate) mailbox: Arc<RunMailbox>,
     pub(crate) handoff: Option<RunHandoff>,
     pub(crate) restored: Option<crate::restore::RestoredState>,
+    pub(crate) turn: providers::RequestTurnContext,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -108,6 +110,7 @@ pub(crate) struct LoopShared {
 const MAX_MODEL_SWITCHES: u32 = 16;
 
 pub(crate) struct LoopState {
+    pub(crate) turn: providers::RequestTurnContext,
     pub(crate) boundary_pending: bool,
     pub(crate) continuity: crate::continuity::Continuity,
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
@@ -271,6 +274,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState {
+        turn: task.turn.clone(),
         boundary_pending,
         continuity,
         benchmark,
@@ -781,6 +785,7 @@ impl LoopState {
                 }
             }
             let invocation = AgentInvocationContext {
+                turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
@@ -1168,6 +1173,7 @@ impl LoopState {
                         }
                         continue;
                     }
+                    self.accept_input_identity(message.2, message.3);
                         self.context.push_user(&message.0);
                         if let Some(user) = self.context.messages.last_mut() {
                             user.content.extend(message.1.into_iter().map(|image| ContentBlock::Image {

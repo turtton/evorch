@@ -30,6 +30,7 @@ async fn tools_follow_declaration_when_preferred_model_support_is_unknown_or_uns
         model
             .complete(
                 &AgentInvocationContext {
+                    turn: None,
                     category: None,
                     run_id: "run".into(),
                     model_preference: Some(ModelPreference {
@@ -61,6 +62,7 @@ async fn automatic_tool_flow_proceeds_when_model_support_is_unknown() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "run".into(),
                 model_preference: None,
@@ -111,6 +113,7 @@ async fn tool_specs_are_unchanged_when_canonical_support_is_supported() {
     model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: "run".into(),
                 model_preference: None,

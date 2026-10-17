@@ -46,6 +46,7 @@ impl AgentModel for HttpModel {
                     service_tier: None,
                     output_schema: None,
                     observation: Some(providers::ObservationContext {
+                        turn: None,
                         run_id: invocation.run_id.clone(),
                         purpose: Default::default(),
                     }),

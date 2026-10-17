@@ -7,14 +7,24 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use serde::Serialize;
 
+mod transport;
+use super::claude::transport::ClaudeTransport;
+use transport::PreparedRequest;
+
+use super::claude::{
+    ClaudeInstallationId, ClaudeReasoningControls, ClaudeRequestContext, ClaudeToolAdapter,
+    ClaudeTransportContext, ClaudeWireProfile,
+};
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
-use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
-use crate::http::{
-    UsageEmitter, build_http_client_without_redirects, map_request_error, map_response_error,
+use crate::http::stream::{
+    FrameInterpretation, WireStreamInterpreter, adapt_sse_stream_with_errors,
 };
-use crate::message::{ChatRequest, ChatResponse, Message, ProviderCapabilities};
+use crate::http::{UsageEmitter, build_http_client_without_redirects};
+use crate::message::{
+    ChatRequest, ChatResponse, Message, ObservationContext, ProviderCapabilities,
+};
 use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
 use crate::stream::DeltaStream;
@@ -51,6 +61,7 @@ impl Default for AnthropicConfig {
 }
 
 /// Anthropic Messages API を canonical provider 契約へ接続するクライアント。
+#[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
     base_url: String,
@@ -58,8 +69,11 @@ pub struct AnthropicClient {
     event_bus: Option<Arc<EventBus>>,
     profile: Option<String>,
     claude_oauth: bool,
+    claude_transport: Option<ClaudeTransport>,
     claude_account_id: Option<String>,
     claude_session_id: String,
+    claude_installation_id: Option<ClaudeInstallationId>,
+    claude_request_context: ClaudeTransportContext,
 }
 
 #[derive(Serialize)]
@@ -68,6 +82,8 @@ struct MessagesRequest {
     wire: crate::wire::anthropic::WireMessagesRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Value>,
+    #[serde(flatten)]
+    reasoning: Option<ClaudeReasoningControls>,
 }
 
 impl AnthropicClient {
@@ -83,8 +99,11 @@ impl AnthropicClient {
             event_bus: config.event_bus,
             profile: None,
             claude_oauth: false,
+            claude_transport: None,
             claude_account_id: None,
             claude_session_id: uuid::Uuid::new_v4().to_string(),
+            claude_installation_id: None,
+            claude_request_context: ClaudeTransportContext::default(),
         })
     }
 
@@ -95,51 +114,135 @@ impl AnthropicClient {
     }
 
     /// Enable Claude subscription Bearer authentication and stable CLI identity.
-    pub fn with_claude_oauth(mut self) -> Self {
+    pub fn with_claude_oauth(mut self) -> Result<Self, ProviderError> {
+        self.claude_transport = Some(ClaudeTransport::new()?);
         self.claude_oauth = true;
-        self
+        self.claude_installation_id = Some(super::claude::process_installation_id());
+        Ok(self)
     }
 
-    /// Snapshot identity at construction; token refresh cannot rewrite sent metadata.
+    /// Pin the authenticated bundle's account on a request-local client clone.
     pub(super) fn with_claude_account_id(mut self, account_id: Option<String>) -> Self {
         self.claude_account_id = account_id;
         self
     }
 
-    fn wire_request(&self, request: &ChatRequest, stream: bool) -> MessagesRequest {
+    pub(super) fn with_claude_installation_id(mut self, id: ClaudeInstallationId) -> Self {
+        self.claude_installation_id = Some(id);
+        self
+    }
+
+    fn wire_request(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<(MessagesRequest, Option<ClaudeToolAdapter>), ProviderError> {
         let mut wire = to_wire_request(request, stream);
-        if self.claude_oauth {
-            super::claude::shape_oauth_request(&mut wire);
+        let reasoning = self
+            .claude_oauth
+            .then(|| {
+                ClaudeWireProfile.reasoning(
+                    &request.model,
+                    wire.max_tokens,
+                    request.reasoning_effort.as_deref(),
+                )
+            })
+            .transpose()?;
+        if self.claude_oauth
+            && (reasoning
+                .as_ref()
+                .is_some_and(ClaudeReasoningControls::is_enabled)
+                || ClaudeWireProfile.requires_default_temperature(&request.model))
+        {
+            if wire.temperature.is_some_and(|value| value != 1.0) {
+                return Err(ProviderError::Request(
+                    "Claude thinking and this model require the default temperature".into(),
+                ));
+            }
+            wire.temperature = None;
         }
+        let adapter = self
+            .claude_oauth
+            .then(|| super::claude::shape_oauth_request(&mut wire))
+            .transpose()?;
         discard_unbound_thinking(&mut wire);
         let metadata = self.claude_oauth.then(|| {
             super::claude::request_metadata(
+                &self
+                    .claude_installation_id
+                    .unwrap_or_else(super::claude::process_installation_id),
                 self.claude_account_id.as_deref(),
-                self.profile.as_deref(),
-                &self.base_url,
                 &self.claude_session_id,
                 request.observation.as_ref().map(|o| o.run_id.as_str()),
             )
         });
-        MessagesRequest { wire, metadata }
+        Ok((
+            MessagesRequest {
+                wire,
+                metadata,
+                reasoning,
+            },
+            adapter,
+        ))
     }
 
-    fn authenticated_request(&self, auth: &ProviderAuth) -> reqwest::RequestBuilder {
-        let builder = self
-            .http_client
-            .post(self.messages_url())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-        if self.claude_oauth {
-            builder
-                .bearer_auth(&auth.api_key)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header("anthropic-beta", super::claude::CLAUDE_INFERENCE_BETAS)
-                .header("user-agent", super::claude::CLAUDE_USER_AGENT)
-                .header("x-app", "cli")
-                .header("anthropic-dangerous-direct-browser-access", "true")
+    fn authenticated_request(
+        &self,
+        auth: &ProviderAuth,
+        request: &MessagesRequest,
+        timeout: Option<Duration>,
+        observation: Option<&ObservationContext>,
+    ) -> Result<(PreparedRequest, Option<ClaudeRequestContext>), ProviderError> {
+        if let Some(transport) = &self.claude_transport {
+            let identity: serde_json::Value = serde_json::from_str(
+                request
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value["user_id"].as_str())
+                    .ok_or_else(|| {
+                        ProviderError::Request("Claude request identity missing".into())
+                    })?,
+            )
+            .map_err(|_| ProviderError::Request("Claude request identity invalid".into()))?;
+            let session_id = identity["session_id"]
+                .as_str()
+                .ok_or_else(|| ProviderError::Request("Claude session identity missing".into()))?;
+            let device_id = identity["device_id"]
+                .as_str()
+                .ok_or_else(|| ProviderError::Request("Claude device identity missing".into()))?;
+            let controls = request
+                .reasoning
+                .as_ref()
+                .ok_or_else(|| ProviderError::Request("Claude request profile missing".into()))?;
+            let context = self
+                .claude_request_context
+                .begin(session_id, device_id, observation)?;
+            let mut headers = ClaudeWireProfile.headers(session_id, controls)?;
+            context.apply_headers(&mut headers)?;
+            let mut builder = transport
+                .request(wreq::Method::POST, &self.messages_url(), auth, headers)
+                .body(super::claude::serialize_request(
+                    &request.wire,
+                    request.metadata.as_ref(),
+                    controls,
+                    Some(&context),
+                )?);
+            if let Some(timeout) = timeout {
+                builder = builder.timeout(timeout);
+            }
+            Ok((PreparedRequest::claude(builder)?, Some(context)))
         } else {
-            builder.header("x-api-key", &auth.api_key)
+            let mut builder = self
+                .http_client
+                .post(self.messages_url())
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header("x-api-key", &auth.api_key)
+                .json(request);
+            if let Some(timeout) = timeout {
+                builder = builder.timeout(timeout);
+            }
+            Ok((PreparedRequest::api(builder)?, None))
         }
     }
 
@@ -158,27 +261,6 @@ impl AnthropicClient {
             PROVIDER_LABEL
         }
     }
-
-    async fn response_error(&self, response: reqwest::Response) -> ProviderError {
-        if !self.claude_oauth {
-            return map_response_error(response).await;
-        }
-        let status = response.status().as_u16();
-        if status == 429 {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            ProviderError::RateLimited { retry_after }
-        } else {
-            ProviderError::Http {
-                status,
-                body: "Claude request rejected".into(),
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -189,32 +271,41 @@ impl ProviderClient for AnthropicClient {
         let mut seen_pages = std::collections::HashSet::new();
         loop {
             let url = format!("{}/models", self.base_url);
-            let mut builder = self
-                .http_client
-                .get(url)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .timeout(self.timeout)
-                .query(&[("limit", "1000")]);
-            if self.claude_oauth {
-                builder = builder
-                    .bearer_auth(&auth.api_key)
-                    .header("anthropic-beta", super::claude::CLAUDE_INFERENCE_BETAS)
-                    .header("user-agent", super::claude::CLAUDE_USER_AGENT);
+            let prepared = if let Some(transport) = &self.claude_transport {
+                let mut builder = transport
+                    .request(
+                        wreq::Method::GET,
+                        &url,
+                        auth,
+                        ClaudeWireProfile.headers(
+                            &self.claude_session_id,
+                            &ClaudeReasoningControls::default(),
+                        )?,
+                    )
+                    .timeout(self.timeout)
+                    .query(&[("limit", "1000")]);
+                if let Some(after_id) = &after_id {
+                    builder = builder.query(&[("after_id", after_id)]);
+                }
+                PreparedRequest::claude(builder)?
             } else {
-                builder = builder.header("x-api-key", &auth.api_key);
+                let mut builder = self
+                    .http_client
+                    .get(url)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .header("x-api-key", &auth.api_key)
+                    .timeout(self.timeout)
+                    .query(&[("limit", "1000")]);
+                if let Some(after_id) = &after_id {
+                    builder = builder.query(&[("after_id", after_id)]);
+                }
+                PreparedRequest::api(builder)?
+            };
+            let response = prepared.execute().await?;
+            if !response.is_success() {
+                return Err(response.error().await);
             }
-            if let Some(after_id) = &after_id {
-                builder = builder.query(&[("after_id", after_id)]);
-            }
-            let response = builder.send().await.map_err(map_request_error)?;
-            if !response.status().is_success() {
-                return Err(self.response_error(response).await);
-            }
-            let body = super::claude::oauth::bounded_json(response)
-                .await
-                .map_err(|_| ProviderError::InvalidJson {
-                    detail: "invalid Anthropic models response".into(),
-                })?;
+            let body = response.bounded_json().await?;
             let data = body["data"]
                 .as_array()
                 .ok_or_else(|| ProviderError::InvalidJson {
@@ -257,7 +348,7 @@ impl ProviderClient for AnthropicClient {
         ProviderCapabilities {
             streaming: true,
             tool_use: true,
-            reasoning: !self.claude_oauth,
+            reasoning: true,
         }
     }
 
@@ -266,7 +357,7 @@ impl ProviderClient for AnthropicClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
-        let wire_request = self.wire_request(request, false);
+        let (wire_request, tool_adapter) = self.wire_request(request, false)?;
         let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
@@ -279,42 +370,39 @@ impl ProviderClient for AnthropicClient {
         )
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
-        let request_builder = self
-            .authenticated_request(auth)
-            .json(&wire_request)
-            .timeout(self.timeout);
-        let http_request = request_builder.build().map_err(map_request_error)?;
+        let (http_request, claude_context) = self.authenticated_request(
+            auth,
+            &wire_request,
+            Some(self.timeout),
+            request.observation.as_ref(),
+        )?;
         observer.emit_started();
-        let response = self
-            .http_client
-            .execute(http_request)
-            .await
-            .map_err(map_request_error)
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        if !response.status().is_success() {
-            let error = self.response_error(response).await;
+        let response = http_request.execute().await.inspect_err(|error| {
+            observer.emit_failed(error);
+        })?;
+        if !response.is_success() {
+            let error = response.error().await;
             observer.emit_failed(&error);
             return Err(error);
         }
+        let provider_request_id = response.request_id().map(str::to_owned);
         let wire = response
             .json::<WireMessagesResponse>()
             .await
-            .map_err(|error| ProviderError::InvalidJson {
-                detail: if self.claude_oauth {
-                    "invalid Claude response JSON".into()
-                } else {
-                    error.to_string()
-                },
-            })
             .inspect_err(|error| {
                 observer.emit_failed(error);
             })?;
+        let provider_message_id = wire.id.clone();
         let mut response = from_wire_response(wire);
         bind_response(&mut response.message, &response_prefix);
-        if self.claude_oauth {
-            super::claude::restore_response_tool_names(&mut response);
+        if let Some(adapter) = tool_adapter {
+            adapter.restore_message(&mut response.message);
+        }
+        if let Some(context) = claude_context {
+            context.complete(
+                provider_request_id.as_deref(),
+                provider_message_id.as_deref(),
+            );
         }
         UsageEmitter::new(self.event_bus.clone(), self.provider_label())
             .emit_usage(&request.model, &response.usage);
@@ -327,7 +415,7 @@ impl ProviderClient for AnthropicClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
-        let wire_request = self.wire_request(request, true);
+        let (wire_request, tool_adapter) = self.wire_request(request, true)?;
         let response_prefix = prefix_hash(&wire_request.wire, wire_request.wire.messages.len());
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
@@ -340,31 +428,26 @@ impl ProviderClient for AnthropicClient {
         )
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
-        let http_request = self
-            .authenticated_request(auth)
-            .json(&wire_request)
-            .build()
-            .map_err(map_request_error)?;
+        let (http_request, claude_context) =
+            self.authenticated_request(auth, &wire_request, None, request.observation.as_ref())?;
         observer.emit_started();
-        let response = self
-            .http_client
-            .execute(http_request)
-            .await
-            .map_err(map_request_error)
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        if !response.status().is_success() {
-            let error = self.response_error(response).await;
+        let response = http_request.execute().await.inspect_err(|error| {
+            observer.emit_failed(error);
+        })?;
+        if !response.is_success() {
+            let error = response.error().await;
             observer.emit_failed(&error);
             return Err(error);
         }
-        Ok(adapt_sse_stream(
+        let provider_request_id = response.request_id().map(str::to_owned);
+        Ok(adapt_sse_stream_with_errors(
             response.bytes_stream(),
             AnthropicInterpreterAdapter {
                 inner: AnthropicStreamInterpreter::new(),
-                claude_oauth: self.claude_oauth,
+                tool_adapter,
                 response_prefix,
+                claude_context,
+                provider_request_id,
             },
             UsageEmitter::new(self.event_bus.clone(), self.provider_label()),
             request.model.clone(),
@@ -375,8 +458,10 @@ impl ProviderClient for AnthropicClient {
 
 struct AnthropicInterpreterAdapter {
     inner: AnthropicStreamInterpreter,
-    claude_oauth: bool,
+    tool_adapter: Option<ClaudeToolAdapter>,
     response_prefix: String,
+    claude_context: Option<ClaudeRequestContext>,
+    provider_request_id: Option<String>,
 }
 
 /// New Claude family/version IDs have a stable alias for their dated snapshot.
@@ -404,7 +489,7 @@ fn claude_model_alias(id: &str) -> Option<&str> {
 impl WireStreamInterpreter for AnthropicInterpreterAdapter {
     fn interpret(&mut self, frame: SseFrame) -> Result<FrameInterpretation, ProviderError> {
         let mut events = self.inner.interpret(&frame).map_err(|error| {
-            if self.claude_oauth {
+            if self.tool_adapter.is_some() {
                 match error {
                     ProviderError::Http { status, .. } => ProviderError::Http {
                         status,
@@ -421,12 +506,15 @@ impl WireStreamInterpreter for AnthropicInterpreterAdapter {
                 error
             }
         })?;
-        let completion = self.inner.is_done().then(|| self.inner.take_result());
-        if self.claude_oauth {
-            for event in &mut events {
-                super::claude::restore_event_tool_names(event);
-            }
+        if let Some(adapter) = &mut self.tool_adapter {
+            adapter.restore_events(&frame, &mut events)?;
         }
+        let completion = self.inner.is_done().then(|| {
+            if let Some(context) = self.claude_context.take() {
+                context.complete(self.provider_request_id.as_deref(), self.inner.message_id());
+            }
+            self.inner.take_result()
+        });
         Ok(FrameInterpretation { events, completion })
     }
 
@@ -437,8 +525,8 @@ impl WireStreamInterpreter for AnthropicInterpreterAdapter {
     fn take_message(&mut self) -> Option<Message> {
         let mut message = self.inner.take_message();
         bind_response(&mut message, &self.response_prefix);
-        if self.claude_oauth {
-            super::claude::restore_message_tool_names(&mut message);
+        if let Some(adapter) = &self.tool_adapter {
+            adapter.restore_message(&mut message);
         }
         Some(message)
     }

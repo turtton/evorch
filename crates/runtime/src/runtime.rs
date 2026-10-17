@@ -1205,6 +1205,21 @@ impl AgentRuntime {
             RunContinuation::Restored(restored) => (None, Some(restored)),
             RunContinuation::Resume { restored, handoff } => (handoff, Some(*restored)),
         };
+        let ancestry = crate::request_turn::RequestAncestry::new(
+            parent,
+            parent.is_some_and(|parent| {
+                lock_runs(&self.shared.runs)
+                    .get(&parent)
+                    .is_some_and(|entry| entry.parent.is_some())
+            }),
+        );
+        let turn = crate::request_turn::initial(
+            ancestry,
+            !history_only && review_seed.is_some(),
+            restored.is_none() && handoff.is_none(),
+            history_only,
+            restored.as_ref().and_then(|state| state.turn.as_ref()),
+        );
         if config.budget == crate::budget_tracker::BudgetSettings::default()
             && let Some(budget) = self.shared.budget.get()
         {
@@ -1349,6 +1364,8 @@ impl AgentRuntime {
             }
         };
         let task = RunTask {
+            ancestry,
+            turn,
             run_id,
             role,
             prompt,
@@ -1692,7 +1709,9 @@ impl AgentRuntime {
                 self.goal_user_input(run_id, &text);
             }
             let enqueue = || {
-                permit.send((text.clone(), images, trusted_user));
+                let prompt_id = trusted_user
+                    .then(|| providers::RequestTurnContext::unattributed(false).prompt_id);
+                permit.send((text.clone(), images, trusted_user, prompt_id));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {
@@ -2658,8 +2677,9 @@ mod review_provenance_tests {
         }
         let mut delivered = Vec::new();
         for _ in 0..16 {
-            let (text, images, trusted) = receiver.recv().await.unwrap();
+            let (text, images, trusted, prompt_id) = receiver.recv().await.unwrap();
             assert!(trusted && images.is_empty());
+            assert!(prompt_id.is_some());
             delivered.push(text);
         }
         let persisted = runtime

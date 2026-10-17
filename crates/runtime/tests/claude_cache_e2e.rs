@@ -3,6 +3,7 @@ use config::{
     ApiProtocolConfig, Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
 };
 use event_bus::EventBus;
+use mock_openai::claude_contract::claude_model_input;
 use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent, ToolSpec};
 use routing::{ComposeDeps, MapEnv};
 use runtime::{AgentInvocationContext, AgentModel, ModelPreference, Role};
@@ -15,6 +16,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 #[derive(Default)]
 struct Oracle {
     requests: Vec<Value>,
+    model_inputs: Vec<Value>,
     prompts: Vec<Vec<u8>>,
     cached: Vec<u64>,
 }
@@ -25,7 +27,13 @@ struct ClaudeEndpoint(Arc<Mutex<Oracle>>);
 impl Respond for ClaudeEndpoint {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
-        let mut normalized = body.clone();
+        let oauth = request.headers.contains_key("authorization");
+        let model_input = if oauth {
+            claude_model_input(&request.body).unwrap()
+        } else {
+            body.clone()
+        };
+        let mut normalized = model_input.clone();
         // Normalize only the moving Anthropic breakpoint, not nested arguments.
         for message in normalized["messages"].as_array_mut().unwrap() {
             for block in message["content"].as_array_mut().unwrap() {
@@ -52,12 +60,23 @@ impl Respond for ClaudeEndpoint {
             .unwrap_or(0) as u64;
         let total = prompt.len() as u64;
         let index = oracle.requests.len();
-        let tool_name = body["tools"][0]["name"].as_str().unwrap().to_owned();
+        let tool_name = match (index, oauth) {
+            (0, true) => "_read",
+            (0, false) => "read",
+            (_, true) => "_mcp__evorch__inspect_run",
+            (_, false) => "inspect_run",
+        };
+        let tool_input = if index == 0 {
+            json!({"path":"report.txt","offset":1,"limit":20})
+        } else {
+            json!({"run_id":"run-1","path":"custom-path"})
+        };
         oracle.requests.push(body);
+        oracle.model_inputs.push(model_input);
         oracle.prompts.push(prompt);
         oracle.cached.push(cached);
         let block = if index < 2 {
-            json!({"type":"tool_use", "id":format!("call-{index}"), "name":tool_name, "input":{"index":index}})
+            json!({"type":"tool_use", "id":format!("call-{index}"), "name":tool_name, "input":tool_input})
         } else {
             json!({"type":"text", "text":"done"})
         };
@@ -196,11 +215,18 @@ async fn exercise(oauth: bool) {
         }),
         ..Default::default()
     };
-    let tools = vec![ToolSpec {
-        name: "read".into(),
-        description: "Read content".into(),
-        input_schema: json!({"type":"object","properties":{"index":{"type":"integer"}}}),
-    }];
+    let tools = vec![
+        ToolSpec {
+            name: "read".into(),
+            description: "Read a bounded UTF-8 file range".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "inspect_run".into(),
+            description: "Inspect a run".into(),
+            input_schema: json!({"type":"object","properties":{"run_id":{"type":"string"},"path":{"type":"string"}},"required":["run_id"]}),
+        },
+    ];
     let mut messages = vec![
         Message {
             role: MessageRole::System,
@@ -222,13 +248,18 @@ async fn exercise(oauth: bool) {
             .await
             .unwrap();
         if index < 2 {
-            assert!(
-                response
-                    .message
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            );
+            let (expected_name, expected_input) = if index == 0 {
+                ("read", json!({"path":"report.txt","offset":1,"limit":20}))
+            } else {
+                (
+                    "inspect_run",
+                    json!({"run_id":"run-1","path":"custom-path"}),
+                )
+            };
+            assert!(response.message.content.iter().any(|block| matches!(
+                block, ContentBlock::ToolUse { name, input, .. }
+                    if name == expected_name && input == &expected_input
+            )));
             messages.push(Message {
                 role: MessageRole::Assistant,
                 content: response.message.content.clone(),
@@ -238,7 +269,10 @@ async fn exercise(oauth: bool) {
                 content: vec![ContentBlock::ToolResult {
                     tool_call_id: format!("call-{index}"),
                     content: vec![ToolResultContent::Text {
-                        text: format!("result-{index}\n").repeat(10_000),
+                        text: format!(
+                            "result-{index}\ncch=00000 \"model\":\"sentinel\",\"max_tokens\":123\n"
+                        )
+                        .repeat(10_000),
                     }],
                     is_error: false,
                 }],
@@ -251,15 +285,21 @@ async fn exercise(oauth: bool) {
     for (index, response) in responses.iter().enumerate().skip(1) {
         mock_openai::cache_contract::assert_append_only(
             mock_openai::cache_contract::CacheProtocol::Anthropic,
-            &oracle.requests[index - 1],
-            &oracle.requests[index],
+            &oracle.model_inputs[index - 1],
+            &oracle.model_inputs[index],
         )
         .unwrap();
         assert!(oracle.cached[index] >= oracle.prompts[index - 1].len() as u64);
         assert_eq!(response.usage.cache_read_tokens, oracle.cached[index]);
     }
-    let last = oracle.requests[2]["messages"].to_string();
-    assert!(last.contains(&"result-0\n".repeat(10_000).replace('\n', "\\n")));
+    assert_eq!(
+        oracle.requests[2]["messages"][2]["content"][0]["content"][0]["text"],
+        "result-0\ncch=00000 \"model\":\"sentinel\",\"max_tokens\":123\n".repeat(10_000)
+    );
+    assert_eq!(
+        oracle.requests[1]["messages"][2]["content"][0]["content"],
+        oracle.requests[2]["messages"][2]["content"][0]["content"]
+    );
     for turn in 0..2 {
         let blocks = oracle.requests[2]["messages"][1 + turn * 2]["content"]
             .as_array()
@@ -275,6 +315,24 @@ async fn exercise(oauth: bool) {
         );
         assert_eq!(blocks[2]["type"], "tool_use");
         assert_eq!(blocks[2]["id"], format!("call-{turn}"));
+        let expected_name = match (turn, oauth) {
+            (0, true) => "_read",
+            (0, false) => "read",
+            (_, true) => "_mcp__evorch__inspect_run",
+            (_, false) => "inspect_run",
+        };
+        assert_eq!(blocks[2]["name"], expected_name);
+        if turn == 0 {
+            assert_eq!(
+                blocks[2]["input"],
+                json!({"path":"report.txt","offset":1,"limit":20})
+            );
+        } else {
+            assert_eq!(
+                blocks[2]["input"],
+                json!({"run_id":"run-1","path":"custom-path"})
+            );
+        }
     }
 }
 

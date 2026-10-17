@@ -558,6 +558,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
     ]);
     let harness = harness(&mock.base_url(), false, Duration::from_secs(2));
     let invocation = AgentInvocationContext {
+        turn: None,
         run_id: "normal-run".into(),
         category: None,
         model_preference: None,

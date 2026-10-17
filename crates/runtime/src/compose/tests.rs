@@ -175,6 +175,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
     model
         .complete(
             &AgentInvocationContext {
+                turn: None,
                 category: None,
                 run_id: run_id.to_string(),
                 model_preference: None,

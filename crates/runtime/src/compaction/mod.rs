@@ -138,6 +138,7 @@ pub(crate) async fn compact_now(
     state.channels.compaction_busy.store(true, Ordering::SeqCst);
     let model_preference = state.channels.model_preference_rx.borrow().clone();
     let invocation = crate::AgentInvocationContext {
+        turn: Some(state.turn.clone()),
         run_id: state.caller_run_id().to_string(),
         category: state.task.config.category.clone(),
         model_preference: model_preference.clone(),
@@ -293,6 +294,7 @@ async fn summarize_range(
         return (StructuralSummarizer.summarize(input).await, None);
     }
     let (result, usage) = ModelSummarizer {
+        turn: Some(state.turn.clone()),
         model: state.shared.model.clone(),
         role: state.run_role(),
         run_id: state.caller_run_id().to_string(),

@@ -31,7 +31,8 @@ pub use hosted_web_search::{
 };
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
-    ProviderCapabilities, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
+    ProviderCapabilities, RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec,
+    Usage,
 };
 pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
 pub use retry::RetryPolicy;

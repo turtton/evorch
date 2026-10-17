@@ -135,6 +135,7 @@ fn harness_with_model(
                         warning: None,
                     },
                 )),
+                ..Default::default()
             },
         },
     )

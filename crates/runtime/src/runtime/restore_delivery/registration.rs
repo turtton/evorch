@@ -7,6 +7,7 @@ impl AgentRuntime {
         identity: (RunId, Option<RunId>, Role, RunConfig, RunId),
         restored: RestoredState,
         trigger: &AgentMessage,
+        durable_parent: Option<(RunId, bool)>,
     ) {
         let (run_id, parent, role, mut config, sender) = identity;
         self.install_run_ownership_guard(run_id, &mut config);
@@ -73,7 +74,21 @@ impl AgentRuntime {
                 tracing::warn!(%run_id, %error, "assistant reference restore failed");
                 None
             });
+        let ancestry = crate::request_turn::RequestAncestry::resolved(
+            parent,
+            parent.and_then(|parent| runs.get(&parent).map(|entry| entry.parent.is_some())),
+            durable_parent,
+        );
+        let turn = crate::request_turn::initial(
+            ancestry,
+            false,
+            false,
+            history_only,
+            restored.turn.as_ref(),
+        );
         let task = restored.attach_to(RunTask {
+            ancestry,
+            turn,
             run_id,
             role,
             prompt: String::new(),
@@ -178,6 +193,7 @@ mod review_tests {
                 &mut lock_runs(&runtime.shared.runs),
                 (run, None, Role::Worker, RunConfig::default(), run),
                 RestoredState {
+                    turn: None,
                     boundary_pending: false,
                     continuity: Default::default(),
                     pending_reference_id: None,
@@ -189,6 +205,7 @@ mod review_tests {
                     allowed_instructions: Default::default(),
                 },
                 &trigger,
+                None,
             );
             assert!(
                 !runtime

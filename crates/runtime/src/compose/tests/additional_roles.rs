@@ -32,6 +32,7 @@ async fn additional_roles_keep_affinity_per_run() {
             model
                 .complete(
                     &AgentInvocationContext {
+                        turn: None,
                         category: None,
                         run_id: format!("{}-{run_id}", role.name()),
                         model_preference: None,

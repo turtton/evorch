@@ -61,6 +61,7 @@ pub fn request() -> HostedWebSearchRequest {
         max_results: None,
         reasoning_effort: Some("low".into()),
         observation: Some(ObservationContext {
+            turn: None,
             run_id: "search-run".into(),
             purpose: event_bus::RequestPurpose::WebSearch,
         }),

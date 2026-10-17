@@ -3,7 +3,8 @@ use std::sync::Mutex;
 
 /// Text, images, and whether this input came from the host user (rather than an
 /// internal team notification). Only host input contributes to the GUI queue.
-pub(crate) type UserInput = (String, Vec<crate::DelegateImage>, bool);
+/// The final field is the UUID captured when host input was accepted.
+pub(crate) type UserInput = (String, Vec<crate::DelegateImage>, bool, Option<String>);
 
 /// Pending input has not yet been appended to the agent's context.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
