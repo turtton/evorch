@@ -144,6 +144,11 @@ change the account's usage-credit settings.
 
 ## Updating the profile
 
+Use the repository's [Claude Code compatibility skill](../.agents/skills/claude-code-compatibility/SKILL.md)
+for repeatable analysis and isolated captures. Review and improve the skill's
+procedures and offline helper during each follow-up; keep current profile values
+in this document and the implementation.
+
 1. Pin the new CLI version and OMP commit. Inspect an isolated installation;
    never use a real credential or the user's normal Claude configuration for
    captures. Direct a dummy token to a loopback mock. For the official-host

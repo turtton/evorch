@@ -26,6 +26,8 @@ jobs:
       EVORCH_CI_METADATA_DIR: target/ci-metadata
     steps:
       - uses: actions/checkout@v4
+      - name: Claude compatibility skill offline tools
+        run: node --test .agents/skills/claude-code-compatibility/scripts/inspect-client-hello.test.mjs
       # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
       # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
