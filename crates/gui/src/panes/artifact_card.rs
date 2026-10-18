@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use egui::{RichText, Ui};
 use event_bus::{ArtifactPresentation, PresentedArtifact};
 
+use crate::model::html_snapshots::{HtmlSnapshots, SnapshotState};
 use crate::theme::icons;
 use crate::theme::text::medium;
 use crate::theme::tokens::{FONT_SMALL, SP_1, SP_2, palette};
@@ -117,12 +118,55 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
             )
             .on_hover_text(&artifact.title);
         }
+    } else if let Some(snapshots) = HtmlSnapshots::installed(ui.ctx()) {
+        html_snapshot(ui, &snapshots, artifact, path);
     } else {
         ui.label(
             RichText::new("HTML mock — open it to view in the browser")
                 .size(FONT_SMALL)
                 .color(palette().TEXT_MUTED),
         );
+    }
+}
+
+fn html_snapshot(
+    ui: &mut Ui,
+    snapshots: &HtmlSnapshots,
+    artifact: &PresentedArtifact,
+    path: &Path,
+) {
+    let note = |ui: &mut Ui, text: String| {
+        ui.label(
+            RichText::new(text)
+                .size(FONT_SMALL)
+                .color(palette().TEXT_MUTED),
+        );
+    };
+    match snapshots.state(&artifact.sha256, path) {
+        SnapshotState::Ready(png) => {
+            let Some(uri) = crate::panes::file_viewer::image_uri(&png) else {
+                return;
+            };
+            crate::panes::file_viewer::install_image_loader(ui.ctx());
+            ui.add_space(SP_1);
+            let width = ui.available_width().min(PREVIEW_MAX_WIDTH);
+            let preview = ui
+                .add(
+                    egui::Image::new(uri)
+                        .alt_text(format!("{} preview", artifact.title))
+                        .max_width(width)
+                        .max_height(PREVIEW_MAX_HEIGHT)
+                        .maintain_aspect_ratio(true)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!("Open {}", artifact.title));
+            if preview.clicked() {
+                request_open(ui.ctx(), path.to_path_buf());
+            }
+        }
+        SnapshotState::Pending => note(ui, "Rendering preview…".into()),
+        SnapshotState::Failed(error) => note(ui, format!("Preview unavailable: {error}")),
     }
 }
 

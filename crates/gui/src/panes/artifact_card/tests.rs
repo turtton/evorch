@@ -1,5 +1,6 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
+use std::sync::Arc;
 
 fn artifact(id: &str, title: &str, media_type: &str, path: &Path) -> PresentedArtifact {
     PresentedArtifact {
@@ -71,4 +72,63 @@ fn summary_names_every_artifact() {
     assert_eq!(summary(&presentation), "Artifacts: One, Two");
     presentation.title = Some("Mocks".into());
     assert_eq!(summary(&presentation), "Artifacts: Mocks (One, Two)");
+}
+
+#[test]
+fn html_cards_show_the_rendered_snapshot_and_open_on_click() {
+    let dir = tempfile::tempdir().unwrap();
+    let html = dir.path().join("mock.html");
+    std::fs::write(&html, "<p>mock</p>").unwrap();
+    let mut mock = artifact("artifact-b", "Variant B", "text/html", &html);
+    mock.sha256 = "ab".repeat(32);
+    let presentation = ArtifactPresentation {
+        presentation_id: "presentation-1".into(),
+        title: None,
+        caption: None,
+        artifacts: vec![mock.clone()],
+    };
+    let snapshots = Arc::new(HtmlSnapshots::new(dir.path().join("snapshots")));
+    let shown = presentation.clone();
+    let mut harness = Harness::new_ui(move |ui| show(ui, egui::Id::new("card"), &shown));
+    Arc::clone(&snapshots).install(&harness.ctx);
+    harness.run();
+
+    assert!(
+        harness
+            .query_by_label_contains("Rendering preview")
+            .is_some()
+    );
+    let requests = snapshots.take_requests();
+    assert_eq!(requests.len(), 1);
+    snapshots.finish(
+        &mock.sha256,
+        Ok(egui::ColorImage::filled([4, 3], egui::Color32::BLUE)),
+    );
+    harness.run();
+
+    harness.get_by_label("Variant B preview").click();
+    harness.run();
+    assert_eq!(take_open_requests(&harness.ctx), vec![html]);
+}
+
+#[test]
+fn html_cards_without_a_snapshot_renderer_keep_the_text_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let html = dir.path().join("mock.html");
+    std::fs::write(&html, "<p>mock</p>").unwrap();
+    let presentation = ArtifactPresentation {
+        presentation_id: "p".into(),
+        title: None,
+        caption: None,
+        artifacts: vec![artifact("a", "One", "text/html", &html)],
+    };
+    let mut harness = Harness::new_ui(move |ui| show(ui, egui::Id::new("card"), &presentation));
+    harness.run();
+
+    assert!(harness.query_by_label_contains("HTML mock").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("Rendering preview")
+            .is_none()
+    );
 }

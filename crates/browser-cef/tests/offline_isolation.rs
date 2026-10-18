@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use browser_cef::devtools::DevTools;
 use browser_cef::offline::ArtifactBundle;
-use browser_cef::{ArtifactContext, CefRuntime, NetLog, OsrBrowser, RuntimeConfig};
+use browser_cef::{
+    ArtifactContext, CefRuntime, NetLog, OsrBrowser, RuntimeConfig, SNAPSHOT_SIZE, render_snapshot,
+};
 use serde_json::{Value, json};
 
 const LEAK_PAGE: &str = include_str!("fixtures/leak.html");
@@ -126,6 +128,19 @@ fn leak_probes_stay_offline() {
     assert_eq!(webrtc["result"]["value"], "undefined");
 }
 
+fn snapshot_captures_the_page_after_its_scripts_ran() {
+    let image = render_snapshot(
+        b"<!doctype html><body style=\"background:#f00\"><script>document.body.style.background = '#00f';</script>".to_vec(),
+        // nextest's slow-timeout bounds the wait; the snapshot has no other deadline.
+        Duration::MAX,
+    )
+    .expect("snapshot");
+
+    assert_eq!(image.size, SNAPSHOT_SIZE.map(|side| side as usize));
+    let center = image.pixels[image.size[0] * image.size[1] / 2 + image.size[0] / 2];
+    assert_eq!(center, egui::Color32::from_rgb(0, 0, 255));
+}
+
 fn renderer_crash_reloads_the_artifact() {
     let (browser, _log) = open(ArtifactBundle::html(
         "<!doctype html><title>alive</title><p>crash me</p>",
@@ -159,6 +174,7 @@ fn cef_preview_is_offline_and_recovers() {
 
     leak_probes_stay_offline();
     renderer_crash_reloads_the_artifact();
+    snapshot_captures_the_page_after_its_scripts_ran();
 
     drop(runtime);
 }

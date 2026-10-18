@@ -128,6 +128,11 @@ impl PaintBuffer {
         })
     }
 
+    /// The whole current frame without consuming the pending upload.
+    pub fn frame(&self) -> Option<ColorImage> {
+        (!self.bgra.is_empty()).then(|| self.rgba(PixelRect::full(self.width, self.height)))
+    }
+
     fn rgba(&self, area: PixelRect) -> ColorImage {
         let stride = self.width as usize * 4;
         let mut pixels = Vec::with_capacity((area.width * area.height) as usize);
@@ -205,5 +210,23 @@ mod tests {
         assert!(!resized.partial);
         assert_eq!(resized.image.size, [4, 4]);
         assert_eq!(buffer.seq(), 3);
+    }
+
+    #[test]
+    fn frame_copies_the_whole_buffer_and_keeps_the_pending_upload() {
+        let mut buffer = PaintBuffer::default();
+        assert!(buffer.frame().is_none());
+        buffer.paint(&solid(2, 2, [0, 0, 255, 255]), 2, 2, &[]);
+
+        let frame = buffer.frame().expect("painted");
+
+        assert_eq!(frame.size, [2, 2]);
+        assert!(
+            frame
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == Color32::from_rgb(255, 0, 0))
+        );
+        assert!(buffer.take_upload(None).is_some());
     }
 }

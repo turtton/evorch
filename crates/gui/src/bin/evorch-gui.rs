@@ -922,7 +922,13 @@ fn run() -> Result<(), GuiError> {
         let opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> = Arc::new(opener);
         (
             opener,
-            gui::html_preview::HtmlPreviewWindows::new(requests, portal_opener),
+            gui::html_preview::HtmlPreviewWindows::new(
+                requests,
+                portal_opener,
+                Arc::new(gui::model::html_snapshots::HtmlSnapshots::new(
+                    catalog::default_cache_dir().join("html-snapshots"),
+                )),
+            ),
         )
     };
     #[cfg(not(feature = "cef"))]
@@ -1027,6 +1033,8 @@ fn run() -> Result<(), GuiError> {
         Box::new(move |creation_context| {
             let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
             state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
+            #[cfg(feature = "cef")]
+            html_previews.install_snapshots(&creation_context.egui_ctx);
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]
