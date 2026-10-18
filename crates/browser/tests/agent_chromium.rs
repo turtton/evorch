@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use browser::agent::{AgentBrowser, LaunchOptions, PageProvider, RequestPolicy};
+use browser::agent::{
+    Activity, AgentBrowser, AgentError, LaunchOptions, PageProvider, RequestPolicy,
+};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -192,4 +194,79 @@ window.attempts = Promise.all([
     );
     assert_eq!(reached.load(Ordering::SeqCst), 0);
     assert!(browser.close("run-1").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn observers_follow_pages_through_their_screencast_and_activity() {
+    // Given: an agent browser whose page list is being watched.
+    let url = serve(PAGE.to_owned()).await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 2,
+    });
+    let mut pages = browser.pages();
+    assert!(pages.borrow_and_update().is_empty());
+
+    // When: a run opens a page and works on it under a screencast.
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    let opened = pages.borrow_and_update().clone();
+    let mut screencast = browser.screencast("run-1", Arc::new(|| ())).await.unwrap();
+    page.navigate(&url).await.unwrap();
+    let frame = screencast.next_frame().await.expect("a frame");
+    let activity = screencast.agent().activity();
+    let switches = page
+        .target()
+        .call("Browser.getBrowserCommandLine", json!({}))
+        .await
+        .unwrap();
+    let missing = browser.screencast("run-2", Arc::new(|| ())).await;
+    assert!(browser.close("run-1").await);
+    pages.changed().await.unwrap();
+
+    // Then: observers saw the page open and close, its frames and actions,
+    // and Chromium received the guard switches.
+    assert_eq!(opened, ["run-1"]);
+    assert!(pages.borrow().is_empty());
+    assert!(frame.width() > 0 && frame.height() > 0);
+    assert!(
+        activity.contains(&Activity::Action {
+            label: format!("navigate {url}"),
+            error: None
+        }),
+        "{activity:?}"
+    );
+    assert!(
+        activity
+            .iter()
+            .any(|entry| matches!(entry, Activity::Blocked(request) if request.contains("blocked.invalid"))),
+        "{activity:?}"
+    );
+    assert!(matches!(missing, Err(AgentError::NoPage(_))));
+    let switches: Vec<&str> = switches["arguments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|argument| argument.as_str())
+        .collect();
+    for switch in [
+        "--proxy-bypass-list=<-loopback>",
+        "--disable-quic",
+        "--block-new-web-contents",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ] {
+        assert!(switches.contains(&switch), "{switch}: {switches:?}");
+    }
+    assert!(
+        switches
+            .iter()
+            .any(|argument| argument.starts_with("--proxy-server=http://127.0.0.1:")),
+        "{switches:?}"
+    );
+    while screencast.next_frame().await.is_some() {}
+    assert!(screencast.ended(), "the screencast ends with its page");
 }

@@ -5509,6 +5509,7 @@ version = "0.1.0"
 dependencies = [
  "agents",
  "async-trait",
+ "browser",
  "catalog",
  "config",
  "event-bus",
@@ -5538,6 +5539,7 @@ dependencies = [
  "tokio-rustls",
  "tools",
  "tracing",
+ "url",
  "wiremock",
 ]
 

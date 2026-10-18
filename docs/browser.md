@@ -59,6 +59,17 @@ Web tools.
 - Popups are refused (`--block-new-web-contents`), QUIC is disabled and WebRTC
   is limited to proxied UDP.
 
+### Watching the agent browser
+
+In GUI builds with the `browser` feature, **Agent browser** opens a read-only
+window onto the runtime's agent pages. Every executor of the process, including
+the ones runs build for their own sandbox, shares one agent browser, so the
+window lists every run that has an open page. Only the selected run's page is
+screencast, and only while the window is open; closing the window stops it.
+The latest actions (navigate, snapshot, click, type, key, scroll, screenshot,
+with failures) and refused requests are laid over the frame. Typed text is
+shown up to 40 characters. The window never sends input to the page.
+
 ## Low-memory verification
 
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
@@ -66,6 +77,7 @@ Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 - `cargo test -p gui --features browser --test browser`
 - `cargo test -p browser`
 - With installed Chromium: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored`
+- With installed Chromium: `cargo test -p browser --lib tests::chromium_receives_the_session_switches -- --ignored`
 - With installed Chromium: `cargo test -p browser --test agent_chromium -- --ignored`
 
 The Chromium integration test uses only an ephemeral localhost HTTP fixture.
