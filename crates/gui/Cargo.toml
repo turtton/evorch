@@ -12,9 +12,12 @@ name = "gui"
 [features]
 default = []
 browser = ["dep:browser"]
+# In-app HTML artifact preview on CEF; needs the CEF distribution (docs/browser.md).
+cef = ["dep:browser-cef", "browser-cef/cef"]
 
 [dependencies]
 browser = { path = "../browser", optional = true }
+browser-cef = { path = "../browser-cef", optional = true }
 base64 = { workspace = true }
 arena = { path = "../arena" }
 agents = { path = "../agents" }

@@ -1,5 +1,7 @@
 //! Opens presented artifacts with the desktop's default application.
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub trait ArtifactOpener: Send + Sync {
     fn open(&self, path: &Path);
@@ -39,4 +41,84 @@ fn open_file(path: &Path) -> Result<(), String> {
                 .map(drop)
                 .map_err(|error| error.to_string())
         })
+}
+
+/// Queues HTML artifacts for the in-app preview and opens everything else, or
+/// everything once the preview drops its receiver, with `fallback`.
+pub struct HtmlPreviewOpener {
+    previews: Sender<PathBuf>,
+    fallback: Arc<dyn ArtifactOpener>,
+}
+
+impl HtmlPreviewOpener {
+    pub fn new(fallback: Arc<dyn ArtifactOpener>) -> (Self, Receiver<PathBuf>) {
+        let (previews, requests) = channel();
+        (Self { previews, fallback }, requests)
+    }
+}
+
+impl ArtifactOpener for HtmlPreviewOpener {
+    fn open(&self, path: &Path) {
+        if !is_html(path) || self.previews.send(path.to_path_buf()).is_err() {
+            self.fallback.open(path);
+        }
+    }
+}
+
+pub fn is_html(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<PathBuf>>);
+
+    impl ArtifactOpener for Recorder {
+        fn open(&self, path: &Path) {
+            self.0.lock().unwrap().push(path.to_path_buf());
+        }
+    }
+
+    #[test]
+    fn html_goes_to_the_preview_and_other_files_to_the_fallback() {
+        let fallback = Arc::new(Recorder::default());
+        let (opener, requests) = HtmlPreviewOpener::new(fallback.clone());
+
+        opener.open(Path::new("/a/report.html"));
+        opener.open(Path::new("/a/PAGE.HTM"));
+        opener.open(Path::new("/a/chart.png"));
+
+        let queued: Vec<_> = requests.try_iter().collect();
+        assert_eq!(
+            queued,
+            [
+                PathBuf::from("/a/report.html"),
+                PathBuf::from("/a/PAGE.HTM")
+            ]
+        );
+        assert_eq!(*fallback.0.lock().unwrap(), [PathBuf::from("/a/chart.png")]);
+    }
+
+    #[test]
+    fn html_falls_back_once_the_preview_is_gone() {
+        let fallback = Arc::new(Recorder::default());
+        let (opener, requests) = HtmlPreviewOpener::new(fallback.clone());
+        drop(requests);
+
+        opener.open(Path::new("/a/report.html"));
+
+        assert_eq!(
+            *fallback.0.lock().unwrap(),
+            [PathBuf::from("/a/report.html")]
+        );
+    }
 }

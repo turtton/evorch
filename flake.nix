@@ -175,33 +175,102 @@
           '';
           meta.mainProgram = "evorch-gui";
         });
-      in
-      {
-        packages = {
-          default = evorch;
-          inherit evorch;
-          evorch-gui = evorch;
-          # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
-          # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
-          # バイナリとセットで push することで次回 run の deps build を skip させる。
-          evorch-deps = cargoArtifacts;
+        # CEF for the in-app HTML preview (ADR 0034 B), pinned to the build cef-rs
+        # 154.5.0 binds. cef-dll-sys reads it through CEF_PATH instead of
+        # downloading; x86_64-linux only because only that archive is hashed.
+        cefArchive = "cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal.tar.bz2";
+        cefRuntimeLibraries = [
+          pkgs.glib
+          pkgs.nss
+          pkgs.nspr
+          pkgs.at-spi2-core
+          pkgs.dbus
+          pkgs.cups
+          pkgs.libx11
+          pkgs.libxcomposite
+          pkgs.libxdamage
+          pkgs.libxext
+          pkgs.libxfixes
+          pkgs.libxrandr
+          pkgs.libxcb
+          pkgs.libxkbcommon
+          pkgs.libgbm
+          pkgs.expat
+          pkgs.cairo
+          pkgs.pango
+          pkgs.systemdLibs
+          pkgs.alsa-lib
+          pkgs.stdenv.cc.cc.lib
+        ];
+        cefDist = pkgs.stdenv.mkDerivation {
+          pname = "cef-minimal";
+          version = "154.0.34";
+          src = pkgs.fetchurl {
+            url = "https://cef-builds.spotifycdn.com/${cefArchive}";
+            hash = "sha256-6H4sdjBDct0ouJnOtu+ks1P1JwBZTdw1ioI37AfsZJI=";
+          };
+          nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+          buildInputs = cefRuntimeLibraries;
+          dontConfigure = true;
+          dontBuild = true;
+          # The flat layout download-cef extracts: runtime files beside the
+          # headers cef-dll-sys reads for the API version. The SUID
+          # chrome-sandbox is dropped (the user-namespace sandbox is used) and
+          # only the locales the GUI ships remain.
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r Release/. Resources/. $out/
+            cp -r include $out/
+            rm $out/chrome-sandbox
+            find $out/locales -name '*.pak' ! -name en-US.pak ! -name ja.pak -delete
+            $STRIP --strip-debug $out/libcef.so
+            cat > $out/archive.json <<EOF
+            {"type":"minimal","name":"${cefArchive}","sha1":"15c91ad767097217b2e82ba8b933fe30b134be69"}
+            EOF
+            runHook postInstall
+          '';
+          meta.platforms = [ "x86_64-linux" ];
         };
-        checks.tests = tests;
-        apps = {
-          default = {
-            type = "app";
-            program = "${evorch}/bin/evorch-gui";
-          };
-          evorch-gui = {
-            type = "app";
-            program = "${evorch}/bin/evorch-gui";
-          };
-          evorch = {
-            type = "app";
-            program = "${evorch}/bin/evorch";
-          };
+        cefArgs = commonArgs // {
+          pname = "evorch-gui-cef";
+          cargoExtraArgs = "-p gui -p browser-cef --features gui/cef,browser-cef/cef";
+          CEF_PATH = cefDist;
         };
-        devShells.default = pkgs.mkShell {
+        evorch-gui-cef = craneLib.buildPackage (cefArgs // {
+          cargoArtifacts = craneLib.buildDepsOnly cefArgs;
+          cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
+          doCheck = false;
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
+          buildInputs = commonArgs.buildInputs ++ runtimeLibraries ++ cefRuntimeLibraries;
+          EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
+          # CEF resolves its paks, locales and the helper beside the executable,
+          # so everything shares one libexec directory behind the wrapper.
+          postInstall = ''
+            app=$out/libexec/evorch-gui-cef
+            mkdir -p $app
+            mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $app/
+            rm -rf $out/bin
+            cp -r ${cefDist}/. $app/
+            chmod -R u+w $app
+            rm -rf $app/include $app/archive.json
+            makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+          '';
+          doInstallCheck = true;
+          installCheckPhase = ''
+            runHook preInstallCheck
+            for binary in evorch-gui evorch-cef-helper libcef.so; do
+              env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
+                "$out/libexec/evorch-gui-cef/$binary" > /dev/null
+            done
+            runHook postInstallCheck
+          '';
+          meta.mainProgram = "evorch-gui-cef";
+          meta.platforms = [ "x86_64-linux" ];
+        });
+        isCefSystem = system == "x86_64-linux";
+        devShell = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
@@ -228,6 +297,46 @@
               lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
             fi
           '';
+        };
+      in
+      {
+        packages = {
+          default = evorch;
+          inherit evorch;
+          evorch-gui = evorch;
+          # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
+          # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
+          # バイナリとセットで push することで次回 run の deps build を skip させる。
+          evorch-deps = cargoArtifacts;
+        } // pkgs.lib.optionalAttrs isCefSystem {
+          inherit evorch-gui-cef cefDist;
+        };
+        checks.tests = tests;
+        apps = {
+          default = {
+            type = "app";
+            program = "${evorch}/bin/evorch-gui";
+          };
+          evorch-gui = {
+            type = "app";
+            program = "${evorch}/bin/evorch-gui";
+          };
+          evorch = {
+            type = "app";
+            program = "${evorch}/bin/evorch";
+          };
+        };
+        devShells = {
+          default = devShell;
+        } // pkgs.lib.optionalAttrs isCefSystem {
+          # `nix develop .#cef`: CEF builds and the ignored browser-cef tests
+          # without downloading CEF. cef-dll-sys copies libcef.so into target/<profile>.
+          cef = devShell.overrideAttrs (old: {
+            CEF_PATH = cefDist;
+            shellHook = old.shellHook + ''
+              export LD_LIBRARY_PATH=$PWD/target/debug''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            '';
+          });
         };
       }
     );

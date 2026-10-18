@@ -284,3 +284,39 @@ jobs:
           # Fail loudly when the evidence contract breaks instead of uploading
           # an empty artifact (issue #114).
           if-no-files-found: error
+
+  # ADR 0034 B: the opt-in CEF HTML preview. cef-dll-sys downloads the CEF
+  # build cef-rs pins into CEF_PATH; it is not cached because the extracted
+  # distribution (~1.8 GB) would crowd the repository cache.
+  cef-e2e:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+      CEF_PATH: ${{ github.workspace }}/../cef-dist
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.99.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-cef
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install linker and Claude transport build dependencies
+        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
+      # Chromium's sandbox needs unprivileged user namespaces; the SUID
+      # chrome-sandbox is never used (ADR 0034).
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Lint the CEF feature
+        run: cargo clippy -p gui -p browser-cef --features gui/cef,browser-cef/cef --all-targets -- -D warnings
+      - name: CEF offline isolation and crash recovery
+        run: |
+          export LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail

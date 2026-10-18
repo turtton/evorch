@@ -12,6 +12,8 @@ pub mod evidence;
 pub mod fixture;
 pub mod format;
 pub mod headless;
+#[cfg(feature = "cef")]
+pub mod html_preview;
 pub mod keymap;
 pub mod logging;
 pub mod model;
