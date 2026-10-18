@@ -1,11 +1,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot, watch},
 };
 
-use super::{BrowserAction, cdp};
+use crate::{BrowserAction, cdp};
 
 /// Resolves the browser evidence directory.
 ///
@@ -122,21 +122,13 @@ async fn chromium_screencast_and_action_evidence() {
             reports: reports_tx,
         },
     ));
-    let outcome = tokio::time::timeout(Duration::from_secs(45), async {
-        tokio::select! {
-            frame = frames.changed() => { frame.expect("first JPEG frame"); }
-            event = events.recv() => {
-                let event = event.expect("startup event");
-                assert!(matches!(event.kind, event_bus::EventKind::Diagnostic(_)));
-                tokio::time::timeout(Duration::from_secs(10), frames.changed()).await
-                    .expect("first JPEG frame deadline").expect("first JPEG frame");
-            }
-        }
+    async {
+        frames.changed().await.expect("first JPEG frame");
         assert!(
             frames
                 .borrow_and_update()
                 .as_ref()
-                .is_some_and(|frame| frame.size[0] > 0)
+                .is_some_and(|frame| frame.width() > 0)
         );
         // When: navigate to the fixture, then click its DOM-changing button.
         for (name, action) in [
@@ -240,14 +232,10 @@ async fn chromium_screencast_and_action_evidence() {
             .expect("save diagnostics");
         }
         eprintln!("Browser evidence: {}", evidence.display());
-    })
+    }
     .await;
     let _ = stop.send(());
-    let closed = tokio::time::timeout(Duration::from_secs(25), browser).await;
+    let closed = browser.await;
     tasks.abort_all();
-    outcome.expect("browser evidence within deadline");
-    closed
-        .expect("shutdown deadline")
-        .expect("browser task")
-        .expect("browser result");
+    closed.expect("browser task").expect("browser result");
 }

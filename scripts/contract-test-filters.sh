@@ -46,7 +46,6 @@ IO_CONTRACT_FILTER='
       | binary(=ownership_close_headless)))
 '
 BROWSER_TEST_FILTER='
-  (kind(lib) & test(/^browser::/))
-  | binary(=browser)
+  binary(=browser)
   | binary(=evorch-gui)
 '

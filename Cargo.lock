@@ -799,6 +799,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chromiumoxide",
+ "event-bus",
+ "futures-util",
+ "image",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "storage",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2571,8 +2590,8 @@ dependencies = [
  "ashpd",
  "async-trait",
  "base64 0.22.1",
+ "browser",
  "catalog",
- "chromiumoxide",
  "chrono",
  "config",
  "eframe",
@@ -2584,7 +2603,6 @@ dependencies = [
  "egui_kittest",
  "egui_plot",
  "event-bus",
- "futures-util",
  "image",
  "mock-openai",
  "model",
@@ -2598,7 +2616,6 @@ dependencies = [
  "sandbox",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "storage",
  "tempfile",
  "thiserror 2.0.18",

@@ -6,7 +6,7 @@ use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sha2::{Digest, Sha256};
 
-use super::{BrowserAction, BrowserError, BrowserReport};
+use crate::{BrowserAction, BrowserError, BrowserReport};
 
 pub(super) fn emit(bus: &EventBus, code: &str, detail: &str, failed: bool) {
     bus.emit(Event::new(DiagnosticEvent {

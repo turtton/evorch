@@ -70,7 +70,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 - 役割: 実 Chromium のヘッドレスセッションを起動し、localhost フィクスチャに
   対するスクリーンキャストとアクション証跡を検証する。通常実行では ignored。
-- コマンド: `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture`
+- コマンド: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture`
 - 環境変数: `EVORCH_BROWSER_EVIDENCE_DIR` (証跡出力先)、
   `CHROME` (chromiumoxide の実行ファイル検出が参照。CI で設定)
 - CI ジョブ: `browser-e2e` (アーティファクト `browser-e2e-evidence`)
@@ -208,7 +208,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
 | `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 40 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
 | `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
-| `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
+| `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |
 | `GUI_QA_MODE` / `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の fixture / 実アプリ、起動バイナリ、出力ディレクトリを指定する | L7 |
 | `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L8 |

@@ -96,7 +96,7 @@ jobs:
         timeout-minutes: 10
         run: cargo test --workspace --doc
       # The default GUI suite above retains default-feature coverage. Only the
-      # browser module, its integration tests, and GUI startup need another run.
+      # browser pane, its integration tests, and GUI startup need another run.
       - name: GUI browser feature tests
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -273,7 +273,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Run Chromium browser evidence test
-        run: cargo nextest run -p gui --features browser --lib -E 'test(=browser::tests::chromium_screencast_and_action_evidence)' --run-ignored only --success-output immediate --no-tests fail
+        run: cargo nextest run -p browser --lib -E 'test(=tests::chromium_screencast_and_action_evidence)' --run-ignored only --success-output immediate --no-tests fail
         env:
           # Cargo runs tests from the crate directory, not the workspace root.
           EVORCH_BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/target/browser-evidence

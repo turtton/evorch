@@ -1,0 +1,25 @@
+[package]
+name = "browser"
+description = "Chromium sessions driven over CDP, shared by the GUI and agent tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+chromiumoxide = { version = "0.9", default-features = false }
+event-bus = { path = "../event-bus" }
+futures-util.workspace = true
+image = { workspace = true, default-features = false, features = ["jpeg"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+url.workspace = true
+
+[dev-dependencies]
+storage = { path = "../storage" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
