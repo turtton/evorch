@@ -398,7 +398,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                             &checker_config,
                             &[root],
                             state.shared.executor.approval_policy(),
-                            Some(state.shared.executor.as_ref()),
+                            crate::runtime::BrowserTools::Inherit(&state.shared.executor),
                         )
                     })
             };

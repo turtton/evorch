@@ -27,6 +27,7 @@ const ROOT_KEYS: &[&str] = &[
     "team",
     "sandbox",
     "comment_checker",
+    "tools",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -124,6 +125,8 @@ const SANDBOX_KEYS: &[&str] = &[
     "escalate_to_user_on_deny",
 ];
 const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
+const TOOLS_KEYS: &[&str] = &["browser"];
+const BROWSER_TOOLS_KEYS: &[&str] = &["enabled", "executable", "max_pages", "coordinate_actions"];
 const ROLE_BINDING_KEYS: &[&str] = &["models", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["models", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];
@@ -195,6 +198,12 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "team", TEAM_KEYS)?;
     validate_section(root, "sandbox", SANDBOX_KEYS)?;
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
+    validate_section(root, "tools", TOOLS_KEYS)?;
+    if let Some(tools) = root.get("tools").and_then(toml::Value::as_table)
+        && let Some(browser) = tools.get("browser").and_then(toml::Value::as_table)
+    {
+        check_keys(browser, "tools.browser", BROWSER_TOOLS_KEYS)?;
+    }
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
 }
 
@@ -312,11 +321,20 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("sandbox", SANDBOX_KEYS),
         ("comment_checker", COMMENT_CHECKER_KEYS),
         ("orchestration", ORCHESTRATION_KEYS),
+        ("tools", TOOLS_KEYS),
     ];
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
             retain_known(table, name, allowed, &mut ignored);
         }
+    }
+    if let Some(browser) = root
+        .get_mut("tools")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tools| tools.get_mut("browser"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(browser, "tools.browser", BROWSER_TOOLS_KEYS, &mut ignored);
     }
     Ok(ignored)
 }

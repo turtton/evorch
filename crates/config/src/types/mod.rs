@@ -15,6 +15,7 @@ pub mod routing;
 pub mod rules;
 pub mod sandbox;
 pub mod team;
+pub mod tools;
 
 use std::collections::BTreeMap;
 
@@ -45,6 +46,7 @@ pub use routing::{CooldownConfig, FallbackConfig, RouteCandidateConfig, RoutingC
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use team::TeamConfig;
+pub use tools::{BrowserToolsConfig, ToolsConfig};
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
 pub const CURRENT_VERSION: u32 = 3;
@@ -98,6 +100,7 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     /// Write/Edit 成功後の外部コメント検査。
     pub comment_checker: CommentCheckerConfig,
+    pub tools: ToolsConfig,
 }
 
 impl Default for Config {
@@ -123,6 +126,7 @@ impl Default for Config {
             team: TeamConfig::default(),
             sandbox: SandboxConfig::default(),
             comment_checker: CommentCheckerConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }

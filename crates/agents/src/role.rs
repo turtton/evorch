@@ -6,10 +6,11 @@ use crate::capability::RoleCapabilities;
 use serde::{Deserialize, Serialize};
 
 /// Agent browser tools (ADR 0034), granted wherever a role may browse the Web.
-pub const BROWSER_TOOLS: [&str; 8] = [
+pub const BROWSER_TOOLS: [&str; 9] = [
     "browser_navigate",
     "browser_snapshot",
     "browser_click",
+    "browser_click_at",
     "browser_type",
     "browser_press_key",
     "browser_scroll",

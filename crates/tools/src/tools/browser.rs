@@ -13,16 +13,26 @@ use crate::network_guard::NetworkGuard;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool};
 
-pub const BROWSER_TOOL_NAMES: [&str; 8] = [
+/// Every browser tool name, including opt-in ones that are registered only
+/// when configured.
+pub const BROWSER_TOOL_NAMES: [&str; 9] = [
     "browser_navigate",
     "browser_snapshot",
     "browser_click",
+    "browser_click_at",
     "browser_type",
     "browser_press_key",
     "browser_scroll",
     "browser_screenshot",
     "browser_close",
 ];
+
+/// Which optional browser tools to register.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BrowserToolOptions {
+    /// `browser_click_at`: clicks at viewport coordinates.
+    pub coordinate_actions: bool,
+}
 
 /// Lets the agent browser load only what `web_fetch` may fetch.
 pub struct GuardPolicy(pub Arc<NetworkGuard>);
@@ -57,6 +67,7 @@ enum Kind {
     Navigate,
     Snapshot,
     Click,
+    ClickAt,
     Type,
     PressKey,
     Scroll,
@@ -64,10 +75,11 @@ enum Kind {
     Close,
 }
 
-const KINDS: [Kind; 8] = [
+const KINDS: [Kind; 9] = [
     Kind::Navigate,
     Kind::Snapshot,
     Kind::Click,
+    Kind::ClickAt,
     Kind::Type,
     Kind::PressKey,
     Kind::Scroll,
@@ -80,9 +92,33 @@ pub struct BrowserTool {
     provider: Arc<dyn PageProvider>,
 }
 
-pub fn browser_tools(provider: Arc<dyn PageProvider>) -> Vec<BrowserTool> {
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Navigate => "browser_navigate",
+            Self::Snapshot => "browser_snapshot",
+            Self::Click => "browser_click",
+            Self::ClickAt => "browser_click_at",
+            Self::Type => "browser_type",
+            Self::PressKey => "browser_press_key",
+            Self::Scroll => "browser_scroll",
+            Self::Screenshot => "browser_screenshot",
+            Self::Close => "browser_close",
+        }
+    }
+
+    fn enabled(self, options: BrowserToolOptions) -> bool {
+        self != Self::ClickAt || options.coordinate_actions
+    }
+}
+
+pub fn browser_tools(
+    provider: Arc<dyn PageProvider>,
+    options: BrowserToolOptions,
+) -> Vec<BrowserTool> {
     KINDS
         .into_iter()
+        .filter(|kind| kind.enabled(options))
         .map(|kind| BrowserTool {
             kind,
             provider: Arc::clone(&provider),
@@ -101,6 +137,8 @@ struct Args {
     submit: bool,
     key: Option<String>,
     direction: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
 }
 
 impl BrowserTool {
@@ -121,6 +159,13 @@ impl BrowserTool {
                 page.navigate(url.as_str()).await?;
             }
             Kind::Click => page.click(&required(args.reference, "ref")?).await?,
+            Kind::ClickAt => {
+                let point = |value: Option<f64>, name: &str| {
+                    value.ok_or_else(|| AgentError::Navigation(format!("missing {name}")))
+                };
+                page.click_at(point(args.x, "x")?, point(args.y, "y")?)
+                    .await?;
+            }
             Kind::Type => {
                 page.type_text(
                     &required(args.reference, "ref")?,
@@ -187,10 +232,7 @@ fn upgrade(url: &str) -> Result<url::Url, AgentError> {
 #[async_trait::async_trait]
 impl Tool for BrowserTool {
     fn name(&self) -> &str {
-        BROWSER_TOOL_NAMES[KINDS
-            .iter()
-            .position(|kind| *kind == self.kind)
-            .unwrap_or(0)]
+        self.kind.name()
     }
 
     fn description(&self) -> &str {
@@ -202,6 +244,9 @@ impl Tool for BrowserTool {
                 "Return the current page as an accessibility outline. Elements carry [ref=eN] for the other browser tools; only refs from the latest outline are accepted."
             }
             Kind::Click => "Click the element with the given ref, then return the updated outline.",
+            Kind::ClickAt => {
+                "Click the point (x, y), in CSS pixels from the top-left of the visible viewport as shown by browser_screenshot, then return the updated outline. Prefer browser_click; use this only for targets the outline does not expose, such as a canvas."
+            }
             Kind::Type => {
                 "Replace the content of the field with the given ref by text (empty clears it); submit presses Enter. Returns the updated outline."
             }
@@ -222,6 +267,10 @@ impl Tool for BrowserTool {
         let (properties, required) = match self.kind {
             Kind::Navigate => (json!({"url": {"type": "string"}}), json!(["url"])),
             Kind::Click => (json!({"ref": reference}), json!(["ref"])),
+            Kind::ClickAt => (
+                json!({"x": {"type": "number", "minimum": 0}, "y": {"type": "number", "minimum": 0}}),
+                json!(["x", "y"]),
+            ),
             Kind::Type => (
                 json!({"ref": reference, "text": {"type": "string"}, "submit": {"type": "boolean", "default": false}}),
                 json!(["ref", "text"]),

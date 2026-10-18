@@ -39,9 +39,26 @@ runtime registers `browser_navigate`, `browser_snapshot`, `browser_click`,
 use them; `sandbox.web_tools_enabled` is their global switch, as for the other
 Web tools.
 
+`[tools.browser]` in the user configuration (`~/.config/evorch/config.toml`
+or its `config.d/`) adjusts them. Project files, environment variables and CLI
+overrides cannot set it, because it names a program to run and widens what
+agents can do.
+
+```toml
+[tools.browser]
+enabled = true                    # false keeps the tools unregistered
+executable = "/usr/bin/chromium"  # default: CHROME, then auto-detection
+max_pages = 8                     # more closes the least recently used page
+coordinate_actions = false        # true also registers browser_click_at
+```
+
+`browser_click_at` clicks a point given in CSS pixels from the top-left of the
+visible viewport, as `browser_screenshot` shows it. It is for targets the
+outline cannot name, such as a canvas; refs stay the default.
+
 - One headless Chromium is launched on first use, with a temporary profile.
-  Each run gets its own page; at most eight stay open and a run's page closes
-  when the run ends or on `browser_close`.
+  Each run gets its own page; at most `max_pages` stay open and a run's page
+  closes when the run ends or on `browser_close`.
 - Pages are read as an accessibility outline. Elements carry `[ref=eN]`, and
   the action tools accept only refs from the latest outline. Actions return
   the updated outline; `browser_screenshot` returns a PNG image result.

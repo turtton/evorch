@@ -73,6 +73,7 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "browser_navigate",
     "browser_snapshot",
     "browser_click",
+    "browser_click_at",
     "browser_type",
     "browser_press_key",
     "browser_scroll",
