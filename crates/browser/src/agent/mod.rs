@@ -11,8 +11,8 @@ mod snapshot;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-pub use chromium::{AgentBrowser, LaunchOptions};
-pub use page::PageAgent;
+pub use chromium::{AgentBrowser, LaunchOptions, Screencast};
+pub use page::{Activity, PageAgent};
 pub use snapshot::{MAX_SNAPSHOT_LINES, Snapshot, render};
 
 /// One page reachable over CDP.
@@ -73,6 +73,8 @@ pub enum AgentError {
     UnknownKey(String),
     #[error("no Chromium or Chrome executable found ({0}); install one or set CHROME to its path")]
     NotFound(String),
+    #[error("no open browser page for {0}")]
+    NoPage(String),
     #[error("browser launch failed: {0}")]
     Launch(String),
     #[error("navigation failed: {0}")]

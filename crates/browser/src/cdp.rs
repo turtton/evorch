@@ -30,19 +30,8 @@ pub(super) async fn run(
     mut channels: Channels,
 ) -> Result<(), BrowserError> {
     let profile = tempfile::tempdir()?;
-    let mut config = BrowserConfig::builder()
-        .new_headless_mode()
-        .user_data_dir(profile.path())
-        .window_size(1280, 720)
-        .launch_timeout(Duration::from_secs(20))
-        .request_timeout(Duration::from_secs(15))
-        .arg("--no-startup-window")
-        .arg("--no-first-run");
-    if headful {
-        config = config.with_head().arg("--start-minimized");
-    }
-    let config = config.build().map_err(BrowserError::Configuration)?;
-    let (mut browser, mut handler) = Browser::launch(config).await?;
+    let (mut browser, mut handler) =
+        Browser::launch(launch_config(profile.path(), headful)?).await?;
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(async move {
         while let Some(result) = handler.next().await {
@@ -79,6 +68,26 @@ pub(super) async fn run(
         false,
     );
     result
+}
+
+/// chromiumoxide prefixes switches with `--` itself; a key that already has
+/// one reaches Chromium as `----key` and is ignored.
+pub(super) fn launch_config(
+    profile: &std::path::Path,
+    headful: bool,
+) -> Result<BrowserConfig, BrowserError> {
+    let mut config = BrowserConfig::builder()
+        .new_headless_mode()
+        .user_data_dir(profile)
+        .window_size(1280, 720)
+        .launch_timeout(Duration::from_secs(20))
+        .request_timeout(Duration::from_secs(15))
+        .arg("no-startup-window")
+        .arg("no-first-run");
+    if headful {
+        config = config.with_head().arg("start-minimized");
+    }
+    config.build().map_err(BrowserError::Configuration)
 }
 
 async fn stream(
@@ -137,7 +146,7 @@ async fn stream(
             },
             frame = events.next() => match frame {
                 Some(frame) => {
-                    let image = decode(&frame.data)?;
+                    let image = decode_jpeg(&frame.data, [1280, 720])?;
                     frames.send_replace(Some(image));
                     acknowledge(&page, frame.session_id).await?;
                 }
@@ -153,13 +162,16 @@ async fn acknowledge(page: &Page, session_id: i64) -> Result<(), BrowserError> {
     Ok(())
 }
 
-fn decode(data: impl AsRef<[u8]>) -> Result<image::RgbaImage, BrowserError> {
+pub(crate) fn decode_jpeg(
+    data: impl AsRef<[u8]>,
+    max: [u32; 2],
+) -> Result<image::RgbaImage, BrowserError> {
     let jpeg = STANDARD.decode(data)?;
     let mut reader =
         image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg);
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(1280);
-    limits.max_image_height = Some(720);
+    limits.max_image_width = Some(max[0]);
+    limits.max_image_height = Some(max[1]);
     limits.max_alloc = Some(16 * 1024 * 1024);
     reader.limits(limits);
     Ok(reader.decode()?.into_rgba8())

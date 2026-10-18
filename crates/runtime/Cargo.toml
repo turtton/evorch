@@ -38,6 +38,8 @@ tracing = { workspace = true }
 socket2 = "0.6"
 
 [dev-dependencies]
+browser = { path = "../browser" }
+url = { workspace = true }
 jsonschema = { workspace = true }
 wiremock = { workspace = true }
 rcgen = { workspace = true }

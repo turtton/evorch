@@ -4,13 +4,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused;
+use chromiumoxide::cdp::browser_protocol::page::{
+    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
+    StopScreencastParams,
+};
+use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use chromiumoxide::types::{Command, Method, MethodId};
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use super::proxy::Proxy;
 use super::{AgentError, CdpTarget, PageAgent, PageProvider, RequestPolicy};
+
+const WINDOW: [u32; 2] = [1280, 800];
 
 pub struct LaunchOptions {
     /// `None` detects an installed Chromium/Chrome (honouring `CHROME`).
@@ -25,6 +33,10 @@ pub struct LaunchOptions {
 pub struct AgentBrowser {
     options: LaunchOptions,
     state: tokio::sync::Mutex<Option<Running>>,
+    pages: watch::Sender<Vec<String>>,
+    /// Keys `release` could not close because the state was busy; the next
+    /// holder of the state closes them.
+    released: std::sync::Mutex<Vec<String>>,
 }
 
 struct Running {
@@ -40,7 +52,110 @@ impl AgentBrowser {
         Self {
             options,
             state: tokio::sync::Mutex::new(None),
+            pages: watch::Sender::new(Vec::new()),
+            released: std::sync::Mutex::default(),
         }
+    }
+
+    /// Keys with an open page, sorted; it changes whenever a page opens or closes.
+    pub fn pages(&self) -> watch::Receiver<Vec<String>> {
+        self.pages.subscribe()
+    }
+
+    async fn close_released(&self, running: &mut Running) {
+        let keys = std::mem::take(
+            &mut *self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for key in keys {
+            if let Some(index) = running.pages.iter().position(|(owner, ..)| *owner == key)
+                && let Some((_, _, page)) = running.pages.remove(index)
+            {
+                let _ = page.close().await;
+            }
+        }
+    }
+
+    fn publish(&self, running: Option<&Running>) {
+        let mut keys: Vec<String> = running
+            .into_iter()
+            .flat_map(|running| running.pages.iter().map(|(key, ..)| key.clone()))
+            .collect();
+        keys.sort();
+        self.pages.send_if_modified(|current| {
+            let changed = *current != keys;
+            *current = keys;
+            changed
+        });
+    }
+
+    /// Starts a screencast of `key`'s open page. `on_frame` runs after each
+    /// frame and once more when the page closes, e.g. to request a repaint.
+    pub async fn screencast(
+        &self,
+        key: &str,
+        on_frame: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Screencast, AgentError> {
+        let mut state = self.state.lock().await;
+        if let Some(running) = state.as_mut() {
+            self.close_released(running).await;
+            self.publish(Some(running));
+        }
+        let (agent, page) = state
+            .as_ref()
+            .and_then(|running| running.pages.iter().find(|(owner, ..)| owner == key))
+            .map(|(_, agent, page)| (Arc::clone(agent), page.clone()))
+            .ok_or_else(|| AgentError::NoPage(key.to_owned()))?;
+        drop(state);
+        let cdp = |error: chromiumoxide::error::CdpError| AgentError::Cdp {
+            method: "Page.startScreencast".into(),
+            detail: error.to_string(),
+        };
+        let mut events = page
+            .event_listener::<EventScreencastFrame>()
+            .await
+            .map_err(cdp)?;
+        page.execute(
+            StartScreencastParams::builder()
+                .format(StartScreencastFormat::Jpeg)
+                .quality(60)
+                .max_width(WINDOW[0])
+                .max_height(WINDOW[1])
+                .build(),
+        )
+        .await
+        .map_err(cdp)?;
+        let (frames_tx, frames) = watch::channel(None);
+        let acknowledging = page.clone();
+        let task = tokio::spawn(async move {
+            while let Some(frame) = events.next().await {
+                match crate::cdp::decode_jpeg(&frame.data, WINDOW) {
+                    Ok(image) => {
+                        frames_tx.send_replace(Some(image));
+                    }
+                    Err(error) => tracing::debug!(%error, "agent screencast frame dropped"),
+                }
+                on_frame();
+                if acknowledging
+                    .execute(ScreencastFrameAckParams::new(frame.session_id))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            drop(frames_tx);
+            on_frame();
+        });
+        Ok(Screencast {
+            agent,
+            frames,
+            page,
+            runtime: tokio::runtime::Handle::current(),
+            task,
+        })
     }
 
     /// The executable `options` would launch, if one can be found.
@@ -60,7 +175,7 @@ impl AgentBrowser {
             .new_headless_mode()
             .chrome_executable(executable)
             .user_data_dir(profile.path())
-            .window_size(1280, 800)
+            .window_size(WINDOW[0], WINDOW[1])
             .launch_timeout(Duration::from_secs(20))
             .request_timeout(Duration::from_secs(30))
             // chromiumoxide adds the leading `--` and merges repeated keys
@@ -110,7 +225,13 @@ impl AgentBrowser {
     async fn open(&self, running: &Running) -> Result<(Arc<PageAgent>, Page), AgentError> {
         let page = running
             .browser
-            .new_page("about:blank")
+            .new_page({
+                // A window per page keeps every page rendering, so any of
+                // them can be screencast.
+                let mut target = CreateTargetParams::new("about:blank");
+                target.new_window = Some(true);
+                target
+            })
             .await
             .map_err(|error| AgentError::Launch(error.to_string()))?;
         let mut paused = page
@@ -177,11 +298,13 @@ impl PageProvider for AgentBrowser {
             .is_some_and(|running| running.handler.is_finished())
         {
             *state = None;
+            self.publish(None);
         }
         if state.is_none() {
             *state = Some(self.launch().await?);
         }
         let running = state.as_mut().expect("launched above");
+        self.close_released(running).await;
         if let Some(index) = running.pages.iter().position(|(owner, ..)| owner == key) {
             let entry = running.pages.remove(index).expect("index from position");
             let agent = Arc::clone(&entry.1);
@@ -197,6 +320,7 @@ impl PageProvider for AgentBrowser {
                 let _ = page.close().await;
             }
         }
+        self.publish(Some(running));
         Ok(agent)
     }
 
@@ -205,17 +329,24 @@ impl PageProvider for AgentBrowser {
         let Some(running) = state.as_mut() else {
             return false;
         };
+        self.close_released(running).await;
+        self.publish(Some(running));
         let Some(index) = running.pages.iter().position(|(owner, ..)| owner == key) else {
             return false;
         };
         if let Some((_, _, page)) = running.pages.remove(index) {
             let _ = page.close().await;
         }
+        self.publish(Some(running));
         true
     }
 
     fn release(&self, key: &str) {
         let Ok(mut state) = self.state.try_lock() else {
+            self.released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.to_owned());
             return;
         };
         let Some(running) = state.as_mut() else {
@@ -231,6 +362,53 @@ impl PageProvider for AgentBrowser {
                 let _ = page.close().await;
             });
         }
+        self.publish(Some(running));
+    }
+}
+
+/// A screencast of one agent page. Frames stop when it is dropped or the
+/// page closes.
+pub struct Screencast {
+    agent: Arc<PageAgent>,
+    frames: watch::Receiver<Option<image::RgbaImage>>,
+    page: Page,
+    runtime: tokio::runtime::Handle,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Screencast {
+    /// The observed page, for its [`PageAgent::activity`].
+    pub fn agent(&self) -> &Arc<PageAgent> {
+        &self.agent
+    }
+
+    /// The latest frame, once per change.
+    pub fn poll_frame(&mut self) -> Option<image::RgbaImage> {
+        match self.frames.has_changed() {
+            Ok(true) => self.frames.borrow_and_update().clone(),
+            Ok(false) | Err(_) => None,
+        }
+    }
+
+    /// Waits for the next frame; `None` once the page has closed.
+    pub async fn next_frame(&mut self) -> Option<image::RgbaImage> {
+        self.frames.changed().await.ok()?;
+        self.frames.borrow_and_update().clone()
+    }
+
+    /// Whether the page closed, so no further frames will arrive.
+    pub fn ended(&self) -> bool {
+        self.frames.has_changed().is_err()
+    }
+}
+
+impl Drop for Screencast {
+    fn drop(&mut self) {
+        self.task.abort();
+        let page = self.page.clone();
+        self.runtime.spawn(async move {
+            let _ = page.execute(StopScreencastParams::default()).await;
+        });
     }
 }
 

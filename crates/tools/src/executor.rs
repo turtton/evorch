@@ -115,6 +115,7 @@ pub struct ToolExecutor {
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
     file_boundary: RwLock<Option<sandbox::SandboxBoundary>>,
     file_escalation: RwLock<Option<Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>>>,
+    agent_browser: Option<Arc<browser::agent::AgentBrowser>>,
 }
 
 impl ToolExecutor {
@@ -130,6 +131,7 @@ impl ToolExecutor {
             workspace_boundary: RwLock::new(None),
             file_boundary: RwLock::new(None),
             file_escalation: RwLock::new(None),
+            agent_browser: None,
         }
     }
 
@@ -414,7 +416,19 @@ impl ToolExecutor {
             tracing::info!(%error, "agent browser tools are unavailable");
             return Ok(self);
         }
-        Ok(self.with_browser_provider(Arc::new(browser::agent::AgentBrowser::new(options))))
+        Ok(self.with_agent_browser(Arc::new(browser::agent::AgentBrowser::new(options))))
+    }
+
+    /// Registers the agent browser tools over a shared [`browser::agent::AgentBrowser`],
+    /// so every executor of the process drives (and observers see) one Chromium.
+    pub fn with_agent_browser(mut self, browser: Arc<browser::agent::AgentBrowser>) -> Self {
+        self.agent_browser = Some(Arc::clone(&browser));
+        self.with_browser_provider(browser)
+    }
+
+    /// The agent browser registered by [`ToolExecutor::with_agent_browser`].
+    pub fn agent_browser(&self) -> Option<Arc<browser::agent::AgentBrowser>> {
+        self.agent_browser.clone()
     }
 
     /// Registers the agent browser tools over `provider`'s pages.
