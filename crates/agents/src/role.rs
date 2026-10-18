@@ -5,6 +5,18 @@
 use crate::capability::RoleCapabilities;
 use serde::{Deserialize, Serialize};
 
+/// Agent browser tools (ADR 0034), granted wherever a role may browse the Web.
+pub const BROWSER_TOOLS: [&str; 8] = [
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_press_key",
+    "browser_scroll",
+    "browser_screenshot",
+    "browser_close",
+];
+
 /// v0.2 のエージェントロール (ADR 0002 の capability boundary)。
 ///
 /// # 境界の一覧
@@ -15,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// | Explorer | read / grep | 不可 |
 /// | Worker | read / write / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | 不可 |
 /// | Reviewer | read / grep / git_diff | 不可 |
-/// | WebResearcher | read / grep / web_search / web_fetch | 不可 |
+/// | WebResearcher | read / grep / web_search / web_fetch / browser_* | 不可 |
 ///
 /// # 設計上の決定
 ///
@@ -138,9 +150,12 @@ impl Role {
                 false,
             ),
             Role::Reviewer => RoleCapabilities::new(["read", "grep", "git_diff"], false),
-            Role::WebResearcher => {
-                RoleCapabilities::new(["read", "grep", "web_search", "web_fetch"], false)
-            }
+            Role::WebResearcher => RoleCapabilities::new(
+                ["read", "grep", "web_search", "web_fetch"]
+                    .into_iter()
+                    .chain(BROWSER_TOOLS),
+                false,
+            ),
             Role::Planner => RoleCapabilities::new(
                 ["read", "grep", "git_diff", "skill_load", "web_fetch"],
                 false,

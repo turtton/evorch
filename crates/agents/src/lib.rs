@@ -6,4 +6,4 @@ pub mod capability;
 pub mod role;
 
 pub use capability::{CapabilityDecision, RoleCapabilities};
-pub use role::Role;
+pub use role::{BROWSER_TOOLS, Role};

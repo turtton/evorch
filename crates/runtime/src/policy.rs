@@ -59,9 +59,12 @@ impl ExecutionPolicy {
                     && is_root
                     && self.role_name == Role::Worker.name()
                 {
-                    self.capabilities
-                        .allowed_tools
-                        .extend(["web_search", "web_fetch"].into_iter().map(str::to_owned));
+                    self.capabilities.allowed_tools.extend(
+                        ["web_search", "web_fetch"]
+                            .into_iter()
+                            .chain(agents::BROWSER_TOOLS)
+                            .map(str::to_owned),
+                    );
                 }
                 return self;
             }
@@ -224,6 +227,7 @@ mod tests {
                 "submit_goal_check",
             ]
             .into_iter()
+            .chain(agents::BROWSER_TOOLS)
             .map(str::to_owned),
         );
         assert_eq!(policy, expected);

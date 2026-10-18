@@ -18,7 +18,7 @@ mod size;
 pub use dns::DnsResolver;
 use dns::{HickoryResolver, PinningResolver};
 pub use error::NetworkGuardError;
-use https::upgrade_to_https;
+pub(crate) use https::upgrade_to_https;
 use ip_policy::IpPolicy;
 
 /// 追従を許可する redirect の最大回数。
@@ -143,6 +143,41 @@ impl NetworkGuard {
     ) -> Result<GuardedResponse, NetworkGuardError> {
         self.guarded_request(url, OutgoingRequest::PostJson { headers, body })
             .await
+    }
+
+    /// Applies the scheme, DNS and IP checks of [`NetworkGuard::get`] to a URL
+    /// another client will load, such as the agent browser. The check alone
+    /// does not pin the addresses; [`NetworkGuard::resolve_destination`] does.
+    ///
+    /// # Errors
+    /// Returns the [`NetworkGuardError`] for a non-HTTPS URL, a failed lookup or a blocked address.
+    pub async fn check_destination(&self, url: &Url) -> Result<(), NetworkGuardError> {
+        ensure_https(url)?;
+        let host = url.host_str().ok_or(NetworkGuardError::MissingHost)?;
+        self.resolve_destination(host, url.port_or_known_default().unwrap_or(443))
+            .await
+            .map(drop)
+    }
+
+    /// Resolves `host` once and returns its addresses for a caller that
+    /// connects to exactly these, such as the agent browser's proxy.
+    ///
+    /// # Errors
+    /// Returns the [`NetworkGuardError`] for a failed lookup or a blocked address.
+    pub async fn resolve_destination(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, NetworkGuardError> {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let addrs = self.resolver.resolve(host).await?;
+        if let Some(&addr) = addrs.iter().find(|addr| self.policy.is_blocked(**addr)) {
+            return Err(NetworkGuardError::BlockedIp { addr });
+        }
+        Ok(addrs
+            .into_iter()
+            .map(|addr| SocketAddr::new(addr, port))
+            .collect())
     }
 
     async fn guarded_request(

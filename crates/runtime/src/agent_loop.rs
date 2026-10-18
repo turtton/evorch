@@ -1230,6 +1230,7 @@ impl LoopState {
             self.shared
                 .executor
                 .cancel_shell_jobs(&self.task.run_id.to_string());
+            self.shared.executor.end_run(&self.task.run_id.to_string());
             self.channels.inbox_rx.close();
             self.task.mailbox.close();
             // Public terminal state permits same-ID restoration. Publish only after

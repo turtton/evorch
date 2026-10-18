@@ -371,10 +371,22 @@ impl QuickModelReviewer {
         self
     }
 
-    /// Reviews one Web fetch using its actual arguments and the real user request.
+    #[cfg(test)]
     pub(crate) async fn review_web_fetch(
         &self,
         run_id: &str,
+        input: &serde_json::Value,
+        context: Option<ReviewContext>,
+    ) -> Result<ReviewVerdict, ReviewError> {
+        self.review_web_request(run_id, "web_fetch", input, context)
+            .await
+    }
+
+    /// Reviews one URL-bearing Web tool call, such as web_fetch or browser_navigate.
+    pub(crate) async fn review_web_request(
+        &self,
+        run_id: &str,
+        tool: &str,
         input: &serde_json::Value,
         context: Option<ReviewContext>,
     ) -> Result<ReviewVerdict, ReviewError> {
@@ -386,16 +398,19 @@ impl QuickModelReviewer {
         };
         if context.real_user_requests.is_empty() {
             return Ok(ReviewVerdict::Deny {
-                reason: "web_fetch lacks a real user request in this run's lineage".into(),
+                reason: format!("{tool} lacks a real user request in this run's lineage"),
             });
         }
-        let payload = serde_json::json!({"tool":"web_fetch", "input":input, "context":context});
+        let instruction = INSTRUCTION.replacen(
+            "Review one web_fetch request.",
+            &format!("Review one {tool} request."),
+            1,
+        );
+        let payload = serde_json::json!({"tool":tool, "input":input, "context":context});
         let messages = [
             Message {
                 role: MessageRole::System,
-                content: vec![ContentBlock::Text {
-                    text: INSTRUCTION.into(),
-                }],
+                content: vec![ContentBlock::Text { text: instruction }],
             },
             Message {
                 role: MessageRole::User,

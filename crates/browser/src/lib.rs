@@ -1,6 +1,7 @@
 //! Chromium sessions driven over CDP (ADR 0034), kept free of GUI types so the
 //! GUI, runtime and tools can share them.
 
+pub mod agent;
 mod cdp;
 mod diagnostics;
 mod session;

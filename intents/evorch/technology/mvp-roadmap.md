@@ -150,6 +150,7 @@ test harness instance
 - 既定: 外部 Playwright/Chromium プロセス + CDP screencast を egui の Browser pane へ JPEG フレームとして stream
 - 将来: `cef-rs` OSR / `browser-relay` を feature flag で追加
 - 2026-10-18 更新（[ADR 0034](../decisions/0034-browser-engine-split.md)）: agent の閲覧は外部 Chromium + CDP、`present` した HTML のプレビューと操作は CEF OSR に分ける。agent 用 tool は AX snapshot と ref による共通の層とする
+- 2026-10-19 進捗（ADR 0034 A 段階 1）: `crates/browser` の `agent` module（`CdpTarget` / `PageAgent` / `AgentBrowser`）と `browser_*` tool 8 種を追加。Chromium 検出時のみ登録し、WebResearcher と会話 root Worker に公開。全通信を evorch の loopback proxy（DNS pinning・TLS のみ）経由にし、CDP Fetch と合わせて `web_fetch` と同じ guard に通す。GUI 観察 pane は段階 2
 - headless 実行の可視化: action log + 前後 screenshot + DOM diff。フォーカスは明示操作時のみ
 
 ### Bundle 却下（採用しない）

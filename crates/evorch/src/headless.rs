@@ -169,6 +169,7 @@ pub async fn run_headless(
                 Arc::new(DirectSandbox::new_unchecked()),
             )
             .with_web_tools()
+            .and_then(ToolExecutor::with_browser_tools)
             .map_err(|error| runtime::RuntimeError::NetworkGuard {
                 detail: error.to_string(),
             })?,

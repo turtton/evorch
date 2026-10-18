@@ -277,6 +277,8 @@ jobs:
         env:
           # Cargo runs tests from the crate directory, not the workspace root.
           EVORCH_BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/target/browser-evidence
+      - name: Run agent browser test
+        run: cargo nextest run -p browser --test agent_chromium --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@v4
         with:
           name: browser-e2e-evidence

@@ -6,7 +6,10 @@ fn additional_roles_have_least_privilege_capabilities() {
     let cases = [
         (
             "WebResearcher",
-            vec!["read", "grep", "web_search", "web_fetch"],
+            ["read", "grep", "web_search", "web_fetch"]
+                .into_iter()
+                .chain(agents::BROWSER_TOOLS)
+                .collect::<Vec<_>>(),
         ),
         (
             "Planner",

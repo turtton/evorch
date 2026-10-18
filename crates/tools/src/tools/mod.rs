@@ -3,6 +3,7 @@
 //! 各ツールは [`crate::Tool`] を実装するスタブであり、実行ボディは wave 2 で
 //! 実装する。スキーマと権限の宣言は最終契約である。
 
+pub mod browser;
 pub mod edit;
 pub mod file_access;
 mod file_diff;
@@ -16,6 +17,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
+pub use browser::{BROWSER_TOOL_NAMES, BrowserTool, GuardPolicy, browser_tools};
 pub use edit::Edit;
 pub use git_diff::GitDiff;
 pub use grep::Grep;

@@ -397,6 +397,46 @@ impl ToolExecutor {
         Ok(self)
     }
 
+    /// Registers the agent browser tools when a Chromium or Chrome executable is
+    /// installed or named by `CHROME`; otherwise they stay unregistered.
+    ///
+    /// # Errors
+    /// Returns [`NetworkGuardError`] when the request guard cannot be built.
+    pub fn with_browser_tools(self) -> Result<Self, NetworkGuardError> {
+        let options = browser::agent::LaunchOptions {
+            executable: None,
+            policy: Arc::new(crate::tools::GuardPolicy(Arc::new(
+                crate::network_guard::NetworkGuard::new()?,
+            ))),
+            max_pages: 8,
+        };
+        if let Err(error) = browser::agent::AgentBrowser::detect(&options) {
+            tracing::info!(%error, "agent browser tools are unavailable");
+            return Ok(self);
+        }
+        Ok(self.with_browser_provider(Arc::new(browser::agent::AgentBrowser::new(options))))
+    }
+
+    /// Registers the agent browser tools over `provider`'s pages.
+    pub fn with_browser_provider(
+        mut self,
+        provider: Arc<dyn browser::agent::PageProvider>,
+    ) -> Self {
+        for tool in crate::tools::browser_tools(provider) {
+            self.register(Arc::new(tool))
+                // SAFE-EXPECT: browser_tool_schemas_compile がスキーマのコンパイルを検証済み。
+                .expect("browser tool schemas compile");
+        }
+        self
+    }
+
+    /// Release per-run tool resources at every terminal boundary.
+    pub fn end_run(&self, run_id: &str) {
+        for registered in self.tools.values() {
+            registered.tool.end_run(run_id);
+        }
+    }
+
     /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録し、production 用の
     /// fail-closed なサンドボックスを注入した実行器を生成する。
     ///

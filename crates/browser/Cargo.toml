@@ -7,19 +7,26 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
+bytes.workspace = true
 chromiumoxide = { version = "0.9", default-features = false }
 event-bus = { path = "../event-bus" }
 futures-util.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 image = { workspace = true, default-features = false, features = ["jpeg"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "net", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 storage = { path = "../storage" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
