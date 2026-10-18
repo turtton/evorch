@@ -21,6 +21,18 @@ pub struct ToolResult {
     /// 反復呼び出しの停滞判定に使う runtime 専用の観測。本文・detail・イベントには
     /// 出さない。進捗を報告しない呼び出しでは `None`。
     pub progress: Option<Progress>,
+    /// Images returned to the model with `content`.
+    pub images: Vec<ToolImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolImage {
+    pub media_type: String,
+    /// Base64-encoded bytes.
+    pub data: String,
+    /// File holding the same bytes, so a model that cannot view images can
+    /// hand the path to another agent.
+    pub path: Option<std::path::PathBuf>,
 }
 
 /// [`Tool::reports_progress`](crate::Tool::reports_progress) が真の呼び出しの観測結果。
@@ -41,6 +53,7 @@ impl ToolResult {
             detail: None,
             origin: ContentOrigin::WebUntrusted,
             progress: None,
+            images: Vec::new(),
         }
     }
 
@@ -52,12 +65,18 @@ impl ToolResult {
             detail: None,
             origin: ContentOrigin::WebUntrusted,
             progress: None,
+            images: Vec::new(),
         }
     }
 
     /// メタデータを添えた結果へ変換する。
     pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
         self.detail = Some(detail);
+        self
+    }
+
+    pub fn with_image(mut self, image: ToolImage) -> Self {
+        self.images.push(image);
         self
     }
 }
@@ -78,6 +97,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
+                images: Vec::new(),
             }
         );
 
@@ -95,6 +115,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
+                images: Vec::new(),
             }
         );
     }

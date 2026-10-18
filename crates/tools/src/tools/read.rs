@@ -20,7 +20,7 @@ impl Tool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read a bounded range of a UTF-8 file. Prefer this over shell cat. offset is a 1-based line number; limit defaults to 300 lines (maximum 300). Returns at most 16 KiB of file text and continuation arguments when truncated. byte_offset continues within an oversized line. Use the returned offset and byte_offset together to read the next range."
+        "Read a bounded range of a UTF-8 file. Prefer this over shell cat. offset is a 1-based line number; limit defaults to 300 lines (maximum 300). Returns at most 16 KiB of file text and continuation arguments when truncated. byte_offset continues within an oversized line. Use the returned offset and byte_offset together to read the next range. A .png, .jpg/.jpeg, .gif or .webp file (up to 3.75 MiB, longest side 8000 px) is returned as an image instead; range arguments are ignored."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -67,11 +67,16 @@ impl Tool for Read {
         let byte_offset = unsigned_arg(&args, "byte_offset", 0, 0)?;
         let path = path.to_owned();
         // 大きなファイルの offset 探索は async executor を塞がない。
-        tokio::task::spawn_blocking(move || read_range(&path, offset, limit, byte_offset))
-            .await
-            .map_err(|error| ToolError::Io {
-                detail: format!("read task failed: {error}"),
-            })?
+        tokio::task::spawn_blocking(move || {
+            match crate::image::ImageFormat::from_extension(std::path::Path::new(&path)) {
+                Some(format) => read_image(&path, format),
+                None => read_range(&path, offset, limit, byte_offset),
+            }
+        })
+        .await
+        .map_err(|error| ToolError::Io {
+            detail: format!("read task failed: {error}"),
+        })?
     }
 }
 
@@ -92,12 +97,7 @@ fn unsigned_arg(
     }
 }
 
-fn read_range(
-    path: &str,
-    offset: u64,
-    limit: u64,
-    byte_offset: u64,
-) -> Result<ToolResult, ToolError> {
+fn file_metadata(path: &str) -> Result<std::fs::Metadata, ToolError> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         if error.kind() == ErrorKind::NotFound {
             ToolError::PathNotFound {
@@ -112,6 +112,47 @@ fn read_range(
             path: path.to_owned(),
         });
     }
+    Ok(metadata)
+}
+
+fn read_image(path: &str, format: crate::image::ImageFormat) -> Result<ToolResult, ToolError> {
+    let metadata = file_metadata(path)?;
+    let limit = crate::image::MAX_IMAGE_BYTES;
+    if metadata.len() > limit as u64 {
+        return Ok(ToolResult::error(format!(
+            "{path} is {} bytes; images are limited to {limit} bytes. Save a smaller or downscaled copy and read that instead.",
+            metadata.len()
+        )));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|error| io_error(path, error))?;
+    let checked = match crate::image::check(format, &bytes) {
+        Ok(checked) => checked,
+        Err(reason) => return Ok(ToolResult::error(format!("{path}: {reason}"))),
+    };
+    let detail = serde_json::json!({
+        "path": path,
+        "media_type": checked.format.media_type(),
+        "width": checked.width,
+        "height": checked.height,
+        "bytes": checked.bytes,
+    });
+    Ok(
+        ToolResult::success(format!("Image {path} ({})", checked.summary()))
+            .with_detail(detail)
+            .with_image(checked.into_tool_image(Some(path.into()))),
+    )
+}
+
+fn read_range(
+    path: &str,
+    offset: u64,
+    limit: u64,
+    byte_offset: u64,
+) -> Result<ToolResult, ToolError> {
+    file_metadata(path)?;
     let file = std::fs::File::open(path).map_err(|error| io_error(path, error))?;
     let mut reader = BufReader::new(file);
     // read_until / lines は巨大な 1 行を丸ごと確保するため使わない。

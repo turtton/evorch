@@ -25,42 +25,29 @@ const MAX_PRESENTED: usize = 8;
 /// The formats a conversation card can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
-    Png,
-    Jpeg,
-    Gif,
-    Webp,
+    Image(tools::image::ImageFormat),
     Html,
 }
 
 impl ArtifactKind {
     fn from_extension(path: &Path) -> Option<Self> {
+        if let Some(format) = tools::image::ImageFormat::from_extension(path) {
+            return Some(Self::Image(format));
+        }
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-        Some(match extension.as_str() {
-            "png" => Self::Png,
-            "jpg" | "jpeg" => Self::Jpeg,
-            "gif" => Self::Gif,
-            "webp" => Self::Webp,
-            "html" | "htm" => Self::Html,
-            _ => return None,
-        })
+        matches!(extension.as_str(), "html" | "htm").then_some(Self::Html)
     }
 
     pub const fn media_type(self) -> &'static str {
         match self {
-            Self::Png => "image/png",
-            Self::Jpeg => "image/jpeg",
-            Self::Gif => "image/gif",
-            Self::Webp => "image/webp",
+            Self::Image(format) => format.media_type(),
             Self::Html => "text/html",
         }
     }
 
     const fn extension(self) -> &'static str {
         match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpg",
-            Self::Gif => "gif",
-            Self::Webp => "webp",
+            Self::Image(format) => format.extension(),
             Self::Html => "html",
         }
     }
@@ -68,7 +55,7 @@ impl ArtifactKind {
     const fn max_bytes(self) -> u64 {
         match self {
             Self::Html => MAX_HTML_BYTES,
-            _ => MAX_IMAGE_BYTES,
+            Self::Image(_) => MAX_IMAGE_BYTES,
         }
     }
 
@@ -76,10 +63,7 @@ impl ArtifactKind {
     /// decodes a mislabeled file and HTML is never mistaken for an image.
     fn matches(self, bytes: &[u8]) -> bool {
         match self {
-            Self::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-            Self::Jpeg => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
-            Self::Gif => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-            Self::Webp => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+            Self::Image(format) => format.matches(bytes),
             Self::Html => !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok(),
         }
     }

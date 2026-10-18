@@ -73,6 +73,7 @@ fn tool_result_text(message: &Message) -> String {
                     .iter()
                     .map(|item| match item {
                         ToolResultContent::Text { text } => text.as_str(),
+                        ToolResultContent::Image { .. } => panic!("unexpected image result"),
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

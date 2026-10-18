@@ -136,6 +136,37 @@ pub(crate) fn apply_model_windows(
     settings.catalog_windows.extend(discovered);
 }
 
+/// Whether each enabled `profile/model` takes image input, for the models whose
+/// catalog entry lists input modalities. Absent models are unknown.
+pub(crate) fn image_input_models(
+    providers: &BTreeMap<String, config::ProviderProfileConfig>,
+    catalog: &ModelCatalog,
+) -> BTreeMap<String, bool> {
+    let mut models = BTreeMap::new();
+    for (name, profile) in providers {
+        for entry in profile.models.iter().filter(|entry| entry.enabled) {
+            let Some(metadata) =
+                resolve_catalog_entry(entry, catalog, Some(name), Some(profile.provider_type))
+            else {
+                continue;
+            };
+            if metadata.modalities.input.is_empty() {
+                continue;
+            }
+            let (base, _) = config::types::provider::parse_model_speed(&entry.id);
+            models.insert(
+                format!("{name}/{base}"),
+                metadata
+                    .modalities
+                    .input
+                    .iter()
+                    .any(|input| input == "image"),
+            );
+        }
+    }
+    models
+}
+
 pub(crate) async fn load_catalog(cache_dir: &Path) -> Option<ModelCatalog> {
     match ModelCatalog::load_or_refresh(cache_dir).await {
         Ok(catalog) => Some(catalog),

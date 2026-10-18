@@ -42,7 +42,9 @@ fn result(messages: &[Message], id: &str) -> (bool, Value) {
                 content,
                 is_error,
             } if tool_call_id == id => {
-                let ToolResultContent::Text { text } = &content[0];
+                let ToolResultContent::Text { text } = &content[0] else {
+                    panic!("expected text result");
+                };
                 Some((
                     *is_error,
                     serde_json::from_str(text).expect("JSON tool result"),

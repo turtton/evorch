@@ -67,7 +67,9 @@ async fn read_related(siblings: bool) -> (Value, bool) {
                 content,
                 is_error,
             } if tool_call_id == "output" => {
-                let ToolResultContent::Text { text } = content.first().unwrap();
+                let ToolResultContent::Text { text } = content.first().unwrap() else {
+                    panic!("expected text result");
+                };
                 assert!(!text.contains("private final text"));
                 Some((
                     serde_json::from_str(text).expect("structured error"),

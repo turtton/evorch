@@ -52,6 +52,29 @@ fn tool_fixture_and_summary_are_redacted_without_losing_restore_structure() {
 }
 
 #[test]
+fn tool_result_images_are_stored_byte_exact_while_text_is_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("image.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut record = context();
+    let image = json!({"type":"image","media_type":"image/png","data":"AKIAIOSFODNN7EXAMPLE","source":"/tmp/shot.png"});
+    record.messages_json = json!([{"role":"user","content":[{"type":"tool_result","tool_call_id":"call-1","is_error":false,"content":[{"type":"text","text":SECRET}, image]}]}]).to_string();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let saved = Database::open(&config)
+        .unwrap()
+        .run_context("run-1")
+        .unwrap()
+        .unwrap();
+    let messages: Value = serde_json::from_str(&saved.messages_json).unwrap();
+    let parts = &messages[0]["content"][0]["content"];
+    assert!(!parts[0].to_string().contains(SECRET));
+    assert_eq!(parts[1], image);
+}
+
+#[test]
 fn failed_update_retains_the_last_valid_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {

@@ -119,9 +119,20 @@ impl AgentContext {
             role: MessageRole::User,
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: tool_call_id.into(),
-                content: vec![ToolResultContent::Text {
+                content: std::iter::once(ToolResultContent::Text {
                     text: result.content,
-                }],
+                })
+                .chain(
+                    result
+                        .images
+                        .into_iter()
+                        .map(|image| ToolResultContent::Image {
+                            media_type: image.media_type,
+                            data: image.data,
+                            source: image.path.map(|path| path.display().to_string()),
+                        }),
+                )
+                .collect(),
                 is_error: result.is_error,
             }],
         });

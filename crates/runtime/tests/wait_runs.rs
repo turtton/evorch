@@ -73,7 +73,9 @@ async fn execute_wait_with_message(arguments: Value, send_message: bool) -> (Str
                 content,
                 is_error,
             } if tool_call_id == "wait-result" => {
-                let ToolResultContent::Text { text } = content.first().unwrap();
+                let ToolResultContent::Text { text } = content.first().unwrap() else {
+                    panic!("expected text result");
+                };
                 Some((text.clone(), *is_error))
             }
             _ => None,

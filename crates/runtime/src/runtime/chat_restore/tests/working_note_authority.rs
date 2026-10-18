@@ -61,7 +61,9 @@ fn tool_json(messages: &[Message], call_id: &str) -> Value {
                 return None;
             }
             assert!(!is_error, "{call_id}: {content:?}");
-            let ToolResultContent::Text { text } = &content[0];
+            let ToolResultContent::Text { text } = &content[0] else {
+                panic!("{call_id}: expected text result");
+            };
             Some(serde_json::from_str(text).unwrap())
         })
         .unwrap_or_else(|| panic!("missing tool result for {call_id}"))

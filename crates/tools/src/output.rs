@@ -17,6 +17,7 @@ use secret_guard::SecretRedactor;
 pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PREVIEW_LINES: usize = 300;
 pub const CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RESULT_IMAGES: usize = 4;
 const SLOTS: usize = 64;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const MARKER: &str = "\n[Output artifact: ";
@@ -73,6 +74,13 @@ impl Capture {
 
 /// Apply the same ceiling before any event, GUI, or model receives a tool result.
 pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
+    if result.images.len() > MAX_RESULT_IMAGES {
+        let omitted = result.images.len() - MAX_RESULT_IMAGES;
+        result.images.truncate(MAX_RESULT_IMAGES);
+        result
+            .content
+            .push_str(&format!("\n[{omitted} more images omitted]"));
+    }
     if result.content.len() > PREVIEW_BYTES + 2048
         || result.content.lines().count() > PREVIEW_LINES + 8
     {
@@ -230,8 +238,29 @@ fn locked_slot(root: &Path, index: usize) -> io::Result<(PathBuf, File)> {
     lock.try_lock().map_err(io::Error::other)?;
     Ok((dir, lock))
 }
+/// Store bytes such as an image in a temporary slot; it can expire like logs.
+pub fn save_file(bytes: &[u8], extension: &str) -> io::Result<PathBuf> {
+    let root = output_root()?;
+    store()
+        .save_bytes(&root, bytes, extension)
+        .map(|(path, _)| path)
+}
+
 impl OutputStore {
     fn save(&self, root: &Path, text: &str) -> io::Result<(PathBuf, usize)> {
+        let mut end = text.len().min(CAPTURE_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.save_bytes(root, &text.as_bytes()[..end], "txt")
+    }
+
+    fn save_bytes(
+        &self,
+        root: &Path,
+        bytes: &[u8],
+        extension: &str,
+    ) -> io::Result<(PathBuf, usize)> {
         use std::os::unix::fs::OpenOptionsExt;
         let first = self.next.fetch_add(1, Ordering::Relaxed) % SLOTS;
         for offset in 0..SLOTS {
@@ -245,17 +274,14 @@ impl OutputStore {
                     std::fs::remove_file(entry.path())?;
                 }
             }
-            let path = dir.join(format!("{}.txt", uuid::Uuid::new_v4()));
+            let path = dir.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&path)?;
-            let mut end = text.len().min(CAPTURE_BYTES);
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            file.write_all(&text.as_bytes()[..end])?;
+            let end = bytes.len().min(CAPTURE_BYTES);
+            file.write_all(&bytes[..end])?;
             return Ok((path, end));
         }
         Err(io::Error::other("all temporary output slots are busy"))

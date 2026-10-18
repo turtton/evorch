@@ -155,6 +155,7 @@ fn results(requests: &[Request]) -> Vec<(bool, String)> {
                     .iter()
                     .map(|part| match part {
                         ToolResultContent::Text { text } => text.as_str(),
+                        ToolResultContent::Image { .. } => panic!("unexpected image result"),
                     })
                     .collect(),
             )),

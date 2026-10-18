@@ -766,7 +766,9 @@ fn question_id_from_tool_result(messages: &[providers::Message]) -> String {
                 content,
                 ..
             } if tool_call_id == "questions" => content.iter().find_map(|content| {
-                let providers::ToolResultContent::Text { text } = content;
+                let providers::ToolResultContent::Text { text } = content else {
+                    panic!("expected text result");
+                };
                 serde_json::from_str::<serde_json::Value>(text)
                     .ok()
                     .and_then(|value| value[0]["id"].as_str().map(str::to_owned))

@@ -229,6 +229,9 @@ pub enum WireToolResultContent {
         /// 本文。
         text: String,
     },
+    Image {
+        source: WireImageSource,
+    },
 }
 
 /// Anthropic Messages API のツール定義。

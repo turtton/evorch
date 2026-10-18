@@ -154,7 +154,8 @@ pub(crate) fn evidence_records(messages: &[Message]) -> Vec<serde_json::Value> {
             ) {
                 continue;
             }
-            let mut content = serde_json::to_value(block).expect("provider block serializes");
+            let mut content = serde_json::to_value(block.without_image_data())
+                .expect("provider block serializes");
             redactor.redact_json(&mut content);
             records.push(serde_json::json!({
                 "message_index": message_index,

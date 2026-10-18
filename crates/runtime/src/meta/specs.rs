@@ -313,7 +313,7 @@ fn delegate_target_schema() -> Value {
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
             "oracle" => "Provide expert reasoning and advice.".to_owned(),
-            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images.".to_owned(),
+            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
             _ => unreachable!("registered delegate role"),
         };
         let mut branch = json!({

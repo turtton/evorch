@@ -100,6 +100,7 @@ impl Fixture {
                     providers::ToolResultContent::Text { text } => {
                         (tool_call_id.as_str(), text.as_str(), *is_error)
                     }
+                    providers::ToolResultContent::Image { .. } => panic!("unexpected image result"),
                 }),
                 _ => None,
             })
@@ -220,7 +221,9 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
                 content,
                 is_error,
             } if tool_call_id == "foreground" => {
-                let providers::ToolResultContent::Text { text } = content.first().unwrap();
+                let providers::ToolResultContent::Text { text } = content.first().unwrap() else {
+                    panic!("expected text result");
+                };
                 assert!(!is_error, "{text}");
                 Some(
                     serde_json::from_str::<serde_json::Value>(text)
@@ -333,7 +336,9 @@ async fn non_delegate_meta_op_remains_a_wave_barrier() {
         results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         ["first", "second", "barrier", "tail"]
     );
-    let providers::ToolResultContent::Text { text } = &results[2].1[0];
+    let providers::ToolResultContent::Text { text } = &results[2].1[0] else {
+        panic!("expected text result");
+    };
     let agents: serde_json::Value = serde_json::from_str(text).expect("agent list");
     let agents = agents.as_array().expect("array");
     assert_eq!(agents.len(), 3);

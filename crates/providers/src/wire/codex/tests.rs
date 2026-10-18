@@ -236,3 +236,53 @@ fn compaction_trigger_is_the_only_change_and_is_last() {
         expected
     );
 }
+
+#[test]
+fn tool_result_images_are_sent_as_input_images_after_the_call_output() {
+    let mut canonical = request();
+    canonical.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "call_1".to_string(),
+            name: "read".to_string(),
+            input: json!({"path": "shot.png"}),
+        }],
+    });
+    canonical.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: vec![
+                crate::message::ToolResultContent::Text {
+                    text: "Image shot.png".to_string(),
+                },
+                crate::message::ToolResultContent::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0K".to_string(),
+                    source: Some("/w/shot.png".to_string()),
+                },
+            ],
+            is_error: false,
+        }],
+    });
+
+    let value = serde_json::to_value(to_wire_request(&canonical)).unwrap();
+    let input = value["input"].as_array().unwrap();
+    let output = input
+        .iter()
+        .position(|item| item["type"] == "function_call_output")
+        .unwrap();
+
+    assert!(
+        !input[output]["output"]
+            .as_str()
+            .unwrap()
+            .contains("iVBORw0K")
+    );
+    let images = &input[output + 1];
+    assert_eq!(images["role"], "user");
+    assert!(images["content"].as_array().unwrap().iter().any(|part| {
+        part["type"] == "input_image" && part["image_url"] == "data:image/png;base64,iVBORw0K"
+    }));
+    assert!(!value.to_string().contains("/w/shot.png"));
+}

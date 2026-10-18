@@ -63,7 +63,9 @@ async fn exercise(
                 content,
                 is_error,
             } if tool_call_id == "output" => {
-                let ToolResultContent::Text { text } = content.first().unwrap();
+                let ToolResultContent::Text { text } = content.first().unwrap() else {
+                    panic!("expected text result");
+                };
                 Some((text.clone(), *is_error))
             }
             _ => None,
@@ -210,7 +212,9 @@ async fn observe_waiting_child(question: Option<bool>) {
                     content,
                     is_error,
                 } if tool_call_id == id => {
-                    let ToolResultContent::Text { text } = content.first().unwrap();
+                    let ToolResultContent::Text { text } = content.first().unwrap() else {
+                        panic!("expected text result");
+                    };
                     assert!(!is_error, "{text}");
                     Some(serde_json::from_str::<Value>(text).unwrap())
                 }

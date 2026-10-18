@@ -45,6 +45,7 @@ impl Invocation {
                         .iter()
                         .map(|part| match part {
                             ToolResultContent::Text { text } => text.as_str(),
+                            ToolResultContent::Image { .. } => panic!("unexpected image result"),
                         })
                         .collect::<Vec<_>>()
                         .join("\n"),

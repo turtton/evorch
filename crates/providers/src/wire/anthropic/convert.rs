@@ -212,6 +212,14 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBloc
                     ToolResultContent::Text { text } => {
                         WireToolResultContent::Text { text: text.clone() }
                     }
+                    ToolResultContent::Image {
+                        media_type, data, ..
+                    } => WireToolResultContent::Image {
+                        source: super::types::WireImageSource::Base64 {
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        },
+                    },
                 })
                 .collect(),
             is_error: *is_error,
@@ -242,6 +250,13 @@ fn from_wire_block(block: WireContentBlock) -> Vec<ContentBlock> {
                 .into_iter()
                 .map(|item| match item {
                     WireToolResultContent::Text { text } => ToolResultContent::Text { text },
+                    WireToolResultContent::Image {
+                        source: super::types::WireImageSource::Base64 { media_type, data },
+                    } => ToolResultContent::Image {
+                        media_type,
+                        data,
+                        source: None,
+                    },
                 })
                 .collect(),
             is_error,

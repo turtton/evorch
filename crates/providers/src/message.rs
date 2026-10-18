@@ -91,7 +91,7 @@ impl ContentBlock {
     }
 }
 
-/// ツール実行結果の内容要素。将来の拡張に備えた enum。
+/// ツール実行結果の内容要素。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultContent {
@@ -100,6 +100,59 @@ pub enum ToolResultContent {
         /// 内容の本文。
         text: String,
     },
+    /// Base64 image. `source` is a local file the image can be read from again;
+    /// it is never sent to a provider.
+    Image {
+        media_type: String,
+        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+}
+
+impl ToolResultContent {
+    /// Text that stands in for this part where image data cannot be carried.
+    pub fn text_or_image_note(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Text { text } => text.into(),
+            Self::Image {
+                media_type, source, ..
+            } => match source {
+                Some(source) => format!("[image {media_type}: {source}]").into(),
+                None => format!("[image {media_type}]").into(),
+            },
+        }
+    }
+}
+
+impl ContentBlock {
+    /// The block with image data replaced by short notes, for transcripts and
+    /// evidence that must not carry base64 payloads.
+    pub fn without_image_data(&self) -> Self {
+        match self {
+            Self::Image { media_type, .. } => Self::Text {
+                text: format!("[image {media_type}]"),
+            },
+            Self::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } => Self::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                content: content
+                    .iter()
+                    .map(|part| match part {
+                        ToolResultContent::Text { .. } => part.clone(),
+                        ToolResultContent::Image { .. } => ToolResultContent::Text {
+                            text: part.text_or_image_note().into_owned(),
+                        },
+                    })
+                    .collect(),
+                is_error: *is_error,
+            },
+            _ => self.clone(),
+        }
+    }
 }
 
 /// 1 つの発話メッセージ。

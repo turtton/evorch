@@ -108,7 +108,9 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
             } = block
                 && tool_call_id == "invalid"
             {
-                let ToolResultContent::Text { text } = &content[0];
+                let ToolResultContent::Text { text } = &content[0] else {
+                    panic!("expected text result");
+                };
                 return Some(
                     serde_json::from_str::<serde_json::Value>(text).expect("structured error"),
                 );

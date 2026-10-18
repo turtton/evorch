@@ -21,6 +21,7 @@ use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod hosted_search;
+mod images;
 
 /// composition root に production の project root と sandbox factory を渡す seam。
 pub struct WorkspaceSeam {
@@ -234,6 +235,8 @@ pub struct RoutedModel {
     codex_version_resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
     event_bus: Option<Arc<EventBus>>,
     credential_store: Option<Arc<dyn CredentialStore>>,
+    provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
+    image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
 }
 
 impl RoutedModel {
@@ -274,7 +277,38 @@ impl RoutedModel {
             codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
             event_bus: None,
             credential_store: None,
+            provider_configs: BTreeMap::new(),
+            image_input: tokio::sync::OnceCell::new(),
         }
+    }
+
+    async fn accepts_images(
+        &self,
+        messages: &[Message],
+        profile: &str,
+        base_model_id: &str,
+    ) -> bool {
+        if !images::has_tool_result_images(messages) {
+            return true;
+        }
+        let models = self
+            .image_input
+            .get_or_init(|| async {
+                if self.provider_configs.is_empty() {
+                    return BTreeMap::new();
+                }
+                match crate::model_resolve::load_catalog(&catalog::default_cache_dir()).await {
+                    Some(catalog) => {
+                        crate::model_resolve::image_input_models(&self.provider_configs, &catalog)
+                    }
+                    None => BTreeMap::new(),
+                }
+            })
+            .await;
+        models
+            .get(&format!("{profile}/{base_model_id}"))
+            .copied()
+            .unwrap_or(true)
     }
 
     /// クールダウンの既定期間を設定し、空の状態から始める。
@@ -667,10 +701,13 @@ impl RoutedModel {
                     });
                 }
             }
+            let accepts_images = self
+                .accepts_images(messages, &route.profile, base_model_id)
+                .await;
             let mut request = ChatRequest {
                 output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
-                messages: messages.to_vec(),
+                messages: images::for_model(messages, &tools, accepts_images),
                 tools,
                 temperature: generation.temperature,
                 max_tokens: generation.max_tokens.map(u64::from),
@@ -872,14 +909,18 @@ impl AgentModel for RoutedModel {
                 .capability_support(base_model_id, Capability::ToolCalling),
             CapabilitySupport::Unsupported
         );
+        let tools = if model_allows_tools && provider.client.capabilities().tool_use {
+            tools.to_vec()
+        } else {
+            Vec::new()
+        };
+        let accepts_images = self
+            .accepts_images(messages, &route.profile, base_model_id)
+            .await;
         let request = ChatRequest {
             model: base_model_id.to_owned(),
-            messages: messages.to_vec(),
-            tools: if model_allows_tools && provider.client.capabilities().tool_use {
-                tools.to_vec()
-            } else {
-                Vec::new()
-            },
+            messages: images::for_model(messages, &tools, accepts_images),
+            tools,
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
             reasoning_effort,
@@ -1212,6 +1253,7 @@ pub fn compose_routed_model(
     model.max_retry_after_wait =
         std::time::Duration::from_secs(config.routing.fallback.max_retry_after_wait_secs);
     model.configured_windows = configured_windows(config);
+    model.provider_configs = config.providers.clone();
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);
     Ok(Arc::new(model))

@@ -82,6 +82,7 @@ async fn delegate_case(args: Value, accepted: bool) -> String {
         .iter()
         .map(|item| match item {
             ToolResultContent::Text { text } => text.as_str(),
+            ToolResultContent::Image { .. } => panic!("unexpected image result"),
         })
         .collect::<Vec<_>>()
         .join("\n");
