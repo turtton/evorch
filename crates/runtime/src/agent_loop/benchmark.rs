@@ -128,10 +128,11 @@ impl LoopState {
             .ok_or_else(|| unsupported("capture requires a resolved workspace"))?
             .canonicalize()
             .map_err(unsupported)?;
-        let model =
-            self.shared
-                .model
-                .benchmark_settings(invocation, self.task.role, &self.tool_specs)?;
+        let model = self
+            .shared
+            .model
+            .benchmark_settings(invocation, self.task.role, &self.tool_specs)
+            .await?;
         let frozen = Arc::clone(&self.shared.model).freeze_for_benchmark(model.clone())?;
         let checkpoint = BenchmarkCheckpoint {
             version: 1,

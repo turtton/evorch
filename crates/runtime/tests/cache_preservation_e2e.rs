@@ -122,6 +122,26 @@ fn harness_with_threshold(
     checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
     threshold: f64,
 ) -> Harness {
+    harness_with_config(
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        |_| {},
+    )
+}
+
+fn harness_with_config(
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
     std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
@@ -155,13 +175,14 @@ summarizer = "structural"
         ),
     )
     .unwrap();
-    let config = Config::load(&LoadOptions {
+    let mut config = Config::load(&LoadOptions {
         project_dir: Some(directory.path().into()),
         user_config_dir: Some(directory.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
     .unwrap();
+    configure(&mut config);
     let bus = Arc::new(EventBus::new(1024));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
@@ -380,6 +401,48 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         total_cached
     );
     assert!(total_cached > 0);
+}
+
+#[tokio::test]
+async fn model_output_limits_preserve_generation_settings_and_the_wire_prefix() {
+    for (explicit, expected) in [(None, 128_000), (Some(8_192), 8_192)] {
+        let mut harness = harness_with_config(
+            vec![read_response(0), read_response(1), text_response("done")],
+            1_000_000,
+            Arc::new(BulkRead),
+            Vec::new(),
+            None,
+            0.5,
+            |config| {
+                config.providers.get_mut("local").unwrap().models[0].preset =
+                    Some("output-limit".into());
+                config.model_presets.insert(
+                    "output-limit".into(),
+                    config::ModelPresetConfig {
+                        max_output_tokens: Some(128_000),
+                        ..Default::default()
+                    },
+                );
+                config.agents.worker.base.generation.max_tokens = explicit;
+            },
+        );
+        let run = harness.runtime.delegate_background(
+            Role::Worker,
+            "Read both inputs and finish".into(),
+            RunConfig::default(),
+        );
+        let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+        assert_eq!(
+            harness.runtime.wait(run).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        verify_trace(&harness, run, &events, 0);
+        let requests = chat_requests(&harness);
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request["max_tokens"], expected);
+        }
+    }
 }
 
 #[tokio::test]

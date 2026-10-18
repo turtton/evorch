@@ -64,7 +64,7 @@ impl AgentModel for Flow {
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "mock/model-a".into()
     }
-    fn benchmark_settings(
+    async fn benchmark_settings(
         &self,
         _: &AgentInvocationContext,
         _: Role,

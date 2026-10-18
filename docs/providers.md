@@ -246,6 +246,21 @@ defined routes and its own reasoning effort, and can be moved up, moved down
 or removed. "Add … fallback" appends the first defined route the chain does
 not use yet.
 
+### Output limits
+
+For Anthropic Messages and OpenAI Chat Completions, each request resolves its
+output limit from explicit role/category `generation.max_tokens`, the selected
+model's preset `max_output_tokens`, then models.dev. Positive metadata values
+are used; unknown limits retain the provider's default. The selected profile
+and model are resolved again on fallback. A `+fast` variant uses its exact
+configured preset when present and its base model for catalog lookup.
+Codex and Cursor do not automatically receive this limit because their wire
+formats do not support that generation field.
+Requests to the official OpenAI HTTPS endpoint (`https://api.openai.com`, port
+443), including configured `openai-compatible` profiles, send this limit as
+`max_completion_tokens`, including reasoning tokens. Other compatible endpoints
+and Kimi retain `max_tokens`.
+
 ### Automatic pools
 
 Saving a provider in the GUI adds its models to the pools that serve the same

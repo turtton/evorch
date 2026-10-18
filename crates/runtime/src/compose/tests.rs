@@ -22,6 +22,7 @@ mod fallback;
 mod hosted_search;
 mod live;
 mod official_compaction;
+mod output_limits;
 mod preference;
 mod speed;
 mod structured;

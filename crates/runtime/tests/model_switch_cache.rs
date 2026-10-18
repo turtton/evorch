@@ -99,14 +99,18 @@ version = 3
 type = "openai-compatible"
 base_url = "{primary}"
 api_key_env = "{KEY_ENV}"
-models = ["{PRIMARY_MODEL}"]
+models = [{{ id = "{PRIMARY_MODEL}", enabled = true, preset = "primary-output" }}]
 default_model = "{PRIMARY_MODEL}"
 [providers.small]
 type = "openai-compatible"
 base_url = "{small}"
 api_key_env = "{KEY_ENV}"
-models = [{{ id = "{SMALL_MODEL}", enabled = true, metadata_source = "manual", context_window = {target_window} }}]
+models = [{{ id = "{SMALL_MODEL}", enabled = true, metadata_source = "manual", context_window = {target_window}, preset = "small-output" }}]
 default_model = "{SMALL_MODEL}"
+[model_presets.primary-output]
+max_output_tokens = 32768
+[model_presets.small-output]
+max_output_tokens = 16384
 [[routing.routes.primary]]
 profile = "primary"
 [[routing.routes.small]]
@@ -206,9 +210,20 @@ summarizer = "structural"
     let before = chat_requests(&primary);
     let after = chat_requests(&small);
     assert_eq!(after.len(), 2);
-    // Apart from the model, the switch is an ordinary compaction transition.
+    for request in &before {
+        assert_eq!(request["max_tokens"], 32_768);
+    }
+    for request in &after {
+        assert_eq!(request["max_tokens"], 16_384);
+    }
+    for pair in before.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
+    }
+    // Model switching is an explicit cache boundary; only this boundary may
+    // replace the model and its output ceiling. Later requests keep both fixed.
     let mut last_primary = before.last().unwrap().clone();
     last_primary["model"] = json!(SMALL_MODEL);
+    last_primary["max_tokens"] = json!(16_384);
     if compacts {
         let (reason, checkpoint_id) = &checkpoints[0];
         assert_eq!(*reason, CompactionReason::ModelSwitch);

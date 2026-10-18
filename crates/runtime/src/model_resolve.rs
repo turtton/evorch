@@ -34,6 +34,7 @@ pub fn resolve_catalog_entry<'a>(
     provider_id: Option<&str>,
     provider_type: Option<config::ProviderTypeConfig>,
 ) -> Option<&'a ModelMetadata> {
+    let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
     let reference = match entry.metadata_source {
         Some(MetadataSource::ModelsDev) | None => entry.metadata_ref.as_deref(),
         Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
@@ -53,10 +54,10 @@ pub fn resolve_catalog_entry<'a>(
             .map(config::ProviderTypeConfig::models_dev_provider_candidates)
             .unwrap_or(&[])
             .iter()
-            .find_map(|slug| catalog.find(slug, &entry.id))
-            .or_else(|| provider_id.and_then(|provider| catalog.find(provider, &entry.id)))
-            .or_else(|| catalog.find_unique_model(&entry.id))
-            .or_else(|| catalog.find_agreeing_model(&entry.id))
+            .find_map(|slug| catalog.find(slug, model_id))
+            .or_else(|| provider_id.and_then(|provider| catalog.find(provider, model_id)))
+            .or_else(|| catalog.find_unique_model(model_id))
+            .or_else(|| catalog.find_agreeing_model(model_id))
     })
 }
 
@@ -84,7 +85,12 @@ pub fn resolve_model_metadata(
         context_window,
         max_output_tokens: preset
             .and_then(|preset| preset.max_output_tokens)
-            .or_else(|| catalog_entry.and_then(|model| model.max_output_tokens)),
+            .filter(|limit| *limit > 0)
+            .or_else(|| {
+                catalog_entry
+                    .and_then(|model| model.max_output_tokens)
+                    .filter(|limit| *limit > 0)
+            }),
         origin,
     }
 }

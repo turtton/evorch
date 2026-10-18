@@ -115,6 +115,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
     }];
     let captured = model
         .benchmark_settings(&invocation, Role::Worker, &tools)
+        .await
         .unwrap();
     for candidate in ["model-a", "model-b"] {
         let mut settings = captured.clone();

@@ -49,13 +49,15 @@ impl AgentModel for SwitchableModel {
         Some(current.invocation_snapshot().unwrap_or(current))
     }
 
-    fn benchmark_settings(
+    async fn benchmark_settings(
         &self,
         invocation: &AgentInvocationContext,
         role: Role,
         tools: &[ToolSpec],
     ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
-        self.current().benchmark_settings(invocation, role, tools)
+        self.current()
+            .benchmark_settings(invocation, role, tools)
+            .await
     }
 
     fn freeze_for_benchmark(
