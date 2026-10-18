@@ -854,9 +854,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chromiumoxide",
  "event-bus",
  "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "image",
  "serde",
  "serde_json",

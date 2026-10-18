@@ -5,8 +5,10 @@
 mod chromium;
 mod keys;
 mod page;
+mod proxy;
 mod snapshot;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use chromium::{AgentBrowser, LaunchOptions};
@@ -33,12 +35,18 @@ pub trait CdpTarget: Send + Sync {
     }
 }
 
-/// Decides whether the page may load a URL. Every request of an agent page,
-/// including redirects and subresources, passes through it.
+/// Decides where an agent page may connect. The Fetch domain asks `check`
+/// for every request it can pause; the proxy that carries all of the page's
+/// traffic, including WebSockets and worker fetches, asks `resolve` and
+/// connects only to the addresses it returns.
 #[async_trait::async_trait]
 pub trait RequestPolicy: Send + Sync {
     /// `Err` carries the reason shown to the model.
     async fn check(&self, url: &url::Url) -> Result<(), String>;
+
+    /// Resolves `host:port` for a connection whose payload is TLS (`tls`) or
+    /// plain HTTP and WebSocket traffic.
+    async fn resolve(&self, host: &str, port: u16, tls: bool) -> Result<Vec<SocketAddr>, String>;
 }
 
 /// Hands out one page per key (a run) and releases it when the run ends.

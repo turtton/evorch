@@ -25,6 +25,10 @@ impl PageAgent {
         }
     }
 
+    pub fn target(&self) -> &Arc<dyn CdpTarget> {
+        &self.target
+    }
+
     /// Notes a request the page's policy refused; the log keeps the latest few.
     pub fn record_blocked(&self, entry: String) {
         let mut log = lock(&self.blocked);

@@ -146,21 +146,38 @@ impl NetworkGuard {
     }
 
     /// Applies the scheme, DNS and IP checks of [`NetworkGuard::get`] to a URL
-    /// another client will load, such as the agent browser. That client
-    /// resolves the host itself, so the checked addresses are not pinned.
+    /// another client will load, such as the agent browser. The check alone
+    /// does not pin the addresses; [`NetworkGuard::resolve_destination`] does.
     ///
     /// # Errors
     /// Returns the [`NetworkGuardError`] for a non-HTTPS URL, a failed lookup or a blocked address.
     pub async fn check_destination(&self, url: &Url) -> Result<(), NetworkGuardError> {
         ensure_https(url)?;
         let host = url.host_str().ok_or(NetworkGuardError::MissingHost)?;
+        self.resolve_destination(host, url.port_or_known_default().unwrap_or(443))
+            .await
+            .map(drop)
+    }
+
+    /// Resolves `host` once and returns its addresses for a caller that
+    /// connects to exactly these, such as the agent browser's proxy.
+    ///
+    /// # Errors
+    /// Returns the [`NetworkGuardError`] for a failed lookup or a blocked address.
+    pub async fn resolve_destination(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, NetworkGuardError> {
         let host = host.trim_start_matches('[').trim_end_matches(']');
-        for addr in self.resolver.resolve(host).await? {
-            if self.policy.is_blocked(addr) {
-                return Err(NetworkGuardError::BlockedIp { addr });
-            }
+        let addrs = self.resolver.resolve(host).await?;
+        if let Some(&addr) = addrs.iter().find(|addr| self.policy.is_blocked(**addr)) {
+            return Err(NetworkGuardError::BlockedIp { addr });
         }
-        Ok(())
+        Ok(addrs
+            .into_iter()
+            .map(|addr| SocketAddr::new(addr, port))
+            .collect())
     }
 
     async fn guarded_request(

@@ -9,6 +9,7 @@ use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
+use super::proxy::Proxy;
 use super::{AgentError, CdpTarget, PageAgent, PageProvider, RequestPolicy};
 
 pub struct LaunchOptions {
@@ -30,6 +31,7 @@ struct Running {
     browser: Browser,
     handler: tokio::task::JoinHandle<()>,
     _profile: tempfile::TempDir,
+    _proxy: Proxy,
     pages: VecDeque<(String, Arc<PageAgent>, Page)>,
 }
 
@@ -53,6 +55,7 @@ impl AgentBrowser {
     async fn launch(&self) -> Result<Running, AgentError> {
         let executable = Self::detect(&self.options)?;
         let profile = tempfile::tempdir().map_err(|error| AgentError::Launch(error.to_string()))?;
+        let proxy = Proxy::start(Arc::clone(&self.options.policy)).await?;
         let config = BrowserConfig::builder()
             .new_headless_mode()
             .chrome_executable(executable)
@@ -60,20 +63,34 @@ impl AgentBrowser {
             .window_size(1280, 800)
             .launch_timeout(Duration::from_secs(20))
             .request_timeout(Duration::from_secs(30))
+            // chromiumoxide adds the leading `--` and merges repeated keys
+            // such as `disable-features`, so switches are bare keys here.
+            .arg((
+                "proxy-server",
+                format!("http://{}", proxy.address()).as_str(),
+            ))
             .args([
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-background-networking",
-                "--disable-component-update",
-                "--disable-sync",
-                "--disable-extensions",
-                "--mute-audio",
+                "no-first-run",
+                "no-default-browser-check",
+                "disable-background-networking",
+                "disable-component-update",
+                "disable-sync",
+                "disable-extensions",
+                "mute-audio",
+                // Refuse popups, which would open targets without Fetch
+                // interception.
+                "block-new-web-contents",
+                // QUIC and direct WebRTC UDP would bypass the proxy.
+                "disable-quic",
+            ])
+            .args([
                 // Keep cross-origin frames in the page session so its Fetch
-                // interception covers them, and refuse popups that would open
-                // unintercepted targets.
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--block-new-web-contents",
-                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                // interception covers them.
+                ("disable-features", "IsolateOrigins,site-per-process"),
+                // Loopback is otherwise bypassed implicitly; every connection
+                // has to meet the policy at the proxy.
+                ("proxy-bypass-list", "<-loopback>"),
+                ("force-webrtc-ip-handling-policy", "disable_non_proxied_udp"),
             ])
             .build()
             .map_err(AgentError::Launch)?;
@@ -85,6 +102,7 @@ impl AgentBrowser {
             browser,
             handler,
             _profile: profile,
+            _proxy: proxy,
             pages: VecDeque::new(),
         })
     }

@@ -46,14 +46,18 @@ Web tools.
   the action tools accept only refs from the latest outline. Actions return
   the updated outline; `browser_screenshot` returns a PNG image result.
 - `browser_navigate` URLs go through the same per-call review as `web_fetch`.
-  Every request of the page, including redirects, subresources and frames, is
-  paused with the CDP Fetch domain and checked like `web_fetch` (HTTPS only,
-  blocked link-local and CGNAT addresses). Refused requests are listed in the
-  next result.
-- Known gaps: Chromium resolves hosts itself, so the checked addresses are not
-  pinned; WebSocket connections and service-worker fetches are not paused.
-  Popups are refused (`--block-new-web-contents`) and WebRTC is limited to
-  proxied UDP.
+- Chromium reaches the network only through a loopback proxy that evorch
+  starts with it (`--proxy-server`, with `--proxy-bypass-list=<-loopback>` so
+  loopback is not bypassed). The proxy applies the `web_fetch` rules to every
+  CONNECT tunnel and plain HTTP request: only TLS tunnels pass, link-local and
+  CGNAT addresses are refused, and the proxy dials exactly the addresses it
+  checked, so DNS rebinding cannot swap them. WebSockets and worker or
+  service-worker fetches take the same path.
+- Requests the CDP Fetch domain can pause (navigations, redirects,
+  subresources and frames) are also checked there first, and refused ones are
+  listed in the next result.
+- Popups are refused (`--block-new-web-contents`), QUIC is disabled and WebRTC
+  is limited to proxied UDP.
 
 ## Low-memory verification
 

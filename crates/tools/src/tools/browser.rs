@@ -35,6 +35,21 @@ impl RequestPolicy for GuardPolicy {
             .await
             .map_err(|error| error.to_string())
     }
+
+    async fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        tls: bool,
+    ) -> Result<Vec<std::net::SocketAddr>, String> {
+        if !tls {
+            return Err("only HTTPS (TLS) connections are allowed".into());
+        }
+        self.0
+            .resolve_destination(host, port)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

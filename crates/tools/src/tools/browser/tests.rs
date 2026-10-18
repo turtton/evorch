@@ -199,4 +199,22 @@ async fn guard_policy_applies_web_fetch_destination_rules() {
             .await
             .is_err()
     );
+    assert_eq!(
+        policy("203.0.113.5")
+            .resolve("example.test", 8443, true)
+            .await,
+        Ok(vec!["203.0.113.5:8443".parse().unwrap()])
+    );
+    assert!(
+        policy("203.0.113.5")
+            .resolve("example.test", 80, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        policy("169.254.169.254")
+            .resolve("metadata.test", 443, true)
+            .await
+            .is_err()
+    );
 }
