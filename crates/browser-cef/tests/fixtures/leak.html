@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>leak probe</title>
+<link rel="prefetch" href="http://127.0.0.1:__PORT__/prefetch">
+<link rel="dns-prefetch" href="//leak-dns.example.com">
+<link rel="stylesheet" href="http://127.0.0.1:__PORT__/style.css">
+</head>
+<body>
+<img src="http://127.0.0.1:__PORT__/img.png" alt="loopback">
+<img src="https://example.com/favicon.ico" alt="internet">
+<img id="file" src="file:///etc/hostname" alt="file">
+<iframe src="http://127.0.0.1:__PORT__/iframe"></iframe>
+<form id="form" action="http://127.0.0.1:__PORT__/form" method="post"><input name="x" value="1"></form>
+<script>
+const port = '__PORT__';
+const leaked = [];
+let violations = 0;
+addEventListener('securitypolicyviolation', () => { violations += 1; });
+const probe = (name, run) => Promise.resolve().then(run).then(
+  () => leaked.push(name),
+  () => {},
+);
+const pageLoaded = new Promise(resolve => addEventListener('load', resolve));
+const fileImage = new Promise(resolve => {
+  const image = document.getElementById('file');
+  image.addEventListener('load', () => { leaked.push('file-img'); resolve(); });
+  image.addEventListener('error', resolve);
+});
+const probes = [
+  probe('fetch-loopback', () => fetch(`http://127.0.0.1:${port}/fetch`)),
+  probe('fetch-internet', () => fetch('https://example.com/')),
+  probe('xhr-loopback', () => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', `http://127.0.0.1:${port}/xhr`);
+    xhr.onload = resolve;
+    xhr.onerror = reject;
+    xhr.send();
+  })),
+  probe('websocket-loopback', () => new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    socket.onopen = resolve;
+    socket.onerror = reject;
+    socket.onclose = reject;
+  })),
+  probe('webrtc', () => {
+    if (typeof RTCPeerConnection === 'undefined') throw new Error('removed');
+  }),
+  probe('window-open', () => {
+    if (!window.open(`http://127.0.0.1:${port}/popup`)) throw new Error('blocked');
+  }),
+  probe('beacon-loopback', () => {
+    navigator.sendBeacon(`http://127.0.0.1:${port}/beacon`, 'x');
+    throw new Error('checked by the listener');
+  }),
+];
+Promise.all([pageLoaded, fileImage, ...probes]).then(() => {
+  document.getElementById('form').submit();
+  document.title = JSON.stringify({ leaked, violations });
+  location.href = `http://127.0.0.1:${port}/navigate`;
+});
+</script>
+</body>
+</html>

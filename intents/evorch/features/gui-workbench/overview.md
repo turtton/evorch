@@ -215,6 +215,8 @@ GUI 複数起動時の連携は ADR 0024 に従う。GUI は thread へ attach �
 
 既定は外部 Playwright/Chromium プロセス + CDP screencast を `Browser` pane へ JPEG フレームとして流す構成。将来 `cef-rs` OSR / `browser-relay` を feature flag で追加。headless 実行の可視化は action log + 前後 screenshot + DOM diff で担保し、フォーカスは明示操作時のみ取得する。
 
+HTML プレビュー（ADR 0034 B）は段階 1 として `gui` の `cef` feature で入った（2026-10-19）。present された HTML artifact を開くと、Portal ではなくアプリ内の CEF ウィンドウで offline のまま操作できる。CEF が起動できないときと feature なしのビルドでは、これまでどおり Portal に渡す。カードのスナップショットとカードからの起動、agent による CEF を送り先にした確認、`<select>` の popup・JS ダイアログ・クリップボードは後の段階で行う。詳細は `docs/browser.md`。
+
 ### Bundle B: GUI 補助要素（v0.6）
 
 - Compaction UX 可視化: cache transition / compaction reason / after-token を Diagnostics と transcript へ表示

@@ -913,10 +913,24 @@ fn run() -> Result<(), GuiError> {
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
     };
+    let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
+        Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
+    #[cfg(feature = "cef")]
+    let (artifact_opener, html_previews) = {
+        let (opener, requests) =
+            gui::model::artifact_opener::HtmlPreviewOpener::new(Arc::clone(&portal_opener));
+        let opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> = Arc::new(opener);
+        (
+            opener,
+            gui::html_preview::HtmlPreviewWindows::new(requests, portal_opener),
+        )
+    };
+    #[cfg(not(feature = "cef"))]
+    let artifact_opener = portal_opener;
     // 会話と goal の投入を production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
-        .with_artifact_opener(Arc::new(gui::model::artifact_opener::PortalArtifactOpener))
+        .with_artifact_opener(artifact_opener)
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_settings_load_options(settings_load_options)
@@ -1017,6 +1031,8 @@ fn run() -> Result<(), GuiError> {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]
                 browser: gui::browser::BrowserWindow::new(bus.clone(), handle.clone()),
+                #[cfg(feature = "cef")]
+                html_previews,
                 _storage: storage_resources,
             }))
         }),
@@ -1028,6 +1044,8 @@ struct GuiApp {
     workbench: WorkbenchApp<AgentRuntime>,
     #[cfg(feature = "browser")]
     browser: gui::browser::BrowserWindow,
+    #[cfg(feature = "cef")]
+    html_previews: gui::html_preview::HtmlPreviewWindows,
     _storage: GuiStorageResources,
 }
 
@@ -1073,6 +1091,10 @@ impl eframe::App for GuiApp {
         #[cfg(feature = "browser")]
         self.browser.render(ui);
         self.workbench.0.ui(ui, frame);
+        // After the workbench, so artifacts opened this frame show without a
+        // second repaint.
+        #[cfg(feature = "cef")]
+        self.html_previews.render(ui.ctx());
     }
 }
 

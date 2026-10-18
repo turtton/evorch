@@ -1,0 +1,27 @@
+[package]
+name = "browser-cef"
+description = "CEF off-screen rendering for offline HTML artifact previews (ADR 0034)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+# Off by default so workspace builds never download or link the CEF distribution.
+cef = ["dep:cef"]
+
+[dependencies]
+cef = { version = "=154.5.0", default-features = false, optional = true }
+egui = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[[bin]]
+name = "evorch-cef-helper"
+path = "src/bin/helper.rs"
+required-features = ["cef"]
+
+[[test]]
+name = "offline_isolation"
+required-features = ["cef"]

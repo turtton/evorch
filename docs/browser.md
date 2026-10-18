@@ -42,3 +42,57 @@ The Chromium integration test uses only an ephemeral localhost HTTP fixture.
 It is ignored by the normal test run to avoid launching Chromium implicitly.
 See [gui-verification.md](gui-verification.md) for the full GUI verification
 layer matrix, where this test is layer L6.
+
+## In-app HTML preview (CEF, opt-in)
+
+The `cef` feature of `gui` opens presented HTML artifacts (`.html`/`.htm`) in
+an in-app window rendered off-screen by CEF (`crates/browser-cef`, ADR 0034 B).
+Other artifacts, and every artifact when CEF cannot start, still go to the XDG
+Portal. Builds without the feature are unchanged and never fetch CEF.
+
+The preview is offline. The artifact is served from
+`https://artifact.evorch.invalid` by a scheme handler, every other request and
+navigation is cancelled, a Content-Security-Policy is attached, the process
+proxy points at an unreachable address, and WebRTC constructors are deleted in
+each renderer. JS dialogs, file choosers, popups and the context menu are
+suppressed; `<select>` dropdowns and the clipboard are not wired yet. A crashed
+renderer is reloaded up to three times.
+
+Rendering is headless (`--ozone-platform=headless`) with the GPU disabled. The
+Chromium sandbox relies on unprivileged user namespaces; the SUID
+`chrome-sandbox` is not shipped. `EVORCH_CEF_NO_SANDBOX=1` disables the sandbox
+on hosts without user namespaces, `EVORCH_CEF_HELPER` overrides the helper path
+(default: `evorch-cef-helper` beside the executable) and `EVORCH_CEF_LOG=<file>`
+writes a verbose CEF log.
+
+### Building
+
+- Nix: `nix build .#evorch-gui-cef` (x86_64-linux) fetches the CEF build cef-rs
+  pins with a fixed hash, strips `libcef.so`, keeps the `en-US` and `ja`
+  locales, and installs `evorch-gui-cef` with the helper and CEF files in one
+  `libexec` directory. The default package does not include CEF.
+- Development: `nix develop .#cef` sets `CEF_PATH` to that distribution and puts
+  `target/debug` (where cef-dll-sys copies `libcef.so`) on `LD_LIBRARY_PATH`.
+  Outside Nix, cef-dll-sys downloads CEF into `CEF_PATH` on the first build.
+
+```sh
+nix develop .#cef
+cargo build -p gui -p browser-cef --features gui/cef,browser-cef/cef \
+  --bin evorch-gui --bin evorch-cef-helper
+cargo run -p gui --features cef --bin evorch-gui
+```
+
+### Tests
+
+The pure parts (frame upload, input translation including IME, the URL
+allowlist) run in the normal workspace suite. The end-to-end test needs CEF
+and is ignored by default; the `cef-e2e` CI job runs it.
+
+```sh
+nix develop .#cef -c cargo nextest run -p browser-cef --features cef --run-ignored all
+```
+
+It serves a page that probes fetch, XHR, WebSocket, beacon, WebRTC, file URLs,
+`window.open`, forms and navigation against a loopback listener, then asserts
+that no connection arrived, the CSP fired, WebRTC is gone (checked through the
+in-process DevTools session) and a killed renderer reloads the artifact.
