@@ -149,6 +149,7 @@ test harness instance
 ### Bundle Browser: 埋め込みブラウザ（opt-in、v0.7）
 - 既定: 外部 Playwright/Chromium プロセス + CDP screencast を egui の Browser pane へ JPEG フレームとして stream
 - 将来: `cef-rs` OSR / `browser-relay` を feature flag で追加
+- 2026-10-18 更新（[ADR 0034](../decisions/0034-browser-engine-split.md)）: agent の閲覧は外部 Chromium + CDP、`present` した HTML のプレビューと操作は CEF OSR に分ける。agent 用 tool は AX snapshot と ref による共通の層とする
 - headless 実行の可視化: action log + 前後 screenshot + DOM diff。フォーカスは明示操作時のみ
 
 ### Bundle 却下（採用しない）

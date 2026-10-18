@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-09）。利用者との設計相談で方針に合意した。webviewによる対話的なHTML表示は保留し、後で再検討する。
+Accepted（2026-10-09）。利用者との設計相談で方針に合意した。webviewによる対話的なHTML表示は保留し、後で再検討する。→ 2026-10-18 に [ADR 0034](0034-browser-engine-split.md) で再検討した。HTMLのプレビューと操作はCEF OSRのpaneで行い、スナップショットもCEFで撮る。
 
 ## Context
 
