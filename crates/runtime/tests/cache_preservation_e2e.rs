@@ -3153,6 +3153,7 @@ async fn allowed_directories_restore_appends_only_the_saved_difference() {
 // Then: the system message stays byte-identical and only the difference is appended,
 //       once, after the restored turn's input
 async fn allowed_restore_preserves_wire_prefix(changed: bool) {
+    let prompt = "Start work; review mentions job-42, job-4294967295, job-18446744073709551614, job-18446744073709551615, job-184467440737095516160";
     let mut harness = harness(
         vec![
             text_response("Initial work"),
@@ -3181,7 +3182,7 @@ async fn allowed_restore_preserves_wire_prefix(changed: bool) {
         run,
         None,
         Role::Worker,
-        "Start work",
+        prompt,
         RunConfig {
             interactive: true,
             ..Default::default()
@@ -3222,6 +3223,11 @@ async fn allowed_restore_preserves_wire_prefix(changed: bool) {
     assert_eq!(requests.len(), 3);
     let systems = wire_texts(&requests[0], "system");
     for request in &requests {
+        assert!(
+            wire_texts(request, "user")
+                .iter()
+                .any(|text| text.contains(prompt))
+        );
         assert_eq!(
             wire_texts(request, "system"),
             systems,

@@ -42,12 +42,14 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   are allocated durably under the user config directory in `shell-job-handles/`
   and are shared across executors and processes. Incomplete, corrupt, or unwritable
   state fails closed: do not delete or roll back this directory to recover it.
-  Restoring a conversation reserves handles from its complete saved history and
-  compaction summaries before making that history live, without rewriting the
-  provider prefix. History may advance the next-number counter only as far as
-  `u32::MAX`; a larger reservation is allowed only when the counter has already
-  reached it. Normal allocation retains its full `u64` range, so arbitrary text
-  cannot reserve its remaining capacity. Rejected history leaves existing state
+  Restoration scans the complete saved history and compaction summaries for
+  reservation hints without rewriting the provider prefix. Each `job-N` hint
+  contributes only when `N + 1` is at most `u32::MAX`. Larger, overflowing, or
+  unparseable numbers in quoted text are ignored individually; they neither
+  block restoration nor suppress other valid hints. The allocator still rejects
+  reservations above that limit unless its counter has already reached them.
+  Normal allocation retains its full `u64` range, and the durable counter protects
+  already-issued high numbers. Rejected reservations leave existing state
   untouched. GUI logs and cards use run, handle, and internal UUID together
   so historical instances cannot attach to another job's output.
 - At most 8 running jobs / 32 retained handles per executor registry, 64 KiB live output per job, and

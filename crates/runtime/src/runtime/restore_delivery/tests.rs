@@ -71,7 +71,7 @@ async fn live_delivery_restores_when_mailbox_closed_before_push() {
 }
 
 #[tokio::test]
-async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot() {
+async fn message_driven_restore_ignores_quoted_huge_handles_and_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("handles.sqlite3"),
@@ -79,12 +79,9 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
     let bus = Arc::new(EventBus::new(128));
-    let runtime = AgentRuntime::new(
-        bus.clone(),
-        Arc::new(ToolExecutor::new(bus)),
-        Arc::new(CompletingModel::default()),
-    )
-    .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let model = Arc::new(CompletingModel::default());
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     let parent =
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     runtime.wait(parent).await.unwrap();
@@ -100,29 +97,21 @@ async fn message_driven_restore_rejects_huge_handles_without_consuming_snapshot(
         providers::Message {
             role: providers::Role::User,
             content: vec![providers::ContentBlock::Text {
-                text: "saved job-18446744073709551614".into(),
+                text: "saved job-42; review: job-4294967295 job-18446744073709551614 job-18446744073709551615 job-184467440737095516160".into(),
             }],
         },
     );
     record.messages_json = serde_json::to_string(&history).unwrap();
     storage.handle().upsert_run_context(&record).unwrap();
-    let before = store.restore_record(child).unwrap().unwrap();
-    let mut events = runtime.shared.bus.subscribe();
-    let result =
-        runtime.prepare_delivery(parent, child, AgentMessageKind::Send, "resume".into(), None);
-    assert!(matches!(
-        result,
-        Err(RuntimeError::RunRestoreFailed {
-            reason: RunRestoreFailure::CorruptContext(_),
-            ..
-        })
-    ));
-    assert_eq!(store.restore_record(child).unwrap().unwrap(), before);
-    assert_eq!(
-        *runtime.entry(child).unwrap().phase_rx.borrow(),
-        AgentRunPhase::Done
-    );
-    assert!(events.drain_pending_snapshot().is_empty());
+    let (_, _, disposition) = runtime
+        .prepare_delivery(parent, child, AgentMessageKind::Send, "resume".into(), None)
+        .unwrap();
+    assert_eq!(disposition, DeliveryDisposition::Restored);
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let after = store.restore_record(child).unwrap().unwrap();
+    let restored: Vec<providers::Message> = serde_json::from_str(&after.messages_json).unwrap();
+    assert_eq!(&restored[..history.len()], history.as_slice());
+    assert_eq!(model.0.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]

@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use crate::ToolError;
 
 const FORMAT: &str = "evorch-shell-handles-v1\n";
-// History is untrusted input: it may advance the counter only within this
-// range. Normal allocation retains u64 capacity; already-issued high numbers
-// can still be restored with a no-op reservation.
-pub(crate) const MAX_RESTORED_HANDLE_FLOOR: u64 = u32::MAX as u64;
+/// Largest next-number floor accepted from untrusted restored history.
+/// Normal allocation retains u64 capacity; already-issued high numbers
+/// remain protected by the durable counter.
+pub const MAX_RESTORED_HANDLE_FLOOR: u64 = u32::MAX as u64;
 
 #[derive(Default)]
 pub(crate) struct HandleAllocator {
