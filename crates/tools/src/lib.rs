@@ -40,6 +40,7 @@ pub use search::{
     ResponsesTransport, SearchError, SearchOptions, SearchProvider, SearchResults,
     TavilyKeylessProvider, count_search_results,
 };
+pub use shell_handles::MAX_RESTORED_HANDLE_FLOOR;
 pub use tool::{Permissions, Tool, ToolExecutionMode};
 pub use tools::{
     CommandVerdict, Edit, GitDiff, Grep, Read, Shell, ShellCommandContract, WebFetch, WebSearch,

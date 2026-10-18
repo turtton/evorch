@@ -38,44 +38,42 @@ fn restored_floor(restored: &crate::restore::RestoredState) -> Result<Option<u64
 }
 
 fn history_floor(messages: &[Message]) -> Result<Option<u64>, String> {
-    // Scan the entire restored provider prefix, including tool inputs, result
-    // text, compacted summaries and inherited history. Restricting this to a
-    // start result misses handles mentioned by a parent or before compaction.
+    // Scan the entire prefix, including parent references and compacted history.
+    // These strings are reservation hints, not evidence of issued handles: code
+    // and reviews may quote arbitrary numbers. The durable counter protects
+    // already-issued high handles without trusting those strings.
     let value = serde_json::to_value(messages).map_err(|error| error.to_string())?;
     let pattern = regex::Regex::new(r"\bjob-([0-9]+)\b").expect("constant handle regex");
-    fn visit(
-        value: &serde_json::Value,
-        pattern: &regex::Regex,
-        largest: &mut Option<u64>,
-    ) -> Result<(), String> {
+    fn visit(value: &serde_json::Value, pattern: &regex::Regex, largest: &mut Option<u64>) {
         match value {
             serde_json::Value::String(text) => {
                 for captures in pattern.captures_iter(text) {
-                    let number = captures[1]
+                    let Some(next) = captures[1]
                         .parse::<u64>()
-                        .map_err(|_| "restored shell handle exceeds u64".to_owned())?;
-                    let next = number
-                        .checked_add(1)
-                        .ok_or_else(|| "restored shell handle capacity exhausted".to_owned())?;
+                        .ok()
+                        .and_then(|number| number.checked_add(1))
+                        .filter(|next| *next <= tools::MAX_RESTORED_HANDLE_FLOOR)
+                    else {
+                        continue;
+                    };
                     *largest = Some(largest.map_or(next, |previous| previous.max(next)));
                 }
             }
             serde_json::Value::Array(values) => {
                 for value in values {
-                    visit(value, pattern, largest)?;
+                    visit(value, pattern, largest);
                 }
             }
             serde_json::Value::Object(values) => {
                 for value in values.values() {
-                    visit(value, pattern, largest)?;
+                    visit(value, pattern, largest);
                 }
             }
             _ => {}
         }
-        Ok(())
     }
     let mut largest = None;
-    visit(&value, &pattern, &mut largest)?;
+    visit(&value, &pattern, &mut largest);
     Ok(largest)
 }
 
@@ -101,7 +99,7 @@ mod tests {
             messages: history("raw job-1"),
             checkpoints: vec![crate::CompactionCheckpoint {
                 id: "checkpoint".into(),
-                summary: history("summary job-999").remove(0),
+                summary: history("summary job-999; quoted job-18446744073709551614").remove(0),
                 range: (0, 1),
             }],
             trigger: None,
@@ -113,13 +111,21 @@ mod tests {
     }
 
     #[test]
-    fn old_history_reserves_the_entire_numeric_handle_without_rewriting_it() {
-        let messages = history("job-9, job-100,\njob-18446744073709551614");
-        let before = serde_json::to_string(&messages).unwrap();
-        assert_eq!(history_floor(&messages).unwrap(), Some(u64::MAX));
-        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
-        assert!(history_floor(&history("job-18446744073709551615")).is_err());
-        assert!(history_floor(&history("job-184467440737095516160")).is_err());
+    fn history_reserves_bounded_hints_without_rewriting_quoted_numbers() {
+        for (text, expected) in [
+            ("job-4294967294", Some(u64::from(u32::MAX))),
+            ("job-4294967295", None),
+            ("job-18446744073709551614", None),
+            ("job-18446744073709551615", None),
+            ("job-184467440737095516160", None),
+        ] {
+            let messages = history(text);
+            let before = serde_json::to_string(&messages).unwrap();
+            assert_eq!(history_floor(&messages).unwrap(), expected, "{text}");
+            assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+            let mixed = history(&format!("job-9, {text}, job-100"));
+            assert_eq!(history_floor(&mixed).unwrap(), expected.max(Some(101)));
+        }
         assert_eq!(
             history_floor(&history("no shell job references")).unwrap(),
             None
