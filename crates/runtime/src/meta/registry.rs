@@ -159,6 +159,9 @@ define_meta_ops! {
     Present => "present" => crate::artifacts::present_spec => |state, runtime, input| {
         crate::artifacts::present(state, runtime, input)
     },
+    InspectArtifact => "inspect_artifact" => crate::artifacts::inspect_spec => |state, runtime, input| {
+        crate::artifacts::inspect(state, runtime, input).await
+    },
 }
 
 fn learning_result(result: Result<Value, String>) -> DispatchResult {

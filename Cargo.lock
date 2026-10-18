@@ -877,9 +877,12 @@ dependencies = [
 name = "browser-cef"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "browser",
  "cef",
  "egui",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

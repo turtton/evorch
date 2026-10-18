@@ -324,9 +324,9 @@ jobs:
         run: |
           export LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
-      - name: Card snapshots render through CEF
+      - name: Card snapshots and agent artifact inspection through CEF
         run: |
           export LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          cargo nextest run -p gui --features cef --lib -E 'test(=html_preview::tests::card_snapshot_requests_render_through_cef)' --run-ignored only --success-output immediate --no-tests fail
+          cargo nextest run -p gui --features cef --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail

@@ -64,8 +64,13 @@ impl Shared {
         }
     }
 
-    fn wait(&self, timeout: Option<Duration>, mut predicate: impl FnMut(&Self) -> bool) -> bool {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    pub(crate) fn wait(
+        &self,
+        timeout: Option<Duration>,
+        mut predicate: impl FnMut(&Self) -> bool,
+    ) -> bool {
+        // A timeout too large for `Instant` waits without a deadline.
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
         loop {
             let seen = *lock(&self.changes);
             if predicate(self) {
@@ -111,7 +116,8 @@ impl Shared {
 /// and close it before the runtime drops.
 pub struct OsrBrowser {
     pub(crate) shared: Arc<Shared>,
-    _artifact: ArtifactContext,
+    // Released on close, so no CEF reference outlives a closed browser.
+    artifact: Mutex<Option<ArtifactContext>>,
 }
 
 impl OsrBrowser {
@@ -163,7 +169,7 @@ impl OsrBrowser {
         }
         Ok(Self {
             shared,
-            _artifact: artifact,
+            artifact: Mutex::new(Some(artifact)),
         })
     }
 
@@ -191,11 +197,7 @@ impl OsrBrowser {
         let deadline = Instant::now().checked_add(timeout);
         let remaining =
             || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let loaded = self.shared.wait(remaining(), |shared| {
-            let status = shared.status();
-            status.closed || (status.load_end_count > 0 && !status.loading)
-        });
-        if !loaded || self.status().closed {
+        if !self.wait_loaded(remaining()) {
             return Err("the page did not finish loading".into());
         }
         let painted = self.frame_seq();
@@ -210,6 +212,15 @@ impl OsrBrowser {
         lock(&self.shared.frame)
             .frame()
             .ok_or_else(|| "no frame was painted".into())
+    }
+
+    /// Waits until the document has loaded and nothing is loading; false if
+    /// `timeout` passes or the browser closes first. `None` waits without a deadline.
+    pub fn wait_loaded(&self, timeout: Option<Duration>) -> bool {
+        self.shared.wait(timeout, |shared| {
+            let status = shared.status();
+            status.closed || (status.load_end_count > 0 && !status.loading)
+        }) && !self.status().closed
     }
 
     pub fn set_repaint_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
@@ -244,12 +255,14 @@ impl OsrBrowser {
     /// Closes the browser and waits for CEF to release it; required before the
     /// runtime shuts down.
     pub fn close(&self) {
-        let Some(host) = self.host() else { return };
-        let host = SendCell(host);
-        on_ui(move || host.0.close_browser(1));
-        self.shared
-            .wait(Some(CLOSE_TIMEOUT), |shared| shared.status().closed);
-        lock(&self.shared.browser).take();
+        if let Some(host) = self.host() {
+            let host = SendCell(host);
+            on_ui(move || host.0.close_browser(1));
+            self.shared
+                .wait(Some(CLOSE_TIMEOUT), |shared| shared.status().closed);
+            lock(&self.shared.browser).take();
+        }
+        lock(&self.artifact).take();
     }
 }
 

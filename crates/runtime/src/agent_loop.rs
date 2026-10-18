@@ -45,7 +45,7 @@ use crate::{
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
 pub(crate) use tool_calls::{
-    append_subagent_context_note, standard_tool_specs, visible_tool_specs,
+    append_subagent_context_note, retain_backed_tools, standard_tool_specs, visible_tool_specs,
 };
 
 pub(crate) struct RunTask {
@@ -436,6 +436,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 .runtime()
                 .is_some_and(|runtime| runtime.web_tools_enabled()),
         );
+        let artifact_pages = state
+            .runtime()
+            .is_some_and(|runtime| runtime.artifact_pages().is_some());
+        retain_backed_tools(&mut state.tool_specs, artifact_pages);
         if !is_restored {
             state.add_team_tools();
         }
@@ -1232,6 +1236,9 @@ impl LoopState {
                 .executor
                 .cancel_shell_jobs(&self.task.run_id.to_string());
             self.shared.executor.end_run(&self.task.run_id.to_string());
+            if let Some(runtime) = self.runtime() {
+                runtime.close_artifact_page(&self.task.run_id.to_string());
+            }
             self.channels.inbox_rx.close();
             self.task.mailbox.close();
             // Public terminal state permits same-ID restoration. Publish only after

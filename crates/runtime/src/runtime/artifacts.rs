@@ -15,6 +15,21 @@ impl AgentRuntime {
         self.shared.artifacts.get().cloned()
     }
 
+    /// Offers `inspect_artifact` on `pages`; only the first call takes effect.
+    pub fn set_artifact_pages(&self, pages: Arc<dyn crate::artifacts::ArtifactPages>) {
+        let _ = self.shared.artifact_pages.set(pages);
+    }
+
+    pub(crate) fn artifact_pages(&self) -> Option<Arc<dyn crate::artifacts::ArtifactPages>> {
+        self.shared.artifact_pages.get().cloned()
+    }
+
+    pub(crate) fn close_artifact_page(&self, run: &str) {
+        if let Some(pages) = self.shared.artifact_pages.get() {
+            pages.close(run);
+        }
+    }
+
     /// The root of `run`'s delegation tree (ADR 0022).
     pub(crate) fn run_root(&self, run: RunId) -> Result<RunId, String> {
         let mut root = run;
