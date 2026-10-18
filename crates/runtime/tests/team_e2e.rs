@@ -1,11 +1,11 @@
 use config::Config;
-use event_bus::{AgentRunPhase, EventBus};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent};
 use mock_openai::{ResponseGate, ScriptedResponse, StreamingMockOpenAi};
 use runtime::{
     CoordinationTopology, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime,
 };
 use sandbox::{DirectSandbox, credential::FileCredentialStore};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tools::ToolExecutor;
 
 fn mock_provider(responses: Vec<ScriptedResponse>) -> StreamingMockOpenAi {
@@ -17,6 +17,13 @@ fn mock_provider(responses: Vec<ScriptedResponse>) -> StreamingMockOpenAi {
 }
 
 fn configured(root: &tempfile::TempDir, mock: &StreamingMockOpenAi) -> runtime::AgentRuntime {
+    configured_with_bus(root, mock).0
+}
+
+fn configured_with_bus(
+    root: &tempfile::TempDir,
+    mock: &StreamingMockOpenAi,
+) -> (runtime::AgentRuntime, Arc<EventBus>) {
     std::fs::create_dir_all(root.path().join(config::PROJECT_CONFIG_DIR))
         .expect("config directory");
     std::fs::write(
@@ -56,7 +63,7 @@ enabled = true
             bus.clone(),
             Arc::new(DirectSandbox::new_unchecked()),
         )),
-        bus,
+        bus: bus.clone(),
         credential_store: Arc::new(
             FileCredentialStore::open(root.path().join("credentials")).unwrap(),
         ),
@@ -65,7 +72,7 @@ enabled = true
         workspace: None,
     })
     .unwrap();
-    composed.runtime
+    (composed.runtime, bus)
 }
 
 // Release blocked fixture threads even when an assertion panics, so teardown
@@ -233,9 +240,13 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
             [r#"{"task_id":"abandoned"}"#],
         ),
         ScriptedResponse::text_stream("worker", "mock-model", ["stopped without completing"]),
-        ScriptedResponse::text_stream("notified", "mock-model", ["recovery observed"]),
+        // Child completion and lease expiry can wake the coordinator separately
+        // or be coalesced into one turn.
+        ScriptedResponse::text_stream("child-notified", "mock-model", ["notification observed"]),
+        ScriptedResponse::text_stream("leases-notified", "mock-model", ["recovery observed"]),
     ]);
-    let runtime = configured(&root, &mock);
+    let (runtime, bus) = configured_with_bus(&root, &mock);
+    let mut events = bus.subscribe();
     let (_writer, team_store) = team_storage(&root);
     let coordinator = runtime.delegate_background(
         Role::Orchestrator,
@@ -249,18 +260,29 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
             ..Default::default()
         },
     );
-    // CI の負荷が高い runner でも待機に入る時間を確保するため余裕を持たせる。
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !runtime
-            .list_agents()
-            .iter()
-            .any(|agent| agent.run_id == coordinator && agent.phase == AgentRunPhase::Waiting)
+    let coordinator_id = coordinator.to_string();
+    loop {
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id, to, reason, ..
+        }) = events
+            .recv()
+            .await
+            .expect("coordinator lifecycle event")
+            .kind
+            && run_id == coordinator_id
         {
-            tokio::task::yield_now().await;
+            if to == AgentRunPhase::Waiting {
+                break;
+            }
+            assert!(
+                !matches!(
+                    to,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                ),
+                "coordinator terminated before waiting: {to:?}: {reason:?}"
+            );
         }
-    })
-    .await
-    .unwrap();
+    }
     let worker = runtime
         .delegate_background_as_child(
             coordinator,
@@ -276,31 +298,53 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
         )
         .unwrap();
     runtime.wait(worker).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if mock
-                .recorded_requests()
-                .iter()
-                .filter(|request| request.path == "/v1/chat/completions")
-                .any(|request| {
-                    request.body["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|message| {
-                            message["content"]
-                                .as_str()
-                                .is_some_and(|text| text.contains("Team leases expired"))
-                        })
-                })
+    let has_lease_notification = || {
+        mock.recorded_requests()
+            .iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .any(|request| {
+                request.body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| {
+                        message["content"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("Team leases expired"))
+                    })
+            })
+    };
+    loop {
+        match events
+            .recv()
+            .await
+            .expect("coordinator recovery event")
+            .kind
+        {
+            EventKind::Message(MessageEvent::MessageCompleted { run_id, .. })
+                if run_id == coordinator_id && has_lease_notification() =>
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to,
+                reason,
+                ..
+            }) if run_id == coordinator_id => assert!(
+                !matches!(
+                    to,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                ),
+                "coordinator terminated before recovery: {to:?}: {reason:?}"
+            ),
+            _ => {}
         }
-    })
-    .await
-    .unwrap();
+    }
+    assert!(
+        has_lease_notification(),
+        "coordinator recovery request must contain the expired-lease notification"
+    );
     assert_eq!(
         runtime.team_tasks()[0].1[0].state,
         runtime::team::ClaimState::Ready
