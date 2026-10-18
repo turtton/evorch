@@ -295,3 +295,43 @@ async fn codex_models_response_supplies_runtime_window_for_base_and_fast() {
     assert_eq!(settings.catalog_windows["codex/gpt-6-astra"], 272_000);
     assert_eq!(settings.catalog_windows["codex/gpt-6-astra+fast"], 272_000);
 }
+
+#[tokio::test]
+async fn image_input_follows_catalog_modalities_and_skips_unlisted_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let data = serde_json::json!({"fetched_at": now, "api": {"deepseek": {"models": {
+        "vision-model": {"id": "vision-model", "modalities": {"input": ["text", "image"], "output": ["text"]}},
+        "text-model": {"id": "text-model", "modalities": {"input": ["text"], "output": ["text"]}},
+        "unlisted-modalities": {"id": "unlisted-modalities"}
+    }}}});
+    std::fs::write(dir.path().join("models-dev.json"), data.to_string()).unwrap();
+    let catalog = catalog::ModelCatalog::load_or_refresh(dir.path())
+        .await
+        .unwrap();
+    let profile = ProviderProfileConfig {
+        models: [
+            "vision-model",
+            "text-model",
+            "unlisted-modalities",
+            "unknown-model",
+        ]
+        .into_iter()
+        .map(ModelEntryConfig::enabled)
+        .collect(),
+        ..ProviderProfileConfig::default()
+    };
+
+    let models = image_input_models(&BTreeMap::from([("deepseek".into(), profile)]), &catalog);
+
+    assert_eq!(
+        models,
+        BTreeMap::from([
+            ("deepseek/text-model".into(), false),
+            ("deepseek/vision-model".into(), true),
+        ])
+    );
+}

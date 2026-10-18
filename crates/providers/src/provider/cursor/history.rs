@@ -304,9 +304,7 @@ pub(super) fn result_text(block: &ContentBlock) -> String {
     if let ContentBlock::ToolResult { content, .. } = block {
         content
             .iter()
-            .map(|b| match b {
-                ToolResultContent::Text { text } => text.as_str(),
-            })
+            .map(ToolResultContent::text_or_image_note)
             .collect::<Vec<_>>()
             .join("\n")
     } else {

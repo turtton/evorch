@@ -249,7 +249,47 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
             })
         }
     };
-    primary.into_iter().chain(tool_results).collect()
+    primary
+        .into_iter()
+        .chain(tool_results)
+        .chain(tool_result_images(&message.content))
+        .collect()
+}
+
+/// Tool messages carry text only, so images follow every result of the turn
+/// in one user message.
+fn tool_result_images(content: &[ContentBlock]) -> Option<WireMessage> {
+    let mut parts = Vec::new();
+    for block in content {
+        let ContentBlock::ToolResult {
+            tool_call_id,
+            content,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let mut images = content.iter().filter_map(|part| match part {
+            ToolResultContent::Image {
+                media_type, data, ..
+            } => Some(super::types::WireInputPart::ImageUrl {
+                image_url: super::types::WireImageUrl {
+                    url: format!("data:{media_type};base64,{data}"),
+                },
+            }),
+            ToolResultContent::Text { .. } => None,
+        });
+        if let Some(first) = images.next() {
+            parts.push(super::types::WireInputPart::Text {
+                text: format!("Images returned by tool call {tool_call_id}:"),
+            });
+            parts.push(first);
+            parts.extend(images);
+        }
+    }
+    (!parts.is_empty()).then_some(WireMessage::User {
+        content: WireContent::Multimodal(parts),
+    })
 }
 
 fn to_wire_tool(tool: &ToolSpec) -> WireTool {
@@ -269,10 +309,13 @@ fn result_wire_content(content: &[ToolResultContent]) -> WireContent {
         parts => WireContent::Parts(
             parts
                 .iter()
-                .map(|part| match part {
-                    ToolResultContent::Text { text } => WireTextPart {
-                        kind: "text".to_string(),
-                        text: text.clone(),
+                .map(|part| WireTextPart {
+                    kind: "text".to_string(),
+                    text: match part {
+                        ToolResultContent::Text { text } => text.clone(),
+                        ToolResultContent::Image { media_type, .. } => {
+                            format!("[image {media_type} attached in the next user message]")
+                        }
                     },
                 })
                 .collect(),

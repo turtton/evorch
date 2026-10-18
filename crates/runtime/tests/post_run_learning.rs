@@ -65,7 +65,9 @@ fn tool_result(messages: &[Message], id: &str) -> Option<Value> {
                 is_error,
             } if tool_call_id == id => {
                 assert!(!is_error, "learning tool {id} failed: {content:?}");
-                let ToolResultContent::Text { text } = &content[0];
+                let ToolResultContent::Text { text } = &content[0] else {
+                    panic!("expected text result");
+                };
                 Some(serde_json::from_str(text).expect("learning tool JSON"))
             }
             _ => None,

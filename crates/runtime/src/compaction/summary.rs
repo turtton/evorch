@@ -345,8 +345,10 @@ fn verification_lines(messages: &[Message]) -> Vec<&str> {
         })
         .flatten()
         .flat_map(|content| match content {
-            ToolResultContent::Text { text } => text.lines(),
+            ToolResultContent::Text { text } => Some(text.lines()),
+            ToolResultContent::Image { .. } => None,
         })
+        .flatten()
         .filter(|line| line.contains("test result:") || line.contains("passed;"))
         .collect()
 }

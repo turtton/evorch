@@ -19,12 +19,14 @@ bench = false
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true }
 config = { path = "../config" }
 dom_smoothie = { workspace = true }
 event-bus = { path = "../event-bus" }
 flate2 = { workspace = true }
 hickory-resolver = { workspace = true }
 htmd = { workspace = true }
+image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ipnet = { workspace = true }
 jsonschema = { workspace = true }
 portable-pty = { workspace = true }

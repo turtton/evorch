@@ -153,3 +153,61 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
     assert!(wire.contains("visible"));
     assert!(wire.contains("instructions"));
 }
+
+fn image_result_request() -> ChatRequest {
+    ChatRequest {
+        model: "gpt-test".to_string(),
+        messages: vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": "shot.png"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    content: vec![
+                        ToolResultContent::Text {
+                            text: "Image shot.png".to_string(),
+                        },
+                        ToolResultContent::Image {
+                            media_type: "image/png".to_string(),
+                            data: "iVBORw0K".to_string(),
+                            source: Some("/w/shot.png".to_string()),
+                        },
+                    ],
+                    is_error: false,
+                }],
+            },
+        ],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        service_tier: None,
+        output_schema: None,
+        observation: None,
+    }
+}
+
+// Given: 画像を含む tool result / When: wire request に変換 / Then: tool message は text のみで、画像は直後の user message で送る
+#[test]
+fn tool_result_images_follow_the_text_only_tool_message() {
+    let wire = serde_json::to_value(to_wire_request(&image_result_request(), false)).unwrap();
+    let messages = wire["messages"].as_array().unwrap();
+
+    assert_eq!(messages[1]["role"], "tool");
+    let tool_text = messages[1]["content"].to_string();
+    assert!(tool_text.contains("Image shot.png"));
+    assert!(!tool_text.contains("iVBORw0K"));
+    assert!(!wire.to_string().contains("/w/shot.png"));
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"][1],
+        json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0K"}})
+    );
+}

@@ -91,6 +91,7 @@ async fn production_composition_exposes_git_trigger_and_loads_body_without_rewri
                 assert!(!is_error);
                 match &content[0] {
                     ToolResultContent::Text { text } => Some(text),
+                    ToolResultContent::Image { .. } => None,
                 }
             }
             _ => None,

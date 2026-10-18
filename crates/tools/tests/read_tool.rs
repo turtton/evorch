@@ -22,6 +22,35 @@ async fn read_returns_file_content() {
     assert_eq!(result.content, content);
 }
 
+// Given: PNG 画像と拡張子だけ PNG のテキスト / When: read を実行 / Then: 画像は保存パス付きの画像結果、偽物はエラー結果になる
+#[tokio::test]
+async fn read_returns_images_and_rejects_mislabelled_files() {
+    let dir = tempdir().expect("一時ディレクトリの作成に失敗");
+    let path = dir.path().join("shot.png");
+    image::RgbImage::new(3, 2)
+        .save(&path)
+        .expect("PNG の書き込みに失敗");
+    let fake = dir.path().join("fake.png");
+    fs::write(&fake, "not an image").expect("テストファイルの書き込みに失敗");
+
+    let result = Read
+        .execute(serde_json::json!({ "path": path.display().to_string() }))
+        .await
+        .expect("画像の読み取りは成功するべき");
+    let rejected = Read
+        .execute(serde_json::json!({ "path": fake.display().to_string() }))
+        .await
+        .expect("偽の画像はエラー結果として返るべき");
+
+    assert!(!result.is_error);
+    assert_eq!(result.images.len(), 1);
+    assert_eq!(result.images[0].media_type, "image/png");
+    assert_eq!(result.images[0].path.as_deref(), Some(path.as_path()));
+    assert_eq!(result.detail.as_ref().unwrap()["width"], 3);
+    assert!(rejected.is_error);
+    assert!(rejected.images.is_empty());
+}
+
 // Given: 存在しないパス / When: read を実行 / Then: PathNotFound が返る
 #[tokio::test]
 async fn read_missing_path_is_path_not_found() {

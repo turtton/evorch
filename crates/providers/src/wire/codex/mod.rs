@@ -234,6 +234,7 @@ fn to_input_items(
 ) -> Vec<InputItem> {
     let mut items = Vec::new();
     let mut content: Vec<InputContent> = Vec::new();
+    let mut result_images: Vec<InputContent> = Vec::new();
     for block in &message.content {
         match block {
             ContentBlock::Image { media_type, data } => content.push(InputContent::Image {
@@ -259,10 +260,30 @@ fn to_input_items(
                 ..
             } => {
                 flush_message(&mut items, &mut content, role);
+                let mut images = blocks.iter().filter_map(|block| match block {
+                    crate::message::ToolResultContent::Image {
+                        media_type, data, ..
+                    } => Some(InputContent::Image {
+                        r#type: "input_image",
+                        image_url: format!("data:{media_type};base64,{data}"),
+                    }),
+                    crate::message::ToolResultContent::Text { .. } => None,
+                });
+                if let Some(first) = images.next() {
+                    result_images.push(InputContent::Text(InputText {
+                        kind: text_type,
+                        text: format!("Images returned by tool call {tool_call_id}:"),
+                    }));
+                    result_images.push(first);
+                    result_images.extend(images);
+                }
                 let output = blocks
                     .iter()
                     .map(|block| match block {
-                        crate::message::ToolResultContent::Text { text } => text.as_str(),
+                        crate::message::ToolResultContent::Text { text } => text.clone(),
+                        crate::message::ToolResultContent::Image { media_type, .. } => {
+                            format!("[image {media_type} attached in the next user message]")
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -283,6 +304,7 @@ fn to_input_items(
         }
     }
     flush_message(&mut items, &mut content, role);
+    flush_message(&mut items, &mut result_images, role);
     items
 }
 

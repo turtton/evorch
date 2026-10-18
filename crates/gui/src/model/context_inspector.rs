@@ -184,7 +184,7 @@ fn block_text(block: &ContentBlock) -> String {
         ContentBlock::ToolUse { name, input, .. } => format!("→ {name} {input}"),
         ContentBlock::ToolResult { content, .. } => content
             .iter()
-            .map(|ToolResultContent::Text { text }| text.as_str())
+            .map(ToolResultContent::text_or_image_note)
             .collect::<Vec<_>>()
             .join("\n"),
         ContentBlock::Compaction { .. } => "[compaction summary]".into(),

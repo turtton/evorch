@@ -1,6 +1,9 @@
-use providers::{Message, ToolSpec, Usage};
+use providers::{ContentBlock, Message, ToolResultContent, ToolSpec, Usage};
 
 const BYTES_PER_TOKEN: u64 = 4;
+/// Providers bill images by pixel area, not base64 length; this covers a
+/// full-size image on the common vision APIs.
+const IMAGE_TOKENS: u64 = 1600;
 
 /// Estimate serialized UTF-8 bytes / 4. Using bytes avoids undercounting
 /// non-ASCII tool output as severely as a character-count heuristic.
@@ -11,7 +14,31 @@ pub(crate) fn estimate_tokens(messages: &[Message]) -> u64 {
     let serialized_bytes = serde_json::to_string(messages).map_or(u64::MAX, |serialized| {
         u64::try_from(serialized.len()).unwrap_or(u64::MAX)
     });
-    serialized_bytes.saturating_add(BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN
+    let (image_bytes, images) = image_data(messages);
+    let text_tokens = serialized_bytes
+        .saturating_sub(image_bytes)
+        .div_ceil(BYTES_PER_TOKEN);
+    text_tokens.saturating_add(images * IMAGE_TOKENS)
+}
+
+fn image_data(messages: &[Message]) -> (u64, u64) {
+    let data = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .flat_map(|block| match block {
+            ContentBlock::Image { data, .. } => vec![data],
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .filter_map(|part| match part {
+                    ToolResultContent::Image { data, .. } => Some(data),
+                    ToolResultContent::Text { .. } => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        });
+    data.fold((0, 0), |(bytes, count), data| {
+        (bytes + data.len() as u64, count + 1)
+    })
 }
 
 /// Include tool definitions in the serialized estimate. Provider input usage already
@@ -59,7 +86,7 @@ fn estimate_visible(messages: &[Message], last_usage: Option<&Usage>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use providers::{ContentBlock, Message, Role, Usage};
+    use providers::{ContentBlock, Message, Role, ToolResultContent, Usage};
     use serde_json::json;
 
     use super::{estimate_tokens, estimate_visible};
@@ -173,6 +200,29 @@ mod tests {
         )];
 
         assert!(estimate_tokens(&large) > estimate_tokens(&small));
+    }
+
+    // Given: base64 サイズの異なる画像 / When: トークン数を推定 / Then: 画像は base64 長ではなく固定量で数える
+    #[test]
+    fn images_count_a_fixed_budget_regardless_of_encoded_size() {
+        let image = |data: &str| {
+            [message(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    content: vec![ToolResultContent::Image {
+                        media_type: "image/png".to_string(),
+                        data: data.to_string(),
+                        source: None,
+                    }],
+                    is_error: false,
+                }],
+            )]
+        };
+
+        let small = estimate_tokens(&image("AAAA"));
+        assert_eq!(small, estimate_tokens(&image(&"A".repeat(1_000_000))));
+        assert!(small >= super::IMAGE_TOKENS);
     }
 
     // Given: 空の履歴 / When: トークン数を推定 / Then: 0 を返す

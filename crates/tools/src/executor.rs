@@ -679,6 +679,7 @@ impl ToolExecutor {
                     detail,
                     origin: result.origin,
                     progress: result.progress,
+                    images: result.images,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
                 Ok(result)
@@ -945,6 +946,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::ToolTrusted,
                 progress: None,
+                images: Vec::new(),
             })
         }
     }

@@ -56,6 +56,7 @@ fn tool_output(observed: &[Vec<Message>], call_id: &str) -> String {
                 ..
             } if tool_call_id == call_id => content.first().map(|item| match item {
                 ToolResultContent::Text { text } => text.clone(),
+                ToolResultContent::Image { .. } => panic!("unexpected image result"),
             }),
             _ => None,
         })

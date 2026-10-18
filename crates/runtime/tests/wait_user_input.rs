@@ -213,7 +213,9 @@ async fn scenario(delivery: Delivery, batch: bool) {
                     "UI input split ToolUse from ToolResult"
                 );
                 assert!(!is_error);
-                let ToolResultContent::Text { text } = &content[0];
+                let ToolResultContent::Text { text } = &content[0] else {
+                    panic!("expected text result");
+                };
                 let result: Value = serde_json::from_str(text).unwrap();
                 assert_eq!(result["user_input_ready"], true);
                 assert_eq!(result["inbox_ready"], false);

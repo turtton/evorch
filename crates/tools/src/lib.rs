@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod executor;
+pub mod image;
 pub mod lsp;
 pub mod mcp;
 pub mod network_guard;
@@ -31,7 +32,7 @@ pub use network_guard::{
     NetworkGuardError,
 };
 pub use origin::{ContentOrigin, derive_content_origin};
-pub use result::{Progress, ToolResult};
+pub use result::{Progress, ToolImage, ToolResult};
 pub use sanitize::escape_control_markers;
 pub use search::{
     ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport,

@@ -38,6 +38,7 @@ fn tool_result(messages: &[providers::Message], call_id: &str) -> Option<(String
                 is_error,
             } if tool_call_id == call_id => content.first().map(|item| match item {
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
+                ToolResultContent::Image { .. } => panic!("unexpected image result"),
             }),
             ContentBlock::Compaction { .. } => {
                 tracing::warn!("この処理では compaction block をスキップします");

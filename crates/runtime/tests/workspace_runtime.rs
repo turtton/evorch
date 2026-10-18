@@ -291,7 +291,9 @@ async fn inspecting_workspace_preserves_already_sent_model_prefix() {
                 content, is_error, ..
             } => {
                 assert!(!is_error);
-                let providers::ToolResultContent::Text { text } = &content[0];
+                let providers::ToolResultContent::Text { text } = &content[0] else {
+                    panic!("expected text result");
+                };
                 Some(serde_json::from_str(text).unwrap())
             }
             _ => None,

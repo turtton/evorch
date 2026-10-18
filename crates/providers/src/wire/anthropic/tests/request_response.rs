@@ -272,3 +272,38 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
     assert!(wire.contains("visible"));
     assert!(wire.contains("instructions"));
 }
+
+// Given: 画像を含む tool result / When: wire request に変換 / Then: tool_result 内の base64 image block として送り、ローカルパスは送らない
+#[test]
+fn tool_result_images_are_native_image_blocks() {
+    let request = ChatRequest {
+        model: "claude-test".to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "toolu_1".to_string(),
+                content: vec![ToolResultContent::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0K".to_string(),
+                    source: Some("/w/shot.png".to_string()),
+                }],
+                is_error: false,
+            }],
+        }],
+        tools: vec![],
+        temperature: None,
+        max_tokens: Some(32),
+        reasoning_effort: None,
+        service_tier: None,
+        output_schema: None,
+        observation: None,
+    };
+
+    let wire = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+
+    assert_eq!(
+        wire["messages"][0]["content"][0]["content"][0],
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"}})
+    );
+    assert!(!wire.to_string().contains("/w/shot.png"));
+}

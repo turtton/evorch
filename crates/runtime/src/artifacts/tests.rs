@@ -229,6 +229,7 @@ fn tool_results(messages: &[Message]) -> Vec<(bool, String)> {
                     .iter()
                     .map(|part| match part {
                         ToolResultContent::Text { text } => text.as_str(),
+                        ToolResultContent::Image { .. } => panic!("unexpected image result"),
                     })
                     .collect(),
             )),

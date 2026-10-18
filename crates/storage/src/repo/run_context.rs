@@ -81,7 +81,19 @@ fn redact_message(
             }
             Some("text" | "reasoning") => "text",
             Some("tool_use") => "input",
-            Some("tool_result") => "content",
+            Some("tool_result") => {
+                if let Some(parts) = block
+                    .get_mut("content")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for part in parts {
+                        if part.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                            count += redactor.redact_json(part);
+                        }
+                    }
+                }
+                continue;
+            }
             _ => continue,
         };
         if let Some(payload) = block.get_mut(field) {
