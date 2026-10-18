@@ -69,6 +69,60 @@ fn head_effort_offers_the_route_model_levels_and_saves() {
     );
 }
 
+#[test]
+fn selecting_claude_route_offers_supported_effort_and_saves_to_runtime() {
+    let temp = tempfile::tempdir().expect("temp");
+    write_config(temp.path(), "[{ route = 'worker' }]");
+    let path = config::project_main_config_path(temp.path());
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "[agents.worker]",
+        "claude = [{ profile = 'claude' }]\n[agents.worker]",
+    );
+    std::fs::write(
+        &path,
+        format!(
+            r#"{text}
+[providers.claude]
+type = "anthropic-subscription"
+credential = {{ type = "keyring", service = "evorch", account = "claude-test" }}
+models = ["claude-sonnet-5-5"]
+default_model = "claude-sonnet-5-5"
+"#
+        ),
+    )
+    .unwrap();
+    let (mut harness, model) = open_fixture(temp.path());
+    harness.run();
+    harness.click_label("Worker");
+    harness.run();
+    harness.click_label("Role route");
+    harness.run();
+    harness.click_label("claude");
+    harness.run();
+    harness.click_label("Role route reasoning effort");
+    harness.run();
+    assert!(harness.has_label("xhigh"));
+    assert!(!harness.has_label("minimal"));
+    assert!(!harness.has_label("none"));
+    harness.click_label("max");
+    harness.run();
+    harness.click_label("Save role settings");
+    harness.step();
+    finish(&mut harness);
+
+    assert_eq!(harness.state().role_settings().error, None);
+    assert_eq!(
+        saved(temp.path()).agents.worker.base.models,
+        [config::ChainEntryConfig::with_effort("claude", "max")]
+    );
+    assert_eq!(
+        model
+            .selected_reasoning_effort(Role::Worker, None)
+            .as_deref(),
+        Some("max")
+    );
+}
+
 // Given: 2 要素のチェーン
 // When: 先頭の route を差し替えて保存する
 // Then: 継承 (チェーンの削除) は選べず、後続の要素と先頭の強度はそのまま残る
@@ -170,11 +224,11 @@ fn fallback_entries_only_offer_defined_routes() {
     assert!(harness.has_label("ghost"));
 }
 
-// Given: 汎用の推論強度を受け付けない provider だけを候補に持つ route
+// Given: 推論強度を受け付けない provider または未知の Claude モデルを持つ route
 // When: route の推論強度の選択肢を求める
 // Then: 選択肢はなく、他の provider を含む route だけが選択肢を持つ
 #[test]
-fn native_effort_providers_offer_no_generic_effort() {
+fn unsupported_providers_or_claude_models_offer_no_effort() {
     for kind in ["anthropic", "anthropic-subscription", "cursor"] {
         let config: config::Config = toml::from_str(&format!(
             r#"

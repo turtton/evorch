@@ -106,7 +106,10 @@ Claude supports text and tool calls, and preserves signed thinking returned by
 the provider across tool continuations and saved history. Subscription profiles
 support model-validated reasoning effort, including adaptive thinking on
 Sonnet 4.6 and Opus 4.6/4.7; unsupported model/effort combinations fail before
-inference. See the [Anthropic stream contract](anthropic-stream-events.md)
+inference. Agent Roles and the chat model picker offer the effort levels
+supported by the selected subscription model. Models that require thinking
+do not offer `none`, and unrecognized models have no effort selector.
+See the [Anthropic stream contract](anthropic-stream-events.md)
 for supported events and signature replay boundaries. Cursor does not expose
 temperature, output-token limits, or service-tier controls.
 

@@ -12,6 +12,21 @@ pub fn effort_choices(levels: Option<&[String]>) -> Vec<String> {
     )
 }
 
+/// Claude model capabilities bound configured choices; configuration can only restrict them.
+pub fn claude_effort_choices(model: &str, levels: Option<&[String]>) -> Vec<String> {
+    let supported = providers::provider::claude::effort_levels(model);
+    levels.map_or_else(
+        || supported.iter().map(|level| (*level).to_owned()).collect(),
+        |levels| {
+            levels
+                .iter()
+                .filter(|level| supported.contains(&level.as_str()))
+                .cloned()
+                .collect()
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

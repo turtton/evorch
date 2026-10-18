@@ -79,6 +79,55 @@ fn route_effort_choices_follow_override_or_profile_default_model() {
 }
 
 #[test]
+fn claude_routes_use_model_capabilities_and_restrict_configured_efforts() {
+    let config: Config = toml::from_str(
+        r#"
+[providers.claude]
+type = "anthropic-subscription"
+default_model = "claude-sonnet-4-5"
+models = [
+  "claude-sonnet-4-5",
+  { id = "claude-sonnet-5-5", effort_levels = ["max", "high", "none", "minimal", "xhigh"] },
+  "claude-mythos-preview",
+  { id = "claude-opus-4-7", effort_levels = [] },
+  { id = "unknown", effort_levels = ["high"] },
+]
+[providers.local]
+type = "openai-compatible"
+default_model = "base"
+models = [{ id = "base", effort_levels = ["minimal", "high"] }]
+[routing.routes]
+inherited = [{ profile = "claude" }]
+overridden = [{ profile = "claude", model = "claude-sonnet-5-5" }]
+required = [{ profile = "claude", model = "claude-mythos-preview" }]
+empty = [{ profile = "claude", model = "claude-opus-4-7" }]
+unknown = [{ profile = "claude", model = "unknown" }]
+mixed = [{ profile = "claude" }, { profile = "claude", model = "claude-sonnet-5-5" }, { profile = "local" }]
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        route_effort_choices(&config, "inherited"),
+        ["none", "low", "medium", "high"]
+    );
+    assert_eq!(
+        route_effort_choices(&config, "overridden"),
+        ["max", "high", "xhigh"]
+    );
+    assert_eq!(
+        route_effort_choices(&config, "required"),
+        ["low", "medium", "high", "max"]
+    );
+    for route in ["empty", "unknown"] {
+        assert!(route_effort_choices(&config, route).is_empty(), "{route}");
+    }
+    assert_eq!(
+        route_effort_choices(&config, "mixed"),
+        ["none", "low", "medium", "high", "max", "xhigh", "minimal"]
+    );
+}
+
+#[test]
 fn seed_preserves_all_routes_and_candidates() {
     // Given: 複数ルートと任意モデル。
     let config = fixture();
