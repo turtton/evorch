@@ -2,7 +2,7 @@
 use config::{
     ApiProtocolConfig, Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
 };
-use event_bus::EventBus;
+use event_bus::{CacheComparison, EventBus, EventKind, ProviderEvent, RequestPurpose};
 use mock_openai::claude_contract::claude_model_input;
 use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent, ToolSpec};
 use routing::{ComposeDeps, MapEnv};
@@ -19,6 +19,7 @@ struct Oracle {
     model_inputs: Vec<Value>,
     prompts: Vec<Vec<u8>>,
     cached: Vec<u64>,
+    searches: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -33,6 +34,31 @@ impl Respond for ClaudeEndpoint {
         } else {
             body.clone()
         };
+        if body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["type"] == "web_search_20250305")
+        }) {
+            assert_eq!(body["model"], "claude-sonnet-4-6");
+            assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(body["tools"][0]["name"], "web_search");
+            assert!(body["tools"][0].get("input_schema").is_none());
+            assert!(!request.body.windows(13).any(|s| s == b"cache_control"));
+            self.0.lock().unwrap().searches.push(model_input);
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "id":"msg_search", "type":"message", "role":"assistant", "stop_reason":"end_turn",
+                "content":[
+                    {"type":"server_tool_use", "id":"srvtoolu_search", "name":"web_search", "input":{"query":"source"}},
+                    {"type":"web_search_tool_result", "tool_use_id":"srvtoolu_search", "content":[
+                        {"type":"web_search_result", "title":"Source", "url":"https://example.com/source", "encrypted_content":"opaque-search-result"}
+                    ]},
+                    {"type":"text", "text":"A sourced answer.", "citations":[
+                        {"type":"web_search_result_location", "title":"Source", "url":"https://example.com/source", "encrypted_index":"opaque-index", "cited_text":"A sourced answer."}
+                    ]}
+                ],
+                "usage":{"input_tokens":31,"output_tokens":7,"server_tool_use":{"web_search_requests":1}}
+            }));
+        }
         let mut normalized = model_input.clone();
         // Normalize only the moving Anthropic breakpoint, not nested arguments.
         for message in normalized["messages"].as_array_mut().unwrap() {
@@ -162,7 +188,7 @@ async fn exercise(oauth: bool) {
         .and(path("/v1/messages"))
         .and(header(auth_header, &auth_value))
         .respond_with(ClaudeEndpoint(oracle.clone()))
-        .expect(3)
+        .expect(5)
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
@@ -195,6 +221,7 @@ async fn exercise(oauth: bool) {
         },
     );
     let bus = Arc::new(EventBus::new(128));
+    let mut events = bus.subscribe();
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {
@@ -242,6 +269,7 @@ async fn exercise(oauth: bool) {
         },
     ];
     let mut responses = vec![];
+    let search_usage = Arc::new(Mutex::new(Vec::new()));
     for index in 0..3 {
         let response = model
             .complete_streaming(&invocation, Role::Worker, &messages, &tools, &bus)
@@ -264,6 +292,29 @@ async fn exercise(oauth: bool) {
                 role: MessageRole::Assistant,
                 content: response.message.content.clone(),
             });
+            let usage = search_usage.clone();
+            let search = model
+                .web_search_provider(
+                    &invocation,
+                    Role::Worker,
+                    &tools,
+                    Arc::new(move |value| usage.lock().unwrap().push(value)),
+                )
+                .unwrap()
+                .expect("selected Claude provider supports hosted search");
+            assert_eq!(search.name(), if oauth { "claude" } else { "anthropic" });
+            let result = search
+                .search(
+                    &format!("source {index}"),
+                    &tools::SearchOptions {
+                        max_results: Some(1),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.result_count, 1);
+            assert!(result.content.contains("https://example.com/source"));
+            assert!(!result.content.contains("opaque-"));
             messages.push(Message {
                 role: MessageRole::User,
                 content: vec![ContentBlock::ToolResult {
@@ -281,6 +332,8 @@ async fn exercise(oauth: bool) {
         responses.push(response);
     }
     let oracle = oracle.lock().unwrap();
+    assert_eq!(oracle.searches.len(), 2);
+    assert_eq!(search_usage.lock().unwrap().len(), 2);
     assert_eq!(oracle.cached[0], 0);
     for (index, response) in responses.iter().enumerate().skip(1) {
         mock_openai::cache_contract::assert_append_only(
@@ -334,14 +387,59 @@ async fn exercise(oauth: bool) {
             );
         }
     }
+    let events = events.drain_pending_snapshot();
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                request_id,
+                purpose,
+                ..
+            }) => Some((request_id, purpose)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 5);
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|(_, purpose)| **purpose == Some(RequestPurpose::WebSearch))
+            .count(),
+        2
+    );
+    let chats: Vec<_> = completed
+        .iter()
+        .filter(|(_, purpose)| **purpose == Some(RequestPurpose::Agent))
+        .collect();
+    assert_eq!(chats.len(), 3);
+    let cache: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::CacheReuseObserved { comparison, .. }) => {
+                Some(comparison)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cache.len(),
+        3,
+        "hosted search must preserve the chat cache baseline"
+    );
+    assert!(
+        matches!(cache[2], CacheComparison::Compared { previous_request_id, .. } if previous_request_id == chats[1].0)
+    );
+    assert!(events.iter().all(
+        |event| !matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "CacheRegression")
+    ));
 }
 
 #[tokio::test]
-async fn claude_api_key_runtime_tool_turns_preserve_prefix() {
+async fn claude_api_key_runtime_tool_turns_and_hosted_search_preserve_prefix() {
     exercise(false).await;
 }
 
 #[tokio::test]
-async fn claude_oauth_runtime_tool_turns_preserve_prefix() {
+async fn claude_oauth_runtime_tool_turns_and_hosted_search_preserve_prefix() {
     exercise(true).await;
 }

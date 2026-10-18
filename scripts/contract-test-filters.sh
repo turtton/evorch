@@ -17,6 +17,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=claude_account_binding)
       | binary(=request_turn_context)
       | binary(=anthropic_signed_replay)
+      | (binary(=anthropic_web_search) & test(search_isolated_from_chat_cache_and_claude_response_correlation))
       | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
   | (package(=routing) & binary(=claude_identity))
   | (package(=runtime) & (

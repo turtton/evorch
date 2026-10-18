@@ -8,6 +8,7 @@ use event_bus::EventBus;
 use serde::Serialize;
 
 mod transport;
+pub(super) mod web_search;
 use super::claude::transport::ClaudeTransport;
 use transport::PreparedRequest;
 
@@ -193,6 +194,17 @@ impl AnthropicClient {
         timeout: Option<Duration>,
         observation: Option<&ObservationContext>,
     ) -> Result<(PreparedRequest, Option<ClaudeRequestContext>), ProviderError> {
+        self.authenticated_request_with_tools(auth, request, timeout, observation, None)
+    }
+
+    fn authenticated_request_with_tools(
+        &self,
+        auth: &ProviderAuth,
+        request: &MessagesRequest,
+        timeout: Option<Duration>,
+        observation: Option<&ObservationContext>,
+        server_tools: Option<&[serde_json::Value]>,
+    ) -> Result<(PreparedRequest, Option<ClaudeRequestContext>), ProviderError> {
         if let Some(transport) = &self.claude_transport {
             let identity: serde_json::Value = serde_json::from_str(
                 request
@@ -219,14 +231,24 @@ impl AnthropicClient {
                 .begin(session_id, device_id, observation)?;
             let mut headers = ClaudeWireProfile.headers(session_id, controls)?;
             context.apply_headers(&mut headers)?;
-            let mut builder = transport
-                .request(wreq::Method::POST, &self.messages_url(), auth, headers)
-                .body(super::claude::serialize_request(
+            let body = match server_tools {
+                Some(tools) => super::claude::serialize_request_with_tools(
                     &request.wire,
                     request.metadata.as_ref(),
                     controls,
                     Some(&context),
-                )?);
+                    Some(tools),
+                )?,
+                None => super::claude::serialize_request(
+                    &request.wire,
+                    request.metadata.as_ref(),
+                    controls,
+                    Some(&context),
+                )?,
+            };
+            let mut builder = transport
+                .request(wreq::Method::POST, &self.messages_url(), auth, headers)
+                .body(body);
             if let Some(timeout) = timeout {
                 builder = builder.timeout(timeout);
             }
@@ -237,8 +259,18 @@ impl AnthropicClient {
                 .post(self.messages_url())
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .header("x-api-key", &auth.api_key)
-                .json(request);
+                .header("x-api-key", &auth.api_key);
+            builder = if let Some(tools) = server_tools {
+                let mut body = serde_json::to_value(request).map_err(|_| {
+                    ProviderError::Request("Anthropic request serialization failed".into())
+                })?;
+                body["tools"] = serde_json::to_value(tools).map_err(|_| {
+                    ProviderError::Request("Anthropic search tools serialization failed".into())
+                })?;
+                builder.json(&body)
+            } else {
+                builder.json(request)
+            };
             if let Some(timeout) = timeout {
                 builder = builder.timeout(timeout);
             }
@@ -265,6 +297,10 @@ impl AnthropicClient {
 
 #[async_trait]
 impl ProviderClient for AnthropicClient {
+    fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
+        Some(self)
+    }
+
     async fn list_models(&self, auth: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;

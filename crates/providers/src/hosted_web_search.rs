@@ -47,6 +47,9 @@ pub enum HostedWebSearchError {
 /// Optional capability discovered through [`crate::ProviderClient`].
 #[async_trait]
 pub trait HostedWebSearch: Send + Sync {
+    /// Stable provider identifier used in search-result metadata.
+    fn provider_name(&self) -> &'static str;
+
     async fn search(
         &self,
         auth: &ProviderAuth,

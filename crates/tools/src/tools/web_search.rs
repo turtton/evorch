@@ -4,7 +4,7 @@
 //! Exa keyless primary・Tavily keyless fallback を使う。chain は常に 2 slot で、
 //! Tavily は keyless 構成専用。選択済みモデルの hosted search は呼び出し単位で
 //! primary を差し替え、Exa へ 1 回だけ fallback する。対象は 429・5xx・timeout
-//! および Codex による hosted web_search の明示的な未対応拒否。
+//! および選択済み provider による hosted web_search の明示的な未対応拒否。
 //! 資格情報の値を metadata に含めず、credential_status はリテラル値のみとする。
 
 use std::sync::Arc;
@@ -71,7 +71,7 @@ type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// keyed または keyless の primary・fallback を持つ web 検索ツール。
 ///
-/// fallback は fallback 対象の error（429・5xx・timeout、
+/// fallback は fallback 対象の error（429・5xx・timeout・hosted search 未対応、
 /// [`SearchError::is_fallback_trigger`]）に対してのみ 1 回試行され、fallback の
 /// 結果が再び fallback 対象でも連鎖しない。
 pub struct WebSearch {

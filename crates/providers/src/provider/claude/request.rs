@@ -15,6 +15,16 @@ pub(crate) fn serialize_request(
     reasoning: &ClaudeReasoningControls,
     context: Option<&ClaudeRequestContext>,
 ) -> Result<Vec<u8>, ProviderError> {
+    serialize_request_with_tools(wire, metadata, reasoning, context, None)
+}
+
+pub(crate) fn serialize_request_with_tools(
+    wire: &WireMessagesRequest,
+    metadata: Option<&Value>,
+    reasoning: &ClaudeReasoningControls,
+    context: Option<&ClaudeRequestContext>,
+    server_tools: Option<&[Value]>,
+) -> Result<Vec<u8>, ProviderError> {
     let first_user_text = wire
         .messages
         .iter()
@@ -42,12 +52,26 @@ pub(crate) fn serialize_request(
         },
     );
     #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Tools<'a> {
+        Client(&'a [WireTool]),
+        Server(&'a [Value]),
+    }
+    impl Tools<'_> {
+        fn is_empty(&self) -> bool {
+            match self {
+                Self::Client(tools) => tools.is_empty(),
+                Self::Server(tools) => tools.is_empty(),
+            }
+        }
+    }
+    #[derive(Serialize)]
     struct Envelope<'a> {
         model: &'a str,
         messages: &'a [WireMessage],
         system: &'a [WireContentBlock],
-        #[serde(skip_serializing_if = "<[WireTool]>::is_empty")]
-        tools: &'a [WireTool],
+        #[serde(skip_serializing_if = "Tools::is_empty")]
+        tools: Tools<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<&'a Value>,
         max_tokens: u64,
@@ -67,7 +91,7 @@ pub(crate) fn serialize_request(
         model: &wire.model,
         messages: &wire.messages,
         system: &system,
-        tools: &wire.tools,
+        tools: server_tools.map_or(Tools::Client(&wire.tools), Tools::Server),
         metadata,
         max_tokens: wire.max_tokens,
         temperature: wire.temperature,

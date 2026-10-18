@@ -23,11 +23,12 @@ pub(super) fn resolve(
         .ok_or_else(|| RuntimeError::Model {
             reason: "resolved search provider profile is unavailable".into(),
         })?;
-    if provider.client.hosted_web_search().is_none() {
+    let Some(capability) = provider.client.hosted_web_search() else {
         return Ok(None);
-    }
+    };
     let (model_id, _) = config::types::provider::parse_model_speed(&resolved.route.model_id);
     Ok(Some(Arc::new(HostedSearchProvider {
+        provider_name: capability.provider_name(),
         client: Arc::clone(&provider.client),
         auth: provider.auth.clone(),
         request: HostedWebSearchRequest {
@@ -46,6 +47,7 @@ pub(super) fn resolve(
 }
 
 struct HostedSearchProvider {
+    provider_name: &'static str,
     client: Arc<dyn providers::ProviderClient>,
     auth: providers::ProviderAuth,
     request: HostedWebSearchRequest,
@@ -54,7 +56,7 @@ struct HostedSearchProvider {
 #[async_trait::async_trait]
 impl SearchProvider for HostedSearchProvider {
     fn name(&self) -> &str {
-        "codex"
+        self.provider_name
     }
 
     fn uses_credentials(&self) -> bool {
@@ -77,7 +79,7 @@ impl SearchProvider for HostedSearchProvider {
                 .search(&self.auth, &request)
                 .await
                 .map_err(|error| match error {
-                    HostedWebSearchError::Unsupported => SearchError::CodexUnsupported,
+                    HostedWebSearchError::Unsupported => SearchError::HostedSearchUnsupported,
                     HostedWebSearchError::Provider(error) => search_error(error),
                 })?;
         let limit = usize::try_from(options.max_results.unwrap_or(10).clamp(1, 10)).unwrap_or(10);

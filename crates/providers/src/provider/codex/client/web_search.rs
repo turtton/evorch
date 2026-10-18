@@ -20,6 +20,10 @@ use stream::SearchStream;
 
 #[async_trait]
 impl HostedWebSearch for CodexClient {
+    fn provider_name(&self) -> &'static str {
+        "codex"
+    }
+
     async fn search(
         &self,
         _auth: &ProviderAuth,
