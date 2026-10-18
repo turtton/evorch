@@ -17,7 +17,9 @@ pub use oauth::{
     CLAUDE_CLIENT_ID, CLAUDE_SCOPE, ClaudeLoginRequest, ClaudeOAuthClient, ClaudeOAuthConfig,
     ClaudeOAuthError,
 };
-pub use profile::{CLAUDE_INFERENCE_BETAS, CLAUDE_SYSTEM_IDENTITY, CLAUDE_USER_AGENT};
+pub use profile::{
+    CLAUDE_INFERENCE_BETAS, CLAUDE_SYSTEM_IDENTITY, CLAUDE_USER_AGENT, effort_levels,
+};
 pub(super) use profile::{ClaudeReasoningControls, ClaudeWireProfile};
 pub use quota::{ClaudeExtraUsage, ClaudeQuotaClient, ClaudeQuotaSnapshot, ClaudeQuotaWindow};
 pub(super) use request::{serialize_request, serialize_request_with_tools};

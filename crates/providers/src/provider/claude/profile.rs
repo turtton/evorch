@@ -134,12 +134,17 @@ impl ClaudeWireProfile {
                 "Claude OAuth reasoning controls are not supported for model {model}"
             ))
         })?;
-        if effort == "none" {
-            if mode.requires_thinking() {
+        if !mode.effort_levels().contains(&effort) {
+            if effort == "none" && mode.requires_thinking() {
                 return Err(ProviderError::Request(format!(
                     "Claude model {model} requires thinking; select low effort instead"
                 )));
             }
+            return Err(ProviderError::Request(format!(
+                "Claude OAuth reasoning effort {effort:?} is not supported for model {model}"
+            )));
+        }
+        if effort == "none" {
             return Ok(ClaudeReasoningControls {
                 thinking: Some(json!({"type": "disabled"})),
                 ..Default::default()
@@ -149,13 +154,7 @@ impl ClaudeWireProfile {
             "low" => 1024,
             "medium" => 4096,
             "high" => 16384,
-            "xhigh" if mode.supports_xhigh() => 0,
-            "max" if mode.is_adaptive() => 0,
-            _ => {
-                return Err(ProviderError::Request(format!(
-                    "Claude OAuth reasoning effort {effort:?} is not supported for model {model}"
-                )));
-            }
+            _ => 0,
         };
         let thinking = if mode.is_adaptive() {
             json!({"type": "adaptive", "display": "updates"})
@@ -189,6 +188,18 @@ enum ModelMode {
 }
 
 impl ModelMode {
+    fn effort_levels(self) -> &'static [&'static str] {
+        match self {
+            Self::Manual | Self::ManualEffort | Self::ManualLegacy => {
+                &["none", "low", "medium", "high"]
+            }
+            Self::Adaptive => &["none", "low", "medium", "high", "max"],
+            Self::AdaptiveXhigh => &["none", "low", "medium", "high", "xhigh", "max"],
+            Self::AdaptiveRequired => &["low", "medium", "high", "max"],
+            Self::AdaptiveRequiredXhigh => &["low", "medium", "high", "xhigh", "max"],
+        }
+    }
+
     fn is_adaptive(self) -> bool {
         matches!(
             self,
@@ -206,6 +217,12 @@ impl ModelMode {
     fn requires_thinking(self) -> bool {
         matches!(self, Self::AdaptiveRequired | Self::AdaptiveRequiredXhigh)
     }
+}
+
+/// Explicit reasoning efforts accepted by the Claude subscription transport for this model.
+/// Unknown model IDs have no supported explicit effort; an unspecified effort remains valid.
+pub fn effort_levels(model: &str) -> &'static [&'static str] {
+    model_mode(model).map_or(&[], ModelMode::effort_levels)
 }
 
 fn model_mode(model: &str) -> Option<ModelMode> {

@@ -259,7 +259,7 @@ fn picker_disabled_without_profiles_offers_settings() {
 }
 
 #[test]
-fn selecting_native_model_clears_prior_effort_and_hides_generic_effort_choices() {
+fn selecting_unsupported_provider_or_claude_model_clears_effort_and_hides_choices() {
     for kind in ["anthropic", "anthropic-subscription", "cursor"] {
         let temp = tempfile::tempdir().unwrap();
         let credential = if kind != "anthropic" {
@@ -313,4 +313,56 @@ default_model = "selected-model"
         assert!(!harness.has_label("Reasoning effort"), "{kind}");
         assert!(!harness.has_label("high"), "{kind}");
     }
+}
+
+#[test]
+fn selecting_claude_model_preserves_compatible_effort_and_persists_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench_with_provider(
+        temp.path(),
+        true,
+        r#"
+[providers.a-claude]
+type = "anthropic-subscription"
+credential = {type = "keyring", service = "evorch", account = "claude-test"}
+models = ["claude-sonnet-5-5"]
+default_model = "claude-sonnet-5-5"
+"#,
+    );
+    harness
+        .state_mut()
+        .set_thread_model_preference(Some(ModelPreference {
+            profile: "local".into(),
+            model: Some("model-b".into()),
+            reasoning_effort: Some("high".into()),
+        }));
+    harness.run();
+    harness.click_label("local / model-b · high");
+    harness.run();
+    harness.click_label("a-claude / claude-sonnet-5-5");
+    harness.run();
+    let mut expected = ModelPreference {
+        profile: "a-claude".into(),
+        model: Some("claude-sonnet-5-5".into()),
+        reasoning_effort: Some("high".into()),
+    };
+    assert_eq!(
+        harness.state().sidebar().threads[0].model_preference,
+        Some(expected.clone())
+    );
+    harness.click_label("a-claude / claude-sonnet-5-5 · high");
+    harness.run();
+    assert!(harness.has_label("Reasoning effort"));
+    assert!(harness.has_label("xhigh"));
+    assert!(!harness.has_label("minimal"));
+    assert!(!harness.has_label("none"));
+    harness.click_label("max");
+    harness.run();
+    expected.reasoning_effort = Some("max".into());
+    assert_eq!(
+        harness.state().sidebar().threads[0].model_preference,
+        Some(expected.clone())
+    );
+    let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    assert_eq!(restored.threads[0].model_preference, Some(expected));
 }

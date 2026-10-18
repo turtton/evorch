@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn model_effort_levels_match_accepted_reasoning_controls() {
+    let manual = &["none", "low", "medium", "high"][..];
+    let adaptive = &["none", "low", "medium", "high", "max"][..];
+    let adaptive_xhigh = &["none", "low", "medium", "high", "xhigh", "max"][..];
+    let required = &["low", "medium", "high", "max"][..];
+    let required_xhigh = &["low", "medium", "high", "xhigh", "max"][..];
+    for (model, expected) in [
+        ("claude-3-7-sonnet-20250219", manual),
+        ("claude-sonnet-4-5", manual),
+        ("claude-opus-4-5-20251101", manual),
+        ("claude-sonnet-4-6", adaptive),
+        ("claude-opus-4-7-20261017", adaptive_xhigh),
+        ("claude-mythos-preview", required),
+        ("claude-sonnet-5-5", required_xhigh),
+        ("claude-fable-5-1-20261017", required_xhigh),
+        ("claude-opus-4-7-custom", &[][..]),
+        ("claude-opus-4-70", &[][..]),
+        ("unknown", &[][..]),
+    ] {
+        assert_eq!(effort_levels(model), expected, "{model}");
+        for effort in [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "custom",
+        ] {
+            assert_eq!(
+                ClaudeWireProfile
+                    .reasoning(model, 32768, Some(effort))
+                    .is_ok(),
+                expected.contains(&effort),
+                "{model}: {effort}"
+            );
+        }
+        assert_eq!(
+            ClaudeWireProfile.reasoning(model, 0, None).unwrap(),
+            ClaudeReasoningControls::default(),
+            "{model}"
+        );
+    }
+}
+
+#[test]
 fn oauth_headers_match_cli_identity_without_authentication_or_credit_opt_in() {
     let profile = ClaudeWireProfile;
     for enabled in [false, true] {

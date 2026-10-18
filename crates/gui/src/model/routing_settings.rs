@@ -41,15 +41,20 @@ pub fn route_effort_choices(config: &Config, route: &str) -> Vec<String> {
         };
         if matches!(
             profile.provider_type,
-            config::ProviderTypeConfig::Anthropic
-                | config::ProviderTypeConfig::AnthropicSubscription
-                | config::ProviderTypeConfig::Cursor
+            config::ProviderTypeConfig::Anthropic | config::ProviderTypeConfig::Cursor
         ) {
             continue;
         }
         let model = candidate.model.as_ref().unwrap_or(&profile.default_model);
         let levels = profile.effort_levels_by_model();
-        for effort in super::effort::effort_choices(levels.get(model).map(Vec::as_slice)) {
+        let configured_levels = levels.get(model).map(Vec::as_slice);
+        let candidate_choices =
+            if profile.provider_type == config::ProviderTypeConfig::AnthropicSubscription {
+                super::effort::claude_effort_choices(model, configured_levels)
+            } else {
+                super::effort::effort_choices(configured_levels)
+            };
+        for effort in candidate_choices {
             if !choices.contains(&effort) {
                 choices.push(effort);
             }
