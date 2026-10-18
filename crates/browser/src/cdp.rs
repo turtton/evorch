@@ -15,13 +15,13 @@ use event_bus::event::diagnostic_codes;
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{BrowserAction, BrowserError, diagnostics};
+use crate::{BrowserAction, BrowserError, BrowserReport, diagnostics};
 
 pub(super) struct Channels {
     pub commands: mpsc::Receiver<BrowserAction>,
-    pub frames: watch::Sender<Option<egui::ColorImage>>,
+    pub frames: watch::Sender<Option<image::RgbaImage>>,
     pub shutdown: oneshot::Receiver<()>,
-    pub reports: mpsc::Sender<super::BrowserReport>,
+    pub reports: mpsc::Sender<BrowserReport>,
 }
 
 pub(super) async fn run(
@@ -87,8 +87,8 @@ async fn stream(
     channels: (
         &event_bus::EventBus,
         &mut mpsc::Receiver<BrowserAction>,
-        &watch::Sender<Option<egui::ColorImage>>,
-        &mpsc::Sender<super::BrowserReport>,
+        &watch::Sender<Option<image::RgbaImage>>,
+        &mpsc::Sender<BrowserReport>,
     ),
 ) -> Result<(), BrowserError> {
     let (bus, commands, frames, reports) = channels;
@@ -123,7 +123,7 @@ async fn stream(
                         Ok(report) => report,
                         Err(error) => {
                             diagnostics::emit(bus, diagnostic_codes::BROWSER_ACTION_ERROR, &error.to_string(), true);
-                            super::BrowserReport {
+                            BrowserReport {
                                 action: action_name.into(),
                                 error: Some(error.to_string()),
                                 removed: String::new(),
@@ -153,7 +153,7 @@ async fn acknowledge(page: &Page, session_id: i64) -> Result<(), BrowserError> {
     Ok(())
 }
 
-fn decode(data: impl AsRef<[u8]>) -> Result<egui::ColorImage, BrowserError> {
+fn decode(data: impl AsRef<[u8]>) -> Result<image::RgbaImage, BrowserError> {
     let jpeg = STANDARD.decode(data)?;
     let mut reader =
         image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg);
@@ -162,13 +162,5 @@ fn decode(data: impl AsRef<[u8]>) -> Result<egui::ColorImage, BrowserError> {
     limits.max_image_height = Some(720);
     limits.max_alloc = Some(16 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode()?.into_rgba8();
-    let width =
-        usize::try_from(image.width()).map_err(|e| BrowserError::Configuration(e.to_string()))?;
-    let height =
-        usize::try_from(image.height()).map_err(|e| BrowserError::Configuration(e.to_string()))?;
-    Ok(egui::ColorImage::from_rgba_unmultiplied(
-        [width, height],
-        image.as_raw(),
-    ))
+    Ok(reader.decode()?.into_rgba8())
 }

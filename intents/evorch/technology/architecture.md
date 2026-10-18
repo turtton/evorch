@@ -39,6 +39,7 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `agents` | role / category / skills の定義 |
 | `arena` | role-eval 実験基盤（comparison / selection / promotion） |
 | `catalog` | model catalog（ADR 0013） |
+| `browser` | 外部 Chromium の CDP セッション（ADR 0034）。GUI の Browser pane と agent tool が共用 |
 | `mock-openai` | OpenAI-compatible テスト用 provider |
 | `workspace-ui` | panel / layout / action / semantic-tree |
 | `gui` | egui + egui_dock（ADR 0007） |

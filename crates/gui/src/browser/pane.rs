@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{BrowserAction, ChromiumSource, FrameSource};
+use super::{BrowserAction, BrowserSession, FrameSource};
 use crate::theme::{text::muted, tokens::palette, widgets::pane_root};
 
 pub struct BrowserPane<S> {
@@ -110,7 +110,7 @@ impl<S: FrameSource> BrowserPane<S> {
 pub struct BrowserWindow {
     bus: Arc<event_bus::EventBus>,
     runtime: tokio::runtime::Handle,
-    pane: Option<BrowserPane<ChromiumSource>>,
+    pane: Option<BrowserPane<BrowserSession>>,
     open: bool,
     headful: bool,
 }
@@ -141,7 +141,7 @@ impl BrowserWindow {
                     match &self.pane {
                         None => {
                             if ui.button("Start browser").clicked() {
-                                self.pane = Some(BrowserPane::new(ChromiumSource::start(
+                                self.pane = Some(BrowserPane::new(BrowserSession::start(
                                     &self.runtime,
                                     self.bus.clone(),
                                     self.headful,

@@ -1,7 +1,9 @@
 # Embedded Browser (opt-in)
 
 Build/run with `cargo run -p gui --features browser --bin evorch-gui`.
-The default feature set is empty; ordinary builds do not compile Chromiumoxide.
+The Chromium session (launch, CDP, diagnostics) lives in `crates/browser` so
+runtime and tools can use it too. The GUI pane is behind the opt-in `browser`
+feature; default GUI builds do not link Chromiumoxide.
 Install Chromium separately. No browser is downloaded or opened automatically.
 
 Open **Browser**, then choose **Start browser**. Headless is the default.
@@ -33,8 +35,8 @@ No screenshot is logged on every video frame, only around explicit actions.
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 
 - `cargo test -p gui --features browser --test browser`
-- `cargo test -p gui --features browser --lib browser::diagnostics`
-- With installed Chromium: `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored`
+- `cargo test -p browser`
+- With installed Chromium: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored`
 
 The Chromium integration test uses only an ephemeral localhost HTTP fixture.
 It is ignored by the normal test run to avoid launching Chromium implicitly.
