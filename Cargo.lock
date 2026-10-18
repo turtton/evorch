@@ -852,6 +852,7 @@ dependencies = [
 name = "browser"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "chromiumoxide",
  "event-bus",
@@ -864,6 +865,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
 ]
 
@@ -6747,6 +6749,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "browser",
  "config",
  "dom_smoothie",
  "event-bus",
@@ -6773,6 +6776,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

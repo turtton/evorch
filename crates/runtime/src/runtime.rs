@@ -2495,6 +2495,7 @@ pub(crate) fn configured_executor(
     .with_post_edit_hook(hook)
     .with_policy(approval_policy)
     .with_web_tools()
+    .and_then(tools::ToolExecutor::with_browser_tools)
     .map_err(|error| RuntimeError::NetworkGuard {
         detail: error.to_string(),
     })?;

@@ -30,6 +30,31 @@ Memory is bounded by an eight-command queue and one latest decoded frame;
 screencasts are limited to 1280x720 and decoded with image allocation limits.
 No screenshot is logged on every video frame, only around explicit actions.
 
+## Agent browser tools
+
+When a Chromium or Chrome executable is installed (or named by `CHROME`), the
+runtime registers `browser_navigate`, `browser_snapshot`, `browser_click`,
+`browser_type`, `browser_press_key`, `browser_scroll`, `browser_screenshot` and
+`browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
+use them; `sandbox.web_tools_enabled` is their global switch, as for the other
+Web tools.
+
+- One headless Chromium is launched on first use, with a temporary profile.
+  Each run gets its own page; at most eight stay open and a run's page closes
+  when the run ends or on `browser_close`.
+- Pages are read as an accessibility outline. Elements carry `[ref=eN]`, and
+  the action tools accept only refs from the latest outline. Actions return
+  the updated outline; `browser_screenshot` returns a PNG image result.
+- `browser_navigate` URLs go through the same per-call review as `web_fetch`.
+  Every request of the page, including redirects, subresources and frames, is
+  paused with the CDP Fetch domain and checked like `web_fetch` (HTTPS only,
+  blocked link-local and CGNAT addresses). Refused requests are listed in the
+  next result.
+- Known gaps: Chromium resolves hosts itself, so the checked addresses are not
+  pinned; WebSocket connections and service-worker fetches are not paused.
+  Popups are refused (`--block-new-web-contents`) and WebRTC is limited to
+  proxied UDP.
+
 ## Low-memory verification
 
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
@@ -37,6 +62,7 @@ Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 - `cargo test -p gui --features browser --test browser`
 - `cargo test -p browser`
 - With installed Chromium: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored`
+- With installed Chromium: `cargo test -p browser --test agent_chromium -- --ignored`
 
 The Chromium integration test uses only an ephemeral localhost HTTP fixture.
 It is ignored by the normal test run to avoid launching Chromium implicitly.

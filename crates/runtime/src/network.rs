@@ -59,6 +59,11 @@ impl SandboxFactory for BwrapFactory {
     }
 }
 
+/// Tools whose URL argument is reviewed on every call before it is loaded.
+pub(crate) fn reviews_url(tool: &str) -> bool {
+    matches!(tool, "web_fetch" | "browser_navigate")
+}
+
 /// Authorization outcome for one network-capable tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkAccessDecision {
@@ -95,8 +100,8 @@ pub fn judge_web_network_access(
         sandbox::PolicyDecision::Ask => NetworkAccessDecision::Ask {
             reason: format!("tool '{tool}' requires review"),
         },
-        sandbox::PolicyDecision::AutoAllow if tool == "web_fetch" => NetworkAccessDecision::Ask {
-            reason: "web_fetch URL requires review".into(),
+        sandbox::PolicyDecision::AutoAllow if reviews_url(tool) => NetworkAccessDecision::Ask {
+            reason: format!("{tool} URL requires review"),
         },
         sandbox::PolicyDecision::AutoAllow => NetworkAccessDecision::Allow,
     }
@@ -155,28 +160,29 @@ mod tests {
     }
 
     #[test]
-    fn web_search_can_run_but_fetch_requires_call_review() {
+    fn only_url_loading_web_tools_require_call_review() {
+        assert_eq!(agents::BROWSER_TOOLS, tools::BROWSER_TOOL_NAMES);
         let role = Role::WebResearcher.capabilities();
-        assert_eq!(
-            judge_web_network_access(
+        for tool in ["web_search", "web_fetch"]
+            .into_iter()
+            .chain(agents::BROWSER_TOOLS)
+        {
+            let decision = judge_web_network_access(
                 &role,
                 "WebResearcher",
-                "web_search",
+                tool,
                 PolicyDecision::AutoAllow,
-                true
-            ),
-            NetworkAccessDecision::Allow,
-        );
-        assert!(matches!(
-            judge_web_network_access(
-                &role,
-                "WebResearcher",
-                "web_fetch",
-                PolicyDecision::AutoAllow,
-                true
-            ),
-            NetworkAccessDecision::Ask { .. },
-        ));
+                true,
+            );
+            if matches!(tool, "web_fetch" | "browser_navigate") {
+                assert!(
+                    matches!(decision, NetworkAccessDecision::Ask { .. }),
+                    "{tool}"
+                );
+            } else {
+                assert_eq!(decision, NetworkAccessDecision::Allow, "{tool}");
+            }
+        }
     }
 
     #[test]

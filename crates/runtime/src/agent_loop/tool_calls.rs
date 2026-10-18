@@ -1003,7 +1003,7 @@ impl LoopState {
                 NetworkGate::Reject(ToolResult::error(reason))
             }
             NetworkAccessDecision::Ask { reason } => {
-                if name == "web_fetch" && per_tool == PolicyDecision::AutoAllow {
+                if crate::network::reviews_url(name) && per_tool == PolicyDecision::AutoAllow {
                     let context = self
                         .runtime()
                         .and_then(|runtime| {
@@ -1040,7 +1040,7 @@ impl LoopState {
                             }
                             return NetworkGate::Reject(ToolResult::error("review was interrupted"));
                         }
-                        verdict = reviewer.review_web_fetch(&review_run_id, input, context) => verdict,
+                        verdict = reviewer.review_web_request(&review_run_id, name, input, context) => verdict,
                     };
                     return match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {

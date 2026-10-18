@@ -25,6 +25,7 @@ impl AgentRuntime {
                 )
             });
         executor.cancel_shell_jobs(&id);
+        executor.end_run(&id);
         let shells = match executor.drain_shell_jobs(&id).await {
             Ok(()) => "stopped".to_string(),
             Err(error) => format!("cleanup failed: {error}"),

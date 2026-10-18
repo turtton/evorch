@@ -136,6 +136,9 @@ pub trait Tool: Send + Sync {
     /// Cancel processes still owned by a terminal/cancelled run. No replay occurs.
     fn cancel_shell_jobs(&self, _run_id: &str) {}
 
+    /// Release per-run resources such as browser pages once the run is terminal.
+    fn end_run(&self, _run_id: &str) {}
+
     /// Stop and await process teardown before deleting its workspace. Failure
     /// means the workspace must be retained.
     async fn drain_shell_jobs(&self, _run_id: &str) -> Result<(), ToolError> {

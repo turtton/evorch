@@ -18,7 +18,7 @@ mod size;
 pub use dns::DnsResolver;
 use dns::{HickoryResolver, PinningResolver};
 pub use error::NetworkGuardError;
-use https::upgrade_to_https;
+pub(crate) use https::upgrade_to_https;
 use ip_policy::IpPolicy;
 
 /// 追従を許可する redirect の最大回数。
@@ -143,6 +143,24 @@ impl NetworkGuard {
     ) -> Result<GuardedResponse, NetworkGuardError> {
         self.guarded_request(url, OutgoingRequest::PostJson { headers, body })
             .await
+    }
+
+    /// Applies the scheme, DNS and IP checks of [`NetworkGuard::get`] to a URL
+    /// another client will load, such as the agent browser. That client
+    /// resolves the host itself, so the checked addresses are not pinned.
+    ///
+    /// # Errors
+    /// Returns the [`NetworkGuardError`] for a non-HTTPS URL, a failed lookup or a blocked address.
+    pub async fn check_destination(&self, url: &Url) -> Result<(), NetworkGuardError> {
+        ensure_https(url)?;
+        let host = url.host_str().ok_or(NetworkGuardError::MissingHost)?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        for addr in self.resolver.resolve(host).await? {
+            if self.policy.is_blocked(addr) {
+                return Err(NetworkGuardError::BlockedIp { addr });
+            }
+        }
+        Ok(())
     }
 
     async fn guarded_request(
