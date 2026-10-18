@@ -16,7 +16,7 @@ commit pins CLI 2.1.280 and SDK 0.112.1; these older constants were not copied.
 | --- | --- |
 | Authentication | Bearer token, `/messages?beta=true`, redirects disabled |
 | Identity | CLI User-Agent and system identity; Stainless headers; persistent installation seed and account-scoped device ID; matching metadata/session header |
-| Tools | OMP `_` prefix; evorch-specific tools have an inner MCP-style namespace |
+| Client tools | OMP `_` prefix; evorch-specific tools have an inner MCP-style namespace |
 | Arguments and schemas | Original evorch definitions; no `path`/`file_path` translation |
 | System | Billing control block, CLI identity, original instructions |
 | Body | CLI field order; checksum patches the final serialized bytes |
@@ -134,6 +134,40 @@ valid recomputed checksums. The general Anthropic cache contract is unchanged.
 These tests protect input preservation. Synthetic cached tokens do not establish
 the service's cache hit rate, subscription eligibility, or usage-credit routing.
 Those remain service-side decisions and require live account validation.
+
+## Hosted web search
+
+Both API-key and subscription clients expose Anthropic's
+[server-side web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)
+through evorch's existing `web_search` tool. The selected model and provider
+credentials are reused for a separate Messages exchange with
+`web_search_20250305`; ordinary chat tools and history retain their existing
+wire format. Server tools keep their official names and schemas, bypassing the
+subscription adapter's client-tool namespace conversion.
+
+Static inspection of the Linux x86_64 Claude Code 2.1.295 native binary
+(SHA-256 `3886a7d7bcf6f40a587b9fd0f1b411797aa54e3a2c45f2d5c92d68d829bc6930`)
+on 2026-10-17 confirms a separate WebSearch Messages call with that tool version,
+at most eight searches, and prompt caching disabled. This is static evidence;
+no live account was used for this feature's validation. The existing OAuth
+identity, account binding, transport, and final-byte checksum are reused.
+
+The search exchange uses JSON responses and automatic tool choice. This differs
+from the inspected native forced choice and disabled thinking: the
+[current tool-use documentation](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)
+restricts forced choice on some models. A completed, matching server search
+result is required even if the model returns prose. Paused responses retain
+their opaque content unchanged during bounded continuation. Returned sources
+are deduplicated and bounded; encrypted search content stays inside the search
+exchange. Each completed request's usage is recorded, including requests whose
+search results fail validation.
+
+Search does not install cache breakpoints or replace the chat cache diagnostic
+baseline. API-key and OAuth runtime tests insert searches between ordinary
+streamed tool turns and check both input-derived cache reuse and independent
+wire-prefix preservation. Existing fallback behavior applies to rate limits,
+server errors, timeouts, and explicit hosted-tool unavailability. Mock contracts
+do not establish live subscription availability or billing eligibility.
 
 Anthropic's [current SDK and third-party app guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
 states that those clients can draw from subscription limits. Its

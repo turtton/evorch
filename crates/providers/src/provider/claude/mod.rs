@@ -20,7 +20,7 @@ pub use oauth::{
 pub use profile::{CLAUDE_INFERENCE_BETAS, CLAUDE_SYSTEM_IDENTITY, CLAUDE_USER_AGENT};
 pub(super) use profile::{ClaudeReasoningControls, ClaudeWireProfile};
 pub use quota::{ClaudeExtraUsage, ClaudeQuotaClient, ClaudeQuotaSnapshot, ClaudeQuotaWindow};
-pub(super) use request::serialize_request;
+pub(super) use request::{serialize_request, serialize_request_with_tools};
 pub use tokens::{ClaudeTokenBundle, ClaudeTokenStore, InMemoryClaudeTokenStore};
 pub(super) use tool_adapter::ClaudeToolAdapter;
 pub(super) use transport_context::{ClaudeRequestContext, ClaudeTransportContext};
@@ -112,6 +112,10 @@ impl ClaudeClient {
 
 #[async_trait]
 impl ProviderClient for ClaudeClient {
+    fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
+        Some(self)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.inner.capabilities()
     }
@@ -139,6 +143,25 @@ impl ProviderClient for ClaudeClient {
         self.inner
             .list_models(&ProviderAuth::new(bundle.access_token))
             .await
+    }
+}
+
+#[async_trait]
+impl crate::HostedWebSearch for ClaudeClient {
+    fn provider_name(&self) -> &'static str {
+        "claude"
+    }
+
+    async fn search(
+        &self,
+        _auth: &ProviderAuth,
+        request: &crate::HostedWebSearchRequest,
+    ) -> Result<crate::HostedWebSearchResponse, crate::HostedWebSearchError> {
+        let (client, auth) = self
+            .messages_auth()
+            .await
+            .map_err(super::anthropic::web_search::sanitize)?;
+        crate::HostedWebSearch::search(&client, &auth, request).await
     }
 }
 

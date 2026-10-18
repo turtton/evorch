@@ -52,7 +52,7 @@ impl SearchProvider for Search {
 async fn hosted_primary_uses_only_exa_for_the_narrow_fallback_matrix() {
     let cases = [
         (None, false),
-        (Some(SearchError::CodexUnsupported), true),
+        (Some(SearchError::HostedSearchUnsupported), true),
         (Some(SearchError::HttpStatus(429)), true),
         (Some(SearchError::HttpStatus(503)), true),
         (Some(SearchError::Timeout), true),

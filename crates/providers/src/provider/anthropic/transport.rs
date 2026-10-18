@@ -53,6 +53,28 @@ pub(super) enum HttpResponse {
 }
 
 impl HttpResponse {
+    pub fn status(&self) -> u16 {
+        match self {
+            Self::Api(response) => response.status().as_u16(),
+            Self::Claude(response) => response.status().as_u16(),
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        let headers = match self {
+            Self::Api(response) => response.headers(),
+            Self::Claude(response) => response.headers(),
+        };
+        headers
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
+    }
+
     pub fn request_id(&self) -> Option<&str> {
         let headers = match self {
             Self::Api(response) => response.headers(),

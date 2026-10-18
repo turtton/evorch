@@ -7,6 +7,7 @@ use tools::search::SearchOptions;
 
 #[derive(Clone)]
 struct SearchClient {
+    provider_name: &'static str,
     chat: StubClient,
     searches: Arc<Mutex<Vec<(String, HostedWebSearchRequest)>>>,
 }
@@ -37,6 +38,10 @@ impl ProviderClient for SearchClient {
 
 #[async_trait]
 impl HostedWebSearch for SearchClient {
+    fn provider_name(&self) -> &'static str {
+        self.provider_name
+    }
+
     async fn search(
         &self,
         auth: &ProviderAuth,
@@ -72,8 +77,17 @@ fn enable_search(
     model: &mut RoutedModel,
     profile: &str,
 ) -> Arc<Mutex<Vec<(String, HostedWebSearchRequest)>>> {
+    enable_named_search(model, profile, "codex")
+}
+
+fn enable_named_search(
+    model: &mut RoutedModel,
+    profile: &str,
+    provider_name: &'static str,
+) -> Arc<Mutex<Vec<(String, HostedWebSearchRequest)>>> {
     let searches = Arc::new(Mutex::new(Vec::new()));
     model.providers.get_mut(profile).unwrap().client = Arc::new(SearchClient {
+        provider_name,
         chat: StubClient {
             result: Ok(response()),
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -81,6 +95,45 @@ fn enable_search(
         searches: searches.clone(),
     });
     searches
+}
+
+#[tokio::test]
+async fn selected_capability_name_reaches_tool_metadata() {
+    use tools::Tool;
+
+    for provider_name in ["codex", "anthropic", "claude"] {
+        let (mut model, _) = routed_model(Ok(response()), "search-model", None);
+        let searches = enable_named_search(&mut model, "local", provider_name);
+        let provider = model
+            .web_search_provider(
+                &invocation("metadata-run", "local", "medium"),
+                Role::Worker,
+                &[],
+                Arc::new(|_| {}),
+            )
+            .unwrap()
+            .unwrap();
+        let tool = tools::WebSearch::for_providers(provider.clone(), provider.clone())
+            .with_hosted_search_fallback(provider.clone());
+        let result = tool
+            .execute_with_search_provider(
+                &tools::ToolExecutionContext {
+                    run_id: "metadata-run".into(),
+                    thread_id: None,
+                    call_id: None,
+                },
+                serde_json::json!({"query": "query"}),
+                Some(&*provider),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let detail = result.detail.unwrap();
+        assert_eq!(detail["provider"], provider_name);
+        assert_eq!(detail["used_fallback"], false);
+        assert_eq!(searches.lock().unwrap().len(), 1);
+    }
 }
 
 fn invocation(run: &str, profile: &str, effort: &str) -> AgentInvocationContext {
