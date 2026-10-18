@@ -63,6 +63,7 @@ impl OpenAiClient {
                 event_bus: config.event_bus,
                 profile: None,
                 prompt_cache_key: true,
+                output_limit_field: OutputLimitField::MaxCompletionTokens,
             })?,
         })
     }
@@ -111,9 +112,30 @@ impl ProviderClient for OpenAiClient {
     }
 }
 
+/// Output limit parameter supported by the selected provider client.
+pub(crate) enum OutputLimitField {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+impl OutputLimitField {
+    pub(crate) fn for_compatible_endpoint(base_url: &str) -> Self {
+        if reqwest::Url::parse(base_url).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("api.openai.com")
+                && url.port_or_known_default() == Some(443)
+        }) {
+            Self::MaxCompletionTokens
+        } else {
+            Self::MaxTokens
+        }
+    }
+}
+
 /// OpenAI形式の送受信処理を共有する内部設定。
 pub(crate) struct ChatCompletionsConfig {
     pub(crate) prompt_cache_key: bool,
+    pub(crate) output_limit_field: OutputLimitField,
     /// API のベース URL。
     pub(crate) base_url: String,
     /// usage イベントに記録するプロバイダ識別子。
@@ -129,6 +151,7 @@ pub(crate) struct ChatCompletionsConfig {
 /// OpenAI wire 形式を共有する Chat Completions HTTP クライアント。
 pub(crate) struct ChatCompletionsClient {
     prompt_cache_key: bool,
+    output_limit_field: OutputLimitField,
     http: reqwest::Client,
     endpoint: String,
     provider_label: String,
@@ -146,6 +169,7 @@ impl ChatCompletionsClient {
         Ok(Self {
             http: build_http_client(None)?,
             prompt_cache_key: config.prompt_cache_key,
+            output_limit_field: config.output_limit_field,
             endpoint: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
             provider_label: config.provider_label,
             timeout: config.timeout,

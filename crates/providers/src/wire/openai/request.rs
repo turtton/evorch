@@ -35,6 +35,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
         tools,
         temperature: request.temperature,
         max_tokens: request.max_tokens,
+        max_completion_tokens: None,
         reasoning_effort: request.reasoning_effort.clone(),
         service_tier: request.service_tier,
         response_format: request.output_schema.as_ref().map(|schema| {

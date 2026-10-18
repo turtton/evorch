@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
+#[tokio::test]
+async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
     for protocol in [
         model::ApiProtocol::OpenAiCodexResponses,
         model::ApiProtocol::AnthropicMessages,
@@ -17,6 +17,7 @@ fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
         let model = Arc::new(model);
         let mut settings = model
             .benchmark_settings(&AgentInvocationContext::default(), Role::Worker, &[])
+            .await
             .unwrap();
         match protocol {
             model::ApiProtocol::AnthropicMessages => {
@@ -49,6 +50,7 @@ async fn frozen_benchmark_request_changes_only_model_selection() {
     }];
     let captured = model
         .benchmark_settings(&invocation, Role::Worker, &tools)
+        .await
         .unwrap();
     model
         .complete(&invocation, Role::Worker, &messages, &tools)
@@ -104,6 +106,7 @@ async fn benchmark_never_silently_strips_tools() {
     };
     let settings = model
         .benchmark_settings(&invocation, Role::Worker, &[])
+        .await
         .unwrap();
     let frozen = model.freeze_for_benchmark(settings).unwrap();
     let tools = vec![ToolSpec {

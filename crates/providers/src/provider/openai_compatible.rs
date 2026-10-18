@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use event_bus::EventBus;
 
-use super::openai::{ChatCompletionsClient, ChatCompletionsConfig};
+use super::openai::{ChatCompletionsClient, ChatCompletionsConfig, OutputLimitField};
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
@@ -34,14 +34,17 @@ impl OpenAiCompatibleClient {
         timeout: Duration,
         event_bus: Option<Arc<EventBus>>,
     ) -> Result<Self, ProviderError> {
+        let base_url = base_url.into();
+        let output_limit_field = OutputLimitField::for_compatible_endpoint(&base_url);
         Ok(Self {
             inner: ChatCompletionsClient::new(ChatCompletionsConfig {
-                base_url: base_url.into(),
+                base_url,
                 provider_label: provider_label.into(),
                 timeout,
                 event_bus,
                 profile: None,
                 prompt_cache_key: false,
+                output_limit_field,
             })?,
         })
     }
@@ -52,6 +55,10 @@ impl OpenAiCompatibleClient {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "openai_compatible/output_limit_tests.rs"]
+mod output_limit_tests;
 
 #[async_trait]
 impl ProviderClient for OpenAiCompatibleClient {

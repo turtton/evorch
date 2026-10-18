@@ -78,7 +78,7 @@ pub trait AgentModel: Send + Sync {
     }
 
     /// Resolve exact model and effective generation for a trusted benchmark.
-    fn benchmark_settings(
+    async fn benchmark_settings(
         &self,
         _invocation: &AgentInvocationContext,
         _role: Role,

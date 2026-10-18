@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use config::{Config, LoadOptions};
 use event_bus::{Event, EventBus, EventKind, MessageEvent};
@@ -93,13 +92,10 @@ profile = "local"
                 ..AgentInvocationContext::default()
             };
             let mut receiver = bus.subscribe();
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                model.complete_streaming(&invocation, role, &[], &[], &bus),
-            )
-            .await
-            .expect("HTTP completion timeout")
-            .expect("model completion");
+            model
+                .complete_streaming(&invocation, role, &[], &[], &bus)
+                .await
+                .expect("model completion");
             bus.emit(Event::new(MessageEvent::MessageDelta {
                 delta: String::new(),
                 run_id: Some(invocation.run_id.clone()),

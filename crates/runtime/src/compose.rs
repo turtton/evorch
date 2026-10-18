@@ -22,6 +22,7 @@ use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError
 mod benchmark;
 mod hosted_search;
 mod images;
+mod output_limits;
 
 /// composition root に production の project root と sandbox factory を渡す seam。
 pub struct WorkspaceSeam {
@@ -237,6 +238,8 @@ pub struct RoutedModel {
     credential_store: Option<Arc<dyn CredentialStore>>,
     provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
     image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
+    metadata_catalog: tokio::sync::OnceCell<Option<catalog::ModelCatalog>>,
+    model_presets: BTreeMap<String, config::ModelPresetConfig>,
 }
 
 impl RoutedModel {
@@ -279,6 +282,8 @@ impl RoutedModel {
             credential_store: None,
             provider_configs: BTreeMap::new(),
             image_input: tokio::sync::OnceCell::new(),
+            metadata_catalog: tokio::sync::OnceCell::new(),
+            model_presets: BTreeMap::new(),
         }
     }
 
@@ -297,9 +302,9 @@ impl RoutedModel {
                 if self.provider_configs.is_empty() {
                     return BTreeMap::new();
                 }
-                match crate::model_resolve::load_catalog(&catalog::default_cache_dir()).await {
+                match self.metadata_catalog().await {
                     Some(catalog) => {
-                        crate::model_resolve::image_input_models(&self.provider_configs, &catalog)
+                        crate::model_resolve::image_input_models(&self.provider_configs, catalog)
                     }
                     None => BTreeMap::new(),
                 }
@@ -710,7 +715,11 @@ impl RoutedModel {
                 messages: images::for_model(messages, &tools, accepts_images),
                 tools,
                 temperature: generation.temperature,
-                max_tokens: generation.max_tokens.map(u64::from),
+                max_tokens: if benchmark.is_some() {
+                    generation.max_tokens.map(u64::from)
+                } else {
+                    self.output_limit(&route, generation.max_tokens).await
+                },
                 reasoning_effort: reasoning_effort.clone(),
                 service_tier: benchmark.map_or_else(
                     || match speed {
@@ -833,7 +842,7 @@ impl AgentModel for RoutedModel {
         hosted_search::resolve(self, invocation, role, tools, usage_sink)
     }
 
-    fn benchmark_settings(
+    async fn benchmark_settings(
         &self,
         invocation: &AgentInvocationContext,
         role: Role,
@@ -841,13 +850,24 @@ impl AgentModel for RoutedModel {
     ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
         let ResolvedInvocation {
             route,
-            generation,
+            mut generation,
             reasoning_effort,
             ..
         } = self.resolve_invocation(invocation, role, tools)?;
         let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
+        let protocol = self.providers[&route.profile].profile.api_protocol;
+        let max_tokens = self
+            .output_limit(&route, generation.max_tokens)
+            .await
+            .or_else(|| {
+                (protocol == model::ApiProtocol::AnthropicMessages)
+                    .then_some(providers::wire::anthropic::DEFAULT_MAX_TOKENS)
+            });
+        generation.max_tokens = max_tokens.map(u32::try_from).transpose().map_err(|_| {
+            crate::benchmark::unsupported("effective max_tokens exceeds benchmark generation range")
+        })?;
         Ok(crate::benchmark::BenchmarkModelSettings {
-            protocol: self.providers[&route.profile].profile.api_protocol,
+            protocol,
             preference: crate::ModelPreference {
                 profile: route.profile,
                 model: Some(route.model_id.clone()),
@@ -922,7 +942,7 @@ impl AgentModel for RoutedModel {
             messages: images::for_model(messages, &tools, accepts_images),
             tools,
             temperature: generation.temperature,
-            max_tokens: generation.max_tokens.map(u64::from),
+            max_tokens: self.output_limit(&route, generation.max_tokens).await,
             reasoning_effort,
             service_tier: match speed {
                 config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
@@ -1254,6 +1274,7 @@ pub fn compose_routed_model(
         std::time::Duration::from_secs(config.routing.fallback.max_retry_after_wait_secs);
     model.configured_windows = configured_windows(config);
     model.provider_configs = config.providers.clone();
+    model.model_presets = config.model_presets.clone();
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);
     Ok(Arc::new(model))

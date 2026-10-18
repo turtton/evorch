@@ -59,6 +59,7 @@ impl Respond for ClaudeEndpoint {
                 "usage":{"input_tokens":31,"output_tokens":7,"server_tool_use":{"web_search_requests":1}}
             }));
         }
+        assert_eq!(body["max_tokens"], 128_000);
         let mut normalized = model_input.clone();
         // Normalize only the moving Anthropic breakpoint, not nested arguments.
         for message in normalized["messages"].as_array_mut().unwrap() {
@@ -218,6 +219,14 @@ async fn exercise(oauth: bool) {
             models: vec![config::ModelEntryConfig::enabled("claude-sonnet-4-6")],
             default_model: "claude-sonnet-4-6".into(),
             excluded_models: vec![],
+        },
+    );
+    config.providers.get_mut("claude").unwrap().models[0].preset = Some("output-limit".into());
+    config.model_presets.insert(
+        "output-limit".into(),
+        config::ModelPresetConfig {
+            max_output_tokens: Some(128_000),
+            ..Default::default()
         },
     );
     let bus = Arc::new(EventBus::new(128));

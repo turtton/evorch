@@ -88,6 +88,10 @@ settings or execution states must be reported rather than silently approximated.
 The initial version requires baseline and candidate to use the same API protocol
 (for example, OpenAI Chat Completions). Explicit settings that the protocol cannot
 send are rejected. Provider profiles can differ within that protocol.
+Capture freezes the effective output limit, including preset/models.dev limits
+and Anthropic's default when no metadata is available. Candidate metadata cannot
+replace this recorded value. Limits outside the benchmark's `u32` generation
+range are reported as unsupported rather than truncated.
 
 The first version targets sequential, self-contained delegations. A recording
 that needs a live parent, concurrent agents, pending shell jobs or team state

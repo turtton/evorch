@@ -147,3 +147,18 @@ async fn unsupported_provider_returns_none_without_sending() {
     );
     assert!(requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn official_compaction_uses_catalog_output_limit() {
+    let (mut model, requests) = super::output_limits::fixture("catalog-model").await;
+    model.providers.get_mut("local").unwrap().client = Arc::new(OfficialClient {
+        requests: requests.clone(),
+        fail: false,
+    });
+    model
+        .compact_context(&AgentInvocationContext::default(), Role::Worker, &[], &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.lock().unwrap()[0].max_tokens, Some(128_000));
+}
