@@ -462,3 +462,5 @@ async fn rejected_manual_goal_preserves_the_existing_restorable_checkpoint() {
     runtime.stop(run, StopScope::SelfOnly).unwrap();
     runtime.wait(run).await.unwrap();
 }
+
+mod advisor;

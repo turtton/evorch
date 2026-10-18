@@ -18,8 +18,8 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../assets/presets/role-planner.md"),
     ),
     (
-        "role-oracle",
-        include_str!("../assets/presets/role-oracle.md"),
+        "role-advisor",
+        include_str!("../assets/presets/role-advisor.md"),
     ),
     (
         "role-multimodallooker",
@@ -161,6 +161,12 @@ fn validate_name(name: &str) -> Result<(), ConfigError> {
 
 /// 同梱プリセットを名前で引く。
 fn bundled(name: &str) -> Option<&'static str> {
+    // Legacy preset references keep user overrides; only the bundled fallback is renamed.
+    let name = if name == "role-oracle" {
+        "role-advisor"
+    } else {
+        name
+    };
     BUNDLED
         .iter()
         .find(|(key, _)| *key == name)

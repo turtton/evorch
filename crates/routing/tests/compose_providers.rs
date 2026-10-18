@@ -166,7 +166,7 @@ fn compose_with_empty_routes_rejects_role_and_arbitrary_names() {
         "reviewer",
         "web_researcher",
         "planner",
-        "oracle",
+        "advisor",
         "multimodal_looker",
         "coding",
         "arbitrary-model",

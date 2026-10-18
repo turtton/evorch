@@ -9,7 +9,7 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         ("Reviewer", "reviewer"),
         ("WebResearcher", "web_researcher"),
         ("Planner", "planner"),
-        ("Oracle", "oracle"),
+        ("Advisor", "advisor"),
         ("Multimodal Looker", "multimodal_looker"),
     ] {
         // Given: providers but no routes or explicit role bindings.

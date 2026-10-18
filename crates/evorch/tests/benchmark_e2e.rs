@@ -748,3 +748,56 @@ async fn failed_nonselected_delegate_poison_survives_parent_recovery_and_selecte
         .contains("poisoned")
     );
 }
+
+#[tokio::test]
+async fn report_and_replay_accept_legacy_oracle_baseline_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(directory.join("workspace")).unwrap();
+    // No checkpoint is needed to verify replay reaches its normal admission
+    // checks after decoding the same baseline consumed by report.
+    let legacy = json!({
+        "version": 1,
+        "spec": {
+            "fixture_dir": directory.join("workspace"), "root_prompt": "Compare options",
+            "target": {"role": "oracle", "category": null, "occurrence": 1},
+            "verifier": {"program": "sh", "args": [], "protected_paths": ["verify.sh"], "allowed_changed_paths": ["answer.txt"]},
+            "budget": {"max_tokens": 1000, "max_tool_calls": 20, "timeout_seconds": 300}
+        },
+        "workspace": directory.join("workspace"), "user_config_dir": null,
+        "initial_snapshot": "unused", "checkpoint_snapshot": null, "checkpoint": null, "local": null,
+        "full": {
+            "name": "baseline", "candidate": null, "phase": "Done", "final_text": "advice", "error": null, "diff": "",
+            "metrics": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "elapsed_ms": 0, "cost": null},
+            "evaluation": {"passed": true, "output": "", "verifier_tampered": [], "unexpected_changes": []}
+        },
+        "protected": {}, "original_files": {}, "poisoned": null
+    });
+    std::fs::write(directory.join("baseline.json"), legacy.to_string()).unwrap();
+    let report = read_report(&directory).unwrap();
+    assert_eq!(report.baseline.spec.target.role, runtime::Role::Advisor);
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["baseline"]["spec"]["target"]["role"],
+        "advisor"
+    );
+    let error = replay(
+        &directory,
+        "candidate",
+        ModelPreference {
+            profile: "unused".into(),
+            model: None,
+            reasoning_effort: None,
+        },
+        None,
+        env(),
+        SandboxChoice::DirectUnchecked,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("baseline did not capture the selected delegation"),
+        "{error}"
+    );
+}

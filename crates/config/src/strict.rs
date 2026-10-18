@@ -84,7 +84,7 @@ const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer",
 const ADDITIONAL_ROLE_KEYS: &[&str] = &[
     "web_researcher",
     "planner",
-    "oracle",
+    "advisor",
     "multimodal_looker",
     "compactor",
 ];

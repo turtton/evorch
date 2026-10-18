@@ -28,7 +28,7 @@ impl ArenaReport {
             Attribution::Worker => ("worker", &mut target.config.agents.worker.base),
             Attribution::Reviewer => ("reviewer", &mut target.config.agents.reviewer.base),
             Attribution::Planner => ("planner", &mut target.config.agents.roles.planner),
-            Attribution::Oracle => ("oracle", &mut target.config.agents.roles.oracle),
+            Attribution::Advisor => ("advisor", &mut target.config.agents.roles.advisor),
             Attribution::MultimodalLooker => (
                 "multimodal_looker",
                 &mut target.config.agents.roles.multimodal_looker,

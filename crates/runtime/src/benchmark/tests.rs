@@ -591,3 +591,15 @@ async fn local_replay_preserves_input_and_settings_before_real_tool_writes() {
         "parent side channels cannot consume future answers"
     );
 }
+
+#[test]
+fn legacy_benchmark_selector_reads_oracle_and_saves_advisor() {
+    for name in ["oracle", "Oracle", "ORACLE", "advisor", "Advisor"] {
+        let selector: BenchmarkSelector = serde_json::from_value(serde_json::json!({
+            "role": name, "category": null, "occurrence": 1,
+        }))
+        .unwrap();
+        assert_eq!(selector.role, Role::Advisor);
+        assert_eq!(serde_json::to_value(&selector).unwrap()["role"], "advisor");
+    }
+}

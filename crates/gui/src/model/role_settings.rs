@@ -108,7 +108,7 @@ pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingCo
         ("reviewer", &agents.reviewer.base),
         ("roles.web_researcher", &agents.roles.web_researcher),
         ("roles.planner", &agents.roles.planner),
-        ("roles.oracle", &agents.roles.oracle),
+        ("roles.advisor", &agents.roles.advisor),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
         ("roles.compactor", &agents.roles.compactor),
     ]

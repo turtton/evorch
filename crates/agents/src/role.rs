@@ -27,6 +27,7 @@ pub const BROWSER_TOOLS: [&str; 8] = [
 /// | Explorer | read / grep | 不可 |
 /// | Worker | read / write / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | 不可 |
 /// | Reviewer | read / grep / git_diff | 不可 |
+/// | Advisor | read / grep / git_diff | 不可 |
 /// | WebResearcher | read / grep / web_search / web_fetch / browser_* | 不可 |
 ///
 /// # 設計上の決定
@@ -57,7 +58,9 @@ pub enum Role {
     /// 外部情報の調査役。read / grep / web_search / web_fetch を持つ。
     WebResearcher,
     Planner,
-    Oracle,
+    /// 判断前の設計案・原因仮説を比較し助言する相談役。合否判定は Reviewer。
+    #[serde(alias = "Oracle", alias = "oracle")]
+    Advisor,
     MultimodalLooker,
 }
 
@@ -83,7 +86,7 @@ impl Role {
             "Reviewer" => Ok(Self::Reviewer),
             "WebResearcher" => Ok(Self::WebResearcher),
             "Planner" => Ok(Self::Planner),
-            "Oracle" => Ok(Self::Oracle),
+            "Advisor" | "advisor" | "Oracle" | "oracle" => Ok(Self::Advisor),
             "MultimodalLooker" => Ok(Self::MultimodalLooker),
             _ => Err(UnknownRole {
                 name: name.to_owned(),
@@ -100,7 +103,7 @@ impl Role {
             Role::Reviewer => "Reviewer",
             Role::WebResearcher => "WebResearcher",
             Role::Planner => "Planner",
-            Role::Oracle => "Oracle",
+            Role::Advisor => "Advisor",
             Role::MultimodalLooker => "MultimodalLooker",
         }
     }
@@ -160,7 +163,7 @@ impl Role {
                 ["read", "grep", "git_diff", "skill_load", "web_fetch"],
                 false,
             ),
-            Role::Oracle => RoleCapabilities::new(["read", "grep", "git_diff"], false),
+            Role::Advisor => RoleCapabilities::new(["read", "grep", "git_diff"], false),
             Role::MultimodalLooker => RoleCapabilities::new(["read"], false),
         };
         capabilities.allowed_tools.extend(

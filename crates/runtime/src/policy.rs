@@ -190,7 +190,7 @@ mod tests {
             Role::Reviewer,
             Role::WebResearcher,
             Role::Planner,
-            Role::Oracle,
+            Role::Advisor,
             Role::MultimodalLooker,
         ] {
             assert_eq!(
@@ -312,7 +312,7 @@ mod tests {
             Role::Reviewer,
             Role::WebResearcher,
             Role::Planner,
-            Role::Oracle,
+            Role::Advisor,
             Role::MultimodalLooker,
         ] {
             let baseline = ExecutionPolicy::for_role(role);

@@ -68,7 +68,7 @@ Self Diagnostics / Self Improvement
 | **Execution Shape** | Intent Gate の出力。`Direct`（単純な質問や局所的修正）または `Coordinated`（複雑な調査・実装・並列探索が必要）のいずれか。 |
 | **Agent Instance** | `Role + Category + Skills + Execution Policy + Route Policy` の5軸で構成される Agent 定義。 |
 | **AgentRun** | 1 回の Agent 実行単位。`id`, `role`, `category`, `skills`, `route`, `context`, `policy` を持つ独立した Tokio task として動作する。 |
-| **Role** | Agent の責任・認知モード・権限・output contract。例: orchestrator, explorer, librarian, oracle, planner, reviewer, worker, multimodal。 |
+| **Role** | Agent の責任・認知モード・権限・output contract。例: orchestrator, explorer, librarian, advisor, planner, reviewer, worker, multimodal。 |
 | **Category** | 仕事の性質。例: quick, deep, high-reasoning, visual, writing, research。誰がやるかではなく、どんな負荷・思考特性でやるか。 |
 | **Skills** | Agent に追加される専門知識や tool / prompt。例: rust, kotlin, frontend, git, database, aws, linux。 |
 | **Execution Policy** | Agent の実行制約。sandbox policy / filesystem permissions / network permissions / background allowed / concurrency / cost budget / timeout など。 |

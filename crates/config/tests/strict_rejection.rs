@@ -571,8 +571,8 @@ fn orchestrator_categories_are_rejected_with_uncategorized_role_path() {
 }
 
 #[test]
-fn oracle_categories_are_rejected_with_uncategorized_role_path() {
-    assert_uncategorized_role("agents.roles.oracle", "visual");
+fn advisor_categories_are_rejected_with_uncategorized_role_path() {
+    assert_uncategorized_role("agents.roles.advisor", "visual");
 }
 
 #[test]

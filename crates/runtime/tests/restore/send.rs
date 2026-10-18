@@ -249,3 +249,55 @@ async fn restored_run_id_never_collides_with_future_runs() {
     assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
     terminal(&runtime, next).await;
 }
+
+#[tokio::test]
+async fn legacy_oracle_snapshot_restores_as_advisor_after_restart() {
+    for legacy in ["Oracle", "oracle"] {
+        let (_dir, config, storage, database) = storage_fixture();
+        let (first, _) = runtime_with(model());
+        let first = first.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let parent =
+            first.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+        terminal(&first, parent).await;
+        let child = first
+            .delegate_background_as_child(parent, Role::Advisor, "consult", RunConfig::default())
+            .unwrap();
+        terminal(&first, child).await;
+        let record = database.run_context(&child.to_string()).unwrap().unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+        descriptor["role"] = serde_json::json!(legacy);
+        drop(first);
+        let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+        conn.execute(
+            "UPDATE run_contexts SET role = ?2, config_json = ?3 WHERE run_id = ?1",
+            rusqlite::params![child.to_string(), legacy, descriptor.to_string()],
+        )
+        .unwrap();
+        let (runtime, _) = runtime_with(model());
+        let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        runtime.spawn_reserved(
+            parent,
+            None,
+            Role::Orchestrator,
+            "parent",
+            RunConfig::default(),
+        );
+        terminal(&runtime, parent).await;
+        runtime
+            .send_agent_message(
+                parent,
+                child,
+                AgentMessageKind::Send,
+                "compare alternatives",
+                None,
+            )
+            .unwrap();
+        assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
+        let restored = runtime
+            .list_agents()
+            .into_iter()
+            .find(|run| run.run_id == child)
+            .unwrap();
+        assert_eq!(restored.role_name, "Advisor");
+    }
+}

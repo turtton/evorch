@@ -168,3 +168,14 @@ when focused local cache validation is needed.
   assertions; fixed high cached-token fixtures alone cannot prove preservation.
 - Do not weaken or remove this contract to make a new feature pass. Intentional
   invalidation requires a documented boundary and tests for reuse after it.
+
+## Current role boundary (ADR 0035)
+
+- Advisor (formerly Oracle) is an optional, read-only consultant before a decision,
+  not a mandatory stage. Return options, trade-offs, a recommendation, uncertainty,
+  and information that would change the decision.
+- Implementation belongs to Worker; detailed execution plans belong to Planner.
+  Comparing implementation results or plans against requirements and issuing an
+  acceptance verdict belongs exclusively to Reviewer.
+- The final independent Reviewer must use a separate context from the consulted
+  Advisor. Advice is not an acceptance verdict.

@@ -124,12 +124,11 @@ impl AgentRuntime {
                 "goal identity".into(),
             )));
         }
-        let thread = self.goal_thread(run_id).or_else(|| {
-            descriptor.name.as_deref().and_then(|name| {
-                name.strip_prefix(&format!("chat:{}:", role.name()))
-                    .map(str::to_owned)
-            })
+        let named_thread = descriptor.name.as_deref().and_then(|name| {
+            let (saved_role, thread) = name.strip_prefix("chat:")?.split_once(':')?;
+            (Role::from_name(saved_role) == Ok(role)).then(|| thread.to_owned())
         });
+        let thread = self.goal_thread(run_id).or_else(|| named_thread.clone());
         if let Some((objective, criteria)) = &authority.initial_thread_goal {
             let thread = thread.as_deref().ok_or_else(|| {
                 fail(RunRestoreFailure::CorruptContext(
@@ -254,7 +253,12 @@ impl AgentRuntime {
             .take()
             .or_else(|| authority.project_root.clone());
         let mut config = RunConfig {
-            name: descriptor.name,
+            // Keep role and chat identity canonical together, including mixed
+            // snapshots written by versions that only renamed the role.
+            name: named_thread
+                .as_ref()
+                .map(|thread| format!("chat:{}:{thread}", role.name()))
+                .or(descriptor.name),
             interactive: true,
             keep_alive: true,
             project_root,
@@ -388,10 +392,22 @@ impl AgentRuntime {
                     run_id: name.clone(),
                     reason,
                 };
-                match store
+                let mut record = store
                     .latest_terminal_named(&name)
-                    .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
-                {
+                    .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+                if record.is_none() && role == Role::Advisor {
+                    for legacy in ["Oracle", "oracle"] {
+                        record = store
+                            .latest_terminal_named(&format!("chat:{legacy}:{thread_id}"))
+                            .map_err(|error| {
+                                fail(RunRestoreFailure::CorruptContext(error.to_string()))
+                            })?;
+                        if record.is_some() {
+                            break;
+                        }
+                    }
+                }
+                match record {
                     None => match seed {
                         None => None,
                         Some(seed) => Some(self.fork_seed_history(store, &seed, role, &config)?),
@@ -402,8 +418,8 @@ impl AgentRuntime {
                                 fail(RunRestoreFailure::CorruptContext(error.to_string()))
                             })?;
                         self.validate_history_restore(&record, &descriptor, &config)?;
-                        if record.role != role.name()
-                            || descriptor.role != role.name()
+                        if Role::from_name(&record.role) != Ok(role)
+                            || Role::from_name(&descriptor.role) != Ok(role)
                             || record.parent_run_id.is_some()
                             || descriptor.parent_run_id.is_some()
                         {
@@ -602,7 +618,7 @@ impl AgentRuntime {
             .restore_record(source)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
-        if record.role != role.name() {
+        if Role::from_name(&record.role) != Ok(role) {
             return Err(fail(RunRestoreFailure::UnsupportedConfig(
                 "fork_seed: chat role differs from the source conversation".into(),
             )));

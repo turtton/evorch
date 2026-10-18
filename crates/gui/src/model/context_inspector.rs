@@ -18,7 +18,7 @@ pub const ROLES: [Role; 8] = [
     Role::Reviewer,
     Role::Planner,
     Role::WebResearcher,
-    Role::Oracle,
+    Role::Advisor,
     Role::MultimodalLooker,
 ];
 
@@ -220,7 +220,7 @@ pub fn run_summary(view: &RunContextView) -> String {
         .unwrap_or("model not recorded");
     format!(
         "{}{category} · {model} · {} messages · {} compaction checkpoints · saved at {}",
-        view.role_name,
+        Role::from_name(&view.role_name).map_or(view.role_name.as_str(), |role| role.name()),
         view.messages.len(),
         view.compaction_checkpoint_count,
         view.checkpoint_phase

@@ -60,3 +60,10 @@ fn legacy_trace_deserializes_without_execution() {
     // Then: absent execution evidence remains explicitly unknown.
     assert!(trace.execution.is_none());
 }
+
+#[test]
+fn legacy_oracle_attribution_reads_as_advisor_and_writes_canonical_name() {
+    let attribution: Attribution = serde_json::from_str("\"oracle\"").unwrap();
+    assert_eq!(attribution, Attribution::Advisor);
+    assert_eq!(serde_json::to_string(&attribution).unwrap(), "\"advisor\"");
+}

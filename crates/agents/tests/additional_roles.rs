@@ -15,7 +15,7 @@ fn additional_roles_have_least_privilege_capabilities() {
             "Planner",
             vec!["read", "grep", "git_diff", "skill_load", "web_fetch"],
         ),
-        ("Oracle", vec!["read", "grep", "git_diff"]),
+        ("Advisor", vec!["read", "grep", "git_diff"]),
         ("MultimodalLooker", vec!["read"]),
     ];
     for (name, tools) in cases {
@@ -52,7 +52,7 @@ fn every_role_authorizes_scoped_memory_meta_ops() {
         Role::Reviewer,
         Role::WebResearcher,
         Role::Planner,
-        Role::Oracle,
+        Role::Advisor,
         Role::MultimodalLooker,
     ] {
         let capabilities = role.capabilities();
@@ -93,5 +93,12 @@ fn existing_role_names_still_round_trip() {
         let parsed = Role::from_name(role.name()).expect("existing role");
         // Then: no identity changes.
         assert_eq!(parsed, role);
+    }
+}
+
+#[test]
+fn legacy_oracle_names_normalize_to_advisor() {
+    for name in ["Oracle", "oracle", "Advisor", "advisor"] {
+        assert_eq!(Role::from_name(name), Ok(Role::Advisor));
     }
 }

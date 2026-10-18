@@ -299,3 +299,15 @@ fn capture_context_tab_png_evidence() {
     settle(&mut harness);
     save(&mut harness, "compare");
 }
+
+#[test]
+fn saved_oracle_context_is_displayed_as_advisor() {
+    let sink = StubSink(Arc::new(Mutex::new(Vec::new())));
+    for legacy in ["Oracle", "oracle"] {
+        let mut view = sink.run_context_view("run-1").unwrap().unwrap();
+        view.role_name = legacy.into();
+        assert!(gui::model::context_inspector::run_summary(&view).starts_with("Advisor"));
+    }
+    assert!(gui::model::context_inspector::ROLES.contains(&Role::Advisor));
+    assert!(gui::model::context_inspector::categories_for(Role::Advisor).is_empty());
+}

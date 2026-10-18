@@ -24,7 +24,7 @@ fn web_researcher_unknown_binding_is_allowed_but_unrouted() {
 fn seed_preserves_all_bindings_when_config_has_overrides() {
     // Given: role and category overrides, including additional roles.
     let mut config = config::Config::default();
-    config.agents.roles.oracle.preset = Some("oracle-preset".into());
+    config.agents.roles.advisor.preset = Some("advisor-preset".into());
     config.agents.roles.compactor = config::RoleBindingConfig {
         models: vec![config::ChainEntryConfig::with_effort(
             "summary-route",

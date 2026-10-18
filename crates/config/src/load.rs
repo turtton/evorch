@@ -94,8 +94,9 @@ impl Config {
     /// 最後に `role_profile` の選択を実効の `agents` / `routing` に反映する
     /// ([`Config::load_unresolved`] は反映しない)。
     ///
-    /// ディスクから読む各ファイルは TOML パース後、マージ前に [`crate::migrate::run`]
-    /// をファイル単位で通す。`file_overrides` の値は現行形式としてそのまま使用する。
+    /// ディスクから読む各ファイルは TOML パース後、マージ前に [`crate::migrate::run_layer`]
+    /// をファイル単位で通す。新名 advisor route の暗黙 chain は全層マージ後に確定する。
+    /// `file_overrides` の値は現行形式としてそのまま使用する。
     /// 上書きのない、存在しないファイル・ディレクトリは黙ってスキップする。
     ///
     /// # Errors
@@ -142,7 +143,7 @@ impl Config {
         opts: &LoadOptions,
         reject_unknown_fields: bool,
     ) -> Result<Config, ConfigError> {
-        let mut merged = builtin_layer()?;
+        let mut merged = migrate::Layer::current(builtin_layer()?);
 
         let user_dir = opts.user_config_dir.clone().or_else(user_config_dir);
         if let Some(dir) = user_dir {
@@ -152,7 +153,7 @@ impl Config {
         // Executable configuration is trusted only through defaults and user/global files.
         let mut trusted = toml::Value::Table(toml::map::Map::from_iter([(
             "comment_checker".into(),
-            merged["comment_checker"].clone(),
+            merged.value["comment_checker"].clone(),
         )]));
         if !reject_unknown_fields {
             for path in crate::strict::remove_unknown_fields(&mut trusted)? {
@@ -168,7 +169,7 @@ impl Config {
             })?;
 
         if let Some(dir) = &opts.project_dir {
-            merge_project_layer(&mut merged, dir, &opts.file_overrides)?;
+            merge_project_layer(&mut merged.value, dir, &opts.file_overrides)?;
         }
 
         if opts.read_env {
@@ -176,12 +177,14 @@ impl Config {
                 Some(vars) => vars.clone(),
                 None => std::env::vars().collect(),
             };
-            merged = deep_merge(merged, env::build_layer(&vars)?);
+            merged.merge(migrate::Layer::current(env::build_layer(&vars)?));
         }
 
         if let Some(overrides) = &opts.cli_overrides {
-            merged = deep_merge(merged, overrides.clone());
+            merged.merge(migrate::Layer::current(overrides.clone()));
         }
+
+        let mut merged = merged.finish();
 
         if !reject_unknown_fields {
             for path in crate::strict::remove_unknown_fields(&mut merged)? {
@@ -262,14 +265,14 @@ const PROJECT_KEYS: &[&str] = &["version", "role_profile"];
 ///
 /// メインファイルを先に、`config.d/*.toml` を辞書順に (後勝ちで) 深マージする。
 fn merge_dir_layer(
-    merged: &mut toml::Value,
+    merged: &mut migrate::Layer,
     dir: &Path,
     main_file: &str,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
 ) -> Result<(), ConfigError> {
     for path in layer_paths(dir, main_file)? {
         if let Some(value) = read_file_migrated(&path, file_overrides)? {
-            *merged = deep_merge(merged.clone(), value);
+            merged.merge(value);
         }
     }
     Ok(())
@@ -288,9 +291,11 @@ fn merge_project_layer(
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
 ) -> Result<(), ConfigError> {
     for path in layer_paths(&project_dir.join(PROJECT_CONFIG_DIR), USER_MAIN_FILE)? {
-        let Some(mut value) = read_file_migrated(&path, file_overrides)? else {
+        let Some(layer) = read_file_migrated(&path, file_overrides)? else {
             continue;
         };
+        // Projects only select a profile; their migration side-table is discarded.
+        let mut value = layer.value;
         if let Some(table) = value.as_table_mut() {
             table.retain(|key, _| {
                 let allowed = PROJECT_KEYS.contains(&key);
@@ -355,9 +360,9 @@ fn collect_dropins(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 fn read_file_migrated(
     path: &Path,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
-) -> Result<Option<toml::Value>, ConfigError> {
+) -> Result<Option<migrate::Layer>, ConfigError> {
     if let Some(value) = file_overrides.get(path) {
-        return Ok(Some(value.clone()));
+        return Ok(Some(migrate::Layer::current(value.clone())));
     }
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -370,7 +375,7 @@ fn read_file_migrated(
             path: path.to_path_buf(),
             source,
         })?;
-    migrate::run(toml::Value::Table(table)).map(Some)
+    migrate::run_layer(toml::Value::Table(table)).map(Some)
 }
 
 #[cfg(test)]
@@ -433,7 +438,7 @@ mod tests {
         // When: resolving that exact path.
         let loaded = read_file_migrated(&path, &overrides).expect("override");
         // Then: unlike migration, the override path does not insert a version field.
-        assert_eq!(loaded, Some(candidate));
+        assert_eq!(loaded.map(|layer| layer.value), Some(candidate));
         assert!(!path.exists());
     }
 
@@ -448,7 +453,7 @@ mod tests {
         // When: resolving a missing file not in the map.
         let loaded = read_file_migrated(&path, &overrides).expect("missing file");
         // Then: a matching filename alone cannot replace a different path.
-        assert_eq!(loaded, None);
+        assert!(loaded.is_none());
     }
 
     #[test]
