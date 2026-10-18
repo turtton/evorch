@@ -18,6 +18,8 @@ mod host;
 #[cfg(feature = "cef")]
 mod runtime;
 #[cfg(feature = "cef")]
+mod snapshot;
+#[cfg(feature = "cef")]
 mod view;
 
 #[cfg(feature = "cef")]
@@ -26,5 +28,7 @@ pub use artifact::{ArtifactContext, NetLog};
 pub use browser::{OsrBrowser, Status};
 #[cfg(feature = "cef")]
 pub use runtime::{CefRuntime, RuntimeConfig, subprocess_app};
+#[cfg(feature = "cef")]
+pub use snapshot::{SNAPSHOT_SIZE, render_snapshot};
 #[cfg(feature = "cef")]
 pub use view::CefView;

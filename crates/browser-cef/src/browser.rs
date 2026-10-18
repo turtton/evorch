@@ -185,6 +185,33 @@ impl OsrBrowser {
         self.shared.wait(None, |shared| predicate(&shared.status()));
     }
 
+    /// The first frame painted after the page finished loading. A repaint is
+    /// forced once loading ends, so the frame reflects the loaded document.
+    pub fn capture_settled(&self, timeout: Duration) -> Result<egui::ColorImage, String> {
+        let deadline = Instant::now().checked_add(timeout);
+        let remaining =
+            || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let loaded = self.shared.wait(remaining(), |shared| {
+            let status = shared.status();
+            status.closed || (status.load_end_count > 0 && !status.loading)
+        });
+        if !loaded || self.status().closed {
+            return Err("the page did not finish loading".into());
+        }
+        let painted = self.frame_seq();
+        let host = SendCell(self.host().ok_or("the browser is closed")?);
+        on_ui(move || host.0.invalidate(PaintElementType::VIEW));
+        if !self
+            .shared
+            .wait(remaining(), |shared| lock(&shared.frame).seq() > painted)
+        {
+            return Err("the page did not paint after loading".into());
+        }
+        lock(&self.shared.frame)
+            .frame()
+            .ok_or_else(|| "no frame was painted".into())
+    }
+
     pub fn set_repaint_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
         *lock(&self.shared.repaint) = Some(Box::new(callback));
     }

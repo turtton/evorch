@@ -88,6 +88,14 @@ each renderer. JS dialogs, file choosers, popups and the context menu are
 suppressed; `<select>` dropdowns and the clipboard are not wired yet. A crashed
 renderer is reloaded up to three times.
 
+Conversation cards show a snapshot of each HTML artifact. A throwaway browser
+renders it offline at 1024×768 DIP under the same isolation, waits for loading
+to finish and one more paint, and stores a PNG in
+`$XDG_CACHE_HOME/evorch/html-snapshots/<sha256>-v1.png`. Artifacts are
+content-addressed, so a cached snapshot is never stale. Snapshots render one at
+a time on a worker thread; clicking one opens the in-app preview. Without the
+feature, cards keep the text entry and the Open button that goes to the Portal.
+
 Rendering is headless (`--ozone-platform=headless`) with the GPU disabled. The
 Chromium sandbox relies on unprivileged user namespaces; the SUID
 `chrome-sandbox` is not shipped. `EVORCH_CEF_NO_SANDBOX=1` disables the sandbox
@@ -125,4 +133,15 @@ nix develop .#cef -c cargo nextest run -p browser-cef --features cef --run-ignor
 It serves a page that probes fetch, XHR, WebSocket, beacon, WebRTC, file URLs,
 `window.open`, forms and navigation against a loopback listener, then asserts
 that no connection arrived, the CSP fired, WebRTC is gone (checked through the
-in-process DevTools session) and a killed renderer reloads the artifact.
+in-process DevTools session), a killed renderer reloads the artifact and a
+snapshot captures the page after its scripts ran. The ignored
+`html_preview::tests::card_snapshot_requests_render_through_cef` test in `gui`
+drives a card's snapshot request through CEF; it needs the helper path:
+
+```sh
+nix develop .#cef
+cargo build -p browser-cef --features cef --bin evorch-cef-helper
+EVORCH_CEF_HELPER=$PWD/target/debug/evorch-cef-helper \
+  cargo nextest run -p gui --features cef --lib --run-ignored only \
+  -E 'test(card_snapshot_requests_render_through_cef)'
+```
