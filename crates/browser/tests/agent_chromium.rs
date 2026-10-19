@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use browser::agent::{
-    Activity, AgentBrowser, AgentError, LaunchOptions, PageProvider, RequestPolicy,
+    Activity, AgentBrowser, AgentError, DialogAnswer, LaunchOptions, PageAgent, PageProvider,
+    RequestPolicy,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -267,6 +268,14 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
             .any(|argument| argument.starts_with("--proxy-server=http://127.0.0.1:")),
         "{switches:?}"
     );
+    assert!(
+        switches
+            .iter()
+            .any(|argument| argument.starts_with("--disable-features=")
+                && argument.contains("BackForwardCache")
+                && argument.contains("site-per-process")),
+        "{switches:?}"
+    );
     while screencast.next_frame().await.is_some() {}
     assert!(screencast.ended(), "the screencast ends with its page");
 }
@@ -303,5 +312,178 @@ async fn click_at_hits_what_is_drawn_at_the_viewport_point() {
     // Then: only the click inside it pressed the button.
     assert!(missed.contains("button \"Press\""), "{missed}");
     assert!(hit.contains("button \"Pressed\""), "{hit}");
+    assert!(browser.close("run-1").await);
+}
+
+const CONTROLS: &str = r##"<!doctype html><html><body>
+<h1 id="where"></h1>
+<script>
+const show = () => document.getElementById("where").textContent = "At " + location.pathname + location.hash;
+show();
+addEventListener("hashchange", show);
+</script>
+<a href="#details">Details</a>
+<button onmouseenter="document.getElementById('items').hidden = false">Menu</button>
+<ul id="items" hidden><li>Hidden item</li></ul>
+<label>Size <select onchange="document.getElementById('picked').textContent = 'Picked ' + this.value">
+<option value="s">Small</option><option value="l">Large</option></select></label>
+<p id="picked">Picked nothing</p>
+<button onclick="document.getElementById('answer').textContent = 'Confirm ' + confirm('Delete it?')">Delete</button>
+<button onclick="document.getElementById('answer').textContent = 'Prompt ' + prompt('Name?', 'nobody')">Name</button>
+<button onclick="alert('Saved'); document.getElementById('answer').textContent = 'Alerted'">Save</button>
+<p id="answer">Unanswered</p>
+</body></html>"##;
+
+async fn controls_page(browser: &AgentBrowser) -> (Arc<PageAgent>, String) {
+    let url = serve(CONTROLS.to_owned()).await;
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    (page, url)
+}
+
+fn controls_browser() -> AgentBrowser {
+    AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 1,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn history_hover_and_select_act_like_a_user() {
+    // Given: two documents in history and a same-document entry after them.
+    let browser = controls_browser();
+    let (page, url) = controls_page(&browser).await;
+    page.navigate(&format!("{url}one")).await.unwrap();
+    page.navigate(&format!("{url}two")).await.unwrap();
+    let outline = page.snapshot().await.unwrap().text;
+    page.click(&reference(&outline, "- link \"Details\""))
+        .await
+        .unwrap();
+
+    // When: the agent walks the history, hovers the menu and picks an option.
+    let mut visited = Vec::new();
+    for step in ["back", "back", "forward", "forward"] {
+        match step {
+            "back" => page.go_back().await.unwrap(),
+            _ => page.go_forward().await.unwrap(),
+        }
+        let text = page.snapshot().await.unwrap().text;
+        visited.push(
+            text.lines()
+                .find(|line| line.contains("At /"))
+                .and_then(|line| line.trim().split(" [ref=").next())
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    let past_end = page.go_forward().await;
+    let outline = page.snapshot().await.unwrap().text;
+    page.hover(&reference(&outline, "- button \"Menu\""))
+        .await
+        .unwrap();
+    let hovered = page.snapshot().await.unwrap().text;
+    let size = reference(&hovered, "- combobox \"Size\"");
+    page.select_option(&size, &["Large".into()]).await.unwrap();
+    let picked = page.snapshot().await.unwrap().text;
+    let missing = page.select_option(&size, &["Huge".into()]).await;
+
+    // Then: each step showed the expected entry and the page reacted.
+    assert_eq!(
+        visited,
+        [
+            "- heading \"At /two\"",
+            "- heading \"At /one\"",
+            "- heading \"At /two\"",
+            "- heading \"At /two#details\"",
+        ],
+        "{visited:?}"
+    );
+    assert!(
+        matches!(past_end, Err(AgentError::Refused(_))),
+        "{past_end:?}"
+    );
+    assert!(!outline.contains("Hidden item"), "{outline}");
+    assert!(hovered.contains("Hidden item"), "{hovered}");
+    assert!(picked.contains("Picked l"), "{picked}");
+    assert!(
+        matches!(&missing, Err(AgentError::Refused(reason)) if reason.contains("\"Small\",\"Large\"")),
+        "{missing:?}"
+    );
+    assert!(browser.close("run-1").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn dialogs_are_dismissed_unless_the_agent_answers_them() {
+    // Given: a page whose buttons open a confirm, a prompt and an alert.
+    let browser = controls_browser();
+    let (page, url) = controls_page(&browser).await;
+    page.navigate(&url).await.unwrap();
+    let outline = page.snapshot().await.unwrap().text;
+    let delete = reference(&outline, "- button \"Delete\"");
+    let name = reference(&outline, "- button \"Name\"");
+    let save = reference(&outline, "- button \"Save\"");
+    let answer = |page: Arc<PageAgent>| async move {
+        let text = page.snapshot().await.unwrap().text;
+        text.lines()
+            .find(|line| {
+                line.contains("Confirm ") || line.contains("Prompt ") || line.contains("Alerted")
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+
+    // When: the agent clicks each with and without an answer.
+    page.click(&delete).await.unwrap();
+    let unanswered_confirm = answer(page.clone()).await;
+    page.answer_next_dialog(DialogAnswer {
+        accept: true,
+        prompt_text: None,
+    });
+    page.click(&delete).await.unwrap();
+    let accepted_confirm = answer(page.clone()).await;
+    page.click(&name).await.unwrap();
+    let unanswered_prompt = answer(page.clone()).await;
+    page.answer_next_dialog(DialogAnswer {
+        accept: true,
+        prompt_text: Some("Ada".into()),
+    });
+    page.click(&name).await.unwrap();
+    let answered_prompt = answer(page.clone()).await;
+    page.click(&save).await.unwrap();
+    let alerted = answer(page.clone()).await;
+
+    // Then: only the answered dialogs were accepted, and each was noted.
+    assert_eq!(
+        [
+            unanswered_confirm,
+            accepted_confirm,
+            unanswered_prompt,
+            answered_prompt,
+            alerted,
+        ],
+        [
+            "- text \"Confirm false\"",
+            "- text \"Confirm true\"",
+            "- text \"Prompt null\"",
+            "- text \"Prompt Ada\"",
+            "- text \"Alerted\"",
+        ]
+        .map(String::from)
+    );
+    let dialogs = page.take_dialogs();
+    assert_eq!(dialogs.len(), 5, "{dialogs:?}");
+    assert!(
+        dialogs[0].starts_with("confirm \"Delete it?\" dismissed"),
+        "{dialogs:?}"
+    );
+    assert_eq!(dialogs[1], "confirm \"Delete it?\" accepted");
+    assert_eq!(dialogs[3], "prompt \"Name?\" answered \"Ada\"");
+    assert_eq!(dialogs[4], "alert \"Saved\" closed");
     assert!(browser.close("run-1").await);
 }

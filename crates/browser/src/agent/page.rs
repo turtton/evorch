@@ -9,6 +9,25 @@ use super::{AgentError, CdpTarget, Snapshot, keys, snapshot};
 const BLOCKED_LOG: usize = 16;
 const ACTIVITY_LOG: usize = 32;
 const TYPED_PREVIEW: usize = 40;
+const DIALOG_LOG: usize = 8;
+const DIALOG_PREVIEW: usize = 200;
+const SELECT_OPTIONS: &str = r#"function(wanted) {
+  if (this.localName !== "select") return "is not a <select> element";
+  if (this.disabled) return "is disabled";
+  if (!this.multiple && wanted.length !== 1) return "takes exactly one value";
+  const options = Array.from(this.options);
+  const picked = [];
+  for (const want of wanted) {
+    const option = options.find(o => o.value === want) || options.find(o => o.label.trim() === want.trim());
+    if (!option) return `has no option with value or label ${JSON.stringify(want)}; options: ${JSON.stringify(options.slice(0, 50).map(o => o.label.trim()))}`;
+    if (option.disabled || option.closest("optgroup")?.disabled) return `option ${JSON.stringify(want)} is disabled`;
+    picked.push(option);
+  }
+  for (const option of options) option.selected = picked.includes(option);
+  this.dispatchEvent(new Event("input", {bubbles: true}));
+  this.dispatchEvent(new Event("change", {bubbles: true}));
+  return null;
+}"#;
 
 /// One entry of a page's recent history, shown to observers such as the GUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +37,24 @@ pub enum Activity {
         error: Option<String>,
     },
     Blocked(String),
+    Dialog(String),
+}
+
+/// A JavaScript dialog a page opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogKind {
+    Alert,
+    Confirm,
+    Prompt,
+    BeforeUnload,
+}
+
+/// How to close a confirm or prompt dialog. `prompt_text` answers a prompt;
+/// without it an accepted prompt keeps its default text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogAnswer {
+    pub accept: bool,
+    pub prompt_text: Option<String>,
 }
 
 /// Ref-addressed operations on one page. Refs come from the latest
@@ -27,6 +64,8 @@ pub struct PageAgent {
     refs: Mutex<BTreeSet<i64>>,
     blocked: Mutex<VecDeque<String>>,
     activity: Mutex<VecDeque<Activity>>,
+    dialogs: Mutex<VecDeque<String>>,
+    dialog_answer: Mutex<Option<DialogAnswer>>,
 }
 
 impl PageAgent {
@@ -36,6 +75,8 @@ impl PageAgent {
             refs: Mutex::new(BTreeSet::new()),
             blocked: Mutex::default(),
             activity: Mutex::default(),
+            dialogs: Mutex::default(),
+            dialog_answer: Mutex::default(),
         }
     }
 
@@ -57,6 +98,78 @@ impl PageAgent {
     /// Requests refused since the last call.
     pub fn take_blocked(&self) -> Vec<String> {
         lock(&self.blocked).drain(..).collect()
+    }
+
+    /// Answers the first confirm or prompt dialog the next action opens.
+    /// Without an answer they are dismissed, so nothing a page guards behind
+    /// a confirmation runs unless the agent asked for it.
+    pub fn answer_next_dialog(&self, answer: DialogAnswer) {
+        self.push_activity(Activity::Action {
+            label: format!(
+                "answer next dialog: {}",
+                if answer.accept { "accept" } else { "dismiss" }
+            ),
+            error: None,
+        });
+        *lock(&self.dialog_answer) = Some(answer);
+    }
+
+    /// Decides how to close a dialog the page opened, and notes it. Alerts
+    /// only have OK, and leaving a page on `beforeunload` is what the agent's
+    /// navigation asked for, so both are accepted.
+    pub fn on_dialog(
+        &self,
+        kind: DialogKind,
+        message: &str,
+        default_prompt: Option<&str>,
+    ) -> DialogAnswer {
+        let answered = match kind {
+            DialogKind::Alert | DialogKind::BeforeUnload => None,
+            DialogKind::Confirm | DialogKind::Prompt => lock(&self.dialog_answer).take(),
+        };
+        let defaulted = answered.is_none();
+        let mut answer = answered.unwrap_or(DialogAnswer {
+            accept: matches!(kind, DialogKind::Alert | DialogKind::BeforeUnload),
+            prompt_text: None,
+        });
+        answer.prompt_text = match kind {
+            DialogKind::Prompt if answer.accept => answer
+                .prompt_text
+                .or_else(|| Some(default_prompt.unwrap_or_default().to_owned())),
+            _ => None,
+        };
+        let mut preview: String = message.chars().take(DIALOG_PREVIEW).collect();
+        if message.chars().nth(DIALOG_PREVIEW).is_some() {
+            preview.push('…');
+        }
+        let outcome = match (kind, &answer.prompt_text) {
+            (DialogKind::Alert, _) => "closed".to_owned(),
+            (DialogKind::BeforeUnload, _) => "left the page".to_owned(),
+            (_, Some(text)) => format!("answered {text:?}"),
+            (_, None) if answer.accept => "accepted".to_owned(),
+            (_, None) if defaulted => "dismissed; to accept it, call browser_handle_dialog with accept=true and repeat the action".to_owned(),
+            (_, None) => "dismissed".to_owned(),
+        };
+        let name = match kind {
+            DialogKind::Alert => "alert",
+            DialogKind::Confirm => "confirm",
+            DialogKind::Prompt => "prompt",
+            DialogKind::BeforeUnload => "beforeunload",
+        };
+        let entry = format!("{name} {preview:?} {outcome}");
+        let mut log = lock(&self.dialogs);
+        if log.len() == DIALOG_LOG {
+            log.pop_front();
+        }
+        log.push_back(entry.clone());
+        drop(log);
+        self.push_activity(Activity::Dialog(entry));
+        answer
+    }
+
+    /// Dialogs closed since the last call.
+    pub fn take_dialogs(&self) -> Vec<String> {
+        lock(&self.dialogs).drain(..).collect()
     }
 
     /// The latest actions and refused requests, oldest first.
@@ -82,6 +195,17 @@ impl PageAgent {
             label,
             error: result.as_ref().err().map(ToString::to_string),
         });
+        result
+    }
+
+    /// Runs an input action. A dialog answer covers only the action after it.
+    async fn act<T>(
+        &self,
+        label: String,
+        action: impl std::future::Future<Output = Result<T, AgentError>>,
+    ) -> Result<T, AgentError> {
+        let result = self.logged(label, action).await;
+        lock(&self.dialog_answer).take();
         result
     }
 
@@ -116,12 +240,12 @@ impl PageAgent {
 
     pub async fn navigate(&self, url: &str) -> Result<(), AgentError> {
         lock(&self.refs).clear();
-        self.logged(format!("navigate {url}"), self.target.navigate(url))
+        self.act(format!("navigate {url}"), self.target.navigate(url))
             .await
     }
 
     pub async fn click(&self, reference: &str) -> Result<(), AgentError> {
-        self.logged(format!("click {reference}"), self.click_ref(reference))
+        self.act(format!("click {reference}"), self.click_ref(reference))
             .await
     }
 
@@ -134,7 +258,7 @@ impl PageAgent {
     /// Clicks viewport coordinates in CSS pixels, for targets an outline
     /// cannot name.
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), AgentError> {
-        self.logged(format!("click at ({x}, {y})"), async {
+        self.act(format!("click at ({x}, {y})"), async {
             if !(x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0) {
                 return Err(AgentError::Navigation(format!(
                     "({x}, {y}) is not a point in the viewport"
@@ -175,7 +299,7 @@ impl PageAgent {
         if submit {
             label.push_str(" + Enter");
         }
-        self.logged(label, self.type_into(reference, text, submit))
+        self.act(label, self.type_into(reference, text, submit))
             .await
     }
 
@@ -215,7 +339,7 @@ impl PageAgent {
     }
 
     pub async fn press(&self, combo: &str) -> Result<(), AgentError> {
-        self.logged(format!("press {combo}"), self.press_keys(combo))
+        self.act(format!("press {combo}"), self.press_keys(combo))
             .await
     }
 
@@ -233,8 +357,7 @@ impl PageAgent {
             Some(reference) => format!("scroll {reference} {direction}"),
             None => format!("scroll {direction}"),
         };
-        self.logged(label, self.scroll_by(reference, direction))
-            .await
+        self.act(label, self.scroll_by(reference, direction)).await
     }
 
     async fn scroll_by(&self, reference: Option<&str>, direction: &str) -> Result<(), AgentError> {
@@ -271,6 +394,100 @@ impl PageAgent {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn go_back(&self) -> Result<(), AgentError> {
+        self.act("back".into(), self.traverse(-1)).await
+    }
+
+    pub async fn go_forward(&self) -> Result<(), AgentError> {
+        self.act("forward".into(), self.traverse(1)).await
+    }
+
+    async fn traverse(&self, delta: i64) -> Result<(), AgentError> {
+        let history = self
+            .target
+            .call("Page.getNavigationHistory", json!({}))
+            .await?;
+        let current = history
+            .get("currentIndex")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| response("Page.getNavigationHistory", "missing currentIndex"))?;
+        let entry = usize::try_from(current + delta)
+            .ok()
+            .and_then(|index| history.get("entries")?.as_array()?.get(index))
+            .ok_or_else(|| {
+                AgentError::Refused(format!(
+                    "there is no {} page in this page's history",
+                    if delta < 0 { "previous" } else { "next" }
+                ))
+            })?;
+        let id = entry
+            .get("id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| response("Page.getNavigationHistory", "missing entry id"))?;
+        lock(&self.refs).clear();
+        self.target.go_to_history_entry(id).await
+    }
+
+    pub async fn hover(&self, reference: &str) -> Result<(), AgentError> {
+        self.act(format!("hover {reference}"), async {
+            let node = self.node(reference)?;
+            let (x, y) = self.center(reference, node).await?;
+            self.target
+                .call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseMoved", "x": x, "y": y, "buttons": 0}),
+                )
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Selects the options of a `<select>` whose value or visible label is in
+    /// `values` and deselects the rest, then fires `input` and `change`.
+    pub async fn select_option(
+        &self,
+        reference: &str,
+        values: &[String],
+    ) -> Result<(), AgentError> {
+        self.act(
+            format!("select {reference} {values:?}"),
+            self.select_values(reference, values),
+        )
+        .await
+    }
+
+    async fn select_values(&self, reference: &str, values: &[String]) -> Result<(), AgentError> {
+        let node = self.node(reference)?;
+        let object = self
+            .target
+            .call("DOM.resolveNode", json!({"backendNodeId": node}))
+            .await?;
+        let object_id = object
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| response("DOM.resolveNode", "missing objectId"))?;
+        let outcome = self
+            .target
+            .call(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": SELECT_OPTIONS,
+                    "arguments": [{"value": values}],
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        if let Some(exception) = outcome.get("exceptionDetails") {
+            return Err(response("Runtime.callFunctionOn", &exception.to_string()));
+        }
+        match outcome.pointer("/result/value").and_then(Value::as_str) {
+            Some(refusal) => Err(AgentError::Refused(format!("{reference}: {refusal}"))),
+            None => Ok(()),
+        }
     }
 
     /// PNG of the visible viewport.
@@ -357,12 +574,16 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         calls: Mutex<Vec<(String, Value)>>,
+        responses: Mutex<std::collections::HashMap<&'static str, Value>>,
     }
 
     #[async_trait::async_trait]
     impl CdpTarget for Recorder {
         async fn call(&self, method: &str, params: Value) -> Result<Value, AgentError> {
             lock(&self.calls).push((method.to_owned(), params));
+            if let Some(response) = lock(&self.responses).get(method) {
+                return Ok(response.clone());
+            }
             Ok(match method {
                 "Accessibility.getFullAXTree" => json!({"nodes": [{
                     "nodeId": "1", "role": {"value": "button"}, "name": {"value": "Go"},
@@ -370,6 +591,10 @@ mod tests {
                 }]}),
                 "DOM.getContentQuads" => json!({"quads": [[10, 20, 30, 20, 30, 40, 10, 40]]}),
                 "DOM.resolveNode" => json!({"object": {"objectId": "obj-7"}}),
+                "Page.getNavigationHistory" => json!({
+                    "currentIndex": 1,
+                    "entries": [{"id": 10, "url": "https://a.test/"}, {"id": 11, "url": "https://b.test/"}],
+                }),
                 _ => json!({}),
             })
         }
@@ -491,5 +716,140 @@ mod tests {
             page.activity().last(),
             Some(Activity::Action { label, error: Some(_) }) if label == "click at (NaN, 1)"
         ));
+    }
+
+    #[tokio::test]
+    async fn history_moves_one_entry_and_refuses_past_either_end() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+        page.snapshot().await.unwrap();
+
+        page.go_back().await.unwrap();
+        let past_end = page.go_forward().await;
+
+        let calls = lock(&target.calls).clone();
+        let moved: Vec<_> = calls
+            .iter()
+            .filter(|(method, _)| method == "Page.navigateToHistoryEntry")
+            .map(|(_, params)| params["entryId"].clone())
+            .collect();
+        assert_eq!(moved, [json!(10)]);
+        assert!(
+            matches!(&past_end, Err(AgentError::Refused(reason)) if reason.contains("no next page")),
+            "{past_end:?}"
+        );
+        assert!(matches!(
+            page.click("e7").await,
+            Err(AgentError::UnknownRef(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn hover_moves_the_mouse_onto_the_element_without_pressing() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+        page.snapshot().await.unwrap();
+        lock(&target.calls).clear();
+
+        page.hover("e7").await.unwrap();
+
+        let calls = lock(&target.calls).clone();
+        let (method, event) = calls.last().unwrap();
+        assert_eq!(method, "Input.dispatchMouseEvent");
+        assert_eq!(event["type"], "mouseMoved");
+        assert_eq!(
+            (event["x"].as_f64(), event["y"].as_f64()),
+            (Some(20.0), Some(30.0))
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "Input.dispatchMouseEvent")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn select_option_hands_the_values_to_the_element_and_reports_its_refusal() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+        page.snapshot().await.unwrap();
+
+        page.select_option("e7", &["Large".into()]).await.unwrap();
+        lock(&target.responses).insert(
+            "Runtime.callFunctionOn",
+            json!({"result": {"type": "string", "value": "takes exactly one value"}}),
+        );
+        let refused = page.select_option("e7", &[]).await;
+
+        let calls = lock(&target.calls).clone();
+        let (_, call) = calls
+            .iter()
+            .find(|(method, _)| method == "Runtime.callFunctionOn")
+            .unwrap();
+        assert_eq!(call["objectId"], "obj-7");
+        assert_eq!(call["arguments"], json!([{"value": ["Large"]}]));
+        assert_eq!(call["returnByValue"], true);
+        assert!(
+            matches!(&refused, Err(AgentError::Refused(reason)) if reason == "e7: takes exactly one value"),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialogs_are_dismissed_unless_answered_for_the_next_action() {
+        let page = PageAgent::new(Arc::new(Recorder::default()));
+        let dismiss = DialogAnswer {
+            accept: false,
+            prompt_text: None,
+        };
+        let accept = DialogAnswer {
+            accept: true,
+            prompt_text: None,
+        };
+
+        let alert = page.on_dialog(DialogKind::Alert, "Saved", None);
+        let leave = page.on_dialog(DialogKind::BeforeUnload, "", None);
+        let unanswered = page.on_dialog(DialogKind::Confirm, "Delete it?", None);
+        page.answer_next_dialog(DialogAnswer {
+            accept: true,
+            prompt_text: Some("Ada".into()),
+        });
+        let answered = page.on_dialog(DialogKind::Prompt, "Name?", Some("nobody"));
+        let consumed = page.on_dialog(DialogKind::Confirm, "Again?", None);
+        page.answer_next_dialog(accept.clone());
+        let kept_default = page.on_dialog(DialogKind::Prompt, "Name?", Some("nobody"));
+        page.answer_next_dialog(accept.clone());
+        page.click_at(1.0, 1.0).await.unwrap();
+        let expired = page.on_dialog(DialogKind::Confirm, "Late?", None);
+
+        assert_eq!((alert, leave), (accept.clone(), accept));
+        assert_eq!(unanswered, dismiss);
+        assert_eq!(
+            answered,
+            DialogAnswer {
+                accept: true,
+                prompt_text: Some("Ada".into())
+            }
+        );
+        assert_eq!(consumed, dismiss, "an answer covers one dialog");
+        assert_eq!(kept_default.prompt_text.as_deref(), Some("nobody"));
+        assert_eq!(expired, dismiss, "an answer covers only the next action");
+        let dialogs = page.take_dialogs();
+        assert_eq!(dialogs[0], "alert \"Saved\" closed");
+        assert!(
+            dialogs[2].starts_with(
+                "confirm \"Delete it?\" dismissed; to accept it, call browser_handle_dialog"
+            ),
+            "{dialogs:?}"
+        );
+        assert_eq!(dialogs[3], "prompt \"Name?\" answered \"Ada\"");
+        assert!(page.take_dialogs().is_empty());
+        assert!(
+            page.activity()
+                .iter()
+                .any(|entry| *entry == Activity::Dialog(dialogs[0].clone()))
+        );
     }
 }

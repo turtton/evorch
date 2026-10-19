@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused;
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
-    StopScreencastParams,
+    DialogType, EventFrameStartedLoading, EventFrameStoppedLoading, EventJavascriptDialogOpening,
+    EventNavigatedWithinDocument, EventScreencastFrame, ScreencastFrameAckParams,
+    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
 };
 use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use chromiumoxide::types::{Command, Method, MethodId};
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use super::proxy::Proxy;
-use super::{AgentError, CdpTarget, PageAgent, PageProvider, RequestPolicy};
+use super::{AgentError, CdpTarget, DialogKind, PageAgent, PageProvider, RequestPolicy};
 
 const WINDOW: [u32; 2] = [1280, 800];
 
@@ -202,6 +203,9 @@ impl AgentBrowser {
                 // Keep cross-origin frames in the page session so its Fetch
                 // interception covers them.
                 ("disable-features", "IsolateOrigins,site-per-process"),
+                // Back and forward then always load the page again, which
+                // they wait for like any other navigation.
+                ("disable-features", "BackForwardCache"),
                 // Loopback is otherwise bypassed implicitly; every connection
                 // has to meet the policy at the proxy.
                 ("proxy-bypass-list", "<-loopback>"),
@@ -238,7 +242,11 @@ impl AgentBrowser {
             .event_listener::<EventRequestPaused>()
             .await
             .map_err(|error| AgentError::Launch(error.to_string()))?;
-        let target = Arc::new(ChromiumTarget(page.clone()));
+        let mut dialogs = page
+            .event_listener::<EventJavascriptDialogOpening>()
+            .await
+            .map_err(|error| AgentError::Launch(error.to_string()))?;
+        let target = Arc::new(ChromiumTarget::new(page.clone()).await?);
         target
             .call(
                 "Fetch.enable",
@@ -246,6 +254,30 @@ impl AgentBrowser {
             )
             .await?;
         let agent = Arc::new(PageAgent::new(target));
+        let answerer = Arc::clone(&agent);
+        let answering = page.clone();
+        tokio::spawn(async move {
+            while let Some(event) = dialogs.next().await {
+                let kind = match event.r#type {
+                    DialogType::Alert => DialogKind::Alert,
+                    DialogType::Confirm => DialogKind::Confirm,
+                    DialogType::Prompt => DialogKind::Prompt,
+                    DialogType::Beforeunload => DialogKind::BeforeUnload,
+                };
+                let answer =
+                    answerer.on_dialog(kind, &event.message, event.default_prompt.as_deref());
+                let mut params = json!({"accept": answer.accept});
+                if let Some(text) = answer.prompt_text {
+                    params["promptText"] = json!(text);
+                }
+                if let Err(error) = answering
+                    .execute(Raw::new("Page.handleJavaScriptDialog", params))
+                    .await
+                {
+                    tracing::debug!(%error, "agent browser dialog answer was not delivered");
+                }
+            }
+        });
         let recorder = Arc::clone(&agent);
         let policy = Arc::clone(&self.options.policy);
         let guarded = page.clone();
@@ -418,12 +450,84 @@ impl Drop for Running {
     }
 }
 
-struct ChromiumTarget(Page);
+/// Loads of a page's main frame seen so far. Chromium alternates starting
+/// and stopping a frame's load, so the counts agree whenever the frame is
+/// idle, whichever order the separate event streams are read in.
+#[derive(Debug, Clone, Copy, Default)]
+struct Loads {
+    started: u64,
+    stopped: u64,
+    within_document: u64,
+}
+
+impl Loads {
+    fn idle(&self) -> bool {
+        self.started <= self.stopped
+    }
+}
+
+/// chromiumoxide's `wait_for_navigation` never sees `Page.frameStoppedLoading`,
+/// so after a same-document navigation, which has no `load`, it waits
+/// forever. The page's own load counts decide instead.
+struct ChromiumTarget {
+    page: Page,
+    loads: watch::Receiver<Loads>,
+}
+
+impl ChromiumTarget {
+    async fn new(page: Page) -> Result<Self, AgentError> {
+        let launch = |error: chromiumoxide::error::CdpError| AgentError::Launch(error.to_string());
+        let main = page
+            .mainframe()
+            .await
+            .map_err(launch)?
+            .ok_or_else(|| AgentError::Launch("the page has no main frame".into()))?;
+        let mut started = page
+            .event_listener::<EventFrameStartedLoading>()
+            .await
+            .map_err(launch)?;
+        let mut stopped = page
+            .event_listener::<EventFrameStoppedLoading>()
+            .await
+            .map_err(launch)?;
+        let mut within = page
+            .event_listener::<EventNavigatedWithinDocument>()
+            .await
+            .map_err(launch)?;
+        let (counts, loads) = watch::channel(Loads::default());
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(event) = started.next() => if event.frame_id == main {
+                        counts.send_modify(|loads| loads.started += 1);
+                    },
+                    Some(event) = stopped.next() => if event.frame_id == main {
+                        counts.send_modify(|loads| loads.stopped += 1);
+                    },
+                    Some(event) = within.next() => if event.frame_id == main {
+                        counts.send_modify(|loads| loads.within_document += 1);
+                    },
+                    else => break,
+                }
+            }
+        });
+        Ok(Self { page, loads })
+    }
+
+    async fn wait_for_loads(&self, done: impl FnMut(&Loads) -> bool) -> Result<(), AgentError> {
+        self.loads
+            .clone()
+            .wait_for(done)
+            .await
+            .map(|_| ())
+            .map_err(|_| AgentError::Navigation("the page closed".into()))
+    }
+}
 
 #[async_trait::async_trait]
 impl CdpTarget for ChromiumTarget {
     async fn call(&self, method: &str, params: Value) -> Result<Value, AgentError> {
-        self.0
+        self.page
             .execute(Raw::new(method, params))
             .await
             .map(|response| response.result)
@@ -434,7 +538,7 @@ impl CdpTarget for ChromiumTarget {
     }
 
     async fn navigate(&self, url: &str) -> Result<(), AgentError> {
-        self.0
+        self.page
             .goto(url)
             .await
             .map(|_| ())
@@ -442,11 +546,18 @@ impl CdpTarget for ChromiumTarget {
     }
 
     async fn settle(&self) -> Result<(), AgentError> {
-        self.0
-            .wait_for_navigation()
-            .await
-            .map(|_| ())
-            .map_err(|error| AgentError::Navigation(error.to_string()))
+        self.wait_for_loads(Loads::idle).await
+    }
+
+    async fn go_to_history_entry(&self, entry_id: i64) -> Result<(), AgentError> {
+        let before = *self.loads.borrow();
+        self.call("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))
+            .await?;
+        self.wait_for_loads(|now| {
+            (now.stopped > before.stopped || now.within_document > before.within_document)
+                && now.idle()
+        })
+        .await
     }
 }
 

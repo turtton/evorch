@@ -33,8 +33,10 @@ No screenshot is logged on every video frame, only around explicit actions.
 ## Agent browser tools
 
 When a Chromium or Chrome executable is installed (or named by `CHROME`), the
-runtime registers `browser_navigate`, `browser_snapshot`, `browser_click`,
-`browser_type`, `browser_press_key`, `browser_scroll`, `browser_screenshot` and
+runtime registers `browser_navigate`, `browser_navigate_back`,
+`browser_navigate_forward`, `browser_snapshot`, `browser_click`,
+`browser_hover`, `browser_type`, `browser_select_option`, `browser_press_key`,
+`browser_scroll`, `browser_handle_dialog`, `browser_screenshot` and
 `browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
 use them; `sandbox.web_tools_enabled` is their global switch, as for the other
 Web tools.
@@ -63,6 +65,17 @@ outline cannot name, such as a canvas; refs stay the default.
   the action tools accept only refs from the latest outline. Actions return
   the updated outline; `browser_screenshot` returns a PNG image result.
 - `browser_navigate` URLs go through the same per-call review as `web_fetch`.
+  Back and forward revisit history entries, which load under the same
+  request policy; the back/forward cache is disabled, so every entry loads
+  again.
+- `browser_select_option` picks `<select>` options by value or visible label
+  and fires `input` and `change`, as a selection by the user would.
+- JavaScript dialogs never wait for an answer. Alerts are closed and
+  `beforeunload` lets the page go. Confirm and prompt dialogs are dismissed
+  unless `browser_handle_dialog` answered them for the action that opened
+  them, so nothing a page guards behind a confirmation runs unless the agent
+  asked. Each dialog is listed in the next result. An open dialog would block
+  the page and every further tool call on it, which is why none is held open.
 - Chromium reaches the network only through a loopback proxy that evorch
   starts with it (`--proxy-server`, with `--proxy-bypass-list=<-loopback>` so
   loopback is not bypassed). The proxy applies the `web_fetch` rules to every
@@ -83,8 +96,8 @@ window onto the runtime's agent pages. Every executor of the process, including
 the ones runs build for their own sandbox, shares one agent browser, so the
 window lists every run that has an open page. Only the selected run's page is
 screencast, and only while the window is open; closing the window stops it.
-The latest actions (navigate, snapshot, click, type, key, scroll, screenshot,
-with failures) and refused requests are laid over the frame. Typed text is
+The latest actions (every browser tool call, with failures), refused requests
+and closed dialogs are laid over the frame. Typed text is
 shown up to 40 characters. The window never sends input to the page.
 
 ## Low-memory verification

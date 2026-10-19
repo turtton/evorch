@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use chromium::{AgentBrowser, LaunchOptions, Screencast};
-pub use page::{Activity, PageAgent};
+pub use page::{Activity, DialogAnswer, DialogKind, PageAgent};
 pub use snapshot::{MAX_SNAPSHOT_LINES, Snapshot, render};
 
 /// One page reachable over CDP.
@@ -32,6 +32,17 @@ pub trait CdpTarget: Send + Sync {
     /// cannot track navigations return immediately.
     async fn settle(&self) -> Result<(), AgentError> {
         Ok(())
+    }
+
+    /// Shows the session history entry `entry_id` (an `id` from
+    /// `Page.getNavigationHistory`) and resolves once it has loaded.
+    async fn go_to_history_entry(&self, entry_id: i64) -> Result<(), AgentError> {
+        self.call(
+            "Page.navigateToHistoryEntry",
+            serde_json::json!({"entryId": entry_id}),
+        )
+        .await?;
+        self.settle().await
     }
 }
 
@@ -79,6 +90,8 @@ pub enum AgentError {
     Launch(String),
     #[error("navigation failed: {0}")]
     Navigation(String),
+    #[error("{0}")]
+    Refused(String),
     #[error("invalid CDP response for {method}: {detail}")]
     Response { method: String, detail: String },
 }

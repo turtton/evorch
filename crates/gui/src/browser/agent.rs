@@ -248,6 +248,7 @@ fn activity_lines(ui: &mut egui::Ui, recent: &[Activity]) {
                 error: Some(error),
             } => (format!("{label} failed: {error}"), true),
             Activity::Blocked(request) => (format!("blocked {request}"), true),
+            Activity::Dialog(dialog) => (format!("dialog {dialog}"), false),
         };
         let color = if failed {
             palette().ERROR_FG
