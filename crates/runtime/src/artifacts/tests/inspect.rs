@@ -140,6 +140,7 @@ async fn conversation_root_operates_the_mock_it_presented() {
             open_last_capture(),
             inspect(json!({"action": "click", "ref": "e7"})),
             inspect(json!({"action": "screenshot"})),
+            inspect(json!({"action": "select_option", "ref": "e7", "values": []})),
             inspect(json!({"action": "close"})),
             stop(),
         ],
@@ -150,7 +151,7 @@ async fn conversation_root_operates_the_mock_it_presented() {
     );
 
     let results = harness.results(run);
-    assert!(results.iter().all(|(error, _)| !error), "{results:?}");
+    assert!(results[..5].iter().all(|(error, _)| !error), "{results:?}");
     let (opened, click, screenshot) = (&results[2].1, &results[3].1, &results[4].1);
     assert!(opened.contains("button \"Add\" [ref=e7]"), "{opened}");
     assert!(
@@ -166,7 +167,11 @@ async fn conversation_root_operates_the_mock_it_presented() {
     assert!(!click.contains("Dialogs"), "{click}");
     assert!(screenshot.contains("1x1"), "{screenshot}");
     assert!(screenshot.contains("[image image/png]"), "{screenshot}");
-    assert!(results[5].1.contains("closed"));
+    assert!(
+        results[5].0 && results[5].1.contains("missing values"),
+        "{results:?}"
+    );
+    assert!(!results[6].0 && results[6].1.contains("closed"));
     assert_eq!(
         pages.opened.lock().unwrap()[0],
         (run.to_string(), b"<!doctype html><p>Mock</p>".to_vec())

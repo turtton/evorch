@@ -43,14 +43,15 @@ pub(crate) fn spec(name: &str) -> ToolSpec {
         json!({"type": "string", "description": "A ref such as e12 from the latest outline."});
     ToolSpec {
         name: name.into(),
-        description: "Check an HTML artifact of this conversation as a user would, in an offline browser page. open loads an HTML artifact_id from render_artifact and returns an accessibility outline whose elements carry [ref=eN]. click, type, press_key and scroll act on refs from the latest outline and return the updated outline; snapshot re-reads it; screenshot returns an image of the 1024x768 viewport; close discards the page. The page has no network access and cannot navigate away from the artifact, so anything not inlined fails to load and is listed as blocked. Nobody sees its dialogs: alert is closed, confirm and prompt are dismissed (false and null), and each is listed. Each run has one page; open replaces it.".into(),
+        description: "Check an HTML artifact of this conversation as a user would, in an offline browser page. open loads an HTML artifact_id from render_artifact and returns an accessibility outline whose elements carry [ref=eN]. click, hover, select_option, type, press_key and scroll act on refs from the latest outline and return the updated outline (hover opens menus and tooltips; select_option chooses <select> options by value or visible label); snapshot re-reads it; screenshot returns an image of the 1024x768 viewport; close discards the page. The page has no network access and cannot navigate away from the artifact, so anything not inlined fails to load and is listed as blocked. Nobody sees its dialogs: alert is closed, confirm and prompt are dismissed (false and null), and each is listed. Each run has one page; open replaces it.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["open", "snapshot", "click", "type", "press_key", "scroll", "screenshot", "close"]},
+                "action": {"type": "string", "enum": ["open", "snapshot", "click", "hover", "select_option", "type", "press_key", "scroll", "screenshot", "close"]},
                 "artifact_id": {"type": "string", "description": "For open."},
                 "ref": reference,
                 "text": {"type": "string", "description": "For type: replaces the field's content; empty clears it."},
+                "values": {"type": "array", "items": {"type": "string"}, "description": "For select_option: option values or visible labels; several for a multiple select."},
                 "submit": {"type": "boolean", "description": "For type: press Enter afterwards."},
                 "key": {"type": "string", "description": "For press_key, such as Enter, Escape, ArrowDown or Control+a."},
                 "direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "For scroll; defaults to down."}
@@ -67,6 +68,8 @@ enum Action {
     Open,
     Snapshot,
     Click,
+    Hover,
+    SelectOption,
     Type,
     PressKey,
     Scroll,
@@ -82,6 +85,7 @@ struct Args {
     #[serde(rename = "ref")]
     reference: Option<String>,
     text: Option<String>,
+    values: Option<Vec<String>>,
     #[serde(default)]
     submit: bool,
     key: Option<String>,
@@ -148,6 +152,20 @@ async fn run(
     match args.action {
         Action::Click => agent
             .click(&required(args.reference, "ref")?)
+            .await
+            .map_err(describe)?,
+        Action::Hover => agent
+            .hover(&required(args.reference, "ref")?)
+            .await
+            .map_err(describe)?,
+        Action::SelectOption => agent
+            .select_option(
+                &required(args.reference, "ref")?,
+                &args
+                    .values
+                    .filter(|values| !values.is_empty())
+                    .ok_or("missing values")?,
+            )
             .await
             .map_err(describe)?,
         Action::Type => agent

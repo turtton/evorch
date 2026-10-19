@@ -161,9 +161,10 @@ Agents check their HTML artifacts through CEF with `inspect_artifact`. The
 action `open` loads an artifact of the caller's conversation into an offline
 page that no window shows (1024×768 DIP, same isolation). The page is driven by
 the same `PageAgent` layer as the `browser_*` tools, over CEF's in-process
-DevTools. The actions `snapshot`, `click`, `type`, `press_key`, `scroll` and
-`screenshot` work as their `browser_*` counterparts. The tool takes no URL and
-the page cannot navigate, so nothing leaves CEF. Refused navigations and
+DevTools. The actions `snapshot`, `click`, `hover`, `select_option`, `type`,
+`press_key`, `scroll` and `screenshot` work as their `browser_*` counterparts.
+There is no `navigate`, `back` or `forward`: the tool takes no URL and the page
+cannot navigate, so nothing leaves CEF. Refused navigations and
 popups are listed in the next outline. Nobody sees the page's JS dialogs:
 `alert` is closed, `confirm` and `prompt` are dismissed (`false` and `null`),
 `beforeunload` leaves, and the next outline lists each under "Dialogs:".
@@ -238,7 +239,8 @@ are:
   request through CEF.
 - `agent_operates_the_artifact_it_presented_through_cef`: runs a scripted
   conversation root Worker. It captures and presents a counter mock, opens it
-  with `inspect_artifact`, clicks and types by ref, and takes a screenshot.
+  with `inspect_artifact`, clicks, types, chooses a `<select>` option and
+  hovers by ref, and takes a screenshot.
   Throughout, no connection may reach a loopback listener.
 
 ```sh
