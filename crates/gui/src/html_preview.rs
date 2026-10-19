@@ -283,6 +283,10 @@ mod tests {
 <button id="add">Add</button>
 <label>Name <input id="name"></label>
 <p id="greeting">Hello</p>
+<label>Size <select id="size"><option value="s">Small</option><option value="l">Large</option></select></label>
+<p id="chosen">Size none</p>
+<button id="info">Info</button>
+<p id="hint">Not hovered</p>
 <img src="http://127.0.0.1:{port}/logo.png" alt="logo">
 <script>
 let count = 0;
@@ -291,6 +295,12 @@ document.getElementById("add").addEventListener("click", () => {
 });
 document.getElementById("name").addEventListener("input", (event) => {
   document.getElementById("greeting").textContent = "Hello " + event.target.value;
+});
+document.getElementById("size").addEventListener("change", (event) => {
+  document.getElementById("chosen").textContent = "Size " + event.target.value;
+});
+document.getElementById("info").addEventListener("mouseover", () => {
+  document.getElementById("hint").textContent = "Hovered";
 });
 </script>"#;
 
@@ -451,6 +461,20 @@ document.getElementById("name").addEventListener("input", (event) => {
                     serde_json::json!({"action": "type", "ref": name, "text": "Ada"}),
                 )]
             }),
+            Box::new(|results| {
+                let size = reference(&results[4].1, "combobox \"Size\"");
+                vec![(
+                    "inspect_artifact",
+                    serde_json::json!({"action": "select_option", "ref": size, "values": ["Large"]}),
+                )]
+            }),
+            Box::new(|results| {
+                let info = reference(&results[5].1, "button \"Info\"");
+                vec![(
+                    "inspect_artifact",
+                    serde_json::json!({"action": "hover", "ref": info}),
+                )]
+            }),
             inspect(serde_json::json!({"action": "screenshot"})),
         ];
         let script = Arc::new(Script {
@@ -491,10 +515,10 @@ document.getElementById("name").addEventListener("input", (event) => {
 
         assert_eq!(phase, runtime::AgentRunPhase::Done);
         let results = script.results.lock().unwrap().clone();
-        assert_eq!(results.len(), 6, "{results:#?}");
+        assert_eq!(results.len(), 8, "{results:#?}");
         assert!(results.iter().all(|(error, _)| !error), "{results:#?}");
-        let (opened, clicked, typed, screenshot) =
-            (&results[2].1, &results[3].1, &results[4].1, &results[5].1);
+        let (opened, clicked, typed) = (&results[2].1, &results[3].1, &results[4].1);
+        let (selected, hovered, screenshot) = (&results[5].1, &results[6].1, &results[7].1);
         assert!(
             opened.starts_with("URL: https://artifact.evorch.invalid/index.html"),
             "{opened}"
@@ -502,6 +526,8 @@ document.getElementById("name").addEventListener("input", (event) => {
         assert!(opened.contains("Count 0"), "{opened}");
         assert!(clicked.contains("Count 1"), "{clicked}");
         assert!(typed.contains("Hello Ada"), "{typed}");
+        assert!(selected.contains("Size l"), "{selected}");
+        assert!(hovered.contains("Hovered"), "{hovered}");
         assert!(screenshot.contains("[image image/png]"), "{screenshot}");
         assert!(screenshot.contains("1024x768"), "{screenshot}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
