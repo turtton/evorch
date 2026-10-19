@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 pub use chromium::{AgentBrowser, LaunchOptions, Screencast};
 pub use page::{
-    Activity, DialogAnswer, DialogKind, PageAgent, UploadTarget, WaitFor, WaitLimits, WaitOutcome,
-    Waited,
+    Activity, DialogAnswer, DialogKind, Outline, PageAgent, Shown, UploadTarget, View, WaitFor,
+    WaitLimits, WaitOutcome, Waited,
 };
 pub use snapshot::{MAX_SNAPSHOT_LINES, Snapshot, render};
 
