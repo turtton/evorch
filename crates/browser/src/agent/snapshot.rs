@@ -141,6 +141,17 @@ fn describe(node: &Value, role: &str, name: &str, backend: Option<i64>) -> Strin
     line
 }
 
+/// Whether an element the outline can show has `text` in its name or value.
+pub fn mentions(nodes: &[Value], text: &str) -> bool {
+    nodes
+        .iter()
+        .filter(|node| node.get("ignored").and_then(Value::as_bool) != Some(true))
+        .any(|node| {
+            ax_string(node.get("name")).contains(text)
+                || ax_string(node.get("value")).contains(text)
+        })
+}
+
 fn ax_string(value: Option<&Value>) -> String {
     match value.and_then(|value| value.get("value")) {
         Some(Value::String(text)) => text.clone(),

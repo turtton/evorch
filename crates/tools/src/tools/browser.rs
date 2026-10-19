@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use browser::agent::{AgentError, DialogAnswer, PageAgent, PageProvider, RequestPolicy};
+use browser::agent::{
+    AgentError, DialogAnswer, PageAgent, PageProvider, RequestPolicy, WaitFor, WaitLimits,
+    WaitOutcome, Waited,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -15,7 +18,7 @@ use crate::tool::{Permissions, Tool};
 
 /// Every browser tool name, including opt-in ones that are registered only
 /// when configured.
-pub const BROWSER_TOOL_NAMES: [&str; 18] = [
+pub const BROWSER_TOOL_NAMES: [&str; 19] = [
     "browser_navigate",
     "browser_navigate_back",
     "browser_navigate_forward",
@@ -28,6 +31,7 @@ pub const BROWSER_TOOL_NAMES: [&str; 18] = [
     "browser_upload_file",
     "browser_press_key",
     "browser_scroll",
+    "browser_wait_for",
     "browser_handle_dialog",
     "browser_tabs",
     "browser_switch_tab",
@@ -85,6 +89,7 @@ enum Kind {
     UploadFile,
     PressKey,
     Scroll,
+    WaitFor,
     HandleDialog,
     Tabs,
     SwitchTab,
@@ -93,7 +98,7 @@ enum Kind {
     Close,
 }
 
-const KINDS: [Kind; 18] = [
+const KINDS: [Kind; 19] = [
     Kind::Navigate,
     Kind::Back,
     Kind::Forward,
@@ -106,6 +111,7 @@ const KINDS: [Kind; 18] = [
     Kind::UploadFile,
     Kind::PressKey,
     Kind::Scroll,
+    Kind::WaitFor,
     Kind::HandleDialog,
     Kind::Tabs,
     Kind::SwitchTab,
@@ -134,6 +140,7 @@ impl Kind {
             Self::UploadFile => "browser_upload_file",
             Self::PressKey => "browser_press_key",
             Self::Scroll => "browser_scroll",
+            Self::WaitFor => "browser_wait_for",
             Self::HandleDialog => "browser_handle_dialog",
             Self::Tabs => "browser_tabs",
             Self::SwitchTab => "browser_switch_tab",
@@ -180,6 +187,12 @@ struct Args {
     accept: Option<bool>,
     prompt_text: Option<String>,
     tab: Option<String>,
+    text_gone: Option<String>,
+    ref_gone: Option<String>,
+    #[serde(default)]
+    network_idle: bool,
+    #[serde(default)]
+    url_changes: bool,
 }
 
 impl BrowserTool {
@@ -276,6 +289,22 @@ impl BrowserTool {
                     "The next confirm or prompt dialog your next browser action opens will be dismissed."
                 }));
             }
+            Kind::WaitFor => {
+                let wanted = WaitFor {
+                    text: args.text,
+                    text_gone: args.text_gone,
+                    reference: args.reference,
+                    reference_gone: args.ref_gone,
+                    network_idle: args.network_idle,
+                    url: args.url,
+                    url_changes: args.url_changes,
+                };
+                let limits = WaitLimits::default();
+                let waited = page.wait_for(&wanted, limits).await?;
+                let mut result = outline(self.provider.as_ref(), key, &page).await?;
+                waited_header(&mut result, &waited, limits);
+                return Ok(result);
+            }
             Kind::Screenshot => return screenshot(&page).await,
             Kind::Snapshot | Kind::Close | Kind::Tabs | Kind::SwitchTab | Kind::CloseTab => {}
         }
@@ -311,6 +340,34 @@ async fn outline(
         "dialogs": dialogs,
         "tabs": tabs,
     })))
+}
+
+/// Puts how the wait ended above the outline; a wait that gave up is an
+/// error result, so the agent does not read the page as ready.
+fn waited_header(result: &mut ToolResult, waited: &Waited, limits: WaitLimits) {
+    let still = waited.unmet.join(", ");
+    let header = match waited.outcome {
+        WaitOutcome::Met => format!("Done waiting after {} page events.\n", waited.events),
+        WaitOutcome::EventLimit => format!(
+            "Gave up after {} page events, still waiting for {still}. The page kept changing; read the outline below, then wait again or act.\n",
+            waited.events
+        ),
+        WaitOutcome::TimeLimit => format!(
+            "Gave up after {} seconds and {} page events, still waiting for {still}. Read the outline below, then wait again or act.\n",
+            limits.time.as_secs(),
+            waited.events
+        ),
+    };
+    result.content.insert_str(0, &header);
+    result.is_error = waited.outcome != WaitOutcome::Met;
+    if let Some(detail) = result.detail.as_mut() {
+        detail["wait"] = json!({
+            "met": waited.outcome == WaitOutcome::Met,
+            "unmet": waited.unmet,
+            "events": waited.events,
+            "checks": waited.checks,
+        });
+    }
 }
 
 async fn tab_list(
@@ -506,6 +563,9 @@ impl Tool for BrowserTool {
             Kind::Scroll => {
                 "Scroll the page, or the element with the given ref, by most of a viewport. Returns the updated outline."
             }
+            Kind::WaitFor => {
+                "Wait until the active tab shows what you name, then return its outline. Name at least one condition; all must hold at once: text appearing or disappearing (text, text_gone; matched in the names and values of the outline), a ref from this or an earlier outline appearing or disappearing (ref, ref_gone), no request in flight (network_idle), the URL containing url, or the URL changing from what it is now (url_changes). Use it when an action's result arrives later. The page is checked again on each change, and the wait gives up after 1000 page changes or 30 seconds with an error result that still holds the outline."
+            }
             Kind::Tabs => {
                 "List this run's browser tabs. Links and scripts that open a new tab add it to the run; the other browser tools act on the active tab."
             }
@@ -547,6 +607,21 @@ impl Tool for BrowserTool {
                 json!(["ref", "text"]),
             ),
             Kind::PressKey => (json!({"key": {"type": "string"}}), json!(["key"])),
+            Kind::WaitFor => {
+                let earlier = json!({"type": "string", "description": "A ref such as e12 from this or an earlier outline."});
+                (
+                    json!({
+                        "text": {"type": "string"},
+                        "text_gone": {"type": "string"},
+                        "ref": earlier,
+                        "ref_gone": earlier,
+                        "network_idle": {"type": "boolean", "default": false},
+                        "url": {"type": "string", "description": "Text the page URL should contain."},
+                        "url_changes": {"type": "boolean", "default": false},
+                    }),
+                    json!([]),
+                )
+            }
             Kind::SwitchTab | Kind::CloseTab => (
                 json!({"tab": {"type": "string", "description": "A tab id such as t2."}}),
                 json!(["tab"]),

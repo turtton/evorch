@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,9 +11,23 @@ use tokio::sync::{mpsc, watch};
 use super::connection::{Connection, Event};
 use super::proxy::Proxy;
 use super::tabs::Registry;
-use super::{AgentError, CdpTarget, DialogKind, PageAgent, PageProvider, RequestPolicy, TabInfo};
+use super::{
+    AgentError, CdpTarget, DialogKind, PageAgent, PageEvents, PageProvider, RequestPolicy, TabInfo,
+};
 
 const WINDOW: [u32; 2] = [1280, 800];
+/// The isolated world that reports DOM changes, out of the page's reach.
+const WAIT_WORLD: &str = "evorch-wait";
+const DOM_BINDING: &str = "__evorchDomChanged";
+/// Reports each batch of DOM changes once, through [`DOM_BINDING`].
+const DOM_OBSERVER: &str = r#"(() => {
+  const notify = globalThis.__evorchDomChanged;
+  if (typeof notify !== "function" || globalThis.__evorchObserving) return;
+  globalThis.__evorchObserving = true;
+  new MutationObserver(() => notify("")).observe(document, {
+    subtree: true, childList: true, attributes: true, characterData: true,
+  });
+})()"#;
 
 pub struct LaunchOptions {
     /// `None` detects an installed Chromium/Chrome (honouring `CHROME`).
@@ -218,7 +233,7 @@ impl AgentBrowser {
             .viewport(None)
             .respect_https_errors()
             .launch_timeout(Duration::from_secs(20))
-            .request_timeout(Duration::from_secs(30))
+            .request_timeout(super::REQUEST_TIMEOUT)
             // chromiumoxide adds the leading `--` and merges repeated keys
             // such as `disable-features`, so switches are bare keys here.
             .arg((
@@ -368,6 +383,7 @@ impl Shared {
         };
         let events = connection.subscribe(session);
         let (counts, loads) = watch::channel(Loads::default());
+        let (activity, page_events) = watch::channel(PageEvents::default());
         let (ready, ready_rx) = watch::channel(None);
         // A new window opens in front of the others.
         *lock(&self.front) = Some(target.to_owned());
@@ -378,6 +394,8 @@ impl Shared {
             front: Arc::clone(&self.front),
             loads,
             ready: ready_rx,
+            page_events,
+            observing: tokio::sync::OnceCell::new(),
         });
         let page = Arc::new(TabPage {
             target: target.to_owned(),
@@ -393,6 +411,7 @@ impl Shared {
         tokio::spawn(pump(
             events,
             counts,
+            activity,
             Arc::clone(&page),
             Arc::clone(&self.policy),
         ));
@@ -424,9 +443,17 @@ async fn prepare(page: Arc<TabPage>, keep: bool) {
         Ok(_) => {
             let resumed = page.raw("Runtime.runIfWaitingForDebugger", json!({}));
             let enabled = page.raw("Page.enable", json!({}));
+            // Only in-flight counts are needed, so no response body is kept.
+            let network = page.raw(
+                "Network.enable",
+                json!({"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}),
+            );
             match (resumed.await, keep) {
                 (Ok(_), false) => Err("the tab was closed: its run is at its tab limit".to_owned()),
-                (Ok(_), true) => enabled.await.map(drop).map_err(|error| error.to_string()),
+                (Ok(_), true) => match (enabled.await, network.await) {
+                    (Ok(_), Ok(_)) => Ok(()),
+                    (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
+                },
                 (Err(error), _) => Err(error.to_string()),
             }
         }
@@ -444,31 +471,63 @@ async fn prepare(page: Arc<TabPage>, keep: bool) {
 async fn pump(
     mut events: mpsc::UnboundedReceiver<Event>,
     counts: watch::Sender<Loads>,
+    activity: watch::Sender<PageEvents>,
     page: Arc<TabPage>,
     policy: Arc<dyn RequestPolicy>,
 ) {
+    // In-flight request ids, with the loader of the document that sent each.
+    let mut requests: HashMap<String, String> = HashMap::new();
     while let Some(event) = events.recv().await {
         let main_frame = event.params["frameId"].as_str() == Some(page.target.as_str());
-        match event.method.as_str() {
+        let request = || event.params["requestId"].as_str().map(str::to_owned);
+        let counted = match event.method.as_str() {
             "Page.frameStartedLoading" if main_frame => {
                 counts.send_modify(|loads| loads.loading = true);
+                true
             }
             "Page.frameStoppedLoading" if main_frame => {
                 counts.send_modify(|loads| loads.loading = false);
+                true
             }
             "Page.frameNavigated"
                 if event.params["frame"]["id"].as_str() == Some(page.target.as_str()) =>
             {
+                let loader = event.params["frame"]["loaderId"].as_str();
+                // Requests of the replaced document may never report an end.
+                requests.retain(|_, sent_by| Some(sent_by.as_str()) == loader);
                 counts.send_modify(|loads| {
                     loads.navigated += 1;
-                    loads.loader = event.params["frame"]["loaderId"]
-                        .as_str()
-                        .map(str::to_owned);
+                    loads.loader = loader.map(str::to_owned);
                 });
+                true
             }
             "Page.navigatedWithinDocument" if main_frame => {
                 counts.send_modify(|loads| loads.within_document += 1);
+                true
             }
+            "Network.requestWillBeSent" => {
+                if let Some(id) = request() {
+                    let loader = event.params["loaderId"].as_str().unwrap_or_default();
+                    requests.insert(id, loader.to_owned());
+                }
+                true
+            }
+            "Network.loadingFinished" | "Network.loadingFailed" => {
+                if let Some(id) = request() {
+                    requests.remove(&id);
+                }
+                true
+            }
+            "Runtime.bindingCalled" => event.params["name"].as_str() == Some(DOM_BINDING),
+            _ => false,
+        };
+        if counted {
+            activity.send_modify(|seen| {
+                seen.count += 1;
+                seen.requests = requests.len();
+            });
+        }
+        match event.method.as_str() {
             "Page.javascriptDialogOpening" => {
                 tokio::spawn(answer_dialog(Arc::clone(&page), event.params));
             }
@@ -783,9 +842,41 @@ struct SessionTarget {
     front: Arc<Mutex<Option<String>>>,
     loads: watch::Receiver<Loads>,
     ready: watch::Receiver<Option<Result<(), String>>>,
+    page_events: watch::Receiver<PageEvents>,
+    /// Set once DOM changes of this and later documents are reported.
+    observing: tokio::sync::OnceCell<()>,
 }
 
 impl SessionTarget {
+    /// Observes the DOM from an isolated world, so the page can neither see
+    /// the observer nor report changes itself. Bindings report calls only
+    /// while the Runtime domain is enabled.
+    async fn observe_dom(&self) -> Result<(), AgentError> {
+        self.call("Runtime.enable", json!({})).await?;
+        self.call(
+            "Runtime.addBinding",
+            json!({"name": DOM_BINDING, "executionContextName": WAIT_WORLD}),
+        )
+        .await?;
+        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": DOM_OBSERVER, "worldName": WAIT_WORLD}),
+        )
+        .await?;
+        let world = self
+            .call(
+                "Page.createIsolatedWorld",
+                json!({"frameId": self.target, "worldName": WAIT_WORLD}),
+            )
+            .await?;
+        self.call(
+            "Runtime.evaluate",
+            json!({"expression": DOM_OBSERVER, "contextId": world["executionContextId"]}),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn ready(&self) -> Result<(), AgentError> {
         let mut ready = self.ready.clone();
         let state = ready
@@ -845,6 +936,13 @@ impl CdpTarget for SessionTarget {
 
     async fn settle(&self) -> Result<(), AgentError> {
         self.wait_for_loads(Loads::idle).await
+    }
+
+    async fn page_events(&self) -> Result<Option<watch::Receiver<PageEvents>>, AgentError> {
+        self.observing
+            .get_or_try_init(|| self.observe_dom())
+            .await?;
+        Ok(Some(self.page_events.clone()))
     }
 
     async fn go_to_history_entry(&self, entry_id: i64) -> Result<(), AgentError> {

@@ -82,6 +82,7 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "browser_upload_file",
     "browser_press_key",
     "browser_scroll",
+    "browser_wait_for",
     "browser_handle_dialog",
     "browser_tabs",
     "browser_switch_tab",

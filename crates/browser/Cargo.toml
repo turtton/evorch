@@ -24,10 +24,10 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "sync", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "net", "io-util", "time"] }
 url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 storage = { path = "../storage" }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "test-util"] }

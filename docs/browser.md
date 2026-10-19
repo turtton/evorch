@@ -36,7 +36,7 @@ When a Chromium or Chrome executable is installed (or named by `CHROME`), the
 runtime registers `browser_navigate`, `browser_navigate_back`,
 `browser_navigate_forward`, `browser_snapshot`, `browser_click`,
 `browser_hover`, `browser_type`, `browser_select_option`, `browser_upload_file`,
-`browser_press_key`, `browser_scroll`, `browser_handle_dialog`,
+`browser_press_key`, `browser_scroll`, `browser_wait_for`, `browser_handle_dialog`,
 `browser_tabs`, `browser_switch_tab`, `browser_close_tab`,
 `browser_screenshot` and `browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
 use them; `sandbox.web_tools_enabled` is their global switch, as for the other
@@ -82,6 +82,25 @@ outline cannot name, such as a canvas; refs stay the default.
   Back and forward revisit history entries, which load under the same
   request policy; the back/forward cache is disabled, so every entry loads
   again.
+- `browser_wait_for` waits until the active tab shows what the agent names:
+  text appearing or disappearing in the outline's names and values, a ref
+  appearing or disappearing, no request in flight, the URL containing some
+  text, or the URL changing. All named conditions must hold at the same
+  check, and the result is the outline.
+  - The conditions are checked once, then again after each page event. Page
+    events are DOM changes, requests starting or ending, and main-frame loads
+    and navigations. A `MutationObserver` reports the DOM changes from an
+    isolated world, so the page can neither see it nor send reports through
+    it. The Network domain tracks requests in flight.
+  - The wait gives up after 1000 page events, which ends it on a busy page.
+    A page that does nothing sends no event to count, so the wait also gives
+    up after 30 seconds. That is the CDP request timeout the agent browser
+    already uses, so a wait blocks the run no longer than one stuck CDP
+    command could. A wait that gave up is an error result that still
+    carries the outline, and the agent may wait again.
+  - Network idle means no request in flight at a check, not a quiet period.
+    Long-lived requests such as EventSource streams keep it from holding,
+    and WebSockets do not count.
 - `browser_select_option` picks `<select>` options by value or visible label
   and fires `input` and `change`, as a selection by the user would.
 - `browser_upload_file` sets the files of a file input through
