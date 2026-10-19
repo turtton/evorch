@@ -227,11 +227,12 @@ fn focused_terminal_sends_keys_to_the_shell_and_restarts_after_exit() {
     press(&mut harness, Key::Tab, Modifiers::NONE);
     type_text(&mut harness, "b");
     press(&mut harness, Key::Enter, Modifiers::NONE);
+    // The exit can be observed before the reader thread delivers the line's tail.
     run_until(&mut harness, &wake, |h| {
         matches!(
             h.state().active_terminal().map(|s| s.status()),
             Some(TerminalStatus::Exited(_))
-        ) && screen_contains(h, "got:[")
+        ) && screen_contains(h, "b]")
     });
 
     let line = screen(&harness)
