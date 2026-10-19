@@ -30,4 +30,3 @@ otel-exporter = [
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-tracing-subscriber = { workspace = true }
