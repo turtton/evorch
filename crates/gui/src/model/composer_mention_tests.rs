@@ -553,8 +553,10 @@ fn retain_allowed_drops_only_entries_outside_the_kept_directories() {
     );
     assert!(labels(&index, "@lib-old").is_empty());
     // Then: the index still names the list it was built for, so it is due a
-    // rebuild for the current list, or for the kept part alone.
+    // rebuild for the current list, the kept part alone, or the original list
+    // if the revoked directory is approved again before a rebuild lands.
     assert_eq!(index.allowed, built);
+    assert!(!index.is_built_for(root, &built));
     assert!(!index.is_built_for(root, &current));
     assert!(!index.is_built_for(root, &["/work/lib".into()]));
     // Then: dropping nothing more leaves it as it is.

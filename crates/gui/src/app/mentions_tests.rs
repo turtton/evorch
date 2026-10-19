@@ -180,6 +180,67 @@ fn a_revoked_directory_makes_room_for_the_rest_without_closing_the_mention() {
 }
 
 #[test]
+fn restoring_the_original_scope_rebuilds_dropped_candidates_once() {
+    // Given: an open mention built for two approved directories.
+    let temp = tempfile::tempdir().expect("temp");
+    let root = folder(temp.path(), "project", "lib.rs");
+    let kept = folder(temp.path(), "kept", "keep.md");
+    let revoked = folder(temp.path(), "revoked", "restore.md");
+    let (mut state, project) = mention_state(&root, &[&kept, &revoked]);
+    let ctx = egui::Context::default();
+    state.refresh_mention_index(&ctx);
+    state.wait_mention_index();
+    let original = state.mention_scope().expect("original scope");
+    let query = vec!["@restore".to_owned()];
+    let before = offered(&state.composer.mentions, &query);
+    assert!(!before[0].is_empty());
+
+    // Given: revocation drops candidates while a rebuild is still pending.
+    // Hold its sender so this frame cannot race with a completed worker.
+    state
+        .set_allowed_trust(&project, &revoked, TrustState::Unapproved)
+        .expect("revoke");
+    let (send, result) = mpsc::sync_channel(1);
+    state.mention_job = Some(Job {
+        scope: state.mention_scope().expect("revoked scope"),
+        result,
+    });
+    state.refresh_mention_index(&ctx);
+    assert!(offered(&state.composer.mentions, &query)[0].is_empty());
+    assert!(has_entry(&state, "/kept/keep.md"));
+    assert!(state.mention_job.is_some());
+    assert_eq!(state.composer.mentions.allowed, original.allowed);
+
+    // When: approval restores the original scope before that rebuild lands.
+    state
+        .set_allowed_trust(&project, &revoked, TrustState::Approved)
+        .expect("approve again");
+    state.refresh_mention_index(&ctx);
+
+    // Then: the pruned index cannot stand in for the original scope; a new
+    // job replaces the pending one and restores the same completion.
+    assert!(
+        state
+            .mention_job
+            .as_ref()
+            .is_some_and(|job| job.scope == original)
+    );
+    drop(send);
+    state.wait_mention_index();
+    assert_eq!(offered(&state.composer.mentions, &query), before);
+    assert!(
+        state
+            .composer
+            .mentions
+            .is_built_for(&original.root, &original.allowed)
+    );
+    for _ in 0..3 {
+        state.refresh_mention_index(&ctx);
+        assert!(state.mention_job.is_none());
+    }
+}
+
+#[test]
 fn revoking_a_parent_offers_what_a_fresh_index_of_the_nested_directory_does() {
     // Given: an open mention over an allowed directory and its parent, added after it.
     let temp = tempfile::tempdir().expect("temp");
