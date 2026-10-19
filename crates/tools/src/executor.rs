@@ -424,6 +424,7 @@ impl ToolExecutor {
                 crate::network_guard::NetworkGuard::new()?,
             ))),
             max_pages: usize::try_from(config.max_pages.get()).unwrap_or(usize::MAX),
+            max_tabs: usize::try_from(config.max_tabs.get()).unwrap_or(usize::MAX),
         };
         if let Err(error) = browser::agent::AgentBrowser::detect(&options) {
             tracing::info!(%error, "agent browser tools are unavailable");

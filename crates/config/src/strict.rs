@@ -126,7 +126,13 @@ const SANDBOX_KEYS: &[&str] = &[
 ];
 const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
 const TOOLS_KEYS: &[&str] = &["browser"];
-const BROWSER_TOOLS_KEYS: &[&str] = &["enabled", "executable", "max_pages", "coordinate_actions"];
+const BROWSER_TOOLS_KEYS: &[&str] = &[
+    "enabled",
+    "executable",
+    "max_pages",
+    "max_tabs",
+    "coordinate_actions",
+];
 const ROLE_BINDING_KEYS: &[&str] = &["models", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["models", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];

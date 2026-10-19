@@ -72,6 +72,7 @@ pub struct PageAgent {
     activity: Mutex<VecDeque<Activity>>,
     dialogs: Mutex<VecDeque<String>>,
     dialog_answer: Mutex<Option<DialogAnswer>>,
+    revision: tokio::sync::watch::Sender<u64>,
 }
 
 impl PageAgent {
@@ -83,6 +84,7 @@ impl PageAgent {
             activity: Mutex::default(),
             dialogs: Mutex::default(),
             dialog_answer: Mutex::default(),
+            revision: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -183,12 +185,19 @@ impl PageAgent {
         lock(&self.activity).iter().cloned().collect()
     }
 
+    /// Changes whenever [`PageAgent::activity`] gains an entry.
+    pub fn activity_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.revision.subscribe()
+    }
+
     fn push_activity(&self, entry: Activity) {
         let mut log = lock(&self.activity);
         if log.len() == ACTIVITY_LOG {
             log.pop_front();
         }
         log.push_back(entry);
+        drop(log);
+        self.revision.send_modify(|revision| *revision += 1);
     }
 
     async fn logged<T>(

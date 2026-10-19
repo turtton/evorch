@@ -1,4 +1,4 @@
-//! Agent browser tools (ADR 0034): a headless Chromium page per run, read as
+//! Agent browser tools (ADR 0034): headless Chromium tabs per run, read as
 //! an accessibility outline and operated by the refs in it.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::tool::{Permissions, Tool};
 
 /// Every browser tool name, including opt-in ones that are registered only
 /// when configured.
-pub const BROWSER_TOOL_NAMES: [&str; 15] = [
+pub const BROWSER_TOOL_NAMES: [&str; 18] = [
     "browser_navigate",
     "browser_navigate_back",
     "browser_navigate_forward",
@@ -29,6 +29,9 @@ pub const BROWSER_TOOL_NAMES: [&str; 15] = [
     "browser_press_key",
     "browser_scroll",
     "browser_handle_dialog",
+    "browser_tabs",
+    "browser_switch_tab",
+    "browser_close_tab",
     "browser_screenshot",
     "browser_close",
 ];
@@ -83,11 +86,14 @@ enum Kind {
     PressKey,
     Scroll,
     HandleDialog,
+    Tabs,
+    SwitchTab,
+    CloseTab,
     Screenshot,
     Close,
 }
 
-const KINDS: [Kind; 15] = [
+const KINDS: [Kind; 18] = [
     Kind::Navigate,
     Kind::Back,
     Kind::Forward,
@@ -101,6 +107,9 @@ const KINDS: [Kind; 15] = [
     Kind::PressKey,
     Kind::Scroll,
     Kind::HandleDialog,
+    Kind::Tabs,
+    Kind::SwitchTab,
+    Kind::CloseTab,
     Kind::Screenshot,
     Kind::Close,
 ];
@@ -126,6 +135,9 @@ impl Kind {
             Self::PressKey => "browser_press_key",
             Self::Scroll => "browser_scroll",
             Self::HandleDialog => "browser_handle_dialog",
+            Self::Tabs => "browser_tabs",
+            Self::SwitchTab => "browser_switch_tab",
+            Self::CloseTab => "browser_close_tab",
             Self::Screenshot => "browser_screenshot",
             Self::Close => "browser_close",
         }
@@ -167,6 +179,7 @@ struct Args {
     paths: Option<Vec<String>>,
     accept: Option<bool>,
     prompt_text: Option<String>,
+    tab: Option<String>,
 }
 
 impl BrowserTool {
@@ -178,6 +191,22 @@ impl BrowserTool {
             } else {
                 "No browser page was open."
             }));
+        }
+        match self.kind {
+            Kind::Tabs => return tab_list(self.provider.as_ref(), key, String::new()).await,
+            Kind::SwitchTab => {
+                let page = self
+                    .provider
+                    .switch_tab(key, &required(args.tab, "tab")?)
+                    .await?;
+                return outline(self.provider.as_ref(), key, &page).await;
+            }
+            Kind::CloseTab => {
+                let tab = required(args.tab, "tab")?;
+                self.provider.close_tab(key, &tab).await?;
+                return tab_list(self.provider.as_ref(), key, format!("Closed {tab}.\n")).await;
+            }
+            _ => {}
         }
         let page = self.provider.page(key).await?;
         match self.kind {
@@ -248,18 +277,27 @@ impl BrowserTool {
                 }));
             }
             Kind::Screenshot => return screenshot(&page).await,
-            Kind::Snapshot | Kind::Close => {}
+            Kind::Snapshot | Kind::Close | Kind::Tabs | Kind::SwitchTab | Kind::CloseTab => {}
         }
-        outline(&page).await
+        outline(self.provider.as_ref(), key, &page).await
     }
 }
 
-async fn outline(page: &PageAgent) -> Result<ToolResult, AgentError> {
+async fn outline(
+    provider: &dyn PageProvider,
+    key: &str,
+    page: &PageAgent,
+) -> Result<ToolResult, AgentError> {
     let snapshot = page.snapshot().await?;
     let mut text = snapshot.text;
     let blocked = page.take_blocked();
     let dialogs = page.take_dialogs();
-    for (heading, entries) in [("Blocked requests", &blocked), ("Dialogs", &dialogs)] {
+    let tabs = provider.tab_news(key);
+    for (heading, entries) in [
+        ("Blocked requests", &blocked),
+        ("Dialogs", &dialogs),
+        ("Tabs", &tabs),
+    ] {
         if !entries.is_empty() {
             text.push_str(&format!("{heading}:\n"));
             for entry in entries {
@@ -271,6 +309,41 @@ async fn outline(page: &PageAgent) -> Result<ToolResult, AgentError> {
         "refs": snapshot.refs.len(),
         "blocked_requests": blocked,
         "dialogs": dialogs,
+        "tabs": tabs,
+    })))
+}
+
+async fn tab_list(
+    provider: &dyn PageProvider,
+    key: &str,
+    mut text: String,
+) -> Result<ToolResult, AgentError> {
+    let tabs = provider.tabs(key).await?;
+    provider.tab_news(key);
+    if tabs.is_empty() {
+        text.push_str("No browser tab is open.");
+    }
+    for tab in &tabs {
+        text.push_str(&format!(
+            "- {}{} {} {:?}{}\n",
+            tab.id,
+            if tab.active { " (active)" } else { "" },
+            tab.url,
+            tab.title,
+            tab.opener
+                .as_ref()
+                .map(|opener| format!(", opened from {opener}"))
+                .unwrap_or_default(),
+        ));
+    }
+    Ok(ToolResult::success(text).with_detail(json!({
+        "tabs": tabs.iter().map(|tab| json!({
+            "id": tab.id,
+            "url": tab.url,
+            "title": tab.title,
+            "active": tab.active,
+            "opener": tab.opener,
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -397,7 +470,7 @@ impl Tool for BrowserTool {
     fn description(&self) -> &str {
         match self.kind {
             Kind::Navigate => {
-                "Open a URL in this run's headless browser page and return its outline. http is upgraded to https; requests to blocked addresses are refused, as in web_fetch."
+                "Open a URL in this run's active browser tab and return its outline. http is upgraded to https; requests to blocked addresses are refused, as in web_fetch."
             }
             Kind::Back => {
                 "Go back one page in this run's browser history, then return the outline."
@@ -433,8 +506,17 @@ impl Tool for BrowserTool {
             Kind::Scroll => {
                 "Scroll the page, or the element with the given ref, by most of a viewport. Returns the updated outline."
             }
-            Kind::Screenshot => "Capture the visible part of the page as an image.",
-            Kind::Close => "Close this run's browser page.",
+            Kind::Tabs => {
+                "List this run's browser tabs. Links and scripts that open a new tab add it to the run; the other browser tools act on the active tab."
+            }
+            Kind::SwitchTab => {
+                "Make the tab with the given id (such as t2, from browser_tabs or a result's Tabs section) the active tab and return its outline."
+            }
+            Kind::CloseTab => {
+                "Close the tab with the given id. If it was active, the tab that opened it, or else the newest remaining tab, becomes active; closing the last tab closes the run's page."
+            }
+            Kind::Screenshot => "Capture the visible part of the active tab as an image.",
+            Kind::Close => "Close all of this run's browser tabs.",
         }
     }
 
@@ -465,13 +547,20 @@ impl Tool for BrowserTool {
                 json!(["ref", "text"]),
             ),
             Kind::PressKey => (json!({"key": {"type": "string"}}), json!(["key"])),
+            Kind::SwitchTab | Kind::CloseTab => (
+                json!({"tab": {"type": "string", "description": "A tab id such as t2."}}),
+                json!(["tab"]),
+            ),
             Kind::Scroll => (
                 json!({"direction": {"type": "string", "enum": ["up", "down", "left", "right"], "default": "down"}, "ref": reference}),
                 json!([]),
             ),
-            Kind::Back | Kind::Forward | Kind::Snapshot | Kind::Screenshot | Kind::Close => {
-                (json!({}), json!([]))
-            }
+            Kind::Back
+            | Kind::Forward
+            | Kind::Snapshot
+            | Kind::Tabs
+            | Kind::Screenshot
+            | Kind::Close => (json!({}), json!([])),
         };
         json!({
             "type": "object",

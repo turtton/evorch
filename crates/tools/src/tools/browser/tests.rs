@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 
 use base64::Engine;
-use browser::agent::CdpTarget;
+use browser::agent::{CdpTarget, TabInfo};
 use serde_json::Value;
 
 use super::*;
@@ -63,6 +63,8 @@ type OpenPage = (Arc<FakePage>, Arc<PageAgent>);
 #[derive(Default)]
 struct FakeProvider {
     pages: tokio::sync::Mutex<HashMap<String, OpenPage>>,
+    tabs: Mutex<Vec<TabInfo>>,
+    news: Mutex<Vec<String>>,
 }
 
 impl FakeProvider {
@@ -105,6 +107,36 @@ impl PageProvider for FakeProvider {
     }
 
     fn release(&self, _key: &str) {}
+
+    async fn tabs(&self, _key: &str) -> Result<Vec<TabInfo>, AgentError> {
+        Ok(self.tabs.lock().unwrap().clone())
+    }
+
+    async fn switch_tab(&self, key: &str, id: &str) -> Result<Arc<PageAgent>, AgentError> {
+        {
+            let mut tabs = self.tabs.lock().unwrap();
+            if !tabs.iter().any(|tab| tab.id == id) {
+                return Err(AgentError::Refused(format!("no tab {id}")));
+            }
+            for tab in tabs.iter_mut() {
+                tab.active = tab.id == id;
+            }
+        }
+        self.page(key).await
+    }
+
+    async fn close_tab(&self, _key: &str, id: &str) -> Result<(), AgentError> {
+        let mut tabs = self.tabs.lock().unwrap();
+        tabs.retain(|tab| tab.id != id);
+        if let Some(first) = tabs.first_mut() {
+            first.active = true;
+        }
+        Ok(())
+    }
+
+    fn tab_news(&self, _key: &str) -> Vec<String> {
+        std::mem::take(&mut self.news.lock().unwrap())
+    }
 }
 
 fn tool(provider: &Arc<FakeProvider>, name: &str) -> BrowserTool {
@@ -461,5 +493,80 @@ async fn upload_review_names_the_receiving_site_and_workspace_relative_files() {
             .iter()
             .any(|call| call == "DOM.setFileInputFiles"),
         "reviewing never uploads"
+    );
+}
+
+#[tokio::test]
+async fn tab_tools_list_switch_and_close_and_outlines_report_new_tabs() {
+    // Given: a run with a page whose click opened a second tab
+    let provider = Arc::new(FakeProvider::default());
+    let tab = |id: &str, active: bool, opener: Option<&str>| TabInfo {
+        id: id.into(),
+        url: format!("https://example.test/{id}"),
+        title: format!("Page {id}"),
+        active,
+        opener: opener.map(Into::into),
+    };
+    *provider.tabs.lock().unwrap() = vec![tab("t1", true, None), tab("t2", false, Some("t1"))];
+    provider
+        .news
+        .lock()
+        .unwrap()
+        .push("t2 opened from t1; browser_switch_tab moves to it".into());
+    let run = |name: &str, args: Value| {
+        let tool = tool(&provider, name);
+        async move { tool.execute_with_context(&context("run-a"), args).await }
+    };
+
+    // When: the agent reads the outline, lists, switches and closes tabs
+    let clicked = run("browser_snapshot", json!({})).await.unwrap();
+    let listed = run("browser_tabs", json!({})).await.unwrap();
+    let switched = run("browser_switch_tab", json!({"tab": "t2"}))
+        .await
+        .unwrap();
+    let missing = run("browser_switch_tab", json!({"tab": "t9"}))
+        .await
+        .unwrap();
+    let closed = run("browser_close_tab", json!({"tab": "t2"}))
+        .await
+        .unwrap();
+    let invalid = run("browser_close_tab", json!({})).await.unwrap();
+
+    // Then: the news shows once, and each tool reports the run's tabs
+    assert!(
+        clicked
+            .content
+            .contains("Tabs:\n- t2 opened from t1; browser_switch_tab moves to it\n"),
+        "{}",
+        clicked.content
+    );
+    assert_eq!(
+        clicked.detail.as_ref().unwrap()["tabs"][0],
+        "t2 opened from t1; browser_switch_tab moves to it"
+    );
+    assert_eq!(
+        listed.content,
+        "- t1 (active) https://example.test/t1 \"Page t1\"\n\
+         - t2 https://example.test/t2 \"Page t2\", opened from t1\n"
+    );
+    assert_eq!(listed.detail.as_ref().unwrap()["tabs"][1]["opener"], "t1");
+    assert!(!switched.is_error, "{}", switched.content);
+    assert!(
+        switched.content.contains("- link \"Docs\""),
+        "{}",
+        switched.content
+    );
+    assert!(!switched.content.contains("Tabs:"), "{}", switched.content);
+    assert!(missing.is_error);
+    assert!(missing.content.contains("no tab t9"), "{}", missing.content);
+    assert_eq!(
+        closed.content,
+        "Closed t2.\n- t1 (active) https://example.test/t1 \"Page t1\"\n"
+    );
+    assert!(invalid.is_error);
+    assert!(
+        invalid.content.contains("missing tab"),
+        "{}",
+        invalid.content
     );
 }

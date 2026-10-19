@@ -3427,6 +3427,7 @@ mod agent_browser_sharing_tests {
                 executable: Some("/nonexistent/chromium".into()),
                 policy: Arc::new(AllowAll),
                 max_pages: 1,
+                max_tabs: 1,
             },
         ));
         let parent = ToolExecutor::new(Arc::clone(&bus)).with_agent_browser(

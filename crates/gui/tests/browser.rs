@@ -144,6 +144,7 @@ fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
             },
             Activity::Blocked("https://tracker.test/ (refused)".into()),
         ],
+        tab: Some("t2".into()),
         ..Default::default()
     };
 
@@ -159,6 +160,11 @@ fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
     assert!(
         harness
             .query_by_label("blocked https://tracker.test/ (refused)")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Showing the active tab t2")
             .is_some()
     );
 }
