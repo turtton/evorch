@@ -37,7 +37,6 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `model` | registry / capabilities |
 | `config` | 設定読み込み・管理 |
 | `agents` | role / category / skills の定義 |
-| `arena` | role-eval 実験基盤（comparison / selection / promotion） |
 | `catalog` | model catalog（ADR 0013） |
 | `browser` | 外部 Chromium の CDP セッション（ADR 0034）。GUI の Browser pane と agent tool が共用 |
 | `browser-cef` | CEF のオフスクリーン描画による offline の HTML artifact プレビュー（ADR 0034 B）。`cef` feature で opt-in |

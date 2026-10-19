@@ -171,7 +171,7 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
 
 1. arena を削除する。
    - `crates/arena`、GUI の Arena パネルとそのテスト、`storage::eval` / `eval_variant`、`docs/arena-acceptance.md` が対象。
-   - `eval_trace` の書き込み API は消し、既存行はマイグレーションで削除する。
+   - `eval_trace` の読み書き API は消す。memory ledger は trigger で追記専用なので、既存の行と部分 index は読まれない履歴として残す。
    - 古いレイアウトを読めるように `PanelKind::Arena` の deserialize と、読み込み時のタブ除去は残す。
 2. thread 開始時点の状態を記録する（§1）。
 3. 隔離した再実行とユーザー役を実装する（§2–§4）。
@@ -183,9 +183,8 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
 ## Compatibility
 
 - thread 開始状態の保存に storage マイグレーションを 1 つ追加する。
-- `eval_trace` の削除にもマイグレーションを 1 つ追加する。
-  - AGENTS.md の Compatibility policy に従い、古いイベントの後方互換は保たない。
-  - ADR 0035 が arena の評価帰属に残した `oracle` alias も、`eval_trace` と一緒に消える。
+- `eval_trace` は API だけを消し、マイグレーションは追加しない（§10 の 1）。
+  ADR 0035 が arena の評価帰属に残した `oracle` alias は、読み手がなくなるので API と一緒に消える。
 - 設定には評価用の節を追加する（ユーザー役・採点の model binding と既定の予算）。既存の節は変更しない。
 
 ## Validation and limits

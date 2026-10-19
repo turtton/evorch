@@ -2,9 +2,8 @@
 
 The benchmark runner helps choose a model for an evorch role/category using
 recorded delegations from a complete task. It uses the normal agent runtime,
-prompts and tools. It is an opt-in CLI workflow; Arena is no longer registered
-as a default GUI tab.
-The former automatic `arena-main` tab is also removed when a saved layout loads.
+prompts and tools. It is an opt-in CLI workflow. ADR 0036 plans to replace it
+with re-running recorded threads.
 
 ## Usage
 

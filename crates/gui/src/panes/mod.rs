@@ -5,7 +5,6 @@ pub mod agent_transcript;
 pub mod agents;
 mod agents_columns;
 pub mod approvals;
-pub mod arena;
 pub mod artifact_card;
 pub mod codex_auth;
 pub mod composer;

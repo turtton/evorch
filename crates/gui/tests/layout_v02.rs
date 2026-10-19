@@ -275,6 +275,8 @@ fn assert_work_tabs<S: AgentRunSource>(state: &WorkbenchState<S>) {
     );
 }
 
+const ARENA_PANELS: [&str; 2] = ["arena-main", "arena-custom"];
+
 #[test]
 fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy_layouts() {
     for (mut workspace, restored_arena) in [Workspace::default_v01(), Workspace::default_v02()]
@@ -283,18 +285,19 @@ fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy
     {
         workspace.version = workspace_ui::WORKSPACE_SCHEMA_VERSION;
         if restored_arena {
-            let id = PanelId::new("arena-main");
             let mut dock = gui::dock::to_dock_state(&workspace).expect("dock");
-            dock.push_to_focused_leaf(id.clone());
-            workspace.panels.insert(
-                id.clone(),
-                Panel {
-                    id,
-                    kind: PanelKind::Arena,
-                    title: "Arena".into(),
-                    target: None,
-                },
-            );
+            for id in ARENA_PANELS.map(PanelId::new) {
+                dock.push_to_focused_leaf(id.clone());
+                workspace.panels.insert(
+                    id.clone(),
+                    Panel {
+                        id,
+                        kind: PanelKind::Arena,
+                        title: "Arena".into(),
+                        target: None,
+                    },
+                );
+            }
             workspace = gui::dock::from_dock_state(&dock, &workspace.panels).expect("saved layout");
         }
         let mut settings = UiSettings::default();
@@ -333,6 +336,8 @@ fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy
                 tasks
             );
         }
-        assert!(state.dock().find_tab(&PanelId::new("arena-main")).is_none());
+        for id in ARENA_PANELS.map(PanelId::new) {
+            assert!(state.dock().find_tab(&id).is_none());
+        }
     }
 }

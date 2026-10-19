@@ -148,7 +148,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
-                arena: &mut self.arena,
                 usage: &mut self.usage,
                 context_inspector: &mut self.context_inspector,
                 shell_jobs: &mut self.shell_jobs,

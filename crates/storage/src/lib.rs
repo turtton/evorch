@@ -58,8 +58,6 @@ mod db;
 mod diagnostic;
 pub mod entity;
 pub mod error;
-pub mod eval;
-pub mod eval_variant;
 pub mod improvement;
 pub mod inspect;
 pub mod memory;
