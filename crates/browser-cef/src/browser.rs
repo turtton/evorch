@@ -4,9 +4,11 @@ use std::time::{Duration, Instant};
 use cef::*;
 
 use crate::artifact::ArtifactContext;
+use crate::clipboard::{COPY_MESSAGE, MAX_COPY_BYTES, MAX_PENDING_COPIES};
 use crate::frame::{PaintBuffer, PixelRect};
 use crate::offline::is_allowed_url;
-use crate::runtime::{SendCell, on_ui};
+use crate::popup::Popup;
+use crate::runtime::{SendCell, on_ui, post_ui};
 
 const CREATE_TIMEOUT: Duration = Duration::from_secs(20);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,7 +38,36 @@ pub struct Status {
     pub renderer_crashes: u32,
     pub last_crash: Option<String>,
     pub ime_caret: Option<PixelRect>,
+    pub popup: Option<Popup>,
+    pub dialog: Option<JsDialog>,
+    /// Text the page copied, waiting for the view to put it on the clipboard.
+    pub copied: Vec<String>,
     pub closed: bool,
+}
+
+/// What happens to `alert`, `confirm`, `prompt` and `beforeunload`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialogs {
+    /// Wait in [`Status::dialog`] for [`OsrBrowser::answer_dialog`].
+    Ask,
+    /// Close alerts, dismiss confirm and prompt, leave on beforeunload, and
+    /// note each in [`Status::suppressed_dialogs`].
+    Suppress,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+    Alert,
+    Confirm,
+    Prompt { default: String },
+    BeforeUnload { reload: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsDialog {
+    pub id: u64,
+    pub kind: DialogKind,
+    pub message: String,
 }
 
 type Repaint = Box<dyn Fn() + Send + Sync>;
@@ -44,6 +75,10 @@ type Repaint = Box<dyn Fn() + Send + Sync>;
 pub(crate) struct Shared {
     view: Mutex<ViewGeometry>,
     pub(crate) frame: Mutex<PaintBuffer>,
+    pub(crate) popup_frame: Mutex<PaintBuffer>,
+    dialogs: Dialogs,
+    // The latest dialog id and the callback still waiting for an answer.
+    dialog_callback: Mutex<(u64, Option<SendCell<JsdialogCallback>>)>,
     status: Mutex<Status>,
     browser: Mutex<Option<SendCell<Browser>>>,
     changes: Mutex<u64>,
@@ -128,6 +163,7 @@ impl OsrBrowser {
         url: &str,
         [width, height]: [i32; 2],
         scale: f32,
+        dialogs: Dialogs,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             view: Mutex::new(ViewGeometry {
@@ -136,6 +172,9 @@ impl OsrBrowser {
                 scale,
             }),
             frame: Mutex::default(),
+            popup_frame: Mutex::default(),
+            dialogs,
+            dialog_callback: Mutex::default(),
             status: Mutex::default(),
             browser: Mutex::default(),
             changes: Mutex::new(0),
@@ -183,6 +222,36 @@ impl OsrBrowser {
 
     pub fn frame_seq(&self) -> u64 {
         lock(&self.shared.frame).seq()
+    }
+
+    pub fn popup_frame_seq(&self) -> u64 {
+        lock(&self.shared.popup_frame).seq()
+    }
+
+    /// Answers the dialog in [`Status::dialog`] with this `id`: OK or Cancel,
+    /// with `text` for a prompt. Answers to a dialog that is gone are ignored.
+    pub fn answer_dialog(&self, id: u64, accept: bool, text: Option<&str>) {
+        let callback = {
+            let mut pending = lock(&self.shared.dialog_callback);
+            if pending.0 == id {
+                pending.1.take()
+            } else {
+                None
+            }
+        };
+        let Some(callback) = callback else { return };
+        self.shared.status().dialog = None;
+        let text = text.map(str::to_owned);
+        post_ui(move || {
+            let text = text.as_deref().map(CefString::from);
+            callback.0.cont(accept.into(), text.as_ref());
+        });
+        self.shared.notify();
+    }
+
+    /// Text the page copied since the last call, oldest first.
+    pub fn take_copies(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.status().copied)
     }
 
     /// Waits without a deadline for `predicate`, re-checked after each browser
@@ -307,13 +376,40 @@ wrap_client! {
             Some(PreviewRequests::new(Arc::clone(&self.shared)))
         }
         fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
-            Some(SuppressJsDialogs::new(Arc::clone(&self.shared)))
+            Some(JsDialogs::new(Arc::clone(&self.shared)))
         }
         fn dialog_handler(&self) -> Option<DialogHandler> {
             Some(CancelFileDialogs::new(Arc::clone(&self.shared)))
         }
         fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
             Some(NoContextMenu::new())
+        }
+
+        fn on_process_message_received(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            source_process: ProcessId,
+            message: Option<&mut ProcessMessage>,
+        ) -> i32 {
+            let Some(message) = message else { return 0 };
+            if source_process != ProcessId::RENDERER || CefString::from(&message.name()).to_string() != COPY_MESSAGE {
+                return 0;
+            }
+            let text = message
+                .argument_list()
+                .map(|arguments| CefString::from(&arguments.string(0)).to_string())
+                .filter(|text| !text.is_empty() && text.len() <= MAX_COPY_BYTES);
+            if let Some(text) = text {
+                let mut status = self.shared.status();
+                if status.copied.len() == MAX_PENDING_COPIES {
+                    status.copied.remove(0);
+                }
+                status.copied.push(text);
+                drop(status);
+                self.shared.notify();
+            }
+            1
         }
     }
 }
@@ -374,14 +470,36 @@ wrap_render_handler! {
             width: i32,
             height: i32,
         ) {
-            if type_ != PaintElementType::VIEW || buffer.is_null() || width <= 0 || height <= 0 {
+            let target = if type_ == PaintElementType::VIEW {
+                &self.shared.frame
+            } else if type_ == PaintElementType::POPUP {
+                &self.shared.popup_frame
+            } else {
+                return;
+            };
+            if buffer.is_null() || width <= 0 || height <= 0 {
                 return;
             }
             let len = width as usize * height as usize * 4;
             // SAFETY: CEF passes a `width * height` BGRA buffer valid for this call.
             let source = unsafe { std::slice::from_raw_parts(buffer, len) };
             let dirty: Vec<_> = dirty_rects.unwrap_or_default().iter().map(pixel_rect).collect();
-            lock(&self.shared.frame).paint(source, width, height, &dirty);
+            lock(target).paint(source, width, height, &dirty);
+            self.shared.notify();
+        }
+
+        fn on_popup_show(&self, _browser: Option<&mut Browser>, show: i32) {
+            if show == 0 {
+                self.shared.status().popup = None;
+                *lock(&self.shared.popup_frame) = PaintBuffer::default();
+                self.shared.notify();
+            }
+        }
+
+        fn on_popup_size(&self, _browser: Option<&mut Browser>, rect: Option<&Rect>) {
+            let Some(rect) = rect else { return };
+            let view = *lock(&self.shared.view);
+            self.shared.status().popup = Some(Popup::place(pixel_rect(rect), view.width, view.height));
             self.shared.notify();
         }
 
@@ -551,8 +669,47 @@ wrap_request_handler! {
     }
 }
 
+impl Shared {
+    /// Holds a dialog for the user, or settles it at once under [`Dialogs::Suppress`].
+    fn open_dialog(
+        &self,
+        kind: DialogKind,
+        message: String,
+        callback: Option<&mut JsdialogCallback>,
+    ) {
+        let Some(callback) = callback else { return };
+        if self.dialogs == Dialogs::Suppress {
+            let (accept, note) = match &kind {
+                DialogKind::Alert => (true, format!("alert {message:?} (closed)")),
+                DialogKind::Confirm => (false, format!("confirm {message:?} (dismissed)")),
+                DialogKind::Prompt { .. } => (false, format!("prompt {message:?} (dismissed)")),
+                DialogKind::BeforeUnload { .. } => {
+                    (true, "beforeunload (left the page)".to_owned())
+                }
+            };
+            self.status().suppressed_dialogs.push(note);
+            callback.cont(accept.into(), None);
+            self.notify();
+            return;
+        }
+        let mut pending = lock(&self.dialog_callback);
+        pending.0 += 1;
+        pending.1 = Some(SendCell(callback.clone()));
+        let id = pending.0;
+        drop(pending);
+        self.status().dialog = Some(JsDialog { id, kind, message });
+        self.notify();
+    }
+
+    fn close_dialog(&self) {
+        lock(&self.dialog_callback).1 = None;
+        self.status().dialog = None;
+        self.notify();
+    }
+}
+
 wrap_jsdialog_handler! {
-    struct SuppressJsDialogs {
+    struct JsDialogs {
         shared: Arc<Shared>,
     }
 
@@ -561,31 +718,37 @@ wrap_jsdialog_handler! {
             &self,
             _browser: Option<&mut Browser>,
             _origin_url: Option<&CefString>,
-            _dialog_type: JsdialogType,
+            dialog_type: JsdialogType,
             message_text: Option<&CefString>,
-            _default_prompt_text: Option<&CefString>,
-            _callback: Option<&mut JsdialogCallback>,
-            suppress_message: Option<&mut i32>,
+            default_prompt_text: Option<&CefString>,
+            callback: Option<&mut JsdialogCallback>,
+            _suppress_message: Option<&mut i32>,
         ) -> i32 {
-            self.shared.status().suppressed_dialogs.push(text(message_text));
-            if let Some(suppress) = suppress_message {
-                *suppress = 1;
-            }
-            self.shared.notify();
-            0
+            let kind = if dialog_type == JsdialogType::CONFIRM {
+                DialogKind::Confirm
+            } else if dialog_type == JsdialogType::PROMPT {
+                DialogKind::Prompt { default: text(default_prompt_text) }
+            } else {
+                DialogKind::Alert
+            };
+            self.shared.open_dialog(kind, text(message_text), callback);
+            1
         }
 
         fn on_before_unload_dialog(
             &self,
             _browser: Option<&mut Browser>,
-            _message_text: Option<&CefString>,
-            _is_reload: i32,
+            message_text: Option<&CefString>,
+            is_reload: i32,
             callback: Option<&mut JsdialogCallback>,
         ) -> i32 {
-            if let Some(callback) = callback {
-                callback.cont(1, None);
-            }
+            let kind = DialogKind::BeforeUnload { reload: is_reload != 0 };
+            self.shared.open_dialog(kind, text(message_text), callback);
             1
+        }
+
+        fn on_reset_dialog_state(&self, _browser: Option<&mut Browser>) {
+            self.shared.close_dialog();
         }
     }
 }

@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use browser_cef::offline::ArtifactBundle;
 use browser_cef::{
-    ArtifactContext, CefRuntime, CefView, NetLog, OsrBrowser, RuntimeConfig, render_snapshot,
+    ArtifactContext, CefRuntime, CefView, Dialogs, NetLog, OsrBrowser, RuntimeConfig,
+    render_snapshot,
 };
 
 use crate::model::artifact_opener::ArtifactOpener;
@@ -165,6 +166,7 @@ impl HtmlPreviewWindows {
             &ArtifactContext::url("index.html"),
             size,
             pixels_per_point,
+            Dialogs::Ask,
         )?;
         self.next_id += 1;
         self.previews.push(Preview {

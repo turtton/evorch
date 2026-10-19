@@ -55,6 +55,8 @@ CEFは`ozone-platform=headless`ならWayland、X11、ディスプレイなしの
 
 - **B（HTMLプレビュー）はCEF OSRをeguiに埋め込む。**
   - CEFの描画（OnPaintのCPUバッファ）をwgpuのtextureに書き込み、eguiのpaneに表示する。マウス・ホイール・キー・IME・カーソル・popup・JSダイアログ・クリップボードはevorchが転送する。
+  - クリップボードはページからホストへのコピーだけを渡す（2026-10-19）。headlessのCEFは自前のクリップボードを持つので、各ページのcontextにページのscriptより先に入れるhookが、ユーザー操作に伴うコピーを拾ってbrowserプロセスに送る。対象はcopy・cutイベント（`element.select()`後のCtrl+Cと`execCommand('copy')`を含む）と`navigator.clipboard.writeText`である。ページはホストのクリップボードを読めない。
+  - 利用者が見ていないagent用のページでは、JSダイアログを誰にも出さない。alertは閉じ、confirmとpromptは取り消し、tool結果に記録する。
   - このCEFは`present`されたartifactの表示とagentによるartifactの確認だけに使い、通常のWeb閲覧には使わない。CEF 154ではcontext単位のネットワーク設定が効かないためである。
   - 遮断は多層で行う。
     - artifactは架空のoriginで、scheme handlerから配信する。
@@ -108,4 +110,3 @@ CEFは`ozone-platform=headless`ならWayland、X11、ディスプレイなしの
 - niri上のfcitx5で、CEFでの実際の日本語入力（変換中の表示、候補窓の位置、確定のEnter）が正しく動くか。利用者が実機で確かめる。
 - GPU経路（dmabufの取り込み）を使うかどうか。dev shellのglibcとmesaの不整合を解消してから評価する。
 - CEFをsidecarプロセスに分けて、GUIを巻き込まないようにするか。
-- JSの`element.select()`による選択をホストのクリップボードへコピーする方法。

@@ -339,6 +339,21 @@ impl InputTranslator {
                         out.push(HostInput::Char { unit, modifiers });
                     }
                 }
+                // egui turns Ctrl+C and Ctrl+X into these; the page needs the keys.
+                Event::Copy | Event::Cut if frame.focused && !self.composing => {
+                    let key = if *event == Event::Copy {
+                        Key::C
+                    } else {
+                        Key::X
+                    };
+                    for down in [true, false] {
+                        out.push(HostInput::Key {
+                            key,
+                            down,
+                            modifiers: CONTROL,
+                        });
+                    }
+                }
                 Event::Text(text) if frame.focused && !self.composing => {
                     out.extend(
                         text.encode_utf16()
@@ -411,6 +426,28 @@ mod tests {
             repeat: false,
             modifiers: Modifiers::default(),
         }
+    }
+
+    #[test]
+    fn copy_and_cut_reach_a_focused_page_as_their_shortcuts() {
+        let mut input = InputTranslator::default();
+        let shortcut = |key| {
+            [true, false].map(|down| HostInput::Key {
+                key,
+                down,
+                modifiers: CONTROL,
+            })
+        };
+
+        assert_eq!(
+            input.translate(&[Event::Copy, Event::Cut], &frame(1.0)),
+            [shortcut(Key::C), shortcut(Key::X)].concat()
+        );
+        let unfocused = FrameInput {
+            focused: false,
+            ..frame(1.0)
+        };
+        assert!(input.translate(&[Event::Copy], &unfocused).is_empty());
     }
 
     #[test]
