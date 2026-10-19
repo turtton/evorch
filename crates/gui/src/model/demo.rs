@@ -344,6 +344,7 @@ impl AgentModel for DemoScriptModel {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             finish_reason: finish_reason_name(&response.finish_reason).to_string(),
+            service_tier: None,
             run_id: Some(invocation.run_id.clone()),
             purpose: None,
             reasoning_tokens: None,

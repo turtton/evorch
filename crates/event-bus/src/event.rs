@@ -810,6 +810,28 @@ impl RequestPurpose {
     }
 }
 
+/// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    /// 優先処理を要求する。
+    Priority,
+}
+
+impl ServiceTier {
+    /// 永続化・表示に使うラベル。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+        }
+    }
+
+    /// [`Self::as_str`] のラベルを読み戻す。未知のラベルは `None`。
+    pub fn parse(label: &str) -> Option<Self> {
+        (label == Self::Priority.as_str()).then_some(Self::Priority)
+    }
+}
+
 /// `cache_retention_ratio` がこの値を下回ると、prompt cache の再利用が
 /// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
 pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
@@ -982,6 +1004,9 @@ pub enum ProviderEvent {
         /// ペイロードでは `None`。
         #[serde(default)]
         purpose: Option<RequestPurpose>,
+        /// wire 上で要求したサービス階層。標準処理と旧形式ペイロードでは `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_tier: Option<ServiceTier>,
     },
     /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
     ///
@@ -2062,6 +2087,7 @@ mod tests {
                     cache_read_tokens: 3,
                     cache_write_tokens: 1,
                     finish_reason: "stop".into(),
+                    service_tier: None,
                     run_id: None,
                     purpose: None,
                     reasoning_tokens: None,
@@ -2518,6 +2544,7 @@ mod tests {
                 cache_read_tokens: 3,
                 cache_write_tokens: 1,
                 finish_reason: "stop".into(),
+                service_tier: None,
                 run_id: None,
                 purpose: None,
                 reasoning_tokens: None,

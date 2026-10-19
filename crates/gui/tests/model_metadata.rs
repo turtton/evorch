@@ -21,6 +21,8 @@ fn entry() -> ModelEntryConfig {
         output_price: None,
         cache_read_price: None,
         cache_write_price: None,
+        fast_price: None,
+        price_tiers: None,
         effort_levels: None,
     }
 }

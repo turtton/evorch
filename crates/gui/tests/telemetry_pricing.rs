@@ -38,6 +38,7 @@ fn completed(model: &str) -> Event {
         cache_read_tokens: 78_300,
         cache_write_tokens: 1_700,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: Some("run-1".into()),
         purpose: None,
         reasoning_tokens: None,
@@ -88,6 +89,7 @@ fn run_cost_survives_when_another_priced_model_has_zero_usage() {
         cache_read_tokens: 0,
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: Some("run-1".into()),
         purpose: None,
         reasoning_tokens: None,
@@ -259,4 +261,66 @@ fn capture_telemetry_cost_png() {
         frame.save_png(&path).expect("PNG saved");
         eprintln!("telemetry evidence: {}", path.display());
     }
+}
+
+fn request(input_tokens: u64, service_tier: Option<event_bus::ServiceTier>) -> Event {
+    Event::new(ProviderEvent::RequestCompleted {
+        request_id: format!("req-{input_tokens}-{service_tier:?}"),
+        provider: "vendor".into(),
+        profile: Some("local".into()),
+        protocol: "fixture".into(),
+        model: "model".into(),
+        streaming: true,
+        duration_ms: 0,
+        input_tokens,
+        output_tokens: 10_000,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        finish_reason: "stop".into(),
+        service_tier,
+        run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
+    })
+}
+
+#[tokio::test]
+async fn each_request_is_priced_at_its_own_context_tier_and_speed() {
+    // Given: catalog prices of $10/$50 per M, $20/$75 above 272K input and $20/$100 for fast.
+    let dir = tempfile::tempdir().expect("cache directory");
+    std::fs::write(
+        dir.path().join("models-dev.json"),
+        serde_json::json!({"fetched_at": 4_102_444_800_u64, "api": {"vendor": {"models": {"model": {
+            "id": "model",
+            "cost": {"input": 10.0, "output": 50.0,
+                "tiers": [{"input": 20.0, "output": 75.0, "tier": {"type": "context", "size": 272_000}}]},
+            "experimental": {"modes": {"fast": {"cost": {"input": 20.0, "output": 100.0}}}}
+        }}}}})
+        .to_string(),
+    )
+    .expect("cache fixture");
+    let mut config = Config::default();
+    config.providers.insert(
+        "local".into(),
+        ProviderProfileConfig {
+            models: vec![ModelEntryConfig::enabled("model")],
+            ..ProviderProfileConfig::default()
+        },
+    );
+    let mut settings = ProviderSettingsModel::seed_from_config(&config);
+    settings.catalog.catalog = Some(Arc::new(
+        catalog::ModelCatalog::load_or_refresh(dir.path())
+            .await
+            .expect("catalog"),
+    ));
+
+    // When: a small, a large and a small fast request complete in one run.
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&request(100_000, None));
+    overlay.apply_event(&request(300_000, None));
+    overlay.apply_event(&request(100_000, Some(event_bus::ServiceTier::Priority)));
+
+    // Then: $1.5 standard + $6.75 at the 272K tier + $3 fast.
+    let cost = overlay.estimated_cost("run-1", &settings).expect("cost");
+    assert!((cost - 11.25).abs() < 1e-9, "{cost}");
 }

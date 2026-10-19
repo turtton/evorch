@@ -81,6 +81,7 @@ fn completed(duration_ms: u64, output_tokens: u64) -> Event {
         cache_read_tokens: 0,
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: Some("run-1".into()),
         purpose: None,
         reasoning_tokens: None,

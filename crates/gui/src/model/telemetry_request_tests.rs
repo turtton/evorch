@@ -33,6 +33,7 @@ fn observed(run: &str, input: u64, cached: u64, output: u64, ttft: u64) -> [Even
             cache_read_tokens: cached,
             cache_write_tokens: 0,
             finish_reason: "tool_use".into(),
+            service_tier: None,
             run_id: Some(run.into()),
             purpose: None,
             reasoning_tokens: None,

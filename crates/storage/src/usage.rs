@@ -58,6 +58,8 @@ pub struct UsageRequestRecord {
     pub duration_ms: u64,
     /// Price at record time. `None` when the model had no known price.
     pub cost_usd: Option<f64>,
+    /// [`event_bus::ServiceTier`] label, `None` for standard processing.
+    pub service_tier: Option<String>,
 }
 
 /// Thread and project that own a run.

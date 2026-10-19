@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc;
 
-use config::types::provider::ModelPricing;
+use config::types::provider::{ModelSpeed, PriceSchedule};
 use storage::usage::{UsageDailyRow, UsageRequestRow, UsageStatus};
 
 use super::telemetry::TokenUsage;
-use super::telemetry::pricing::UsagePricing;
+use super::telemetry::pricing::{self, UsagePricing};
 
 #[path = "usage_stats/day.rs"]
 pub mod day;
@@ -194,6 +194,8 @@ pub struct RequestDetail {
     pub reasoning: Option<u64>,
     pub ttft_ms: Option<u64>,
     pub duration_ms: u64,
+    /// Fast when the request asked for priority processing.
+    pub speed: ModelSpeed,
 }
 
 impl UsageFact {
@@ -237,6 +239,12 @@ impl UsageFact {
                 reasoning: record.reasoning_tokens,
                 ttft_ms: record.ttft_ms,
                 duration_ms: record.duration_ms,
+                speed: pricing::speed(
+                    record
+                        .service_tier
+                        .as_deref()
+                        .and_then(event_bus::ServiceTier::parse),
+                ),
             }),
         })
     }
@@ -463,7 +471,7 @@ struct FactCost {
 pub struct CostCalculator<'a> {
     pricing: &'a UsagePricing,
     mode: CostMode,
-    cache: HashMap<(String, Option<String>, String), Option<ModelPricing>>,
+    cache: HashMap<(String, Option<String>, String), Option<PriceSchedule>>,
 }
 
 impl<'a> CostCalculator<'a> {
@@ -497,11 +505,16 @@ impl<'a> CostCalculator<'a> {
             fact.profile.clone(),
             fact.model.clone(),
         );
-        let pricing = *self.cache.entry(key).or_insert_with(|| {
+        let schedule = self.cache.entry(key).or_insert_with(|| {
             self.pricing
                 .pricing(&fact.provider, fact.profile.as_deref(), &fact.model)
         });
-        match tokens.estimated_cost(pricing) {
+        // A daily bucket sums many requests, so no tier or speed applies to it.
+        let cost = match &fact.request {
+            Some(request) => tokens.request_cost(schedule.as_ref(), request.speed),
+            None => tokens.estimated_cost(schedule.as_ref().map(|schedule| schedule.standard.base)),
+        };
+        match cost {
             Some(cost) => FactCost {
                 usd: base + cost,
                 unpriced: false,

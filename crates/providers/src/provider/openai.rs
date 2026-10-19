@@ -203,6 +203,7 @@ impl ChatCompletionsClient {
             false,
             request.observation.clone(),
         )
+        .with_service_tier(request.service_tier)
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let request = self
@@ -278,6 +279,7 @@ impl ChatCompletionsClient {
             true,
             request.observation.clone(),
         )
+        .with_service_tier(request.service_tier)
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let request = self

@@ -28,8 +28,8 @@ pub use event::{
     DiagnosticSeverity, EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta,
     FallbackAxis, FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent,
     ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES, RequestPurpose, RoutingSource,
-    RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent, UserQuestion,
-    WindowSource,
+    RunActivity, SCHEMA_VERSION, ServiceTier, SkillDiagnosticKind, ToolEvent, UsageEvent,
+    UserQuestion, WindowSource,
 };
 pub use orchestrator::OrchestratorEvent;
 pub use otel::{

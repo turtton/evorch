@@ -5,7 +5,7 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
-use crate::types::provider::ModelEntryConfig;
+use crate::types::provider::{ModelEntryConfig, ModelPricing};
 use crate::{CURRENT_VERSION, Config, ConfigError};
 
 /// 秘密値ではなく資格情報の参照先。
@@ -173,6 +173,8 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                     && model.preset.is_none()
                     && model.context_window.is_none()
                     && model.pricing_for(None).is_none()
+                    && model.fast_price.is_none()
+                    && model.price_tiers.is_none()
                     && model.effort_levels.is_none()
                 {
                     toml_edit::Value::from(model.id)
@@ -212,6 +214,22 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                             table.insert(key, price.into());
                         }
                     }
+                    if let Some(fast) = model.fast_price {
+                        table.insert("fast_price", price_table(None, fast)?.into());
+                    }
+                    if let Some(tiers) = model.price_tiers {
+                        table.insert(
+                            "price_tiers",
+                            tiers
+                                .iter()
+                                .map(|tier| {
+                                    price_table(Some(tier.above_input_tokens), tier.pricing())
+                                        .map(toml_edit::Value::from)
+                                })
+                                .collect::<Result<toml_edit::Array, _>>()?
+                                .into(),
+                        );
+                    }
                     if let Some(levels) = model.effort_levels {
                         table.insert(
                             "effort_levels",
@@ -227,6 +245,34 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
             )
         })
         .collect::<Result<Array, ConfigError>>()
+}
+
+fn price_table(
+    above_input_tokens: Option<u64>,
+    prices: ModelPricing,
+) -> Result<InlineTable, ConfigError> {
+    let mut table = InlineTable::new();
+    if let Some(threshold) = above_input_tokens {
+        table.insert(
+            "above_input_tokens",
+            toml_edit::Value::from(
+                i64::try_from(threshold).map_err(|_| {
+                    invalid_field("above_input_tokens", "must fit in a TOML integer")
+                })?,
+            ),
+        );
+    }
+    for (key, price) in [
+        ("input", prices.input),
+        ("output", prices.output),
+        ("cache_read", prices.cache_read),
+        ("cache_write", prices.cache_write),
+    ] {
+        if let Some(price) = price {
+            table.insert(key, price.into());
+        }
+    }
+    Ok(table)
 }
 
 pub(crate) fn remove_original_profile(

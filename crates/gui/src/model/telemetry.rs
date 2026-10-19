@@ -138,7 +138,7 @@ pub struct TelemetryOverlay {
     pub kimi_quota: super::kimi_quota::KimiQuotaState,
     pub subscription_quota: super::subscription_quota::SubscriptionQuotaState,
     rows: BTreeMap<String, TelemetryRow>,
-    billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
+    billed: BTreeMap<String, Vec<pricing::BilledRequest>>,
     costs: BTreeMap<String, f64>,
     active_running_start: BTreeMap<String, Instant>,
     accumulated_running: BTreeMap<String, Duration>,
@@ -299,22 +299,26 @@ impl TelemetryOverlay {
                 duration_ms,
                 run_id: Some(run_id),
                 reasoning_tokens,
+                service_tier,
                 ..
             }) => {
-                let usage = self
-                    .billed
+                self.billed
                     .entry(run_id.clone())
                     .or_default()
-                    .entry(pricing::ModelKey {
-                        provider: provider.clone(),
-                        profile: profile.clone(),
-                        model: model.clone(),
-                    })
-                    .or_default();
-                usage.input = usage.input.saturating_add(*input_tokens);
-                usage.output = usage.output.saturating_add(*output_tokens);
-                usage.cache_read = usage.cache_read.saturating_add(*cache_read_tokens);
-                usage.cache_write = usage.cache_write.saturating_add(*cache_write_tokens);
+                    .push(pricing::BilledRequest {
+                        key: pricing::ModelKey {
+                            provider: provider.clone(),
+                            profile: profile.clone(),
+                            model: model.clone(),
+                        },
+                        speed: pricing::speed(*service_tier),
+                        usage: TokenUsage {
+                            input: *input_tokens,
+                            output: *output_tokens,
+                            cache_read: *cache_read_tokens,
+                            cache_write: *cache_write_tokens,
+                        },
+                    });
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.usage.input = row.usage.input.saturating_add(*input_tokens);
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);

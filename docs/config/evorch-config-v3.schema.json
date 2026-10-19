@@ -868,6 +868,17 @@
               "type": "boolean",
               "default": true
             },
+            "fast_price": {
+              "description": "Fast (priority) request prices; omitted prices may be supplied by the catalog.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelPricing"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "id": {
               "description": "モデル ID。",
               "type": "string"
@@ -908,6 +919,16 @@
                 "string",
                 "null"
               ]
+            },
+            "price_tiers": {
+              "description": "Input-size tiers; when present they replace the catalog's tiers entirely.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/PriceTier"
+              }
             }
           },
           "additionalProperties": false,
@@ -949,6 +970,45 @@
             "null"
           ],
           "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelPricing": {
+      "description": "USD per million tokens. Each `None` is unknown, not zero/free.",
+      "type": "object",
+      "properties": {
+        "cache_read": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "cache_write": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "input": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "output": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
         }
       },
       "additionalProperties": false
@@ -1022,6 +1082,49 @@
         }
       },
       "additionalProperties": false
+    },
+    "PriceTier": {
+      "description": "Prices of a whole request whose input tokens exceed `above_input_tokens`.\nOmitted prices keep the rate of the set the tier belongs to.",
+      "type": "object",
+      "properties": {
+        "above_input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "cache_write": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "input": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "output": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "above_input_tokens"
+      ]
     },
     "ProviderProfileConfig": {
       "description": "プロバイダプロファイル 1 件分の設定。\n\n[`super::Config`] の `providers` マップのキーがプロファイル名になります。",

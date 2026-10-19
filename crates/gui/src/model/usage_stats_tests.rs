@@ -36,6 +36,7 @@ fn request(day: &str, model: &str, project: &str, cost: Option<f64>) -> UsageReq
             ttft_ms: Some(100),
             duration_ms: 1_000,
             cost_usd: cost,
+            service_tier: None,
         },
         day: day.into(),
         time: "12:00:00".into(),
@@ -172,4 +173,81 @@ fn ranges_start_on_the_expected_day() {
     assert_eq!(first(UsageRange::Last7Days).as_deref(), Some("2026-09-28"));
     assert_eq!(first(UsageRange::ThisMonth).as_deref(), Some("2026-10-01"));
     assert_eq!(first(UsageRange::AllTime), None);
+}
+
+#[test]
+fn current_mode_prices_requests_by_tier_and_speed_and_daily_totals_at_base_rates() {
+    // Given: $1/M input with a $3/M tier above 1.5M and $5/M fast input, and a 1M-input
+    // fast request, a 2M-input request and a 2M-input daily rollup, none with a recorded price.
+    let mut entry = config::ModelEntryConfig::enabled("tiered");
+    entry.input_price = Some(1.0);
+    entry.price_tiers = Some(vec![config::types::provider::PriceTier {
+        above_input_tokens: 1_500_000,
+        input: Some(3.0),
+        output: None,
+        cache_read: None,
+        cache_write: None,
+    }]);
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(5.0),
+        ..Default::default()
+    });
+    let profile = config::ProviderProfileConfig {
+        models: vec![entry],
+        ..config::ProviderProfileConfig::default()
+    };
+    let pricing = UsagePricing::new([("main".to_owned(), profile)].into(), None);
+    let mut fast = request("2026-10-04", "tiered", "fast", None);
+    fast.record.output_tokens = 0;
+    fast.record.service_tier = Some("priority".into());
+    let mut large = request("2026-10-04", "tiered", "large", None);
+    large.record.input_tokens = 2_000_000;
+    large.record.output_tokens = 0;
+    let daily = UsageDailyRow {
+        day: "2026-10-03".into(),
+        provider: "openai".into(),
+        profile: Some("main".into()),
+        model: "tiered".into(),
+        project_id: Some("daily".into()),
+        role: None,
+        purpose: None,
+        request_count: 4,
+        failed_count: 0,
+        input_tokens: 2_000_000,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        cost_usd: 0.0,
+        unpriced_input_tokens: 2_000_000,
+        unpriced_output_tokens: 0,
+        unpriced_cache_read_tokens: 0,
+        unpriced_cache_write_tokens: 0,
+        ttft_sum_ms: 0,
+        ttft_count: 0,
+        duration_sum_ms: 0,
+    };
+    let data = UsageDataset::from_rows(
+        LocalDay::parse("2026-10-04").unwrap(),
+        &[fast, large],
+        &[daily],
+    );
+
+    // When: the facts are repriced at current rates.
+    let (rows, _) = breakdown(
+        &data.facts,
+        &UsageFilter::default(),
+        UsageDimension::Project,
+        &mut CostCalculator::new(&pricing, CostMode::Current),
+    );
+
+    // Then: fast $5, the large request $6 at its tier, the daily bucket $2 at base rates.
+    let costs: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row.totals.cost))
+        .collect();
+    assert_eq!(
+        costs,
+        [("daily", 2.0), ("fast", 5.0), ("large", 6.0)].into()
+    );
 }

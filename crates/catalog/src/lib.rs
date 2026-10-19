@@ -1,7 +1,7 @@
 mod cache;
 mod metadata;
 
-pub use metadata::{Modalities, ModelMetadata};
+pub use metadata::{Modalities, ModePricing, ModelMetadata, PriceTier, Prices};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

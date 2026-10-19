@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use event_bus::{
     Event, EventBus, ProviderEvent, ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES,
+    ServiceTier,
 };
 
 use crate::error::ProviderError;
@@ -42,6 +43,7 @@ pub(crate) struct AttemptObserver {
     model: String,
     streaming: bool,
     observation: Option<ObservationContext>,
+    service_tier: Option<ServiceTier>,
     started_at: tokio::time::Instant,
     started_emitted: bool,
     first_token_emitted: bool,
@@ -71,6 +73,7 @@ impl AttemptObserver {
             model: model.into(),
             streaming,
             observation,
+            service_tier: None,
             started_at: tokio::time::Instant::now(),
             started_emitted: false,
             first_token_emitted: false,
@@ -83,6 +86,12 @@ impl AttemptObserver {
     /// 失敗詳細から伏せる credential を登録する。空文字列は無視する。
     pub(crate) fn with_known_secret(mut self, secret: &str) -> Self {
         self.known_secret = (!secret.is_empty()).then(|| secret.to_owned());
+        self
+    }
+
+    /// wire へ実際に載せるサービス階層を完了イベントへ記録する。
+    pub(crate) fn with_service_tier(mut self, service_tier: Option<ServiceTier>) -> Self {
+        self.service_tier = service_tier;
         self
     }
 
@@ -164,6 +173,7 @@ impl AttemptObserver {
             run_id: self.observation_run_id(),
             reasoning_tokens: usage.reasoning_tokens,
             purpose: self.observation_purpose(),
+            service_tier: self.service_tier,
         });
         self.terminal_emitted = true;
     }
