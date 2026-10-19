@@ -493,3 +493,139 @@ async fn allowed_directories_apply_to_the_same_executor_as_they_change() {
         assert!(denial(read(executor, &secret).await).contains("outside the sandbox boundary"));
     }
 }
+
+/// A page whose outline names one file input, `e5`, and that records the
+/// files Chromium would be given.
+#[derive(Default)]
+struct UploadPage {
+    files: Mutex<Vec<serde_json::Value>>,
+}
+
+#[async_trait::async_trait]
+impl browser::agent::CdpTarget for UploadPage {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, browser::agent::AgentError> {
+        if method == "DOM.setFileInputFiles" {
+            self.files.lock().unwrap().push(params["files"].clone());
+        }
+        Ok(match method {
+            "Accessibility.getFullAXTree" => json!({"nodes": [{
+                "nodeId": "1", "role": {"value": "button"}, "name": {"value": "Choose file"},
+                "backendDOMNodeId": 5
+            }]}),
+            _ => json!({}),
+        })
+    }
+
+    async fn navigate(&self, _url: &str) -> Result<(), browser::agent::AgentError> {
+        Ok(())
+    }
+}
+
+struct OnePage(Arc<browser::agent::PageAgent>);
+
+#[async_trait::async_trait]
+impl browser::agent::PageProvider for OnePage {
+    async fn page(
+        &self,
+        _key: &str,
+    ) -> Result<Arc<browser::agent::PageAgent>, browser::agent::AgentError> {
+        Ok(Arc::clone(&self.0))
+    }
+
+    async fn open_page(&self, _key: &str) -> Option<Arc<browser::agent::PageAgent>> {
+        Some(Arc::clone(&self.0))
+    }
+
+    async fn close(&self, _key: &str) -> bool {
+        false
+    }
+
+    fn release(&self, _key: &str) {}
+}
+
+async fn upload(executor: &ToolExecutor, path: PathBuf) -> Result<tools::ToolResult, ToolError> {
+    executor
+        .execute(
+            &context(),
+            "browser_upload_file",
+            "upload",
+            json!({"ref": "e5", "paths": [path]}),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn browser_uploads_take_only_files_the_run_sandbox_may_read() {
+    // Given: a run boundary, a link inside it that points outside, and a
+    // browser page with a file input.
+    let layout = layout();
+    std::os::unix::fs::symlink(
+        layout.outside.join("secret.txt"),
+        layout.project.join("escape.txt"),
+    )
+    .unwrap();
+    let page = Arc::new(UploadPage::default());
+    let agent = Arc::new(browser::agent::PageAgent::new(page.clone()));
+    agent.snapshot().await.unwrap();
+    let browsing = |bounded: bool| {
+        let executor = ToolExecutor::with_standard_tools_in(
+            Arc::new(EventBus::new(64)),
+            Arc::new(DirectSandbox::new_unchecked()),
+            Some(layout.project.clone()),
+        )
+        .with_policy(
+            sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest)
+                .with_override("browser_upload_file", sandbox::PolicyDecision::AutoAllow),
+        )
+        .with_browser_provider(Arc::new(OnePage(Arc::clone(&agent))), Default::default());
+        if bounded {
+            executor.set_file_boundary(
+                &SandboxBoundary::new(layout.project.clone())
+                    .cargo_cache(&layout.cargo)
+                    .read_only(&layout.readonly)
+                    .with_scratch(&layout.scratch),
+            );
+        }
+        executor
+    };
+    let bounded = browsing(true);
+
+    // When: the agent uploads files inside, outside and through the link,
+    // and once from an executor without a boundary.
+    let inside = upload(&bounded, layout.project.join("inside.txt"))
+        .await
+        .unwrap();
+    let read_only = upload(&bounded, layout.readonly.join("shared.txt"))
+        .await
+        .unwrap();
+    let outside = denial(upload(&bounded, layout.outside.join("secret.txt")).await);
+    let linked = denial(upload(&bounded, layout.project.join("escape.txt")).await);
+    let cargo_secret = denial(upload(&bounded, layout.cargo.join("credentials.toml")).await);
+    let unbounded = denial(upload(&browsing(false), layout.project.join("inside.txt")).await);
+
+    // Then: only readable files reached the page, checked after resolving links.
+    assert!(!inside.is_error, "{}", inside.content);
+    assert!(!read_only.is_error, "{}", read_only.content);
+    for reason in [&outside, &linked, &cargo_secret] {
+        assert!(reason.contains("cannot be uploaded"), "{reason}");
+    }
+    assert!(
+        linked.contains(&layout.outside.join("secret.txt").display().to_string()),
+        "the link is judged by its target: {linked}"
+    );
+    assert!(
+        unbounded.contains("needs the run's sandbox boundary"),
+        "{unbounded}"
+    );
+    assert_eq!(
+        *page.files.lock().unwrap(),
+        [
+            json!([layout.project.join("inside.txt")]),
+            json!([layout.readonly.join("shared.txt")]),
+        ]
+    );
+}

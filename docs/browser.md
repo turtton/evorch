@@ -35,9 +35,9 @@ No screenshot is logged on every video frame, only around explicit actions.
 When a Chromium or Chrome executable is installed (or named by `CHROME`), the
 runtime registers `browser_navigate`, `browser_navigate_back`,
 `browser_navigate_forward`, `browser_snapshot`, `browser_click`,
-`browser_hover`, `browser_type`, `browser_select_option`, `browser_press_key`,
-`browser_scroll`, `browser_handle_dialog`, `browser_screenshot` and
-`browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
+`browser_hover`, `browser_type`, `browser_select_option`, `browser_upload_file`,
+`browser_press_key`, `browser_scroll`, `browser_handle_dialog`,
+`browser_screenshot` and `browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
 use them; `sandbox.web_tools_enabled` is their global switch, as for the other
 Web tools.
 
@@ -70,6 +70,21 @@ outline cannot name, such as a canvas; refs stay the default.
   again.
 - `browser_select_option` picks `<select>` options by value or visible label
   and fires `input` and `change`, as a selection by the user would.
+- `browser_upload_file` sets the files of a file input through
+  `DOM.setFileInputFiles`. Only files the run's sandbox may read are accepted:
+  the same boundary as `read`, judged after links are resolved, with no
+  `unsandboxed` escape, and no uploads at all from an executor without a
+  sandbox boundary. Files over 32 MiB and files the secret guard recognises as
+  credentials (key blocks, API key shapes, configured credential values) are
+  refused; other secrets such as an arbitrary `.env` are only kept out by the
+  boundary. Every upload is also reviewed, like a `browser_navigate` URL, by
+  the quick reviewer model: it sees the origin and URL of the document that
+  holds the file input (which receives the files), the page URL, and each
+  file's path (relative to the workspace when inside it) and size, and judges
+  whether handing these files to this site serves the user's request. Without
+  an approving verdict, including when review is unavailable, nothing is
+  uploaded. Chromium, outside the sandbox, reads the accepted files itself,
+  and the page can send them only through the proxy and Fetch rules above.
 - JavaScript dialogs never wait for an answer. Alerts are closed and
   `beforeunload` lets the page go. Confirm and prompt dialogs are dismissed
   unless `browser_handle_dialog` answered them for the action that opened

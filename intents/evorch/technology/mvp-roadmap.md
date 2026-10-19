@@ -154,6 +154,7 @@ test harness instance
 - 2026-10-19 進捗（ADR 0034 A 段階 2）: GUI に読み取り専用の **Agent browser** window を追加。`AgentBrowser::pages`（page 開閉の購読）と `AgentBrowser::screencast` で選択中 run の page だけを screencast し、`PageAgent::activity`（直近の操作・遮断した request）を重ねて表示する。run ごとの executor も親の agent browser を共有する。あわせて GUI Browser pane の起動 switch が `----` になり無視されていた不具合を修正
 - 2026-10-19 進捗（ADR 0034 A 段階 3-1）: user 設定に `[tools.browser]`（`enabled` / `executable` / `max_pages` / `coordinate_actions`）を追加。`comment_checker` と同じく defaults と user/global ファイルからのみ読み、project・env・CLI では変えられない。`coordinate_actions = true` のときだけ座標クリックの `browser_click_at` を登録する。headless と run ごとの executor も設定に従う
 - 2026-10-19 進捗（ADR 0034 A 段階 3-2）: `browser_navigate_back` / `browser_navigate_forward` / `browser_hover` / `browser_select_option` / `browser_handle_dialog` を追加。JS dialog は保留せず、alert は閉じ、confirm / prompt は agent が直前に `browser_handle_dialog` で答えた場合だけ accept し、既定は dismiss。あわせて同一文書内の遷移（`#` link）で click が戻らなくなる不具合を、main frame の load 開始・終了を数えて待つ方式で修正
+- 2026-10-19 進捗（ADR 0034 A 段階 3-3）: `browser_upload_file`（`DOM.setFileInputFiles`）を追加。渡せるのは run の sandbox が読めるファイルだけで、`read` と同じ境界判定を symlink 解決後に行い、`unsandboxed` の逃げ道はなく、境界のない executor では拒否する。upload は毎回、送り先の origin・URL とファイル（workspace 相対パス・サイズ）を軽量モデルのレビューに通し、承認がなければ渡さない。32 MiB 超と secret guard が credential と判定したファイルも拒否する
 - headless 実行の可視化: action log + 前後 screenshot + DOM diff。フォーカスは明示操作時のみ
 
 ### Bundle 却下（採用しない）

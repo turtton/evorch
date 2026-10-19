@@ -356,6 +356,16 @@ impl PageProvider for AgentBrowser {
         Ok(agent)
     }
 
+    async fn open_page(&self, key: &str) -> Option<Arc<PageAgent>> {
+        let state = self.state.lock().await;
+        state
+            .as_ref()?
+            .pages
+            .iter()
+            .find(|(owner, ..)| owner == key)
+            .map(|(_, agent, _)| Arc::clone(agent))
+    }
+
     async fn close(&self, key: &str) -> bool {
         let mut state = self.state.lock().await;
         let Some(running) = state.as_mut() else {

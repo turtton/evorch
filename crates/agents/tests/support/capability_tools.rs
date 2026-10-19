@@ -79,6 +79,7 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "browser_hover",
     "browser_type",
     "browser_select_option",
+    "browser_upload_file",
     "browser_press_key",
     "browser_scroll",
     "browser_handle_dialog",

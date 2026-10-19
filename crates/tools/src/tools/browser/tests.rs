@@ -12,18 +12,29 @@ use crate::network_guard::{DnsResolver, NetworkGuardError};
 #[derive(Default)]
 struct FakePage {
     calls: Mutex<Vec<String>>,
+    uploaded: Mutex<Vec<Value>>,
 }
 
 #[async_trait::async_trait]
 impl CdpTarget for FakePage {
-    async fn call(&self, method: &str, _params: Value) -> Result<Value, AgentError> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, AgentError> {
         self.calls.lock().unwrap().push(method.to_owned());
+        if method == "DOM.setFileInputFiles" {
+            self.uploaded.lock().unwrap().push(params["files"].clone());
+        }
         Ok(match method {
             "Accessibility.getFullAXTree" => json!({"nodes": [{
                 "nodeId": "1", "role": {"value": "link"}, "name": {"value": "Docs"},
                 "backendDOMNodeId": 5
             }]}),
             "Runtime.evaluate" => json!({"result": {"value": "https://example.test/"}}),
+            "Runtime.callFunctionOn"
+                if params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|function| function.contains("ownerDocument")) =>
+            {
+                json!({"result": {"value": "https://forms.example.test/upload?step=2"}})
+            }
             "DOM.getContentQuads" => json!({"quads": [[0, 0, 10, 0, 10, 10, 0, 10]]}),
             "DOM.resolveNode" => json!({"object": {"objectId": "obj-5"}}),
             "Page.getNavigationHistory" => json!({
@@ -58,6 +69,15 @@ impl FakeProvider {
     async fn calls(&self, key: &str) -> Vec<String> {
         self.pages.lock().await[key].0.calls.lock().unwrap().clone()
     }
+
+    async fn uploaded(&self, key: &str) -> Vec<Value> {
+        self.pages.lock().await[key]
+            .0
+            .uploaded
+            .lock()
+            .unwrap()
+            .clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -70,6 +90,14 @@ impl PageProvider for FakeProvider {
             (page, agent)
         });
         Ok(Arc::clone(agent))
+    }
+
+    async fn open_page(&self, key: &str) -> Option<Arc<PageAgent>> {
+        self.pages
+            .lock()
+            .await
+            .get(key)
+            .map(|(_, agent)| Arc::clone(agent))
     }
 
     async fn close(&self, key: &str) -> bool {
@@ -117,7 +145,9 @@ fn browser_tool_schemas_compile_with_unique_names() {
     for tool in &tools {
         jsonschema::validator_for(&tool.schema())
             .unwrap_or_else(|error| panic!("{}: {error}", tool.name()));
-        assert_eq!(tool.permissions(), Permissions::network());
+        if tool.name() != "browser_upload_file" {
+            assert_eq!(tool.permissions(), Permissions::network());
+        }
     }
 }
 
@@ -338,4 +368,98 @@ async fn page_operations_return_the_outline_and_dialogs_are_listed() {
             "{method}: {calls:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn uploads_resolve_links_and_refuse_credentials_and_non_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("report.txt"), "quarterly numbers").unwrap();
+    std::os::unix::fs::symlink(root.join("report.txt"), root.join("latest.txt")).unwrap();
+    std::fs::write(
+        root.join("id_ed25519"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let provider = Arc::new(FakeProvider::default());
+    let upload = |paths: Vec<std::path::PathBuf>| {
+        let tool = tool(&provider, "browser_upload_file");
+        async move {
+            tool.execute_with_context(&context("run-a"), json!({"ref": "e5", "paths": paths}))
+                .await
+                .unwrap()
+        }
+    };
+    tool(&provider, "browser_snapshot")
+        .execute_with_context(&context("run-a"), json!({}))
+        .await
+        .unwrap();
+
+    let linked = upload(vec![root.join("latest.txt")]).await;
+    let credential = upload(vec![root.join("report.txt"), root.join("id_ed25519")]).await;
+    let directory = upload(vec![root.clone()]).await;
+    let missing = upload(vec![root.join("absent.txt")]).await;
+
+    assert!(!linked.is_error, "{}", linked.content);
+    assert!(
+        credential.is_error && credential.content.contains("private-key-block"),
+        "{}",
+        credential.content
+    );
+    assert!(
+        directory.is_error && directory.content.contains("not a regular file"),
+        "{}",
+        directory.content
+    );
+    assert!(missing.is_error, "{}", missing.content);
+    assert_eq!(
+        provider.uploaded("run-a").await,
+        [json!([root.join("report.txt")])],
+        "only the resolved, credential-free upload reached the page"
+    );
+    let upload_tool = tool(&provider, "browser_upload_file");
+    assert!(upload_tool.permissions().fs_read && upload_tool.permissions().network);
+}
+
+#[tokio::test]
+async fn upload_review_names_the_receiving_site_and_workspace_relative_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/report.txt"), "quarterly numbers").unwrap();
+    let elsewhere = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(elsewhere.path(), "1234").unwrap();
+    let provider = Arc::new(FakeProvider::default());
+    let args = json!({"ref": "e5", "paths": [root.join("docs/report.txt"), elsewhere.path()]});
+
+    let before_page = upload_review(provider.as_ref(), "run-a", &args, Some(&root)).await;
+    tool(&provider, "browser_snapshot")
+        .execute_with_context(&context("run-a"), json!({}))
+        .await
+        .unwrap();
+    let facts = upload_review(provider.as_ref(), "run-a", &args, Some(&root))
+        .await
+        .unwrap();
+
+    assert!(before_page.unwrap_err().contains("no browser page is open"));
+    assert_eq!(
+        facts,
+        json!({
+            "form_origin": "https://forms.example.test",
+            "form_url": "https://forms.example.test/upload?step=2",
+            "page_url": "https://example.test/",
+            "files": [
+                {"path": "docs/report.txt", "bytes": 17},
+                {"path": elsewhere.path().canonicalize().unwrap(), "bytes": 4},
+            ],
+        })
+    );
+    assert!(
+        !provider
+            .calls("run-a")
+            .await
+            .iter()
+            .any(|call| call == "DOM.setFileInputFiles"),
+        "reviewing never uploads"
+    );
 }

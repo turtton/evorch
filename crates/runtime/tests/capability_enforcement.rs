@@ -503,3 +503,144 @@ async fn explorer_web_fetch_is_denied_without_tool_started() {
         EventKind::Tool(ToolEvent::ToolStarted { tool_name, .. }) if tool_name == "web_fetch"
     )));
 }
+
+/// A page whose outline names one file input, `e5`, inside a form served by
+/// `https://forms.example.test`, and that records every upload.
+#[derive(Default)]
+struct UploadPage {
+    uploads: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+#[async_trait::async_trait]
+impl browser::agent::CdpTarget for UploadPage {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, browser::agent::AgentError> {
+        Ok(match method {
+            "Accessibility.getFullAXTree" => json!({"nodes": [{
+                "nodeId": "1", "role": {"value": "button"}, "name": {"value": "Attachment"},
+                "backendDOMNodeId": 5
+            }]}),
+            "DOM.resolveNode" => json!({"object": {"objectId": "input-5"}}),
+            "Runtime.callFunctionOn" => {
+                json!({"result": {"value": "https://forms.example.test/vendor/upload"}})
+            }
+            "Runtime.evaluate" => json!({"result": {"value": "https://portal.example.test/apply"}}),
+            "DOM.setFileInputFiles" => {
+                self.uploads.lock().unwrap().push(params["files"].clone());
+                json!({})
+            }
+            _ => json!({}),
+        })
+    }
+
+    async fn navigate(&self, _url: &str) -> Result<(), browser::agent::AgentError> {
+        Ok(())
+    }
+}
+
+struct OnePage(Arc<browser::agent::PageAgent>);
+
+#[async_trait::async_trait]
+impl browser::agent::PageProvider for OnePage {
+    async fn page(
+        &self,
+        _key: &str,
+    ) -> Result<Arc<browser::agent::PageAgent>, browser::agent::AgentError> {
+        Ok(Arc::clone(&self.0))
+    }
+
+    async fn open_page(&self, _key: &str) -> Option<Arc<browser::agent::PageAgent>> {
+        Some(Arc::clone(&self.0))
+    }
+
+    async fn close(&self, _key: &str) -> bool {
+        false
+    }
+
+    fn release(&self, _key: &str) {}
+}
+
+#[tokio::test]
+async fn browser_upload_runs_only_after_its_review_approves() {
+    let approve = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_level":"high"}"#;
+    let deny = r#"{"approve":false,"reason":"unrelated site","risk_level":"high","authorization_level":"none"}"#;
+    for (verdict, uploads) in [(approve, true), (deny, false), ("not a verdict", false)] {
+        // Given: a run whose page shows a file input and a workspace file to
+        // upload, with a reviewer that answers `verdict`.
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/report.txt"), "quarterly numbers").unwrap();
+        let page = Arc::new(UploadPage::default());
+        let agent = Arc::new(browser::agent::PageAgent::new(page.clone()));
+        agent.snapshot().await.unwrap();
+        let bus = Arc::new(EventBus::new(128));
+        let executor = ToolExecutor::with_standard_tools_in(
+            Arc::clone(&bus),
+            Arc::new(DirectSandbox::new_unchecked()),
+            Some(root.clone()),
+        )
+        .with_browser_provider(Arc::new(OnePage(agent)), Default::default());
+        executor.set_file_boundary(&sandbox::SandboxBoundary::new(root.clone()));
+        let model = Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "upload-1",
+                "browser_upload_file",
+                json!({"ref": "e5", "paths": [root.join("docs/report.txt")]}),
+            )),
+            Ok(text_response(verdict, FinishReason::Stop)),
+            Ok(text_response("finished", FinishReason::Stop)),
+        ]));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+        runtime.set_web_tools_enabled(true);
+        let mut events = bus.subscribe();
+
+        // When: the agent uploads the file.
+        let run_id = runtime
+            .delegate_chat(
+                "upload",
+                Role::WebResearcher,
+                "Send docs/report.txt through the vendor form".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+        let events = drain_events(&mut events).await;
+
+        // Then: the reviewer saw the receiving site and the file, and the
+        // page got the file only when the review approved.
+        let started = events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. })
+                    if tool_name == "browser_upload_file" && call_id == "upload-1"
+            )
+        });
+        assert_eq!(started, uploads, "{verdict}");
+        assert_eq!(
+            page.uploads.lock().unwrap().len(),
+            usize::from(uploads),
+            "{verdict}"
+        );
+        let review = &model.observed().await[1];
+        let providers::ContentBlock::Text { text } = &review[1].content[0] else {
+            panic!("review payload");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            payload["upload"]["form_origin"],
+            "https://forms.example.test"
+        );
+        assert_eq!(
+            payload["upload"]["page_url"],
+            "https://portal.example.test/apply"
+        );
+        assert_eq!(
+            payload["upload"]["files"],
+            json!([{"path": "docs/report.txt", "bytes": 17}])
+        );
+    }
+}

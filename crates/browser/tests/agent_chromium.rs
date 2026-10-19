@@ -487,3 +487,66 @@ async fn dialogs_are_dismissed_unless_the_agent_answers_them() {
     assert_eq!(dialogs[4], "alert \"Saved\" closed");
     assert!(browser.close("run-1").await);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn uploaded_files_reach_the_page_through_its_file_input() {
+    // Given: a page that reads whatever its file input receives.
+    let url = serve(
+        r#"<!doctype html><html><body>
+<label>Attachment <input type="file" multiple></label>
+<button>Other</button>
+<script>
+const input = document.querySelector("input");
+window.received = new Promise(resolve => input.addEventListener("change", async () => {
+  resolve(await Promise.all([...input.files].map(async file => file.name + "=" + await file.text())));
+}));
+</script>
+</body></html>"#
+            .to_owned(),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = ["a.txt", "b.txt"].map(|name| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("contents of {name}")).unwrap();
+        path.to_string_lossy().into_owned()
+    });
+    let browser = controls_browser();
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.unwrap();
+    let outline = page.snapshot().await.unwrap().text;
+
+    // When: the agent asks where uploads would go, then uploads two files.
+    let input = reference(&outline, "- button \"Attachment\"");
+    let target = page.upload_target(&input).await.unwrap();
+    let not_an_input = page
+        .upload_target(&reference(&outline, "- button \"Other\""))
+        .await;
+    page.upload_files(&input, &files).await.unwrap();
+    let received = page
+        .target()
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": "window.received", "awaitPromise": true, "returnByValue": true}),
+        )
+        .await
+        .unwrap();
+
+    // Then: the target is the input's document, and the page's change
+    // listener read both files.
+    assert_eq!(
+        (target.frame_url.as_str(), target.page_url.as_str()),
+        (url.as_str(), url.as_str())
+    );
+    assert!(
+        matches!(not_an_input, Err(AgentError::Refused(_))),
+        "{not_an_input:?}"
+    );
+    assert_eq!(
+        received["result"]["value"],
+        json!(["a.txt=contents of a.txt", "b.txt=contents of b.txt"]),
+        "{received}"
+    );
+    assert!(browser.close("run-1").await);
+}

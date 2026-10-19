@@ -57,6 +57,12 @@ pub struct DialogAnswer {
     pub prompt_text: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadTarget {
+    pub page_url: String,
+    pub frame_url: String,
+}
+
 /// Ref-addressed operations on one page. Refs come from the latest
 /// [`PageAgent::snapshot`]; others are rejected so the model re-reads the page.
 pub struct PageAgent {
@@ -459,6 +465,73 @@ impl PageAgent {
         .await
     }
 
+    /// Sets the files of an `<input type="file">` as a user's choice would,
+    /// firing `input` and `change`. Chromium reads `files`, so callers decide
+    /// which host paths may be passed.
+    pub async fn upload_files(&self, reference: &str, files: &[String]) -> Result<(), AgentError> {
+        let names: Vec<&str> = files
+            .iter()
+            .map(|file| file.rsplit('/').next().unwrap_or(file))
+            .collect();
+        self.act(format!("upload {reference} {names:?}"), async {
+            let node = self.node(reference)?;
+            self.target
+                .call(
+                    "DOM.setFileInputFiles",
+                    json!({"files": files, "backendNodeId": node}),
+                )
+                .await?;
+            self.target.settle().await
+        })
+        .await
+    }
+
+    /// Where files uploaded to the ref would go: the URL of the document that
+    /// holds the file input (a frame may differ from the page) and of the page.
+    pub async fn upload_target(&self, reference: &str) -> Result<UploadTarget, AgentError> {
+        let node = self.node(reference)?;
+        let object = self
+            .target
+            .call("DOM.resolveNode", json!({"backendNodeId": node}))
+            .await?;
+        let object_id = object
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| response("DOM.resolveNode", "missing objectId"))?;
+        let frame = self
+            .target
+            .call(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function() { return this.localName === \"input\" && this.type === \"file\" ? this.ownerDocument.location?.href ?? null : null; }",
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        let frame_url = frame
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::Refused(format!("{reference} is not a file input")))?
+            .to_owned();
+        let page = self
+            .target
+            .call(
+                "Runtime.evaluate",
+                json!({"expression": "location.href", "returnByValue": true}),
+            )
+            .await?;
+        let page_url = page
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| response("Runtime.evaluate", "missing location"))?
+            .to_owned();
+        Ok(UploadTarget {
+            page_url,
+            frame_url,
+        })
+    }
+
     async fn select_values(&self, reference: &str, values: &[String]) -> Result<(), AgentError> {
         let node = self.node(reference)?;
         let object = self
@@ -850,6 +923,73 @@ mod tests {
             page.activity()
                 .iter()
                 .any(|entry| *entry == Activity::Dialog(dialogs[0].clone()))
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_sets_the_files_of_the_ref_input() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+        let files = ["/work/report.pdf".to_owned(), "/work/notes.txt".to_owned()];
+        assert!(matches!(
+            page.upload_files("e7", &files).await,
+            Err(AgentError::UnknownRef(_))
+        ));
+        page.snapshot().await.unwrap();
+        lock(&target.calls).clear();
+
+        page.upload_files("e7", &files).await.unwrap();
+
+        let calls = lock(&target.calls).clone();
+        assert_eq!(
+            calls,
+            [(
+                "DOM.setFileInputFiles".to_owned(),
+                json!({"files": files, "backendNodeId": 7})
+            )]
+        );
+        assert!(matches!(
+            page.activity().last(),
+            Some(Activity::Action { label, error: None }) if label == r#"upload e7 ["report.pdf", "notes.txt"]"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_target_names_the_inputs_document_and_refuses_other_elements() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+        page.snapshot().await.unwrap();
+        lock(&target.responses).insert(
+            "Runtime.callFunctionOn",
+            json!({"result": {"type": "string", "value": "https://forms.test/upload"}}),
+        );
+        lock(&target.responses).insert(
+            "Runtime.evaluate",
+            json!({"result": {"type": "string", "value": "https://site.test/apply"}}),
+        );
+
+        let found = page.upload_target("e7").await.unwrap();
+        lock(&target.responses).insert(
+            "Runtime.callFunctionOn",
+            json!({"result": {"type": "object", "subtype": "null", "value": null}}),
+        );
+        let refused = page.upload_target("e7").await;
+
+        assert_eq!(
+            found,
+            UploadTarget {
+                page_url: "https://site.test/apply".into(),
+                frame_url: "https://forms.test/upload".into(),
+            }
+        );
+        assert!(
+            matches!(&refused, Err(AgentError::Refused(reason)) if reason == "e7 is not a file input"),
+            "{refused:?}"
+        );
+        assert!(
+            !lock(&target.calls)
+                .iter()
+                .any(|(method, _)| method == "DOM.setFileInputFiles")
         );
     }
 }
