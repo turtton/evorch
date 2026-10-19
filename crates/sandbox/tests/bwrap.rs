@@ -282,6 +282,31 @@ fn configured_scratch_is_shared_at_its_host_path_and_tmp() {
     assert_eq!(second.stdout, b"sharedshared");
 }
 
+// Given: the host tool output root mounted read-only, as the tool executor does / When: a
+// sandboxed evorch writes its outputs below $EVORCH_OUTPUT_DIR / Then: they land in the scratch
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn nested_evorch_outputs_go_to_the_writable_scratch() {
+    let workspace = workspace();
+    let host_outputs = tempdir().unwrap();
+    let sandbox = BwrapSandbox::detect(
+        BwrapConfig::new(workspace.path().to_path_buf()).ro_bind(host_outputs.path()),
+    )
+    .unwrap();
+    let output = sh(
+        &sandbox,
+        &format!(
+            "test ! -w '{}' && test \"$EVORCH_OUTPUT_DIR\" = \"$TMPDIR\" && mkdir \"$EVORCH_OUTPUT_DIR/evorch-output-probe\"",
+            host_outputs.path().display()
+        ),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[ignore = "bwrap 実行環境が必要"]
 #[test]
 fn cargo_cache_is_readable_without_credentials_and_cannot_be_modified() {
