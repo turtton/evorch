@@ -1,7 +1,9 @@
 //! `@` mentions: project file/skill index, cursor token detection and skill expansion.
 //!
 //! Files under the project's allowed directories are indexed too and inserted
-//! as absolute paths, the form the agent is told those directories by.
+//! as absolute paths, the form the agent is told those directories by. Each
+//! path is indexed once: the project root keeps its relative form, and an
+//! allowed directory nested in another is covered by the outer one.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -73,6 +75,8 @@ pub struct MentionEntry {
     /// allowed directory its folder name plus the path inside it, so `@shared`
     /// finds it without the absolute prefix matching unrelated queries.
     search: String,
+    /// Lies in an allowed directory, so `value` is an absolute path.
+    in_allowed: bool,
 }
 
 impl MentionEntry {
@@ -84,6 +88,7 @@ impl MentionEntry {
             key,
             value,
             detail,
+            in_allowed: false,
         }
     }
 
@@ -98,6 +103,7 @@ impl MentionEntry {
             search: search.to_lowercase(),
             value,
             detail: detail.into(),
+            in_allowed: true,
         }
     }
 }
@@ -105,7 +111,9 @@ impl MentionEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MentionIndex {
     pub root: Option<PathBuf>,
-    /// Allowed directories indexed alongside `root`, as given to [`Self::build`].
+    /// Allowed directories the index covers: those given to [`Self::build`],
+    /// less any dropped by [`Self::retain_allowed`]. Allowed-directory
+    /// entries lie only within these.
     pub allowed: Vec<PathBuf>,
     pub entries: Vec<MentionEntry>,
 }
@@ -120,15 +128,27 @@ pub struct MentionQuery<'a> {
 impl MentionIndex {
     /// Indexes `root`, then each of `allowed` within the remaining path budget.
     pub fn build(root: &Path, allowed: &[PathBuf], skills: &SkillRegistry) -> Self {
+        Self::build_within(root, allowed, skills, MAX_INDEXED_PATHS)
+    }
+
+    /// [`Self::build`] with at most `limit` files across all directories.
+    fn build_within(
+        root: &Path,
+        allowed: &[PathBuf],
+        skills: &SkillRegistry,
+        limit: usize,
+    ) -> Self {
         let skills = skills
             .available_skills()
             .into_iter()
             .map(|skill| (skill.name, skill.description));
-        let files = list_files(root, MAX_INDEXED_PATHS);
-        let mut budget = MAX_INDEXED_PATHS.saturating_sub(files.len());
+        let files = list_files(root, None, limit);
+        let mut budget = limit.saturating_sub(files.len());
         let mut index = Self::from_parts(Some(root.to_owned()), &files, skills);
-        for directory in allowed {
-            let files = list_files(directory, budget);
+        for directory in distinct_allowed(root, allowed) {
+            // The project's own files keep their relative entries.
+            let excluded = Some(root).filter(|root| root.starts_with(directory));
+            let files = list_files(directory, excluded, budget);
             budget = budget.saturating_sub(files.len());
             index.add_allowed_directory(directory, &files);
         }
@@ -137,23 +157,17 @@ impl MentionIndex {
     }
 
     /// Adds `directory` itself, its folders and `files` (relative to it) as
-    /// absolute-path entries. Paths already indexed are not repeated.
-    pub fn add_allowed_directory(&mut self, directory: &Path, files: &[String]) {
-        let Some(base) = directory.to_str().map(slash_path) else {
+    /// absolute-path entries.
+    fn add_allowed_directory(&mut self, directory: &Path, files: &[String]) {
+        let Some(base) = slash_base(directory) else {
             return;
         };
-        let base = base.trim_end_matches('/');
         let name = base
             .rsplit('/')
             .next()
             .filter(|name| !name.is_empty())
-            .unwrap_or(base);
-        let mut seen: BTreeSet<String> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.kind != CompletionKind::Skill)
-            .map(|entry| entry.value.clone())
-            .collect();
+            .unwrap_or(&base)
+            .to_owned();
         let dirs: BTreeSet<&str> = files
             .iter()
             .flat_map(|file| {
@@ -170,15 +184,34 @@ impl MentionIndex {
             );
         for (kind, path) in relative {
             let (value, search) = if path.is_empty() {
-                (base.to_owned(), name.to_owned())
+                (base.clone(), name.clone())
             } else {
                 (format!("{base}/{path}"), format!("{name}/{path}"))
             };
-            if seen.insert(value.clone()) {
-                self.entries
-                    .push(MentionEntry::allowed(kind, value, &search));
-            }
+            self.entries
+                .push(MentionEntry::allowed(kind, value, &search));
         }
+    }
+
+    /// Keeps only the allowed directories also in `allowed`, dropping the
+    /// entries of the rest so a revoked directory stops completing at once.
+    pub fn retain_allowed(&mut self, allowed: &[PathBuf]) {
+        if self
+            .allowed
+            .iter()
+            .all(|directory| allowed.contains(directory))
+        {
+            return;
+        }
+        self.allowed.retain(|directory| allowed.contains(directory));
+        let bases: Vec<_> = self
+            .allowed
+            .iter()
+            .filter_map(|directory| slash_base(directory))
+            .collect();
+        self.entries.retain(|entry| {
+            !entry.in_allowed || bases.iter().any(|base| is_within(&entry.value, base))
+        });
     }
 
     /// Folders are derived from file paths; `skills` are `(name, description)`.
@@ -373,14 +406,44 @@ fn slash_path(path: &str) -> String {
     path.replace(std::path::MAIN_SEPARATOR, "/")
 }
 
+/// The `/`-separated prefix of the absolute entries under `directory`.
+fn slash_base(directory: &Path) -> Option<String> {
+    let base = slash_path(directory.to_str()?);
+    Some(base.trim_end_matches('/').to_owned())
+}
+
+/// Whether `/`-separated `path` is `base` or lies under it.
+fn is_within(path: &str, base: &str) -> bool {
+    path.strip_prefix(base)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The `allowed` directories that hold paths of their own, each once: those
+/// that exist and lie neither in `root` nor in another allowed directory.
+/// Checking existence here keeps filesystem access off the UI thread.
+fn distinct_allowed<'a>(root: &Path, allowed: &'a [PathBuf]) -> Vec<&'a Path> {
+    let mut distinct: Vec<&Path> = Vec::new();
+    for directory in allowed {
+        let covered = directory.starts_with(root)
+            || allowed
+                .iter()
+                .any(|outer| outer != directory && directory.starts_with(outer));
+        if !covered && !distinct.contains(&directory.as_path()) && directory.is_dir() {
+            distinct.push(directory);
+        }
+    }
+    distinct
+}
+
 /// Up to `limit` files under `root`, relative to it with `/` separators.
-fn list_files(root: &Path, limit: usize) -> Vec<String> {
+/// The `excluded` subtree is skipped before it can use up the limit.
+fn list_files(root: &Path, excluded: Option<&Path>, limit: usize) -> Vec<String> {
     if limit == 0 {
         return Vec::new();
     }
-    let mut files = git_files(root, limit).unwrap_or_else(|| {
+    let mut files = git_files(root, excluded, limit).unwrap_or_else(|| {
         let mut files = Vec::new();
-        walk(root, root, limit, &mut files);
+        walk(root, root, excluded, limit, &mut files);
         files
     });
     files.sort();
@@ -389,7 +452,13 @@ fn list_files(root: &Path, limit: usize) -> Vec<String> {
 }
 
 /// Tracked plus untracked-but-not-ignored files, honouring `.gitignore`.
-fn git_files(root: &Path, limit: usize) -> Option<Vec<String>> {
+fn git_files(root: &Path, excluded: Option<&Path>, limit: usize) -> Option<Vec<String>> {
+    // git prints `/`-separated paths relative to `root`; compare in that form.
+    let excluded = excluded
+        .and_then(|excluded| excluded.strip_prefix(root).ok())
+        .and_then(Path::to_str)
+        .map(slash_path)
+        .filter(|excluded| !excluded.is_empty());
     let mut command = std::process::Command::new("git");
     for variable in GIT_LOCAL_ENV {
         command.env_remove(variable);
@@ -415,14 +484,20 @@ fn git_files(root: &Path, limit: usize) -> Option<Vec<String>> {
             .stdout
             .split(|byte| *byte == 0)
             .filter_map(|path| std::str::from_utf8(path).ok())
-            .filter(|path| !path.is_empty() && root.join(path).exists())
+            .filter(|path| {
+                !path.is_empty()
+                    && !excluded
+                        .as_deref()
+                        .is_some_and(|excluded| is_within(path, excluded))
+                    && root.join(path).exists()
+            })
             .take(limit)
             .map(str::to_owned)
             .collect(),
     )
 }
 
-fn walk(root: &Path, dir: &Path, limit: usize, files: &mut Vec<String>) {
+fn walk(root: &Path, dir: &Path, excluded: Option<&Path>, limit: usize, files: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -435,8 +510,10 @@ fn walk(root: &Path, dir: &Path, limit: usize, files: &mut Vec<String>) {
             continue;
         };
         if kind.is_dir() {
-            if !SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()) {
-                walk(root, &path, limit, files);
+            if !SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+                && excluded != Some(path.as_path())
+            {
+                walk(root, &path, excluded, limit, files);
             }
         } else if let Some(relative) = path
             .strip_prefix(root)

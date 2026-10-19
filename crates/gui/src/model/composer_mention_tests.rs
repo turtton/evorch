@@ -33,6 +33,39 @@ fn skill_registry(root: &Path, skills: &[(&str, &str)]) -> SkillRegistry {
     runtime::skill::discover_skills(&[(runtime::skill::SkillScope::Repo, dir)])
 }
 
+fn git_init(root: &Path) {
+    let mut init = std::process::Command::new("git");
+    for variable in GIT_LOCAL_ENV {
+        init.env_remove(variable);
+    }
+    let status = init
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+}
+
+fn write_files(root: &Path, paths: &[&str]) {
+    for path in paths {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, "").expect("file");
+    }
+}
+
+fn base_of(directory: &Path) -> String {
+    slash_path(directory.to_str().expect("utf-8 temp path"))
+}
+
+fn values(index: &MentionIndex) -> Vec<(CompletionKind, String)> {
+    index
+        .entries
+        .iter()
+        .map(|entry| (entry.kind, entry.value.clone()))
+        .collect()
+}
+
 #[test]
 fn mention_token_requires_word_boundary_and_covers_whole_token() {
     for (input, cursor, expected) in [
@@ -164,16 +197,7 @@ fn unreadable_skill_reports_its_name() {
 fn git_index_honours_gitignore_and_lists_untracked_files() {
     let temp = tempfile::tempdir().expect("root");
     let root = temp.path();
-    let mut init = std::process::Command::new("git");
-    for variable in GIT_LOCAL_ENV {
-        init.env_remove(variable);
-    }
-    let status = init
-        .args(["init", "--quiet"])
-        .current_dir(root)
-        .status()
-        .expect("git init");
-    assert!(status.success());
+    git_init(root);
     std::fs::create_dir_all(root.join("src")).expect("src");
     std::fs::create_dir_all(root.join("build")).expect("build");
     std::fs::write(root.join(".gitignore"), "build/\n").expect("ignore");
@@ -262,38 +286,199 @@ fn allowed_directories_complete_to_absolute_paths() {
 }
 
 #[test]
-fn build_indexes_allowed_directories_within_one_path_budget() {
+fn build_shares_one_path_budget_with_allowed_directories() {
+    // Given: two project files, and three files beside build output in an allowed directory.
     let project = tempfile::tempdir().expect("project");
     let shared = tempfile::tempdir().expect("shared");
-    std::fs::create_dir_all(project.path().join("src")).expect("src");
-    std::fs::write(project.path().join("src/lib.rs"), "").expect("lib");
-    std::fs::create_dir_all(shared.path().join("docs")).expect("docs");
-    std::fs::write(shared.path().join("docs/guide.md"), "").expect("guide");
-    std::fs::create_dir_all(shared.path().join("target")).expect("target");
-    std::fs::write(shared.path().join("target/out"), "").expect("out");
-    let base = slash_path(shared.path().to_str().expect("utf-8 temp path"));
+    write_files(project.path(), &["src/lib.rs", "src/main.rs"]);
+    write_files(
+        shared.path(),
+        &["docs/a.md", "docs/b.md", "docs/c.md", "target/out"],
+    );
+    let skills = skill_registry(project.path(), &[]);
+    let allowed = [shared.path().to_owned()];
+    let base = base_of(shared.path());
+    let build = |limit| MentionIndex::build_within(project.path(), &allowed, &skills, limit);
+    let files = |index: &MentionIndex| -> Vec<String> {
+        index
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == CompletionKind::File)
+            .map(|entry| entry.value.clone())
+            .collect()
+    };
 
-    let index = MentionIndex::build(
-        project.path(),
-        &[shared.path().to_owned()],
-        &skill_registry(project.path(), &[]),
+    // When: the limit fits all five files exactly.
+    let index = build(5);
+    // Then: each is indexed once, project paths first, and build output is skipped.
+    assert_eq!(
+        values(&index),
+        [
+            (CompletionKind::Dir, "src".to_owned()),
+            (CompletionKind::File, "src/lib.rs".to_owned()),
+            (CompletionKind::File, "src/main.rs".to_owned()),
+            (CompletionKind::Dir, base.clone()),
+            (CompletionKind::Dir, format!("{base}/docs")),
+            (CompletionKind::File, format!("{base}/docs/a.md")),
+            (CompletionKind::File, format!("{base}/docs/b.md")),
+            (CompletionKind::File, format!("{base}/docs/c.md")),
+        ]
+    );
+    assert_eq!(index.allowed, allowed);
+
+    // When: the limit is one short.
+    let listed = files(&build(4));
+    // Then: the allowed directory gets only what the project left.
+    assert_eq!(listed.len(), 4);
+    assert_eq!(listed[..2], ["src/lib.rs", "src/main.rs"]);
+    assert!(
+        listed[2..]
+            .iter()
+            .all(|file| file.starts_with(&format!("{base}/docs/")))
     );
 
-    let values: Vec<_> = index
-        .entries
-        .iter()
-        .map(|entry| (entry.kind, entry.value.clone()))
-        .collect();
+    // When: the project takes the whole limit, or more.
+    for limit in [2, 1] {
+        let index = build(limit);
+        // Then: no allowed file fits, yet the allowed folder itself can still be mentioned.
+        let listed = files(&index);
+        assert_eq!(listed.len(), limit);
+        assert!(listed.iter().all(|file| file.starts_with("src/")));
+        assert!(
+            index
+                .entries
+                .iter()
+                .any(|entry| entry.kind == CompletionKind::Dir && entry.value == base)
+        );
+    }
+}
+
+#[test]
+fn allowed_directory_containing_the_project_leaves_project_files_relative() {
+    for git in [false, true] {
+        // Given: an allowed directory whose subfolder is the project root.
+        let temp = tempfile::tempdir().expect("temp");
+        let shared = temp.path().join("shared");
+        let project = shared.join("app");
+        write_files(&shared, &["app/src/lib.rs", "notes.md"]);
+        if git {
+            git_init(&shared);
+        }
+        let base = base_of(&shared);
+
+        // When: the limit fits the two distinct files exactly.
+        let index = MentionIndex::build_within(
+            &project,
+            std::slice::from_ref(&shared),
+            &skill_registry(&project, &[]),
+            2,
+        );
+
+        // Then: project files stay relative, neither repeated nor charged under the allowed directory.
+        assert_eq!(
+            values(&index),
+            [
+                (CompletionKind::Dir, "src".to_owned()),
+                (CompletionKind::File, "src/lib.rs".to_owned()),
+                (CompletionKind::Dir, base.clone()),
+                (CompletionKind::File, format!("{base}/notes.md")),
+            ],
+            "git: {git}"
+        );
+    }
+}
+
+#[test]
+fn nested_duplicate_and_missing_allowed_directories_add_each_path_once() {
+    // Given: an allowed directory added before its parent, a duplicate, and a missing one.
+    let project = tempfile::tempdir().expect("project");
+    let temp = tempfile::tempdir().expect("temp");
+    let outer = temp.path().join("outer");
+    let inner = outer.join("inner");
+    write_files(project.path(), &["src/lib.rs"]);
+    write_files(&outer, &["inner/deep.md", "top.md"]);
+    let allowed = [
+        inner,
+        temp.path().join("missing"),
+        outer.clone(),
+        outer.clone(),
+    ];
+    let base = base_of(&outer);
+
+    // When: the limit fits the three distinct files exactly.
+    let index = MentionIndex::build_within(
+        project.path(),
+        &allowed,
+        &skill_registry(project.path(), &[]),
+        3,
+    );
+
+    // Then: the parent covers the nested directory and no path is listed twice.
     assert_eq!(
-        values,
+        values(&index),
         [
             (CompletionKind::Dir, "src".to_owned()),
             (CompletionKind::File, "src/lib.rs".to_owned()),
             (CompletionKind::Dir, base.clone()),
-            (CompletionKind::Dir, format!("{base}/docs")),
-            (CompletionKind::File, format!("{base}/docs/guide.md")),
+            (CompletionKind::Dir, format!("{base}/inner")),
+            (CompletionKind::File, format!("{base}/inner/deep.md")),
+            (CompletionKind::File, format!("{base}/top.md")),
         ]
     );
-    assert_eq!(index.allowed, [shared.path().to_owned()]);
-    assert!(list_files(shared.path(), 0).is_empty());
+    // Then: the nested folder is still found by its name.
+    assert_eq!(labels(&index, "@inner")[0], format!("@{base}/inner/"));
+    // Then: the index keeps the list it was built for, so that list does not look stale.
+    assert_eq!(index.allowed, allowed);
+}
+
+#[test]
+fn retain_allowed_drops_only_entries_outside_the_kept_directories() {
+    // Given: project entries plus two allowed directories, one named like a prefix of the other.
+    let mut index = index(&["src/main.rs"], &[("share", "skill")]);
+    index.add_allowed_directory(Path::new("/work/lib"), &["a.rs".into()]);
+    index.add_allowed_directory(Path::new("/work/lib-old"), &["b.rs".into()]);
+    index.allowed = vec!["/work/lib".into(), "/work/lib-old".into()];
+    let project = [
+        (CompletionKind::Dir, "src".to_owned()),
+        (CompletionKind::File, "src/main.rs".to_owned()),
+        (CompletionKind::Skill, "share".to_owned()),
+    ];
+    assert!(!labels(&index, "@lib-old").is_empty());
+
+    // When: `/work/lib-old` is revoked as another directory is approved.
+    index.retain_allowed(&["/work/new".into(), "/work/lib".into()]);
+    // Then: only the revoked entries go; the new directory waits for a rebuild.
+    assert_eq!(index.allowed, [PathBuf::from("/work/lib")]);
+    assert_eq!(
+        values(&index)[project.len()..],
+        [
+            (CompletionKind::Dir, "/work/lib".to_owned()),
+            (CompletionKind::File, "/work/lib/a.rs".to_owned()),
+        ]
+    );
+    assert!(labels(&index, "@lib-old").is_empty());
+
+    // When: nothing stays approved.
+    index.retain_allowed(&[]);
+    // Then: project entries and skills remain.
+    assert!(index.allowed.is_empty());
+    assert_eq!(values(&index), project);
+
+    // Given: a parent that covers a nested allowed directory.
+    let mut nested = MentionIndex::default();
+    nested.add_allowed_directory(
+        Path::new("/work/outer"),
+        &["inner/deep.md".into(), "top.md".into()],
+    );
+    nested.allowed = vec!["/work/outer/inner".into(), "/work/outer".into()];
+    // When: the parent is revoked but the nested directory stays.
+    nested.retain_allowed(&["/work/outer/inner".into()]);
+    // Then: the nested directory keeps its entries.
+    assert_eq!(
+        values(&nested),
+        [
+            (CompletionKind::Dir, "/work/outer/inner".to_owned()),
+            (CompletionKind::File, "/work/outer/inner/deep.md".to_owned()),
+        ]
+    );
 }

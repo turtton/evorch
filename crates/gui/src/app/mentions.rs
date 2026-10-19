@@ -7,7 +7,9 @@ use super::WorkbenchState;
 use crate::model::composer::MentionIndex;
 use crate::model::tasks::AgentRunSource;
 
-/// What an index covers: the project root and its allowed directories.
+/// What an index covers: the project root and its approved allowed
+/// directories. Missing ones are left out by the index job, not here, so
+/// checking a scope never touches the filesystem.
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     root: PathBuf,
@@ -21,14 +23,20 @@ pub(super) struct Job {
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Rebuilds the `@` index whenever a mention starts, so new files and
-    /// skills appear without a filesystem watcher.
+    /// skills appear without a filesystem watcher, and keeps it within the
+    /// selected project's current allowed directories.
     pub(super) fn refresh_mention_index(&mut self, ctx: &egui::Context) {
-        self.poll_mention_index();
         let active = self.composer.mention_query().is_some();
         let started = active && !self.mention_active;
         self.mention_active = active;
-        let scope = if active { self.mention_scope() } else { None };
-        if let Some(scope) = scope {
+        let scope = self.mention_scope();
+        self.poll_mention_index(scope.as_ref());
+        // A revoked or removed directory stops completing before any rebuild lands.
+        let allowed = scope
+            .as_ref()
+            .map_or(&[][..], |scope| scope.allowed.as_slice());
+        self.composer.mentions.retain_allowed(allowed);
+        if let Some(scope) = scope.filter(|_| active) {
             let index = &self.composer.mentions;
             let stale = index.root.as_ref() != Some(&scope.root) || index.allowed != scope.allowed;
             if (started || stale)
@@ -61,8 +69,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// The selected project's root plus the approved allowed directories that
-    /// still exist, matching what the runtime declares to the agent.
+    /// The selected project's root plus its approved allowed directories,
+    /// the ones the runtime declares to the agent when they exist.
     fn mention_scope(&self) -> Option<Scope> {
         let project_id = self.sidebar.selected_project.as_ref()?;
         let project = self
@@ -75,7 +83,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .filter(|directory| directory.trust == TrustState::Approved)
             .map(|directory| directory.path.clone())
-            .filter(|path| path.is_dir())
             .collect();
         Some(Scope {
             root: project.repo_root.clone(),
@@ -83,13 +90,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         })
     }
 
-    fn poll_mention_index(&mut self) {
+    /// Takes a finished index, discarding it when the scope changed meanwhile.
+    fn poll_mention_index(&mut self, scope: Option<&Scope>) {
         let Some(job) = &self.mention_job else {
             return;
         };
         match job.result.try_recv() {
             Ok(index) => {
-                self.composer.mentions = index;
+                if scope == Some(&job.scope) {
+                    self.composer.mentions = index;
+                }
                 self.mention_job = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -101,8 +111,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn wait_mention_index(&mut self) {
         if let Some(job) = self.mention_job.take()
             && let Ok(index) = job.result.recv()
+            && self.mention_scope() == Some(job.scope)
         {
             self.composer.mentions = index;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mentions_tests.rs"]
+mod tests;
