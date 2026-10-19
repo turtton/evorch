@@ -5,6 +5,9 @@ use crate::merge::deep_merge;
 use crate::types::{CURRENT_VERSION, MetricsConfig};
 
 mod chains;
+mod roles;
+
+pub(crate) use roles::Layer;
 
 type MigrationResult = Result<toml::Value, ConfigError>;
 
@@ -13,13 +16,20 @@ type MigrationResult = Result<toml::Value, ConfigError>;
 /// インデックス `i` の関数は v`(i + 1)` から v`(i + 2)` へ変換する。
 const MIGRATIONS: &[fn(toml::Value) -> MigrationResult] = &[migrate_v1_to_v2, migrate_v2_to_v3];
 
+/// 単独の設定値を移行し、遅延した Advisor の暗黙 route も解決する。
+/// 保存時はファイル単体で完結させ、レイヤー読み込み時は [`run_layer`] を使う。
+pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
+    Ok(run_layer(value)?.finish())
+}
+
 /// 読み込んだ 1 ファイル分の設定値を現在のスキーマへマイグレーションする。
 ///
 /// ファイル単位・マージ前 (deep_merge の直前) にかならず通すシームであり、
 /// `version` キーは次の規則で扱う:
 ///
 /// - ルートがテーブルでない、または `version` キーが存在しない場合は
-///   現行バージョン ([`CURRENT_VERSION`]) とみなしてそのまま返す。
+///   現行バージョン ([`CURRENT_VERSION`]) とみなし、バージョン間変換を省略する。
+///   旧キー・ロール名の正規化は引き続き行う。
 /// - `version` が [`CURRENT_VERSION`] より大きい場合は
 ///   [`ConfigError::UnsupportedVersion`] を返す。
 /// - 過去のバージョンの場合は、対応する変換を順に適用する。
@@ -37,7 +47,7 @@ const MIGRATIONS: &[fn(toml::Value) -> MigrationResult] = &[migrate_v1_to_v2, mi
 ///   ([`ConfigError::Migration`])。
 /// - `version` が [`CURRENT_VERSION`] より大きい場合
 ///   ([`ConfigError::UnsupportedVersion`])。
-pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
+pub(crate) fn run_layer(value: toml::Value) -> Result<Layer, ConfigError> {
     let version = match value.as_table().and_then(|table| table.get("version")) {
         None => CURRENT_VERSION,
         Some(raw_version) => match raw_version
@@ -76,7 +86,8 @@ pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
             "ignoring removed config field; set reasoning_effort on agents.*.models entries"
         );
     }
-    for warning in chains::move_to_chains(&mut migrated) {
+    let chains = chains::move_to_chains(&mut migrated);
+    for warning in chains.warnings {
         tracing::warn!(%warning, "migrated config to role model chains");
     }
 
@@ -86,7 +97,7 @@ pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
             toml::Value::Integer(CURRENT_VERSION.into()),
         );
     }
-    Ok(migrated)
+    Ok(Layer::migrated(migrated, chains.implicit_oracle))
 }
 
 /// v1 の設定へ v2 で追加された metrics 既定値を補完する。

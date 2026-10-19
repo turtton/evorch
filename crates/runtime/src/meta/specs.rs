@@ -309,10 +309,10 @@ fn delegate_target_schema() -> Value {
             "orchestrator" => "Coordinate agents and execution.".to_owned(),
             "explorer" => "Read-only local code investigation.".to_owned(),
             "worker" => "Implement, fix, run commands or commit; choose a category by the task's primary difficulty.".to_owned(),
-            "reviewer" => format!("Evaluate existing work without executing the task; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
+            "reviewer" => format!("Independently compare implementation results or plans against requirements and give an acceptance verdict; consultation belongs to Advisor, in a separate context; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
-            "oracle" => "Provide expert reasoning and advice.".to_owned(),
+            "advisor" | "oracle" => "Consult Advisor only when needed before deciding: compare design options or cause hypotheses; return options, trade-offs, recommendation, uncertainty, and information that would change the decision. No implementation (Worker), acceptance verdict (Reviewer), or detailed execution plan (Planner). Use a separate context for the final independent Reviewer, not the consulted Advisor. oracle is a legacy alias for advisor.".to_owned(),
             "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
             _ => unreachable!("registered delegate role"),
         };
@@ -383,6 +383,24 @@ mod tests {
             .zip(super::super::delegation::DELEGATE_ROLES)
         {
             assert_eq!(branch["properties"]["role"]["const"], *role);
+            if matches!(*role, "advisor" | "oracle") {
+                let guidance = branch["description"].as_str().unwrap();
+                for contract in [
+                    "only when needed",
+                    "options",
+                    "trade-offs",
+                    "recommendation",
+                    "uncertainty",
+                    "information that would change",
+                    "Worker",
+                    "Reviewer",
+                    "Planner",
+                    "separate context",
+                    "legacy alias",
+                ] {
+                    assert!(guidance.contains(contract), "{contract}");
+                }
+            }
             let public: Vec<_> = config::agent_categories::public_categories()
                 .filter(|category| category.role == *role)
                 .map(|category| category.id.as_str())

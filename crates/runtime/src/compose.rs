@@ -1076,7 +1076,7 @@ impl AgentModel for RoutedModel {
         for pin in pins {
             affinity.pin(
                 run_id,
-                &pin.chain,
+                &normalize_chain_key(&pin.chain),
                 routing::RoutePin {
                     position: pin.position,
                     profile: pin.profile.clone(),
@@ -1134,6 +1134,19 @@ struct ResolvedInvocation {
 struct ChainChoice {
     chain: routing::Chain,
     position: usize,
+}
+
+/// Saved affinity keys identify roles, not user-defined routing.routes names.
+/// Normalize only the role segment; a category named `oracle` stays unchanged.
+fn normalize_chain_key(key: &str) -> String {
+    let (role, category) = key
+        .split_once('/')
+        .map_or((key, None), |(role, category)| (role, Some(category)));
+    if role == "oracle" {
+        chain_key(Role::Advisor, category)
+    } else {
+        key.to_owned()
+    }
 }
 
 /// Affinity key of a role's chain: the role, or role and category.
@@ -1198,7 +1211,7 @@ const fn role_key(role: Role) -> &'static str {
         Role::Reviewer => "reviewer",
         Role::WebResearcher => "web_researcher",
         Role::Planner => "planner",
-        Role::Oracle => "oracle",
+        Role::Advisor => "advisor",
         Role::MultimodalLooker => "multimodal_looker",
     }
 }

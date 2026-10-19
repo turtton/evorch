@@ -104,7 +104,7 @@ impl AgentRuntime {
             serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
         if descriptor.parent_run_id != Some(caller)
             || record.parent_run_id.as_deref() != Some(caller.to_string().as_str())
-            || descriptor.role != role.name()
+            || crate::Role::from_name(&descriptor.role) != Ok(role)
             || record.role != descriptor.role
             || record.terminal_phase != "Done"
         {

@@ -2,7 +2,7 @@ use config::Config;
 
 #[test]
 fn named_roles_reject_category_overrides_when_loaded() {
-    for role in ["planner", "oracle", "multimodal_looker", "compactor"] {
+    for role in ["planner", "advisor", "multimodal_looker", "compactor"] {
         // Given: a named non-worker role with a category override.
         let directory = tempfile::tempdir().expect("temporary config directory");
         let doc = format!(
@@ -46,8 +46,8 @@ fn layered_loading_validates_closed_role_bindings() {
             Some("agents.roles.custom"),
         ),
         (
-            "[agents.roles.oracle]\nunknown = true",
-            Some("agents.roles.oracle.unknown"),
+            "[agents.roles.advisor]\nunknown = true",
+            Some("agents.roles.advisor.unknown"),
         ),
         (
             "[agents.roles.multimodal_looker.categories.typo]\nmodels = [{ route = 'vision' }]",

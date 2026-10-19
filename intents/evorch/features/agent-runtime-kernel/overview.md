@@ -34,7 +34,7 @@ Agent Kernel
 
 `crates/agents/`（Role / RoleCapabilities / NetworkAccess・ADR 0002 capability 行列を `Role::capabilities()` にコード化）と `crates/runtime/`（AgentRun の 5 相状態遷移 Pending/Running/Waiting/Done/Error を EventBus へ event-sourced で emit）がコード確定（PR #16、issue #7）。要点:
 
-- **capability 強制**: runtime は `RoleCapabilities` のみを消費し `Role` にマッチしない。Librarian / Oracle 追加は Role 定義 + capability 表の追加だけ（v0.2）
+- **capability 強制**: runtime は `RoleCapabilities` のみを消費し `Role` にマッチしない。Librarian / Advisor（旧 Oracle、ADR 0035） 追加は Role 定義 + capability 表の追加だけ（v0.2）
 - **independent context**: `AgentContext` は run タスク専有で、複数 AgentRun が同時並行動作
 - **background agent**: `delegate`（`background: true`）/ `send_message` / `wait` / `cancel` を `BackgroundTaskStarted` / `Completed` / `Cancelled` イベントで観測（GUI 非依存）
 - **routing 委譲境界**: `AgentModel` trait が role → model routing の境界。v01-routing-profiles（実装中）が本 trait を実装する

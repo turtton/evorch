@@ -116,7 +116,7 @@ fn resolved_preview_shows_profile_model_per_role() {
     agents.reviewer.models = vec![config::ChainEntryConfig::route("fast")];
     agents.roles.web_researcher.models = vec![config::ChainEntryConfig::route("fast")];
     agents.roles.planner.models = vec![config::ChainEntryConfig::route("fast")];
-    agents.roles.oracle.models = vec![config::ChainEntryConfig::route("fast")];
+    agents.roles.advisor.models = vec![config::ChainEntryConfig::route("fast")];
     agents.roles.multimodal_looker.models = vec![config::ChainEntryConfig::route("fast")];
     agents.worker.categories.insert(
         "quick".into(),
@@ -135,7 +135,7 @@ fn resolved_preview_shows_profile_model_per_role() {
         "Reviewer",
         "WebResearcher",
         "Planner",
-        "Oracle",
+        "Advisor",
         "Multimodal Looker",
     ] {
         harness.state_mut().open_role_settings();

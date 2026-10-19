@@ -60,7 +60,7 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
         agents::Role::Reviewer,
         agents::Role::WebResearcher,
         agents::Role::Planner,
-        agents::Role::Oracle,
+        agents::Role::Advisor,
         agents::Role::MultimodalLooker,
     ];
     ROLES
@@ -85,7 +85,7 @@ fn role_purpose(role: agents::Role) -> &'static str {
             "具体的な変更・実装とその検証が必要なときに使う。ローカル調査だけなら Explorer、複数担当にまたがる計画なら Planner を選ぶ"
         }
         agents::Role::Reviewer => {
-            "実装結果や実行前の計画を、作成者から独立して仕様・受け入れ条件と照合するときに使う。問題点と合否を報告し、修正実装は Worker に任せる"
+            "実装結果や実行前の計画を、作成者から独立して仕様・受け入れ条件と照合するときに使う。問題点と合否を報告し、修正実装は Worker に任せる。判断前の相談は Advisor の担当であり、最終独立レビューは相談した Advisor とは別 context で行う"
         }
         agents::Role::WebResearcher => {
             "ローカル資料では足りず、外部の仕様・最新情報を Web で確認するときに使う。出典付きで報告し、ローカルのコード調査は Explorer に任せる"
@@ -93,8 +93,8 @@ fn role_purpose(role: agents::Role) -> &'static str {
         agents::Role::Planner => {
             "複数担当にまたがる実装で、依存順序・担当境界・統合時の受け入れ条件の設計が必要なときに使う。Worker からの escalate 後も、引き継ぎの計画案を検証・補完して実装可能な詳細計画にする。範囲と完了条件が明確な局所修正・定型作業や、権限・環境問題だけの昇格では省略できる"
         }
-        agents::Role::Oracle => {
-            "設計案のトレードオフ比較や、原因を絞れない難しい不具合の分析・助言が必要なときに使う。変更は行わず、実装は Worker、実行計画への具体化は Planner に任せる"
+        agents::Role::Advisor => {
+            "判断前に設計案・原因仮説の比較と助言が必要なときのみ使う。固定工程ではない。選択肢・トレードオフ・推奨案・不確実性・判断を変える追加情報を報告する。実装は Worker、受入判定（合否）は Reviewer、詳細実行計画は Planner に任せる。相談した Advisor と最終独立 Reviewer は別 context にする"
         }
         agents::Role::MultimodalLooker => {
             "画像・PDF・スクリーンショットなどの視覚情報を読み解く必要があるときに使う。内容の解釈を担当し、コードの変更は Worker に任せる"
@@ -233,7 +233,7 @@ mod tests {
                 "Reviewer",
                 "WebResearcher",
                 "Planner",
-                "Oracle",
+                "Advisor",
                 "MultimodalLooker"
             ]
         );

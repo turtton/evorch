@@ -33,7 +33,8 @@ pub(super) const DELEGATE_ROLES: &[&str] = &[
     "reviewer",
     "web_researcher",
     "planner",
-    "oracle",
+    "advisor",
+    "oracle", // Legacy alias, like multimodallooker; normalized by parse_role.
     "multimodal_looker",
     "multimodallooker",
 ];

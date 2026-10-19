@@ -334,3 +334,66 @@ async fn restored_chat_continues_in_the_project_it_was_started_in() {
         Some(started)
     );
 }
+
+#[tokio::test]
+async fn followup_restores_legacy_oracle_chat_as_advisor() {
+    for legacy in ["Oracle", "oracle"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("chat.sqlite3"),
+            ..StorageConfig::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let answer = text_response("prior advice", FinishReason::Stop);
+        let model = Arc::new(ScriptedModel::new([
+            Ok(answer.clone()),
+            Ok(text_response("new advice", FinishReason::Stop)),
+        ]));
+        let first = runtime(model.clone(), &config, &storage);
+        let prior = first.delegate_background(
+            Role::Advisor,
+            "prior question".into(),
+            RunConfig {
+                name: Some(format!("chat:{legacy}:thread")),
+                ..RunConfig::default()
+            },
+        );
+        first.wait(prior).await.unwrap();
+        let database = storage::Database::open(&config).unwrap();
+        let record = database.run_context(&prior.to_string()).unwrap().unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+        descriptor["role"] = serde_json::json!(legacy);
+        drop(first);
+        let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+        conn.execute(
+            "UPDATE run_contexts SET role = ?2, config_json = ?3 WHERE run_id = ?1",
+            rusqlite::params![prior.to_string(), legacy, descriptor.to_string()],
+        )
+        .unwrap();
+        let runtime = runtime(model.clone(), &config, &storage);
+        let view = runtime.run_context_view(prior).unwrap().unwrap();
+        assert_eq!(view.role_name, legacy);
+        let run = runtime
+            .delegate_chat(
+                "thread",
+                Role::Advisor,
+                "followup".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        runtime.wait(run).await.unwrap();
+        assert_eq!(
+            model.observed().await[1],
+            vec![user("prior question"), answer.message, user("followup")]
+        );
+        assert_eq!(
+            runtime
+                .list_agents()
+                .iter()
+                .find(|agent| agent.run_id == run)
+                .unwrap()
+                .role_name,
+            "Advisor"
+        );
+    }
+}

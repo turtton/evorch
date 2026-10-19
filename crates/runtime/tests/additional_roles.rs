@@ -33,21 +33,21 @@ fn production_catalog_and_triggers_cover_additional_roles() {
     let planner_prompt = catalog
         .system_prompt_for(Role::Planner, None, "generic")
         .expect("Planner prompt");
-    let oracle_prompt = catalog
-        .system_prompt_for(Role::Oracle, None, "generic")
-        .expect("Oracle prompt");
+    let advisor_prompt = catalog
+        .system_prompt_for(Role::Advisor, None, "generic")
+        .expect("Advisor prompt");
     let looker_prompt = catalog
         .system_prompt_for(Role::MultimodalLooker, None, "generic")
         .expect("MultimodalLooker prompt");
-    assert_ne!(planner_prompt, oracle_prompt);
+    assert_ne!(planner_prompt, advisor_prompt);
     assert_ne!(planner_prompt, looker_prompt);
-    assert_ne!(oracle_prompt, looker_prompt);
+    assert_ne!(advisor_prompt, looker_prompt);
 
     // Then: each role has a purpose trigger without a duplicated tool roster.
     for role in [
         Role::WebResearcher,
         Role::Planner,
-        Role::Oracle,
+        Role::Advisor,
         Role::MultimodalLooker,
     ] {
         let trigger = triggers
@@ -66,7 +66,8 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     model.add_keyed("ROOT", [
         Ok(tool_response("researcher", "delegate", json!({"target": {"role": "web_researcher"}, "prompt":"CHILD"}))),
         Ok(tool_response("planner", "delegate", json!({"target": {"role": "planner"}, "prompt":"CHILD"}))),
-        Ok(tool_response("oracle", "delegate", json!({"target": {"role": "oracle"}, "prompt":"CHILD"}))),
+        Ok(tool_response("advisor", "delegate", json!({"target": {"role": "advisor"}, "prompt":"CHILD"}))),
+        Ok(tool_response("legacy", "delegate", json!({"target": {"role": "oracle"}, "prompt":"CHILD"}))),
         Ok(tool_response("looker", "delegate", json!({"target": {"role": "multimodal_looker"}, "prompt":"CHILD", "images":[{"media_type":"image/png", "data":"aGVsbG8="}]}))),
         Ok(tool_response("invalid", "delegate", json!({"target": {"role": "invalid"}, "prompt":"CHILD"}))),
         Ok(text_response("done", FinishReason::Stop)),
@@ -74,7 +75,7 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     model
         .add_keyed(
             "CHILD",
-            (0..4).map(|_| Ok(text_response("done", FinishReason::Stop))),
+            (0..5).map(|_| Ok(text_response("done", FinishReason::Stop))),
         )
         .await;
     let bus = Arc::new(EventBus::new(128));
@@ -88,8 +89,12 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     assert_eq!(runtime.wait(root).await, Ok(AgentRunPhase::Done));
     // Then: only known roles spawn, and the invalid role returns structured data.
     let runs = runtime.list_agents();
-    assert_eq!(runs.len(), 5);
-    for name in ["WebResearcher", "Planner", "Oracle", "MultimodalLooker"] {
+    assert_eq!(runs.len(), 6);
+    assert_eq!(
+        runs.iter().filter(|run| run.role_name == "Advisor").count(),
+        2
+    );
+    for name in ["WebResearcher", "Planner", "Advisor", "MultimodalLooker"] {
         assert!(runs.iter().any(|run| run.role_name == name));
     }
     let observed = model.observed().await;
@@ -120,4 +125,51 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
         .expect("unknown role result");
     assert_eq!(error["code"], "unknown_role");
     assert_eq!(error["role"], "invalid");
+}
+
+#[test]
+fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
+    let advisor = config::PresetStore::resolve("role-advisor", None).unwrap();
+    let reviewer = config::PresetStore::resolve("role-reviewer", None).unwrap();
+    let triggers = runtime::prompt::default_role_triggers();
+    let guidance = &triggers
+        .iter()
+        .find(|t| t.name == "Advisor")
+        .unwrap()
+        .description;
+    for contract in [
+        "選択肢",
+        "トレードオフ",
+        "推奨案",
+        "不確実性",
+        "判断を変える追加情報",
+    ] {
+        assert!(advisor.contains(contract), "{contract}");
+        assert!(guidance.contains(contract), "{contract}");
+    }
+    for boundary in [
+        "Worker",
+        "Reviewer",
+        "Planner",
+        "合否",
+        "詳細実行計画",
+        "別 context",
+        "固定工程",
+    ] {
+        assert!(advisor.contains(boundary), "{boundary}");
+        assert!(guidance.contains(boundary), "{boundary}");
+    }
+    for contract in [
+        "実装結果",
+        "計画",
+        "仕様",
+        "合否",
+        "Advisor",
+        "別 context",
+        "承認 / 修正要求",
+    ] {
+        assert!(reviewer.contains(contract), "{contract}");
+    }
+    assert_eq!(triggers.len(), 8);
+    assert!(!triggers.iter().any(|t| t.name == "Oracle"));
 }

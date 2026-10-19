@@ -66,7 +66,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 
         ("reviewer", &agents.reviewer),
         ("webresearcher", &agents.roles.web_researcher),
         ("planner", &agents.roles.planner),
-        ("oracle", &agents.roles.oracle),
+        ("advisor", &agents.roles.advisor),
         ("multimodallooker", &agents.roles.multimodal_looker),
     ]
 }

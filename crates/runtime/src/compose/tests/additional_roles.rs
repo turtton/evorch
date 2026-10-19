@@ -19,13 +19,13 @@ async fn additional_roles_keep_affinity_per_run() {
     let (mut model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
     model.agents.roles.web_researcher.models = vec![config::ChainEntryConfig::route("worker")];
     model.agents.roles.planner.models = vec![config::ChainEntryConfig::route("worker")];
-    model.agents.roles.oracle.models = vec![config::ChainEntryConfig::route("worker")];
+    model.agents.roles.advisor.models = vec![config::ChainEntryConfig::route("worker")];
     model.agents.roles.multimodal_looker.models = vec![config::ChainEntryConfig::route("worker")];
     // When: 各 role で同じ run を二度、別 run を一度 complete する
     for role in [
         Role::WebResearcher,
         Role::Planner,
-        Role::Oracle,
+        Role::Advisor,
         Role::MultimodalLooker,
     ] {
         for run_id in ["same", "same", "other"] {

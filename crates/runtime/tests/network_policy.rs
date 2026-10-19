@@ -16,7 +16,7 @@ fn every_role_starts_with_an_isolated_process_network() {
         Role::Reviewer,
         Role::WebResearcher,
         Role::Planner,
-        Role::Oracle,
+        Role::Advisor,
         Role::MultimodalLooker,
     ] {
         let sandbox = build_sandbox(&ExecutionPolicy::for_role(role), workspace.path().into())

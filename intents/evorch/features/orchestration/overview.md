@@ -12,7 +12,7 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 - **汎用thread goal（2026-10-04）**: root agentは依頼の完遂に必要と判断したら会話途中でgoalを設定できる。調査やローカル修正も対象とし、PRは必須にしない。ターン終了時の自己確認を基本とし、利用者が有効化した独立reviewで未達が見つかれば修正・再確認・再reviewしてから完了する。checks Pauseは作業を止めず確認機構だけを止める。詳細は[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)。
 - **Intent Gate**: task type / required capabilities / mutation allowed? / scope / uncertainty / expected output / completion criteria / likely need for delegation を抽出する。workflow は決めない
 - **Execution Shape**: Direct（単純な質問・局所的修正）または Coordinated（複雑な調査・実装・並列探索）だけを決める
-- **Role 分離**: Orchestrator / Explorer / Librarian / Oracle / Planner / Reviewer / Worker / Multimodal Looker を capability boundary として分離する。cognitive isolation（生成と独立レビューの分離）を徹底する（Librarian / Oracle / Planner / Multimodal Looker は v0.6 Bundle B で追加）
+- **Role 分離**: Orchestrator / Explorer / Librarian / Advisor / Planner / Reviewer / Worker / Multimodal Looker を capability boundary として分離する。cognitive isolation（生成と独立レビューの分離）を徹底する（Advisor は旧 Oracle、相談専用。ADR 0035）
 - **Team mode（opt-in、v0.7 Bundle E2）**: `ExecutionShape::Coordinated(DynamicTeam)` として実装する。root coordinator + 最大 3 worker、capability role、atomic task claim + lease / heartbeat、append-only finding log、artifact ownership、failure recovery、visibility。固定 leader/member workflow は採用しない（ADR 0001 遵守）。worker 同士の直接通信は許可するが必須ではない。単一 agent 代替ではなく、delegation value 明示時のみ有効
 - **役割別評価 / arena（v0.7 Bundle E4）**: role ごとに task type・model・prompt version・topology を測る評価系を導入する。同一 task / budget の arena、hard gate → Pareto → pairwise、train / validation / holdout / redteam 分割、failure attribution、promotion gate。結果は Router の model candidate へ段階的に反映する（観測のみ → 固定 arena → role matrix → optimizer → online feedback）
 

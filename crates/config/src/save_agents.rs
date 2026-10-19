@@ -55,7 +55,7 @@ pub(crate) fn agents_document_table(agents: &AgentsConfig) -> Table {
     for (name, binding) in [
         ("web_researcher", &agents.roles.web_researcher),
         ("planner", &agents.roles.planner),
-        ("oracle", &agents.roles.oracle),
+        ("advisor", &agents.roles.advisor),
         ("multimodal_looker", &agents.roles.multimodal_looker),
         ("compactor", &agents.roles.compactor),
     ] {

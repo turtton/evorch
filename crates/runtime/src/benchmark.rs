@@ -32,6 +32,9 @@ mod role_name {
         deserializer: D,
     ) -> Result<Role, D::Error> {
         let name = String::deserialize(deserializer)?;
+        if name.eq_ignore_ascii_case("oracle") {
+            return Ok(Role::Advisor);
+        }
         [
             Role::Orchestrator,
             Role::Explorer,
@@ -39,7 +42,7 @@ mod role_name {
             Role::Reviewer,
             Role::WebResearcher,
             Role::Planner,
-            Role::Oracle,
+            Role::Advisor,
             Role::MultimodalLooker,
         ]
         .into_iter()

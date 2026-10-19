@@ -15,7 +15,7 @@ fn web_researcher_defaults_when_binding_is_absent() {
 #[test]
 fn config_defaults_when_web_researcher_is_absent() {
     // Given: a configuration omitting the optional research binding.
-    let document = "[agents.orchestrator]\n[agents.explorer]\n[agents.worker]\n[agents.reviewer]\n[agents.roles.planner]\n[agents.roles.oracle]\n[agents.roles.multimodal_looker]\n";
+    let document = "[agents.orchestrator]\n[agents.explorer]\n[agents.worker]\n[agents.reviewer]\n[agents.roles.planner]\n[agents.roles.advisor]\n[agents.roles.multimodal_looker]\n";
     // When: deserializing the document.
     let config: Config = toml::from_str(document).expect("optional role binding");
     // Then: omitted bindings resolve to their defaults.

@@ -8,7 +8,9 @@ fn additional_role_names_are_case_insensitive() {
         ("WEB_RESEARCHER", Role::WebResearcher),
         ("WebResearcher", Role::WebResearcher),
         ("planner", Role::Planner),
-        ("ORACLE", Role::Oracle),
+        ("ADVISOR", Role::Advisor),
+        ("ORACLE", Role::Advisor),
+        ("oracle", Role::Advisor),
         ("multimodal_looker", Role::MultimodalLooker),
         ("MultimodalLooker", Role::MultimodalLooker),
     ] {
@@ -22,4 +24,13 @@ fn unknown_role_is_structured_and_preserves_original_name() {
     let value: serde_json::Value = serde_json::from_str(&error).expect("JSON error");
     assert_eq!(value["code"], "unknown_role");
     assert_eq!(value["role"], "CustomRole");
+}
+
+#[test]
+fn persisted_role_aliases_deserialize_and_serialize_canonically() {
+    for name in ["Oracle", "oracle", "Advisor"] {
+        let role: Role = serde_json::from_value(serde_json::json!(name)).unwrap();
+        assert_eq!(role, Role::Advisor);
+        assert_eq!(serde_json::to_value(role).unwrap(), "Advisor");
+    }
 }

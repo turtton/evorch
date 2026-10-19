@@ -28,6 +28,15 @@ async fn fixture_with_hook(
     owned: bool,
     hook: Option<Arc<dyn tools::post_edit::PostEditHook>>,
 ) -> Fixture {
+    fixture_with_role(blocking, owned, hook, Role::Worker).await
+}
+
+async fn fixture_with_role(
+    blocking: bool,
+    owned: bool,
+    hook: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    role: Role,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("questions.db"),
@@ -95,7 +104,7 @@ async fn fixture_with_hook(
     );
     model.wait_for_request(0).await;
     let child = runtime
-        .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+        .delegate_background_as_child(parent, role, "CHILD", RunConfig::default())
         .unwrap();
     Fixture {
         bus,
@@ -629,4 +638,57 @@ async fn child_continuation_uses_current_parent_owner_and_fences_stale_parent() 
     );
     fixture.runtime.cancel(fixture.parent).unwrap();
     fixture.runtime.wait(fixture.parent).await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_answer_resumes_legacy_oracle_child_snapshot() {
+    for legacy in ["Oracle", "oracle"] {
+        let fixture = fixture_with_role(false, false, None, Role::Advisor).await;
+        assert_eq!(
+            fixture.runtime.wait(fixture.child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        let database = storage::Database::open(&fixture.config).unwrap();
+        let mut record = database
+            .run_context(&fixture.child.to_string())
+            .unwrap()
+            .unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+        descriptor["role"] = serde_json::json!(legacy);
+        record.role = legacy.into();
+        record.config_json = descriptor.to_string();
+        fixture
+            .storage
+            .handle()
+            .upsert_run_context(&record)
+            .unwrap();
+        let question = fixture
+            .runtime
+            .user_answers(fixture.child)
+            .unwrap()
+            .remove(0);
+        fixture
+            .runtime
+            .answer_subagent_question(fixture.parent, &question.id, "Use A")
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.runtime.wait(fixture.child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        let observed = fixture.model.observed().await;
+        let history = serde_json::to_string(observed.last().unwrap()).unwrap();
+        assert!(history.contains("Independent work completed"));
+        assert!(history.contains("Use A"));
+        assert_eq!(
+            database
+                .run_context(&fixture.child.to_string())
+                .unwrap()
+                .unwrap()
+                .role,
+            "Advisor"
+        );
+        fixture.runtime.cancel(fixture.parent).unwrap();
+        fixture.runtime.wait(fixture.parent).await.unwrap();
+    }
 }

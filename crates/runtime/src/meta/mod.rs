@@ -124,7 +124,7 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
         "reviewer" => Ok(Role::Reviewer),
         "web_researcher" | "webresearcher" => Ok(Role::WebResearcher),
         "planner" => Ok(Role::Planner),
-        "oracle" => Ok(Role::Oracle),
+        "advisor" | "oracle" => Ok(Role::Advisor),
         "multimodallooker" | "multimodal_looker" => Ok(Role::MultimodalLooker),
         _ => Err(serde_json::json!({
             "code": "unknown_role",

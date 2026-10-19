@@ -14,7 +14,7 @@ impl AgentRunSource for Source {
 
 #[test]
 fn agents_display_additional_role_names() {
-    let roles = [(1, "Planner"), (2, "Oracle"), (3, "MultimodalLooker")];
+    let roles = [(1, "Planner"), (2, "Advisor"), (3, "MultimodalLooker")];
     let source = Source(
         roles
             .iter()

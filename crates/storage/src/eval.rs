@@ -13,7 +13,8 @@ pub enum Attribution {
     Qa,
     ToolUse,
     WebResearcher,
-    Oracle,
+    #[serde(alias = "oracle")]
+    Advisor,
     MultimodalLooker,
     Synthesizer,
 }

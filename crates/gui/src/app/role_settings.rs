@@ -111,7 +111,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ("Reviewer", Role::Reviewer),
             ("WebResearcher", Role::WebResearcher),
             ("Planner", Role::Planner),
-            ("Oracle", Role::Oracle),
+            ("Advisor", Role::Advisor),
             ("Multimodal Looker", Role::MultimodalLooker),
         ];
         let rows = roles

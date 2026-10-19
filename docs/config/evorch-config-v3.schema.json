@@ -19,13 +19,13 @@
           "generation": {}
         },
         "roles": {
+          "advisor": {
+            "generation": {}
+          },
           "compactor": {
             "generation": {}
           },
           "multimodal_looker": {
-            "generation": {}
-          },
-          "oracle": {
             "generation": {}
           },
           "planner": {
@@ -223,6 +223,12 @@
     "AdditionalRoleBindings": {
       "type": "object",
       "properties": {
+        "advisor": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
         "compactor": {
           "description": "要約 (compaction) にだけ使うチェーン。agent としては起動しない。\n`models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。",
           "$ref": "#/$defs/RoleBindingConfig",
@@ -231,12 +237,6 @@
           }
         },
         "multimodal_looker": {
-          "$ref": "#/$defs/RoleBindingConfig",
-          "default": {
-            "generation": {}
-          }
-        },
-        "oracle": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
             "generation": {}
@@ -286,13 +286,13 @@
         "roles": {
           "$ref": "#/$defs/AdditionalRoleBindings",
           "default": {
+            "advisor": {
+              "generation": {}
+            },
             "compactor": {
               "generation": {}
             },
             "multimodal_looker": {
-              "generation": {}
-            },
-            "oracle": {
               "generation": {}
             },
             "planner": {
@@ -1175,13 +1175,13 @@
               "generation": {}
             },
             "roles": {
+              "advisor": {
+                "generation": {}
+              },
               "compactor": {
                 "generation": {}
               },
               "multimodal_looker": {
-                "generation": {}
-              },
-              "oracle": {
                 "generation": {}
               },
               "planner": {

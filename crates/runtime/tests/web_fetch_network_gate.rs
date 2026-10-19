@@ -53,7 +53,7 @@ fn production_roles_expose_only_their_supported_web_tools() {
         Role::Reviewer,
         Role::WebResearcher,
         Role::Planner,
-        Role::Oracle,
+        Role::Advisor,
         Role::MultimodalLooker,
     ] {
         let policy = ExecutionPolicy::for_role(role);

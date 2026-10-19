@@ -48,7 +48,7 @@ fn role_bindings(config: &Config) -> [(Role, &RoleBindingConfig); 8] {
         (Role::Reviewer, &config.agents.reviewer),
         (Role::WebResearcher, &config.agents.roles.web_researcher),
         (Role::Planner, &config.agents.roles.planner),
-        (Role::Oracle, &config.agents.roles.oracle),
+        (Role::Advisor, &config.agents.roles.advisor),
         (
             Role::MultimodalLooker,
             &config.agents.roles.multimodal_looker,

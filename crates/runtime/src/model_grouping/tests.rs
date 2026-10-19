@@ -245,7 +245,7 @@ async fn unknown_identities_unused_pools_and_served_pools_are_left_alone() {
         ("mystery", vec![candidate("nocanon", "mystery", false)]),
     ]);
     let mut agents = planner_uses("served");
-    agents.roles.oracle.models = vec![ChainEntryConfig::route("mystery")];
+    agents.roles.advisor.models = vec![ChainEntryConfig::route("mystery")];
     // When / Then: none of them changes.
     for profile in ["neuralwatt", "other"] {
         assert_eq!(

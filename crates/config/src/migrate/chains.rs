@@ -3,51 +3,67 @@
 //! 1 ファイル分の値だけを見る。route と agents が別の層にあると推論強度を引けないため、
 //! その場合は推論強度なしで移して警告を返す。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::roles::Scope;
+
+#[derive(Default)]
+pub(super) struct ChainMigration {
+    pub(super) warnings: Vec<String>,
+    pub(super) implicit_oracle: BTreeSet<Scope>,
+}
 
 /// 移行の対象になるロールの設定上のアドレス (`agents.` からの相対)。
-const ROLE_ADDRESSES: [&str; 8] = [
+const ROLE_ADDRESSES: [&str; 9] = [
     "orchestrator",
     "explorer",
     "worker",
     "reviewer",
     "roles.web_researcher",
     "roles.planner",
-    "roles.oracle",
+    "roles.advisor",
+    "roles.oracle", // Convert legacy logical_model before renaming the binding.
     "roles.multimodal_looker",
 ];
 
 /// route 名 → 先頭候補の推論強度 (候補が持たなければ `None`)。
 type RouteEfforts = BTreeMap<String, Option<String>>;
 
-/// 旧形式のフィールドをチェーンへ移し、移行内容の警告を返す。
+/// 旧形式のフィールドをチェーンへ移し、警告と生成した Oracle chain の位置を返す。
 ///
 /// 旧形式のキーがなければ何もしないため、version に関わらず適用できる。
-pub(super) fn move_to_chains(value: &mut toml::Value) -> Vec<String> {
-    let mut warnings = Vec::new();
+pub(super) fn move_to_chains(value: &mut toml::Value) -> ChainMigration {
+    let mut result = ChainMigration::default();
     let Some(root) = value.as_table_mut() else {
-        return warnings;
+        return result;
     };
-    migrate_scope(root, "", &mut warnings);
+    if migrate_scope(root, "", &mut result.warnings) {
+        result.implicit_oracle.insert(None);
+    }
     if let Some(profiles) = root
         .get_mut("role_profiles")
         .and_then(toml::Value::as_table_mut)
     {
         for (name, profile) in profiles.iter_mut() {
-            if let Some(profile) = profile.as_table_mut() {
-                migrate_scope(profile, &format!("role_profiles.{name}."), &mut warnings);
+            if let Some(profile) = profile.as_table_mut()
+                && migrate_scope(
+                    profile,
+                    &format!("role_profiles.{name}."),
+                    &mut result.warnings,
+                )
+            {
+                result.implicit_oracle.insert(Some(name.clone()));
             }
         }
     }
-    warnings
+    result
 }
 
 /// `agents` と `routing` を同じ階層に持つ 1 スコープ (トップレベルかロールプロファイル) を移す。
-fn migrate_scope(scope: &mut toml::value::Table, prefix: &str, warnings: &mut Vec<String>) {
+fn migrate_scope(scope: &mut toml::value::Table, prefix: &str, warnings: &mut Vec<String>) -> bool {
     let efforts = take_route_efforts(scope, prefix, warnings);
     let Some(agents) = scope.get_mut("agents").and_then(toml::Value::as_table_mut) else {
-        add_implicit_chains(scope, prefix, &efforts, warnings);
-        return;
+        return add_implicit_chains(scope, prefix, &efforts, warnings);
     };
     for address in ROLE_ADDRESSES {
         let path = format!("{prefix}agents.{address}");
@@ -71,10 +87,13 @@ fn migrate_scope(scope: &mut toml::value::Table, prefix: &str, warnings: &mut Ve
             }
         }
     }
-    add_implicit_chains(scope, prefix, &efforts, warnings);
+    add_implicit_chains(scope, prefix, &efforts, warnings)
 }
 
 /// route 候補から `reasoning_effort` を取り除き、route ごとの推論強度を返す。
+/// `routing.routes.advisor` の effort だけは全層マージまで保持する。新名 route からの
+/// 暗黙 chain が他層の明示 chain を上書きしないための改称固有の例外である。
+/// 単独ファイルの保存では、呼び出し側がマージ相当の最終化まで行う。
 fn take_route_efforts(
     scope: &mut toml::value::Table,
     prefix: &str,
@@ -95,10 +114,16 @@ fn take_route_efforts(
         let taken: Vec<Option<String>> = candidates
             .iter_mut()
             .map(|candidate| {
-                candidate
-                    .as_table_mut()
-                    .and_then(|candidate| candidate.remove("reasoning_effort"))
-                    .and_then(|effort| effort.as_str().map(str::to_owned))
+                candidate.as_table_mut().and_then(|candidate| {
+                    // Keep the new implicit route's effort with its layer until
+                    // the merged configuration can decide whether it is used.
+                    let effort = if name == "advisor" {
+                        candidate.get("reasoning_effort").cloned()
+                    } else {
+                        candidate.remove("reasoning_effort")
+                    };
+                    effort.and_then(|effort| effort.as_str().map(str::to_owned))
+                })
             })
             .collect();
         let first = taken.first().cloned().flatten();
@@ -154,9 +179,15 @@ fn add_implicit_chains(
     prefix: &str,
     efforts: &RouteEfforts,
     warnings: &mut Vec<String>,
-) {
+) -> bool {
+    let mut implicit_oracle = false;
     for address in ROLE_ADDRESSES {
         let role = address.strip_prefix("roles.").unwrap_or(address);
+        if role == "advisor" || (role == "oracle" && efforts.contains_key("advisor")) {
+            // Advisor did not name a role before the rename. Defer its implicit
+            // chain until after merging so it cannot replace an explicit binding.
+            continue;
+        }
         let Some(Some(effort)) = efforts.get(role) else {
             continue;
         };
@@ -164,7 +195,7 @@ fn add_implicit_chains(
             .entry("agents")
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
         let Some(agents) = agents.as_table_mut() else {
-            return;
+            return implicit_oracle;
         };
         let binding = match address.split_once('.') {
             Some((group, name)) => agents
@@ -189,11 +220,13 @@ fn add_implicit_chains(
             continue;
         }
         binding.insert("models".into(), chain(role, Some(effort.clone())));
+        implicit_oracle |= role == "oracle";
         warnings.push(format!(
             "{prefix}agents.{address}.models: moved reasoning_effort `{effort}` from \
              {prefix}routing.routes.{role}, which the role used implicitly"
         ));
     }
+    implicit_oracle
 }
 
 fn binding_mut<'a>(
@@ -225,7 +258,7 @@ mod tests {
 
     fn migrate(text: &str) -> (toml::Value, Vec<String>) {
         let mut value: toml::Value = toml::from_str(text).expect("TOML");
-        let warnings = move_to_chains(&mut value);
+        let warnings = move_to_chains(&mut value).warnings;
         (value, warnings)
     }
 

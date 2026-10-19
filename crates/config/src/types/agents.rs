@@ -26,7 +26,7 @@ pub struct AgentsConfig {
 /// agents 内の明示的な route 参照 (チェーンの要素) を旧名→新名で置き換える。
 ///
 /// 各 role (orchestrator/explorer/worker/reviewer/roles.web_researcher/roles.planner/
-/// roles.oracle/roles.multimodal_looker) と worker.categories / reviewer.categories の全 category が対象。
+/// roles.advisor/roles.multimodal_looker) と worker.categories / reviewer.categories の全 category が対象。
 /// `models` が空 (暗黙の role 名参照) のものは変更しない。
 /// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
 pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
@@ -41,7 +41,7 @@ pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, S
         &mut agents.reviewer.base.models,
         &mut agents.roles.web_researcher.models,
         &mut agents.roles.planner.models,
-        &mut agents.roles.oracle.models,
+        &mut agents.roles.advisor.models,
         &mut agents.roles.multimodal_looker.models,
         &mut agents.roles.compactor.models,
     ]
@@ -118,7 +118,7 @@ pub fn chain_at_mut<'a>(
         "reviewer" => &mut agents.reviewer.base,
         "roles.web_researcher" => &mut agents.roles.web_researcher,
         "roles.planner" => &mut agents.roles.planner,
-        "roles.oracle" => &mut agents.roles.oracle,
+        "roles.advisor" => &mut agents.roles.advisor,
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker,
         "roles.compactor" => &mut agents.roles.compactor,
         address => {
@@ -162,7 +162,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 9] {
         ("reviewer", &agents.reviewer),
         ("roles.web_researcher", &agents.roles.web_researcher),
         ("roles.planner", &agents.roles.planner),
-        ("roles.oracle", &agents.roles.oracle),
+        ("roles.advisor", &agents.roles.advisor),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
         ("roles.compactor", &agents.roles.compactor),
     ]
@@ -173,7 +173,8 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 9] {
 pub struct AdditionalRoleBindings {
     pub web_researcher: RoleBindingConfig,
     pub planner: RoleBindingConfig,
-    pub oracle: RoleBindingConfig,
+    #[serde(alias = "oracle")]
+    pub advisor: RoleBindingConfig,
     pub multimodal_looker: RoleBindingConfig,
     /// 要約 (compaction) にだけ使うチェーン。agent としては起動しない。
     /// `models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。
@@ -197,6 +198,7 @@ impl AgentsConfig {
         role: &str,
         category: Option<&str>,
     ) -> Result<ResolvedAgentBinding, ConfigError> {
+        let role = if role == "oracle" { "advisor" } else { role };
         if let Some(category) = category
             && category_for_role(role, category).is_none()
             && (!matches!(role, "worker" | "reviewer")
@@ -216,7 +218,7 @@ impl AgentsConfig {
             "reviewer" => &self.reviewer.base,
             "web_researcher" => &self.roles.web_researcher,
             "planner" => &self.roles.planner,
-            "oracle" => &self.roles.oracle,
+            "advisor" => &self.roles.advisor,
             "multimodal_looker" => &self.roles.multimodal_looker,
             other => {
                 return Err(ConfigError::UnknownAgentRole {
@@ -439,7 +441,7 @@ mod tests {
             "reviewer",
             "roles.web_researcher",
             "roles.planner",
-            "roles.oracle",
+            "roles.advisor",
             "roles.multimodal_looker",
         ]
         .into_iter()
@@ -517,7 +519,7 @@ mod tests {
             ("reviewer", "reviewer"),
             ("web_researcher", "roles.web_researcher"),
             ("planner", "roles.planner"),
-            ("oracle", "roles.oracle"),
+            ("advisor", "roles.advisor"),
             ("multimodal_looker", "roles.multimodal_looker"),
         ] {
             // Then: only the role address is reported (not its inheriting categories).
@@ -559,7 +561,7 @@ models = [{ route = "old" }]
 models = [{ route = "old" }]
 [agents.roles.planner]
 models = [{ route = "old" }]
-[agents.roles.oracle]
+[agents.roles.advisor]
 models = [{ route = "old" }]
 [agents.roles.multimodal_looker]
 models = [{ route = "old" }]
@@ -624,7 +626,7 @@ models = [{ route = "old" }]
             "reviewer",
             "web_researcher",
             "planner",
-            "oracle",
+            "advisor",
             "multimodal_looker",
             "quick",
         ]
@@ -1079,7 +1081,7 @@ models = [{ route = "shared" }]
 models = [{ route = "shared" }]
 [agents.roles.planner]
 models = [{ route = "shared" }]
-[agents.roles.oracle]
+[agents.roles.advisor]
 models = [{ route = "shared" }]
 [agents.roles.multimodal_looker]
 models = [{ route = "shared" }]
@@ -1096,8 +1098,8 @@ models = [{ route = "shared" }]
                 "explorer",
                 "orchestrator",
                 "reviewer",
+                "roles.advisor",
                 "roles.multimodal_looker",
-                "roles.oracle",
                 "roles.planner",
                 "roles.web_researcher",
                 "worker",
