@@ -413,42 +413,137 @@ fn nested_duplicate_and_missing_allowed_directories_add_each_path_once() {
         3,
     );
 
-    // Then: the parent covers the nested directory and no path is listed twice.
+    // Then: the nested directory lists its own files, which the parent skips,
+    // so no path is listed twice.
     assert_eq!(
         values(&index),
         [
             (CompletionKind::Dir, "src".to_owned()),
             (CompletionKind::File, "src/lib.rs".to_owned()),
-            (CompletionKind::Dir, base.clone()),
             (CompletionKind::Dir, format!("{base}/inner")),
             (CompletionKind::File, format!("{base}/inner/deep.md")),
+            (CompletionKind::Dir, base.clone()),
             (CompletionKind::File, format!("{base}/top.md")),
         ]
     );
-    // Then: the nested folder is still found by its name.
+    // Then: the nested folder is found by its name, and browsed like any allowed directory.
     assert_eq!(labels(&index, "@inner")[0], format!("@{base}/inner/"));
+    assert!(labels(&index, "@").contains(&format!("@{base}/inner/")));
     // Then: the index keeps the list it was built for, so that list does not look stale.
     assert_eq!(index.allowed, allowed);
+    assert!(index.is_built_for(project.path(), &allowed));
+}
+
+#[test]
+fn a_nested_allowed_directory_completes_where_its_parent_lists_none_of_it() {
+    // Each way the parent's listing leaves the nested directory out.
+    for case in ["ignored by git", "own repository", "skipped folder"] {
+        // Given: a nested allowed directory with a file two levels down.
+        let project = tempfile::tempdir().expect("project");
+        let temp = tempfile::tempdir().expect("temp");
+        let outer = temp.path().join("outer");
+        let inner = outer.join(if case == "skipped folder" {
+            "target"
+        } else {
+            "inner"
+        });
+        write_files(project.path(), &["src/lib.rs"]);
+        write_files(&outer, &["top.md"]);
+        write_files(&inner, &["sub/deep.md"]);
+        match case {
+            "ignored by git" => {
+                git_init(&outer);
+                std::fs::write(outer.join(".gitignore"), "inner/\n").expect("ignore");
+            }
+            "own repository" => {
+                git_init(&outer);
+                git_init(&inner);
+            }
+            _ => {}
+        }
+        let skills = skill_registry(project.path(), &[]);
+        let deep = format!("@{}/sub/deep.md ", base_of(&inner));
+        let top = format!("@{}/top.md ", base_of(&outer));
+
+        // When: it is approved alone, then with its parent added after it (or listed before it).
+        for allowed in [
+            vec![inner.clone()],
+            vec![inner.clone(), outer.clone()],
+            vec![outer.clone(), inner.clone()],
+        ] {
+            let index = MentionIndex::build(project.path(), &allowed, &skills);
+            let first = |query: &str| {
+                index
+                    .complete(&mention_at(query, query.len()).expect("mention"))
+                    .first()
+                    .map(|item| item.replacement.clone())
+            };
+
+            // Then: its file is found by name and inserted as an absolute path.
+            assert_eq!(first("@deep").as_ref(), Some(&deep), "{case}: {allowed:?}");
+            // Then: the parent's own files complete too, and no path is listed twice.
+            if allowed.contains(&outer) {
+                assert_eq!(first("@top").as_ref(), Some(&top), "{case}: {allowed:?}");
+            }
+            let listed = values(&index);
+            let distinct: BTreeSet<_> = listed.iter().map(|(_, value)| value).collect();
+            assert_eq!(distinct.len(), listed.len(), "{case}: {allowed:?}");
+        }
+    }
+}
+
+#[test]
+fn only_allowed_directories_are_walked_when_their_repository_ignores_them() {
+    // Given: a repository that ignores a folder holding a file.
+    let temp = tempfile::tempdir().expect("temp");
+    let repo = temp.path().join("repo");
+    let ignored = repo.join("ignored");
+    write_files(&ignored, &["notes.md"]);
+    git_init(&repo);
+    std::fs::write(repo.join(".gitignore"), "ignored/\n").expect("ignore");
+    let elsewhere = tempfile::tempdir().expect("project");
+    write_files(elsewhere.path(), &["src/lib.rs"]);
+
+    // When: the folder is the project root, it keeps git's listing, which is empty.
+    let project = MentionIndex::build(&ignored, &[], &skill_registry(&ignored, &[]));
+    assert!(values(&project).is_empty());
+
+    // When: the folder is approved as an allowed directory, it is walked instead.
+    let approved = MentionIndex::build(
+        elsewhere.path(),
+        std::slice::from_ref(&ignored),
+        &skill_registry(elsewhere.path(), &[]),
+    );
+    assert!(values(&approved).contains(&(
+        CompletionKind::File,
+        format!("{}/notes.md", base_of(&ignored))
+    )));
 }
 
 #[test]
 fn retain_allowed_drops_only_entries_outside_the_kept_directories() {
     // Given: project entries plus two allowed directories, one named like a prefix of the other.
+    let root = Path::new("/work/app");
     let mut index = index(&["src/main.rs"], &[("share", "skill")]);
     index.add_allowed_directory(Path::new("/work/lib"), &["a.rs".into()]);
     index.add_allowed_directory(Path::new("/work/lib-old"), &["b.rs".into()]);
-    index.allowed = vec!["/work/lib".into(), "/work/lib-old".into()];
+    let built: Vec<PathBuf> = vec!["/work/lib".into(), "/work/lib-old".into()];
+    index.root = Some(root.to_owned());
+    index.allowed = built.clone();
+    index.retained = built.clone();
     let project = [
         (CompletionKind::Dir, "src".to_owned()),
         (CompletionKind::File, "src/main.rs".to_owned()),
         (CompletionKind::Skill, "share".to_owned()),
     ];
+    assert!(index.is_built_for(root, &built));
     assert!(!labels(&index, "@lib-old").is_empty());
 
     // When: `/work/lib-old` is revoked as another directory is approved.
-    index.retain_allowed(&["/work/new".into(), "/work/lib".into()]);
+    let current: Vec<PathBuf> = vec!["/work/new".into(), "/work/lib".into()];
+    index.retain_allowed(&current);
     // Then: only the revoked entries go; the new directory waits for a rebuild.
-    assert_eq!(index.allowed, [PathBuf::from("/work/lib")]);
+    assert_eq!(index.retained, [PathBuf::from("/work/lib")]);
     assert_eq!(
         values(&index)[project.len()..],
         [
@@ -457,28 +552,34 @@ fn retain_allowed_drops_only_entries_outside_the_kept_directories() {
         ]
     );
     assert!(labels(&index, "@lib-old").is_empty());
+    // Then: the index still names the list it was built for, so it is due a
+    // rebuild for the current list, or for the kept part alone.
+    assert_eq!(index.allowed, built);
+    assert!(!index.is_built_for(root, &current));
+    assert!(!index.is_built_for(root, &["/work/lib".into()]));
+    // Then: dropping nothing more leaves it as it is.
+    let before = index.clone();
+    index.retain_allowed(&current);
+    assert_eq!(index, before);
 
     // When: nothing stays approved.
     index.retain_allowed(&[]);
     // Then: project entries and skills remain.
-    assert!(index.allowed.is_empty());
+    assert!(index.retained.is_empty());
     assert_eq!(values(&index), project);
+    assert!(!index.is_built_for(root, &[]));
 
-    // Given: a parent that covers a nested allowed directory.
+    // Given: a parent and the nested allowed directory it leaves to list its own files.
     let mut nested = MentionIndex::default();
-    nested.add_allowed_directory(
-        Path::new("/work/outer"),
-        &["inner/deep.md".into(), "top.md".into()],
-    );
+    nested.add_allowed_directory(Path::new("/work/outer"), &["top.md".into()]);
+    nested.add_allowed_directory(Path::new("/work/outer/inner"), &["deep.md".into()]);
     nested.allowed = vec!["/work/outer/inner".into(), "/work/outer".into()];
+    nested.retained = nested.allowed.clone();
     // When: the parent is revoked but the nested directory stays.
     nested.retain_allowed(&["/work/outer/inner".into()]);
-    // Then: the nested directory keeps its entries.
-    assert_eq!(
-        values(&nested),
-        [
-            (CompletionKind::Dir, "/work/outer/inner".to_owned()),
-            (CompletionKind::File, "/work/outer/inner/deep.md".to_owned()),
-        ]
-    );
+    // Then: the nested directory keeps its entries, named as if listed alone.
+    let mut alone = MentionIndex::default();
+    alone.add_allowed_directory(Path::new("/work/outer/inner"), &["deep.md".into()]);
+    assert_eq!(nested.entries, alone.entries);
+    assert_eq!(labels(&nested, "@"), ["@/work/outer/inner/"]);
 }

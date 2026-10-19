@@ -31,14 +31,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.mention_active = active;
         let scope = self.mention_scope();
         self.poll_mention_index(scope.as_ref());
-        // A revoked or removed directory stops completing before any rebuild lands.
+        // A revoked or removed directory stops completing before any rebuild
+        // lands; the rebuild then hands its share of the path budget on.
         let allowed = scope
             .as_ref()
             .map_or(&[][..], |scope| scope.allowed.as_slice());
         self.composer.mentions.retain_allowed(allowed);
         if let Some(scope) = scope.filter(|_| active) {
-            let index = &self.composer.mentions;
-            let stale = index.root.as_ref() != Some(&scope.root) || index.allowed != scope.allowed;
+            let stale = !self
+                .composer
+                .mentions
+                .is_built_for(&scope.root, &scope.allowed);
             if (started || stale)
                 && self
                     .mention_job
