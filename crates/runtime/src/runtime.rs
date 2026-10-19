@@ -2471,13 +2471,20 @@ pub fn production_executor_with_config(
         &config.comment_checker,
         &[workspace_root],
         sandbox::ApprovalPolicy::allow_all(),
-        None,
+        BrowserTools::Configure(&config.tools.browser),
     )
 }
 
 /// Production executor composition, also used after a run builds its own sandbox.
+/// Where a composed executor's agent browser tools come from.
+pub(crate) enum BrowserTools<'a> {
+    /// Launch as `[tools.browser]` sets: the process's first executor.
+    Configure(&'a config::BrowserToolsConfig),
+    /// Share the parent's browser, so one Chromium serves the process.
+    Inherit(&'a ToolExecutor),
+}
+
 /// File tools are confined to `boundary`, the list the sandbox was built from.
-/// A run's executor reuses `parent`'s agent browser, so one Chromium serves the process.
 pub(crate) fn configured_executor(
     bus: Arc<EventBus>,
     sandbox: Arc<dyn sandbox::Sandbox>,
@@ -2485,7 +2492,7 @@ pub(crate) fn configured_executor(
     checker_config: &config::CommentCheckerConfig,
     forbidden_roots: &[PathBuf],
     approval_policy: sandbox::ApprovalPolicy,
-    parent: Option<&ToolExecutor>,
+    browser: BrowserTools<'_>,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let hook = tools::post_edit::CommentChecker::resolve_with_roots(
         Arc::clone(&sandbox),
@@ -2501,12 +2508,10 @@ pub(crate) fn configured_executor(
     .with_post_edit_hook(hook)
     .with_policy(approval_policy)
     .with_web_tools()
-    .and_then(
-        |executor| match parent.and_then(ToolExecutor::agent_browser) {
-            Some(browser) => Ok(executor.with_agent_browser(browser)),
-            None => executor.with_browser_tools(),
-        },
-    )
+    .and_then(|executor| match browser {
+        BrowserTools::Configure(config) => executor.with_browser_tools(config),
+        BrowserTools::Inherit(parent) => Ok(executor.inherit_agent_browser(parent)),
+    })
     .map_err(|error| RuntimeError::NetworkGuard {
         detail: error.to_string(),
     })?;
@@ -3424,23 +3429,56 @@ mod agent_browser_sharing_tests {
                 max_pages: 1,
             },
         ));
-        let parent = ToolExecutor::new(Arc::clone(&bus)).with_agent_browser(Arc::clone(&browser));
+        let parent = ToolExecutor::new(Arc::clone(&bus)).with_agent_browser(
+            Arc::clone(&browser),
+            tools::BrowserToolOptions {
+                coordinate_actions: true,
+            },
+        );
         let workspace = tempfile::tempdir().unwrap();
 
         // When: a run composes its own executor from that parent.
-        let run = configured_executor(
-            bus,
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&parent));
+
+        // Then: its browser tools, opt-in ones included, use the same browser,
+        // so observers see its page.
+        assert!(Arc::ptr_eq(&run.agent_browser().unwrap(), &browser));
+        assert!(run.tool_permissions("browser_navigate").is_some());
+        assert!(run.tool_permissions("browser_click_at").is_some());
+    }
+
+    #[test]
+    fn disabled_browser_config_registers_no_browser_tools() {
+        let bus = Arc::new(EventBus::new(16));
+        let workspace = tempfile::tempdir().unwrap();
+        let disabled = config::BrowserToolsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let first = compose(&bus, workspace.path(), BrowserTools::Configure(&disabled));
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&first));
+
+        for executor in [first, run] {
+            assert!(executor.agent_browser().is_none());
+            assert!(executor.tool_permissions("browser_navigate").is_none());
+        }
+    }
+
+    fn compose(
+        bus: &Arc<EventBus>,
+        workspace: &std::path::Path,
+        browser: BrowserTools<'_>,
+    ) -> Arc<ToolExecutor> {
+        configured_executor(
+            Arc::clone(bus),
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
-            &sandbox::SandboxBoundary::new(workspace.path().to_path_buf()),
+            &sandbox::SandboxBoundary::new(workspace.to_path_buf()),
             &config::CommentCheckerConfig::default(),
             &[],
             sandbox::ApprovalPolicy::allow_all(),
-            Some(&parent),
+            browser,
         )
-        .unwrap();
-
-        // Then: its browser tools use the same browser, so observers see its page.
-        assert!(Arc::ptr_eq(&run.agent_browser().unwrap(), &browser));
-        assert!(run.tool_permissions("browser_navigate").is_some());
+        .unwrap()
     }
 }

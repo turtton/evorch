@@ -270,3 +270,38 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
     while screencast.next_frame().await.is_some() {}
     assert!(screencast.ended(), "the screencast ends with its page");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn click_at_hits_what_is_drawn_at_the_viewport_point() {
+    // Given: a page whose button covers the top-left quarter of the viewport.
+    let url = serve(
+        r#"<!doctype html><html><body style="margin:0">
+<button style="position:fixed;left:0;top:0;width:50vw;height:50vh"
+  onclick="this.textContent = 'Pressed'">Press</button>
+</body></html>"#
+            .to_owned(),
+    )
+    .await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 1,
+    });
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.unwrap();
+
+    // When: the agent clicks outside the button, then inside it.
+    page.click_at(1000.0, 700.0).await.unwrap();
+    let missed = page.snapshot().await.unwrap().text;
+    page.click_at(20.0, 20.0).await.unwrap();
+    let hit = page.snapshot().await.unwrap().text;
+
+    // Then: only the click inside it pressed the button.
+    assert!(missed.contains("button \"Press\""), "{missed}");
+    assert!(hit.contains("button \"Pressed\""), "{hit}");
+    assert!(browser.close("run-1").await);
+}

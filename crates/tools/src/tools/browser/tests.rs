@@ -75,10 +75,15 @@ impl PageProvider for FakeProvider {
 }
 
 fn tool(provider: &Arc<FakeProvider>, name: &str) -> BrowserTool {
-    browser_tools(provider.clone() as Arc<dyn PageProvider>)
-        .into_iter()
-        .find(|tool| tool.name() == name)
-        .unwrap()
+    browser_tools(
+        provider.clone() as Arc<dyn PageProvider>,
+        BrowserToolOptions {
+            coordinate_actions: true,
+        },
+    )
+    .into_iter()
+    .find(|tool| tool.name() == name)
+    .unwrap()
 }
 
 fn context(run_id: &str) -> ToolExecutionContext {
@@ -91,9 +96,18 @@ fn context(run_id: &str) -> ToolExecutionContext {
 
 #[test]
 fn browser_tool_schemas_compile_with_unique_names() {
-    let tools = browser_tools(Arc::new(FakeProvider::default()));
-    let names: std::collections::BTreeSet<_> = tools.iter().map(|tool| tool.name()).collect();
-    assert_eq!(names.len(), BROWSER_TOOL_NAMES.len());
+    let all = BrowserToolOptions {
+        coordinate_actions: true,
+    };
+    let tools = browser_tools(Arc::new(FakeProvider::default()), all);
+    let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+    assert_eq!(names, BROWSER_TOOL_NAMES);
+    let default: Vec<_> = browser_tools(Arc::new(FakeProvider::default()), Default::default())
+        .iter()
+        .map(|tool| tool.name().to_owned())
+        .collect();
+    assert!(!default.iter().any(|name| name == "browser_click_at"));
+    assert_eq!(default.len(), BROWSER_TOOL_NAMES.len() - 1);
     for tool in &tools {
         jsonschema::validator_for(&tool.schema())
             .unwrap_or_else(|error| panic!("{}: {error}", tool.name()));
@@ -217,4 +231,35 @@ async fn guard_policy_applies_web_fetch_destination_rules() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn click_at_presses_the_viewport_point_and_rejects_points_outside_it() {
+    let provider = Arc::new(FakeProvider::default());
+    let click_at = tool(&provider, "browser_click_at");
+
+    let clicked = click_at
+        .execute_with_context(&context("run-a"), json!({"x": 40, "y": 12.5}))
+        .await
+        .unwrap();
+    let outside = click_at
+        .execute_with_context(&context("run-a"), json!({"x": -1, "y": 3}))
+        .await
+        .unwrap();
+
+    assert!(!clicked.is_error, "{}", clicked.content);
+    assert!(
+        clicked.content.contains("- link \"Docs\""),
+        "{}",
+        clicked.content
+    );
+    let calls = provider.calls("run-a").await;
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| *call == "Input.dispatchMouseEvent")
+            .count(),
+        3
+    );
+    assert!(outside.is_error);
 }

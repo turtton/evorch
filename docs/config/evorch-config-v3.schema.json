@@ -199,6 +199,17 @@
         "max_workers": 3
       }
     },
+    "tools": {
+      "$ref": "#/$defs/ToolsConfig",
+      "default": {
+        "browser": {
+          "coordinate_actions": false,
+          "enabled": true,
+          "executable": null,
+          "max_pages": 8
+        }
+      }
+    },
     "version": {
       "description": "設定スキーマのバージョン。",
       "type": "integer",
@@ -332,6 +343,38 @@
           "const": "cursor-agent"
         }
       ]
+    },
+    "BrowserToolsConfig": {
+      "description": "The agent browser tools (ADR 0034).",
+      "type": "object",
+      "properties": {
+        "coordinate_actions": {
+          "description": "Also registers `browser_click_at`, which clicks viewport coordinates\nread from a screenshot rather than an outline ref.",
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "description": "Registers the tools when a Chromium or Chrome executable is found.",
+          "type": "boolean",
+          "default": true
+        },
+        "executable": {
+          "description": "The browser to launch. Unset uses `CHROME`, then auto-detection.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_pages": {
+          "description": "Agent pages kept open; opening another closes the least recently used.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 8,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "BudgetConfig": {
       "description": "ツール実行と停滞検出の上限。",
@@ -1345,6 +1388,21 @@
           "default": 3,
           "maximum": 3,
           "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolsConfig": {
+      "type": "object",
+      "properties": {
+        "browser": {
+          "$ref": "#/$defs/BrowserToolsConfig",
+          "default": {
+            "coordinate_actions": false,
+            "enabled": true,
+            "executable": null,
+            "max_pages": 8
+          }
         }
       },
       "additionalProperties": false

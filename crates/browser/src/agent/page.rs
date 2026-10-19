@@ -128,6 +128,24 @@ impl PageAgent {
     async fn click_ref(&self, reference: &str) -> Result<(), AgentError> {
         let node = self.node(reference)?;
         let (x, y) = self.center(reference, node).await?;
+        self.click_point(x, y).await
+    }
+
+    /// Clicks viewport coordinates in CSS pixels, for targets an outline
+    /// cannot name.
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<(), AgentError> {
+        self.logged(format!("click at ({x}, {y})"), async {
+            if !(x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0) {
+                return Err(AgentError::Navigation(format!(
+                    "({x}, {y}) is not a point in the viewport"
+                )));
+            }
+            self.click_point(x, y).await
+        })
+        .await
+    }
+
+    async fn click_point(&self, x: f64, y: f64) -> Result<(), AgentError> {
         for (kind, buttons) in [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)] {
             let mut event = json!({"type": kind, "x": x, "y": y, "buttons": buttons});
             if kind != "mouseMoved" {
@@ -448,5 +466,30 @@ mod tests {
             5,
             "draining blocked keeps the history"
         );
+    }
+
+    #[tokio::test]
+    async fn click_at_sends_a_trusted_click_at_the_point() {
+        let target = Arc::new(Recorder::default());
+        let page = PageAgent::new(target.clone());
+
+        page.click_at(40.0, 12.5).await.unwrap();
+        let refused = page.click_at(f64::NAN, 1.0).await;
+
+        let calls = lock(&target.calls).clone();
+        assert_eq!(calls.len(), 3);
+        for (method, params) in &calls {
+            assert_eq!(method, "Input.dispatchMouseEvent");
+            assert_eq!(
+                (params["x"].as_f64(), params["y"].as_f64()),
+                (Some(40.0), Some(12.5))
+            );
+        }
+        assert_eq!(calls[1].1["type"], "mousePressed");
+        assert!(matches!(refused, Err(AgentError::Navigation(_))));
+        assert!(matches!(
+            page.activity().last(),
+            Some(Activity::Action { label, error: Some(_) }) if label == "click at (NaN, 1)"
+        ));
     }
 }

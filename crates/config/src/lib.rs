@@ -61,4 +61,5 @@ pub use types::{
     RoutingConfig, RulesConfig, SandboxConfig, SelfImprovementConfig, SummarizerKind,
     WorkerBindingConfig,
 };
+pub use types::{BrowserToolsConfig, ToolsConfig};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
