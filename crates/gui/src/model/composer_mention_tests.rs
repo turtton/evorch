@@ -180,7 +180,7 @@ fn git_index_honours_gitignore_and_lists_untracked_files() {
     std::fs::write(root.join("src/lib.rs"), "").expect("lib");
     std::fs::write(root.join("build/out.bin"), "").expect("out");
 
-    let index = MentionIndex::build(root, &skill_registry(root, &[("lint", "body")]));
+    let index = MentionIndex::build(root, &[], &skill_registry(root, &[("lint", "body")]));
 
     let values: Vec<_> = index
         .entries
@@ -210,11 +210,90 @@ fn non_git_index_walks_the_tree_skipping_build_output() {
         std::fs::create_dir_all(root.join(path).parent().expect("parent")).expect("dir");
         std::fs::write(root.join(path), "").expect("file");
     }
-    let index = MentionIndex::build(root, &skill_registry(root, &[]));
+    let index = MentionIndex::build(root, &[], &skill_registry(root, &[]));
     let values: Vec<_> = index
         .entries
         .iter()
         .map(|entry| entry.value.as_str())
         .collect();
     assert_eq!(values, ["src", "src/lib.rs"]);
+}
+
+#[test]
+fn allowed_directories_complete_to_absolute_paths() {
+    // Given: a project file plus an allowed directory outside the project.
+    let mut index = index(&["src/main.rs"], &[("share", "skill")]);
+    index.add_allowed_directory(
+        Path::new("/work/shared-lib"),
+        &["src/util.rs".into(), "README.md".into()],
+    );
+
+    // Then: an empty query lists the allowed directory next to the project root entries.
+    assert_eq!(
+        labels(&index, "@"),
+        ["@/work/shared-lib/", "@share", "@src/"]
+    );
+    // Then: its folder name or a file name finds entries, inserted as absolute paths.
+    assert_eq!(
+        labels(&index, "@shared"),
+        [
+            "@/work/shared-lib/",
+            "@/work/shared-lib/src/",
+            "@/work/shared-lib/README.md",
+            "@/work/shared-lib/src/util.rs"
+        ]
+    );
+    let util = &index.complete(&mention_at("@util", 5).expect("mention"))[0];
+    assert_eq!(
+        (util.replacement.as_str(), util.detail.as_str()),
+        ("@/work/shared-lib/src/util.rs ", "allowed file")
+    );
+    // Then: an accepted folder keeps browsing by its absolute path, direct children first.
+    assert_eq!(
+        labels(&index, "@/work/shared-lib/"),
+        [
+            "@/work/shared-lib/src/",
+            "@/work/shared-lib/README.md",
+            "@/work/shared-lib/src/util.rs"
+        ]
+    );
+    // Then: the absolute prefix alone does not make every allowed file match.
+    assert_eq!(labels(&index, "@work"), Vec::<String>::new());
+}
+
+#[test]
+fn build_indexes_allowed_directories_within_one_path_budget() {
+    let project = tempfile::tempdir().expect("project");
+    let shared = tempfile::tempdir().expect("shared");
+    std::fs::create_dir_all(project.path().join("src")).expect("src");
+    std::fs::write(project.path().join("src/lib.rs"), "").expect("lib");
+    std::fs::create_dir_all(shared.path().join("docs")).expect("docs");
+    std::fs::write(shared.path().join("docs/guide.md"), "").expect("guide");
+    std::fs::create_dir_all(shared.path().join("target")).expect("target");
+    std::fs::write(shared.path().join("target/out"), "").expect("out");
+    let base = slash_path(shared.path().to_str().expect("utf-8 temp path"));
+
+    let index = MentionIndex::build(
+        project.path(),
+        &[shared.path().to_owned()],
+        &skill_registry(project.path(), &[]),
+    );
+
+    let values: Vec<_> = index
+        .entries
+        .iter()
+        .map(|entry| (entry.kind, entry.value.clone()))
+        .collect();
+    assert_eq!(
+        values,
+        [
+            (CompletionKind::Dir, "src".to_owned()),
+            (CompletionKind::File, "src/lib.rs".to_owned()),
+            (CompletionKind::Dir, base.clone()),
+            (CompletionKind::Dir, format!("{base}/docs")),
+            (CompletionKind::File, format!("{base}/docs/guide.md")),
+        ]
+    );
+    assert_eq!(index.allowed, [shared.path().to_owned()]);
+    assert!(list_files(shared.path(), 0).is_empty());
 }

@@ -1,12 +1,21 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use workspace_ui::TrustState;
+
 use super::WorkbenchState;
 use crate::model::composer::MentionIndex;
 use crate::model::tasks::AgentRunSource;
 
-pub(super) struct Job {
+/// What an index covers: the project root and its allowed directories.
+#[derive(Clone, PartialEq, Eq)]
+struct Scope {
     root: PathBuf,
+    allowed: Vec<PathBuf>,
+}
+
+pub(super) struct Job {
+    scope: Scope,
     result: mpsc::Receiver<MentionIndex>,
 }
 
@@ -18,29 +27,60 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let active = self.composer.mention_query().is_some();
         let started = active && !self.mention_active;
         self.mention_active = active;
-        let Some(root) = self.active_repo_root() else {
-            return;
-        };
-        let stale = self.composer.mentions.root.as_ref() != Some(&root);
-        if (started || (active && stale))
-            && self.mention_job.as_ref().is_none_or(|job| job.root != root)
-        {
-            let (send, result) = mpsc::sync_channel(1);
-            let worker_root = root.clone();
-            let spawned = std::thread::Builder::new()
-                .name("mention-index".into())
-                .spawn(move || {
-                    let skills = runtime::skill::build_standard_registry(Some(&worker_root));
-                    let _ = send.send(MentionIndex::build(&worker_root, &skills));
-                });
-            match spawned {
-                Ok(_) => self.mention_job = Some(Job { root, result }),
-                Err(error) => tracing::warn!(%error, "failed to start mention indexing"),
+        let scope = if active { self.mention_scope() } else { None };
+        if let Some(scope) = scope {
+            let index = &self.composer.mentions;
+            let stale = index.root.as_ref() != Some(&scope.root) || index.allowed != scope.allowed;
+            if (started || stale)
+                && self
+                    .mention_job
+                    .as_ref()
+                    .is_none_or(|job| job.scope != scope)
+            {
+                self.spawn_mention_index(scope);
             }
         }
         if self.mention_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+    }
+
+    fn spawn_mention_index(&mut self, scope: Scope) {
+        let (send, result) = mpsc::sync_channel(1);
+        let worker_scope = scope.clone();
+        let spawned = std::thread::Builder::new()
+            .name("mention-index".into())
+            .spawn(move || {
+                let Scope { root, allowed } = worker_scope;
+                let skills = runtime::skill::build_standard_registry(Some(&root));
+                let _ = send.send(MentionIndex::build(&root, &allowed, &skills));
+            });
+        match spawned {
+            Ok(_) => self.mention_job = Some(Job { scope, result }),
+            Err(error) => tracing::warn!(%error, "failed to start mention indexing"),
+        }
+    }
+
+    /// The selected project's root plus the approved allowed directories that
+    /// still exist, matching what the runtime declares to the agent.
+    fn mention_scope(&self) -> Option<Scope> {
+        let project_id = self.sidebar.selected_project.as_ref()?;
+        let project = self
+            .sidebar
+            .projects
+            .iter()
+            .find(|project| &project.id == project_id)?;
+        let allowed = project
+            .allowed_directories
+            .iter()
+            .filter(|directory| directory.trust == TrustState::Approved)
+            .map(|directory| directory.path.clone())
+            .filter(|path| path.is_dir())
+            .collect();
+        Some(Scope {
+            root: project.repo_root.clone(),
+            allowed,
+        })
     }
 
     fn poll_mention_index(&mut self) {

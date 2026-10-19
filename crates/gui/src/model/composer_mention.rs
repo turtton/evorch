@@ -1,4 +1,7 @@
 //! `@` mentions: project file/skill index, cursor token detection and skill expansion.
+//!
+//! Files under the project's allowed directories are indexed too and inserted
+//! as absolute paths, the form the agent is told those directories by.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -6,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use runtime::skill::SkillRegistry;
 
-/// Upper bound on indexed paths so huge checkouts keep matching per keystroke cheap.
+/// Upper bound on indexed paths, across the project and its allowed
+/// directories, so huge checkouts keep matching per keystroke cheap.
 pub const MAX_INDEXED_PATHS: usize = 50_000;
 pub const MAX_COMPLETIONS: usize = 8;
 const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules"];
@@ -59,19 +63,41 @@ impl CompletionItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MentionEntry {
     pub kind: CompletionKind,
-    /// Repo-relative path with `/` separators, or the skill name.
+    /// Repo-relative path with `/` separators, an absolute path inside an
+    /// allowed directory, or the skill name.
     pub value: String,
     pub detail: String,
+    /// Lowercased `value`; a query that prefixes it browses by full path.
     key: String,
+    /// Lowercased name for fuzzy matching and depth: `key` itself, or for an
+    /// allowed directory its folder name plus the path inside it, so `@shared`
+    /// finds it without the absolute prefix matching unrelated queries.
+    search: String,
 }
 
 impl MentionEntry {
     fn new(kind: CompletionKind, value: String, detail: String) -> Self {
+        let key = value.to_lowercase();
+        Self {
+            kind,
+            search: key.clone(),
+            key,
+            value,
+            detail,
+        }
+    }
+
+    fn allowed(kind: CompletionKind, value: String, search: &str) -> Self {
+        let detail = match kind {
+            CompletionKind::Dir => "allowed folder",
+            _ => "allowed file",
+        };
         Self {
             kind,
             key: value.to_lowercase(),
+            search: search.to_lowercase(),
             value,
-            detail,
+            detail: detail.into(),
         }
     }
 }
@@ -79,6 +105,8 @@ impl MentionEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MentionIndex {
     pub root: Option<PathBuf>,
+    /// Allowed directories indexed alongside `root`, as given to [`Self::build`].
+    pub allowed: Vec<PathBuf>,
     pub entries: Vec<MentionEntry>,
 }
 
@@ -90,12 +118,67 @@ pub struct MentionQuery<'a> {
 }
 
 impl MentionIndex {
-    pub fn build(root: &Path, skills: &SkillRegistry) -> Self {
+    /// Indexes `root`, then each of `allowed` within the remaining path budget.
+    pub fn build(root: &Path, allowed: &[PathBuf], skills: &SkillRegistry) -> Self {
         let skills = skills
             .available_skills()
             .into_iter()
             .map(|skill| (skill.name, skill.description));
-        Self::from_parts(Some(root.to_owned()), &list_files(root), skills)
+        let files = list_files(root, MAX_INDEXED_PATHS);
+        let mut budget = MAX_INDEXED_PATHS.saturating_sub(files.len());
+        let mut index = Self::from_parts(Some(root.to_owned()), &files, skills);
+        for directory in allowed {
+            let files = list_files(directory, budget);
+            budget = budget.saturating_sub(files.len());
+            index.add_allowed_directory(directory, &files);
+        }
+        index.allowed = allowed.to_vec();
+        index
+    }
+
+    /// Adds `directory` itself, its folders and `files` (relative to it) as
+    /// absolute-path entries. Paths already indexed are not repeated.
+    pub fn add_allowed_directory(&mut self, directory: &Path, files: &[String]) {
+        let Some(base) = directory.to_str().map(slash_path) else {
+            return;
+        };
+        let base = base.trim_end_matches('/');
+        let name = base
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(base);
+        let mut seen: BTreeSet<String> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.kind != CompletionKind::Skill)
+            .map(|entry| entry.value.clone())
+            .collect();
+        let dirs: BTreeSet<&str> = files
+            .iter()
+            .flat_map(|file| {
+                file.match_indices('/')
+                    .map(move |(index, _)| &file[..index])
+            })
+            .collect();
+        let relative = std::iter::once((CompletionKind::Dir, ""))
+            .chain(dirs.into_iter().map(|dir| (CompletionKind::Dir, dir)))
+            .chain(
+                files
+                    .iter()
+                    .map(|file| (CompletionKind::File, file.as_str())),
+            );
+        for (kind, path) in relative {
+            let (value, search) = if path.is_empty() {
+                (base.to_owned(), name.to_owned())
+            } else {
+                (format!("{base}/{path}"), format!("{name}/{path}"))
+            };
+            if seen.insert(value.clone()) {
+                self.entries
+                    .push(MentionEntry::allowed(kind, value, &search));
+            }
+        }
     }
 
     /// Folders are derived from file paths; `skills` are `(name, description)`.
@@ -127,7 +210,11 @@ impl MentionIndex {
                 format!("skill · {description}"),
             )
         }));
-        Self { root, entries }
+        Self {
+            root,
+            allowed: Vec::new(),
+            entries,
+        }
     }
 
     pub fn complete(&self, mention: &MentionQuery<'_>) -> Vec<CompletionItem> {
@@ -135,7 +222,7 @@ impl MentionIndex {
         let mut scored: Vec<_> = self
             .entries
             .iter()
-            .filter_map(|entry| score(&entry.key, &query).map(|score| (score, entry)))
+            .filter_map(|entry| score(entry, &query).map(|score| (score, entry)))
             .collect();
         scored.sort_by(|(left, a), (right, b)| left.cmp(right).then_with(|| a.key.cmp(&b.key)));
         scored
@@ -161,25 +248,27 @@ impl MentionIndex {
 }
 
 /// Lower sorts first: match tier, path depth, then length. An empty query
-/// browses the project root alphabetically.
-fn score(key: &str, query: &str) -> Option<(u8, usize, usize)> {
-    let depth = key.matches('/').count();
+/// browses the project root and the allowed directories alphabetically.
+fn score(entry: &MentionEntry, query: &str) -> Option<(u8, usize, usize)> {
+    let search = entry.search.as_str();
+    let depth = search.matches('/').count();
     if query.is_empty() {
         return (depth == 0).then_some((0, 0, 0));
     }
-    let name = key.rsplit('/').next().unwrap_or(key);
-    let tier = if key.starts_with(query) || name.starts_with(query) {
-        0
-    } else if name.contains(query) {
-        1
-    } else if key.contains(query) {
-        2
-    } else if is_subsequence(key, query) {
-        3
-    } else {
-        return None;
-    };
-    Some((tier, depth, key.len()))
+    let name = search.rsplit('/').next().unwrap_or(search);
+    let tier =
+        if entry.key.starts_with(query) || search.starts_with(query) || name.starts_with(query) {
+            0
+        } else if name.contains(query) {
+            1
+        } else if search.contains(query) {
+            2
+        } else if is_subsequence(search, query) {
+            3
+        } else {
+            return None;
+        };
+    Some((tier, depth, search.len()))
 }
 
 fn is_subsequence(haystack: &str, needle: &str) -> bool {
@@ -279,10 +368,19 @@ fn parse_skill_blocks(rest: &str) -> Option<Vec<&str>> {
     None
 }
 
-fn list_files(root: &Path) -> Vec<String> {
-    let mut files = git_files(root).unwrap_or_else(|| {
+/// `/`-separated form of a native path string.
+fn slash_path(path: &str) -> String {
+    path.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+/// Up to `limit` files under `root`, relative to it with `/` separators.
+fn list_files(root: &Path, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut files = git_files(root, limit).unwrap_or_else(|| {
         let mut files = Vec::new();
-        walk(root, root, &mut files);
+        walk(root, root, limit, &mut files);
         files
     });
     files.sort();
@@ -291,7 +389,7 @@ fn list_files(root: &Path) -> Vec<String> {
 }
 
 /// Tracked plus untracked-but-not-ignored files, honouring `.gitignore`.
-fn git_files(root: &Path) -> Option<Vec<String>> {
+fn git_files(root: &Path, limit: usize) -> Option<Vec<String>> {
     let mut command = std::process::Command::new("git");
     for variable in GIT_LOCAL_ENV {
         command.env_remove(variable);
@@ -318,18 +416,18 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
             .split(|byte| *byte == 0)
             .filter_map(|path| std::str::from_utf8(path).ok())
             .filter(|path| !path.is_empty() && root.join(path).exists())
-            .take(MAX_INDEXED_PATHS)
+            .take(limit)
             .map(str::to_owned)
             .collect(),
     )
 }
 
-fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
+fn walk(root: &Path, dir: &Path, limit: usize, files: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if files.len() >= MAX_INDEXED_PATHS {
+        if files.len() >= limit {
             return;
         }
         let path = entry.path();
@@ -338,13 +436,13 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
         };
         if kind.is_dir() {
             if !SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()) {
-                walk(root, &path, files);
+                walk(root, &path, limit, files);
             }
         } else if let Some(relative) = path
             .strip_prefix(root)
             .ok()
             .and_then(Path::to_str)
-            .map(|path| path.replace(std::path::MAIN_SEPARATOR, "/"))
+            .map(slash_path)
         {
             files.push(relative);
         }

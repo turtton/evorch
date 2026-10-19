@@ -4,9 +4,12 @@ use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::WorkbenchCommand;
 use gui::model::composer::ProviderStatus;
-use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
-fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
+fn workbench(
+    root: &std::path::Path,
+    allowed: &[&std::path::Path],
+) -> HeadlessWorkbench<DemoSource> {
     for (path, content) in [
         ("src/lib.rs", ""),
         (
@@ -23,6 +26,11 @@ fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
     sidebar
         .add_project(project.clone(), "mention-test", root)
         .expect("project");
+    for directory in allowed {
+        sidebar
+            .add_allowed_directory(&project, directory, TrustState::Approved)
+            .expect("allowed directory");
+    }
     sidebar.select_project(&project).expect("select");
     let thread = ThreadId::new("mention-thread");
     sidebar
@@ -45,7 +53,7 @@ fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
 fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
     // Given: a project with a source file and a repo skill, composer focused.
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path());
+    let mut harness = workbench(temp.path(), &[]);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
@@ -96,10 +104,48 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
 }
 
 #[test]
+fn at_mentions_complete_files_in_allowed_directories_as_absolute_paths() {
+    // Given: a project with an approved allowed directory outside its root.
+    let temp = tempfile::tempdir().expect("root");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_root = shared.path().canonicalize().expect("canonical shared");
+    std::fs::create_dir_all(shared_root.join("notes")).expect("notes");
+    std::fs::write(shared_root.join("notes/plan.md"), "").expect("plan");
+    let mut harness = workbench(temp.path(), &[&shared_root]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    let base = shared_root.to_str().expect("utf-8 temp path");
+
+    // When: a mention starts, the index covers the allowed directory too.
+    type_text(&mut harness, "@");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    // Then: the allowed directory is offered beside the project root.
+    for label in ["@src/".to_owned(), format!("@{base}/")] {
+        assert!(harness.has_label(&label), "{label}");
+    }
+
+    // When: a file inside it is searched by name and accepted.
+    type_text(&mut harness, "plan");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    assert!(harness.has_label(&format!("@{base}/notes/plan.md")));
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: the draft holds the absolute path the agent was told about.
+    assert_eq!(
+        harness.state().composer().input,
+        format!("@{base}/notes/plan.md ")
+    );
+}
+
+#[test]
 #[ignore = "writes native offscreen mention completion evidence"]
 fn capture_mention_completion() {
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path());
+    let mut harness = workbench(temp.path(), &[]);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
