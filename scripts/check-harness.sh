@@ -27,7 +27,7 @@ run providers cargo test -p providers --lib
 run tools cargo test -p tools -p sandbox
 run storage cargo test -p storage --test user_questions --test migration
 run gui cargo test -p gui --test user_questions_headless --test goal_restore_authority \
-    --test goal_restore_binding --test runtime_wiring --lib
+    --test runtime_wiring --lib
 if [[ "$mode" == full ]]; then
     run workspace cargo test --workspace --no-fail-fast
     run lint cargo clippy --workspace --all-targets -- -D warnings
