@@ -4,9 +4,12 @@ use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::WorkbenchCommand;
 use gui::model::composer::ProviderStatus;
-use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
-fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
+fn workbench(
+    root: &std::path::Path,
+    allowed: &[&std::path::Path],
+) -> HeadlessWorkbench<DemoSource> {
     for (path, content) in [
         ("src/lib.rs", ""),
         (
@@ -23,6 +26,11 @@ fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
     sidebar
         .add_project(project.clone(), "mention-test", root)
         .expect("project");
+    for directory in allowed {
+        sidebar
+            .add_allowed_directory(&project, directory, TrustState::Approved)
+            .expect("allowed directory");
+    }
     sidebar.select_project(&project).expect("select");
     let thread = ThreadId::new("mention-thread");
     sidebar
@@ -41,11 +49,28 @@ fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
     harness.run();
 }
 
+/// The `/`-separated absolute form completions insert for a directory.
+fn slash_form(path: &std::path::Path) -> String {
+    path.to_str()
+        .expect("utf-8 temp path")
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn completion_labels(harness: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
+    harness
+        .state()
+        .composer()
+        .completion_items()
+        .into_iter()
+        .map(|item| item.label)
+        .collect()
+}
+
 #[test]
 fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
     // Given: a project with a source file and a repo skill, composer focused.
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path());
+    let mut harness = workbench(temp.path(), &[]);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
@@ -96,10 +121,99 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
 }
 
 #[test]
+fn at_mentions_complete_files_in_allowed_directories_as_absolute_paths() {
+    // Given: a project with an approved allowed directory outside its root.
+    let temp = tempfile::tempdir().expect("root");
+    let shared = tempfile::tempdir().expect("shared");
+    let shared_root = shared.path().canonicalize().expect("canonical shared");
+    std::fs::create_dir_all(shared_root.join("notes")).expect("notes");
+    std::fs::write(shared_root.join("notes/plan.md"), "").expect("plan");
+    let mut harness = workbench(temp.path(), &[&shared_root]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    let base = slash_form(&shared_root);
+
+    // When: a mention starts, the index covers the allowed directory too.
+    type_text(&mut harness, "@");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    // Then: the allowed directory is offered beside the project root.
+    for label in ["@src/".to_owned(), format!("@{base}/")] {
+        assert!(harness.has_label(&label), "{label}");
+    }
+
+    // When: a file inside it is searched by name and accepted.
+    type_text(&mut harness, "plan");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    assert!(harness.has_label(&format!("@{base}/notes/plan.md")));
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: the draft holds the absolute path the agent was told about.
+    assert_eq!(
+        harness.state().composer().input,
+        format!("@{base}/notes/plan.md ")
+    );
+}
+
+#[test]
+fn revoked_or_removed_allowed_directories_stop_completing_at_once() {
+    // Given: two approved allowed directories completing during an open mention.
+    let temp = tempfile::tempdir().expect("root");
+    let shared = tempfile::tempdir().expect("shared");
+    let allowed_dir = |name: &str, file: &str| {
+        let root = shared.path().join(name);
+        std::fs::create_dir_all(&root).expect("allowed directory");
+        std::fs::write(root.join(file), "").expect("file");
+        root.canonicalize().expect("canonical")
+    };
+    let kept = allowed_dir("kept", "keep.md");
+    let revoked = allowed_dir("revoked", "drop.md");
+    let mut harness = workbench(temp.path(), &[&kept, &revoked]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    type_text(&mut harness, "@.md");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    let keep = format!("@{}/keep.md", slash_form(&kept));
+    let dropped = format!("@{}/drop.md", slash_form(&revoked));
+    for label in [&keep, &dropped] {
+        assert!(harness.has_label(label), "{label}");
+    }
+    let project = ProjectId::new("mention-test");
+
+    // When: one directory's approval is withdrawn.
+    harness
+        .state_mut()
+        .set_allowed_trust(&project, &revoked, TrustState::Unapproved)
+        .expect("revoke");
+    harness.step();
+    // Then: the very next frame no longer offers it, without waiting for a rebuild.
+    assert!(!completion_labels(&harness).contains(&dropped));
+    assert!(completion_labels(&harness).contains(&keep));
+
+    // When: the other directory is removed from the project.
+    harness
+        .state_mut()
+        .remove_allowed_directory(&project, &kept)
+        .expect("remove");
+    harness.step();
+    // Then: it stops completing as well.
+    assert!(!completion_labels(&harness).contains(&keep));
+    harness.run();
+    for label in [&keep, &dropped] {
+        assert!(!harness.has_label(label), "{label}");
+    }
+}
+
+#[test]
 #[ignore = "writes native offscreen mention completion evidence"]
 fn capture_mention_completion() {
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path());
+    let mut harness = workbench(temp.path(), &[]);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
