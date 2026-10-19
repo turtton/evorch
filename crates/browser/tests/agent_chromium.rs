@@ -111,6 +111,7 @@ async fn agent_reads_and_operates_a_page_by_ref_under_the_request_policy() {
             port: 0,
         }),
         max_pages: 2,
+        max_tabs: 4,
     });
     let page = browser.page("run-1").await.expect("launch Chromium");
 
@@ -173,6 +174,7 @@ window.attempts = Promise.all([
             port,
         }),
         max_pages: 1,
+        max_tabs: 4,
     });
     let page = browser.page("run-1").await.expect("launch Chromium");
 
@@ -209,6 +211,7 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
             port: 0,
         }),
         max_pages: 2,
+        max_tabs: 4,
     });
     let mut pages = browser.pages();
     assert!(pages.borrow_and_update().is_empty());
@@ -225,12 +228,21 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
         .call("Browser.getBrowserCommandLine", json!({}))
         .await
         .unwrap();
+    let viewport = page
+        .target()
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": "[innerWidth, navigator.maxTouchPoints]", "returnByValue": true}),
+        )
+        .await
+        .unwrap();
     let missing = browser.screencast("run-2", Arc::new(|| ())).await;
     assert!(browser.close("run-1").await);
     pages.changed().await.unwrap();
 
     // Then: observers saw the page open and close, its frames and actions,
-    // and Chromium received the guard switches.
+    // the page kept the window's viewport, and Chromium received the guard
+    // switches.
     assert_eq!(opened, ["run-1"]);
     assert!(pages.borrow().is_empty());
     assert!(frame.width() > 0 && frame.height() > 0);
@@ -248,6 +260,11 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
         "{activity:?}"
     );
     assert!(matches!(missing, Err(AgentError::NoPage(_))));
+    assert_eq!(
+        viewport["result"]["value"],
+        json!([1280, 0]),
+        "the window's own width, without emulated touch"
+    );
     let switches: Vec<&str> = switches["arguments"]
         .as_array()
         .unwrap()
@@ -257,7 +274,6 @@ async fn observers_follow_pages_through_their_screencast_and_activity() {
     for switch in [
         "--proxy-bypass-list=<-loopback>",
         "--disable-quic",
-        "--block-new-web-contents",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     ] {
         assert!(switches.contains(&switch), "{switch}: {switches:?}");
@@ -299,6 +315,7 @@ async fn click_at_hits_what_is_drawn_at_the_viewport_point() {
             port: 0,
         }),
         max_pages: 1,
+        max_tabs: 4,
     });
     let page = browser.page("run-1").await.expect("launch Chromium");
     page.navigate(&url).await.unwrap();
@@ -348,6 +365,7 @@ fn controls_browser() -> AgentBrowser {
             port: 0,
         }),
         max_pages: 1,
+        max_tabs: 4,
     })
 }
 
@@ -549,4 +567,189 @@ window.received = new Promise(resolve => input.addEventListener("change", async 
         "{received}"
     );
     assert!(browser.close("run-1").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn popups_open_as_tabs_of_their_run_under_the_same_guard() {
+    // Given: a refused loopback port, and a page that opens tabs to it with
+    // window.open and a target=_blank link, and to an allowed page. Pages of
+    // the fixture other than the first report their load with a request to
+    // the refused port.
+    let (port, reached) = counting_listener().await;
+    let refused = format!("http://127.0.0.1:{port}");
+    let url = serve(format!(
+        r#"<!doctype html><html><body>
+<h1 id="where"></h1>
+<script>
+document.getElementById("where").textContent = "At " + location.pathname;
+if (location.pathname !== "/") fetch("{refused}/loaded" + location.pathname).catch(() => {{}});
+</script>
+<button onclick="window.open('{refused}/scripted')">Open refused</button>
+<a href="{refused}/linked" target="_blank">Refused link</a>
+<a href="/second" target="_blank">Second</a>
+<button onclick="window.open('/third')">Open third</button>
+</body></html>"#
+    ))
+    .await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port,
+        }),
+        max_pages: 8,
+        max_tabs: 4,
+    });
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.unwrap();
+    let outline = page.snapshot().await.unwrap().text;
+
+    // When: the agent opens each tab, then one more than its run may hold,
+    // and works in the new tabs.
+    let mut news = Vec::new();
+    for name in [
+        "- button \"Open refused\"",
+        "- link \"Refused link\"",
+        "- link \"Second\"",
+        "- button \"Open third\"",
+    ] {
+        page.click(&reference(&outline, name)).await.unwrap();
+        news.push(browser.tab_news("run-1"));
+    }
+    let listed = browser.tabs("run-1").await.unwrap();
+    let mut refusals = Vec::new();
+    for id in ["t2", "t3"] {
+        let tab = browser.switch_tab("run-1", id).await.unwrap();
+        let mut changes = tab.activity_changes();
+        changes
+            .wait_for(|_| {
+                tab.activity()
+                    .iter()
+                    .any(|entry| matches!(entry, Activity::Blocked(request) if request.contains(&refused)))
+            })
+            .await
+            .unwrap();
+        refusals.push(tab.take_blocked());
+    }
+    let second = browser.switch_tab("run-1", "t4").await.unwrap();
+    let mut changes = second.activity_changes();
+    changes
+        .wait_for(|_| {
+            second
+                .activity()
+                .iter()
+                .any(|entry| matches!(entry, Activity::Blocked(request) if request.contains("/loaded/second")))
+        })
+        .await
+        .unwrap();
+    let second_outline = second.snapshot().await.unwrap().text;
+    browser.close_tab("run-1", "t4").await.unwrap();
+    let after_close = browser.tabs("run-1").await.unwrap();
+    let missing = browser.switch_tab("run-1", "t5").await.err();
+
+    // Then: every tab joined the run, the refused destination was never
+    // reached from either, the extra popup was closed, and closing the
+    // active tab returned to its opener.
+    let first_news: Vec<&str> = news
+        .iter()
+        .map(|entries| entries.first().map(String::as_str).unwrap_or_default())
+        .collect();
+    assert!(first_news[0].starts_with("t2 opened from t1"), "{news:?}");
+    assert!(first_news[1].starts_with("t3 opened from t1"), "{news:?}");
+    assert!(first_news[2].starts_with("t4 opened from t1"), "{news:?}");
+    assert!(first_news[3].contains("already has 4 tabs"), "{news:?}");
+    let summary = |tabs: &[browser::agent::TabInfo]| -> Vec<String> {
+        tabs.iter()
+            .map(|tab| format!("{}{}", tab.id, if tab.active { "*" } else { "" }))
+            .collect()
+    };
+    assert_eq!(summary(&listed), ["t1*", "t2", "t3", "t4"], "{listed:?}");
+    assert_eq!(listed[1].opener.as_deref(), Some("t1"));
+    assert_eq!(listed[0].url, url);
+    for blocked in &refusals {
+        assert!(
+            blocked.iter().any(|entry| entry.contains(&refused)),
+            "{refusals:?}"
+        );
+    }
+    assert_eq!(reached.load(Ordering::SeqCst), 0);
+    assert!(second_outline.contains("At /second"), "{second_outline}");
+    assert_eq!(
+        summary(&after_close),
+        ["t1*", "t2", "t3"],
+        "{after_close:?}"
+    );
+    assert!(
+        matches!(&missing, Some(AgentError::Refused(reason)) if reason.contains("open tabs: t1, t2, t3")),
+        "{missing:?}"
+    );
+    assert!(browser.close("run-1").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn the_screencast_follows_the_runs_active_tab() {
+    // Given: a run's page under a screencast, with a link that opens a tab.
+    let url = serve(
+        r#"<!doctype html><html><body><a href="/second" target="_blank">Second</a></body></html>"#
+            .to_owned(),
+    )
+    .await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 2,
+        max_tabs: 2,
+    });
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.unwrap();
+    let mut screencast = browser.screencast("run-1", Arc::new(|| ())).await.unwrap();
+    let first = screencast.tab();
+    let outline = page.snapshot().await.unwrap().text;
+
+    // When: the agent opens the tab, moves to it and paints it blue, then
+    // closes it.
+    page.click(&reference(&outline, "- link \"Second\""))
+        .await
+        .unwrap();
+    let second = browser.switch_tab("run-1", "t2").await.unwrap();
+    let followed = screencast.next_tab().await;
+    let observed_second = Arc::ptr_eq(&screencast.agent(), &second);
+    second.navigate(&format!("{url}blue")).await.unwrap();
+    second
+        .target()
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": "document.documentElement.style.background = 'rgb(0, 0, 255)'"}),
+        )
+        .await
+        .unwrap();
+    let blue = loop {
+        let frame = screencast.next_frame().await.expect("frames of t2");
+        let [r, g, b, _] = frame.get_pixel(frame.width() / 2, frame.height() / 2).0;
+        if r < 40 && g < 40 && b > 200 {
+            break true;
+        }
+    };
+    browser.close_tab("run-1", "t2").await.unwrap();
+    let returned = screencast.next_tab().await;
+    let observed_first = Arc::ptr_eq(&screencast.agent(), &page);
+    assert!(browser.close("run-1").await);
+    let after_close = screencast.next_tab().await;
+
+    // Then: the screencast showed t1, then t2's frames, then t1 again, and
+    // ended with the run.
+    assert_eq!(first, "t1");
+    assert_eq!(followed.as_deref(), Some("t2"));
+    assert!(observed_second);
+    assert!(blue);
+    assert_eq!(returned.as_deref(), Some("t1"));
+    assert!(observed_first);
+    assert_eq!(after_close, None);
+    while screencast.next_frame().await.is_some() {}
+    assert!(screencast.ended());
 }

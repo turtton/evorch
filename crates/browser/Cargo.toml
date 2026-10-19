@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+async-tungstenite = { version = "0.32", default-features = false, features = ["tokio-runtime"] }
 base64.workspace = true
 bytes.workspace = true
 chromiumoxide = { version = "0.9", default-features = false }

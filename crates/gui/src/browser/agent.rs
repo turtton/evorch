@@ -14,6 +14,8 @@ pub trait AgentView {
     /// Screencasts `key`'s page from now on, or nothing with `None`.
     fn observe(&mut self, key: Option<&str>, ctx: &egui::Context);
     fn poll_frame(&mut self) -> Option<egui::ColorImage>;
+    /// The run's tab the screencast shows (its active tab).
+    fn tab(&self) -> Option<String>;
     fn activity(&self) -> Vec<Activity>;
     fn error(&self) -> Option<String>;
 }
@@ -103,6 +105,10 @@ impl AgentView for LiveAgentView {
         ))
     }
 
+    fn tab(&self) -> Option<String> {
+        self.stream.as_ref().map(Screencast::tab)
+    }
+
     fn activity(&self) -> Vec<Activity> {
         self.stream
             .as_ref()
@@ -183,6 +189,9 @@ impl<V: AgentView> AgentBrowserPane<V> {
                         }
                     }
                 });
+            if let Some(tab) = self.view.tab() {
+                ui.label(muted(format!("Showing the active tab {tab}")));
+            }
             if let Some(error) = self.view.error() {
                 ui.colored_label(palette().ERROR_FG, error);
             }
@@ -294,6 +303,7 @@ pub struct FakeAgentView {
     pub frames: std::collections::VecDeque<egui::ColorImage>,
     pub activity: Vec<Activity>,
     pub failure: Option<String>,
+    pub tab: Option<String>,
     pub observed: Vec<Option<String>>,
 }
 
@@ -308,6 +318,10 @@ impl AgentView for FakeAgentView {
 
     fn poll_frame(&mut self) -> Option<egui::ColorImage> {
         self.frames.pop_front()
+    }
+
+    fn tab(&self) -> Option<String> {
+        self.tab.clone()
     }
 
     fn activity(&self) -> Vec<Activity> {

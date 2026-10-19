@@ -37,6 +37,7 @@ runtime registers `browser_navigate`, `browser_navigate_back`,
 `browser_navigate_forward`, `browser_snapshot`, `browser_click`,
 `browser_hover`, `browser_type`, `browser_select_option`, `browser_upload_file`,
 `browser_press_key`, `browser_scroll`, `browser_handle_dialog`,
+`browser_tabs`, `browser_switch_tab`, `browser_close_tab`,
 `browser_screenshot` and `browser_close` (ADR 0034). WebResearcher and the conversation root Worker may
 use them; `sandbox.web_tools_enabled` is their global switch, as for the other
 Web tools.
@@ -50,7 +51,8 @@ agents can do.
 [tools.browser]
 enabled = true                    # false keeps the tools unregistered
 executable = "/usr/bin/chromium"  # default: CHROME, then auto-detection
-max_pages = 8                     # more closes the least recently used page
+max_pages = 8                     # tabs across all runs; more closes the least recently used run
+max_tabs = 4                      # tabs per run; a popup beyond this is closed
 coordinate_actions = false        # true also registers browser_click_at
 ```
 
@@ -59,8 +61,20 @@ visible viewport, as `browser_screenshot` shows it. It is for targets the
 outline cannot name, such as a canvas; refs stay the default.
 
 - One headless Chromium is launched on first use, with a temporary profile.
-  Each run gets its own page; at most `max_pages` stay open and a run's page
-  closes when the run ends or on `browser_close`.
+  Each run gets its own tab; at most `max_pages` tabs stay open across all
+  runs, and opening one more closes the least recently used other run with
+  all its tabs. A run's tabs close when the run ends or on `browser_close`.
+- Links with `target=_blank` and `window.open` open a new tab in the run of
+  the page that opened it, `noopener` ones included. The result of the action
+  that opened it says so under "Tabs:"; the opener stays the active tab until
+  `browser_switch_tab`, and every other tool acts on the active tab.
+  `browser_tabs` lists the run's tabs (`t1`, `t2`, ...; ids are not reused)
+  with their URL, title and opener. `browser_close_tab` closes one; the tab
+  that opened it, or else the newest one left, becomes active.
+- A run holds at most `min(max_tabs, max_pages)` tabs. A popup beyond that is
+  closed as soon as it is caught (until then its requests pass the same
+  checks as any other tab), and the next result says so. A page that
+  no run opened, such as one a page could create some other way, is closed.
 - Pages are read as an accessibility outline. Elements carry `[ref=eN]`, and
   the action tools accept only refs from the latest outline. Actions return
   the updated outline; `browser_screenshot` returns a PNG image result.
@@ -101,16 +115,25 @@ outline cannot name, such as a canvas; refs stay the default.
 - Requests the CDP Fetch domain can pause (navigations, redirects,
   subresources and frames) are also checked there first, and refused ones are
   listed in the next result.
-- Popups are refused (`--block-new-web-contents`), QUIC is disabled and WebRTC
-  is limited to proxied UDP.
+- New tabs are caught before they run anything. A second CDP connection asks
+  the browser to auto-attach to every new page and hold it
+  (`Target.setAutoAttach` with `waitForDebuggerOnStart` and `flatten`). Fetch
+  interception is enabled on the held tab, and only then does it resume, so a
+  popup's first request is checked like any other, and it goes through the
+  same proxy.
+- QUIC is disabled and WebRTC is limited to proxied UDP. TLS certificate
+  errors fail the load. Pages see the window's own size (1280 wide): evorch
+  does not emulate a viewport.
 
 ### Watching the agent browser
 
 In GUI builds with the `browser` feature, **Agent browser** opens a read-only
 window onto the runtime's agent pages. Every executor of the process, including
 the ones runs build for their own sandbox, shares one agent browser, so the
-window lists every run that has an open page. Only the selected run's page is
-screencast, and only while the window is open; closing the window stops it.
+window lists every run that has an open page. Only the selected run's active
+tab is screencast, and only while the window is open; closing the window stops
+it. When the run switches or closes tabs, the window follows its active tab and
+names it above the frame.
 The latest actions (every browser tool call, with failures), refused requests
 and closed dialogs are laid over the frame. Typed text is
 shown up to 40 characters. The window never sends input to the page.

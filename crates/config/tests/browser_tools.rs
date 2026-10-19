@@ -15,11 +15,11 @@ fn browser_tool_settings_come_only_from_the_user_layer() {
     let root = tempfile::tempdir().unwrap();
     put(
         &root.path().join("user/config.toml"),
-        "[tools.browser]\nexecutable = '/trusted/chromium'\nmax_pages = 3\n",
+        "[tools.browser]\nexecutable = '/trusted/chromium'\nmax_pages = 3\nmax_tabs = 2\n",
     );
     put(
         &root.path().join("project/.evorch/config.toml"),
-        "[tools.browser]\nexecutable = '/untrusted/chromium'\ncoordinate_actions = true\nenabled = false\n",
+        "[tools.browser]\nexecutable = '/untrusted/chromium'\ncoordinate_actions = true\nenabled = false\nmax_tabs = 6\n",
     );
     let opts = LoadOptions {
         user_config_dir: Some(root.path().join("user")),
@@ -40,6 +40,7 @@ fn browser_tool_settings_come_only_from_the_user_layer() {
     let expected = BrowserToolsConfig {
         executable: Some("/trusted/chromium".into()),
         max_pages: 3.try_into().unwrap(),
+        max_tabs: 2.try_into().unwrap(),
         ..Default::default()
     };
     for load in [Config::load, Config::load_strict] {

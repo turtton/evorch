@@ -22,8 +22,12 @@ pub struct BrowserToolsConfig {
     pub enabled: bool,
     /// The browser to launch. Unset uses `CHROME`, then auto-detection.
     pub executable: Option<PathBuf>,
-    /// Agent pages kept open; opening another closes the least recently used.
+    /// Agent browser tabs kept open across all runs. Going over closes every
+    /// tab of the least recently used other run.
     pub max_pages: NonZeroU32,
+    /// Tabs one run may keep open, counting popups its pages open; capped by
+    /// `max_pages`. Popups beyond it are closed as soon as they open.
+    pub max_tabs: NonZeroU32,
     /// Also registers `browser_click_at`, which clicks viewport coordinates
     /// read from a screenshot rather than an outline ref.
     pub coordinate_actions: bool,
@@ -35,6 +39,7 @@ impl Default for BrowserToolsConfig {
             enabled: true,
             executable: None,
             max_pages: NonZeroU32::new(8).expect("8 is non-zero"),
+            max_tabs: NonZeroU32::new(4).expect("4 is non-zero"),
             coordinate_actions: false,
         }
     }
@@ -65,5 +70,6 @@ mod tests {
             }
         );
         assert!(toml::from_str::<Config>("[tools.browser]\nmax_pages = 0").is_err());
+        assert!(toml::from_str::<Config>("[tools.browser]\nmax_tabs = 0").is_err());
     }
 }

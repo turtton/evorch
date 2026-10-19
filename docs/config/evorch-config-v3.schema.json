@@ -206,7 +206,8 @@
           "coordinate_actions": false,
           "enabled": true,
           "executable": null,
-          "max_pages": 8
+          "max_pages": 8,
+          "max_tabs": 4
         }
       }
     },
@@ -367,10 +368,17 @@
           "default": null
         },
         "max_pages": {
-          "description": "Agent pages kept open; opening another closes the least recently used.",
+          "description": "Agent browser tabs kept open across all runs. Going over closes every\ntab of the least recently used other run.",
           "type": "integer",
           "format": "uint32",
           "default": 8,
+          "minimum": 1
+        },
+        "max_tabs": {
+          "description": "Tabs one run may keep open, counting popups its pages open; capped by\n`max_pages`. Popups beyond it are closed as soon as they open.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 4,
           "minimum": 1
         }
       },
@@ -1401,7 +1409,8 @@
             "coordinate_actions": false,
             "enabled": true,
             "executable": null,
-            "max_pages": 8
+            "max_pages": 8,
+            "max_tabs": 4
           }
         }
       },

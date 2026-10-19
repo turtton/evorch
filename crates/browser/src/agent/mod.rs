@@ -3,10 +3,12 @@
 //! CEF's in-process DevTools.
 
 mod chromium;
+mod connection;
 mod keys;
 mod page;
 mod proxy;
 mod snapshot;
+mod tabs;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -60,7 +62,9 @@ pub trait RequestPolicy: Send + Sync {
     async fn resolve(&self, host: &str, port: u16, tls: bool) -> Result<Vec<SocketAddr>, String>;
 }
 
-/// Hands out one page per key (a run) and releases it when the run ends.
+/// Hands out pages per key (a run) and releases them when the run ends. A
+/// run starts with one tab; tabs its pages open join it, and the tools act
+/// on its active tab.
 #[async_trait::async_trait]
 pub trait PageProvider: Send + Sync {
     async fn page(&self, key: &str) -> Result<Arc<PageAgent>, AgentError>;
@@ -73,6 +77,37 @@ pub trait PageProvider: Send + Sync {
 
     /// Closes the key's page without waiting, for synchronous teardown paths.
     fn release(&self, key: &str);
+
+    /// The key's open tabs, in the order they opened.
+    async fn tabs(&self, _key: &str) -> Result<Vec<TabInfo>, AgentError> {
+        Ok(Vec::new())
+    }
+
+    /// Makes tab `id` (such as `t2`) the key's active tab and returns it.
+    async fn switch_tab(&self, _key: &str, _id: &str) -> Result<Arc<PageAgent>, AgentError> {
+        Err(AgentError::Refused("this browser has a single tab".into()))
+    }
+
+    /// Closes tab `id`; closing the last one closes the key's page.
+    async fn close_tab(&self, _key: &str, _id: &str) -> Result<(), AgentError> {
+        Err(AgentError::Refused("this browser has a single tab".into()))
+    }
+
+    /// Tabs the key's pages opened or closed since the last call.
+    fn tab_news(&self, _key: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// One tab of a run, as [`PageProvider::tabs`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabInfo {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub active: bool,
+    /// The tab whose page opened this one.
+    pub opener: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
