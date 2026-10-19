@@ -151,6 +151,9 @@ impl ToolExecutor {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<(), String> {
+        if name == "browser_upload_file" {
+            return self.enforce_upload_boundary(args);
+        }
         let keys = file_path_keys(name);
         if keys.is_empty() {
             return Ok(());
@@ -244,6 +247,42 @@ impl ToolExecutor {
                 Err(format!("file access escalation denied: {reason}"))
             }
         }
+    }
+}
+
+impl ToolExecutor {
+    /// Uploads hand host files to Chromium, which sends them where the page
+    /// asks. They are limited to what the run's sandbox may read, with no
+    /// reviewed escape and no upload at all from an executor without a boundary.
+    pub(super) fn enforce_upload_boundary(&self, args: &serde_json::Value) -> Result<(), String> {
+        let Some(regions) = self
+            .file_boundary
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(SandboxBoundary::regions)
+        else {
+            return Err(
+                "browser_upload_file needs the run's sandbox boundary, and this run has none"
+                    .into(),
+            );
+        };
+        let paths = args
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str);
+        for path in paths {
+            let location = canonical_location(Path::new(path));
+            if place(&regions, location.as_deref()).is_none() {
+                return Err(format!(
+                    "{} is outside what this run's sandbox may read (the project root and this thread's $TMPDIR, plus read-only system, tool output and Cargo/rustup cache paths), so it cannot be uploaded",
+                    location.as_deref().unwrap_or(Path::new(path)).display()
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

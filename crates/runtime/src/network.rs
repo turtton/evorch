@@ -64,6 +64,14 @@ pub(crate) fn reviews_url(tool: &str) -> bool {
     matches!(tool, "web_fetch" | "browser_navigate")
 }
 
+/// Hands local files to a web page; every call is reviewed.
+pub(crate) const UPLOAD_TOOL: &str = "browser_upload_file";
+
+/// Tools reviewed on every call before they run.
+pub(crate) fn reviews_each_call(tool: &str) -> bool {
+    reviews_url(tool) || tool == UPLOAD_TOOL
+}
+
 /// Authorization outcome for one network-capable tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkAccessDecision {
@@ -102,6 +110,9 @@ pub fn judge_web_network_access(
         },
         sandbox::PolicyDecision::AutoAllow if reviews_url(tool) => NetworkAccessDecision::Ask {
             reason: format!("{tool} URL requires review"),
+        },
+        sandbox::PolicyDecision::AutoAllow if tool == UPLOAD_TOOL => NetworkAccessDecision::Ask {
+            reason: format!("each {tool} call requires review"),
         },
         sandbox::PolicyDecision::AutoAllow => NetworkAccessDecision::Allow,
     }
@@ -160,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn only_url_loading_web_tools_require_call_review() {
+    fn only_url_loading_and_upload_tools_require_call_review() {
         assert_eq!(agents::BROWSER_TOOLS, tools::BROWSER_TOOL_NAMES);
         let role = Role::WebResearcher.capabilities();
         for tool in ["web_search", "web_fetch"]
@@ -174,7 +185,7 @@ mod tests {
                 PolicyDecision::AutoAllow,
                 true,
             );
-            if matches!(tool, "web_fetch" | "browser_navigate") {
+            if matches!(tool, "web_fetch" | "browser_navigate" | UPLOAD_TOOL) {
                 assert!(
                     matches!(decision, NetworkAccessDecision::Ask { .. }),
                     "{tool}"

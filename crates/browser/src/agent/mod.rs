@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use chromium::{AgentBrowser, LaunchOptions, Screencast};
-pub use page::{Activity, DialogAnswer, DialogKind, PageAgent};
+pub use page::{Activity, DialogAnswer, DialogKind, PageAgent, UploadTarget};
 pub use snapshot::{MAX_SNAPSHOT_LINES, Snapshot, render};
 
 /// One page reachable over CDP.
@@ -64,6 +64,9 @@ pub trait RequestPolicy: Send + Sync {
 #[async_trait::async_trait]
 pub trait PageProvider: Send + Sync {
     async fn page(&self, key: &str) -> Result<Arc<PageAgent>, AgentError>;
+
+    /// The key's page if one is open; never launches or opens one.
+    async fn open_page(&self, key: &str) -> Option<Arc<PageAgent>>;
 
     /// Closes the key's page; returns whether one was open.
     async fn close(&self, key: &str) -> bool;

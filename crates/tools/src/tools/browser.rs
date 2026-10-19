@@ -15,7 +15,7 @@ use crate::tool::{Permissions, Tool};
 
 /// Every browser tool name, including opt-in ones that are registered only
 /// when configured.
-pub const BROWSER_TOOL_NAMES: [&str; 14] = [
+pub const BROWSER_TOOL_NAMES: [&str; 15] = [
     "browser_navigate",
     "browser_navigate_back",
     "browser_navigate_forward",
@@ -25,6 +25,7 @@ pub const BROWSER_TOOL_NAMES: [&str; 14] = [
     "browser_hover",
     "browser_type",
     "browser_select_option",
+    "browser_upload_file",
     "browser_press_key",
     "browser_scroll",
     "browser_handle_dialog",
@@ -78,6 +79,7 @@ enum Kind {
     Hover,
     Type,
     SelectOption,
+    UploadFile,
     PressKey,
     Scroll,
     HandleDialog,
@@ -85,7 +87,7 @@ enum Kind {
     Close,
 }
 
-const KINDS: [Kind; 14] = [
+const KINDS: [Kind; 15] = [
     Kind::Navigate,
     Kind::Back,
     Kind::Forward,
@@ -95,6 +97,7 @@ const KINDS: [Kind; 14] = [
     Kind::Hover,
     Kind::Type,
     Kind::SelectOption,
+    Kind::UploadFile,
     Kind::PressKey,
     Kind::Scroll,
     Kind::HandleDialog,
@@ -119,6 +122,7 @@ impl Kind {
             Self::Hover => "browser_hover",
             Self::Type => "browser_type",
             Self::SelectOption => "browser_select_option",
+            Self::UploadFile => "browser_upload_file",
             Self::PressKey => "browser_press_key",
             Self::Scroll => "browser_scroll",
             Self::HandleDialog => "browser_handle_dialog",
@@ -160,6 +164,7 @@ struct Args {
     x: Option<f64>,
     y: Option<f64>,
     values: Option<Vec<String>>,
+    paths: Option<Vec<String>>,
     accept: Option<bool>,
     prompt_text: Option<String>,
 }
@@ -206,6 +211,19 @@ impl BrowserTool {
                     .ok_or_else(|| AgentError::Refused("missing values".into()))?;
                 page.select_option(&required(args.reference, "ref")?, &values)
                     .await?;
+            }
+            Kind::UploadFile => {
+                let reference = required(args.reference, "ref")?;
+                let paths = args
+                    .paths
+                    .filter(|paths| !paths.is_empty())
+                    .ok_or_else(|| AgentError::Refused("missing paths".into()))?;
+                let files = tokio::task::spawn_blocking(move || uploadable(paths))
+                    .await
+                    .map_err(|error| {
+                        AgentError::Refused(format!("upload check failed: {error}"))
+                    })??;
+                page.upload_files(&reference, &files).await?;
             }
             Kind::PressKey => page.press(&required(args.key, "key")?).await?,
             Kind::Scroll => {
@@ -275,6 +293,96 @@ fn required(value: Option<String>, name: &str) -> Result<String, AgentError> {
         .ok_or_else(|| AgentError::Navigation(format!("missing {name}")))
 }
 
+/// Files larger than this are refused, which bounds the credential scan.
+const MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Resolves upload paths for Chromium. The executor has already placed each
+/// resolved path inside the run's sandbox boundary; Chromium gets the resolved
+/// path rather than following links itself. Files the secret guard, which
+/// redacts tool output, would flag as credentials are refused.
+fn uploadable(paths: Vec<String>) -> Result<Vec<String>, AgentError> {
+    let redactor = secret_guard::SecretRedactor::from_env();
+    paths
+        .into_iter()
+        .map(|path| {
+            let refuse = |reason: String| AgentError::Refused(format!("{path}: {reason}"));
+            let resolved =
+                std::fs::canonicalize(&path).map_err(|error| refuse(error.to_string()))?;
+            let metadata =
+                std::fs::metadata(&resolved).map_err(|error| refuse(error.to_string()))?;
+            if !metadata.is_file() {
+                return Err(refuse("not a regular file".into()));
+            }
+            if metadata.len() > MAX_UPLOAD_BYTES {
+                return Err(refuse(format!(
+                    "{} bytes is over the {MAX_UPLOAD_BYTES}-byte upload limit",
+                    metadata.len()
+                )));
+            }
+            let content = std::fs::read(&resolved).map_err(|error| refuse(error.to_string()))?;
+            if let Some(rule) = redactor.detect(&String::from_utf8_lossy(&content)) {
+                return Err(refuse(format!(
+                    "looks like it contains a credential ({rule}), so it is not uploaded"
+                )));
+            }
+            resolved
+                .into_os_string()
+                .into_string()
+                .map_err(|_| refuse("the path is not UTF-8".into()))
+        })
+        .collect()
+}
+
+pub(crate) async fn upload_review(
+    provider: &dyn PageProvider,
+    run_id: &str,
+    args: &serde_json::Value,
+    root: Option<&std::path::Path>,
+) -> Result<serde_json::Value, String> {
+    let reference = args
+        .get("ref")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing ref")?;
+    let page = provider
+        .open_page(run_id)
+        .await
+        .ok_or("no browser page is open for this run; take a browser_snapshot first")?;
+    let target = page
+        .upload_target(reference)
+        .await
+        .map_err(|error| error.to_string())?;
+    let origin = url::Url::parse(&target.frame_url)
+        .map_err(|error| format!("{}: {error}", target.frame_url))?
+        .origin()
+        .ascii_serialization();
+    let mut files = Vec::new();
+    for path in args
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        let resolved = tokio::fs::canonicalize(path)
+            .await
+            .map_err(|error| format!("{path}: {error}"))?;
+        let bytes = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|error| format!("{path}: {error}"))?
+            .len();
+        let shown = root
+            .and_then(|root| resolved.strip_prefix(root).ok())
+            .unwrap_or(&resolved);
+        files.push(json!({"path": shown, "bytes": bytes}));
+    }
+    Ok(json!({
+        "form_origin": origin,
+        "form_url": target.frame_url,
+        "page_url": target.page_url,
+        "files": files,
+    }))
+}
+
 fn upgrade(url: &str) -> Result<url::Url, AgentError> {
     crate::network_guard::upgrade_to_https(url)
         .map_err(|error| AgentError::Navigation(error.to_string()))
@@ -310,6 +418,9 @@ impl Tool for BrowserTool {
             Kind::SelectOption => {
                 "Choose options in the <select> element (combobox or listbox) with the given ref, by value or visible label: one value, or any number for a multiple select. Returns the updated outline."
             }
+            Kind::UploadFile => {
+                "Set the files of the file input with the given ref, as if the user chose them, then return the updated outline. paths are absolute paths to files this run's sandbox may read (the project root, this thread's $TMPDIR and read-only system, tool output and Cargo/rustup cache paths); other paths, and files that look like they contain credentials, are refused. The page may send the files to its site, under the same network rules as browser_navigate, so each call is first reviewed against the user's request."
+            }
             Kind::HandleDialog => {
                 "Decide how to answer the confirm or prompt dialog that your next browser action opens: accept=true presses OK (prompt_text answers a prompt), accept=false cancels. Unanswered confirm and prompt dialogs are cancelled and alerts are closed; results list each dialog."
             }
@@ -336,6 +447,10 @@ impl Tool for BrowserTool {
             Kind::SelectOption => (
                 json!({"ref": reference, "values": {"type": "array", "items": {"type": "string"}, "description": "Option values or visible labels."}}),
                 json!(["ref", "values"]),
+            ),
+            Kind::UploadFile => (
+                json!({"ref": reference, "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Absolute file paths inside this run's sandbox boundary."}}),
+                json!(["ref", "paths"]),
             ),
             Kind::HandleDialog => (
                 json!({"accept": {"type": "boolean"}, "prompt_text": {"type": "string"}}),
@@ -367,7 +482,10 @@ impl Tool for BrowserTool {
     }
 
     fn permissions(&self) -> Permissions {
-        Permissions::network()
+        Permissions {
+            fs_read: self.kind == Kind::UploadFile,
+            ..Permissions::network()
+        }
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

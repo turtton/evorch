@@ -1003,7 +1003,8 @@ impl LoopState {
                 NetworkGate::Reject(ToolResult::error(reason))
             }
             NetworkAccessDecision::Ask { reason } => {
-                if crate::network::reviews_url(name) && per_tool == PolicyDecision::AutoAllow {
+                if crate::network::reviews_each_call(name) && per_tool == PolicyDecision::AutoAllow
+                {
                     let context = self
                         .runtime()
                         .and_then(|runtime| {
@@ -1031,6 +1032,24 @@ impl LoopState {
                         &self.shared.model,
                     ));
                     let review_run_id = self.task.run_id.to_string();
+                    let executor = Arc::clone(&self.shared.executor);
+                    let review = async {
+                        if name != crate::network::UPLOAD_TOOL {
+                            return reviewer
+                                .review_web_request(&review_run_id, name, input, context)
+                                .await;
+                        }
+                        match executor.browser_upload_review(&review_run_id, input).await {
+                            Ok(upload) => {
+                                reviewer
+                                    .review_upload(&review_run_id, upload, context)
+                                    .await
+                            }
+                            Err(reason) => {
+                                Ok(crate::escalation_review::ReviewVerdict::Deny { reason })
+                            }
+                        }
+                    };
                     let verdict = tokio::select! {
                         biased;
                         changed = self.channels.cancel_rx.changed() => {
@@ -1040,7 +1059,7 @@ impl LoopState {
                             }
                             return NetworkGate::Reject(ToolResult::error("review was interrupted"));
                         }
-                        verdict = reviewer.review_web_request(&review_run_id, name, input, context) => verdict,
+                        verdict = review => verdict,
                     };
                     return match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {

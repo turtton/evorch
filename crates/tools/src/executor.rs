@@ -119,6 +119,7 @@ pub struct ToolExecutor {
         Arc<browser::agent::AgentBrowser>,
         crate::tools::BrowserToolOptions,
     )>,
+    browser_provider: Option<Arc<dyn browser::agent::PageProvider>>,
 }
 
 impl ToolExecutor {
@@ -135,6 +136,7 @@ impl ToolExecutor {
             file_boundary: RwLock::new(None),
             file_escalation: RwLock::new(None),
             agent_browser: None,
+            browser_provider: None,
         }
     }
 
@@ -467,6 +469,7 @@ impl ToolExecutor {
         provider: Arc<dyn browser::agent::PageProvider>,
         options: crate::tools::BrowserToolOptions,
     ) -> Self {
+        self.browser_provider = Some(Arc::clone(&provider));
         for tool in crate::tools::browser_tools(provider, options) {
             self.register(Arc::new(tool))
                 // SAFE-EXPECT: browser_tool_schemas_compile がスキーマのコンパイルを検証済み。
@@ -511,6 +514,27 @@ impl ToolExecutor {
         );
         executor.set_file_boundary(&boundary);
         Ok(executor)
+    }
+
+    /// What a `browser_upload_file` call would hand to which site, for its
+    /// per-call review. Paths the upload boundary refuses fail here already.
+    pub async fn browser_upload_review(
+        &self,
+        run_id: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.enforce_upload_boundary(args)?;
+        let provider = self
+            .browser_provider
+            .clone()
+            .ok_or("browser tools are not available")?;
+        let root = self
+            .file_boundary
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|boundary| boundary.workspace_root().canonicalize().ok());
+        crate::tools::browser::upload_review(provider.as_ref(), run_id, args, root.as_deref()).await
     }
 
     /// 実行判定に使う承認方針を設定する。
