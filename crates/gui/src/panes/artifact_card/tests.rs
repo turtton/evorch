@@ -104,10 +104,12 @@ fn html_cards_show_the_rendered_snapshot_and_open_on_click() {
         &mock.sha256,
         Ok(egui::ColorImage::filled([4, 3], egui::Color32::BLUE)),
     );
-    harness.run();
+    // The PNG loads on egui's loader thread and its spinner repaints until then,
+    // so step frames instead of running until the UI settles.
+    harness.step();
 
     harness.get_by_label("Variant B preview").click();
-    harness.run();
+    harness.step();
     assert_eq!(take_open_requests(&harness.ctx), vec![html]);
 }
 
