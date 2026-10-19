@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 
 use base64::Engine;
-use browser::agent::{CdpTarget, TabInfo};
+use browser::agent::{CdpTarget, PageEvents, TabInfo};
 use serde_json::Value;
 
 use super::*;
@@ -13,6 +13,15 @@ use crate::network_guard::{DnsResolver, NetworkGuardError};
 struct FakePage {
     calls: Mutex<Vec<String>>,
     uploaded: Mutex<Vec<Value>>,
+    events: FakeEvents,
+}
+
+struct FakeEvents(tokio::sync::watch::Sender<PageEvents>);
+
+impl Default for FakeEvents {
+    fn default() -> Self {
+        Self(tokio::sync::watch::Sender::new(PageEvents::default()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -55,6 +64,12 @@ impl CdpTarget for FakePage {
     async fn navigate(&self, url: &str) -> Result<(), AgentError> {
         self.calls.lock().unwrap().push(format!("navigate {url}"));
         Ok(())
+    }
+
+    async fn page_events(
+        &self,
+    ) -> Result<Option<tokio::sync::watch::Receiver<PageEvents>>, AgentError> {
+        Ok(Some(self.events.0.subscribe()))
     }
 }
 
@@ -568,5 +583,62 @@ async fn tab_tools_list_switch_and_close_and_outlines_report_new_tabs() {
         invalid.content.contains("missing tab"),
         "{}",
         invalid.content
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn waits_return_the_outline_and_giving_up_is_an_error_result() {
+    // Given: a page that shows "Docs" and has a request in flight that
+    // never ends (time is virtual here).
+    let provider = Arc::new(FakeProvider::default());
+    let run = |args: Value| {
+        let tool = tool(&provider, "browser_wait_for");
+        async move {
+            tool.execute_with_context(&context("run-a"), args)
+                .await
+                .unwrap()
+        }
+    };
+    provider.page("run-a").await.unwrap();
+    provider.pages.lock().await["run-a"]
+        .0
+        .events
+        .0
+        .send_modify(|seen| seen.requests = 1);
+
+    // When: the agent waits for what is there, for the network, and for nothing.
+    let shown = run(json!({"text": "Docs"})).await;
+    let quiet = run(json!({"network_idle": true})).await;
+    let nothing = run(json!({})).await;
+
+    // Then: a met wait returns the outline; one that gave up says why.
+    assert!(!shown.is_error, "{}", shown.content);
+    assert!(
+        shown
+            .content
+            .starts_with("Done waiting after 0 page events.\nURL: "),
+        "{}",
+        shown.content
+    );
+    assert_eq!(shown.detail.as_ref().unwrap()["wait"]["checks"], 1);
+    assert!(quiet.is_error);
+    assert!(
+        quiet.content.starts_with(
+            "Gave up after 30 seconds and 0 page events, still waiting for no request in flight (1 now)."
+        ),
+        "{}",
+        quiet.content
+    );
+    assert!(
+        quiet.content.contains("- link \"Docs\""),
+        "{}",
+        quiet.content
+    );
+    assert_eq!(quiet.detail.as_ref().unwrap()["wait"]["met"], false);
+    assert!(nothing.is_error);
+    assert!(
+        nothing.content.contains("name something to wait for"),
+        "{}",
+        nothing.content
     );
 }

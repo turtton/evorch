@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 
 use super::{AgentError, CdpTarget, Snapshot, keys, snapshot};
 
+mod wait;
+
+pub use wait::{WaitFor, WaitLimits, WaitOutcome, Waited};
+
 const BLOCKED_LOG: usize = 16;
 const ACTIVITY_LOG: usize = 32;
 const TYPED_PREVIEW: usize = 40;
@@ -229,16 +233,27 @@ impl PageAgent {
     }
 
     async fn read_snapshot(&self) -> Result<Snapshot, AgentError> {
+        let mut snapshot = snapshot::render(&self.outline_nodes().await?);
+        if let Some(url) = self.location().await? {
+            snapshot.text = format!("URL: {url}\n{}", snapshot.text);
+        }
+        lock(&self.refs).clone_from(&snapshot.refs);
+        Ok(snapshot)
+    }
+
+    async fn outline_nodes(&self) -> Result<Vec<Value>, AgentError> {
         self.target.call("Accessibility.enable", json!({})).await?;
-        let tree = self
+        let mut tree = self
             .target
             .call("Accessibility.getFullAXTree", json!({}))
             .await?;
-        let nodes = tree
-            .get("nodes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| response("Accessibility.getFullAXTree", "missing nodes"))?;
-        let mut snapshot = snapshot::render(nodes);
+        match tree.get_mut("nodes").map(Value::take) {
+            Some(Value::Array(nodes)) => Ok(nodes),
+            _ => Err(response("Accessibility.getFullAXTree", "missing nodes")),
+        }
+    }
+
+    async fn location(&self) -> Result<Option<String>, AgentError> {
         let location = self
             .target
             .call(
@@ -246,11 +261,10 @@ impl PageAgent {
                 json!({"expression": "location.href", "returnByValue": true}),
             )
             .await?;
-        if let Some(url) = location.pointer("/result/value").and_then(Value::as_str) {
-            snapshot.text = format!("URL: {url}\n{}", snapshot.text);
-        }
-        lock(&self.refs).clone_from(&snapshot.refs);
-        Ok(snapshot)
+        Ok(location
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
 
     pub async fn navigate(&self, url: &str) -> Result<(), AgentError> {

@@ -14,8 +14,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use chromium::{AgentBrowser, LaunchOptions, Screencast};
-pub use page::{Activity, DialogAnswer, DialogKind, PageAgent, UploadTarget};
+pub use page::{
+    Activity, DialogAnswer, DialogKind, PageAgent, UploadTarget, WaitFor, WaitLimits, WaitOutcome,
+    Waited,
+};
 pub use snapshot::{MAX_SNAPSHOT_LINES, Snapshot, render};
+
+/// How long one CDP command may take before the agent browser treats it as
+/// stuck. A wait on a silent page gives up after the same time.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One page reachable over CDP.
 #[async_trait::async_trait]
@@ -46,6 +53,24 @@ pub trait CdpTarget: Send + Sync {
         .await?;
         self.settle().await
     }
+
+    /// The page's events, for [`PageAgent::wait_for`]. `None` when the target
+    /// reports none, so nothing can be waited for.
+    async fn page_events(
+        &self,
+    ) -> Result<Option<tokio::sync::watch::Receiver<PageEvents>>, AgentError> {
+        Ok(None)
+    }
+}
+
+/// What a page has done, as waits observe it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageEvents {
+    /// Grows with every batch of DOM changes, request start or end, and
+    /// main-frame load or navigation.
+    pub count: u64,
+    /// Requests the page has in flight.
+    pub requests: usize,
 }
 
 /// Decides where an agent page may connect. The Fetch domain asks `check`

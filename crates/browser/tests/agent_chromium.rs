@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use browser::agent::{
     Activity, AgentBrowser, AgentError, DialogAnswer, LaunchOptions, PageAgent, PageProvider,
-    RequestPolicy,
+    RequestPolicy, WaitFor, WaitLimits, WaitOutcome, Waited,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -752,4 +752,196 @@ async fn the_screencast_follows_the_runs_active_tab() {
     assert_eq!(after_close, None);
     while screencast.next_frame().await.is_some() {}
     assert!(screencast.ended());
+}
+
+const LATE: &str = r#"<!doctype html><html><head><title>Late</title></head><body>
+<p id="status">Loading</p>
+<script>
+window.reveal = () => {
+  document.getElementById('status').textContent = 'Ready';
+  const button = document.createElement('button');
+  button.textContent = 'Continue';
+  button.onclick = () => { document.getElementById('status').textContent = 'Continued'; };
+  document.body.append(button);
+};
+window.hold = () => fetch('/hold').then(() => { document.title = 'Held'; });
+</script>
+</body></html>"#;
+
+/// Serves `page`, and answers `/hold` only once `release` is notified.
+async fn serve_holding(page: &'static str, release: Arc<tokio::sync::Notify>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                let mut request = [0; 2048];
+                let read = socket.read(&mut request).await.unwrap_or_default();
+                let body = if request[..read].starts_with(b"GET /hold ") {
+                    release.notified().await;
+                    "held"
+                } else {
+                    page
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{address}/")
+}
+
+/// Resolves once `page` has checked the conditions of `label` once and
+/// started waiting for the page to change.
+async fn waiting(page: &PageAgent, label: &str) {
+    let label = format!("waiting for {label}");
+    page.activity_changes()
+        .wait_for(|_| {
+            page.activity().iter().any(
+                |entry| matches!(entry, Activity::Action { label: seen, .. } if *seen == label),
+            )
+        })
+        .await
+        .unwrap();
+}
+
+/// Runs `trigger` in the page once the wait has seen the page without what
+/// it waits for, and returns how the wait ended.
+async fn wait_then_trigger(
+    page: &Arc<PageAgent>,
+    wanted: WaitFor,
+    label: &str,
+    trigger: &str,
+) -> Waited {
+    let wait = tokio::spawn({
+        let page = Arc::clone(page);
+        async move {
+            // No time limit: only page events decide the outcome here.
+            let limits = WaitLimits {
+                events: 1000,
+                time: std::time::Duration::MAX,
+            };
+            page.wait_for(&wanted, limits).await
+        }
+    });
+    waiting(page, label).await;
+    page.target()
+        .call("Runtime.evaluate", json!({"expression": trigger}))
+        .await
+        .unwrap();
+    wait.await.unwrap().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn waits_end_on_the_page_events_they_name() {
+    // Given: a page that shows its content only when the test triggers it,
+    // and holds a request until the test releases it.
+    let release = Arc::new(tokio::sync::Notify::new());
+    let url = serve_holding(LATE, Arc::clone(&release)).await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 1,
+        max_tabs: 1,
+    });
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.expect("navigate");
+    let before = page.snapshot().await.unwrap().text;
+    assert!(!before.contains("Continue"), "{before}");
+
+    // When: the agent waits for the content, then uses it.
+    let appeared = wait_then_trigger(
+        &page,
+        WaitFor {
+            text: Some("Ready".into()),
+            ..Default::default()
+        },
+        "text \"Ready\" to appear",
+        "reveal()",
+    )
+    .await;
+    let shown = page.snapshot().await.unwrap().text;
+    let button = reference(&shown, "- button \"Continue\"");
+    page.click(&button)
+        .await
+        .expect("click the revealed button");
+    let clicked = page.snapshot().await.unwrap().text;
+
+    // Then: the wait saw the page without it first, and the ref works.
+    assert_eq!(appeared.outcome, WaitOutcome::Met, "{appeared:?}");
+    assert!(appeared.checks >= 2, "{appeared:?}");
+    assert!(clicked.contains("Continued"), "{clicked}");
+
+    // When: the agent waits for the button to go and for the URL to change.
+    let gone = wait_then_trigger(
+        &page,
+        WaitFor {
+            reference_gone: Some(button.clone()),
+            ..Default::default()
+        },
+        &format!("{button} to disappear"),
+        "document.querySelector('button').remove()",
+    )
+    .await;
+    let moved = wait_then_trigger(
+        &page,
+        WaitFor {
+            url: Some("/done".into()),
+            url_changes: true,
+            ..Default::default()
+        },
+        "a URL containing \"/done\", the URL to change",
+        "history.pushState(null, '', '/done')",
+    )
+    .await;
+
+    // Then: each wait ended on the change it named.
+    for waited in [&gone, &moved] {
+        assert_eq!(waited.outcome, WaitOutcome::Met, "{waited:?}");
+        assert!(waited.checks >= 2, "{waited:?}");
+    }
+
+    // When: a request is in flight, the agent waits for the network to go
+    // quiet, and the server answers.
+    page.target()
+        .call("Runtime.evaluate", json!({"expression": "hold(); 0"}))
+        .await
+        .unwrap();
+    page.target()
+        .page_events()
+        .await
+        .unwrap()
+        .expect("Chromium reports page events")
+        .wait_for(|seen| seen.requests > 0)
+        .await
+        .unwrap();
+    let wait = tokio::spawn({
+        let page = Arc::clone(&page);
+        async move {
+            let wanted = WaitFor {
+                network_idle: true,
+                ..Default::default()
+            };
+            let limits = WaitLimits {
+                events: 1000,
+                time: std::time::Duration::MAX,
+            };
+            page.wait_for(&wanted, limits).await
+        }
+    });
+    waiting(&page, "no request in flight").await;
+    release.notify_one();
+    let quiet = wait.await.unwrap().unwrap();
+
+    // Then: the wait ended once the held request finished.
+    assert_eq!(quiet.outcome, WaitOutcome::Met, "{quiet:?}");
+    assert!(quiet.checks >= 2, "{quiet:?}");
 }
