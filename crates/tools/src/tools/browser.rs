@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use browser::agent::{AgentError, PageAgent, PageProvider, RequestPolicy};
+use browser::agent::{AgentError, DialogAnswer, PageAgent, PageProvider, RequestPolicy};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -15,14 +15,19 @@ use crate::tool::{Permissions, Tool};
 
 /// Every browser tool name, including opt-in ones that are registered only
 /// when configured.
-pub const BROWSER_TOOL_NAMES: [&str; 9] = [
+pub const BROWSER_TOOL_NAMES: [&str; 14] = [
     "browser_navigate",
+    "browser_navigate_back",
+    "browser_navigate_forward",
     "browser_snapshot",
     "browser_click",
     "browser_click_at",
+    "browser_hover",
     "browser_type",
+    "browser_select_option",
     "browser_press_key",
     "browser_scroll",
+    "browser_handle_dialog",
     "browser_screenshot",
     "browser_close",
 ];
@@ -65,24 +70,34 @@ impl RequestPolicy for GuardPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Navigate,
+    Back,
+    Forward,
     Snapshot,
     Click,
     ClickAt,
+    Hover,
     Type,
+    SelectOption,
     PressKey,
     Scroll,
+    HandleDialog,
     Screenshot,
     Close,
 }
 
-const KINDS: [Kind; 9] = [
+const KINDS: [Kind; 14] = [
     Kind::Navigate,
+    Kind::Back,
+    Kind::Forward,
     Kind::Snapshot,
     Kind::Click,
     Kind::ClickAt,
+    Kind::Hover,
     Kind::Type,
+    Kind::SelectOption,
     Kind::PressKey,
     Kind::Scroll,
+    Kind::HandleDialog,
     Kind::Screenshot,
     Kind::Close,
 ];
@@ -96,12 +111,17 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Self::Navigate => "browser_navigate",
+            Self::Back => "browser_navigate_back",
+            Self::Forward => "browser_navigate_forward",
             Self::Snapshot => "browser_snapshot",
             Self::Click => "browser_click",
             Self::ClickAt => "browser_click_at",
+            Self::Hover => "browser_hover",
             Self::Type => "browser_type",
+            Self::SelectOption => "browser_select_option",
             Self::PressKey => "browser_press_key",
             Self::Scroll => "browser_scroll",
+            Self::HandleDialog => "browser_handle_dialog",
             Self::Screenshot => "browser_screenshot",
             Self::Close => "browser_close",
         }
@@ -139,6 +159,9 @@ struct Args {
     direction: Option<String>,
     x: Option<f64>,
     y: Option<f64>,
+    values: Option<Vec<String>>,
+    accept: Option<bool>,
+    prompt_text: Option<String>,
 }
 
 impl BrowserTool {
@@ -158,6 +181,8 @@ impl BrowserTool {
                 let url = upgrade(&url)?;
                 page.navigate(url.as_str()).await?;
             }
+            Kind::Back => page.go_back().await?,
+            Kind::Forward => page.go_forward().await?,
             Kind::Click => page.click(&required(args.reference, "ref")?).await?,
             Kind::ClickAt => {
                 let point = |value: Option<f64>, name: &str| {
@@ -166,6 +191,7 @@ impl BrowserTool {
                 page.click_at(point(args.x, "x")?, point(args.y, "y")?)
                     .await?;
             }
+            Kind::Hover => page.hover(&required(args.reference, "ref")?).await?,
             Kind::Type => {
                 page.type_text(
                     &required(args.reference, "ref")?,
@@ -174,6 +200,13 @@ impl BrowserTool {
                 )
                 .await?;
             }
+            Kind::SelectOption => {
+                let values = args
+                    .values
+                    .ok_or_else(|| AgentError::Refused("missing values".into()))?;
+                page.select_option(&required(args.reference, "ref")?, &values)
+                    .await?;
+            }
             Kind::PressKey => page.press(&required(args.key, "key")?).await?,
             Kind::Scroll => {
                 page.scroll(
@@ -181,6 +214,20 @@ impl BrowserTool {
                     args.direction.as_deref().unwrap_or("down"),
                 )
                 .await?;
+            }
+            Kind::HandleDialog => {
+                let accept = args
+                    .accept
+                    .ok_or_else(|| AgentError::Refused("missing accept".into()))?;
+                page.answer_next_dialog(DialogAnswer {
+                    accept,
+                    prompt_text: args.prompt_text,
+                });
+                return Ok(ToolResult::success(if accept {
+                    "The next confirm or prompt dialog your next browser action opens will be accepted."
+                } else {
+                    "The next confirm or prompt dialog your next browser action opens will be dismissed."
+                }));
             }
             Kind::Screenshot => return screenshot(&page).await,
             Kind::Snapshot | Kind::Close => {}
@@ -193,15 +240,19 @@ async fn outline(page: &PageAgent) -> Result<ToolResult, AgentError> {
     let snapshot = page.snapshot().await?;
     let mut text = snapshot.text;
     let blocked = page.take_blocked();
-    if !blocked.is_empty() {
-        text.push_str("Blocked requests:\n");
-        for entry in &blocked {
-            text.push_str(&format!("- {entry}\n"));
+    let dialogs = page.take_dialogs();
+    for (heading, entries) in [("Blocked requests", &blocked), ("Dialogs", &dialogs)] {
+        if !entries.is_empty() {
+            text.push_str(&format!("{heading}:\n"));
+            for entry in entries {
+                text.push_str(&format!("- {entry}\n"));
+            }
         }
     }
     Ok(ToolResult::success(text).with_detail(json!({
         "refs": snapshot.refs.len(),
         "blocked_requests": blocked,
+        "dialogs": dialogs,
     })))
 }
 
@@ -240,12 +291,27 @@ impl Tool for BrowserTool {
             Kind::Navigate => {
                 "Open a URL in this run's headless browser page and return its outline. http is upgraded to https; requests to blocked addresses are refused, as in web_fetch."
             }
+            Kind::Back => {
+                "Go back one page in this run's browser history, then return the outline."
+            }
+            Kind::Forward => {
+                "Go forward one page in this run's browser history, then return the outline."
+            }
             Kind::Snapshot => {
                 "Return the current page as an accessibility outline. Elements carry [ref=eN] for the other browser tools; only refs from the latest outline are accepted."
             }
             Kind::Click => "Click the element with the given ref, then return the updated outline.",
             Kind::ClickAt => {
                 "Click the point (x, y), in CSS pixels from the top-left of the visible viewport as shown by browser_screenshot, then return the updated outline. Prefer browser_click; use this only for targets the outline does not expose, such as a canvas."
+            }
+            Kind::Hover => {
+                "Move the mouse over the element with the given ref, for menus and tooltips that open on hover. Returns the updated outline."
+            }
+            Kind::SelectOption => {
+                "Choose options in the <select> element (combobox or listbox) with the given ref, by value or visible label: one value, or any number for a multiple select. Returns the updated outline."
+            }
+            Kind::HandleDialog => {
+                "Decide how to answer the confirm or prompt dialog that your next browser action opens: accept=true presses OK (prompt_text answers a prompt), accept=false cancels. Unanswered confirm and prompt dialogs are cancelled and alerts are closed; results list each dialog."
             }
             Kind::Type => {
                 "Replace the content of the field with the given ref by text (empty clears it); submit presses Enter. Returns the updated outline."
@@ -266,7 +332,15 @@ impl Tool for BrowserTool {
             json!({"type": "string", "description": "A ref such as e12 from the latest outline."});
         let (properties, required) = match self.kind {
             Kind::Navigate => (json!({"url": {"type": "string"}}), json!(["url"])),
-            Kind::Click => (json!({"ref": reference}), json!(["ref"])),
+            Kind::Click | Kind::Hover => (json!({"ref": reference}), json!(["ref"])),
+            Kind::SelectOption => (
+                json!({"ref": reference, "values": {"type": "array", "items": {"type": "string"}, "description": "Option values or visible labels."}}),
+                json!(["ref", "values"]),
+            ),
+            Kind::HandleDialog => (
+                json!({"accept": {"type": "boolean"}, "prompt_text": {"type": "string"}}),
+                json!(["accept"]),
+            ),
             Kind::ClickAt => (
                 json!({"x": {"type": "number", "minimum": 0}, "y": {"type": "number", "minimum": 0}}),
                 json!(["x", "y"]),
@@ -280,7 +354,9 @@ impl Tool for BrowserTool {
                 json!({"direction": {"type": "string", "enum": ["up", "down", "left", "right"], "default": "down"}, "ref": reference}),
                 json!([]),
             ),
-            Kind::Snapshot | Kind::Screenshot | Kind::Close => (json!({}), json!([])),
+            Kind::Back | Kind::Forward | Kind::Snapshot | Kind::Screenshot | Kind::Close => {
+                (json!({}), json!([]))
+            }
         };
         json!({
             "type": "object",
