@@ -4,7 +4,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Clone)]
 pub(crate) enum Mutation {
-    EvalTrace(crate::eval::EvalTrace),
     Finding(Lesson),
     Team(crate::team::TeamSnapshot),
     Candidates(Vec<Lesson>),
@@ -17,9 +16,6 @@ pub(crate) enum Mutation {
 pub(crate) fn append(conn: &Connection, mutation: &Mutation) -> Result<(), StorageError> {
     if let Mutation::Team(snapshot) = mutation {
         return crate::team::append(conn, snapshot);
-    }
-    if let Mutation::EvalTrace(trace) = mutation {
-        return crate::eval::append(conn, trace);
     }
     let transaction = conn.unchecked_transaction()?;
     match mutation {
@@ -102,7 +98,6 @@ fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageErr
                 }
                 Mutation::Candidate(_)
                 | Mutation::Candidates(_)
-                | Mutation::EvalTrace(_)
                 | Mutation::Finding(_)
                 | Mutation::Team(_) => {
                     return Err(invalid("invalid transition"));
@@ -110,7 +105,7 @@ fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageErr
             };
             (entry.lesson, status)
         }
-        Mutation::EvalTrace(_) | Mutation::Candidates(_) | Mutation::Team(_) => {
+        Mutation::Candidates(_) | Mutation::Team(_) => {
             return Err(invalid("invalid transition"));
         }
     };

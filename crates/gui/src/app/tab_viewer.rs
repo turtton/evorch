@@ -41,7 +41,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) notifications: &'a mut NotificationsModel,
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
-    pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
@@ -415,15 +414,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     self.memory.render(ui, project.as_deref());
                 }
             }
-            PanelKind::Arena => {
-                let project = self
-                    .sidebar
-                    .selected_project
-                    .as_ref()
-                    .map(ToString::to_string);
-                self.arena
-                    .render(ui, self.memory.config.as_ref().zip(project.as_deref()));
-            }
+            // Arena panels are dropped when a layout loads; the kind stays for deserialization.
+            PanelKind::Arena => {}
             PanelKind::Usage => {
                 if let Some(thread) = self.usage.render(
                     ui,

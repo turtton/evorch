@@ -353,7 +353,7 @@ Modes:
    --theme NAME   graphite (default), tokyo-night, or high-contrast
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
-   --with-memory  register the Memory and Arena panels with an isolated SQLite fixture
+   --with-memory  register the Memory panels with an isolated SQLite fixture
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --pending-approvals  with --demo: show two requests in Conversation (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)

@@ -47,7 +47,6 @@ pub struct WorkbenchState<S> {
     pub(super) mention_job: Option<super::mentions::Job>,
     /// Whether the composer had an `@` query last frame; a new one refreshes the index.
     pub(super) mention_active: bool,
-    pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) usage: crate::panes::usage::UsagePane,
     pub(super) context_inspector: crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: crate::panes::shell_jobs::ShellJobsPane,
@@ -167,7 +166,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             external_job: None,
             mention_job: None,
             mention_active: false,
-            arena: crate::panes::arena::ArenaPane::default(),
             usage: crate::panes::usage::UsagePane::default(),
             context_inspector: crate::panes::context_inspector::ContextInspectorPane::default(),
             shell_jobs: crate::panes::shell_jobs::ShellJobsPane::default(),
@@ -240,13 +238,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
         };
-        // Older saved layouts contain the former automatically registered tab.
-        let arena = PanelId::new("arena-main");
-        if state
+        // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
+        let arenas: Vec<PanelId> = state
             .panels
-            .get(&arena)
-            .is_some_and(|panel| panel.kind == PanelKind::Arena)
-        {
+            .iter()
+            .filter(|(_, panel)| panel.kind == PanelKind::Arena)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for arena in arenas {
             while let Some(path) = state.dock.find_tab(&arena) {
                 state.dock.remove_tab(path);
             }

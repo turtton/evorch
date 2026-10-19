@@ -107,22 +107,3 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
         )
     );
 }
-
-#[test]
-fn arena_header_uses_h3_when_storage_is_connected() {
-    // Given: a real evaluation pane backed by an isolated database.
-    let dir = tempfile::tempdir().unwrap();
-    let config = storage::StorageConfig {
-        db_path: dir.path().join("arena.db"),
-        ..Default::default()
-    };
-    let mut pane = gui::panes::arena::ArenaPane::default();
-    let mut harness = Harness::new_ui(|ui| {
-        gui::theme::install(ui.ctx());
-        pane.render(ui, Some((&config, "project")));
-    });
-    // When: the pane renders.
-    harness.run_steps(2);
-    // Then: the workbench title uses the same h3 role as conversation.
-    assert_header(&harness, "Role evaluation arena", FONT_H3);
-}
