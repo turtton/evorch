@@ -17,7 +17,13 @@ Only the conversation owner may call it: the root Worker or root Orchestrator of
 a user-facing conversation. Delegated agents return their `artifact_id` values in
 their result, and the Orchestrator presents them.
 
-Both conditions come from the runtime (category, root, purpose), not from model
+`inspect_artifact` opens an HTML artifact of the caller's conversation in an
+offline CEF page. The agent reads the page as an accessibility outline, clicks
+or types by ref, and takes screenshots. Only `evorch-gui` built with the `cef`
+feature offers it ([browser.md](browser.md)). The agents that may capture or
+present artifacts may use it.
+
+These conditions come from the runtime (category, root, purpose), not from model
 input. Each tool checks them again when it runs.
 
 ## Capture rules
@@ -58,6 +64,7 @@ authority.
 
 ## Not yet supported
 
-HTML snapshots in the card, multiple viewports, opening in the Browser pane,
-returning captures to the model for self-review, and attaching artifacts to
-`ask_user` choices are later phases of ADR 0029.
+Multiple viewports, self-review of HTML in builds without CEF, and attaching
+artifacts to `ask_user` choices are later phases of ADR 0029. With the `cef`
+feature, cards already show HTML snapshots and open in-app
+([browser.md](browser.md)).

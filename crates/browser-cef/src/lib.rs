@@ -8,6 +8,8 @@ pub mod input;
 pub mod offline;
 
 #[cfg(feature = "cef")]
+mod agent;
+#[cfg(feature = "cef")]
 mod artifact;
 #[cfg(feature = "cef")]
 mod browser;
@@ -22,6 +24,8 @@ mod snapshot;
 #[cfg(feature = "cef")]
 mod view;
 
+#[cfg(feature = "cef")]
+pub use agent::{AgentPage, CefTarget};
 #[cfg(feature = "cef")]
 pub use artifact::{ArtifactContext, NetLog};
 #[cfg(feature = "cef")]

@@ -108,6 +108,28 @@ content-addressed, so a cached snapshot is never stale. Snapshots render one at
 a time on a worker thread; clicking one opens the in-app preview. Without the
 feature, cards keep the text entry and the Open button that goes to the Portal.
 
+Agents check their HTML artifacts through CEF with `inspect_artifact`. The
+action `open` loads an artifact of the caller's conversation into an offline
+page that no window shows (1024×768 DIP, same isolation). The page is driven by
+the same `PageAgent` layer as the `browser_*` tools, over CEF's in-process
+DevTools. The actions `snapshot`, `click`, `type`, `press_key`, `scroll` and
+`screenshot` work as their `browser_*` counterparts. The tool takes no URL and
+the page cannot navigate, so nothing leaves CEF. Refused navigations and
+popups are listed in the next outline.
+
+- Who can use it: visual Workers, and the conversation's root Worker or root
+  Orchestrator, the same agents that capture or present artifacts. Ownership
+  is checked against the artifact store as for `present`.
+- Pages: each run has one page, and at most four are open at once. A run's
+  page closes when the run ends or on `close`.
+- Startup: the GUI starts CEF when its window is created, so tool calls do not
+  depend on the window drawing frames.
+- Builds without CEF, and runtimes without the GUI, do not offer the tool.
+- Why it is separate from `browser_*`:
+  - It reaches different agents.
+  - It needs no network permission.
+  - It has no URL parameter that would need refusing.
+
 Rendering is headless (`--ozone-platform=headless`) with the GPU disabled. The
 Chromium sandbox relies on unprivileged user namespaces; the SUID
 `chrome-sandbox` is not shipped. `EVORCH_CEF_NO_SANDBOX=1` disables the sandbox
@@ -146,14 +168,20 @@ It serves a page that probes fetch, XHR, WebSocket, beacon, WebRTC, file URLs,
 `window.open`, forms and navigation against a loopback listener, then asserts
 that no connection arrived, the CSP fired, WebRTC is gone (checked through the
 in-process DevTools session), a killed renderer reloads the artifact and a
-snapshot captures the page after its scripts ran. The ignored
-`html_preview::tests::card_snapshot_requests_render_through_cef` test in `gui`
-drives a card's snapshot request through CEF; it needs the helper path:
+snapshot captures the page after its scripts ran. The ignored tests in
+`gui`'s `html_preview::tests` need the helper path. They are:
+
+- `card_snapshot_requests_render_through_cef`: drives a card's snapshot
+  request through CEF.
+- `agent_operates_the_artifact_it_presented_through_cef`: runs a scripted
+  conversation root Worker. It captures and presents a counter mock, opens it
+  with `inspect_artifact`, clicks and types by ref, and takes a screenshot.
+  Throughout, no connection may reach a loopback listener.
 
 ```sh
 nix develop .#cef
 cargo build -p browser-cef --features cef --bin evorch-cef-helper
 EVORCH_CEF_HELPER=$PWD/target/debug/evorch-cef-helper \
   cargo nextest run -p gui --features cef --lib --run-ignored only \
-  -E 'test(card_snapshot_requests_render_through_cef)'
+  -E 'test(/^html_preview::tests::/)'
 ```

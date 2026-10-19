@@ -253,12 +253,21 @@ pub(crate) fn on_ui<R: Send + 'static>(job: impl FnOnce() -> R + Send + 'static)
         return Some(job());
     }
     let (sender, receiver) = mpsc::channel();
-    let job: Job = Box::new(move || {
+    if !post_ui(move || {
         let _ = sender.send(job());
-    });
-    let mut task = UiTask::new(Arc::new(Mutex::new(Some(job))));
-    if post_task(ThreadId::UI, Some(&mut task)) != 1 {
+    }) {
         return None;
     }
     receiver.recv_timeout(UI_CALL_TIMEOUT).ok()
+}
+
+/// Queues `job` on the CEF UI thread without waiting; false if CEF refused it.
+pub(crate) fn post_ui(job: impl FnOnce() + Send + 'static) -> bool {
+    if currently_on(ThreadId::UI) == 1 {
+        job();
+        return true;
+    }
+    let job: Job = Box::new(job);
+    let mut task = UiTask::new(Arc::new(Mutex::new(Some(job))));
+    post_task(ThreadId::UI, Some(&mut task)) == 1
 }

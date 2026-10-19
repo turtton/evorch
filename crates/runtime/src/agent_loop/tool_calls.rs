@@ -1185,6 +1185,14 @@ pub(crate) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpe
     specs
 }
 
+/// Drops `inspect_artifact` unless the runtime has pages to open artifacts in,
+/// so builds without CEF never offer it.
+pub(crate) fn retain_backed_tools(specs: &mut Vec<ToolSpec>, artifact_pages: bool) {
+    if !artifact_pages {
+        specs.retain(|spec| spec.name != crate::artifacts::INSPECT_ARTIFACT);
+    }
+}
+
 pub(crate) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate::ModelFamily) {
     if !matches!(
         family,

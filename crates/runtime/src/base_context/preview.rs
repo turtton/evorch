@@ -11,8 +11,8 @@ use super::{
     compose_system_sections, resolve_preset_origins, workspace_note,
 };
 use crate::agent_loop::{
-    LoopShared, append_subagent_context_note, shared_active_root, standard_tool_specs,
-    visible_tool_specs,
+    LoopShared, append_subagent_context_note, retain_backed_tools, shared_active_root,
+    standard_tool_specs, visible_tool_specs,
 };
 use crate::allowed_directories;
 use crate::compaction::estimator::estimate_tool_tokens;
@@ -255,6 +255,7 @@ impl AgentRuntime {
             request.child,
             web_tools_enabled,
         );
+        retain_backed_tools(&mut visible, self.artifact_pages().is_some());
         append_subagent_context_note(&mut visible, classify(selected_model));
         let excluded = all
             .iter()

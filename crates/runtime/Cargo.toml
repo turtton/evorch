@@ -10,6 +10,7 @@ name = "runtime"
 [dependencies]
 agents = { path = "../agents" }
 async-trait = { workspace = true }
+browser = { path = "../browser" }
 catalog = { path = "../catalog" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
@@ -38,7 +39,6 @@ tracing = { workspace = true }
 socket2 = "0.6"
 
 [dev-dependencies]
-browser = { path = "../browser" }
 url = { workspace = true }
 jsonschema = { workspace = true }
 wiremock = { workspace = true }

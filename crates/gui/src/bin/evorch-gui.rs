@@ -920,7 +920,7 @@ fn run() -> Result<(), GuiError> {
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
     #[cfg(feature = "cef")]
-    let (artifact_opener, html_previews) = {
+    let (artifact_opener, mut html_previews) = {
         let (opener, requests) =
             gui::model::artifact_opener::HtmlPreviewOpener::new(Arc::clone(&portal_opener));
         let opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> = Arc::new(opener);
@@ -1029,6 +1029,8 @@ fn run() -> Result<(), GuiError> {
     // One captured owner preserves shutdown ordering even if run_native fails
     // before invoking its app constructor and only drops the closure captures.
     let storage_resources = storage;
+    #[cfg(feature = "cef")]
+    let inspecting_runtime = runtime.clone();
     let title = arguments.window_title;
     let options = gui::window::native_options(&title);
     eframe::run_native(
@@ -1039,6 +1041,14 @@ fn run() -> Result<(), GuiError> {
             state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
             #[cfg(feature = "cef")]
             html_previews.install_snapshots(&creation_context.egui_ctx);
+            // CEF must start on this thread, which also drops it. Starting it here
+            // rather than on demand lets agents inspect artifacts while the window
+            // draws no frames.
+            #[cfg(feature = "cef")]
+            match html_previews.artifact_pages() {
+                Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
+                Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
+            }
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]

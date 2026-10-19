@@ -13,7 +13,7 @@ name = "gui"
 default = []
 browser = ["dep:browser"]
 # In-app HTML artifact preview on CEF; needs the CEF distribution (docs/browser.md).
-cef = ["dep:browser-cef", "browser-cef/cef"]
+cef = ["dep:browser", "dep:browser-cef", "browser-cef/cef"]
 
 [dependencies]
 browser = { path = "../browser", optional = true }
