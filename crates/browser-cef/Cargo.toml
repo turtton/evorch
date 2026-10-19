@@ -20,6 +20,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"], optional = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+egui_kittest = { workspace = true }
+
 [[bin]]
 name = "evorch-cef-helper"
 path = "src/bin/helper.rs"
@@ -27,4 +30,8 @@ required-features = ["cef"]
 
 [[test]]
 name = "offline_isolation"
+required-features = ["cef"]
+
+[[test]]
+name = "interaction"
 required-features = ["cef"]

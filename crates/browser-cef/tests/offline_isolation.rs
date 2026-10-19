@@ -12,7 +12,8 @@ use std::time::Duration;
 use browser_cef::devtools::DevTools;
 use browser_cef::offline::ArtifactBundle;
 use browser_cef::{
-    ArtifactContext, CefRuntime, NetLog, OsrBrowser, RuntimeConfig, SNAPSHOT_SIZE, render_snapshot,
+    ArtifactContext, CefRuntime, Dialogs, NetLog, OsrBrowser, RuntimeConfig, SNAPSHOT_SIZE,
+    render_snapshot,
 };
 use serde_json::{Value, json};
 
@@ -40,6 +41,7 @@ fn open(bundle: ArtifactBundle) -> (OsrBrowser, Arc<NetLog>) {
         &ArtifactContext::url("index.html"),
         [800, 600],
         2.0,
+        Dialogs::Suppress,
     )
     .expect("browser");
     (browser, log)

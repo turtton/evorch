@@ -8,7 +8,7 @@ use browser::agent::{AgentError, CdpTarget, PageAgent};
 use serde_json::Value;
 
 use crate::artifact::{ArtifactContext, NetLog};
-use crate::browser::{OsrBrowser, Shared};
+use crate::browser::{Dialogs, OsrBrowser, Shared};
 use crate::devtools::DevTools;
 use crate::offline::{ArtifactBundle, INDEX};
 use crate::snapshot::SNAPSHOT_SIZE;
@@ -77,6 +77,7 @@ struct Reported {
     requests: usize,
     navigations: usize,
     popups: usize,
+    dialogs: usize,
 }
 
 impl AgentPage {
@@ -85,8 +86,13 @@ impl AgentPage {
     pub fn open(html: Vec<u8>, timeout: Duration) -> Result<Self, String> {
         let context = ArtifactContext::create(ArtifactBundle::html(html))?;
         let log = Arc::clone(&context.log);
-        let browser =
-            OsrBrowser::create(context, &ArtifactContext::url(INDEX), SNAPSHOT_SIZE, 1.0)?;
+        let browser = OsrBrowser::create(
+            context,
+            &ArtifactContext::url(INDEX),
+            SNAPSHOT_SIZE,
+            1.0,
+            Dialogs::Suppress,
+        )?;
         if !browser.wait_loaded(Some(timeout)) {
             return Err("the artifact did not finish loading".into());
         }
@@ -133,6 +139,16 @@ impl AgentPage {
             *seen = entries.len();
         }
         blocked
+    }
+
+    /// Dialogs the page opened since the last call. Nobody sees them: alerts
+    /// are closed, confirm and prompt dismissed and beforeunload left.
+    pub fn take_dialogs(&self) -> Vec<String> {
+        let mut reported = self.reported.lock().unwrap_or_else(|e| e.into_inner());
+        let status = self.browser.status();
+        let dialogs = status.suppressed_dialogs[reported.dialogs..].to_vec();
+        reported.dialogs = status.suppressed_dialogs.len();
+        dialogs
     }
 
     /// Detaches the agent and closes the browser. Agent calls made afterwards

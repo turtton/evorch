@@ -113,9 +113,28 @@ The preview is offline. The artifact is served from
 `https://artifact.evorch.invalid` by a scheme handler, every other request and
 navigation is cancelled, a Content-Security-Policy is attached, the process
 proxy points at an unreachable address, and WebRTC constructors are deleted in
-each renderer. JS dialogs, file choosers, popups and the context menu are
-suppressed; `<select>` dropdowns and the clipboard are not wired yet. A crashed
-renderer is reloaded up to three times.
+each renderer. A crashed renderer is reloaded up to three times.
+
+What the user can do in the preview pane:
+
+- Native popups: `<select>` dropdowns and other popup widgets are painted
+  over the pane (kept inside it) and take pointer input.
+- JS dialogs: `alert`, `confirm`, `prompt` and `beforeunload` open an egui
+  modal, and the page receives the answer. Closing the modal is Cancel (OK
+  for an alert).
+- Copying: copies the user makes (Ctrl+C or Ctrl+X on a selection,
+  `document.execCommand("copy")`, and `navigator.clipboard.writeText`, each
+  only with user activation) reach the host clipboard. Headless CEF keeps its
+  own clipboard, so a hook installed before page scripts reports the copied
+  text to the browser process. `navigator.clipboard.write` with
+  `ClipboardItem` is not forwarded.
+- The page never reads the host clipboard: `readText` and `read` reject with
+  `NotAllowedError`, and host pastes are not forwarded.
+- Still suppressed: file choosers, `window.open` popups and the context menu.
+
+In practice Chromium did not ask for a `beforeunload` dialog in this off-screen
+setup, whether the page or the browser reloaded, so the page leaves without a
+prompt. The modal is wired for when CEF does ask.
 
 Conversation cards show a snapshot of each HTML artifact. A throwaway browser
 renders it offline at 1024×768 DIP under the same isolation, waits for loading
@@ -132,7 +151,9 @@ the same `PageAgent` layer as the `browser_*` tools, over CEF's in-process
 DevTools. The actions `snapshot`, `click`, `type`, `press_key`, `scroll` and
 `screenshot` work as their `browser_*` counterparts. The tool takes no URL and
 the page cannot navigate, so nothing leaves CEF. Refused navigations and
-popups are listed in the next outline.
+popups are listed in the next outline. Nobody sees the page's JS dialogs:
+`alert` is closed, `confirm` and `prompt` are dismissed (`false` and `null`),
+`beforeunload` leaves, and the next outline lists each under "Dialogs:".
 
 - Who can use it: visual Workers, and the conversation's root Worker or root
   Orchestrator, the same agents that capture or present artifacts. Ownership
@@ -173,20 +194,32 @@ cargo run -p gui --features cef --bin evorch-gui
 
 ### Tests
 
-The pure parts (frame upload, input translation including IME, the URL
-allowlist) run in the normal workspace suite. The end-to-end test needs CEF
-and is ignored by default; the `cef-e2e` CI job runs it.
+The pure parts (frame upload, input translation including IME, popup placement,
+the URL allowlist) run in the normal workspace suite. The end-to-end tests need
+CEF and are ignored by default; the `cef-e2e` CI job runs them.
 
 ```sh
 nix develop .#cef -c cargo nextest run -p browser-cef --features cef --run-ignored all
 ```
 
-It serves a page that probes fetch, XHR, WebSocket, beacon, WebRTC, file URLs,
-`window.open`, forms and navigation against a loopback listener, then asserts
-that no connection arrived, the CSP fired, WebRTC is gone (checked through the
-in-process DevTools session), a killed renderer reloads the artifact and a
-snapshot captures the page after its scripts ran. The ignored tests in
-`gui`'s `html_preview::tests` need the helper path. They are:
+`offline_isolation` serves a page that probes fetch, XHR, WebSocket, beacon,
+WebRTC, file URLs, `window.open`, forms and navigation against a loopback
+listener. It then asserts that no connection arrived, the CSP fired and WebRTC
+is gone (checked through the in-process DevTools session). It also checks that
+a killed renderer reloads the artifact and that a snapshot captures the page
+after its scripts ran.
+
+`interaction` drives the preview pane (`CefView`) through egui_kittest, with a
+test clipboard in place of egui's. It opens a `<select>` and checks that the
+popup is drawn over the pane and that clicking an option selects it. It answers
+`confirm`, `prompt` and `alert` in the modal and checks what the page received.
+It copies with `execCommand`, `navigator.clipboard.writeText` and Ctrl+C after
+`select()`, checks that each copy reached the clipboard, and checks that
+`readText` is denied. It also checks that an agent page settles its dialogs and
+reports them.
+
+The ignored tests in `gui`'s `html_preview::tests` need the helper path. They
+are:
 
 - `card_snapshot_requests_render_through_cef`: drives a card's snapshot
   request through CEF.

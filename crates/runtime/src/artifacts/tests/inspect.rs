@@ -46,6 +46,7 @@ impl CdpTarget for Target {
 struct Page {
     agent: PageAgent,
     blocked: Mutex<Vec<String>>,
+    dialogs: Mutex<Vec<String>>,
 }
 
 impl ArtifactPage for Page {
@@ -55,6 +56,10 @@ impl ArtifactPage for Page {
 
     fn take_blocked(&self) -> Vec<String> {
         std::mem::take(&mut self.blocked.lock().unwrap())
+    }
+
+    fn take_dialogs(&self) -> Vec<String> {
+        std::mem::take(&mut self.dialogs.lock().unwrap())
     }
 }
 
@@ -72,6 +77,7 @@ impl ArtifactPages for Pages {
         let page = Arc::new(Page {
             agent: PageAgent::new(Arc::new(Target::default())),
             blocked: Mutex::new(vec!["request https://cdn.example/app.js".into()]),
+            dialogs: Mutex::new(vec!["confirm \"Save?\" (dismissed)".into()]),
         });
         self.open
             .lock()
@@ -151,8 +157,13 @@ async fn conversation_root_operates_the_mock_it_presented() {
         opened.contains("Blocked requests:\n- request https://cdn.example/app.js"),
         "{opened}"
     );
+    assert!(
+        opened.contains("Dialogs:\n- confirm \"Save?\" (dismissed)"),
+        "{opened}"
+    );
     assert!(click.contains("button \"Added\" [ref=e7]"), "{click}");
     assert!(!click.contains("Blocked requests"), "{click}");
+    assert!(!click.contains("Dialogs"), "{click}");
     assert!(screenshot.contains("1x1"), "{screenshot}");
     assert!(screenshot.contains("[image image/png]"), "{screenshot}");
     assert!(results[5].1.contains("closed"));

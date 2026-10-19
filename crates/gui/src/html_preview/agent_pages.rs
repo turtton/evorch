@@ -36,6 +36,10 @@ impl ArtifactPage for CefPage {
     fn take_blocked(&self) -> Vec<String> {
         self.0.take_blocked()
     }
+
+    fn take_dialogs(&self) -> Vec<String> {
+        self.0.take_dialogs()
+    }
 }
 
 impl CefArtifactPages {

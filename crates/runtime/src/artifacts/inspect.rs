@@ -32,6 +32,10 @@ pub trait ArtifactPage: Send + Sync {
 
     /// Requests the offline policy refused since the last call.
     fn take_blocked(&self) -> Vec<String>;
+
+    /// Dialogs the page opened since the last call. They are answered without
+    /// anyone seeing them: alerts closed, confirm and prompt dismissed.
+    fn take_dialogs(&self) -> Vec<String>;
 }
 
 pub(crate) fn spec(name: &str) -> ToolSpec {
@@ -39,7 +43,7 @@ pub(crate) fn spec(name: &str) -> ToolSpec {
         json!({"type": "string", "description": "A ref such as e12 from the latest outline."});
     ToolSpec {
         name: name.into(),
-        description: "Check an HTML artifact of this conversation as a user would, in an offline browser page. open loads an HTML artifact_id from render_artifact and returns an accessibility outline whose elements carry [ref=eN]. click, type, press_key and scroll act on refs from the latest outline and return the updated outline; snapshot re-reads it; screenshot returns an image of the 1024x768 viewport; close discards the page. The page has no network access and cannot navigate away from the artifact, so anything not inlined fails to load and is listed as blocked. Each run has one page; open replaces it.".into(),
+        description: "Check an HTML artifact of this conversation as a user would, in an offline browser page. open loads an HTML artifact_id from render_artifact and returns an accessibility outline whose elements carry [ref=eN]. click, type, press_key and scroll act on refs from the latest outline and return the updated outline; snapshot re-reads it; screenshot returns an image of the 1024x768 viewport; close discards the page. The page has no network access and cannot navigate away from the artifact, so anything not inlined fails to load and is listed as blocked. Nobody sees its dialogs: alert is closed, confirm and prompt are dismissed (false and null), and each is listed. Each run has one page; open replaces it.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -204,9 +208,17 @@ async fn outline(page: &dyn ArtifactPage) -> Result<ToolResult, String> {
             text.push_str(&format!("- {entry}\n"));
         }
     }
+    let dialogs = page.take_dialogs();
+    if !dialogs.is_empty() {
+        text.push_str("Dialogs:\n");
+        for entry in &dialogs {
+            text.push_str(&format!("- {entry}\n"));
+        }
+    }
     Ok(ToolResult::success(text).with_detail(json!({
         "refs": snapshot.refs.len(),
         "blocked_requests": blocked,
+        "dialogs": dialogs,
     })))
 }
 

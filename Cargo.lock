@@ -881,6 +881,7 @@ dependencies = [
  "browser",
  "cef",
  "egui",
+ "egui_kittest",
  "serde_json",
  "tokio",
  "tracing",
