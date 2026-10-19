@@ -9,13 +9,19 @@ publish = false
 [features]
 default = []
 # Off by default so workspace builds never download or link the CEF distribution.
-cef = ["dep:cef"]
+cef = ["dep:cef", "dep:async-trait", "dep:browser", "dep:tokio"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
+browser = { path = "../browser", optional = true }
 cef = { version = "=154.5.0", default-features = false, optional = true }
 egui = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"], optional = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
 
 [[bin]]
 name = "evorch-cef-helper"
@@ -24,4 +30,8 @@ required-features = ["cef"]
 
 [[test]]
 name = "offline_isolation"
+required-features = ["cef"]
+
+[[test]]
+name = "interaction"
 required-features = ["cef"]

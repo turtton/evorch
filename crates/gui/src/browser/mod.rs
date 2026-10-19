@@ -1,6 +1,9 @@
+mod agent;
 mod pane;
 
+pub use ::browser::agent::Activity;
 pub use ::browser::{BrowserAction, BrowserError, BrowserReport, BrowserSession};
+pub use agent::{AgentBrowserPane, AgentBrowserWindow, AgentView, FakeAgentView, LiveAgentView};
 pub use pane::{BrowserPane, BrowserWindow};
 
 use std::collections::VecDeque;

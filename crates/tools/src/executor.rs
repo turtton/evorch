@@ -115,6 +115,10 @@ pub struct ToolExecutor {
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
     file_boundary: RwLock<Option<sandbox::SandboxBoundary>>,
     file_escalation: RwLock<Option<Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>>>,
+    agent_browser: Option<(
+        Arc<browser::agent::AgentBrowser>,
+        crate::tools::BrowserToolOptions,
+    )>,
 }
 
 impl ToolExecutor {
@@ -130,6 +134,7 @@ impl ToolExecutor {
             workspace_boundary: RwLock::new(None),
             file_boundary: RwLock::new(None),
             file_escalation: RwLock::new(None),
+            agent_browser: None,
         }
     }
 
@@ -397,32 +402,72 @@ impl ToolExecutor {
         Ok(self)
     }
 
-    /// Registers the agent browser tools when a Chromium or Chrome executable is
-    /// installed or named by `CHROME`; otherwise they stay unregistered.
+    /// Registers the agent browser tools as `config` sets, when it enables them
+    /// and a Chromium or Chrome executable is found; otherwise they stay
+    /// unregistered.
     ///
     /// # Errors
     /// Returns [`NetworkGuardError`] when the request guard cannot be built.
-    pub fn with_browser_tools(self) -> Result<Self, NetworkGuardError> {
+    pub fn with_browser_tools(
+        self,
+        config: &config::BrowserToolsConfig,
+    ) -> Result<Self, NetworkGuardError> {
+        if !config.enabled {
+            tracing::info!("agent browser tools are disabled by [tools.browser]");
+            return Ok(self);
+        }
         let options = browser::agent::LaunchOptions {
-            executable: None,
+            executable: config.executable.clone(),
             policy: Arc::new(crate::tools::GuardPolicy(Arc::new(
                 crate::network_guard::NetworkGuard::new()?,
             ))),
-            max_pages: 8,
+            max_pages: usize::try_from(config.max_pages.get()).unwrap_or(usize::MAX),
         };
         if let Err(error) = browser::agent::AgentBrowser::detect(&options) {
             tracing::info!(%error, "agent browser tools are unavailable");
             return Ok(self);
         }
-        Ok(self.with_browser_provider(Arc::new(browser::agent::AgentBrowser::new(options))))
+        Ok(self.with_agent_browser(
+            Arc::new(browser::agent::AgentBrowser::new(options)),
+            crate::tools::BrowserToolOptions {
+                coordinate_actions: config.coordinate_actions,
+            },
+        ))
+    }
+
+    /// Registers the agent browser tools over a shared [`browser::agent::AgentBrowser`],
+    /// so every executor of the process drives (and observers see) one Chromium.
+    pub fn with_agent_browser(
+        mut self,
+        browser: Arc<browser::agent::AgentBrowser>,
+        options: crate::tools::BrowserToolOptions,
+    ) -> Self {
+        self.agent_browser = Some((Arc::clone(&browser), options));
+        self.with_browser_provider(browser, options)
+    }
+
+    /// Registers the same agent browser tools as `parent`, if it has any.
+    pub fn inherit_agent_browser(self, parent: &ToolExecutor) -> Self {
+        match parent.agent_browser.clone() {
+            Some((browser, options)) => self.with_agent_browser(browser, options),
+            None => self,
+        }
+    }
+
+    /// The agent browser registered by [`ToolExecutor::with_agent_browser`].
+    pub fn agent_browser(&self) -> Option<Arc<browser::agent::AgentBrowser>> {
+        self.agent_browser
+            .as_ref()
+            .map(|(browser, _)| Arc::clone(browser))
     }
 
     /// Registers the agent browser tools over `provider`'s pages.
     pub fn with_browser_provider(
         mut self,
         provider: Arc<dyn browser::agent::PageProvider>,
+        options: crate::tools::BrowserToolOptions,
     ) -> Self {
-        for tool in crate::tools::browser_tools(provider) {
+        for tool in crate::tools::browser_tools(provider, options) {
             self.register(Arc::new(tool))
                 // SAFE-EXPECT: browser_tool_schemas_compile がスキーマのコンパイルを検証済み。
                 .expect("browser tool schemas compile");

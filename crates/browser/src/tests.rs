@@ -239,3 +239,41 @@ async fn chromium_screencast_and_action_evidence() {
     tasks.abort_all();
     closed.expect("browser task").expect("browser result");
 }
+
+#[tokio::test]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn chromium_receives_the_session_switches() {
+    use chromiumoxide::cdp::browser_protocol::browser::GetBrowserCommandLineParams;
+    use futures_util::StreamExt;
+
+    // Given: Chromium launched with the GUI session's configuration.
+    let profile = tempfile::tempdir().unwrap();
+    let (mut browser, mut handler) =
+        chromiumoxide::Browser::launch(cdp::launch_config(profile.path(), false).unwrap())
+            .await
+            .unwrap();
+    let events = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    // When: the browser reports the command line it was started with.
+    let arguments = browser
+        .execute(GetBrowserCommandLineParams::default())
+        .await
+        .unwrap()
+        .result
+        .arguments;
+    browser.close().await.unwrap();
+    browser.wait().await.unwrap();
+    events.abort();
+
+    // Then: every switch arrived with a single `--` prefix.
+    for switch in ["--no-startup-window", "--no-first-run"] {
+        assert!(
+            arguments.iter().any(|argument| argument == switch),
+            "{switch}: {arguments:?}"
+        );
+    }
+    assert!(
+        !arguments.iter().any(|argument| argument.starts_with("---")),
+        "{arguments:?}"
+    );
+}

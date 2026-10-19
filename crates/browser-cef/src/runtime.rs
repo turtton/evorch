@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use cef::{args::Args, *};
 
+use crate::clipboard::{COPY_HOOK, COPY_MESSAGE};
 use crate::offline::{DISABLE_WEBRTC_SWITCH, WEBRTC_GLOBALS, browser_switches};
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -168,10 +169,10 @@ wrap_app! {
         }
 
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
-            let disable = command_line_get_global().is_some_and(|line| {
+            let disable_webrtc = command_line_get_global().is_some_and(|line| {
                 line.has_switch(Some(&CefString::from(DISABLE_WEBRTC_SWITCH))) == 1
             });
-            disable.then(WebRtcBlocker::new)
+            Some(PageHooks::new(disable_webrtc))
         }
     }
 }
@@ -198,20 +199,79 @@ wrap_browser_process_handler! {
 }
 
 wrap_render_process_handler! {
-    struct WebRtcBlocker;
+    struct PageHooks {
+        disable_webrtc: bool,
+    }
 
     impl RenderProcessHandler {
         fn on_context_created(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             context: Option<&mut V8Context>,
         ) {
-            if let Some(global) = context.and_then(|context| context.global()) {
+            let Some(context) = context else { return };
+            if self.disable_webrtc
+                && let Some(global) = context.global()
+            {
                 for name in WEBRTC_GLOBALS {
                     global.delete_value_bykey(Some(&CefString::from(*name)));
                 }
             }
+            if let Some(frame) = frame {
+                install_copy_hook(context, frame.clone());
+            }
+        }
+    }
+}
+
+/// Runs [`COPY_HOOK`] in a new page context with a native `send` that
+/// forwards copied text to the browser process.
+fn install_copy_hook(context: &V8Context, frame: Frame) {
+    let mut forwarder = CopyForwarder::new(frame);
+    let Some(send) = v8_value_create_function(Some(&CefString::from("send")), Some(&mut forwarder))
+    else {
+        return;
+    };
+    let (mut installer, mut exception) = (None, None);
+    context.eval(
+        Some(&CefString::from(COPY_HOOK)),
+        None,
+        0,
+        Some(&mut installer),
+        Some(&mut exception),
+    );
+    if let Some(installer) = installer {
+        installer.execute_function(None, Some(&[Some(send)]));
+    }
+}
+
+wrap_v8_handler! {
+    struct CopyForwarder {
+        frame: Frame,
+    }
+
+    impl V8Handler {
+        fn execute(
+            &self,
+            _name: Option<&CefString>,
+            _object: Option<&mut V8Value>,
+            arguments: Option<&[Option<V8Value>]>,
+            _retval: Option<&mut Option<V8Value>>,
+            _exception: Option<&mut CefString>,
+        ) -> i32 {
+            let text = arguments
+                .and_then(|arguments| arguments.first()?.as_ref())
+                .filter(|value| value.is_string() == 1)
+                .map(|value| CefString::from(&value.string_value()));
+            let Some(text) = text else { return 1 };
+            if let Some(mut message) = process_message_create(Some(&CefString::from(COPY_MESSAGE))) {
+                if let Some(arguments) = message.argument_list() {
+                    arguments.set_string(0, Some(&text));
+                }
+                self.frame.send_process_message(ProcessId::BROWSER, Some(&mut message));
+            }
+            1
         }
     }
 }
@@ -253,12 +313,21 @@ pub(crate) fn on_ui<R: Send + 'static>(job: impl FnOnce() -> R + Send + 'static)
         return Some(job());
     }
     let (sender, receiver) = mpsc::channel();
-    let job: Job = Box::new(move || {
+    if !post_ui(move || {
         let _ = sender.send(job());
-    });
-    let mut task = UiTask::new(Arc::new(Mutex::new(Some(job))));
-    if post_task(ThreadId::UI, Some(&mut task)) != 1 {
+    }) {
         return None;
     }
     receiver.recv_timeout(UI_CALL_TIMEOUT).ok()
+}
+
+/// Queues `job` on the CEF UI thread without waiting; false if CEF refused it.
+pub(crate) fn post_ui(job: impl FnOnce() + Send + 'static) -> bool {
+    if currently_on(ThreadId::UI) == 1 {
+        job();
+        return true;
+    }
+    let job: Job = Box::new(job);
+    let mut task = UiTask::new(Arc::new(Mutex::new(Some(job))));
+    post_task(ThreadId::UI, Some(&mut task)) == 1
 }

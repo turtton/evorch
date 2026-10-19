@@ -17,7 +17,9 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
-pub use browser::{BROWSER_TOOL_NAMES, BrowserTool, GuardPolicy, browser_tools};
+pub use browser::{
+    BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, GuardPolicy, browser_tools,
+};
 pub use edit::Edit;
 pub use git_diff::GitDiff;
 pub use grep::Grep;

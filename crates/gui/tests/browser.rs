@@ -112,3 +112,85 @@ fn failed_action_keeps_dom_evidence_visible_across_frames() {
     );
     assert!(harness.query_by_label("+ <p>retry</p>").is_some());
 }
+
+fn agent_pane(
+    view: gui::browser::FakeAgentView,
+) -> egui_kittest::Harness<'static, gui::browser::AgentBrowserPane<gui::browser::FakeAgentView>> {
+    egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui_state(
+            |ui, pane: &mut gui::browser::AgentBrowserPane<gui::browser::FakeAgentView>| {
+                pane.render(ui)
+            },
+            gui::browser::AgentBrowserPane::new(view),
+        )
+}
+
+#[test]
+fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
+    // Given: two runs with open pages, a frame and recent activity.
+    use gui::browser::Activity;
+    let view = gui::browser::FakeAgentView {
+        pages: vec!["run-a".into(), "run-b".into()],
+        frames: [egui::ColorImage::filled([320, 200], egui::Color32::GRAY)].into(),
+        activity: vec![
+            Activity::Action {
+                label: "click e5".into(),
+                error: None,
+            },
+            Activity::Action {
+                label: "press Enter".into(),
+                error: Some("boom".into()),
+            },
+            Activity::Blocked("https://tracker.test/ (refused)".into()),
+        ],
+        ..Default::default()
+    };
+
+    // When: the pane renders.
+    let mut harness = agent_pane(view);
+    harness.run();
+
+    // Then: only the first run is observed, and its frame and activity show.
+    assert_eq!(harness.state().view().observed, [Some("run-a".to_owned())]);
+    assert_eq!(harness.state().texture_size(), Some([320, 200]));
+    assert!(harness.query_by_label("click e5").is_some());
+    assert!(harness.query_by_label("press Enter failed: boom").is_some());
+    assert!(
+        harness
+            .query_by_label("blocked https://tracker.test/ (refused)")
+            .is_some()
+    );
+}
+
+#[test]
+fn agent_pane_switches_runs_and_stops_when_the_page_closes() {
+    // Given: a pane observing the first of two runs.
+    let view = gui::browser::FakeAgentView {
+        pages: vec!["run-a".into(), "run-b".into()],
+        ..Default::default()
+    };
+    let mut harness = agent_pane(view);
+    harness.run();
+
+    // When: the user picks the other run, and then its page closes.
+    harness.get_by_label("Run").click();
+    harness.run();
+    harness.get_by_label("run-b").click();
+    harness.run();
+    let switched = harness.state().selected().map(str::to_owned);
+    harness.state_mut().view_mut().pages.clear();
+    harness.run();
+
+    // Then: observation moved to run-b and stopped once nothing is open.
+    assert_eq!(switched.as_deref(), Some("run-b"));
+    assert_eq!(
+        harness.state().view().observed,
+        [Some("run-a".to_owned()), Some("run-b".to_owned()), None]
+    );
+    assert!(
+        harness
+            .query_by_label_contains("No agent page is open")
+            .is_some()
+    );
+}

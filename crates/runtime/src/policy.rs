@@ -44,15 +44,17 @@ impl ExecutionPolicy {
                     && is_root
                     && matches!(self.role_name.as_str(), "Worker" | "Orchestrator")
                 {
-                    self.capabilities.allowed_tools.insert("todo_write".into());
-                    self.capabilities.allowed_tools.insert("present".into());
+                    self.capabilities.allowed_tools.extend(
+                        ["todo_write", "present", crate::artifacts::INSPECT_ARTIFACT]
+                            .map(str::to_owned),
+                    );
                 }
                 if Role::from_name(&self.role_name)
                     .is_ok_and(|role| crate::artifacts::may_render(role, config, is_root))
                 {
-                    self.capabilities
-                        .allowed_tools
-                        .insert("render_artifact".into());
+                    self.capabilities.allowed_tools.extend(
+                        ["render_artifact", crate::artifacts::INSPECT_ARTIFACT].map(str::to_owned),
+                    );
                 }
                 if config.conversation
                     && config.category.as_deref() == Some(CategoryId::Conversation.as_str())
@@ -222,6 +224,7 @@ mod tests {
                 "todo_write",
                 "present",
                 "render_artifact",
+                "inspect_artifact",
                 "create_goal",
                 "get_goal",
                 "submit_goal_check",
@@ -291,7 +294,7 @@ mod tests {
                 expected
                     .capabilities
                     .allowed_tools
-                    .extend(["todo_write", "present"].map(str::to_owned));
+                    .extend(["todo_write", "present", "inspect_artifact"].map(str::to_owned));
             }
             assert_eq!(policy, expected);
             for tool in ["web_search", "web_fetch"] {
@@ -328,7 +331,7 @@ mod tests {
                 expected
                     .capabilities
                     .allowed_tools
-                    .extend(["todo_write", "present"].map(str::to_owned));
+                    .extend(["todo_write", "present", "inspect_artifact"].map(str::to_owned));
             }
             assert_eq!(policy, expected);
             // Orchestrator already allows fetch and WebResearcher already allows both.
@@ -418,6 +421,36 @@ mod tests {
                 policy.authorize("present").is_ok(),
                 allowed,
                 "{role:?} root={is_root}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_artifact_goes_to_those_who_render_or_present() {
+        let visual = crate::RunConfig {
+            category: Some("visual".into()),
+            ..Default::default()
+        };
+        let orchestrator_conversation = crate::RunConfig {
+            conversation: true,
+            ..Default::default()
+        };
+        for (role, config, is_root, allowed) in [
+            (Role::Worker, visual.clone(), false, true),
+            (Role::Worker, conversation_config(), true, true),
+            (Role::Orchestrator, orchestrator_conversation, true, true),
+            (Role::Worker, conversation_config(), false, false),
+            (Role::Worker, crate::RunConfig::default(), true, false),
+            (Role::Orchestrator, crate::RunConfig::default(), true, false),
+            (Role::Reviewer, visual, false, false),
+            (Role::WebResearcher, conversation_config(), true, false),
+        ] {
+            let policy = ExecutionPolicy::for_role(role).for_run_config(&config, is_root);
+            assert_eq!(
+                policy.authorize("inspect_artifact").is_ok(),
+                allowed,
+                "{role:?} {:?} root={is_root}",
+                config.category
             );
         }
     }

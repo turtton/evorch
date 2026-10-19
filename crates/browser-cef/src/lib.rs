@@ -3,10 +3,14 @@
 //! Frame handling, input translation and the network policy are plain Rust and
 //! always compiled; everything that touches CEF is behind the `cef` feature.
 
+pub mod clipboard;
 pub mod frame;
 pub mod input;
 pub mod offline;
+pub mod popup;
 
+#[cfg(feature = "cef")]
+mod agent;
 #[cfg(feature = "cef")]
 mod artifact;
 #[cfg(feature = "cef")]
@@ -23,9 +27,11 @@ mod snapshot;
 mod view;
 
 #[cfg(feature = "cef")]
+pub use agent::{AgentPage, CefTarget};
+#[cfg(feature = "cef")]
 pub use artifact::{ArtifactContext, NetLog};
 #[cfg(feature = "cef")]
-pub use browser::{OsrBrowser, Status};
+pub use browser::{DialogKind, Dialogs, JsDialog, OsrBrowser, Status};
 #[cfg(feature = "cef")]
 pub use runtime::{CefRuntime, RuntimeConfig, subprocess_app};
 #[cfg(feature = "cef")]

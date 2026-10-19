@@ -23,6 +23,9 @@ pub const PROJECT_CONFIG_DIR: &str = ".evorch";
 
 /// ドロップイン設定ディレクトリ名。
 const DROPIN_DIR: &str = "config.d";
+/// Sections only defaults and user/global files may set: they run programs or
+/// widen agent capabilities, so project files, env and CLI overrides cannot.
+const TRUSTED_SECTIONS: &[&str] = &["comment_checker", "tools"];
 
 /// [`Config::load`] の読み込みオプション。
 #[derive(Debug, Clone)]
@@ -151,10 +154,11 @@ impl Config {
         }
 
         // Executable configuration is trusted only through defaults and user/global files.
-        let mut trusted = toml::Value::Table(toml::map::Map::from_iter([(
-            "comment_checker".into(),
-            merged.value["comment_checker"].clone(),
-        )]));
+        let mut trusted = toml::Value::Table(toml::map::Map::from_iter(
+            TRUSTED_SECTIONS
+                .iter()
+                .map(|section| ((*section).to_owned(), merged.value[*section].clone())),
+        ));
         if !reject_unknown_fields {
             for path in crate::strict::remove_unknown_fields(&mut trusted)? {
                 tracing::warn!(field = %path, "ignoring unknown config field");
@@ -167,6 +171,9 @@ impl Config {
             .map_err(|err| {
                 ConfigError::Migration(format!("invalid trusted comment checker config: {err}"))
             })?;
+        let tools: crate::ToolsConfig = trusted["tools"].clone().try_into().map_err(|err| {
+            ConfigError::Migration(format!("invalid trusted tools config: {err}"))
+        })?;
 
         if let Some(dir) = &opts.project_dir {
             merge_project_layer(&mut merged.value, dir, &opts.file_overrides)?;
@@ -194,6 +201,8 @@ impl Config {
         crate::strict::validate_strict(&merged)?;
         merged["comment_checker"] = toml::Value::try_from(checker)
             .map_err(|err| ConfigError::Migration(err.to_string()))?;
+        merged["tools"] =
+            toml::Value::try_from(tools).map_err(|err| ConfigError::Migration(err.to_string()))?;
         let config: Config = merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;

@@ -25,6 +25,11 @@ impl CdpTarget for FakePage {
             }]}),
             "Runtime.evaluate" => json!({"result": {"value": "https://example.test/"}}),
             "DOM.getContentQuads" => json!({"quads": [[0, 0, 10, 0, 10, 10, 0, 10]]}),
+            "DOM.resolveNode" => json!({"object": {"objectId": "obj-5"}}),
+            "Page.getNavigationHistory" => json!({
+                "currentIndex": 1,
+                "entries": [{"id": 1}, {"id": 2}],
+            }),
             "Page.captureScreenshot" => {
                 let mut png = std::io::Cursor::new(Vec::new());
                 image::RgbImage::new(3, 2)
@@ -75,10 +80,15 @@ impl PageProvider for FakeProvider {
 }
 
 fn tool(provider: &Arc<FakeProvider>, name: &str) -> BrowserTool {
-    browser_tools(provider.clone() as Arc<dyn PageProvider>)
-        .into_iter()
-        .find(|tool| tool.name() == name)
-        .unwrap()
+    browser_tools(
+        provider.clone() as Arc<dyn PageProvider>,
+        BrowserToolOptions {
+            coordinate_actions: true,
+        },
+    )
+    .into_iter()
+    .find(|tool| tool.name() == name)
+    .unwrap()
 }
 
 fn context(run_id: &str) -> ToolExecutionContext {
@@ -91,9 +101,19 @@ fn context(run_id: &str) -> ToolExecutionContext {
 
 #[test]
 fn browser_tool_schemas_compile_with_unique_names() {
-    let tools = browser_tools(Arc::new(FakeProvider::default()));
-    let names: std::collections::BTreeSet<_> = tools.iter().map(|tool| tool.name()).collect();
-    assert_eq!(names.len(), BROWSER_TOOL_NAMES.len());
+    let all = BrowserToolOptions {
+        coordinate_actions: true,
+    };
+    let tools = browser_tools(Arc::new(FakeProvider::default()), all);
+    let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+    assert_eq!(names, BROWSER_TOOL_NAMES);
+    let default: Vec<_> = browser_tools(Arc::new(FakeProvider::default()), Default::default())
+        .iter()
+        .map(|tool| tool.name().to_owned())
+        .collect();
+    assert!(!default.iter().any(|name| name == "browser_click_at"));
+    assert!(default.iter().any(|name| name == "browser_handle_dialog"));
+    assert_eq!(default.len(), BROWSER_TOOL_NAMES.len() - 1);
     for tool in &tools {
         jsonschema::validator_for(&tool.schema())
             .unwrap_or_else(|error| panic!("{}: {error}", tool.name()));
@@ -217,4 +237,105 @@ async fn guard_policy_applies_web_fetch_destination_rules() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn click_at_presses_the_viewport_point_and_rejects_points_outside_it() {
+    let provider = Arc::new(FakeProvider::default());
+    let click_at = tool(&provider, "browser_click_at");
+
+    let clicked = click_at
+        .execute_with_context(&context("run-a"), json!({"x": 40, "y": 12.5}))
+        .await
+        .unwrap();
+    let outside = click_at
+        .execute_with_context(&context("run-a"), json!({"x": -1, "y": 3}))
+        .await
+        .unwrap();
+
+    assert!(!clicked.is_error, "{}", clicked.content);
+    assert!(
+        clicked.content.contains("- link \"Docs\""),
+        "{}",
+        clicked.content
+    );
+    let calls = provider.calls("run-a").await;
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| *call == "Input.dispatchMouseEvent")
+            .count(),
+        3
+    );
+    assert!(outside.is_error);
+}
+
+#[tokio::test]
+async fn page_operations_return_the_outline_and_dialogs_are_listed() {
+    let provider = Arc::new(FakeProvider::default());
+    let run = |name: &str, args: Value| {
+        let tool = tool(&provider, name);
+        async move {
+            tool.execute_with_context(&context("run-a"), args)
+                .await
+                .unwrap()
+        }
+    };
+    run("browser_snapshot", json!({})).await;
+
+    let back = run("browser_navigate_back", json!({})).await;
+    let forward = run("browser_navigate_forward", json!({})).await;
+    run("browser_snapshot", json!({})).await;
+    let hover = run("browser_hover", json!({"ref": "e5"})).await;
+    let selected = run(
+        "browser_select_option",
+        json!({"ref": "e5", "values": ["Large"]}),
+    )
+    .await;
+    let armed = run("browser_handle_dialog", json!({"accept": true})).await;
+    let page = provider.page("run-a").await.unwrap();
+    let answer = page.on_dialog(browser::agent::DialogKind::Confirm, "Delete it?", None);
+    let listed = run("browser_snapshot", json!({})).await;
+    let invalid = tool(&provider, "browser_select_option")
+        .execute_with_context(&context("run-a"), json!({"ref": "e5", "value": "Large"}))
+        .await;
+
+    for result in [&back, &hover, &selected] {
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("- link \"Docs\""),
+            "{}",
+            result.content
+        );
+    }
+    assert!(forward.is_error, "the fake history has no next page");
+    assert!(
+        armed.content.contains("will be accepted"),
+        "{}",
+        armed.content
+    );
+    assert!(answer.accept);
+    assert!(
+        listed
+            .content
+            .contains("Dialogs:\n- confirm \"Delete it?\" accepted\n"),
+        "{}",
+        listed.content
+    );
+    assert_eq!(
+        listed.detail.as_ref().unwrap()["dialogs"][0],
+        "confirm \"Delete it?\" accepted"
+    );
+    assert!(matches!(invalid, Err(ToolError::InvalidArgs { .. })));
+    let calls = provider.calls("run-a").await;
+    for method in [
+        "Page.navigateToHistoryEntry",
+        "Runtime.callFunctionOn",
+        "Input.dispatchMouseEvent",
+    ] {
+        assert!(
+            calls.iter().any(|call| call == method),
+            "{method}: {calls:?}"
+        );
+    }
 }

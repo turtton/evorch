@@ -10,7 +10,7 @@ use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
 use routing::EnvLookup;
 use runtime::{
     ExecutionPolicy, ModelSource, Role, RunConfig, RunId, RuntimeComposition, compose_runtime,
-    production_executor,
+    production_executor_with_config,
 };
 use sandbox::credential::{CredentialStore, open_default};
 use sandbox::{CredentialError, DirectSandbox};
@@ -158,10 +158,11 @@ pub async fn run_headless(
     let bus = Arc::new(EventBus::new(256));
     let approval_receiver = bus.subscribe();
     let executor: Arc<ToolExecutor> = match sandbox {
-        SandboxChoice::Production => production_executor(
+        SandboxChoice::Production => production_executor_with_config(
             Arc::clone(&bus),
             &ExecutionPolicy::for_role(args.role),
             args.project_dir.clone(),
+            &config,
         )?,
         SandboxChoice::DirectUnchecked => Arc::new(
             ToolExecutor::with_standard_tools(
@@ -169,7 +170,7 @@ pub async fn run_headless(
                 Arc::new(DirectSandbox::new_unchecked()),
             )
             .with_web_tools()
-            .and_then(ToolExecutor::with_browser_tools)
+            .and_then(|executor| executor.with_browser_tools(&config.tools.browser))
             .map_err(|error| runtime::RuntimeError::NetworkGuard {
                 detail: error.to_string(),
             })?,

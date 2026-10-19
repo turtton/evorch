@@ -151,6 +151,7 @@ fn stop() -> Step {
 struct Model {
     scripts: Mutex<HashMap<String, VecDeque<Step>>>,
     results: Mutex<HashMap<String, Vec<(bool, String)>>>,
+    tools: Mutex<HashMap<String, Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -164,8 +165,12 @@ impl AgentModel for Model {
         ctx: &AgentInvocationContext,
         _: Role,
         messages: &[Message],
-        _: &[ToolSpec],
+        tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.tools.lock().unwrap().insert(
+            ctx.run_id.clone(),
+            tools.iter().map(|tool| tool.name.clone()).collect(),
+        );
         self.results
             .lock()
             .unwrap()
@@ -228,8 +233,10 @@ fn tool_results(messages: &[Message]) -> Vec<(bool, String)> {
                 content
                     .iter()
                     .map(|part| match part {
-                        ToolResultContent::Text { text } => text.as_str(),
-                        ToolResultContent::Image { .. } => panic!("unexpected image result"),
+                        ToolResultContent::Text { text } => text.clone(),
+                        ToolResultContent::Image { media_type, .. } => {
+                            format!("[image {media_type}]")
+                        }
                     })
                     .collect(),
             )),
@@ -265,6 +272,7 @@ impl Harness {
         let model = Arc::new(Model {
             scripts: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
+            tools: Mutex::new(HashMap::new()),
         });
         let bus = Arc::new(event_bus::EventBus::new(4096));
         let events = bus.subscribe();
@@ -573,3 +581,5 @@ async fn orchestrator_cannot_capture_and_missing_store_fails_closed() {
         "{result:?}"
     );
 }
+
+mod inspect;

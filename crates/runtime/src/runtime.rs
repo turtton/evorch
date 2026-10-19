@@ -83,6 +83,7 @@ pub(crate) struct Shared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Mutex<Arc<ToolExecutor>>,
     pub(crate) artifacts: OnceLock<Arc<crate::artifacts::ArtifactStore>>,
+    pub(crate) artifact_pages: OnceLock<Arc<dyn crate::artifacts::ArtifactPages>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
@@ -630,6 +631,7 @@ impl AgentRuntime {
                 bus,
                 executor: Mutex::new(executor),
                 artifacts: OnceLock::new(),
+                artifact_pages: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
@@ -933,6 +935,7 @@ impl AgentRuntime {
                 self_improvement_task: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
                 artifacts: OnceLock::new(),
+                artifact_pages: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
@@ -2468,10 +2471,19 @@ pub fn production_executor_with_config(
         &config.comment_checker,
         &[workspace_root],
         sandbox::ApprovalPolicy::allow_all(),
+        BrowserTools::Configure(&config.tools.browser),
     )
 }
 
 /// Production executor composition, also used after a run builds its own sandbox.
+/// Where a composed executor's agent browser tools come from.
+pub(crate) enum BrowserTools<'a> {
+    /// Launch as `[tools.browser]` sets: the process's first executor.
+    Configure(&'a config::BrowserToolsConfig),
+    /// Share the parent's browser, so one Chromium serves the process.
+    Inherit(&'a ToolExecutor),
+}
+
 /// File tools are confined to `boundary`, the list the sandbox was built from.
 pub(crate) fn configured_executor(
     bus: Arc<EventBus>,
@@ -2480,6 +2492,7 @@ pub(crate) fn configured_executor(
     checker_config: &config::CommentCheckerConfig,
     forbidden_roots: &[PathBuf],
     approval_policy: sandbox::ApprovalPolicy,
+    browser: BrowserTools<'_>,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let hook = tools::post_edit::CommentChecker::resolve_with_roots(
         Arc::clone(&sandbox),
@@ -2495,7 +2508,10 @@ pub(crate) fn configured_executor(
     .with_post_edit_hook(hook)
     .with_policy(approval_policy)
     .with_web_tools()
-    .and_then(tools::ToolExecutor::with_browser_tools)
+    .and_then(|executor| match browser {
+        BrowserTools::Configure(config) => executor.with_browser_tools(config),
+        BrowserTools::Inherit(parent) => Ok(executor.inherit_agent_browser(parent)),
+    })
     .map_err(|error| RuntimeError::NetworkGuard {
         detail: error.to_string(),
     })?;
@@ -3377,5 +3393,92 @@ mod review_registration_tests {
                 .unwrap()
                 .contains_key(&child)
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_browser_sharing_tests {
+    use super::*;
+
+    struct AllowAll;
+
+    #[async_trait::async_trait]
+    impl browser::agent::RequestPolicy for AllowAll {
+        async fn check(&self, _url: &url::Url) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn resolve(
+            &self,
+            _host: &str,
+            _port: u16,
+            _tls: bool,
+        ) -> Result<Vec<std::net::SocketAddr>, String> {
+            Err("unused".into())
+        }
+    }
+
+    #[test]
+    fn run_executors_drive_the_parent_agent_browser() {
+        // Given: a runtime executor holding the process's agent browser.
+        let bus = Arc::new(EventBus::new(16));
+        let browser = Arc::new(browser::agent::AgentBrowser::new(
+            browser::agent::LaunchOptions {
+                executable: Some("/nonexistent/chromium".into()),
+                policy: Arc::new(AllowAll),
+                max_pages: 1,
+            },
+        ));
+        let parent = ToolExecutor::new(Arc::clone(&bus)).with_agent_browser(
+            Arc::clone(&browser),
+            tools::BrowserToolOptions {
+                coordinate_actions: true,
+            },
+        );
+        let workspace = tempfile::tempdir().unwrap();
+
+        // When: a run composes its own executor from that parent.
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&parent));
+
+        // Then: its browser tools, opt-in ones included, use the same browser,
+        // so observers see its page.
+        assert!(Arc::ptr_eq(&run.agent_browser().unwrap(), &browser));
+        assert!(run.tool_permissions("browser_navigate").is_some());
+        assert!(run.tool_permissions("browser_click_at").is_some());
+    }
+
+    #[test]
+    fn disabled_browser_config_registers_no_browser_tools() {
+        let bus = Arc::new(EventBus::new(16));
+        let workspace = tempfile::tempdir().unwrap();
+        let disabled = config::BrowserToolsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let first = compose(&bus, workspace.path(), BrowserTools::Configure(&disabled));
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&first));
+
+        for executor in [first, run] {
+            assert!(executor.agent_browser().is_none());
+            assert!(executor.tool_permissions("browser_navigate").is_none());
+        }
+    }
+
+    fn compose(
+        bus: &Arc<EventBus>,
+        workspace: &std::path::Path,
+        browser: BrowserTools<'_>,
+    ) -> Arc<ToolExecutor> {
+        configured_executor(
+            Arc::clone(bus),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            &sandbox::SandboxBoundary::new(workspace.to_path_buf()),
+            &config::CommentCheckerConfig::default(),
+            &[],
+            sandbox::ApprovalPolicy::allow_all(),
+            browser,
+        )
+        .unwrap()
     }
 }

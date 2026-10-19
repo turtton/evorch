@@ -611,7 +611,7 @@ fn run() -> Result<(), GuiError> {
             Arc::new(runtime::compose::SwitchableModel::new(initial)),
         )
     });
-    let runtime = match demo_directory.as_ref() {
+    let (runtime, agent_browser) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let seam = WorkspaceSeam::production(demo_repo.clone())?;
@@ -621,6 +621,7 @@ fn run() -> Result<(), GuiError> {
                 seam.project_root().to_path_buf(),
                 &composition_config,
             )?;
+            let agent_browser = executor.agent_browser();
             let demo_model: Arc<dyn AgentModel> = Arc::new(DemoScriptModel::new(Arc::clone(&bus)));
             let ComposedRuntime {
                 runtime,
@@ -639,7 +640,7 @@ fn run() -> Result<(), GuiError> {
                 ?model_identity,
                 "demo runtime composed via provider composition root"
             );
-            runtime
+            (runtime, agent_browser)
         }
         None => {
             let seam = WorkspaceSeam::production(effective_project_root.clone())?;
@@ -649,6 +650,7 @@ fn run() -> Result<(), GuiError> {
                 effective_project_root.clone(),
                 &composition_config,
             )?;
+            let agent_browser = executor.agent_browser();
             let ComposedRuntime {
                 runtime,
                 model_identity,
@@ -669,9 +671,11 @@ fn run() -> Result<(), GuiError> {
                 ?model_identity,
                 "runtime composed via provider composition root"
             );
-            runtime
+            (runtime, agent_browser)
         }
     };
+    #[cfg(not(feature = "browser"))]
+    drop(agent_browser);
 
     // Runs of other projects use models composed from those projects' role profiles.
     let project_models = production_model
@@ -916,7 +920,7 @@ fn run() -> Result<(), GuiError> {
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
     #[cfg(feature = "cef")]
-    let (artifact_opener, html_previews) = {
+    let (artifact_opener, mut html_previews) = {
         let (opener, requests) =
             gui::model::artifact_opener::HtmlPreviewOpener::new(Arc::clone(&portal_opener));
         let opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> = Arc::new(opener);
@@ -1025,6 +1029,8 @@ fn run() -> Result<(), GuiError> {
     // One captured owner preserves shutdown ordering even if run_native fails
     // before invoking its app constructor and only drops the closure captures.
     let storage_resources = storage;
+    #[cfg(feature = "cef")]
+    let inspecting_runtime = runtime.clone();
     let title = arguments.window_title;
     let options = gui::window::native_options(&title);
     eframe::run_native(
@@ -1035,10 +1041,21 @@ fn run() -> Result<(), GuiError> {
             state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
             #[cfg(feature = "cef")]
             html_previews.install_snapshots(&creation_context.egui_ctx);
+            // CEF must start on this thread, which also drops it. Starting it here
+            // rather than on demand lets agents inspect artifacts while the window
+            // draws no frames.
+            #[cfg(feature = "cef")]
+            match html_previews.artifact_pages() {
+                Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
+                Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
+            }
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]
                 browser: gui::browser::BrowserWindow::new(bus.clone(), handle.clone()),
+                #[cfg(feature = "browser")]
+                agent_browser: agent_browser
+                    .map(|browser| gui::browser::AgentBrowserWindow::new(browser, handle.clone())),
                 #[cfg(feature = "cef")]
                 html_previews,
                 _storage: storage_resources,
@@ -1052,6 +1069,8 @@ struct GuiApp {
     workbench: WorkbenchApp<AgentRuntime>,
     #[cfg(feature = "browser")]
     browser: gui::browser::BrowserWindow,
+    #[cfg(feature = "browser")]
+    agent_browser: Option<gui::browser::AgentBrowserWindow>,
     #[cfg(feature = "cef")]
     html_previews: gui::html_preview::HtmlPreviewWindows,
     _storage: GuiStorageResources,
@@ -1098,6 +1117,10 @@ impl eframe::App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(feature = "browser")]
         self.browser.render(ui);
+        #[cfg(feature = "browser")]
+        if let Some(agent_browser) = &mut self.agent_browser {
+            agent_browser.render(ui);
+        }
         self.workbench.0.ui(ui, frame);
         // After the workbench, so artifacts opened this frame show without a
         // second repaint.

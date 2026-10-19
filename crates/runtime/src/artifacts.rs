@@ -463,5 +463,9 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
     })())
 }
 
+mod inspect;
+pub use inspect::{ArtifactPage, ArtifactPages, INSPECT_ARTIFACT};
+pub(crate) use inspect::{inspect, spec as inspect_spec};
+
 #[cfg(test)]
 mod tests;
