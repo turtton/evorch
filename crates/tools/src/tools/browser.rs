@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use browser::agent::{
-    AgentError, DialogAnswer, PageAgent, PageProvider, RequestPolicy, WaitFor, WaitLimits,
-    WaitOutcome, Waited,
+    AgentError, DialogAnswer, PageAgent, PageProvider, RequestPolicy, Shown, View, WaitFor,
+    WaitLimits, WaitOutcome, Waited,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -187,6 +187,7 @@ struct Args {
     accept: Option<bool>,
     prompt_text: Option<String>,
     tab: Option<String>,
+    depth: Option<usize>,
     text_gone: Option<String>,
     ref_gone: Option<String>,
     #[serde(default)]
@@ -212,7 +213,7 @@ impl BrowserTool {
                     .provider
                     .switch_tab(key, &required(args.tab, "tab")?)
                     .await?;
-                return outline(self.provider.as_ref(), key, &page).await;
+                return outline(self.provider.as_ref(), key, &page, View::Full).await;
             }
             Kind::CloseTab => {
                 let tab = required(args.tab, "tab")?;
@@ -222,6 +223,17 @@ impl BrowserTool {
             _ => {}
         }
         let page = self.provider.page(key).await?;
+        // A new document is read whole; after anything else the agent reads
+        // what its action changed.
+        let view = match self.kind {
+            Kind::Navigate => View::Full,
+            Kind::Snapshot if args.reference.is_none() && args.depth.is_none() => View::Full,
+            Kind::Snapshot => View::Scoped {
+                root: args.reference.clone(),
+                depth: args.depth,
+            },
+            _ => View::Changes,
+        };
         match self.kind {
             Kind::Navigate => {
                 let url = required(args.url, "url")?;
@@ -301,14 +313,14 @@ impl BrowserTool {
                 };
                 let limits = WaitLimits::default();
                 let waited = page.wait_for(&wanted, limits).await?;
-                let mut result = outline(self.provider.as_ref(), key, &page).await?;
+                let mut result = outline(self.provider.as_ref(), key, &page, View::Changes).await?;
                 waited_header(&mut result, &waited, limits);
                 return Ok(result);
             }
             Kind::Screenshot => return screenshot(&page).await,
             Kind::Snapshot | Kind::Close | Kind::Tabs | Kind::SwitchTab | Kind::CloseTab => {}
         }
-        outline(self.provider.as_ref(), key, &page).await
+        outline(self.provider.as_ref(), key, &page, view).await
     }
 }
 
@@ -316,8 +328,9 @@ async fn outline(
     provider: &dyn PageProvider,
     key: &str,
     page: &PageAgent,
+    view: View,
 ) -> Result<ToolResult, AgentError> {
-    let snapshot = page.snapshot().await?;
+    let snapshot = page.outline(view).await?;
     let mut text = snapshot.text;
     let blocked = page.take_blocked();
     let dialogs = page.take_dialogs();
@@ -336,6 +349,12 @@ async fn outline(
     }
     Ok(ToolResult::success(text).with_detail(json!({
         "refs": snapshot.refs.len(),
+        "shown": match snapshot.shown {
+            Shown::Full => "full",
+            Shown::Scoped => "scoped",
+            Shown::Changes => "changes",
+            Shown::Unchanged => "unchanged",
+        },
         "blocked_requests": blocked,
         "dialogs": dialogs,
         "tabs": tabs,
@@ -349,11 +368,11 @@ fn waited_header(result: &mut ToolResult, waited: &Waited, limits: WaitLimits) {
     let header = match waited.outcome {
         WaitOutcome::Met => format!("Done waiting after {} page events.\n", waited.events),
         WaitOutcome::EventLimit => format!(
-            "Gave up after {} page events, still waiting for {still}. The page kept changing; read the outline below, then wait again or act.\n",
+            "Gave up after {} page events, still waiting for {still}. The page kept changing; read the page below, then wait again or act.\n",
             waited.events
         ),
         WaitOutcome::TimeLimit => format!(
-            "Gave up after {} seconds and {} page events, still waiting for {still}. Read the outline below, then wait again or act.\n",
+            "Gave up after {} seconds and {} page events, still waiting for {still}. Read the page below, then wait again or act.\n",
             limits.time.as_secs(),
             waited.events
         ),
@@ -530,41 +549,43 @@ impl Tool for BrowserTool {
                 "Open a URL in this run's active browser tab and return its outline. http is upgraded to https; requests to blocked addresses are refused, as in web_fetch."
             }
             Kind::Back => {
-                "Go back one page in this run's browser history, then return the outline."
+                "Go back one page in this run's browser history, then return what changed in the outline."
             }
             Kind::Forward => {
-                "Go forward one page in this run's browser history, then return the outline."
+                "Go forward one page in this run's browser history, then return what changed in the outline."
             }
             Kind::Snapshot => {
-                "Return the current page as an accessibility outline. Elements carry [ref=eN] for the other browser tools; only refs from the latest outline are accepted."
+                "Return the active tab as an accessibility outline. With ref, only the part under that element; with depth, at most that many levels below it (0 is the element alone). Elements carry [ref=eN] for the other browser tools. Other browser tools return only what changed in the outline since it was last read (the whole outline after browser_navigate, or when most of it changed). A ref works for as long as its element is on the page, whichever outline or change list showed it."
             }
-            Kind::Click => "Click the element with the given ref, then return the updated outline.",
+            Kind::Click => {
+                "Click the element with the given ref, then return what changed in the outline."
+            }
             Kind::ClickAt => {
-                "Click the point (x, y), in CSS pixels from the top-left of the visible viewport as shown by browser_screenshot, then return the updated outline. Prefer browser_click; use this only for targets the outline does not expose, such as a canvas."
+                "Click the point (x, y), in CSS pixels from the top-left of the visible viewport as shown by browser_screenshot, then return what changed in the outline. Prefer browser_click; use this only for targets the outline does not expose, such as a canvas."
             }
             Kind::Hover => {
-                "Move the mouse over the element with the given ref, for menus and tooltips that open on hover. Returns the updated outline."
+                "Move the mouse over the element with the given ref, for menus and tooltips that open on hover. Returns what changed in the outline."
             }
             Kind::SelectOption => {
-                "Choose options in the <select> element (combobox or listbox) with the given ref, by value or visible label: one value, or any number for a multiple select. Returns the updated outline."
+                "Choose options in the <select> element (combobox or listbox) with the given ref, by value or visible label: one value, or any number for a multiple select. Returns what changed in the outline."
             }
             Kind::UploadFile => {
-                "Set the files of the file input with the given ref, as if the user chose them, then return the updated outline. paths are absolute paths to files this run's sandbox may read (the project root, this thread's $TMPDIR and read-only system, tool output and Cargo/rustup cache paths); other paths, and files that look like they contain credentials, are refused. The page may send the files to its site, under the same network rules as browser_navigate, so each call is first reviewed against the user's request."
+                "Set the files of the file input with the given ref, as if the user chose them, then return what changed in the outline. paths are absolute paths to files this run's sandbox may read (the project root, this thread's $TMPDIR and read-only system, tool output and Cargo/rustup cache paths); other paths, and files that look like they contain credentials, are refused. The page may send the files to its site, under the same network rules as browser_navigate, so each call is first reviewed against the user's request."
             }
             Kind::HandleDialog => {
                 "Decide how to answer the confirm or prompt dialog that your next browser action opens: accept=true presses OK (prompt_text answers a prompt), accept=false cancels. Unanswered confirm and prompt dialogs are cancelled and alerts are closed; results list each dialog."
             }
             Kind::Type => {
-                "Replace the content of the field with the given ref by text (empty clears it); submit presses Enter. Returns the updated outline."
+                "Replace the content of the field with the given ref by text (empty clears it); submit presses Enter. Returns what changed in the outline."
             }
             Kind::PressKey => {
-                "Press a key in the focused element, such as Enter, Escape, ArrowDown, a or Control+a. Returns the updated outline."
+                "Press a key in the focused element, such as Enter, Escape, ArrowDown, a or Control+a. Returns what changed in the outline."
             }
             Kind::Scroll => {
-                "Scroll the page, or the element with the given ref, by most of a viewport. Returns the updated outline."
+                "Scroll the page, or the element with the given ref, by most of a viewport. Returns what changed in the outline."
             }
             Kind::WaitFor => {
-                "Wait until the active tab shows what you name, then return its outline. Name at least one condition; all must hold at once: text appearing or disappearing (text, text_gone; matched in the names and values of the outline), a ref from this or an earlier outline appearing or disappearing (ref, ref_gone), no request in flight (network_idle), the URL containing url, or the URL changing from what it is now (url_changes). Use it when an action's result arrives later. The page is checked again on each change, and the wait gives up after 1000 page changes or 30 seconds with an error result that still holds the outline."
+                "Wait until the active tab shows what you name, then return what changed in the outline. Name at least one condition; all must hold at once: text appearing or disappearing (text, text_gone; matched in the names and values of the outline), a ref from this or an earlier outline appearing or disappearing (ref, ref_gone), no request in flight (network_idle), the URL containing url, or the URL changing from what it is now (url_changes). Use it when an action's result arrives later. The page is checked again on each change, and the wait gives up after 1000 page changes or 30 seconds with an error result that still shows the page."
             }
             Kind::Tabs => {
                 "List this run's browser tabs. Links and scripts that open a new tab add it to the run; the other browser tools act on the active tab."
@@ -581,8 +602,7 @@ impl Tool for BrowserTool {
     }
 
     fn schema(&self) -> serde_json::Value {
-        let reference =
-            json!({"type": "string", "description": "A ref such as e12 from the latest outline."});
+        let reference = json!({"type": "string", "description": "A ref such as e12 from an outline of this page."});
         let (properties, required) = match self.kind {
             Kind::Navigate => (json!({"url": {"type": "string"}}), json!(["url"])),
             Kind::Click | Kind::Hover => (json!({"ref": reference}), json!(["ref"])),
@@ -630,12 +650,13 @@ impl Tool for BrowserTool {
                 json!({"direction": {"type": "string", "enum": ["up", "down", "left", "right"], "default": "down"}, "ref": reference}),
                 json!([]),
             ),
-            Kind::Back
-            | Kind::Forward
-            | Kind::Snapshot
-            | Kind::Tabs
-            | Kind::Screenshot
-            | Kind::Close => (json!({}), json!([])),
+            Kind::Snapshot => (
+                json!({"ref": reference, "depth": {"type": "integer", "minimum": 0, "description": "Levels below the element (or the page) to show."}}),
+                json!([]),
+            ),
+            Kind::Back | Kind::Forward | Kind::Tabs | Kind::Screenshot | Kind::Close => {
+                (json!({}), json!([]))
+            }
         };
         json!({
             "type": "object",

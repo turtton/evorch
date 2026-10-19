@@ -10,6 +10,40 @@ mod wait;
 
 pub use wait::{WaitFor, WaitLimits, WaitOutcome, Waited};
 
+/// How [`PageAgent::outline`] shows the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum View {
+    Full,
+    /// The lines under `root` (a ref; the whole page with `None`), at most
+    /// `depth` levels below it.
+    Scoped {
+        root: Option<String>,
+        depth: Option<usize>,
+    },
+    /// What changed since the page was last read. The whole outline when it
+    /// was not read before, or when the changes would take about as many
+    /// lines.
+    Changes,
+}
+
+/// What an [`Outline`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    Full,
+    Scoped,
+    Changes,
+    Unchanged,
+}
+
+/// A page as [`PageAgent::outline`] shows it. Whatever it shows, every ref
+/// of the page as it was read works, including refs it leaves out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    pub text: String,
+    pub refs: BTreeSet<i64>,
+    pub shown: Shown,
+}
+
 const BLOCKED_LOG: usize = 16;
 const ACTIVITY_LOG: usize = 32;
 const TYPED_PREVIEW: usize = 40;
@@ -72,6 +106,8 @@ pub struct UploadTarget {
 pub struct PageAgent {
     target: Arc<dyn CdpTarget>,
     refs: Mutex<BTreeSet<i64>>,
+    /// The outline lines of the last read, which changes are counted from.
+    last: Mutex<Option<Vec<snapshot::Line>>>,
     blocked: Mutex<VecDeque<String>>,
     activity: Mutex<VecDeque<Activity>>,
     dialogs: Mutex<VecDeque<String>>,
@@ -84,6 +120,7 @@ impl PageAgent {
         Self {
             target,
             refs: Mutex::new(BTreeSet::new()),
+            last: Mutex::default(),
             blocked: Mutex::default(),
             activity: Mutex::default(),
             dialogs: Mutex::default(),
@@ -233,12 +270,78 @@ impl PageAgent {
     }
 
     async fn read_snapshot(&self) -> Result<Snapshot, AgentError> {
-        let mut snapshot = snapshot::render(&self.outline_nodes().await?);
-        if let Some(url) = self.location().await? {
-            snapshot.text = format!("URL: {url}\n{}", snapshot.text);
-        }
-        lock(&self.refs).clone_from(&snapshot.refs);
-        Ok(snapshot)
+        let outline = self.read_outline(View::Full).await?;
+        Ok(Snapshot {
+            text: outline.text,
+            refs: outline.refs,
+        })
+    }
+
+    /// Reads the page and shows it as `view` asks.
+    pub async fn outline(&self, view: View) -> Result<Outline, AgentError> {
+        let label = match &view {
+            View::Scoped {
+                root: Some(root), ..
+            } => format!("snapshot {root}"),
+            _ => "snapshot".to_owned(),
+        };
+        self.logged(label, self.read_outline(view)).await
+    }
+
+    async fn read_outline(&self, view: View) -> Result<Outline, AgentError> {
+        let tree = snapshot::tree(&self.outline_nodes().await?);
+        let url = self.location().await?;
+        lock(&self.refs).clone_from(&tree.refs);
+        let previous = lock(&self.last).replace(tree.lines.clone());
+        let full = || (snapshot::text(&tree.lines), Shown::Full);
+        let (body, shown) = match view {
+            View::Full => full(),
+            View::Scoped { root, depth } => {
+                let node = match &root {
+                    Some(root) => Some(
+                        root.strip_prefix('e')
+                            .and_then(|id| id.parse().ok())
+                            .filter(|id| tree.refs.contains(id))
+                            .ok_or_else(|| AgentError::UnknownRef(root.clone()))?,
+                    ),
+                    None => None,
+                };
+                let lines = snapshot::scope(&tree.lines, node, depth)
+                    .ok_or_else(|| AgentError::UnknownRef(root.unwrap_or_default()))?;
+                (snapshot::text(&lines), Shown::Scoped)
+            }
+            View::Changes => match previous {
+                None => full(),
+                Some(old) => {
+                    let diff = snapshot::diff(&old, &tree.lines);
+                    if diff.changes == 0 {
+                        (
+                            "The outline has not changed since it was last read; its refs still work.\n".to_owned(),
+                            Shown::Unchanged,
+                        )
+                    } else if diff.lines * 2 > tree.lines.len().min(snapshot::MAX_SNAPSHOT_LINES) {
+                        full()
+                    } else {
+                        (
+                            format!(
+                                "Changes since the outline was last read (+ added, - removed, ~ changed); refs not listed here still work:\n{}",
+                                diff.text
+                            ),
+                            Shown::Changes,
+                        )
+                    }
+                }
+            },
+        };
+        let text = match url {
+            Some(url) => format!("URL: {url}\n{body}"),
+            None => body,
+        };
+        Ok(Outline {
+            text,
+            refs: tree.refs,
+            shown,
+        })
     }
 
     async fn outline_nodes(&self) -> Result<Vec<Value>, AgentError> {
@@ -269,6 +372,7 @@ impl PageAgent {
 
     pub async fn navigate(&self, url: &str) -> Result<(), AgentError> {
         lock(&self.refs).clear();
+        lock(&self.last).take();
         self.act(format!("navigate {url}"), self.target.navigate(url))
             .await
     }

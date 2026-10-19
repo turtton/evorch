@@ -14,6 +14,8 @@ struct FakePage {
     calls: Mutex<Vec<String>>,
     uploaded: Mutex<Vec<Value>>,
     events: FakeEvents,
+    /// AX nodes that replace the single link when set.
+    nodes: Mutex<Option<Value>>,
 }
 
 struct FakeEvents(tokio::sync::watch::Sender<PageEvents>);
@@ -32,6 +34,9 @@ impl CdpTarget for FakePage {
             self.uploaded.lock().unwrap().push(params["files"].clone());
         }
         Ok(match method {
+            "Accessibility.getFullAXTree" if self.nodes.lock().unwrap().is_some() => {
+                json!({"nodes": self.nodes.lock().unwrap().clone()})
+            }
             "Accessibility.getFullAXTree" => json!({"nodes": [{
                 "nodeId": "1", "role": {"value": "link"}, "name": {"value": "Docs"},
                 "backendDOMNodeId": 5
@@ -379,8 +384,9 @@ async fn page_operations_return_the_outline_and_dialogs_are_listed() {
 
     for result in [&back, &hover, &selected] {
         assert!(!result.is_error, "{}", result.content);
-        assert!(
-            result.content.contains("- link \"Docs\""),
+        assert_eq!(
+            result.detail.as_ref().unwrap()["shown"],
+            "unchanged",
             "{}",
             result.content
         );
@@ -630,7 +636,7 @@ async fn waits_return_the_outline_and_giving_up_is_an_error_result() {
         quiet.content
     );
     assert!(
-        quiet.content.contains("- link \"Docs\""),
+        quiet.content.contains("has not changed"),
         "{}",
         quiet.content
     );
@@ -641,4 +647,75 @@ async fn waits_return_the_outline_and_giving_up_is_an_error_result() {
         "{}",
         nothing.content
     );
+}
+
+/// A list of ten links (e2 to e11) under the page (e1), plus `extra`.
+fn links(extra: &[Value]) -> Value {
+    let mut nodes = vec![json!({
+        "nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Shop"},
+        "backendDOMNodeId": 1,
+        "childIds": (2..12).map(|id| id.to_string()).chain(extra.iter().map(|node| node["nodeId"].as_str().unwrap().to_owned())).collect::<Vec<_>>(),
+    })];
+    nodes.extend((2..12).map(|id| {
+        json!({
+            "nodeId": id.to_string(), "parentId": "1", "role": {"value": "link"},
+            "name": {"value": format!("Item {id}")}, "backendDOMNodeId": id,
+        })
+    }));
+    nodes.extend(extra.iter().cloned());
+    Value::Array(nodes)
+}
+
+#[tokio::test]
+async fn actions_return_what_changed_and_snapshots_can_show_part_of_the_page() {
+    // Given: a page of ten links, read once by navigating to it.
+    let provider = Arc::new(FakeProvider::default());
+    provider.page("run-a").await.unwrap();
+    let fake = Arc::clone(&provider.pages.lock().await["run-a"].0);
+    *fake.nodes.lock().unwrap() = Some(links(&[]));
+    let run = |name: &str, args: Value| {
+        let tool = tool(&provider, name);
+        async move {
+            tool.execute_with_context(&context("run-a"), args)
+                .await
+                .unwrap()
+        }
+    };
+    let opened = run("browser_navigate", json!({"url": "https://example.test/"})).await;
+
+    // When: a click adds a button, another click uses an earlier ref, and
+    // the agent looks at parts of the page.
+    *fake.nodes.lock().unwrap() = Some(links(&[json!({
+        "nodeId": "20", "parentId": "1", "role": {"value": "button"},
+        "name": {"value": "Buy"}, "backendDOMNodeId": 20,
+    })]));
+    let clicked = run("browser_click", json!({"ref": "e3"})).await;
+    let again = run("browser_click", json!({"ref": "e4"})).await;
+    let top = run("browser_snapshot", json!({"depth": 0})).await;
+    let item = run("browser_snapshot", json!({"ref": "e5"})).await;
+    let gone = run("browser_snapshot", json!({"ref": "e99"})).await;
+
+    // Then: the whole page came after navigating, then only what changed,
+    // and every ref of the page kept working.
+    assert_eq!(opened.detail.as_ref().unwrap()["shown"], "full");
+    assert!(opened.content.contains("- link \"Item 11\" [ref=e11]"));
+    assert_eq!(
+        clicked.content,
+        "URL: https://example.test/\n\
+         Changes since the outline was last read (+ added, - removed, ~ changed); refs not listed here still work:\n\
+         \x20 - RootWebArea \"Shop\" [ref=e1]\n\
+         +   - button \"Buy\" [ref=e20]\n"
+    );
+    assert_eq!(again.detail.as_ref().unwrap()["shown"], "unchanged");
+    assert!(!again.is_error, "{}", again.content);
+    assert_eq!(
+        top.content,
+        "URL: https://example.test/\n- RootWebArea \"Shop\" [ref=e1]\n  - … 11 more lines deeper; pass the ref above to browser_snapshot\n"
+    );
+    assert_eq!(
+        item.content,
+        "URL: https://example.test/\n- link \"Item 5\" [ref=e5]\n"
+    );
+    assert!(gone.is_error);
+    assert!(gone.content.contains("unknown ref e99"), "{}", gone.content);
 }

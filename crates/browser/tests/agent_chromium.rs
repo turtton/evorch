@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use browser::agent::{
     Activity, AgentBrowser, AgentError, DialogAnswer, LaunchOptions, PageAgent, PageProvider,
-    RequestPolicy, WaitFor, WaitLimits, WaitOutcome, Waited,
+    RequestPolicy, Shown, View, WaitFor, WaitLimits, WaitOutcome, Waited,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -944,4 +944,85 @@ async fn waits_end_on_the_page_events_they_name() {
     // Then: the wait ended once the held request finished.
     assert_eq!(quiet.outcome, WaitOutcome::Met, "{quiet:?}");
     assert!(quiet.checks >= 2, "{quiet:?}");
+}
+
+const CART: &str = r#"<!doctype html><html><head><title>Cart</title></head><body>
+<h1>Cart</h1>
+<ul><li>Apple</li><li>Banana</li><li>Cherry</li><li>Date</li><li>Elder</li>
+<li>Fig</li><li>Grape</li><li>Hazel</li><li>Iris</li><li>Juniper</li></ul>
+<label>Note <input id="note"></label>
+<button onclick="document.getElementById('status').textContent = 'Added'">Add</button>
+<p id="status">Empty</p>
+</body></html>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium; run explicitly with --ignored"]
+async fn outlines_show_changes_and_parts_with_refs_that_keep_working() {
+    // Given: a cart page read whole once.
+    let url = serve(CART.to_owned()).await;
+    let browser = AgentBrowser::new(LaunchOptions {
+        executable: None,
+        policy: Arc::new(Refuse {
+            host: "blocked.invalid",
+            port: 0,
+        }),
+        max_pages: 1,
+        max_tabs: 1,
+    });
+    let page = browser.page("run-1").await.expect("launch Chromium");
+    page.navigate(&url).await.expect("navigate");
+    let full = page.outline(View::Full).await.unwrap();
+    let list = reference(&full.text, "- list");
+    let note = reference(&full.text, "- textbox \"Note\"");
+
+    // When: the agent clicks, types by a ref only the full outline showed,
+    // and reads the list by its ref.
+    page.click(&reference(&full.text, "- button \"Add\""))
+        .await
+        .unwrap();
+    let added = page.outline(View::Changes).await.unwrap();
+    page.type_text(&note, "gift", false).await.unwrap();
+    let typed = page.outline(View::Changes).await.unwrap();
+    let unchanged = page.outline(View::Changes).await.unwrap();
+    let top = page
+        .outline(View::Scoped {
+            root: Some(list.clone()),
+            depth: Some(0),
+        })
+        .await
+        .unwrap();
+    let items = page
+        .outline(View::Scoped {
+            root: Some(list.clone()),
+            depth: None,
+        })
+        .await
+        .unwrap();
+
+    // Then: each change list holds only what changed, and the refs held.
+    assert_eq!(full.shown, Shown::Full);
+    assert_eq!(added.shown, Shown::Changes, "{}", added.text);
+    assert!(
+        added.text.contains("+ ") && added.text.contains("Added"),
+        "{}",
+        added.text
+    );
+    assert!(!added.text.contains("Banana"), "{}", added.text);
+    assert_eq!(typed.shown, Shown::Changes, "{}", typed.text);
+    assert!(
+        typed.text.lines().any(|line| line.starts_with('~')
+            && line.contains("value=\"gift\"")
+            && line.contains(&note)),
+        "{}",
+        typed.text
+    );
+    assert_eq!(unchanged.shown, Shown::Unchanged, "{}", unchanged.text);
+    assert!(
+        top.text.contains(&format!("[ref={list}]\n  - … ")),
+        "{}",
+        top.text
+    );
+    assert!(!top.text.contains("Apple"), "{}", top.text);
+    assert!(items.text.contains("Juniper"), "{}", items.text);
+    assert!(!items.text.contains("Cart"), "{}", items.text);
 }

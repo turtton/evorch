@@ -75,9 +75,28 @@ outline cannot name, such as a canvas; refs stay the default.
   closed as soon as it is caught (until then its requests pass the same
   checks as any other tab), and the next result says so. A page that
   no run opened, such as one a page could create some other way, is closed.
-- Pages are read as an accessibility outline. Elements carry `[ref=eN]`, and
-  the action tools accept only refs from the latest outline. Actions return
-  the updated outline; `browser_screenshot` returns a PNG image result.
+- Pages are read as an accessibility outline. Elements carry `[ref=eN]`,
+  where `N` is the element's DOM node, so a ref stays the same for as long as
+  the element exists. The action tools accept any ref of the page as last
+  read, including refs that the result left out. `browser_screenshot` returns
+  a PNG image result.
+- `browser_snapshot` returns the whole outline. With `ref` it returns only
+  the part under that element, and with `depth` at most that many levels
+  below it. A cut level is summed up in one line ("… 12 more lines
+  deeper"), so the agent knows where to look closer.
+- The other tools return only what changed in the outline since the page
+  was last read. Each change is shown as `+` added, `-` removed or `~`
+  changed (with the old line), under the unchanged lines that hold it. Lines
+  are matched by their DOM node.
+  - The whole outline comes back after `browser_navigate`, after
+    `browser_switch_tab`, the first time a tab is read, and when the change
+    list would be at least half as long as the outline (a new document, for
+    instance). With no change, the result says so in one line.
+  - Changes are the default because a full outline after every click
+    repeats the whole page, up to 800 lines, while the agent needs to see
+    what its action did. The change list says that directly, and it costs
+    a few lines. The agent loses nothing by it: refs it does not show keep
+    working, and `browser_snapshot` reads the whole page at any time.
 - `browser_navigate` URLs go through the same per-call review as `web_fetch`.
   Back and forward revisit history entries, which load under the same
   request policy; the back/forward cache is disabled, so every entry loads
