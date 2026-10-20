@@ -41,6 +41,13 @@ fn small_button(ui: &mut egui::Ui, enabled: bool, icon: &str, label: &str) -> eg
     response
 }
 
+/// Icon-only variant; callers add the hover text.
+fn small_icon_button(ui: &mut egui::Ui, enabled: bool, icon: &str, label: &str) -> egui::Response {
+    let response = ui.add_enabled(enabled, ghost(small(icon)));
+    accessible(&response, label);
+    response
+}
+
 /// Fork and rewind actions after a completed turn, plus versions branching there.
 pub(super) fn turn_footer(
     ui: &mut egui::Ui,
@@ -55,8 +62,10 @@ pub(super) fn turn_footer(
     let thread = &branch.thread.id;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
-        if small_button(ui, true, icons::GIT_FORK, "ここから fork")
-            .on_hover_text("このターンまでの会話を引き継いだ新しい thread を作ります")
+        if small_icon_button(ui, true, icons::GIT_FORK, "ここから fork")
+            .on_hover_text(
+                "ここから fork: このターンまでの会話を引き継いだ新しい thread を作ります",
+            )
             .clicked()
         {
             *action = Some(SidebarAction::ForkAtTurn {
@@ -64,13 +73,15 @@ pub(super) fn turn_footer(
                 entry_id,
             });
         }
-        let rewind = small_button(
+        let rewind = small_icon_button(
             ui,
             branch.rewind_block.is_none(),
             icons::ARROW_COUNTER_CLOCKWISE,
             "ここまで巻き戻す",
         )
-        .on_hover_text("このターンの直後まで会話を戻します。今の会話は版として残ります")
+        .on_hover_text(
+            "ここまで巻き戻す: このターンの直後まで会話を戻します。今の会話は版として残ります",
+        )
         .on_disabled_hover_text(branch.rewind_block.unwrap_or_default());
         if rewind.clicked() {
             request_confirm(
@@ -122,7 +133,8 @@ pub(super) fn edit_button(
 }
 
 /// Where the conversation leaves inherited history. Only the thread's own
-/// marker offers navigation; inherited markers are plain dividers.
+/// marker offers navigation; inherited markers are plain dividers. Rewinds show
+/// just the version switcher.
 pub(super) fn branch_divider(
     ui: &mut egui::Ui,
     kind: LineageKind,
@@ -133,12 +145,11 @@ pub(super) fn branch_divider(
     ui.add_space(SP_1);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
-        let (icon, text) = match kind {
-            LineageKind::Fork => (icons::GIT_FORK, "ここから分岐しました"),
-            LineageKind::Rewind => (icons::ARROW_COUNTER_CLOCKWISE, "ここで巻き戻しました"),
-        };
-        let label = ui.label(small(&with_icon(icon, text)));
-        label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+        if kind == LineageKind::Fork {
+            let text = "ここから分岐しました";
+            let label = ui.label(small(&with_icon(icons::GIT_FORK, text)));
+            label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+        }
         let Some(branch) = branch.filter(|_| own) else {
             return;
         };
@@ -171,10 +182,6 @@ pub(super) fn branch_divider(
                     .and_then(|lineage| lineage.point.as_ref());
                 let versions = workspace_ui::branch_versions(branch.threads, parent, point);
                 version_switcher(ui, branch, &versions, action);
-                if small_button(ui, true, icons::ARROW_U_UP_LEFT, "巻き戻し前に戻す").clicked()
-                {
-                    *action = Some(SidebarAction::SwitchVersion(parent.clone()));
-                }
             }
         }
     });
@@ -209,18 +216,22 @@ fn version_switcher(
     let Some(current) = versions.iter().position(|id| id == &branch.thread.id) else {
         return;
     };
-    if small_button(ui, current > 0, icons::CARET_LEFT, "前の版").clicked() {
+    if small_icon_button(ui, current > 0, icons::CARET_LEFT, "前の版")
+        .on_hover_text("前の版")
+        .clicked()
+    {
         *action = Some(SidebarAction::SwitchVersion(versions[current - 1].clone()));
     }
-    let text = format!("版 {} / {}", current + 1, versions.len());
-    let label = ui.label(small(&text));
-    label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
-    if small_button(
+    let name = format!("版 {} / {}", current + 1, versions.len());
+    let label = ui.label(small(&format!("{}/{}", current + 1, versions.len())));
+    label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name));
+    if small_icon_button(
         ui,
         current + 1 < versions.len(),
         icons::CARET_RIGHT,
         "次の版",
     )
+    .on_hover_text("次の版")
     .clicked()
     {
         *action = Some(SidebarAction::SwitchVersion(versions[current + 1].clone()));
@@ -254,7 +265,11 @@ pub(super) fn confirm_modal(ui: &egui::Ui, action: &mut Option<SidebarAction>) {
                 pending.turn
             ));
         }
-        ui.label("巻き戻し前の会話は版として残り、「巻き戻し前に戻す」でいつでも戻せます。");
+        ui.label(format!(
+            "巻き戻し前の会話は版として残り、{} {} でいつでも切り替えられます。",
+            icons::CARET_LEFT,
+            icons::CARET_RIGHT
+        ));
         ui.label(
             egui::RichText::new("ファイルの変更は巻き戻りません。").color(palette().WARNING_FG),
         );

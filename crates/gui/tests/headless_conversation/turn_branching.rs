@@ -220,8 +220,8 @@ fn rewind_replaces_the_row_in_place_and_can_be_undone() {
     let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
     harness.run();
     assert!(harness.has_label("版 2 / 2"));
-    // When: restoring the pre-rewind version from the branch marker.
-    harness.click_label("巻き戻し前に戻す");
+    // When: switching back to the pre-rewind version from the branch marker.
+    harness.click_label("前の版");
     harness.run();
     // Then: the original conversation is back, still offering the newer version.
     let gui = harness.state();
