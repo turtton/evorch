@@ -201,6 +201,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             ComposerInput::Command { spec, args } => match spec.name {
+                "compaction" => {
+                    if !args.is_empty() {
+                        self.push_notice("usage: /compaction");
+                        return;
+                    }
+                    let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
+                        self.push_notice("Select or start a thread first");
+                        return;
+                    };
+                    self.submit_command(WorkbenchCommand::CompactChat {
+                        thread_id: thread_id.to_string(),
+                    });
+                    self.composer.input.clear();
+                }
                 "continue" => {
                     if !args.is_empty() {
                         self.push_notice("usage: /continue");

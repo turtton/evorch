@@ -310,6 +310,7 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SetGoalReview { thread_id, .. }
                 | WorkbenchCommand::SetGoalChecksPaused { thread_id, .. }
+                | WorkbenchCommand::CompactChat { thread_id }
                 | WorkbenchCommand::StopChat { thread_id }
                 | WorkbenchCommand::StopRun { thread_id, .. }
                 | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
@@ -466,6 +467,37 @@ impl RuntimeCommandSink {
                     }));
                 }
                 Vec::new()
+            }
+            WorkbenchCommand::CompactChat { thread_id } => {
+                let result =
+                    self.chat_runs
+                        .get(&thread_id)
+                        .or_else(|| self.goal_runs.get(&thread_id))
+                        .ok_or_else(|| "No active conversation run to compact".to_owned())
+                        .and_then(|run_id| {
+                            let run = self.runtime.inspect_agent(*run_id).map_err(|error| {
+                                format!("Could not request context compaction: {error}")
+                            })?;
+                            // compact() queues a generation even for a terminal run.
+                            if !matches!(
+                                run.phase,
+                                event_bus::AgentRunPhase::Pending
+                                    | event_bus::AgentRunPhase::Running
+                                    | event_bus::AgentRunPhase::Waiting
+                            ) {
+                                return Err("The conversation run has ended; resume with /continue before requesting compaction".into());
+                            }
+                            self.runtime.compact(*run_id).map_err(|error| {
+                                format!("Could not request context compaction: {error}")
+                            })
+                        });
+                vec![LoopEvent::ChatNotice {
+                    thread_id,
+                    text: match result {
+                        Ok(()) => "Context compaction requested for the next turn boundary".into(),
+                        Err(reason) => reason,
+                    },
+                }]
             }
             WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 let result = self

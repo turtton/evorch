@@ -64,6 +64,10 @@ pub enum WorkbenchCommand {
     },
     SendChat(ChatSubmission),
     ContinueChat(ChatContinuation),
+    /// Request compaction of the current conversation root without sending a message.
+    CompactChat {
+        thread_id: String,
+    },
     StopChat {
         thread_id: String,
     },
@@ -241,6 +245,10 @@ pub struct FixtureLoopAdapter {
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
+            WorkbenchCommand::CompactChat { thread_id } => vec![LoopEvent::ChatNotice {
+                thread_id,
+                text: "Context compaction is unavailable in demo mode".into(),
+            }],
             WorkbenchCommand::ContinueChat(_) => vec![LoopEvent::CommandRejected {
                 reason: "No resumable conversation in demo mode".into(),
             }],
