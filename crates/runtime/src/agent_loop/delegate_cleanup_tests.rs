@@ -115,6 +115,7 @@ fn fixture_with_model(
         todo_context_pending: false,
         todo_context_deferred: false,
         model_switches: 0,
+        owner_turn_open: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
