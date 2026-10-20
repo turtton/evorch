@@ -19,6 +19,7 @@ fn chat_and_tool_spans_parent_to_known_agent() {
             model: "gpt-test".to_owned(),
             streaming: true,
             run_id: Some("run-1".to_owned()),
+            reasoning_effort: None,
         },
         2,
     ));
@@ -92,6 +93,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             model: "model".to_owned(),
             streaming: false,
             run_id: None,
+            reasoning_effort: None,
         },
         1,
     ));
@@ -113,6 +115,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             model: "model".to_owned(),
             streaming: false,
             run_id: Some("absent".to_owned()),
+            reasoning_effort: None,
         },
         3,
     ));

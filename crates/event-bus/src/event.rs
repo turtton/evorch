@@ -927,6 +927,9 @@ pub enum ProviderEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// wire に載せた reasoning effort。送らなかった attempt と旧形式ペイロードでは `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
     },
     /// ストリーミング attempt で最初の user-visible delta を観測した (TTFT)。
     ///
@@ -2064,6 +2067,7 @@ mod tests {
                     model: "gpt-contract".into(),
                     streaming: false,
                     run_id: None,
+                    reasoning_effort: None,
                 },
             ),
             (
@@ -2449,6 +2453,7 @@ mod tests {
                 model: "gpt-contract".into(),
                 streaming: false,
                 run_id: None,
+                reasoning_effort: None,
             })
         );
     }

@@ -155,3 +155,32 @@ fn interpreter_ignores_unknown_event_type() {
 
     assert!(events.is_empty());
 }
+
+// Given: message_delta が thinking 内訳を報告 / When: 最終結果を取り出す / Then: reasoning_tokens に反映される
+#[test]
+fn interpreter_reports_thinking_tokens_from_message_delta() {
+    let frames = [
+        frame(
+            Some("message_start"),
+            json!({"type": "message_start", "message": {
+                "id": "msg_1", "model": "claude-test",
+                "usage": {"input_tokens": 10, "output_tokens": 1, "output_tokens_details": {"thinking_tokens": 0}}
+            }}),
+        ),
+        frame(
+            Some("message_delta"),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 300, "output_tokens_details": {"thinking_tokens": 120}}}),
+        ),
+        frame(Some("message_stop"), json!({"type": "message_stop"})),
+    ];
+    let mut interpreter = AnthropicStreamInterpreter::new();
+    for item in &frames {
+        interpreter.interpret(item).unwrap();
+    }
+
+    let (usage, _) = interpreter.take_result();
+
+    assert_eq!(usage.output_tokens, 300);
+    assert_eq!(usage.reasoning_tokens, Some(120));
+}

@@ -40,6 +40,7 @@ fn live_pressure_uses_new_model_window_with_previous_usage_baseline() {
             model: "other".into(),
             streaming: true,
             run_id: Some("run-1".into()),
+            reasoning_effort: None,
         }));
         overlay.apply_event(&Event::new(MessageEvent::MessageDelta {
             delta: "x".repeat(400),

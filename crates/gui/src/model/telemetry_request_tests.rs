@@ -116,6 +116,7 @@ fn request_started(run: &str) -> Event {
         model: "model".into(),
         streaming: true,
         run_id: Some(run.into()),
+        reasoning_effort: None,
     })
 }
 
@@ -229,6 +230,7 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
             model: "model".into(),
             streaming: true,
             run_id: Some("run".into()),
+            reasoning_effort: None,
         }),
         start + Duration::from_secs(201),
     );
@@ -290,6 +292,7 @@ fn streaming_estimates_and_failed_requests_do_not_change_average_throughput() {
         model: "model".into(),
         streaming: true,
         run_id: Some("run".into()),
+        reasoning_effort: None,
     }));
     telemetry.apply_event(&Event::new(MessageEvent::MessageDelta {
         delta: "a".repeat(1_000),
@@ -444,6 +447,7 @@ fn provider_label_prefers_the_routing_profile_and_tokens_stay_compact() {
             model: "gpt-6-astra".into(),
             streaming: true,
             run_id: Some("run".into()),
+            reasoning_effort: None,
         })
     };
     let mut telemetry = TelemetryOverlay::new();

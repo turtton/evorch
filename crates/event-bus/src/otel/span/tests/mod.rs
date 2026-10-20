@@ -89,6 +89,7 @@ fn request_started_custom(
             model: model.to_owned(),
             streaming: false,
             run_id: Some(run_id.to_owned()),
+            reasoning_effort: None,
         },
         seconds,
     )

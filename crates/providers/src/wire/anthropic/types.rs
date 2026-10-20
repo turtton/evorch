@@ -290,4 +290,15 @@ pub struct WireUsage {
     /// キャッシュから読み出した入力トークン数。
     #[serde(default)]
     pub cache_read_input_tokens: Option<u64>,
+    /// 出力トークンの内訳。thinking-token-count beta で報告される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<WireOutputTokensDetails>,
+}
+
+/// 出力トークンの内訳。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireOutputTokensDetails {
+    /// thinking に使われた出力トークン数。
+    #[serde(default)]
+    pub thinking_tokens: Option<u64>,
 }

@@ -153,8 +153,9 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_input_tokens.unwrap_or_default(),
         cache_write_tokens: usage.cache_creation_input_tokens.unwrap_or_default(),
-        // Anthropic は thinking を output_tokens に含め、内訳を報告しない。
-        reasoning_tokens: None,
+        reasoning_tokens: usage
+            .output_tokens_details
+            .and_then(|details| details.thinking_tokens),
     }
 }
 

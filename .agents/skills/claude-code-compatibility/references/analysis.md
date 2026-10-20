@@ -48,6 +48,14 @@ rg --text --only-matching --byte-offset \
 | prompt/attempt/response/agent ID | caller の mode・目的・階層と成功時の更新条件 | 同 `transport_context.rs`、`crates/runtime/src/request_turn.rs` |
 | HTTP/TLS、圧縮、CA、retry | raw wire、runtime の client 設定 | 同 `transport.rs`、`crates/providers/src/provider/anthropic/transport.rs` |
 
+native の送信値を真似るときは、その値で**応答に何が返るか**も確かめる。
+例えば thinking の `display` は設定（`showThinkingSummaries` など）と mode 判定関数で決まり、
+既定値が「thinking 本文を返さない」表示である場合がある。判定関数は
+`thinking_and_connector_text` のような mode 名で探し、各 mode の送信値と設定の対応を並べる。
+SSE で受け取る delta 型は、bundled SDK の accumulator（`case"thinking_delta"` 付近の
+`switch(n.delta.type)`）を読めば列挙できる。既定値の模倣が evorch の表示要件と合わなければ、
+native が設定次第で送る別の値を採り、その理由を互換性ドキュメントに残す。
+
 UI の main、print/SDK、auxiliary、child、compaction の分岐を区別する。
 階層の意味は生成元まで追い、root の run/session ID を parent subagent ID と推測しない。
 実測で確かめる対象は [capture matrix](capture.md) に従う。

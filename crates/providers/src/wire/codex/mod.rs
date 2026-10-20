@@ -147,6 +147,14 @@ enum ReasoningSummary {
     Auto,
 }
 
+impl CodexResponsesRequest {
+    /// wire に載せる reasoning effort。
+    #[must_use]
+    pub fn reasoning_effort(&self) -> &str {
+        &self.reasoning.effort
+    }
+}
+
 /// canonical request を Codex Responses API のリクエストへ変換します。
 #[must_use]
 pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {

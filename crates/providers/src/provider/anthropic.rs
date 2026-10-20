@@ -87,6 +87,15 @@ struct MessagesRequest {
     reasoning: Option<ClaudeReasoningControls>,
 }
 
+impl MessagesRequest {
+    fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning
+            .as_ref()
+            .and_then(|controls| controls.output_config.as_ref())
+            .and_then(|config| config["effort"].as_str())
+    }
+}
+
 impl AnthropicClient {
     /// 設定から Anthropic クライアントを構築する。
     ///
@@ -404,6 +413,7 @@ impl ProviderClient for AnthropicClient {
             false,
             request.observation.clone(),
         )
+        .with_reasoning_effort(wire_request.reasoning_effort())
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let (http_request, claude_context) = self.authenticated_request(
@@ -462,6 +472,7 @@ impl ProviderClient for AnthropicClient {
             true,
             request.observation.clone(),
         )
+        .with_reasoning_effort(wire_request.reasoning_effort())
         .with_cache_observation(&wire_request)
         .with_known_secret(&auth.api_key);
         let (http_request, claude_context) =

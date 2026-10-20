@@ -446,7 +446,7 @@ async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_sta
     let subscription = claude_model_input(&captured[0].body).unwrap();
     assert_eq!(
         subscription["thinking"],
-        json!({"type":"adaptive","display":"updates"})
+        json!({"type":"adaptive","display":"summarized"})
     );
     assert_eq!(subscription["output_config"], json!({"effort":"high"}));
     assert_eq!(
@@ -887,4 +887,52 @@ async fn claude_api_credentials_are_not_forwarded_to_redirect_destinations() {
         Err(providers::ProviderError::Http { status: 307, .. })
     ));
     assert!(destination.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn request_started_records_the_effort_actually_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(send_response()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let bus = Arc::new(event_bus::EventBus::new(32));
+    let mut receiver = bus.subscribe();
+    let config = || AnthropicConfig {
+        event_bus: Some(bus.clone()),
+        ..config(&server)
+    };
+    let mut input = request();
+    input.model = "claude-opus-5-5".into();
+    input.reasoning_effort = Some("high".into());
+    let auth = ProviderAuth::new("fixture-token");
+    let oauth = AnthropicClient::new(config())
+        .unwrap()
+        .with_claude_oauth()
+        .unwrap();
+    oauth.send(&auth, &input).await.unwrap();
+    AnthropicClient::new(config())
+        .unwrap()
+        .send(&auth, &input)
+        .await
+        .unwrap();
+
+    let mut efforts = Vec::new();
+    while efforts.len() < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("RequestStarted arrives")
+            .unwrap();
+        if let event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
+            reasoning_effort,
+            ..
+        }) = event.kind
+        {
+            efforts.push(reasoning_effort);
+        }
+    }
+
+    assert_eq!(efforts, [Some("high".to_owned()), None]);
 }

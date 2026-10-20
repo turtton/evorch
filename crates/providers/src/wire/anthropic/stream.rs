@@ -9,7 +9,7 @@ use crate::sse::SseFrame;
 use crate::stream::StreamEvent;
 
 use super::convert::{from_raw_block, from_wire_usage, to_finish_reason};
-use super::types::{WireUsage, validate_block};
+use super::types::{WireOutputTokensDetails, WireUsage, validate_block};
 
 /// Anthropic Messages API の SSE フレームを canonical 差分へ変換する状態機械。
 #[derive(Debug, Clone, Default)]
@@ -115,7 +115,13 @@ impl AnthropicStreamInterpreter {
                     body: format!("{}: {}", event.error.kind, event.error.message),
                 })
             }
-            _ => Ok(Vec::new()),
+            unknown => {
+                tracing::debug!(
+                    event_type = unknown,
+                    "未知の Anthropic stream event を無視します"
+                );
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -132,7 +138,13 @@ impl AnthropicStreamInterpreter {
             "input_json_delta" => "partial_json",
             "citations_delta" => "citation",
             "compaction_delta" => "content",
-            _ => return Ok(Vec::new()),
+            unknown => {
+                tracing::debug!(
+                    delta_type = unknown,
+                    "未知の Anthropic content delta を無視します"
+                );
+                return Ok(Vec::new());
+            }
         };
         // Preserve the legacy tolerance of deltas arriving without a start frame.
         let state = self
@@ -349,6 +361,7 @@ struct DeltaUsage {
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+    output_tokens_details: Option<WireOutputTokensDetails>,
 }
 
 impl DeltaUsage {
@@ -364,6 +377,9 @@ impl DeltaUsage {
         }
         if let Some(value) = self.cache_read_input_tokens {
             usage.cache_read_input_tokens = Some(value);
+        }
+        if let Some(value) = self.output_tokens_details {
+            usage.output_tokens_details = Some(value);
         }
     }
 }

@@ -44,6 +44,7 @@ pub(crate) struct AttemptObserver {
     streaming: bool,
     observation: Option<ObservationContext>,
     service_tier: Option<ServiceTier>,
+    reasoning_effort: Option<String>,
     started_at: tokio::time::Instant,
     started_emitted: bool,
     first_token_emitted: bool,
@@ -74,6 +75,7 @@ impl AttemptObserver {
             streaming,
             observation,
             service_tier: None,
+            reasoning_effort: None,
             started_at: tokio::time::Instant::now(),
             started_emitted: false,
             first_token_emitted: false,
@@ -92,6 +94,12 @@ impl AttemptObserver {
     /// wire へ実際に載せるサービス階層を完了イベントへ記録する。
     pub(crate) fn with_service_tier(mut self, service_tier: Option<ServiceTier>) -> Self {
         self.service_tier = service_tier;
+        self
+    }
+
+    /// wire へ実際に載せる reasoning effort を開始イベントへ記録する。
+    pub(crate) fn with_reasoning_effort(mut self, effort: Option<&str>) -> Self {
+        self.reasoning_effort = effort.map(str::to_owned);
         self
     }
 
@@ -115,6 +123,7 @@ impl AttemptObserver {
             model: self.model.clone(),
             streaming: self.streaming,
             run_id: self.observation_run_id(),
+            reasoning_effort: self.reasoning_effort.clone(),
         });
     }
 

@@ -908,6 +908,7 @@ mod tests {
                 model: "kimi-k3".to_owned(),
                 streaming: false,
                 run_id: None,
+                reasoning_effort: None,
             }),
             Event::new(UsageEvent::CacheStats {
                 provider: "anthropic".to_owned(),

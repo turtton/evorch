@@ -195,6 +195,7 @@ impl CodexClient {
         let wire_request = to_wire_request(request);
         let mut observer = self
             .observer(request, streaming)
+            .with_reasoning_effort(Some(wire_request.reasoning_effort()))
             .with_cache_observation(&wire_request);
         let response = self
             .send_response(

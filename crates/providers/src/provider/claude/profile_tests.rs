@@ -58,10 +58,7 @@ fn oauth_headers_match_cli_identity_without_authentication_or_credit_opt_in() {
         assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
         let betas = headers["anthropic-beta"].to_str().unwrap();
         assert_eq!(betas.contains("effort-2025-11-24"), enabled);
-        assert_eq!(
-            betas.contains("thinking-display-updates-2026-08-18"),
-            enabled
-        );
+        assert!(!betas.contains("thinking-display-updates"));
         assert!(!betas.contains("context-1m"));
         assert!(!betas.contains("fallback-credit"));
         assert!(!headers.contains_key("authorization"));
@@ -111,7 +108,7 @@ fn adaptive_models_emit_effort_and_preserve_thinking_across_tool_turns() {
             let controls = profile.reasoning(model, 8192, Some(effort)).unwrap();
             assert_eq!(
                 controls.thinking,
-                Some(json!({"type":"adaptive","display":"updates"}))
+                Some(json!({"type":"adaptive","display":"summarized"}))
             );
             assert_eq!(controls.output_config, Some(json!({"effort": effort})));
             assert_eq!(
