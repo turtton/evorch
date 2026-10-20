@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use event_bus::{EventBus, EventKind};
 use sandbox::{DirectSandbox, LivePaths, PathAccess, SandboxBoundary};
 use serde_json::json;
+use tools::tool::Tool;
 use tools::tools::shell_escalation::{EscalationDecision, FileAccessRequest, ShellEscalationGate};
+use tools::tools::{Edit, Grep, Read, Write};
 use tools::{ToolError, ToolExecutionContext, ToolExecutor};
 
 const SECRET: &str = "outside-secret-token";
@@ -360,6 +362,115 @@ async fn unsandboxed_access_requires_justification_and_a_gate_approval_per_call(
     assert!(!requests[0].write);
     assert_eq!(requests[0].justification, "user asked for it");
     assert_eq!(requests[0].change, None);
+}
+
+#[tokio::test]
+async fn unsandboxed_access_inside_the_boundary_runs_without_review() {
+    // Given: a declining gate, and a read-only allowed directory next to the project.
+    let layout = layout();
+    let (executor, _) = executor(&layout);
+    let allowed = LivePaths::default();
+    allowed.set(vec![layout.outside.clone()]);
+    executor.set_file_boundary(
+        &SandboxBoundary::new(layout.project.clone())
+            .read_only(&layout.readonly)
+            .with_scratch(&layout.scratch)
+            .with_allowed(allowed, PathAccess::ReadOnly),
+    );
+    let gate = with_gate(&executor, false);
+    let unsandboxed = |mut args: serde_json::Value| {
+        args["sandbox_access"] = json!("unsandboxed");
+        args["justification"] = json!("review the allowed directory");
+        args
+    };
+
+    // When: reads in the project, a read-only region and the allowed directory,
+    // and a write in the project, all ask for unsandboxed access.
+    for path in [
+        layout.project.join("inside.txt"),
+        layout.readonly.join("shared.txt"),
+        layout.outside.join("secret.txt"),
+    ] {
+        executor
+            .execute(&context(), "read", "r", unsandboxed(json!({"path": path})))
+            .await
+            .unwrap();
+    }
+    executor
+        .execute(
+            &context(),
+            "grep",
+            "g",
+            unsandboxed(json!({"pattern": SECRET, "path": layout.outside})),
+        )
+        .await
+        .unwrap();
+    executor
+        .execute(
+            &context(),
+            "write",
+            "w",
+            unsandboxed(json!({"path": layout.project.join("new.txt"), "content":"written"})),
+        )
+        .await
+        .unwrap();
+
+    // Then: every call ran as if isolated, and the reviewer was never consulted.
+    assert_eq!(
+        std::fs::read_to_string(layout.project.join("new.txt")).unwrap(),
+        "written"
+    );
+    assert!(gate.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn escalation_review_lists_only_the_paths_outside_the_boundary() {
+    // Given: an approving gate.
+    let layout = layout();
+    let (executor, _) = executor(&layout);
+    let gate = with_gate(&executor, true);
+    let secret = layout.outside.join("secret.txt");
+
+    // When: a read names an outside path, with in-boundary paths in its aliases.
+    executor
+        .execute(
+            &context(),
+            "read",
+            "r",
+            json!({"path": secret, "file": layout.project, "target": layout.scratch.join("tmp.txt"),
+                "sandbox_access":"unsandboxed", "justification":"user asked for it"}),
+        )
+        .await
+        .unwrap();
+
+    // Then: the reviewer is asked only about the path that leaves the boundary.
+    let requests = gate.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].paths, std::slice::from_ref(&secret));
+}
+
+#[test]
+fn file_tool_access_description_counts_allowed_directories_inside_the_boundary() {
+    // Given: the standard file tools.
+    let tools: [Box<dyn Tool>; 4] = [
+        Box::new(Read),
+        Box::new(Grep),
+        Box::new(Write::default()),
+        Box::new(Edit::default()),
+    ];
+
+    // When / Then: each sandbox_access description says allowed directories are inside.
+    for tool in tools {
+        let schema = tool.schema();
+        let description = schema["properties"]["sandbox_access"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains("allowed directories"),
+            "{}: {description}",
+            tool.name()
+        );
+    }
 }
 
 #[tokio::test]
