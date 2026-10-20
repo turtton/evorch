@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{Event, EventBus, LifecycleEvent, UsageEvent};
-use gui::storage_bridge::{self, StorageBridge};
+use recorder::storage_bridge::{self, StorageBridge};
 use storage::{Database, Storage, StorageConfig};
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;

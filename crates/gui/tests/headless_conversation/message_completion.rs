@@ -1,7 +1,7 @@
 use event_bus::{Event, MessageEvent, ToolEvent};
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::TranscriptRegistry;
-use gui::storage_bridge::StorageBridge;
+use recorder::storage_bridge::StorageBridge;
 
 fn delta(run: &str, text: &str) -> Event {
     Event::new(MessageEvent::MessageDelta {

@@ -8,10 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc;
 
 use config::types::provider::{ModelSpeed, PriceSchedule};
+use recorder::pricing::{self, TokenUsage, UsagePricing};
 use storage::usage::{UsageDailyRow, UsageRequestRow, UsageStatus};
-
-use super::telemetry::TokenUsage;
-use super::telemetry::pricing::{self, UsagePricing};
 
 #[path = "usage_stats/day.rs"]
 pub mod day;

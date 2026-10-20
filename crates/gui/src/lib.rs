@@ -20,7 +20,6 @@ pub mod model;
 pub mod panes;
 pub mod pty;
 pub mod runtime_sink;
-pub mod storage_bridge;
 pub mod terminal;
 pub mod theme;
 pub mod window;

@@ -1,9 +1,7 @@
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
-use gui::{
-    model::transcript_registry::TranscriptRegistry,
-    storage_bridge::{DiagnosticPersistence, StorageBridge},
-};
+use gui::model::transcript_registry::TranscriptRegistry;
+use recorder::storage_bridge::{DiagnosticPersistence, StorageBridge};
 use storage::{Database, Storage, StorageConfig};
 
 #[test]

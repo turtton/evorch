@@ -7,13 +7,13 @@ use workspace_ui::SidebarState;
 use super::charts::{self, SERIES};
 use super::{compact_tokens, format_cost, key_label};
 use crate::model::telemetry::latency_label;
-use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::series::{self, Share};
 use crate::model::usage_stats::{
     CostCalculator, CostMode, LocalDay, UsageDataset, UsageDimension, UsageFilter, UsageRange,
     UsageTotals,
 };
 use crate::theme::text::muted;
+use recorder::pricing::UsagePricing;
 
 /// Dimensions offered by the distribution view.
 pub(super) const DISTRIBUTION: [UsageDimension; 6] = [

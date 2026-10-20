@@ -234,7 +234,7 @@ fn restoring_history_seeds_completed_turns_without_resending_them() {
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
-    let mut bridge = gui::storage_bridge::StorageBridge::new(storage.handle(), "session");
+    let mut bridge = recorder::storage_bridge::StorageBridge::new(storage.handle(), "session");
     for event in [started("root", "one", None), turn("root", 3)] {
         bridge.handle_event(&event).unwrap();
     }

@@ -3,27 +3,6 @@ use event_bus::{Event, ProviderEvent};
 use gui::model::{provider_settings::ProviderSettingsModel, telemetry::TelemetryOverlay};
 use std::sync::Arc;
 
-#[test]
-fn cost_includes_known_prices_when_cache_prices_are_unknown() {
-    // Given: input/output prices without cache prices.
-    let usage = gui::model::telemetry::TokenUsage {
-        input: 98_300,
-        output: 15_400,
-        cache_read: 78_300,
-        cache_write: 1_700,
-    };
-    let pricing = config::types::provider::ModelPricing {
-        input: Some(0.5),
-        output: Some(2.0),
-        cache_read: None,
-        cache_write: None,
-    };
-    // When: the cost is estimated for cached usage.
-    let cost = usage.estimated_cost(Some(pricing));
-    // Then: the input and output portion remains visible.
-    assert_eq!(cost, Some(0.03995));
-}
-
 fn completed(model: &str) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
         request_id: model.into(),
@@ -43,18 +22,6 @@ fn completed(model: &str) -> Event {
         purpose: None,
         reasoning_tokens: None,
     })
-}
-
-#[test]
-fn zero_usage_cost_is_zero_when_pricing_exists() {
-    let usage = gui::model::telemetry::TokenUsage::default();
-    let pricing = config::types::provider::ModelPricing {
-        input: Some(0.5),
-        output: Some(2.0),
-        cache_read: Some(0.01),
-        cache_write: Some(0.25),
-    };
-    assert_eq!(usage.estimated_cost(Some(pricing)), Some(0.0));
 }
 
 #[test]

@@ -320,9 +320,9 @@ impl QuotaEfficiency {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::telemetry::TokenUsage;
-    use crate::model::telemetry::pricing::UsagePricing;
     use crate::model::usage_stats::CostMode;
+    use recorder::pricing::TokenUsage;
+    use recorder::pricing::UsagePricing;
 
     fn fact(day: &str, model: &str, project: &str, cost: f64, ttft: Option<u64>) -> UsageFact {
         UsageFact {

@@ -7,7 +7,7 @@ use fixture::{Call, execute};
 use gui::model::ledger::LedgerRegistry;
 use gui::model::transcript::{ToolStatus, TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::TranscriptRegistry;
-use gui::storage_bridge::StorageBridge;
+use recorder::storage_bridge::StorageBridge;
 use serde_json::{Value, json};
 use storage::{Database, Storage, StorageConfig};
 

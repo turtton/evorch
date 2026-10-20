@@ -42,7 +42,7 @@ impl Default for TestChanges {
     }
 }
 
-/// Memory-only health counters for one GUI storage bridge.
+/// Memory-only health counters for one storage bridge.
 #[derive(Clone, Default)]
 pub struct StorageBridgeMonitor(Arc<Inner>);
 

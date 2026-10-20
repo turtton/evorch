@@ -7,7 +7,7 @@ use storage::usage::RunAttribution;
 
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
-use crate::model::telemetry::pricing::SharedUsagePricing;
+use recorder::pricing::SharedUsagePricing;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 

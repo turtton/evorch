@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 
 use super::{FlushReply, StorageBridge, StorageBridgeMonitor, run_subscribed};
 
-/// Owns durable storage and its GUI event bridge. Dropping this guard signals a
+/// Owns durable storage and its event bridge. Dropping this guard signals a
 /// finite drain, joins the bridge, and only then lets the SQLite writer close.
 /// This also covers startup errors and window creation failures.
 pub struct OwnedStorageBridge {
