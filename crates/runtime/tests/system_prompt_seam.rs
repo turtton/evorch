@@ -367,6 +367,55 @@ async fn delegated_child_run_gets_role_and_category_specific_system_prompt() {
     assert_ne!(parent_system, child_system);
 }
 
+// Given: a runtime with a system prompt preamble, and an Orchestrator that delegates a Worker
+// When: both runs finish
+// Then: every request of both runs starts with the preamble, and each run's System is byte-stable
+#[tokio::test]
+async fn system_prompt_preamble_leads_every_run_and_is_stable_within_a_run() {
+    let model = Arc::new(ScriptedModel::new([]));
+    orchestrator_delegate_script(&model, "quick", "all done").await;
+    model
+        .add_keyed("W1", [Ok(text_response("child done", FinishReason::Stop))])
+        .await;
+    let (runtime, _bus) = runtime_with(model.clone(), Some(complete_catalog()));
+    let runtime = runtime.with_system_prompt_preamble("eval-run-nonce-7f3a".into());
+
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default());
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
+    let child = runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.parent_run_id == Some(parent))
+        .expect("delegated child run")
+        .run_id;
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
+
+    let observed = model.observed().await;
+    for prompt in ["ORCH", "W1"] {
+        let systems: Vec<_> = observed
+            .iter()
+            .filter(|call| text_of_role(call, MessageRole::User) == Some(prompt))
+            .map(|call| {
+                assert_eq!(call[0].role, MessageRole::System);
+                call[0].clone()
+            })
+            .collect();
+        assert!(!systems.is_empty(), "{prompt} run calls the model");
+        assert!(
+            systems.iter().all(|system| *system == systems[0]),
+            "{prompt} keeps one System message across its requests"
+        );
+        let text = text_of_role(&systems[..1], MessageRole::System).unwrap();
+        assert!(text.starts_with("eval-run-nonce-7f3a\n\n"), "{text}");
+    }
+    let orchestrator_calls = observed
+        .iter()
+        .filter(|call| text_of_role(call, MessageRole::User) == Some("ORCH"))
+        .count();
+    assert_eq!(orchestrator_calls, 2);
+}
+
 // Given: 未知カテゴリ "typo" で委譲する Orchestrator スクリプト (子用スクリプトは未登録)
 // When: 親 run を終端まで実行する
 // Then: 委譲 op はエラー ToolResult で拒否され、子 run は登録もモデル呼び出しもされない

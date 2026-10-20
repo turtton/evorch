@@ -363,6 +363,14 @@ impl ToolExecutor {
         })
     }
 
+    /// Replace the variables the registered shell adds to every command.
+    /// Variables the sandbox forces, such as `HOME` under bwrap, still win.
+    pub fn set_shell_environment(&self, env: Vec<(String, String)>) {
+        if let Some(registered) = self.tools.get("shell") {
+            registered.tool.set_shell_environment(env);
+        }
+    }
+
     /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。
     /// File tools leaving their boundary are reviewed by the same gate.
     pub fn set_shell_escalation(

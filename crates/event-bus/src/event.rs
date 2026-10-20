@@ -794,6 +794,10 @@ pub enum RequestPurpose {
     EscalationReview,
     /// Provider-hosted web search invoked by a tool.
     WebSearch,
+    /// The model playing the user while an evaluation replays a thread.
+    UserSimulation,
+    /// The model grading or comparing evaluation results.
+    Judging,
 }
 
 impl RequestPurpose {
@@ -806,6 +810,8 @@ impl RequestPurpose {
             Self::Routing => "routing",
             Self::EscalationReview => "escalation_review",
             Self::WebSearch => "web_search",
+            Self::UserSimulation => "user_simulation",
+            Self::Judging => "judging",
         }
     }
 }
@@ -2794,5 +2800,32 @@ mod tests {
                 serde_json::from_str(&json).expect("deserialize CompactionReason");
             assert_eq!(reason, restored, "round-trip mismatch: {tag}");
         }
+    }
+
+    // Given: every request purpose, including the evaluation ones
+    // When: each is labelled and serialized
+    // Then: the stored label matches its serde form and the eval labels stay stable
+    #[test]
+    fn request_purpose_labels_match_serde_names() {
+        let purposes = [
+            RequestPurpose::Agent,
+            RequestPurpose::Compaction,
+            RequestPurpose::Title,
+            RequestPurpose::Routing,
+            RequestPurpose::EscalationReview,
+            RequestPurpose::WebSearch,
+            RequestPurpose::UserSimulation,
+            RequestPurpose::Judging,
+        ];
+
+        for purpose in purposes {
+            let json = serde_json::to_string(&purpose).expect("serialize RequestPurpose");
+            assert_eq!(json, format!("\"{}\"", purpose.as_str()));
+            let restored: RequestPurpose =
+                serde_json::from_str(&json).expect("deserialize RequestPurpose");
+            assert_eq!(restored, purpose);
+        }
+        assert_eq!(RequestPurpose::UserSimulation.as_str(), "user_simulation");
+        assert_eq!(RequestPurpose::Judging.as_str(), "judging");
     }
 }

@@ -141,7 +141,7 @@ mod tests {
 pub struct Shell {
     sandbox: Arc<dyn Sandbox>,
     contract: ShellCommandContract,
-    extra_env: Vec<(String, String)>,
+    extra_env: Arc<RwLock<Vec<(String, String)>>>,
     default_cwd: Arc<Mutex<Option<PathBuf>>>,
     escalation: Arc<RwLock<Option<ShellEscalation>>>,
     jobs: Arc<jobs::JobRegistry>,
@@ -160,7 +160,7 @@ impl Shell {
         Self {
             sandbox,
             contract,
-            extra_env: Vec::new(),
+            extra_env: Arc::default(),
             default_cwd: Arc::new(Mutex::new(None)),
             escalation: Arc::new(RwLock::new(None)),
             jobs: Arc::new(jobs::JobRegistry::default()),
@@ -180,7 +180,7 @@ impl Shell {
         Self {
             sandbox,
             contract,
-            extra_env,
+            extra_env: Arc::new(RwLock::new(extra_env)),
             default_cwd: Arc::new(Mutex::new(None)),
             escalation: Arc::new(RwLock::new(None)),
             jobs: Arc::new(jobs::JobRegistry::default()),
@@ -305,6 +305,13 @@ impl Tool for Shell {
 
     fn set_event_bus(&self, bus: Arc<event_bus::EventBus>) {
         self.jobs.set_event_bus(bus);
+    }
+
+    fn set_shell_environment(&self, env: Vec<(String, String)>) {
+        *self
+            .extra_env
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = env;
     }
 
     fn set_shell_escalation(
@@ -501,7 +508,11 @@ impl Tool for Shell {
                 program: "sh".to_string(),
                 args: shell_args,
                 cwd,
-                extra_env: self.extra_env.clone(),
+                extra_env: self
+                    .extra_env
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
             })
             .map_err(|error| ToolError::SandboxUnavailable {
                 detail: error.to_string(),

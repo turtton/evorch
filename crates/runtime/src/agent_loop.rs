@@ -97,6 +97,7 @@ pub(crate) struct LoopShared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
+    pub(crate) system_prompt_preamble: Option<String>,
     pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
@@ -406,6 +407,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 Ok(executor) => {
                     if let Some(runtime) = state.runtime() {
                         runtime.configure_shell_escalation(&executor, state.scratch_dir());
+                        runtime.configure_shell_environment(&executor);
                     }
                     state.shared.executor = executor;
                 }

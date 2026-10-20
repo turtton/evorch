@@ -918,3 +918,32 @@ async fn edit_and_write_publish_the_same_diff_returned_to_the_agent() {
         assert_eq!(output.as_deref(), Some(result.content.as_str()));
     }
 }
+
+// Given: 実行器に shell 環境を設定 / When: 通常実行と PTY 実行で変数を読む / Then: どちらの子プロセスにも値が渡る
+#[tokio::test]
+async fn executor_shell_environment_reaches_pipe_and_pty_commands() {
+    let (_bus, executor, _receiver) = setup_executor();
+    executor.set_shell_environment(vec![("CARGO_NET_OFFLINE".into(), "true".into())]);
+
+    for interactive in [false, true] {
+        let result = executor
+            .execute(
+                &test_ctx("run-env"),
+                "shell",
+                "call-env",
+                serde_json::json!({
+                    "command": "printf 'offline=%s' \"$CARGO_NET_OFFLINE\"",
+                    "interactive": interactive,
+                }),
+            )
+            .await
+            .expect("shell は実行できる");
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("offline=true"),
+            "{}",
+            result.content
+        );
+    }
+}

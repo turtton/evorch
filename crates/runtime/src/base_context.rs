@@ -46,6 +46,8 @@ pub(crate) fn is_workspace_note(text: &str) -> bool {
 /// Kinds of base context sections, in the order the system message joins them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextSectionKind {
+    /// Runtime-supplied text that opens the system message, such as a per-run cache nonce.
+    Preamble,
     RoleBaseline,
     ModelFamily,
     CategoryOverlay,
@@ -67,6 +69,7 @@ impl ContextSectionKind {
     /// Short label for UI rows.
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Preamble => "Preamble",
             Self::RoleBaseline => "Role baseline",
             Self::ModelFamily => "Model family",
             Self::CategoryOverlay => "Category overlay",
@@ -178,8 +181,8 @@ pub(crate) struct SystemInputs<'a> {
     pub(crate) allowed_directories: &'a [ToldDirectory],
 }
 
-/// Resolve the initial system message as ordered sections: catalog, skills, rules,
-/// compaction, allowed directories.
+/// Resolve the initial system message as ordered sections: preamble, catalog, skills,
+/// rules, compaction, allowed directories.
 ///
 /// Joining the non-empty sections with one blank line gives the exact system text.
 pub(crate) fn compose_system_sections(
@@ -188,6 +191,13 @@ pub(crate) fn compose_system_sections(
 ) -> Result<Vec<ContextSection>, InitialSystemPromptError> {
     let model_id = shared.model.selected_model(inputs.role, inputs.category);
     let mut sections = Vec::new();
+    if let Some(preamble) = &shared.system_prompt_preamble {
+        sections.push(ContextSection::new(
+            ContextSectionKind::Preamble,
+            ContextSource::Generated,
+            preamble.clone(),
+        ));
+    }
     if let Some(catalog) = shared.system_prompts.as_ref() {
         for part in catalog.system_prompt_sections_for(inputs.role, inputs.category, &model_id)? {
             let source =
