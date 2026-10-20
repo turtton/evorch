@@ -425,6 +425,32 @@ impl Registry {
         permit: &super::OwnerPermit,
         messages: &[providers::Message],
     ) -> Result<ThreadOwner, RegistryError> {
+        let payload = self.serialize_checkpoint(permit, messages)?;
+        self.checkpoint_serialized(permit, &payload)
+    }
+
+    /// Serialize a checkpoint before any write lock is taken. A failure leaves
+    /// the registry untouched; no ownership decision is made here.
+    pub(super) fn serialize_checkpoint<P: serde::Serialize + ?Sized>(
+        &self,
+        permit: &super::OwnerPermit,
+        messages: &P,
+    ) -> Result<String, RegistryError> {
+        let started = Instant::now();
+        serde_json::to_string(messages).map_err(|error| {
+            self.site(DbOperation::Checkpoint, &permit.thread_id, started, None)
+                .json(DbPhase::Serialize, error)
+        })
+    }
+
+    /// Store an already serialized checkpoint. Reading the owner, validating
+    /// the permit and writing both rows stay in one IMMEDIATE transaction, so a
+    /// claim committed after serialization fences this write.
+    pub(super) fn checkpoint_serialized(
+        &mut self,
+        permit: &super::OwnerPermit,
+        payload: &str,
+    ) -> Result<ThreadOwner, RegistryError> {
         let thread_id = &permit.thread_id;
         let token = &permit.lease;
         let started = Instant::now();
@@ -435,7 +461,7 @@ impl Registry {
             thread_id,
             attempt: self.attempt,
             started,
-            payload_bytes: None,
+            payload_bytes: Some(payload.len()),
             quiet_contention: false,
         };
         let transaction = self
@@ -454,12 +480,6 @@ impl Registry {
             Some(run) => owner.checkpoint_run(token, run)?,
             None => owner.checkpoint(token)?,
         }
-        let payload = serde_json::to_string(messages)
-            .map_err(|error| site.json(DbPhase::Serialize, error))?;
-        let site = Site {
-            payload_bytes: Some(payload.len()),
-            ..site
-        };
         transaction
             .execute(
                 "INSERT INTO owner_checkpoints VALUES (?1, ?2, ?3) ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation, payload=excluded.payload",

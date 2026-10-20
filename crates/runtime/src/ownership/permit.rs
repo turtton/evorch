@@ -165,7 +165,18 @@ impl OwnerPermit {
     }
 
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
+        self.checkpoint_payload(messages)
+    }
+
+    /// Serialize the payload before any write transaction; the write then
+    /// validates the permit again inside its own transaction.
+    pub(super) fn checkpoint_payload<P: serde::Serialize + ?Sized>(
+        &self,
+        messages: &P,
+    ) -> Result<(), RegistryError> {
         let mut registry = self.open_write_attempt(DbOperation::Checkpoint, ATTEMPT_TIMEOUT, 1)?;
+        // This read only fences early or skips a run that already
+        // checkpointed; it never grants the write below.
         let owner = registry.attach_as(DbOperation::Checkpoint, &self.thread_id)?;
         owner.validate(&self.lease)?;
         if self
@@ -175,8 +186,8 @@ impl OwnerPermit {
         {
             return Ok(());
         }
-        registry.checkpoint_permit(self, messages)?;
-        Ok(())
+        let payload = registry.serialize_checkpoint(self, messages)?;
+        registry.checkpoint_serialized(self, &payload).map(drop)
     }
 }
 

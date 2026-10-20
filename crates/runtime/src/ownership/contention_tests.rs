@@ -1,6 +1,7 @@
 //! Contention, retry and observability tests for ownership registry writes.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -291,4 +292,105 @@ fn a_locked_emit_guard_records_its_phase_without_recursion_or_body() {
     assert_eq!(dropped.len(), 1, "{dropped:?}");
     assert_eq!(field(&dropped[0], "family"), Some("message"));
     records.assert_no_body();
+}
+
+/// The committed state of a claim by owner `b` at the next generation.
+fn claimed(owner: &ThreadOwner) -> ThreadOwner {
+    let mut next = owner.clone();
+    next.lease = Lease {
+        owner_id: "b".into(),
+        generation: owner.lease.generation + 1,
+        expires_at: u64::MAX,
+    };
+    next.active_turn = false;
+    next.active_runs.clear();
+    next
+}
+
+// ---- (a) serialization outside the write transaction ----
+
+#[test]
+fn stored_checkpoint_is_the_serialized_message_history() {
+    let fixture = fixture();
+    let messages = messages();
+    fixture.permit.checkpoint(&messages).expect("checkpoint");
+    assert_eq!(
+        stored_payload(&fixture.path),
+        Some(serde_json::to_string(&messages).unwrap())
+    );
+    let owner = owner_of(&fixture.path);
+    assert!(owner.active_runs.is_empty());
+    assert!(!owner.active_turn);
+}
+
+struct FailingPayload(Arc<AtomicUsize>);
+
+impl serde::Serialize for FailingPayload {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(serde::ser::Error::custom(BODY_MARKER))
+    }
+}
+
+#[test]
+fn a_serialization_failure_leaves_the_owner_untouched_and_is_not_retried() {
+    let fixture = fixture();
+    let before = owner_of(&fixture.path);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let records = Records::default();
+    let result = tracing::dispatcher::with_default(&records.dispatch(), || {
+        fixture
+            .permit
+            .checkpoint_payload(&FailingPayload(Arc::clone(&calls)))
+    });
+    assert!(matches!(result, Err(RegistryError::Json(_))), "{result:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owner_of(&fixture.path), before);
+    assert_eq!(stored_payload(&fixture.path), None);
+    let serialize = records.find(|record| field(record, "phase") == Some("serialize"));
+    assert_eq!(serialize.len(), 1, "{serialize:?}");
+    assert_eq!(field(&serialize[0], "operation"), Some("checkpoint"));
+    records.assert_no_body();
+}
+
+/// Commits a claim while the checkpoint is being serialized: after the
+/// permit's early read, before its write transaction.
+struct ClaimingPayload {
+    path: PathBuf,
+}
+
+impl serde::Serialize for ClaimingPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // With serialization inside the write transaction this claim would
+        // wait for that transaction and fail with SQLITE_BUSY.
+        let mut registry =
+            Registry::open_existing(&self.path).map_err(serde::ser::Error::custom)?;
+        registry
+            .update("thread-1", |owner| {
+                *owner = claimed(owner);
+                Ok(())
+            })
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_unit()
+    }
+}
+
+#[test]
+fn a_claim_committed_after_serialization_fences_the_old_generation_commit() {
+    let fixture = fixture();
+    let result = fixture.permit.checkpoint_payload(&ClaimingPayload {
+        path: fixture.path.clone(),
+    });
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::Ownership(OwnershipError::Fenced))
+        ),
+        "{result:?}"
+    );
+    let owner = owner_of(&fixture.path);
+    assert_eq!(owner.lease.owner_id, "b");
+    assert_eq!(owner.lease.generation, 2);
+    // Only the claim's own generation-change marker exists, not a payload.
+    assert_eq!(stored_payload(&fixture.path).as_deref(), Some("[]"));
 }
