@@ -1,9 +1,9 @@
 //! What the user saw of a replay, in order: the input sent to the root run, the
 //! root's assistant text, and its user-visible questions with their answers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
     User {
@@ -15,7 +15,7 @@ pub enum Entry {
     Question {
         id: String,
         title: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         options: Vec<String>,
     },
     Answer {

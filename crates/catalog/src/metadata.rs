@@ -31,6 +31,8 @@ pub struct ModelMetadata {
     pub modalities: Modalities,
     /// models.dev's provider-independent identity, such as `moonshotai/kimi-k3`.
     pub canonical_model_id: Option<String>,
+    /// models.dev's model family, such as `claude-sonnet`.
+    pub family: Option<String>,
 }
 
 /// USD per million tokens. Each `None` is unknown.
@@ -79,6 +81,7 @@ struct WireModel {
     #[serde(default)]
     modalities: Modalities,
     canonical_model_id: Option<String>,
+    family: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -177,6 +180,7 @@ impl From<WireModel> for ModelMetadata {
             reasoning: model.reasoning,
             modalities: model.modalities,
             canonical_model_id: model.canonical_model_id.filter(|id| !id.trim().is_empty()),
+            family: model.family.filter(|family| !family.trim().is_empty()),
         }
     }
 }

@@ -12,7 +12,7 @@ use event_bus::{
     ProviderEvent, RequestPurpose, ToolEvent, event::diagnostic_codes,
 };
 use runtime::{AgentRuntime, RunConfig, StopScope};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 
 use crate::conversation::Entry;
@@ -22,7 +22,7 @@ use crate::source::OriginalThread;
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const INPUT_SUMMARY_CHARS: usize = 400;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Completed,
@@ -32,7 +32,7 @@ pub enum Status {
 }
 
 /// A request the replay refused because it would leave the evaluation environment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeniedRequest {
     pub tool: String,
     pub input: String,

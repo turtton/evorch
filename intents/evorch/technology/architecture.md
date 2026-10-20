@@ -30,7 +30,7 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `runtime` | agent / session / task / event の実行基盤。orchestration を内部モジュールとして保持 |
 | `event-bus` | in-process tokio broadcast の event bus（ADR 0017） |
 | `storage` | SQLite / events 永続化 |
-| `recorder` | event / usage を storage へ書く永続化 bridge と usage の価格解決。GUI と headless の runner が共用 |
+| `recorder` | event / usage を storage へ書く永続化 bridge と usage の価格解決（subscription の API 換算を含む）。GUI と headless の runner が共用 |
 | `providers` | anthropic / openai / openai-codex / github-copilot / openrouter / openai-compatible |
 | `tools` | filesystem / shell / pty / git / search / code-intel |
 | `sandbox` | policy / macos / linux / windows の実行隔離 |
@@ -41,7 +41,7 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `catalog` | model catalog（ADR 0013） |
 | `browser` | 外部 Chromium の CDP セッション（ADR 0034）。GUI の Browser pane と agent tool が共用 |
 | `browser-cef` | CEF のオフスクリーン描画による offline の HTML artifact プレビュー（ADR 0034 B）。`cef` feature で opt-in |
-| `eval` | thread の再実行による構成評価（ADR 0036）。開始状態の clone、ユーザー役の LLM、予算、実行結果の保存。`gui` には依存しない |
+| `eval` | thread の再実行による構成評価（ADR 0036）。開始状態の clone、ユーザー役の LLM、予算、実行結果の保存、検証コマンド、指標と費用の付け直し、LLM の採点と report。`gui` には依存しない |
 | `mock-openai` | OpenAI-compatible テスト用 provider |
 | `workspace-ui` | panel / layout / action / semantic-tree |
 | `gui` | egui + egui_dock（ADR 0007） |
