@@ -200,6 +200,16 @@ pub(super) fn run_writer(
                 });
                 let _ = reply.send(result);
             }
+            Ok(Command::SaveThreadStartState(start, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "thread start writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    save_thread_start(&state.conn, &start)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::AnswerUserQuestionWithEvidence(id, answer, rows, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     // Plan A: the answer's checked UPDATE is the first-answer-wins
@@ -326,6 +336,16 @@ pub(super) fn run_writer(
     }
 }
 
+fn save_thread_start(
+    conn: &Connection,
+    start: &crate::thread_start::ThreadStartState,
+) -> Result<bool, StorageError> {
+    let transaction = conn.unchecked_transaction()?;
+    let inserted = crate::repo::thread_start::save(&transaction, start)?;
+    transaction.commit()?;
+    Ok(inserted)
+}
+
 fn merge_usage(pending: &mut HashMap<BucketKey, UsageBucket>, buckets: Vec<UsageBucket>) {
     for bucket in buckets {
         pending
@@ -370,8 +390,9 @@ fn run_due_work(state: &mut WriterState) {
 /// Maintenance scans one bounded diagnostic batch, then reclaims a bounded
 /// page budget and checks storage limits against the resulting file sizes.
 fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
-    let removed = diagnostic::retain_recent(state, std::time::SystemTime::now())?;
-    roll_up_usage(state, std::time::SystemTime::now())?;
+    let now = std::time::SystemTime::now();
+    let removed = diagnostic::retain_recent(state, now)? + retain_thread_starts(state, now)?;
+    roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
         vacuum_config.vacuum_freelist_threshold_pages = 1;
@@ -402,6 +423,24 @@ fn roll_up_usage(state: &WriterState, now: std::time::SystemTime) -> Result<usiz
         tracing::debug!(rows = moved, "usage ledger rolled up");
     }
     Ok(moved)
+}
+
+/// Delete one bounded batch of thread start states older than the retention window.
+fn retain_thread_starts(
+    state: &WriterState,
+    now: std::time::SystemTime,
+) -> Result<u64, StorageError> {
+    let days = state.config.thread_start_retention_days;
+    if days == 0 {
+        return Ok(0);
+    }
+    let window = std::time::Duration::from_secs(u64::from(days) * 86_400);
+    let Some(cutoff) = now.checked_sub(window) else {
+        return Ok(0);
+    };
+    let removed =
+        crate::repo::thread_start::delete_before(&state.conn, crate::system_time_to_ns(cutoff)?)?;
+    Ok(removed as u64)
 }
 
 /// freelist が設定閾値以上のときだけ、設定 page budget 以内で incremental vacuum を実行し、

@@ -7,7 +7,9 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 31] = [
+const EXPECTED_TABLES: [&str; 33] = [
+    "thread_start_states",
+    "thread_start_untracked",
     "assistant_references",
     "review_evidence",
     "review_lineage_edges",
@@ -41,7 +43,8 @@ const EXPECTED_TABLES: [&str; 31] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 28] = [
+const EXPECTED_INDICES: [&str; 29] = [
+    "idx_thread_start_states_captured",
     "review_evidence_id",
     "review_evidence_target",
     "review_evidence_root",
@@ -103,9 +106,9 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     let database = Database::open(&config_for(&path)).expect("fresh database must open");
 
-    // Then: v19 と定義済みテーブル・インデックスが作成される
+    // Then: v20 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -114,7 +117,9 @@ fn fresh_open_applies_latest_schema() {
         schema_objects(&connection, "index"),
         EXPECTED_INDICES.into_iter().map(String::from).collect()
     );
-    assert!(schema_objects(&connection, "trigger").contains("run_ledger_no_replace"));
+    let triggers = schema_objects(&connection, "trigger");
+    assert!(triggers.contains("run_ledger_no_replace"));
+    assert!(triggers.contains("thread_start_untracked_replayable"));
 }
 
 #[test]
@@ -127,13 +132,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v19 のまま維持される
+    // Then: スキーマは重複せず v20 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        19
+        20
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -164,7 +169,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 19,
+            supported: 20,
         }
     );
 }
@@ -209,7 +214,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
 }
 
 #[test]
@@ -246,7 +251,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -279,7 +284,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let database = Database::open(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
     let columns: BTreeSet<String> = connection
         .prepare("PRAGMA table_info(tasks)")
         .unwrap()
@@ -341,7 +346,9 @@ fn v16_backfills_candidate_occurrence_tracking() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE IF EXISTS assistant_references;
+            "DROP TABLE IF EXISTS thread_start_untracked;
+             DROP TABLE IF EXISTS thread_start_states;
+             DROP TABLE IF EXISTS assistant_references;
              DROP TABLE IF EXISTS review_evidence;
              DROP TABLE IF EXISTS review_lineage_edges;
              ALTER TABLE usage_requests DROP COLUMN service_tier;
@@ -390,7 +397,9 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE IF EXISTS assistant_references;
+        "DROP TABLE IF EXISTS thread_start_untracked;
+         DROP TABLE IF EXISTS thread_start_states;
+         DROP TABLE IF EXISTS assistant_references;
          DROP TABLE IF EXISTS review_evidence;
          DROP TABLE IF EXISTS review_lineage_edges;
          ALTER TABLE usage_requests DROP COLUMN service_tier;
@@ -403,7 +412,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     // When: opening applies v17 and reopening is idempotent.
     for _ in 0..2 {
         let database = Database::open(&config_for(&path)).unwrap();
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
         assert_eq!(
             database.run_context("existing").unwrap().unwrap().name,
@@ -428,14 +437,16 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE assistant_references;
+        "DROP TABLE thread_start_untracked;
+         DROP TABLE thread_start_states;
+         DROP TABLE assistant_references;
          ALTER TABLE usage_requests DROP COLUMN service_tier;
          INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('existing', 'complete note', 7);"
     ).unwrap();
     connection.pragma_update(None, "user_version", 17).unwrap();
     drop(connection);
     let database = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 19);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
     assert_eq!(
         database
             .latest_run_ledger("existing")
@@ -445,4 +456,41 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
         "complete note"
     );
     assert!(database.assistant_reference("missing").unwrap().is_none());
+}
+
+#[test]
+fn v20_adds_thread_start_storage_without_changing_existing_data() {
+    // Given: a v19 database with existing data and no thread start tables.
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    drop(Database::open(&config_for(&path)).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE thread_start_untracked;
+             DROP TABLE thread_start_states;
+             INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('existing', 'keep me', 7);",
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 19).unwrap();
+    drop(connection);
+
+    // When: opening applies v20 and reopening is idempotent.
+    for _ in 0..2 {
+        let database = Database::open(&config_for(&path)).unwrap();
+
+        // Then: earlier data stays and the thread start schema is complete.
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 20);
+        assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
+        assert!(database.thread_start_state("missing").unwrap().is_none());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            schema_objects(&connection, "table"),
+            EXPECTED_TABLES.into_iter().map(String::from).collect()
+        );
+        assert_eq!(
+            schema_objects(&connection, "index"),
+            EXPECTED_INDICES.into_iter().map(String::from).collect()
+        );
+    }
 }

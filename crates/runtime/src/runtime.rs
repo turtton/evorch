@@ -1198,8 +1198,13 @@ impl AgentRuntime {
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
         let history_only = matches!(continuation, RunContinuation::Resume { .. });
         let original_prompt = prompt.clone();
+        let mut start_thread = None;
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
+            RunContinuation::FreshThread(thread_id) => {
+                start_thread = Some(thread_id);
+                (None, None)
+            }
             RunContinuation::Awaited => (None, None),
             RunContinuation::Handoff(mut handoff) => {
                 let restored = handoff.restored.take();
@@ -1276,6 +1281,11 @@ impl AgentRuntime {
             _ => None,
         };
         self.install_run_ownership_guard(run_id, &mut config);
+        let start_capture = start_thread.zip(
+            self.shared
+                .run_project(&config)
+                .map(|project| project.root.clone()),
+        );
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         if parent.is_some() && escalated_from.is_some() {
             tracing::debug!(%run_id, ?parent, ?escalated_from,
@@ -1494,6 +1504,11 @@ impl AgentRuntime {
                 }
                 None => None,
             };
+            // Recorded before the agent loop, so no model request or tool call can
+            // change the tree first.
+            if let Some((thread_id, root)) = start_capture {
+                crate::thread_start::record(&weak, thread_id, task.run_id, root).await;
+            }
             let _monitor = task.config.team.clone().map(|team| {
                 crate::team_context::monitor(
                     weak.clone(),
