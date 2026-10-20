@@ -368,6 +368,14 @@ impl Database {
         Ok(messages)
     }
 
+    /// Whether a thread goal (ADR 0028) was ever bound to the thread.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn thread_goal_recorded(&self, thread_id: &str) -> Result<bool, StorageError> {
+        event::thread_goal_recorded(&self.conn, thread_id)
+    }
+
     /// 全イベントを採番順で返します。
     ///
     /// # Errors

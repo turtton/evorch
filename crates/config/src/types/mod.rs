@@ -4,6 +4,7 @@ pub mod agents;
 pub mod budget;
 pub mod comment_checker;
 pub mod compaction;
+pub mod eval;
 pub mod misc;
 pub mod model_preset;
 pub mod orchestration;
@@ -29,6 +30,7 @@ pub use agents::{
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
+pub use eval::{EvalBudgetConfig, EvalConfig};
 pub use misc::{
     DiagnosticPersistence, DiagnosticsConfig, MetricsConfig, PermissionConfig,
     SelfImprovementConfig,
@@ -101,6 +103,8 @@ pub struct Config {
     /// Write/Edit 成功後の外部コメント検査。
     pub comment_checker: CommentCheckerConfig,
     pub tools: ToolsConfig,
+    /// Thread replay evaluation (ADR 0036).
+    pub eval: EvalConfig,
 }
 
 impl Default for Config {
@@ -127,6 +131,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             comment_checker: CommentCheckerConfig::default(),
             tools: ToolsConfig::default(),
+            eval: EvalConfig::default(),
         }
     }
 }

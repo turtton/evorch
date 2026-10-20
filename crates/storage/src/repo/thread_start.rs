@@ -21,14 +21,15 @@ pub fn save(conn: &Connection, state: &ThreadStartState) -> Result<bool, Storage
     };
     let inserted = conn.execute(
         "INSERT INTO thread_start_states (thread_id, root_run_id, project_root, repo_prefix, \
-         head_commit, diff, captured_at_ns, replayable, reason) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(thread_id) DO NOTHING",
+         head_commit, head_ref, diff, captured_at_ns, replayable, reason) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(thread_id) DO NOTHING",
         params![
             state.thread_id,
             state.root_run_id,
             state.project_root,
             snapshot.map(|snapshot| &snapshot.repo_prefix),
             snapshot.map(|snapshot| &snapshot.head_commit),
+            snapshot.and_then(|snapshot| snapshot.head_ref.as_ref()),
             snapshot.map(|snapshot| &snapshot.diff),
             state.captured_at_ns,
             snapshot.is_some(),
@@ -57,7 +58,7 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadStartState
     let row = conn
         .query_row(
             "SELECT root_run_id, project_root, repo_prefix, head_commit, diff, captured_at_ns, \
-             reason FROM thread_start_states WHERE thread_id = ?1",
+             reason, head_ref FROM thread_start_states WHERE thread_id = ?1",
             [thread_id],
             |row| {
                 Ok((
@@ -68,11 +69,14 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadStartState
                     row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((root_run_id, project_root, prefix, head, diff, captured_at_ns, reason)) = row else {
+    let Some((root_run_id, project_root, prefix, head, diff, captured_at_ns, reason, head_ref)) =
+        row
+    else {
         return Ok(None);
     };
     let capture = match (reason, prefix, head, diff) {
@@ -83,6 +87,7 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadStartState
             ThreadStartCapture::Replayable(ThreadStartSnapshot {
                 repo_prefix,
                 head_commit,
+                head_ref,
                 diff,
                 untracked: untracked(conn, thread_id)?,
             })

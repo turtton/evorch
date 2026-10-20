@@ -41,6 +41,7 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `catalog` | model catalog（ADR 0013） |
 | `browser` | 外部 Chromium の CDP セッション（ADR 0034）。GUI の Browser pane と agent tool が共用 |
 | `browser-cef` | CEF のオフスクリーン描画による offline の HTML artifact プレビュー（ADR 0034 B）。`cef` feature で opt-in |
+| `eval` | thread の再実行による構成評価（ADR 0036）。開始状態の clone、ユーザー役の LLM、予算、実行結果の保存。`gui` には依存しない |
 | `mock-openai` | OpenAI-compatible テスト用 provider |
 | `workspace-ui` | panel / layout / action / semantic-tree |
 | `gui` | egui + egui_dock（ADR 0007） |

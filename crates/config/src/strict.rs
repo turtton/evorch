@@ -28,6 +28,7 @@ const ROOT_KEYS: &[&str] = &[
     "sandbox",
     "comment_checker",
     "tools",
+    "eval",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -143,6 +144,20 @@ const BROWSER_TOOLS_KEYS: &[&str] = &[
     "max_tabs",
     "coordinate_actions",
 ];
+const EVAL_KEYS: &[&str] = &[
+    "user_simulator",
+    "judge",
+    "budget",
+    "repeat_target",
+    "repeat_regression",
+];
+const EVAL_BUDGET_KEYS: &[&str] = &[
+    "max_user_turns",
+    "max_tokens",
+    "max_tool_calls",
+    "max_elapsed_secs",
+];
+const EVAL_BINDINGS: &[&str] = &["user_simulator", "judge"];
 const ROLE_BINDING_KEYS: &[&str] = &["models", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["models", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];
@@ -220,7 +235,30 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     {
         check_keys(browser, "tools.browser", BROWSER_TOOLS_KEYS)?;
     }
+    validate_eval(root)?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
+}
+
+fn validate_eval(root: &toml::value::Table) -> Result<(), ConfigError> {
+    validate_section(root, "eval", EVAL_KEYS)?;
+    let Some(eval) = root.get("eval").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    if let Some(budget) = eval.get("budget").and_then(toml::Value::as_table) {
+        check_keys(budget, "eval.budget", EVAL_BUDGET_KEYS)?;
+    }
+    for name in EVAL_BINDINGS {
+        let Some(binding) = eval.get(*name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        let path = format!("eval.{name}");
+        check_keys(binding, &path, CATEGORY_BINDING_KEYS)?;
+        validate_chain_entries(binding, &path)?;
+        if let Some(generation) = binding.get("generation").and_then(toml::Value::as_table) {
+            check_keys(generation, &format!("{path}.generation"), GENERATION_KEYS)?;
+        }
+    }
+    Ok(())
 }
 
 /// 読み込み時に未対応のキーだけを取り除く。値はログに出さず、パスのみ返す。
@@ -335,6 +373,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("comment_checker", COMMENT_CHECKER_KEYS),
         ("orchestration", ORCHESTRATION_KEYS),
         ("tools", TOOLS_KEYS),
+        ("eval", EVAL_KEYS),
     ];
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
@@ -349,7 +388,35 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
     {
         retain_known(browser, "tools.browser", BROWSER_TOOLS_KEYS, &mut ignored);
     }
+    if let Some(eval) = root.get_mut("eval").and_then(toml::Value::as_table_mut) {
+        strip_eval(eval, &mut ignored);
+    }
     Ok(ignored)
+}
+
+fn strip_eval(eval: &mut toml::value::Table, ignored: &mut Vec<String>) {
+    if let Some(budget) = eval.get_mut("budget").and_then(toml::Value::as_table_mut) {
+        retain_known(budget, "eval.budget", EVAL_BUDGET_KEYS, ignored);
+    }
+    for name in EVAL_BINDINGS {
+        let Some(binding) = eval.get_mut(*name).and_then(toml::Value::as_table_mut) else {
+            continue;
+        };
+        let path = format!("eval.{name}");
+        retain_known(binding, &path, CATEGORY_BINDING_KEYS, ignored);
+        strip_chain_entries(binding, &path, ignored);
+        if let Some(generation) = binding
+            .get_mut("generation")
+            .and_then(toml::Value::as_table_mut)
+        {
+            retain_known(
+                generation,
+                &format!("{path}.generation"),
+                GENERATION_KEYS,
+                ignored,
+            );
+        }
+    }
 }
 
 fn strip_routing(routing: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {

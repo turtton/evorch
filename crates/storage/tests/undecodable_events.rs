@@ -172,3 +172,38 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
             .is_some()
     );
 }
+
+#[test]
+fn thread_goal_lookup_matches_only_threads_a_goal_was_bound_to() {
+    // Given: a goal snapshot for one thread and a todo snapshot for another.
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let config = StorageConfig {
+        db_path: temp_dir.path().join("goal-lookup.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    let other_todo = ThreadTodoSnapshot {
+        thread_id: "thread-2".into(),
+        ..todo()
+    };
+    for event in [
+        Event::new(OrchestratorEvent::ThreadGoalUpdated { snapshot: goal() }),
+        Event::new(OrchestratorEvent::ThreadTodoUpdated {
+            snapshot: other_todo,
+        }),
+    ] {
+        storage
+            .handle()
+            .append_event(Some("session-1"), &event)
+            .expect("event must append");
+    }
+    storage.close();
+
+    // When: each thread is looked up.
+    let database = Database::open(&config).expect("database must open");
+
+    // Then: only the goal's thread reports a goal.
+    assert!(database.thread_goal_recorded("thread-1").unwrap());
+    assert!(!database.thread_goal_recorded("thread-2").unwrap());
+    assert!(!database.thread_goal_recorded("thread").unwrap());
+}

@@ -55,11 +55,11 @@ pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategorizedRoleBindingConfig,
     CategoryBindingConfig, ChainEntryConfig, CommentCheckerConfig, CompactionConfig, Config,
     CooldownConfig, CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig,
-    EscalationApproval, FallbackConfig, GenerationOverridesConfig, MetadataSource, MetricsConfig,
-    ModelEntryConfig, ModelPresetConfig, PanelConfig, PermissionConfig, ProviderProfileConfig,
-    ProviderTypeConfig, ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig,
-    RoutingConfig, RulesConfig, SandboxConfig, SelfImprovementConfig, SummarizerKind,
-    WorkerBindingConfig,
+    EscalationApproval, EvalBudgetConfig, EvalConfig, FallbackConfig, GenerationOverridesConfig,
+    MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
+    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
+    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
+    SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
 };
 pub use types::{BrowserToolsConfig, ToolsConfig};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};

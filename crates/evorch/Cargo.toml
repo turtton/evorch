@@ -14,7 +14,9 @@ path = "src/main.rs"
 [dependencies]
 async-trait = { workspace = true }
 agents = { path = "../agents" }
+catalog = { path = "../catalog" }
 config = { path = "../config" }
+eval = { path = "../eval" }
 event-bus = { path = "../event-bus" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }

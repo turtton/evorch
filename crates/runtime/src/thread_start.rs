@@ -125,6 +125,7 @@ fn snapshot(
         .map_err(|_| NotReplayableReason::CaptureFailed)?
         .trim()
         .to_owned();
+    let head_ref = head_ref(toplevel, git)?;
 
     // Fixed flags keep the diff applicable whatever the user's diff config says.
     let diff = succeeded(git.run(
@@ -177,9 +178,23 @@ fn snapshot(
     Ok(ThreadStartSnapshot {
         repo_prefix,
         head_commit,
+        head_ref,
         diff,
         untracked,
     })
+}
+
+/// `git symbolic-ref` exits with 1 when `HEAD` is detached.
+fn head_ref(toplevel: &Path, git: &Git<'_>) -> Result<Option<String>, NotReplayableReason> {
+    let output = git.run(toplevel, &["symbolic-ref", "-q", "HEAD"], STDERR_LIMIT)?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    let name = String::from_utf8(succeeded(output)?)
+        .map_err(|_| NotReplayableReason::CaptureFailed)?
+        .trim()
+        .to_owned();
+    Ok(Some(name))
 }
 
 /// `None` for entries that are neither regular files nor symlinks, or vanished since listing.
