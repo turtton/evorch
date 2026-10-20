@@ -395,11 +395,14 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
     // When: the populated sidebar layout settles
     harness.run();
 
-    // Then: titles stay dense, with archive and status icons on the same row.
+    // Then: titles stay dense, with pin and status icons on the same row; the
+    // running thread hides Archive.
     let project = harness.label_rects("evorch")[0];
     let title = harness.label_rects("Refine GUI design system")[0];
     let archives = harness.label_rects("Archive");
+    let pins = harness.label_rects("☆");
     let running = harness.label_rects("Thread status: Running");
+    let on_title_line = |rect: &egui::Rect| (rect.center().y - title.center().y).abs() <= 1.0;
     assert!(
         (project.height() - ROW_DENSE).abs() <= 0.5,
         "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, archives={archives:?}, running={running:?}",
@@ -411,10 +414,12 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
         title.height()
     );
     assert!(
-        archives
-            .iter()
-            .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
-        "Archive must share the title line: title={title:?}, archives={archives:?}"
+        pins.iter().any(on_title_line),
+        "Pin must share the title line: title={title:?}, pins={pins:?}"
+    );
+    assert!(
+        !archives.iter().any(on_title_line),
+        "a running thread must hide Archive: title={title:?}, archives={archives:?}"
     );
     assert!(
         running
