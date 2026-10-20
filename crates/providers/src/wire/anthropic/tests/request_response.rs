@@ -243,6 +243,7 @@ fn canonical_input_includes_cache_reads_and_writes_once() {
             output_tokens: 7,
             cache_read_input_tokens: Some(read),
             cache_creation_input_tokens: Some(write),
+            ..WireUsage::default()
         });
         assert_eq!(
             usage,
@@ -306,4 +307,19 @@ fn tool_result_images_are_native_image_blocks() {
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"}})
     );
     assert!(!wire.to_string().contains("/w/shot.png"));
+}
+
+#[test]
+fn usage_reports_thinking_tokens_only_when_the_breakdown_is_present() {
+    use super::super::convert::from_wire_usage;
+
+    let reported: WireUsage = serde_json::from_value(
+        json!({"input_tokens": 3, "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 40}}),
+    )
+    .unwrap();
+    let absent: WireUsage =
+        serde_json::from_value(json!({"input_tokens": 3, "output_tokens": 50})).unwrap();
+
+    assert_eq!(from_wire_usage(reported).reasoning_tokens, Some(40));
+    assert_eq!(from_wire_usage(absent).reasoning_tokens, None);
 }

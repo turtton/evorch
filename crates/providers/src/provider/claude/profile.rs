@@ -101,13 +101,6 @@ impl ClaudeWireProfile {
         {
             betas.push("effort-2025-11-24");
         }
-        if controls
-            .thinking
-            .as_ref()
-            .is_some_and(|value| value["display"] == "updates")
-        {
-            betas.push("thinking-display-updates-2026-08-18");
-        }
         betas.push("extended-cache-ttl-2025-04-11");
         headers.insert(
             "anthropic-beta",
@@ -156,8 +149,10 @@ impl ClaudeWireProfile {
             "high" => 16384,
             _ => 0,
         };
+        // Native Claude Code sends this when `showThinkingSummaries` is on; its default
+        // `updates` display omits thinking text, leaving the transcript nothing to show.
         let thinking = if mode.is_adaptive() {
-            json!({"type": "adaptive", "display": "updates"})
+            json!({"type": "adaptive", "display": "summarized"})
         } else {
             if max_tokens <= 1024 {
                 return Err(ProviderError::Request(

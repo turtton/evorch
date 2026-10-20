@@ -17,6 +17,6 @@ pub(crate) use replay::{bind_response, discard_unbound_thinking, prefix_hash};
 pub use stream::AnthropicStreamInterpreter;
 pub(crate) use types::CacheControl;
 pub use types::{
-    WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse, WireRole, WireTool,
-    WireToolResultContent, WireUsage,
+    WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse,
+    WireOutputTokensDetails, WireRole, WireTool, WireToolResultContent, WireUsage,
 };

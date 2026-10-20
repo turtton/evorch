@@ -52,6 +52,7 @@ fn started() -> Event {
         model: "model".into(),
         streaming: true,
         run_id: Some("run-1".into()),
+        reasoning_effort: None,
     })
 }
 

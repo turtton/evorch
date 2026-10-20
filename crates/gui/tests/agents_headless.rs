@@ -505,6 +505,7 @@ fn request_started(run_id: &str, provider: &str, profile: Option<&str>, model: &
         model: model.into(),
         streaming: true,
         run_id: Some(run_id.into()),
+        reasoning_effort: None,
     })
 }
 

@@ -21,14 +21,17 @@ commit pins CLI 2.1.280 and SDK 0.112.1; these older constants were not copied.
 | System | Billing control block, CLI identity, original instructions |
 | Body | CLI field order; checksum patches the final serialized bytes |
 | Caching | One-hour system/tool/message markers; original history retained |
-| Thinking | Explicit model-validated adaptive/budget controls and keep-all context management |
+| Thinking | Explicit model-validated adaptive/budget controls, summarized adaptive display, and keep-all context management |
 | Compression | gzip, deflate, Brotli, and Zstandard accepted and decoded |
 | Transport | OAuth-only BoringSSL client, captured TLS ClientHello, HTTP/1 header casing/order, no hidden retries |
 | Correlation | Attempt UUIDs, request class, truthful prompt provenance, previous successful response IDs |
 
 The beta profile contains the common inference defaults and extended-cache TTL.
-Effort and thinking-display-updates are advertised only when their fields are
-sent; cache-diagnosis accompanies the diagnostics envelope. Optional OMP features such as
+Effort is advertised only when its field is sent; cache-diagnosis accompanies
+the diagnostics envelope. Adaptive thinking requests `display: "summarized"`,
+as native Claude Code does with `showThinkingSummaries` enabled, so the
+transcript receives readable thinking. Native's default `updates` display omits
+thinking text, and its `thinking-display-updates` beta is not sent. Optional OMP features such as
 fallback credits, fast mode, deferred tools, server compaction, and tool-search
 controls are not enabled by this adapter. No one-million-context beta is added.
 The adapter keeps original tool definitions. It does not advertise deferred
