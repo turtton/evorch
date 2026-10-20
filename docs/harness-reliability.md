@@ -176,6 +176,9 @@ keeps `/var/tmp`; relative paths are rejected, and `TMPDIR` is never consulted.
 Missing base directories are created recursively. The per-user output directory
 is still created with mode 0700 and checked for current-user ownership, no group
 or other permissions, and no symlinks, including with a custom base.
+Sandboxed commands get `EVORCH_OUTPUT_DIR` set to their writable scratch unless
+the command sets it explicitly, so an evorch built and tested inside the sandbox
+does not try to write into the read-only host directory.
 If the capture limit is exceeded, the result explicitly reports that
 only the initial portion was saved, and previews the end of that saved portion.
 Timeout is an error result containing the captured partial output.

@@ -12,6 +12,8 @@ use crate::{
     exec::{CommandSpec, Sandbox, WrappedCommand, merge_environment},
 };
 
+const OUTPUT_DIR_ENV: &str = "EVORCH_OUTPUT_DIR";
+
 /// bubblewrap のマウントとネットワーク構成。
 #[derive(Debug, Clone)]
 pub struct BwrapConfig {
@@ -252,6 +254,14 @@ impl Sandbox for BwrapSandbox {
             ("CARGO_HOME".to_owned(), "/tmp/home/.cargo".to_owned()),
             ("RUSTUP_HOME".to_owned(), "/tmp/home/.rustup".to_owned()),
         ]);
+        // The host's tool output root (`tools::output`) is mounted read-only, so an
+        // evorch started inside the sandbox stores its outputs in the scratch instead.
+        if !env.iter().any(|(key, _)| key == OUTPUT_DIR_ENV) {
+            env.push((
+                OUTPUT_DIR_ENV.to_owned(),
+                self.scratch.to_string_lossy().into_owned(),
+            ));
+        }
         let mut fallback = "/tmp/home/.cargo/bin".to_owned();
         if self.config.isolate_processes {
             fallback.push_str(":/usr/bin:/bin");
@@ -637,6 +647,7 @@ mod tests {
             ("HOME", "/tmp/home"),
             ("CARGO_HOME", "/tmp/home/.cargo"),
             ("RUSTUP_HOME", "/tmp/home/.rustup"),
+            ("EVORCH_OUTPUT_DIR", host.as_str()),
         ] {
             assert!(
                 wrapped.env.contains(&(key.to_owned(), value.to_owned())),
@@ -663,6 +674,23 @@ mod tests {
                 .env
                 .contains(&("HOME".to_owned(), "/tmp/home".to_owned()))
         );
+    }
+
+    // Given: 出力先を明示したコマンド / When: コマンドを包む / Then: scratch で上書きしない
+    #[test]
+    fn explicit_output_dir_is_kept() {
+        let mut command = spec(None);
+        command.extra_env = vec![("EVORCH_OUTPUT_DIR".into(), "/workspace/out".into())];
+        let wrapped = sandbox(BwrapConfig::new(PathBuf::from("/workspace")))
+            .wrap(command)
+            .expect("コマンドを包めるはずです");
+        let outputs: Vec<_> = wrapped
+            .env
+            .iter()
+            .filter(|(key, _)| key == "EVORCH_OUTPUT_DIR")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(outputs, ["/workspace/out"]);
     }
 
     // Given: a sandbox whose allowed directories are declared after it was built
