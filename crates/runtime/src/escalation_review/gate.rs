@@ -198,16 +198,25 @@ impl SandboxEscalationGate {
                     Some(reviewer) => review(Arc::clone(reviewer)).await,
                     None => Err(ReviewError::Model),
                 };
-                let reason = match verdict {
+                let (reason, requires_user) = match verdict {
                     Ok((ReviewVerdict::Approve, stamp)) => {
                         reviewed_stamp = stamp;
-                        None
+                        (None, false)
                     }
-                    Ok((ReviewVerdict::Deny { reason }, _)) => Some(reason),
-                    Err(error) => Some(error.to_string()),
+                    Ok((ReviewVerdict::RequiresUser { reason }, _)) => (Some(reason), true),
+                    Ok((ReviewVerdict::Deny { reason }, _)) => (Some(reason), false),
+                    Err(error) => (Some(error.to_string()), false),
                 };
                 match reason {
                     None => EscalationDecision::Approve,
+                    Some(reason) if requires_user => {
+                        self.diagnose(
+                            ctx,
+                            DiagnosticSeverity::Info,
+                            &format!("automatic review requires user approval: {reason}"),
+                        );
+                        human().await
+                    }
                     Some(reason) if fallback => {
                         self.diagnose(
                             ctx,
@@ -380,6 +389,40 @@ mod evidence_tests {
             },
             run,
         )
+    }
+
+    #[tokio::test]
+    async fn requires_user_verdict_asks_user_even_without_deny_fallback() {
+        for approved in [false, true] {
+            let (_runtime, gate, ctx, _run) = fixture();
+            let asked = std::sync::atomic::AtomicBool::new(false);
+            let decision = gate
+                .arbitrate(
+                    &ctx,
+                    "test",
+                    |_| async {
+                        Ok((
+                            ReviewVerdict::RequiresUser {
+                                reason: "forced push".into(),
+                            },
+                            None,
+                        ))
+                    },
+                    || async {
+                        asked.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if approved {
+                            EscalationDecision::Approve
+                        } else {
+                            EscalationDecision::Deny {
+                                reason: "shell escalation denied by user".into(),
+                            }
+                        }
+                    },
+                )
+                .await;
+            assert!(asked.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
+        }
     }
 
     #[tokio::test]
