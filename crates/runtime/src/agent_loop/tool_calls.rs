@@ -1087,9 +1087,12 @@ impl LoopState {
                         }
                         outcome => {
                             let error = match outcome {
-                                Ok(crate::escalation_review::ReviewVerdict::Deny { reason }) => {
-                                    reason
-                                }
+                                Ok(
+                                    crate::escalation_review::ReviewVerdict::Deny { reason }
+                                    | crate::escalation_review::ReviewVerdict::RequiresUser {
+                                        reason,
+                                    },
+                                ) => reason,
                                 Err(error) => error.to_string(),
                                 _ => unreachable!(),
                             };
