@@ -174,6 +174,7 @@ impl CodexClient {
             streaming,
             request.observation.clone(),
         )
+        .with_service_tier(request.service_tier)
     }
 
     async fn execute(

@@ -224,3 +224,84 @@ fn canonical_model_id_is_read_and_blank_ids_are_absent() {
     );
     assert_eq!(canonical("kimi-code-plan-global", "kimi-for-coding"), None);
 }
+
+#[test]
+fn context_tiers_and_fast_mode_prices_are_read() {
+    // Given: models.dev pricing with a context tier, an unknown tier type, an unreadable
+    // tier, a legacy over-200k object and fast-mode prices with their own tier.
+    let catalog = catalog_with_models(
+        r#"{"openai": {"models": {"gpt-6-astra": {
+            "id": "gpt-6-astra",
+            "cost": {
+                "input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5,
+                "tiers": [
+                    {"input": 20, "output": 75, "cache_read": 2, "cache_write": 25,
+                     "tier": {"type": "context", "size": 272000}},
+                    {"input": 99, "tier": {"type": "time_of_day", "size": 1}},
+                    {"input": 99, "tier": {"type": "context", "size": "large"}}
+                ],
+                "context_over_200k": {"input": 99, "output": 99}
+            },
+            "experimental": {"modes": {
+                "fast": {
+                    "cost": {"input": 20, "output": 100, "cache_read": 2,
+                             "tiers": [{"input": 40, "tier": {"type": "context", "size": 272000}}]},
+                    "provider": {"body": {"service_tier": "priority"}}
+                },
+                "pro": {"provider": {"body": {"reasoning": {"mode": "pro"}}}}
+            }}
+        }}}}"#,
+    );
+
+    // When
+    let model = catalog.find("openai", "gpt-6-astra").unwrap();
+
+    // Then: only readable context tiers are kept, and fast prices stay separate.
+    assert_eq!(
+        model.price_tiers,
+        [PriceTier {
+            above_input_tokens: 272_000,
+            prices: Prices {
+                input: Some(20.0),
+                output: Some(75.0),
+                cache_read: Some(2.0),
+                cache_write: Some(25.0),
+            },
+        }]
+    );
+    assert_eq!(
+        model.fast_pricing,
+        Some(ModePricing {
+            prices: Prices {
+                input: Some(20.0),
+                output: Some(100.0),
+                cache_read: Some(2.0),
+                cache_write: None,
+            },
+            tiers: vec![PriceTier {
+                above_input_tokens: 272_000,
+                prices: Prices {
+                    input: Some(40.0),
+                    ..Prices::default()
+                },
+            }],
+        })
+    );
+    assert_eq!(model.input_price, Some(10.0));
+}
+
+#[test]
+fn modes_without_fast_cost_have_no_fast_pricing() {
+    // Given: experimental modes that carry no fast cost, and an unreadable fast cost.
+    let catalog = catalog_with_models(
+        r#"{"openai": {"models": {
+            "pro-only": {"id": "pro-only", "experimental": {"modes": {"pro": {}}}},
+            "odd": {"id": "odd", "experimental": {"modes": {"fast": {"cost": "free"}}}}
+        }}}"#,
+    );
+
+    // When / Then: the catalog still loads and neither model has fast prices.
+    for id in ["pro-only", "odd"] {
+        assert_eq!(catalog.find("openai", id).unwrap().fast_pricing, None);
+    }
+}

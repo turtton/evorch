@@ -52,7 +52,17 @@ const MODEL_ENTRY_KEYS: &[&str] = &[
     "output_price",
     "cache_read_price",
     "cache_write_price",
+    "fast_price",
+    "price_tiers",
     "effort_levels",
+];
+const FAST_PRICE_KEYS: &[&str] = &["input", "output", "cache_read", "cache_write"];
+const PRICE_TIER_KEYS: &[&str] = &[
+    "above_input_tokens",
+    "input",
+    "output",
+    "cache_read",
+    "cache_write",
 ];
 const MODEL_PRESET_KEYS: &[&str] = &[
     "context_window",
@@ -270,12 +280,9 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
             {
                 for (index, model) in models.iter_mut().enumerate() {
                     if let Some(table) = model.as_table_mut() {
-                        retain_known(
-                            table,
-                            &format!("{path}.models[{index}]"),
-                            MODEL_ENTRY_KEYS,
-                            &mut ignored,
-                        );
+                        let model_path = format!("{path}.models[{index}]");
+                        retain_known(table, &model_path, MODEL_ENTRY_KEYS, &mut ignored);
+                        retain_price_tables(table, &model_path, &mut ignored);
                     }
                 }
             }
@@ -542,6 +549,7 @@ fn validate_models(profile: &toml::value::Table, profile_path: &str) -> Result<(
             toml::Value::String(_) => {}
             toml::Value::Table(table) => {
                 check_keys(table, &path, MODEL_ENTRY_KEYS)?;
+                check_price_tables(table, &path)?;
                 if !table
                     .get("id")
                     .and_then(toml::Value::as_str)
@@ -774,6 +782,58 @@ fn validate_section(
         return Ok(());
     };
     check_keys(table, section, allowed)
+}
+
+fn check_price_tables(model: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
+    if let Some(fast) = model.get("fast_price").and_then(toml::Value::as_table) {
+        check_keys(fast, &format!("{path}.fast_price"), FAST_PRICE_KEYS)?;
+    }
+    for (index, tier) in model
+        .get("price_tiers")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(tier) = tier.as_table() {
+            check_keys(
+                tier,
+                &format!("{path}.price_tiers[{index}]"),
+                PRICE_TIER_KEYS,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn retain_price_tables(model: &mut toml::value::Table, path: &str, ignored: &mut Vec<String>) {
+    if let Some(fast) = model
+        .get_mut("fast_price")
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            fast,
+            &format!("{path}.fast_price"),
+            FAST_PRICE_KEYS,
+            ignored,
+        );
+    }
+    for (index, tier) in model
+        .get_mut("price_tiers")
+        .and_then(toml::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(tier) = tier.as_table_mut() {
+            retain_known(
+                tier,
+                &format!("{path}.price_tiers[{index}]"),
+                PRICE_TIER_KEYS,
+                ignored,
+            );
+        }
+    }
 }
 
 fn check_keys(

@@ -266,13 +266,7 @@ impl RequestTurnContext {
     }
 }
 
-/// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServiceTier {
-    /// 優先処理を要求する。
-    Priority,
-}
+pub use event_bus::ServiceTier;
 
 /// 最終回答に要求する名前付き JSON Schema。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

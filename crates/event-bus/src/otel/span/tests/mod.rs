@@ -109,6 +109,7 @@ fn request_completed(request_id: &str, seconds: u64) -> Event {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
+            service_tier: None,
             run_id: None,
             purpose: None,
             reasoning_tokens: None,

@@ -412,6 +412,7 @@ mod tests {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 finish_reason: "stop".into(),
+                service_tier: None,
                 run_id: Some("run-3".into()),
                 purpose: None,
                 reasoning_tokens: None,

@@ -459,6 +459,7 @@ mod tests {
                     cache_read_tokens: 3,
                     cache_write_tokens: 4,
                     finish_reason: format!("other {KNOWN_VALUE}"),
+                    service_tier: None,
                     run_id: None,
                     purpose: None,
                     reasoning_tokens: None,

@@ -26,6 +26,7 @@ fn request_completed(run_id: Option<&str>, input: u64, output: u64) -> Event {
         cache_read_tokens: 3,
         cache_write_tokens: 4,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: run_id.map(str::to_owned),
         purpose: None,
         reasoning_tokens: None,

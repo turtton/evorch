@@ -218,6 +218,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 finish_reason: "stop".to_owned(),
+                service_tier: None,
                 run_id: Some("run-1".to_owned()),
                 purpose: None,
                 reasoning_tokens: None,

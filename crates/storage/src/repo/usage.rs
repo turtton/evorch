@@ -23,9 +23,9 @@ pub fn insert_requests(
             "INSERT OR IGNORE INTO usage_requests (request_id, at_ns, provider, profile, model, \
              run_id, parent_run_id, role, purpose, status, failure, finish_reason, input_tokens, \
              output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, ttft_ms, \
-             duration_ms, cost_usd) \
+             duration_ms, cost_usd, service_tier) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-             ?18, ?19, ?20)",
+             ?18, ?19, ?20, ?21)",
         )?;
         for record in records {
             statement.execute(params![
@@ -55,6 +55,7 @@ pub fn insert_requests(
                     .transpose()?,
                 to_i64(record.duration_ms, "duration")?,
                 record.cost_usd.filter(|cost| cost.is_finite()),
+                record.service_tier,
             ])?;
         }
     }
@@ -148,7 +149,8 @@ pub fn roll_up_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, Storag
 const REQUEST_COLUMNS: &str = "SELECT r.request_id, r.at_ns, r.provider, r.profile, r.model, \
      r.run_id, r.parent_run_id, r.role, r.purpose, r.status, r.failure, r.finish_reason, \
      r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, \
-     r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, t.thread_id, t.project_id, \
+     r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, r.service_tier, t.thread_id, \
+     t.project_id, \
      date(r.at_ns / 1000000000, 'unixepoch', 'localtime'), \
      time(r.at_ns / 1000000000, 'unixepoch', 'localtime') \
      FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id";
@@ -219,10 +221,10 @@ fn query_requests(
     while let Some(row) = rows.next()? {
         result.push(UsageRequestRow {
             record: request_record(row)?,
-            day: row.get(22)?,
-            time: row.get(23)?,
-            thread_id: row.get(20)?,
-            project_id: row.get(21)?,
+            day: row.get(23)?,
+            time: row.get(24)?,
+            thread_id: row.get(21)?,
+            project_id: row.get(22)?,
         });
     }
     Ok(result)
@@ -303,6 +305,7 @@ fn request_record(row: &Row<'_>) -> Result<UsageRequestRecord, StorageError> {
         ttft_ms: optional(17, "ttft")?,
         duration_ms: from_i64(row.get(18)?, "duration")?,
         cost_usd: row.get(19)?,
+        service_tier: row.get(20)?,
     })
 }
 

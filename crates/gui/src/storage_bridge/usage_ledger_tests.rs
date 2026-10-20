@@ -46,6 +46,7 @@ fn completed(request_id: &str, model: &str) -> Event {
         cache_read_tokens: 500_000,
         cache_write_tokens: 100_000,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: Some("run-2".into()),
         reasoning_tokens: Some(40_000),
         purpose: Some(RequestPurpose::Compaction),
@@ -143,4 +144,82 @@ fn disabled_metrics_record_no_ledger_rows() {
     // Then: the provider event persists, but no ledger row is written.
     assert_eq!(db.events_all_ordered().unwrap().len(), 1);
     assert!(db.usage_requests_between(0, i64::MAX).unwrap().is_empty());
+}
+
+#[test]
+fn fast_and_large_requests_are_recorded_at_their_configured_rates() {
+    // Given: manual prices of $1/M input with a $2/M tier above 500K, and $4/M fast input.
+    let (_dir, storage, db) = fixture();
+    let mut entry = config::ModelEntryConfig::enabled("model");
+    entry.input_price = Some(1.0);
+    entry.price_tiers = Some(vec![config::types::provider::PriceTier {
+        above_input_tokens: 500_000,
+        input: Some(2.0),
+        output: None,
+        cache_read: None,
+        cache_write: None,
+    }]);
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(4.0),
+        ..Default::default()
+    });
+    let profile = config::ProviderProfileConfig {
+        models: vec![entry],
+        ..config::ProviderProfileConfig::default()
+    };
+    let pricing = std::sync::Arc::new(std::sync::RwLock::new(UsagePricing::new(
+        [("main".to_owned(), profile)].into(),
+        None,
+    )));
+    let mut bridge = StorageBridge::new(storage.handle(), "session").with_usage_ledger(pricing);
+    let request = |request_id: &str, input_tokens: u64, service_tier| {
+        Event::new(ProviderEvent::RequestCompleted {
+            request_id: request_id.into(),
+            provider: "openai".into(),
+            profile: Some("main".into()),
+            protocol: "openai-chat-completions".into(),
+            model: "model".into(),
+            streaming: true,
+            duration_ms: 10,
+            input_tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            service_tier,
+            run_id: None,
+            reasoning_tokens: None,
+            purpose: None,
+        })
+    };
+
+    // When: a small, a large and a fast request complete.
+    for event in [
+        request("small", 100_000, None),
+        request("large", 1_000_000, None),
+        request("fast", 100_000, Some(event_bus::ServiceTier::Priority)),
+    ] {
+        bridge.handle_event(&event).unwrap();
+    }
+
+    // Then: each cost uses its own rate and the fast request keeps its tier label.
+    let rows = db.usage_requests_between(0, i64::MAX).unwrap();
+    let recorded: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.record.request_id.as_str(),
+                row.record.cost_usd.map(|cost| (cost * 1e6).round() / 1e6),
+                row.record.service_tier.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("small", Some(0.1), None),
+            ("large", Some(2.0), None),
+            ("fast", Some(0.4), Some("priority")),
+        ]
+    );
 }

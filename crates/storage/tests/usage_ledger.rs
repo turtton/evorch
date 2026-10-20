@@ -42,6 +42,7 @@ fn completed(request_id: &str, run_id: Option<&str>) -> ProviderEvent {
         cache_read_tokens: 60,
         cache_write_tokens: 5,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: run_id.map(Into::into),
         reasoning_tokens: Some(7),
         purpose: Some(RequestPurpose::Compaction),
@@ -70,6 +71,7 @@ fn record(request_id: &str, at: SystemTime, cost_usd: Option<f64>) -> UsageReque
         ttft_ms: Some(300),
         duration_ms: 900,
         cost_usd,
+        service_tier: None,
     }
 }
 
@@ -299,4 +301,43 @@ fn local_day_reads_bound_requests_by_the_ledger_clock() {
     let clock = database.usage_local_clock().unwrap();
     assert_eq!(clock.today, today);
     assert!(clock.day_start_ns <= rows[0].record.at_ns && rows[0].record.at_ns < clock.day_end_ns);
+}
+
+#[test]
+fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
+    // Given: a v18 database holding a request recorded before service tiers existed.
+    let temp_dir = TempDir::new().unwrap();
+    let config = config(&temp_dir);
+    let now = SystemTime::now();
+    let storage = Storage::open(config.clone()).unwrap();
+    storage
+        .handle()
+        .record_usage_requests(vec![record("earlier", now, Some(0.25))])
+        .unwrap();
+    storage.close();
+    let conn = Connection::open(&config.db_path).unwrap();
+    conn.execute_batch("ALTER TABLE usage_requests DROP COLUMN service_tier;")
+        .unwrap();
+    conn.pragma_update(None, "user_version", 18).unwrap();
+    drop(conn);
+
+    // When: opening applies v19 and a fast request is recorded.
+    let storage = Storage::open(config.clone()).unwrap();
+    let fast = UsageRequestRecord {
+        service_tier: Some("priority".into()),
+        ..record("fast", now, Some(1.0))
+    };
+    storage
+        .handle()
+        .record_usage_requests(vec![fast.clone()])
+        .unwrap();
+    storage.close();
+
+    // Then: the earlier request reads as standard and the fast one keeps its tier.
+    let rows = Database::open(&config)
+        .unwrap()
+        .usage_requests_between(0, i64::MAX)
+        .unwrap();
+    let records: Vec<_> = rows.into_iter().map(|row| row.record).collect();
+    assert_eq!(records, [record("earlier", now, Some(0.25)), fast]);
 }

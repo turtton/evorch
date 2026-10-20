@@ -28,6 +28,7 @@ fn record(request_id: &str, model: &str, cost_usd: f64) -> UsageRequestRecord {
         ttft_ms: Some(150),
         duration_ms: 900,
         cost_usd: Some(cost_usd),
+        service_tier: None,
     }
 }
 

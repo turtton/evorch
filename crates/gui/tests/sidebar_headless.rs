@@ -484,6 +484,7 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
             cache_read_tokens: 100_000,
             cache_write_tokens: 0,
             finish_reason: "stop".into(),
+            service_tier: None,
             run_id: Some("run-1".into()),
             purpose: None,
             reasoning_tokens: None,

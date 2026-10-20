@@ -6,7 +6,7 @@ use event_bus::{Event, EventKind, LifecycleEvent, ProviderEvent, ProviderFailure
 use storage::usage::{UsageRequestRecord, UsageStatus};
 
 use crate::model::telemetry::TokenUsage;
-use crate::model::telemetry::pricing::SharedUsagePricing;
+use crate::model::telemetry::pricing::{SharedUsagePricing, speed};
 
 /// Tracks the run tree and first-token latency the terminal event lacks, and
 /// prices each completed attempt at the rates in force when it is recorded.
@@ -100,6 +100,7 @@ impl UsageRecorder {
             ttft_ms: self.first_token_ms.remove(request_id),
             duration_ms: 0,
             cost_usd: None,
+            service_tier: None,
         };
         match &event.kind {
             EventKind::Provider(ProviderEvent::RequestCompleted {
@@ -110,6 +111,7 @@ impl UsageRecorder {
                 cache_write_tokens,
                 finish_reason,
                 reasoning_tokens,
+                service_tier,
                 ..
             }) => {
                 record.duration_ms = *duration_ms;
@@ -119,7 +121,8 @@ impl UsageRecorder {
                 record.cache_write_tokens = *cache_write_tokens;
                 record.reasoning_tokens = *reasoning_tokens;
                 record.finish_reason = Some(finish_reason.clone());
-                let pricing = self
+                record.service_tier = service_tier.map(|tier| tier.as_str().to_owned());
+                let schedule = self
                     .pricing
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -130,7 +133,7 @@ impl UsageRecorder {
                     cache_read: *cache_read_tokens,
                     cache_write: *cache_write_tokens,
                 }
-                .estimated_cost(pricing);
+                .request_cost(schedule.as_ref(), speed(*service_tier));
             }
             EventKind::Provider(ProviderEvent::RequestFailed {
                 duration_ms,

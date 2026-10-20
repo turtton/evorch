@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use catalog::ModelCatalog;
 use config::ModelEntryConfig;
-use config::types::provider::ModelPricing;
+use config::types::provider::{ModelPricing, ModelSpeed, PriceSchedule, PriceSet, PriceTier};
 
 use super::{TelemetryOverlay, TelemetryRow, TokenUsage};
 use crate::model::provider_settings::ProviderSettingsModel;
@@ -27,6 +27,21 @@ impl ModelKey {
     }
 }
 
+/// A completed request kept whole, since its tier depends on its own input size.
+#[derive(Debug, Clone)]
+pub(super) struct BilledRequest {
+    pub key: ModelKey,
+    pub speed: ModelSpeed,
+    pub usage: TokenUsage,
+}
+
+pub(crate) fn speed(service_tier: Option<event_bus::ServiceTier>) -> ModelSpeed {
+    match service_tier {
+        Some(event_bus::ServiceTier::Priority) => ModelSpeed::Fast,
+        None => ModelSpeed::Standard,
+    }
+}
+
 /// Direct clients and saved Codex observations can lack a profile.
 fn fallback_provider_type(provider: &str) -> Option<config::ProviderTypeConfig> {
     match provider {
@@ -43,7 +58,7 @@ fn resolve_model_pricing(
     catalog: Option<&ModelCatalog>,
     profile: &str,
     model: &str,
-) -> Option<ModelPricing> {
+) -> Option<PriceSchedule> {
     let fallback = ModelEntryConfig::enabled(model);
     let entry = entry.unwrap_or(&fallback);
     let catalog = catalog
@@ -55,13 +70,48 @@ fn resolve_model_pricing(
                 provider_type,
             )
         })
-        .map(|model| ModelPricing {
-            input: model.input_price,
-            output: model.output_price,
-            cache_read: model.cache_read_price,
-            cache_write: model.cache_write_price,
-        });
+        .map(catalog_schedule);
     entry.pricing_for(catalog)
+}
+
+fn catalog_schedule(model: &catalog::ModelMetadata) -> PriceSchedule {
+    PriceSchedule {
+        standard: PriceSet {
+            base: ModelPricing {
+                input: model.input_price,
+                output: model.output_price,
+                cache_read: model.cache_read_price,
+                cache_write: model.cache_write_price,
+            },
+            tiers: price_tiers(&model.price_tiers),
+        },
+        fast: model.fast_pricing.as_ref().map(|fast| PriceSet {
+            base: prices(fast.prices),
+            tiers: price_tiers(&fast.tiers),
+        }),
+    }
+}
+
+fn prices(prices: catalog::Prices) -> ModelPricing {
+    ModelPricing {
+        input: prices.input,
+        output: prices.output,
+        cache_read: prices.cache_read,
+        cache_write: prices.cache_write,
+    }
+}
+
+fn price_tiers(tiers: &[catalog::PriceTier]) -> Vec<PriceTier> {
+    tiers
+        .iter()
+        .map(|tier| PriceTier {
+            above_input_tokens: tier.above_input_tokens,
+            input: tier.prices.input,
+            output: tier.prices.output,
+            cache_read: tier.prices.cache_read,
+            cache_write: tier.prices.cache_write,
+        })
+        .collect()
 }
 
 /// Thread-safe price snapshot shared with the storage bridge, which records
@@ -83,13 +133,13 @@ impl UsagePricing {
         Self { entries, catalog }
     }
 
-    /// Prices for one observed model, or `None` when every price is unknown.
+    /// Price schedule for one observed model, or `None` when every price is unknown.
     pub fn pricing(
         &self,
         provider: &str,
         profile: Option<&str>,
         model: &str,
-    ) -> Option<ModelPricing> {
+    ) -> Option<PriceSchedule> {
         let name = profile.unwrap_or(provider);
         let profile_config = self.entries.get(name);
         let provider_type = profile_config
@@ -123,6 +173,11 @@ impl TokenUsage {
         } else {
             (tokens(self.cache_read) / total * 100.0).min(100.0)
         }
+    }
+
+    /// Cost of one request, at the tier its input size and speed select.
+    pub fn request_cost(&self, schedule: Option<&PriceSchedule>, speed: ModelSpeed) -> Option<f64> {
+        self.estimated_cost(schedule.map(|schedule| schedule.rates_for(self.input, speed)))
     }
 
     pub fn estimated_cost(&self, pricing: Option<ModelPricing>) -> Option<f64> {
@@ -203,19 +258,26 @@ impl TelemetryOverlay {
     }
 
     pub fn estimated_cost(&self, run_id: &str, settings: &ProviderSettingsModel) -> Option<f64> {
+        let mut schedules: BTreeMap<&ModelKey, Option<PriceSchedule>> = BTreeMap::new();
         self.billed
             .get(run_id)?
             .iter()
-            .try_fold(0.0, |total, (key, usage)| {
-                let profile = key.profile.as_deref().unwrap_or(&key.provider);
-                let pricing = resolve_model_pricing(
-                    settings.model_entry(profile, &key.model),
-                    key.provider_type(settings),
-                    settings.catalog.catalog.as_deref(),
-                    profile,
-                    &key.model,
-                );
-                let cost = total + usage.estimated_cost(pricing)?;
+            .try_fold(0.0, |total, request| {
+                let key = &request.key;
+                let schedule = schedules.entry(key).or_insert_with(|| {
+                    let profile = key.profile.as_deref().unwrap_or(&key.provider);
+                    resolve_model_pricing(
+                        settings.model_entry(profile, &key.model),
+                        key.provider_type(settings),
+                        settings.catalog.catalog.as_deref(),
+                        profile,
+                        &key.model,
+                    )
+                });
+                let cost = total
+                    + request
+                        .usage
+                        .request_cost(schedule.as_ref(), request.speed)?;
                 cost.is_finite().then_some(cost)
             })
     }

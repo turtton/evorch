@@ -191,6 +191,12 @@ pub struct ModelEntryConfig {
     pub cache_read_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_price: Option<f64>,
+    /// Fast (priority) request prices; omitted prices may be supplied by the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_price: Option<ModelPricing>,
+    /// Input-size tiers; when present they replace the catalog's tiers entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_tiers: Option<Vec<PriceTier>>,
     /// このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_levels: Option<Vec<String>>,
@@ -204,6 +210,90 @@ pub struct ModelPricing {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
+}
+
+impl ModelPricing {
+    /// Fills each unknown price from `fallback`.
+    pub fn or(self, fallback: Self) -> Self {
+        Self {
+            input: self.input.or(fallback.input),
+            output: self.output.or(fallback.output),
+            cache_read: self.cache_read.or(fallback.cache_read),
+            cache_write: self.cache_write.or(fallback.cache_write),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Prices of a whole request whose input tokens exceed `above_input_tokens`.
+/// Omitted prices keep the rate of the set the tier belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PriceTier {
+    pub above_input_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+impl PriceTier {
+    pub fn pricing(&self) -> ModelPricing {
+        ModelPricing {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+        }
+    }
+}
+
+/// Base prices and the input-size tiers that replace them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PriceSet {
+    pub base: ModelPricing,
+    pub tiers: Vec<PriceTier>,
+}
+
+impl PriceSet {
+    /// The highest tier whose threshold `input_tokens` exceeds, otherwise the base prices.
+    pub fn rates_for(&self, input_tokens: u64) -> ModelPricing {
+        self.tiers
+            .iter()
+            .filter(|tier| input_tokens > tier.above_input_tokens)
+            .max_by_key(|tier| tier.above_input_tokens)
+            .map_or(self.base, |tier| tier.pricing().or(self.base))
+    }
+
+    fn is_unknown(&self) -> bool {
+        self.base.is_unknown() && self.tiers.iter().all(|tier| tier.pricing().is_unknown())
+    }
+}
+
+/// A model's resolved prices for standard and fast requests.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PriceSchedule {
+    pub standard: PriceSet,
+    pub fast: Option<PriceSet>,
+}
+
+impl PriceSchedule {
+    /// Prices for one request. A fast request without known fast prices, and any fast
+    /// price left unknown, uses the standard price, so its cost is a lower bound.
+    pub fn rates_for(&self, input_tokens: u64, speed: ModelSpeed) -> ModelPricing {
+        let standard = self.standard.rates_for(input_tokens);
+        match (speed, &self.fast) {
+            (ModelSpeed::Fast, Some(fast)) => fast.rates_for(input_tokens).or(standard),
+            (ModelSpeed::Fast, None) | (ModelSpeed::Standard, _) => standard,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -232,25 +322,47 @@ impl ModelEntryConfig {
             output_price: None,
             cache_read_price: None,
             cache_write_price: None,
+            fast_price: None,
+            price_tiers: None,
             effort_levels: None,
         }
     }
 
     /// Resolves each price from static TOML first, then caller-selected catalog data.
-    /// Returns `None` only when all four prices are unknown; no I/O is performed.
-    pub fn pricing_for(&self, catalog: Option<ModelPricing>) -> Option<ModelPricing> {
-        let fallback = catalog.unwrap_or_default();
-        let pricing = ModelPricing {
-            input: self.input_price.or(fallback.input),
-            output: self.output_price.or(fallback.output),
-            cache_read: self.cache_read_price.or(fallback.cache_read),
-            cache_write: self.cache_write_price.or(fallback.cache_write),
+    /// Static tiers replace catalog tiers as a whole. Returns `None` only when every
+    /// price is unknown; no I/O is performed.
+    pub fn pricing_for(&self, catalog: Option<PriceSchedule>) -> Option<PriceSchedule> {
+        let catalog = catalog.unwrap_or_default();
+        let base = ModelPricing {
+            input: self.input_price,
+            output: self.output_price,
+            cache_read: self.cache_read_price,
+            cache_write: self.cache_write_price,
         };
-        (pricing.input.is_some()
-            || pricing.output.is_some()
-            || pricing.cache_read.is_some()
-            || pricing.cache_write.is_some())
-        .then_some(pricing)
+        let fast = match (self.fast_price, catalog.fast) {
+            (None, fast) => fast,
+            (Some(base), None) => Some(PriceSet {
+                base,
+                tiers: Vec::new(),
+            }),
+            (Some(base), Some(fast)) => Some(PriceSet {
+                base: base.or(fast.base),
+                tiers: fast.tiers,
+            }),
+        };
+        let schedule = PriceSchedule {
+            standard: PriceSet {
+                base: base.or(catalog.standard.base),
+                tiers: self.price_tiers.clone().unwrap_or(catalog.standard.tiers),
+            },
+            fast,
+        };
+        (!schedule.standard.is_unknown()
+            || schedule
+                .fast
+                .as_ref()
+                .is_some_and(|fast| !fast.is_unknown()))
+        .then_some(schedule)
     }
 }
 
@@ -283,6 +395,10 @@ struct ModelEntryDe {
     cache_read_price: Option<f64>,
     #[serde(default)]
     cache_write_price: Option<f64>,
+    #[serde(default)]
+    fast_price: Option<ModelPricing>,
+    #[serde(default)]
+    price_tiers: Option<Vec<PriceTier>>,
     #[serde(default)]
     effort_levels: Option<Vec<String>>,
 }
@@ -329,6 +445,8 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                     output_price: entry.output_price,
                     cache_read_price: entry.cache_read_price,
                     cache_write_price: entry.cache_write_price,
+                    fast_price: entry.fast_price,
+                    price_tiers: entry.price_tiers,
                     effort_levels: entry.effort_levels,
                 })
             }

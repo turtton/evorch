@@ -53,6 +53,7 @@ fn completed(provider: &str, profile: Option<&str>) -> Event {
         cache_read_tokens: 600,
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
+        service_tier: None,
         run_id: Some("run-1".into()),
         purpose: None,
         reasoning_tokens: None,
