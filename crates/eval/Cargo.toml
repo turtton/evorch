@@ -26,6 +26,7 @@ rustix = { version = "1", features = ["process"] }
 sandbox = { path = "../sandbox" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+similar = { workspace = true }
 storage = { path = "../storage" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }

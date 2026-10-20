@@ -154,6 +154,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // Browser session/action/DOM/screenshot telemetry is not a fault signal.
         BROWSER_SESSION | BROWSER_STOPPED | BROWSER_ACTION | BROWSER_DOM_DIFF
         | BROWSER_SCREENSHOT => Ignored,
+        // eval: a requested evaluation ended; its failures are the replays', not the harness's.
+        EVALUATION_FINISHED => Ignored,
         // Includes tool-result codes (unknown_run/run_output_denied), not bus diagnostics.
         _ => return None,
     })

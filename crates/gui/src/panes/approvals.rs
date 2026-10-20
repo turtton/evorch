@@ -67,9 +67,15 @@ pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestActio
     action
 }
 
-/// File-tool escalations lead with their target path, as shell ones do with the command.
+/// File-tool escalations lead with their target path, as shell ones do with the
+/// command; host tools that ask for themselves (ADR 0036) lead with their summary.
 fn primary_key(input: &serde_json::Value) -> &'static str {
-    if input.get("kind").and_then(serde_json::Value::as_str) == Some("file_access") {
+    if input
+        .get("summary")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        "summary"
+    } else if input.get("kind").and_then(serde_json::Value::as_str) == Some("file_access") {
         "path"
     } else {
         "command"

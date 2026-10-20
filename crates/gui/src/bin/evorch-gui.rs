@@ -387,6 +387,39 @@ fn latest_thread_goals(
     latest
 }
 
+type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+/// The Evaluator's tools are built before the runtime and the models they
+/// reach, so both are filled in once startup has composed them. The runtime
+/// owns these tools, so the host holds it weakly.
+#[derive(Default)]
+struct EvaluatorHost {
+    runtime: OnceLock<runtime::WeakAgentRuntime>,
+    reload: OnceLock<Reload>,
+}
+
+impl eval::evaluator::EvaluatorHost for EvaluatorHost {
+    fn deliver_notice(&self, run_id: &str, notice: &str) -> Result<String, String> {
+        let runtime = self
+            .runtime
+            .get()
+            .and_then(runtime::WeakAgentRuntime::upgrade)
+            .ok_or("the runtime is not running")?;
+        let run_id: runtime::RunId = run_id.parse().map_err(|error| format!("{error}"))?;
+        runtime
+            .deliver_notice(run_id, notice)
+            .map(|run| run.to_string())
+            .map_err(|error| error.to_string())
+    }
+
+    fn reload_config(&self) -> Result<(), String> {
+        self.reload
+            .get()
+            .ok_or_else(|| "the models are not composed yet".to_owned())
+            .and_then(|reload| reload())
+    }
+}
+
 fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
     let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
     match result {
@@ -619,6 +652,7 @@ fn run() -> Result<(), GuiError> {
     };
     let storage = Storage::open(storage_config.clone())?;
     // The Evaluator reads and pins threads of the same database the GUI records into.
+    let evaluator_host = Arc::new(EvaluatorHost::default());
     let evaluator_tools = |user_config_dir: Option<PathBuf>, catalog_dir: Option<PathBuf>| {
         user_config_dir
             .map(|user_config_dir| {
@@ -627,6 +661,9 @@ fn run() -> Result<(), GuiError> {
                     storage: storage.handle(),
                     user_config_dir,
                     catalog_dir,
+                    bus: Arc::clone(&bus),
+                    host: Arc::clone(&evaluator_host) as Arc<dyn eval::evaluator::EvaluatorHost>,
+                    cli: None,
                 })
             })
             .unwrap_or_default()
@@ -902,6 +939,14 @@ fn run() -> Result<(), GuiError> {
             .map(|drafts| drafts.join("crash-spool")),
     )?;
     restore_thread_goals(&storage_config, &runtime);
+    let _ = evaluator_host.runtime.set(runtime.downgrade());
+    let _ = evaluator_host.reload.set({
+        let production = production_model.clone();
+        let projects = project_models.clone();
+        Box::new(move || {
+            gui::model::production::reload_models(production.as_ref(), projects.as_ref())
+        })
+    });
     restore_thread_todos(&storage_config, &runtime, &sidebar);
 
     let ownership_root = match demo_directory.as_ref() {

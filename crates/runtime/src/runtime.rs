@@ -64,6 +64,16 @@ pub struct AgentRuntime {
     pub(crate) shared: Arc<Shared>,
 }
 
+/// See [`AgentRuntime::downgrade`].
+#[derive(Clone)]
+pub struct WeakAgentRuntime(Weak<Shared>);
+
+impl WeakAgentRuntime {
+    pub fn upgrade(&self) -> Option<AgentRuntime> {
+        AgentRuntime::from_weak(&self.0)
+    }
+}
+
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
@@ -609,6 +619,11 @@ impl AgentRuntime {
 
     pub(crate) fn from_weak(shared: &Weak<Shared>) -> Option<Self> {
         shared.upgrade().map(|shared| Self { shared })
+    }
+
+    /// A handle for hosts the runtime's own tools hold, which must not keep it alive.
+    pub fn downgrade(&self) -> WeakAgentRuntime {
+        WeakAgentRuntime(Arc::downgrade(&self.shared))
     }
 
     /// 共有イベントバス・ツール実行器・モデル境界からランタイムを生成する。
@@ -1676,6 +1691,68 @@ impl AgentRuntime {
         text: String,
     ) -> Result<(), RuntimeError> {
         self.send_inbox_message(run_id, text, Vec::new(), false, None)
+    }
+
+    /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
+    /// first live interactive run among `run_id`, its ancestors and then newer
+    /// runs of the same conversation, so a run that would end without reading
+    /// it is skipped. The notice wakes a waiting run without user authority.
+    ///
+    /// # Errors
+    /// [`RuntimeError::UnknownRun`] for an unregistered run, otherwise the
+    /// last delivery error, [`RuntimeError::RunTerminated`] when none was tried.
+    pub fn deliver_notice(&self, run_id: RunId, text: &str) -> Result<RunId, RuntimeError> {
+        let candidates = {
+            let runs = lock_runs(&self.shared.runs);
+            if !runs.contains_key(&run_id) {
+                return Err(unknown_run(run_id));
+            }
+            let mut lineage = Vec::new();
+            let mut next = Some(run_id);
+            while let Some(id) = next {
+                let Some(entry) = runs.get(&id) else { break };
+                lineage.push(id);
+                next = entry.parent;
+            }
+            let conversation = lineage
+                .last()
+                .and_then(|root| runs.get(root))
+                .map(|root| root.name.clone())
+                .filter(|name| name.starts_with("chat:"));
+            let mut later: Vec<RunId> = runs
+                .iter()
+                .filter(|(id, entry)| {
+                    entry.parent.is_none()
+                        && Some(&entry.name) == conversation.as_ref()
+                        && !lineage.contains(id)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            later.sort_by(|a, b| b.cmp(a));
+            lineage
+                .into_iter()
+                .chain(later)
+                .filter(|id| {
+                    runs.get(id).is_some_and(|entry| {
+                        entry.config.interactive
+                            && !matches!(
+                                *entry.phase_rx.borrow(),
+                                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
+                            )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut failure = RuntimeError::RunTerminated {
+            run_id: run_id.to_string(),
+        };
+        for candidate in candidates {
+            match self.send_internal_message(candidate, text.to_owned()) {
+                Ok(()) => return Ok(candidate),
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
     }
 
     fn send_inbox_message(

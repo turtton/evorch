@@ -103,6 +103,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ToolArgumentsMalformed", TransientOrExternal),
         ("CompactionFailed", TransientOrExternal),
         ("ContextCheckpointSaved", Ignored),
+        ("EvaluationFinished", Ignored),
         ("escalation_review", Ignored),
         ("tool_call_access", Ignored),
         ("scope_denied", Ignored),

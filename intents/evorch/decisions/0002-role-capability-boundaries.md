@@ -64,6 +64,7 @@ Role を personality ではなく capability boundary とする。
 ## 2026-10-21 確定: Evaluator を追加する（ADR 0036）
 
 - agent の振る舞いや構成の相談を受ける読み取り専用ロールとして `Role::Evaluator` を追加する。delegate と設定の識別子は `evaluator`、設定バインディングは `[agents.roles.evaluator]`、同梱の基準プロンプトは `role-evaluator`。
-- ツールは `read` / `grep` と評価用の `eval_list_threads` / `eval_inspect_thread` / `eval_save_sample` / `eval_remove_sample` / `eval_report`。書き込み・編集・shell・再委譲・Web は不可。全ロール共通の ledger / user question 操作は引き続き利用できる。
+- ツールは `read` / `grep` と評価用の `eval_list_threads` / `eval_inspect_thread` / `eval_save_sample` / `eval_remove_sample` / `eval_start` / `eval_report` / `eval_apply_config`。書き込み・編集・shell・再委譲・Web は不可。全ロール共通の ledger / user question 操作は引き続き利用できる。
 - 評価用ツールはユーザー DB と `<user config dir>/eval/` を読む host tool で、GUI プロセスが executor に登録し、run ごとの executor へ引き継ぐ。capability で Evaluator 以外には公開しない。サンプルの保存・解除は DB への書き込みとして `fs_write` を宣言し、副作用のあるツールとして並行実行しない。
+- `eval_start` は `evorch eval run` の起動として `process_spawn` を、`eval_apply_config` はユーザー設定の書き込みとして `fs_write` を宣言する。どちらも実行前に tool 自身が承認ゲートでユーザーの承認を待ち、model はそれを省略できない。書き込めるのは設定保存処理が扱う `agents` / `routing` / 既存の `role_profiles.<name>` の同じ節に限る。
 - Orchestrator は Evaluator へ委譲できる。headless 実行はユーザー DB を持たないため評価用ツールを登録しない。

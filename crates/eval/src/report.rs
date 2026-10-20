@@ -489,7 +489,7 @@ async fn report_dir(dir: &Path, context: &mut Context<'_>) -> Result<Report, Eva
     })
 }
 
-fn unpriced_list(cost: &Cost) -> String {
+pub(crate) fn unpriced_list(cost: &Cost) -> String {
     cost.unpriced
         .iter()
         .map(|unpriced| {
@@ -799,7 +799,7 @@ fn process_side(run: &LoadedRun) -> serde_json::Value {
     })
 }
 
-fn usd(cost: &Cost) -> String {
+pub(crate) fn usd(cost: &Cost) -> String {
     let mut text = format!("${:.4}", cost.usd);
     if cost.is_api_equivalent() {
         text.push_str(" (API-equivalent)");
