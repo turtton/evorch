@@ -16,6 +16,30 @@ impl AgentRuntime {
             (approval, escalate_to_user_on_deny);
     }
 
+    /// Add `env` to every shell command of this runtime's runs, including the
+    /// executors runs build for their own sandbox. Sandbox-forced variables
+    /// (`HOME`, `TMPDIR`, `CARGO_HOME`, `RUSTUP_HOME` under bwrap) still win.
+    /// The first value set wins.
+    #[must_use]
+    pub fn with_shell_environment(self, env: Vec<(String, String)>) -> Self {
+        if self.shared.shell_environment.set(env).is_ok() {
+            self.configure_shell_environment(
+                &self
+                    .shared
+                    .executor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
+        self
+    }
+
+    pub(crate) fn configure_shell_environment(&self, executor: &tools::ToolExecutor) {
+        if let Some(env) = self.shared.shell_environment.get() {
+            executor.set_shell_environment(env.clone());
+        }
+    }
+
     /// Escalated shells keep the run's `TMPDIR` when it has a thread scratch.
     pub(crate) fn configure_shell_escalation(
         &self,

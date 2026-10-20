@@ -693,6 +693,39 @@ mod tests {
         assert_eq!(outputs, ["/workspace/out"]);
     }
 
+    // Given: a command whose extra environment also names the sandbox's forced variables
+    // When: the command is wrapped
+    // Then: the forced values win once each, and the other extra variables pass through
+    #[test]
+    fn forced_variables_win_over_extra_environment() {
+        let mut command = spec(None);
+        command.extra_env = ["HOME", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME"]
+            .into_iter()
+            .map(|key| (key.to_owned(), "/host".to_owned()))
+            .chain([("CARGO_NET_OFFLINE".to_owned(), "true".to_owned())])
+            .collect();
+        let sandbox = sandbox(BwrapConfig::new(PathBuf::from("/workspace")));
+        let scratch = sandbox.scratch.to_string_lossy().into_owned();
+
+        let wrapped = sandbox.wrap(command).expect("コマンドを包めるはずです");
+
+        for (key, value) in [
+            ("HOME", "/tmp/home"),
+            ("TMPDIR", scratch.as_str()),
+            ("CARGO_HOME", "/tmp/home/.cargo"),
+            ("RUSTUP_HOME", "/tmp/home/.rustup"),
+            ("CARGO_NET_OFFLINE", "true"),
+        ] {
+            let values: Vec<_> = wrapped
+                .env
+                .iter()
+                .filter(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(values, [value], "{key}");
+        }
+    }
+
     // Given: a sandbox whose allowed directories are declared after it was built
     // When: the declaration changes between two commands
     // Then: each command mounts the list current at that moment, with the run's access

@@ -304,3 +304,48 @@ async fn inspecting_workspace_preserves_already_sent_model_prefix() {
         assert_eq!(inspection["workspace"]["active_root"], json!(root.path()));
     }
 }
+
+// Given: a runtime with a shell environment, with and without a per-run sandbox root
+// When: a run's shell prints the variable
+// Then: both the shared executor and a run-built executor pass it to the command
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_environment_reaches_shared_and_per_run_executors() {
+    for per_run_executor in [false, true] {
+        let (_temp, repo) = init_git_repo();
+        let model = Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "shell-1",
+                "shell",
+                json!({"command": "printf 'offline=%s' \"$CARGO_NET_OFFLINE\""}),
+            )),
+            Ok(text_response("done", FinishReason::Stop)),
+        ]));
+        let (runtime, mounts, _bus) = runtime_with_factory(Arc::clone(&model));
+        let runtime =
+            runtime.with_shell_environment(vec![("CARGO_NET_OFFLINE".into(), "true".into())]);
+        let runtime = if per_run_executor {
+            runtime.with_sandbox_root(repo)
+        } else {
+            runtime
+        };
+
+        let run_id =
+            runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
+
+        assert_eq!(
+            runtime.wait(run_id).await,
+            Ok(AgentRunPhase::Done),
+            "per_run_executor={per_run_executor}"
+        );
+        assert_eq!(
+            captured_mounts(&mounts).len(),
+            usize::from(per_run_executor)
+        );
+        let observed = model.observed().await;
+        assert!(
+            format!("{:?}", observed[1]).contains("offline=true"),
+            "per_run_executor={per_run_executor}: {:?}",
+            observed[1]
+        );
+    }
+}

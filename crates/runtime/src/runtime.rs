@@ -86,6 +86,8 @@ pub(crate) struct Shared {
     pub(crate) artifact_pages: OnceLock<Arc<dyn crate::artifacts::ArtifactPages>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
+    /// Text that opens every run's system message, ahead of the catalog.
+    pub(crate) system_prompt_preamble: OnceLock<String>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) skill_source: OnceLock<Arc<SkillCatalogSource>>,
     pub(crate) rules: Mutex<Option<Arc<RulesSource>>>,
@@ -97,6 +99,8 @@ pub(crate) struct Shared {
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
+    /// Variables added to every shell command, including run-built executors'.
+    pub(crate) shell_environment: OnceLock<Vec<(String, String)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
     pub(crate) thread_scratch: Mutex<Option<Arc<crate::scratch::ThreadScratch>>>,
     pub(crate) compaction_configured: AtomicBool,
@@ -634,6 +638,7 @@ impl AgentRuntime {
                 artifact_pages: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
+                system_prompt_preamble: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
                 rules: Mutex::new(None),
@@ -645,6 +650,7 @@ impl AgentRuntime {
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
+                shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),
                 thread_scratch: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
@@ -675,6 +681,16 @@ impl AgentRuntime {
     #[must_use]
     pub fn with_sequential_run_ids(self) -> Self {
         let _ = self.shared.run_ids.use_sequential();
+        self
+    }
+
+    /// Open every run's system message, delegated children included, with
+    /// `preamble`. A run-unique value keeps provider prompt caches from being
+    /// shared across runtimes while each run's own prefix stays cacheable.
+    /// The first value set wins.
+    #[must_use]
+    pub fn with_system_prompt_preamble(self, preamble: String) -> Self {
+        let _ = self.shared.system_prompt_preamble.set(preamble);
         self
     }
 
@@ -911,6 +927,7 @@ impl AgentRuntime {
                 model,
                 topology: OnceLock::new(),
                 system_prompts: OnceLock::new(),
+                system_prompt_preamble: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
                 rules: Mutex::new(None),
@@ -922,6 +939,7 @@ impl AgentRuntime {
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
+                shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),
                 thread_scratch: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
@@ -2595,6 +2613,7 @@ pub(crate) fn loop_shared(
                 Some(project) => project.rules.clone(),
                 None => shared.rules(),
             },
+            system_prompt_preamble: shared.system_prompt_preamble.get().cloned(),
             compaction: shared.compaction.get().cloned().unwrap_or_default(),
             compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
             escalation: shared

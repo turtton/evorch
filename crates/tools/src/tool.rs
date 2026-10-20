@@ -180,6 +180,9 @@ pub trait Tool: Send + Sync {
     /// result, such as live shell job output. Other tools ignore it.
     fn set_event_bus(&self, _bus: std::sync::Arc<event_bus::EventBus>) {}
 
+    /// Replace the variables a shell adds to every command it starts. Other tools ignore it.
+    fn set_shell_environment(&self, _env: Vec<(String, String)>) {}
+
     /// shell の呼び出し単位の隔離解除を構成する。他のツールでは何もしない。
     fn set_shell_escalation(
         &self,
