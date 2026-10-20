@@ -23,6 +23,13 @@ pub enum RegistryError {
         #[source]
         source: rusqlite::Error,
     },
+    /// The caller was interrupted while waiting to retry contention. Nothing
+    /// was committed by this operation.
+    #[error("ownership {operation} interrupted while retrying after {attempts} attempt(s)")]
+    Interrupted {
+        operation: DbOperation,
+        attempts: u32,
+    },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -58,6 +65,42 @@ impl RegistryError {
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
         )
     }
+
+    /// Transient contention after which a rolled-back transaction may run
+    /// again. `SQLITE_BUSY` (including a busy `COMMIT`, which commits nothing)
+    /// qualifies. Of `SQLITE_LOCKED`, only shared-cache table locks held by
+    /// another connection do; other variants are conflicts within the same
+    /// connection that a retry would repeat. Ownership, validation, JSON and
+    /// I/O errors are never retried.
+    pub(super) fn is_retryable(&self) -> bool {
+        let Some(error) = self.sqlite().and_then(rusqlite::Error::sqlite_error) else {
+            return false;
+        };
+        match error.code {
+            rusqlite::ErrorCode::DatabaseBusy => true,
+            rusqlite::ErrorCode::DatabaseLocked => {
+                error.extended_code == rusqlite::ffi::SQLITE_LOCKED_SHAREDCACHE
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn with_attempts(self, attempts: u32) -> Self {
+        match self {
+            Self::Database {
+                operation,
+                phase,
+                source,
+                ..
+            } => Self::Database {
+                operation,
+                phase,
+                attempt: attempts,
+                source,
+            },
+            other => other,
+        }
+    }
 }
 
 pub struct Registry {
@@ -86,6 +129,15 @@ thread_local! {
 pub(super) enum Access {
     ReadOnly,
     ReadWrite,
+}
+
+/// How a connection waits for SQLite locks.
+#[derive(Clone, Copy)]
+pub(super) enum Wait {
+    /// SQLite's busy timeout, applied to each lock wait separately.
+    Timeout(Duration),
+    /// The current retry attempt's absolute budget, shared by all statements.
+    Budget,
 }
 
 impl Registry {
@@ -187,11 +239,11 @@ impl Registry {
         Ok(registry)
     }
 
-    /// Open one attempt of an operation, waiting at most `timeout` per lock.
+    /// Open one attempt of an operation, waiting for locks as `wait` allows.
     pub(super) fn open_attempt(
         path: &Path,
         access: Access,
-        timeout: Duration,
+        wait: Wait,
         operation: DbOperation,
         thread_id: &str,
         attempt: u32,
@@ -200,22 +252,34 @@ impl Registry {
             Access::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             Access::ReadWrite => OpenFlags::SQLITE_OPEN_READ_WRITE,
         };
-        let mut registry =
-            Self::open_with_timeout(path, flags, timeout).map_err(|error| match error {
-                RegistryError::Sql(error) => Site {
-                    db: &path.to_string_lossy(),
-                    operation,
-                    thread_id,
-                    attempt,
-                    started: Instant::now(),
-                    payload_bytes: None,
-                    quiet_contention: false,
-                }
-                .sql(DbPhase::Open, error),
-                other => other,
-            })?;
+        let opened = match wait {
+            Wait::Timeout(timeout) => Self::open_with_timeout(path, flags, timeout),
+            Wait::Budget => Self::open_with_budget(path, flags),
+        };
+        let mut registry = opened.map_err(|error| match error {
+            RegistryError::Sql(error) => Site {
+                db: &path.to_string_lossy(),
+                operation,
+                thread_id,
+                attempt,
+                started: Instant::now(),
+                payload_bytes: None,
+                quiet_contention: false,
+            }
+            .sql(DbPhase::Open, error),
+            other => other,
+        })?;
         registry.attempt = attempt;
         Ok(registry)
+    }
+
+    /// Every statement on this connection waits within the budget of the
+    /// retry attempt running on the current thread, never per statement.
+    fn open_with_budget(path: &Path, flags: OpenFlags) -> Result<Self, RegistryError> {
+        let connection =
+            Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        connection.busy_handler(Some(super::retry::wait_within_budget))?;
+        Ok(Self::from_connection(connection, 1, false))
     }
 
     fn open_with_flags(path: &Path, flags: OpenFlags) -> Result<Self, RegistryError> {

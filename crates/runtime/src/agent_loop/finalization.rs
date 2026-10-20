@@ -19,9 +19,17 @@ impl LoopState {
             }
         };
         if drained
-            && let Some(permit) = &self.task.config.ownership
-            && let Err(error) = permit.checkpoint(&self.context.visible_messages())
+            && let Some(permit) = self.task.config.ownership.clone()
+            && let Err(error) = permit
+                .checkpoint_off_thread(
+                    self.context.visible_messages(),
+                    self.ownership_retry(),
+                    || false,
+                )
+                .await
         {
+            // Teardown runs after any interrupt, so its checkpoint keeps retrying
+            // within the policy deadline instead of observing that interrupt.
             if let crate::ownership::RegistryError::Database {
                 operation, phase, ..
             } = &error

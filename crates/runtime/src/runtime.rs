@@ -94,6 +94,8 @@ pub(crate) struct Shared {
     pub(crate) compaction: OnceLock<CompactionSettings>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
+    /// Contention budget of ownership checkpoints and turn starts; unset is the default.
+    pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
@@ -645,6 +647,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -700,6 +703,16 @@ impl AgentRuntime {
             self.shared.run_ids.observe(latest);
         }
         let _ = self.shared.run_store.set(store);
+        self
+    }
+
+    /// Override the ownership registry contention budget (deadline, per-attempt
+    /// wait, backoff). For tests only: they shorten the budget so contention
+    /// that outlasts it does not take the production 10 s. Production keeps
+    /// [`crate::ownership::RetryPolicy::default`]. First setting wins.
+    #[doc(hidden)]
+    pub fn with_ownership_retry_policy(self, policy: crate::ownership::RetryPolicy) -> Self {
+        let _ = self.shared.ownership_retry.set(policy);
         self
     }
 
@@ -934,6 +947,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
