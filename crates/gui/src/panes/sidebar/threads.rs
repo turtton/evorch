@@ -227,20 +227,17 @@ fn active_row(
         thread_status_icon(ui, state, attention);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
-        if display_root {
-            let can_archive = !thread.pinned && !family_running;
-            let disabled_reason = if family_running {
-                "Archive unavailable while a thread in this family is running"
-            } else {
-                "Unpin this thread before archiving"
-            };
+        // A running family hides Archive instead of showing a disabled control;
+        // the reserved space keeps every row's pin aligned.
+        if display_root && !family_running {
+            let can_archive = !thread.pinned;
             let archive = ui
                 .add_enabled(
                     can_archive,
                     ghost(icon_text(icons::ARCHIVE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
                 )
                 .on_hover_text("Archive")
-                .on_disabled_hover_text(disabled_reason);
+                .on_disabled_hover_text("Unpin this thread before archiving");
             archive.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
             });
@@ -248,7 +245,6 @@ fn active_row(
                 *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
             }
         } else {
-            // Keep pins of child rows aligned with their root's pin.
             ui.add_space(ACTION_SIZE);
         }
         let (pin_icon, pin_label, pin_hint) = if thread.pinned {

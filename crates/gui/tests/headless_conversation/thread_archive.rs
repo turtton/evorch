@@ -1,7 +1,4 @@
-use egui_kittest::{
-    Harness,
-    kittest::{NodeT, Queryable},
-};
+use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{AgentRunPhase, Event, LifecycleEvent};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
@@ -81,22 +78,28 @@ fn set_thread_phase(
 }
 
 #[test]
-fn running_thread_archive_button_is_disabled_and_direct_action_is_noop() {
+fn running_thread_archive_button_is_hidden_and_direct_action_is_noop() {
     for phase in [AgentRunPhase::Pending, AgentRunPhase::Running] {
         // Given: a thread whose aggregated state is Running.
         let temp = tempfile::tempdir().unwrap();
         let mut harness = fixture(temp.path(), false);
         let target = ThreadId::new("target");
+        harness.run();
+        let idle_archive = harness.label_rects("Archive")[0];
         set_thread_phase(harness.state_mut(), &target, phase);
         harness.run();
         let before = harness.state().sidebar().clone();
         let saved = std::fs::read(temp.path().join("sidebar.json")).unwrap();
         assert!(harness.has_label("Thread status: Running"));
 
-        // When: clicking the disabled control, then bypassing the UI.
-        harness.click_label("Archive");
-        harness.run();
-        assert_eq!(harness.state().sidebar(), &before);
+        // When: the row renders without its control, then the UI is bypassed.
+        assert!(!harness.has_label("Archive"));
+        let pin = harness.label_rects("☆")[0];
+        let status = harness.label_rects("Thread status: Running")[0];
+        assert!(
+            status.left() - pin.right() >= idle_archive.width() - 0.5,
+            "the hidden control keeps its space: archive={idle_archive:?}, pin={pin:?}, status={status:?}"
+        );
         harness.state_mut().toggle_archive(target).unwrap();
 
         // Then: neither path changes selection, archive state or persistence.
@@ -115,27 +118,10 @@ fn assert_archive_blocked(state: WorkbenchState<EmptySource>, root: &std::path::
             |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
             state,
         );
-    harness.ctx.global_style_mut(|style| {
-        style.interaction.tooltip_delay = 0.0;
-        style.interaction.show_tooltips_only_when_still = false;
-    });
     harness.run_steps(3);
     let before = harness.state().sidebar().clone();
     let saved = std::fs::read(root.join("sidebar.json")).unwrap();
-    let archive = harness.get_by_label("Archive");
-    assert!(archive.accesskit_node().is_disabled());
-    archive.hover();
-    harness.run_steps(3);
-    assert!(
-        harness
-            .query_by_label("Archive unavailable while a thread in this family is running")
-            .is_some()
-    );
-
-    harness.get_by_label("Archive").click();
-    harness.run_steps(3);
-    assert_eq!(harness.state().sidebar(), &before);
-    assert_eq!(std::fs::read(root.join("sidebar.json")).unwrap(), saved);
+    assert!(harness.query_by_label("Archive").is_none());
 
     harness
         .state_mut()

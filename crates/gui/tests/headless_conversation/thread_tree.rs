@@ -1,10 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::epaint::{ColorMode, Shape};
-use egui_kittest::{
-    Harness,
-    kittest::{NodeT, Queryable},
-};
+use egui_kittest::{Harness, kittest::Queryable};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::tasks::AgentRunSource;
@@ -55,6 +52,14 @@ fn fixture(root: &std::path::Path) -> HeadlessWorkbench<EmptySource> {
 }
 
 const QUESTION_LABEL: &str = "Answer needed: this thread has an unanswered question";
+
+/// Running families hide Archive, leaving Pin as the trailing row action.
+fn trailing_action(harness: &Harness<'_, Option<SidebarAction>>) -> egui::Rect {
+    harness
+        .query_by_label("Archive")
+        .unwrap_or_else(|| harness.get_by_label("☆"))
+        .rect()
+}
 
 fn status_fixture(
     phase: Option<ThreadRunPhase>,
@@ -152,13 +157,7 @@ fn thread_status_icons_follow_state_and_question_priority() {
                         .is_none()
                 );
             }
-            assert_eq!(
-                harness
-                    .get_by_label("Archive")
-                    .accesskit_node()
-                    .is_disabled(),
-                running
-            );
+            assert_eq!(harness.query_by_label("Archive").is_none(), running);
             // Verify actual shapes rather than just accessible names.
             let shapes = &harness.output().shapes;
             let spinners = shapes
@@ -202,7 +201,7 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
             let mut harness = status_fixture(Some(phase), question, width);
             let title = harness.get_by_label("Status thread").rect();
             let icon = harness.get_by_label(label).rect();
-            let action = harness.get_by_label("Archive").rect();
+            let action = trailing_action(&harness);
             assert!(title.right() <= action.left(), "{title:?} {action:?}");
             assert!(
                 action.right() + SP_1 <= icon.left() + 0.5,
@@ -239,7 +238,7 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
             let title = harness.get_by_label("Status thread").rect();
             let icon = harness.get_by_label(status).rect();
             let blob = harness.get_by_label(QUESTION_LABEL).rect();
-            let action = harness.get_by_label("Archive").rect();
+            let action = trailing_action(&harness);
             assert!(title.right() <= action.left(), "{title:?} {action:?}");
             assert!(
                 action.right() + SP_1 <= blob.left() + 0.5,
