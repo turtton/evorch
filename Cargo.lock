@@ -2202,6 +2202,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "eval"
+version = "0.1.0"
+dependencies = [
+ "agents",
+ "async-trait",
+ "catalog",
+ "chrono",
+ "config",
+ "event-bus",
+ "getrandom 0.3.4",
+ "model",
+ "providers",
+ "recorder",
+ "routing",
+ "runtime",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "storage",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tools",
+ "tracing",
+ "workspace-ui",
+]
+
+[[package]]
 name = "event-bus"
 version = "0.1.0"
 dependencies = [
@@ -2240,7 +2269,9 @@ version = "0.1.0"
 dependencies = [
  "agents",
  "async-trait",
+ "catalog",
  "config",
+ "eval",
  "event-bus",
  "mock-openai",
  "routing",

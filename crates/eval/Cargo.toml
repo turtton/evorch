@@ -1,0 +1,38 @@
+[package]
+name = "eval"
+description = "Replays recorded threads in isolated workspaces to evaluate agent configurations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "eval"
+
+[dependencies]
+agents = { path = "../agents" }
+async-trait = { workspace = true }
+catalog = { path = "../catalog" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+config = { path = "../config" }
+event-bus = { path = "../event-bus" }
+getrandom = { workspace = true }
+model = { path = "../model" }
+providers = { path = "../providers" }
+recorder = { path = "../recorder" }
+routing = { path = "../routing" }
+runtime = { path = "../runtime" }
+sandbox = { path = "../sandbox" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+storage = { path = "../storage" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+toml = { workspace = true }
+tools = { path = "../tools" }
+tracing = { workspace = true }
+workspace-ui = { path = "../workspace-ui" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

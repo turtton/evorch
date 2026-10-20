@@ -128,9 +128,27 @@ fn clean_repository_records_only_head() {
 
     // Then: only the commit is recorded.
     assert_eq!(snapshot.head_commit, repo.head());
+    assert_eq!(snapshot.head_ref.as_deref(), Some("refs/heads/main"));
     assert_eq!(snapshot.repo_prefix, "");
     assert!(snapshot.diff.is_empty());
     assert!(snapshot.untracked.is_empty());
+}
+
+#[test]
+fn checked_out_branch_is_recorded_and_detached_head_records_none() {
+    // Given: a repository on a feature branch.
+    let repo = Repo::new();
+    git(&repo.root(), &["checkout", "--quiet", "-b", "feature/x"]);
+
+    // When: the start state is captured on the branch and again with HEAD detached.
+    let on_branch = repo.snapshot();
+    git(&repo.root(), &["checkout", "--quiet", "--detach"]);
+    let detached = repo.snapshot();
+
+    // Then: the branch is named only while HEAD points at it.
+    assert_eq!(on_branch.head_ref.as_deref(), Some("refs/heads/feature/x"));
+    assert_eq!(detached.head_ref, None);
+    assert_eq!(detached.head_commit, on_branch.head_commit);
 }
 
 #[test]

@@ -88,6 +88,20 @@
         "persistence": "warnings"
       }
     },
+    "eval": {
+      "description": "Thread replay evaluation (ADR 0036).",
+      "$ref": "#/$defs/EvalConfig",
+      "default": {
+        "budget": {
+          "max_elapsed_secs": 3600,
+          "max_tokens": 5000000,
+          "max_tool_calls": 500,
+          "max_user_turns": 20
+        },
+        "repeat_regression": 1,
+        "repeat_target": 2
+      }
+    },
     "metrics": {
       "description": "メトリクス設定。",
       "$ref": "#/$defs/MetricsConfig",
@@ -746,6 +760,90 @@
           "const": "auto"
         }
       ]
+    },
+    "EvalBudgetConfig": {
+      "type": "object",
+      "properties": {
+        "max_elapsed_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "max_tokens": {
+          "description": "Input plus output tokens of agent requests.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000000,
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 500,
+          "minimum": 0
+        },
+        "max_user_turns": {
+          "description": "Messages the simulated user may send, the original first request included.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvalConfig": {
+      "type": "object",
+      "properties": {
+        "budget": {
+          "description": "Limits for one replay, counted over its whole delegation tree.",
+          "$ref": "#/$defs/EvalBudgetConfig",
+          "default": {
+            "max_elapsed_secs": 3600,
+            "max_tokens": 5000000,
+            "max_tool_calls": 500,
+            "max_user_turns": 20
+          }
+        },
+        "judge": {
+          "description": "The model grading the replays.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleBindingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeat_regression": {
+          "description": "Replays per configuration of each regression thread.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "repeat_target": {
+          "description": "Replays per configuration of the thread under consultation.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "user_simulator": {
+          "description": "The model playing the original user. Unset uses the worker binding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleBindingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "FallbackConfig": {
       "description": "チェーンのフォールバック設定 (ADR 0030)。",

@@ -189,6 +189,23 @@ pub fn list_all_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageEr
     )
 }
 
+/// Whether any persisted thread goal snapshot was bound to `thread_id`.
+pub fn thread_goal_recorded(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
+    let goals = list_events(
+        conn,
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
+         FROM events WHERE kind = 'Orchestrator' AND instr(payload, 'ThreadGoalUpdated') > 0",
+        [],
+    )?;
+    Ok(goals.iter().any(|stored| {
+        matches!(
+            &stored.event.kind,
+            EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot })
+                if snapshot.thread_id == thread_id
+        )
+    }))
+}
+
 fn list_events<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,

@@ -34,6 +34,7 @@ fn snapshot(diff: &[u8], untracked: Vec<UntrackedEntry>) -> ThreadStartSnapshot 
     ThreadStartSnapshot {
         repo_prefix: "crates/app/".into(),
         head_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        head_ref: Some("refs/heads/main".into()),
         diff: diff.to_vec(),
         untracked,
     }
@@ -82,6 +83,32 @@ fn replayable_state_round_trips_with_every_untracked_kind() {
     assert!(inserted);
     assert_eq!(database.thread_start_state("thread").unwrap(), Some(start));
     assert_eq!(database.thread_start_state("missing").unwrap(), None);
+}
+
+#[test]
+fn detached_start_round_trips_without_a_head_ref() {
+    // Given: a replayable start recorded while HEAD was detached.
+    let (_dir, storage, database) = fixture();
+    let start = state(
+        "detached",
+        3,
+        ThreadStartCapture::Replayable(ThreadStartSnapshot {
+            head_ref: None,
+            ..snapshot(b"", vec![])
+        }),
+    );
+
+    // When: it is saved and read back.
+    storage
+        .handle()
+        .save_thread_start_state(start.clone())
+        .unwrap();
+
+    // Then: the missing head ref survives as `None`.
+    assert_eq!(
+        database.thread_start_state("detached").unwrap(),
+        Some(start)
+    );
 }
 
 #[test]

@@ -83,8 +83,12 @@ arena と `evorch benchmark` はこの仕組みで置き換え、削除する。
 
 ### 3. 隔離した場所で再実行する
 
-- 実行ごとに runner が所有するディレクトリへ、記録した commit から `git clone --shared` し、差分と未追跡ファイルを復元する。
-  - 元の remote は外し、`origin` は §4 のローカル bare repository に置き換える。ユーザーの checkout と `.git` には書き込まない。
+- 実行ごとに runner が所有するディレクトリへ `git clone --local --no-checkout` し、記録した commit を checkout して差分と未追跡ファイルを復元する。
+  - `--shared` は使わない。clone の object がユーザーの `.git` に依存しないようにし、ユーザー側の gc で clone が壊れないようにする。
+  - 元の remote は外し、`origin` は §4 のローカル bare repository に置き換える。
+    bare repository は clone の `.git/evorch-origin.git` に置き、記録時の branch をそこに作って checkout した branch の upstream にする。
+    `HEAD` が detached だった thread は detached のまま checkout する。
+  - ユーザーの checkout と `.git` には書き込まない。
   - project の絶対パスに依存する thread があるため、手順のなかで path の違いを明示する。
     ただし同じ絶対パスでの再現は保証しない。
 - 再実行は専用の storage DB とイベントバスを使う。ユーザーの DB と `sidebar.json` は読み取り専用の題材として扱う。

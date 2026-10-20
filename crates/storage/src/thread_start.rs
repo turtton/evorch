@@ -91,6 +91,8 @@ pub struct ThreadStartSnapshot {
     /// The project root relative to the repository top level: empty or ending in `/`.
     pub repo_prefix: String,
     pub head_commit: String,
+    /// The full ref `HEAD` named, such as `refs/heads/main`; `None` when detached.
+    pub head_ref: Option<String>,
     /// `git diff --binary HEAD` over the whole repository.
     pub diff: Vec<u8>,
     pub untracked: Vec<UntrackedEntry>,

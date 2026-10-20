@@ -22,6 +22,9 @@ fn main() -> ExitCode {
     if argv.first().is_some_and(|command| command == "inspect") {
         return inspect(argv);
     }
+    if argv.first().is_some_and(|command| command == "eval") {
+        return evaluate(argv);
+    }
 
     let args = match headless::parse_args(argv.into_iter()) {
         Ok(args) => args,
@@ -91,6 +94,36 @@ fn benchmark(argv: Vec<String>) -> ExitCode {
     )) {
         Ok(result) => {
             println!("{result}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn evaluate(argv: Vec<String>) -> ExitCode {
+    let args = match evorch::evaluation::parse_args(argv.into_iter()) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start async runtime: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(evorch::evaluation::run(args, Arc::new(ProcessEnv))) {
+        Ok(text) => {
+            println!("{text}");
             ExitCode::SUCCESS
         }
         Err(error) => {
