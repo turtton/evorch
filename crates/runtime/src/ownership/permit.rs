@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::observe::DbOperation;
+use super::registry::{ATTEMPT_TIMEOUT, Access};
 use super::{Lease, OwnerState, OwnershipError, Registry, RegistryError, ThreadOwner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +38,14 @@ impl OwnerPermit {
     }
 
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
-        let registry = Registry::open_readonly(&self.registry_path)?;
+        let mut registry = Registry::open_attempt(
+            &self.registry_path,
+            Access::ReadOnly,
+            ATTEMPT_TIMEOUT,
+            DbOperation::Guard,
+            &self.thread_id,
+            1,
+        )?;
         registry.guard_generation(self)?;
         Ok(registry)
     }
@@ -46,20 +55,13 @@ impl OwnerPermit {
     /// an error means authority could not be established and fails closed.
     pub fn try_mutation_guard(&self) -> Result<Option<Registry>, RegistryError> {
         let attempt = || {
-            let registry = Registry::open_readonly_nonblocking(&self.registry_path)?;
+            let mut registry = Registry::open_readonly_nonblocking(&self.registry_path)?;
             registry.guard_generation(self)?;
-            Ok(registry)
+            Ok::<_, RegistryError>(registry)
         };
         match attempt() {
             Ok(registry) => Ok(Some(registry)),
-            Err(RegistryError::Sql(error))
-                if matches!(
-                    error.sqlite_error_code(),
-                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-                ) =>
-            {
-                Ok(None)
-            }
+            Err(error) if error.is_contention() => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -67,14 +69,32 @@ impl OwnerPermit {
         self.mutation_guard().map(drop)
     }
     pub fn begin_turn(&self) -> Result<(), RegistryError> {
-        Registry::open_existing(&self.registry_path)?.update(
-            &self.thread_id,
-            |owner| match self.run_id.as_deref() {
-                Some(run) => owner.begin_run(&self.lease, run, now_ms()),
-                None => owner.begin_turn(&self.lease, now_ms()),
-            },
-        )?;
+        self.open_write_attempt(DbOperation::BeginTurn, ATTEMPT_TIMEOUT, 1)?
+            .update_as(
+                DbOperation::BeginTurn,
+                &self.thread_id,
+                |owner| match self.run_id.as_deref() {
+                    Some(run) => owner.begin_run(&self.lease, run, now_ms()),
+                    None => owner.begin_turn(&self.lease, now_ms()),
+                },
+            )?;
         Ok(())
+    }
+
+    fn open_write_attempt(
+        &self,
+        operation: DbOperation,
+        timeout: std::time::Duration,
+        attempt: u32,
+    ) -> Result<Registry, RegistryError> {
+        Registry::open_attempt(
+            &self.registry_path,
+            Access::ReadWrite,
+            timeout,
+            operation,
+            &self.thread_id,
+            attempt,
+        )
     }
 
     pub fn validate_mutation(&self) -> Result<(), RegistryError> {
@@ -85,7 +105,15 @@ impl OwnerPermit {
         &self,
         clock: impl Fn() -> u64,
     ) -> Result<(), RegistryError> {
-        let owner = Registry::open_readonly(&self.registry_path)?.attach(&self.thread_id)?;
+        let owner = Registry::open_attempt(
+            &self.registry_path,
+            Access::ReadOnly,
+            ATTEMPT_TIMEOUT,
+            DbOperation::Validate,
+            &self.thread_id,
+            1,
+        )?
+        .attach_as(DbOperation::Validate, &self.thread_id)?;
         self.validate_active(&owner)?;
         if owner.lease.expires_at > clock() {
             return Ok(());
@@ -94,8 +122,8 @@ impl OwnerPermit {
         // Keep the usual probe read-only. A delayed heartbeat needs a write,
         // with authority rechecked under the same lock as the renewal so a
         // claim or handoff committed since the read always fences this permit.
-        Registry::open_existing(&self.registry_path)?
-            .update(&self.thread_id, |owner| {
+        self.open_write_attempt(DbOperation::Validate, ATTEMPT_TIMEOUT, 1)?
+            .update_as(DbOperation::Validate, &self.thread_id, |owner| {
                 self.validate_active(owner)?;
                 let now = clock();
                 if owner.lease.expires_at <= now {
@@ -137,8 +165,8 @@ impl OwnerPermit {
     }
 
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
-        let mut registry = Registry::open_existing(&self.registry_path)?;
-        let owner = registry.attach(&self.thread_id)?;
+        let mut registry = self.open_write_attempt(DbOperation::Checkpoint, ATTEMPT_TIMEOUT, 1)?;
+        let owner = registry.attach_as(DbOperation::Checkpoint, &self.thread_id)?;
         owner.validate(&self.lease)?;
         if self
             .run_id

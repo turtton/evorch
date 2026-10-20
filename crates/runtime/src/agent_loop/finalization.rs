@@ -22,6 +22,20 @@ impl LoopState {
             && let Some(permit) = &self.task.config.ownership
             && let Err(error) = permit.checkpoint(&self.context.visible_messages())
         {
+            if let crate::ownership::RegistryError::Database {
+                operation, phase, ..
+            } = &error
+            {
+                tracing::warn!(
+                    target: crate::ownership::DB_TRACE_TARGET,
+                    run_id = %run_id,
+                    stage = "finalization",
+                    operation = operation.as_str(),
+                    phase = phase.as_str(),
+                    sqlite_code = ?error.sqlite_code(),
+                    "ownership checkpoint failed during finalization"
+                );
+            }
             self.finalization_error(error.to_string());
         }
         let uncertain = self.shared.executor.has_unobserved_shell_jobs(&run_id);

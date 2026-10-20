@@ -45,6 +45,14 @@ impl EventBus {
     /// 0 として扱い panic しない。
     pub fn emit(&self, event: Event) -> usize {
         let Some(_guards) = self.fences.acquire(&event) else {
+            // Report through tracing only: emitting a diagnostic event here
+            // would reacquire the guard that just failed for this run.
+            tracing::debug!(
+                target: "evorch::fencing",
+                family = event_family(&event),
+                runs = ?crate::fencing::event_run_ids(std::slice::from_ref(&event)),
+                "event dropped: its mutation fence rejected it or could not be acquired"
+            );
             return 0;
         };
         self.tx.send(event).unwrap_or(0)
@@ -95,6 +103,25 @@ impl EventBus {
     /// 現在の受信者数を返す。
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
+    }
+}
+
+/// The event's top-level family, which never contains message bodies.
+fn event_family(event: &Event) -> &'static str {
+    use crate::event::EventKind;
+    match &event.kind {
+        EventKind::Lifecycle(_) => "lifecycle",
+        EventKind::Message(_) => "message",
+        EventKind::Tool(_) => "tool",
+        EventKind::Usage(_) => "usage",
+        EventKind::Provider(_) => "provider",
+        EventKind::Fault(_) => "fault",
+        EventKind::AgentMessage(_) => "agent_message",
+        EventKind::Compaction(_) => "compaction",
+        EventKind::Orchestrator(_) => "orchestrator",
+        EventKind::Diagnostic(_) => "diagnostic",
+        EventKind::Ownership(_) => "ownership",
+        EventKind::Ledger(_) => "ledger",
     }
 }
 

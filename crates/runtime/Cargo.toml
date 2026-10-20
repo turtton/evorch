@@ -48,3 +48,4 @@ tokio-rustls = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }

@@ -732,7 +732,7 @@ impl LoopState {
                     permit.begin_turn()
                 };
                 if let Err(error) = result {
-                    self.finish_error(error.to_string());
+                    self.finish_owner_error("begin_turn", error);
                     return;
                 }
                 self.owner_turn_open = true;
@@ -1024,7 +1024,7 @@ impl LoopState {
             if let Some(permit) = &self.task.config.ownership
                 && let Err(error) = permit.checkpoint(&self.context.visible_messages())
             {
-                self.finish_error(error.to_string());
+                self.finish_owner_error("checkpoint", error);
                 return;
             }
             self.owner_turn_open = false;
@@ -1454,6 +1454,30 @@ impl LoopState {
 
     fn finish_error(&mut self, reason: String) {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
+    }
+
+    /// End the run on an ownership registry failure. The error text names
+    /// the registry operation and phase for SQLite failures.
+    fn finish_owner_error(&mut self, stage: &'static str, error: crate::ownership::RegistryError) {
+        if let crate::ownership::RegistryError::Database {
+            operation,
+            phase,
+            attempt,
+            ..
+        } = &error
+        {
+            tracing::warn!(
+                target: crate::ownership::DB_TRACE_TARGET,
+                run_id = %self.task.run_id,
+                stage,
+                operation = operation.as_str(),
+                phase = phase.as_str(),
+                attempt,
+                sqlite_code = ?error.sqlite_code(),
+                "ownership registry failure ends the run"
+            );
+        }
+        self.finish_error(error.to_string());
     }
 
     fn finish_stopped(&mut self) {
