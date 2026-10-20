@@ -37,6 +37,68 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn compaction_dispatches_without_a_message_and_preserves_attachments() {
+    let temp = tempfile::tempdir().unwrap();
+    // Unlike sending a message, compaction does not need current provider settings.
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    submit(&mut harness, " /compaction \n");
+    assert_eq!(
+        harness.state().issued(),
+        &[WorkbenchCommand::CompactChat {
+            thread_id: "thread-1".into(),
+        }]
+    );
+    assert!(
+        !harness
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+    );
+    assert!(harness.state().composer().input.is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+    assert!(harness.has_label("Context compaction is unavailable in demo mode"));
+}
+
+#[test]
+fn compaction_checks_arguments_and_active_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/compaction extra");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("usage: /compaction"));
+    assert_eq!(harness.state().composer().input, "/compaction extra");
+
+    let state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default()).unwrap();
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    submit(&mut harness, "/compaction");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("Select or start a thread first"));
+    assert_eq!(harness.state().composer().input, "/compaction");
+}
+
+#[test]
+fn compaction_is_available_in_completions_and_help() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().input = "/comp".into();
+    harness.run();
+    harness.click_label("/compaction");
+    harness.run();
+    assert_eq!(harness.state().composer().input.trim(), "/compaction");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Notice { text } if text.contains("/compaction —"))
+    ));
+}
+
+#[test]
 fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);

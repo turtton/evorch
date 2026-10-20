@@ -537,6 +537,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
+            | WorkbenchCommand::CompactChat { .. }
             | WorkbenchCommand::StopChat { .. }
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }

@@ -97,6 +97,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         argument_hint: None,
     },
     SlashCommandSpec {
+        name: "compaction",
+        description: "Request context compaction at the next turn boundary",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
         name: "continue",
         description: "Resume the current conversation after a stop or error",
         argument_hint: None,
@@ -387,6 +392,8 @@ mod tests {
             ("/goal", "goal", ""),
             ("/help", "help", ""),
             ("/help extra", "help", "extra"),
+            (" /compaction \n", "compaction", ""),
+            ("/compaction extra", "compaction", "extra"),
         ] {
             // When
             let parsed = parse_input(raw);
@@ -436,7 +443,20 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            ("/", &["team", "goal", "help", "new", "continue", "run"]),
+            (
+                "/",
+                &[
+                    "team",
+                    "goal",
+                    "help",
+                    "new",
+                    "compaction",
+                    "continue",
+                    "run",
+                ],
+            ),
+            ("/comp", &["compaction"]),
+            ("/compaction ", &[]),
             ("/r", &["run"]),
             ("/con", &["continue"]),
             ("/continue ", &[]),

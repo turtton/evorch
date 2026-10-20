@@ -1,3 +1,6 @@
+#[path = "support/compaction_command.rs"]
+mod compaction_command;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
