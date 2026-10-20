@@ -23,15 +23,64 @@ pub fn save_role_profile_bindings(
     routing: Option<&RoutingConfig>,
     agents: Option<&AgentsConfig>,
 ) -> Result<(), ConfigError> {
+    save_role_profiles_bindings(
+        path,
+        &[RoleProfileBindings {
+            profile,
+            routing,
+            agents,
+        }],
+    )
+}
+
+/// One profile's sections for [`save_role_profiles_bindings`].
+#[derive(Debug, Clone, Copy)]
+pub struct RoleProfileBindings<'a> {
+    /// `None` and `"default"` are the top-level sections.
+    pub profile: Option<&'a str>,
+    pub routing: Option<&'a RoutingConfig>,
+    pub agents: Option<&'a AgentsConfig>,
+}
+
+/// Replace several profiles' agents / routing in one atomic write, as
+/// [`save_role_profile_bindings`] does for one.
+///
+/// # Errors
+/// Fails like [`save_role_profile_bindings`]; nothing is written then.
+pub fn save_role_profiles_bindings(
+    path: &Path,
+    changes: &[RoleProfileBindings<'_>],
+) -> Result<(), ConfigError> {
+    crate::save::write_document(path, &bindings_document(path, changes)?)
+}
+
+/// The file's text after [`save_role_profiles_bindings`], validated as saving
+/// would but not written.
+///
+/// # Errors
+/// Fails like [`save_role_profiles_bindings`].
+pub fn preview_role_profiles_bindings(
+    path: &Path,
+    changes: &[RoleProfileBindings<'_>],
+) -> Result<String, ConfigError> {
+    crate::save::checked_text(&bindings_document(path, changes)?)
+}
+
+fn bindings_document(
+    path: &Path,
+    changes: &[RoleProfileBindings<'_>],
+) -> Result<DocumentMut, ConfigError> {
     let mut doc = crate::save::read_document(path)?;
-    let target = target_table(&mut doc, profile, false)?;
-    if let Some(routing) = routing {
-        target.insert("routing", Item::Table(routing_document_table(routing)));
+    for change in changes {
+        let target = target_table(&mut doc, change.profile, false)?;
+        if let Some(routing) = change.routing {
+            target.insert("routing", Item::Table(routing_document_table(routing)));
+        }
+        if let Some(agents) = change.agents {
+            target.insert("agents", Item::Table(agents_document_table(agents)));
+        }
     }
-    if let Some(agents) = agents {
-        target.insert("agents", Item::Table(agents_document_table(agents)));
-    }
-    crate::save::write_document(path, &doc)
+    Ok(doc)
 }
 
 /// 名前付きプロファイルを作成 (または置換) する。

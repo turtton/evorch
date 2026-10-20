@@ -144,6 +144,34 @@ fn displays_file_access_path_tool_and_justification() {
 }
 
 #[test]
+fn displays_an_evaluator_summary_as_the_request_itself() {
+    // Given: Evaluator の評価開始に対する承認要求。
+    let summary =
+        "Start an evaluation of a candidate configuration (ADR 0036).\n\nEstimated total: $8.0000";
+    let mut state =
+        WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
+    state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+        tool_name: "eval_start".into(),
+        call_id: "run-2:call-3".into(),
+        input: Some(json!({"kind": "eval_start", "summary": summary})),
+    })]);
+    let mut harness = Harness::builder().build_ui_state(
+        |ui, state| {
+            gui::theme::install(ui.ctx());
+            for item in state.pending_approvals().items() {
+                gui::panes::approvals::approval_card(ui, item);
+            }
+        },
+        state,
+    );
+    // When: 承認待ちの pane を描画する。
+    harness.run_steps(3);
+    // Then: 要約を改行ごとそのまま示し、承認ボタンを出す。
+    assert!(harness.query_by_label(summary).is_some());
+    assert_eq!(harness.query_all_by_label("Approve").count(), 1);
+}
+
+#[test]
 fn displays_correlations_and_arguments_when_requests_are_pending() {
     // Given: 同じ元 call ID を共有する別 run の要求と、A だけの引数。
     let (mut harness, _) = harness();

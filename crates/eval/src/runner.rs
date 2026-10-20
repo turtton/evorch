@@ -290,22 +290,29 @@ fn read_overlay(
 ) -> Result<(String, toml::Value), EvalError> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
-    let value: toml::Value = toml::from_str(&text)
+    let value = parse_overlay(&text, user_config_dir)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
+    Ok((text, value))
+}
+
+/// A candidate overlay as `eval run` accepts it: a TOML table that leaves the
+/// keys a candidate cannot change alone and loads over the user's configuration.
+pub(crate) fn parse_overlay(
+    text: &str,
+    user_config_dir: Option<&Path>,
+) -> Result<toml::Value, String> {
+    let value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let table = value
         .as_table()
-        .ok_or_else(|| EvalError::Overlay("the overlay must be a TOML table".into()))?;
+        .ok_or_else(|| "the overlay must be a TOML table".to_owned())?;
     if let Some(key) = OVERLAY_FORBIDDEN_KEYS
         .iter()
         .find(|key| table.contains_key(**key))
     {
-        return Err(EvalError::Overlay(format!(
-            "`{key}` cannot be changed by a candidate"
-        )));
+        return Err(format!("`{key}` cannot be changed by a candidate"));
     }
-    load_config(user_config_dir, None, Some(&value))
-        .map_err(|error| EvalError::Overlay(error.to_string()))?;
-    Ok((text, value))
+    load_config(user_config_dir, None, Some(&value)).map_err(|error| error.to_string())?;
+    Ok(value)
 }
 
 /// The simulated user runs on the user's configuration, never the candidate's,

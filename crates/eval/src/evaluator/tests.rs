@@ -1,5 +1,9 @@
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use config::{EvalBudgetConfig, RoleBindingConfig};
-use event_bus::{Event, LifecycleEvent, MessageEvent, ToolEvent};
+use event_bus::{Event, EventKind, LifecycleEvent, MessageEvent, ToolEvent};
 
 use super::*;
 use crate::cost::Cost;
@@ -9,6 +13,9 @@ use crate::report::{Overhead, PairReport, PriceSource};
 use crate::source::tests::Recorded;
 use crate::test_support::usage;
 
+mod apply;
+mod start;
+
 const CONFIG: &str = r#"version = 3
 
 [providers.main]
@@ -17,9 +24,31 @@ default_model = "gpt-test"
 models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0 }]
 "#;
 
+/// Records notices and reloads, and answers every notice as the run's root.
+struct RecordingHost {
+    notices: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    reloads: AtomicUsize,
+}
+
+impl EvaluatorHost for RecordingHost {
+    fn deliver_notice(&self, run_id: &str, notice: &str) -> Result<String, String> {
+        let _ = self.notices.send((run_id.to_owned(), notice.to_owned()));
+        Ok(format!("{run_id}-root"))
+    }
+
+    fn reload_config(&self) -> Result<(), String> {
+        self.reloads.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 struct Fixture {
     recorded: Recorded,
     user: tempfile::TempDir,
+    _bin: tempfile::TempDir,
+    bus: Arc<EventBus>,
+    host: Arc<RecordingHost>,
+    notices: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>>,
     tools: Vec<Arc<dyn Tool>>,
 }
 
@@ -28,17 +57,96 @@ impl Fixture {
         let recorded = Recorded::new();
         let user = tempfile::tempdir().unwrap();
         std::fs::write(user.path().join("config.toml"), CONFIG).unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let bus = Arc::new(EventBus::new(1024));
+        let (sender, notices) = tokio::sync::mpsc::unbounded_channel();
+        let host = Arc::new(RecordingHost {
+            notices: sender,
+            reloads: AtomicUsize::new(0),
+        });
         let tools = tools(EvaluatorContext {
             database: recorded.config.db_path.clone(),
             storage: recorded.storage.handle(),
             user_config_dir: user.path().to_path_buf(),
             catalog_dir: None,
+            bus: Arc::clone(&bus),
+            host: Arc::clone(&host) as Arc<dyn EvaluatorHost>,
+            cli: Some(start::fake_cli(bin.path())),
         });
         Self {
             recorded,
             user,
+            _bin: bin,
+            bus,
+            host,
+            notices: Mutex::new(Some(notices)),
             tools,
         }
+    }
+
+    async fn call_in_run(&self, name: &str, args: Value) -> ToolResult {
+        let ctx = ToolExecutionContext {
+            run_id: "run-7".into(),
+            thread_id: None,
+            call_id: Some(format!("call-{name}")),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            self.tool(name).execute_with_context(&ctx, args),
+        )
+        .await
+        .expect("the tool answers without waiting for an approval nobody gives")
+        .unwrap()
+    }
+
+    /// Answer the next approval request and return what it showed.
+    fn answer_approval(&self, approved: bool) -> tokio::task::JoinHandle<Value> {
+        let mut events = self.bus.subscribe();
+        let bus = Arc::clone(&self.bus);
+        tokio::spawn(async move {
+            loop {
+                let event = events.recv().await.unwrap();
+                if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, input, .. }) =
+                    event.kind
+                {
+                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved,
+                    }));
+                    return input.unwrap();
+                }
+            }
+        })
+    }
+
+    async fn notice(&self) -> (String, String) {
+        let mut notices = self.notices.lock().unwrap().take().unwrap();
+        let notice = tokio::time::timeout(Duration::from_secs(20), notices.recv())
+            .await
+            .expect("a completion notice")
+            .unwrap();
+        *self.notices.lock().unwrap() = Some(notices);
+        notice
+    }
+
+    fn pending_notices(&self) -> usize {
+        let mut notices = self.notices.lock().unwrap();
+        let notices = notices.as_mut().unwrap();
+        let mut pending = 0;
+        while notices.try_recv().is_ok() {
+            pending += 1;
+        }
+        pending
+    }
+
+    async fn pin(&self, thread_id: &str, problem: &str) {
+        let saved = self
+            .call(
+                "eval_save_sample",
+                json!({"thread_id": thread_id, "problem": problem, "focus_roles": ["worker"]}),
+            )
+            .await;
+        assert!(!saved.is_error, "{}", saved.content);
     }
 
     fn project(&self) -> PathBuf {
@@ -117,16 +225,8 @@ impl Fixture {
 #[test]
 fn every_role_tool_is_provided() {
     // Given / When: the tools are built.
-    let recorded = Recorded::new();
-    let names: Vec<String> = tools(EvaluatorContext {
-        database: recorded.config.db_path.clone(),
-        storage: recorded.storage.handle(),
-        user_config_dir: recorded.source.dir.path().to_path_buf(),
-        catalog_dir: None,
-    })
-    .iter()
-    .map(|tool| tool.name().to_owned())
-    .collect();
+    let fixture = Fixture::new();
+    let names: Vec<&str> = fixture.tools.iter().map(|tool| tool.name()).collect();
 
     // Then: they are exactly the Evaluator's tools.
     assert_eq!(names, agents::EVALUATOR_TOOLS);

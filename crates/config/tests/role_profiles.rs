@@ -3,9 +3,10 @@
 use std::path::Path;
 
 use config::{
-    Config, ConfigError, LoadOptions, RoleProfileConfig, RouteCandidateConfig, RoutingConfig,
-    delete_role_profile, project_role_profile, save_project_role_profile, save_role_profile,
-    save_role_profile_bindings,
+    Config, ConfigError, LoadOptions, RoleProfileBindings, RoleProfileConfig, RouteCandidateConfig,
+    RoutingConfig, delete_role_profile, preview_role_profiles_bindings, project_role_profile,
+    save_project_role_profile, save_role_profile, save_role_profile_bindings,
+    save_role_profiles_bindings,
 };
 
 fn options(user: &Path) -> LoadOptions {
@@ -177,4 +178,61 @@ fn project_role_profile_selection_round_trips() {
     let text = std::fs::read_to_string(config::project_main_config_path(&project)).unwrap();
     assert!(!text.contains("role_profile"), "{text}");
     assert!(save_project_role_profile(&project, Some("Bad Name")).is_err());
+}
+
+// Given: コメント付きのユーザ設定と名前付きプロファイル
+// When: トップレベルとプロファイルの変更を下見し、そのあと一度に保存する
+// Then: 下見はファイルを変えず、保存後の内容は下見と一致する
+#[test]
+fn several_profiles_are_previewed_then_saved_in_one_write() {
+    let tmp = tempfile::tempdir().expect("temp");
+    let path = tmp.path().join("config.toml");
+    let original = "[eval]\n# keep me\nrepeat_target = 3\n[agents.worker]\nmodels = [{ route = 'default-model' }]\n[routing.routes]\ndefault-model = [{ profile = 'local' }]\n";
+    std::fs::write(&path, original).expect("config");
+    let base = Config::load_unresolved(&options(tmp.path())).expect("load");
+    let mut fast = base.role_profile_config(None).expect("default profile");
+    save_role_profile(&path, "fast", &fast).expect("create");
+    let created = std::fs::read_to_string(&path).expect("text");
+    let mut agents = base.agents.clone();
+    agents.worker.base.models = vec![config::ChainEntryConfig::route("other")];
+    fast.routing = routing("other", "local");
+    fast.agents = agents.clone();
+    let changes = [
+        RoleProfileBindings {
+            profile: None,
+            routing: Some(&fast.routing),
+            agents: Some(&agents),
+        },
+        RoleProfileBindings {
+            profile: Some("fast"),
+            routing: Some(&fast.routing),
+            agents: Some(&agents),
+        },
+    ];
+
+    let preview = preview_role_profiles_bindings(&path, &changes).expect("preview");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), created);
+    save_role_profiles_bindings(&path, &changes).expect("save");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), preview);
+    assert!(
+        preview.contains("# keep me\nrepeat_target = 3\n"),
+        "{preview}"
+    );
+    let saved = Config::load_strict(&options(tmp.path())).expect("strict reload");
+    assert_eq!(saved.agents.worker.base.head_route(), Some("other"));
+    assert_eq!(
+        saved.role_profiles["fast"].agents.worker.base.head_route(),
+        Some("other")
+    );
+    assert_eq!(
+        saved.role_profiles["fast"].routing,
+        routing("other", "local")
+    );
+    let missing = [RoleProfileBindings {
+        profile: Some("missing"),
+        routing: None,
+        agents: Some(&agents),
+    }];
+    assert!(preview_role_profiles_bindings(&path, &missing).is_err());
 }

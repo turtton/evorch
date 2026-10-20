@@ -1,27 +1,37 @@
 //! The Evaluator role's tools (ADR 0036 §1): list and inspect recorded threads
-//! in the user's database, pin them as evaluation samples, and read evaluation
-//! reports. Every result is bounded so it fits in a model's context.
+//! in the user's database, pin them as evaluation samples, start evaluations in
+//! the background, read their reports and apply an adopted overlay to the
+//! user's configuration. Starting and applying wait for the user's approval.
+//! Every result is bounded so it fits in a model's context.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use catalog::ModelCatalog;
+use event_bus::EventBus;
+use sandbox::approval::{ApprovalGate, ApprovalOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use storage::eval_sample::EvalSample;
 use storage::thread_start::ThreadStartSummary;
 use storage::{Database, StorageHandle};
-use tools::{Permissions, Tool, ToolError, ToolExecutionMode, ToolResult};
+use tools::{Permissions, Tool, ToolError, ToolExecutionContext, ToolExecutionMode, ToolResult};
 
 use crate::conversation;
-use crate::cost::PriceTable;
+use crate::cost::{Cost, PriceTable, RequestUsage};
 use crate::metrics::{self, RunMetrics, RunRecord};
 use crate::output::{self, Manifest};
 use crate::report::{self, Report};
 use crate::roles;
 use crate::source::{ChatThread, OriginalThread};
+
+mod apply;
+mod groups;
+mod start;
+
+pub use groups::find_cli;
 
 const LIST_DEFAULT: usize = 20;
 const LIST_MAX: usize = 50;
@@ -38,7 +48,25 @@ const REASON_CHARS: usize = 400;
 const ANALYSIS_CHARS: usize = 800;
 const REPORT_BYTES: u64 = 8 * 1024 * 1024;
 const REPORT_DIRS: usize = 20;
+const GROUPS_LISTED: usize = 10;
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const COST_NOTE: &str = "repriced from current prices; requests older than the usage retention are rolled up into daily totals and not included";
+
+/// What the host process does for the Evaluator's tools.
+pub trait EvaluatorHost: Send + Sync {
+    /// Deliver an evaluation's completion notice to the run that started it,
+    /// or the conversation it belongs to, returning the run that received it.
+    ///
+    /// # Errors
+    /// Why no run could receive it.
+    fn deliver_notice(&self, run_id: &str, notice: &str) -> Result<String, String>;
+
+    /// Recompose the models after the user's configuration file was saved.
+    ///
+    /// # Errors
+    /// Why the saved configuration could not be applied to running sessions.
+    fn reload_config(&self) -> Result<(), String>;
+}
 
 /// Where the Evaluator's tools read and write.
 #[derive(Clone)]
@@ -51,11 +79,17 @@ pub struct EvaluatorContext {
     pub user_config_dir: PathBuf,
     /// The models.dev cache; `None` prices from the configuration alone.
     pub catalog_dir: Option<PathBuf>,
+    /// Carries approval requests to the user and evaluation diagnostics.
+    pub bus: Arc<EventBus>,
+    pub host: Arc<dyn EvaluatorHost>,
+    /// The `evorch` CLI evaluations run; `None` uses [`find_cli`].
+    pub cli: Option<PathBuf>,
 }
 
 struct Shared {
     context: EvaluatorContext,
     catalog: tokio::sync::OnceCell<Option<Arc<ModelCatalog>>>,
+    groups: groups::Groups,
 }
 
 impl Shared {
@@ -103,14 +137,40 @@ pub fn tools(context: EvaluatorContext) -> Vec<Arc<dyn Tool>> {
     let shared = Arc::new(Shared {
         context,
         catalog: tokio::sync::OnceCell::new(),
+        groups: groups::Groups::default(),
     });
     vec![
         Arc::new(ListThreads(Arc::clone(&shared))),
         Arc::new(InspectThread(Arc::clone(&shared))),
         Arc::new(SaveSample(Arc::clone(&shared))),
         Arc::new(RemoveSample(Arc::clone(&shared))),
-        Arc::new(ReadReport(shared)),
+        Arc::new(start::StartEvaluation(Arc::clone(&shared))),
+        Arc::new(ReadReport(Arc::clone(&shared))),
+        Arc::new(apply::ApplyConfig(shared)),
     ]
+}
+
+/// Show `summary` to the user as an approval request and wait for the answer.
+/// Only the user resolves it, so the model cannot start or write anything alone.
+async fn ask(
+    shared: &Shared,
+    ctx: &ToolExecutionContext,
+    tool: &str,
+    summary: String,
+) -> Result<(), String> {
+    let call_id = format!("{}:{}", ctx.run_id, ctx.call_id.as_deref().unwrap_or(tool));
+    let input = json!({"kind": tool, "summary": summary});
+    match ApprovalGate::new(Arc::clone(&shared.context.bus), APPROVAL_TIMEOUT)
+        .request_with_input(tool, &call_id, Some(input))
+        .await
+    {
+        ApprovalOutcome::Approved => Ok(()),
+        ApprovalOutcome::Denied => Err("the user declined".into()),
+        ApprovalOutcome::TimedOut => Err(format!(
+            "the user did not answer within {} minutes",
+            APPROVAL_TIMEOUT.as_secs() / 60
+        )),
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, ToolError> {
@@ -165,6 +225,23 @@ fn thread_runs(
         .map_err(storage_error)
 }
 
+/// The repriced cost of the thread's agent requests, delegated runs included.
+fn thread_cost(
+    database: &Database,
+    chat: Option<&ChatThread>,
+    root_run_id: &str,
+    prices: &PriceTable,
+) -> Result<Cost, String> {
+    let runs = thread_runs(database, chat, root_run_id)?;
+    let requests: Vec<_> = database
+        .usage_requests_for_runs(&runs)
+        .map_err(storage_error)?
+        .iter()
+        .map(|row| RequestUsage::from_record(&row.record))
+        .collect();
+    Ok(prices.cost(requests.iter().filter(|request| !request.is_overhead())))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListArgs {
@@ -199,20 +276,14 @@ fn list_entry(
         Some(reason) => Some(format!("start state is {}", reason.as_str())),
         None => replay_refusal(database, &summary.thread_id),
     };
-    let runs = thread_runs(database, chat.as_ref(), &summary.root_run_id)?;
-    let requests: Vec<_> = database
-        .usage_requests_for_runs(&runs)
-        .map_err(storage_error)?
-        .iter()
-        .map(|row| crate::cost::RequestUsage::from_record(&row.record))
-        .collect();
+    let cost = thread_cost(database, chat.as_ref(), &summary.root_run_id, prices)?;
     let mut entry = json!({
         "thread_id": summary.thread_id,
         "first_request": first_request,
         "project_root": summary.project_root,
         "captured_at": timestamp(summary.captured_at_ns),
         "replayable": refusal.is_none(),
-        "cost": report::cost_value(&prices.cost(requests.iter().filter(|request| !request.is_overhead()))),
+        "cost": report::cost_value(&cost),
         "sample": sample.map(sample_value),
     });
     if let Some(refusal) = refusal {
@@ -559,6 +630,8 @@ impl Tool for RemoveSample {
 struct ReportArgs {
     #[serde(default)]
     dir: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
 }
 
 struct ReadReport(Arc<Shared>);
@@ -600,16 +673,33 @@ fn evaluation_dir(root: &Path, dir: &str) -> Result<PathBuf, String> {
 
 fn progress(manifest: &Manifest) -> Value {
     json!({
+        "planned_runs": manifest.repeat as usize * manifest.configurations.len(),
         "runs": manifest.runs.len(),
         "finished_runs": manifest.runs.iter().filter(|run| run.finished_at.is_some()).count(),
         "finished": manifest.finished_at.is_some(),
     })
 }
 
-fn list_evaluations(root: &Path) -> Result<Value, String> {
+fn evaluation_state(
+    running: &HashSet<std::ffi::OsString>,
+    dir: &Path,
+    manifest: &Manifest,
+) -> &'static str {
+    if manifest.finished_at.is_some() {
+        "finished"
+    } else if dir.file_name().is_some_and(|name| running.contains(name)) {
+        "running"
+    } else {
+        "interrupted"
+    }
+}
+
+fn list_evaluations(shared: &Shared, root: &Path) -> Result<Value, String> {
+    let running = shared.groups.running_dirs();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
         .map_err(|error| format!("{}: {error}", root.display()))?
         .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
@@ -630,6 +720,7 @@ fn list_evaluations(root: &Path) -> Result<Value, String> {
                     "problem": manifest.problem.as_deref().map(|problem| metrics::clip(problem, PREVIEW_CHARS)),
                     "configurations": manifest.configurations,
                     "started_at": manifest.started_at,
+                    "state": evaluation_state(&running, dir, &manifest),
                     "progress": progress(&manifest),
                     "report": dir.join(output::REPORT_JSON_FILE).is_file(),
                 }),
@@ -641,6 +732,8 @@ fn list_evaluations(root: &Path) -> Result<Value, String> {
         "root": root,
         "evaluations": evaluations,
         "more": total.saturating_sub(REPORT_DIRS),
+        "groups": groups::list(shared, root, GROUPS_LISTED),
+        "note": "interrupted means no process of this GUI session runs it: it stopped with an earlier session, or an `evorch eval run` started elsewhere is still writing it",
     }))
 }
 
@@ -733,13 +826,16 @@ fn summarize(dir: &Path, report: &Report) -> Value {
     })
 }
 
-fn read_report(user_config_dir: &Path, dir: Option<&str>) -> Result<Value, String> {
-    let root = user_config_dir.join("eval");
+fn read_report(shared: &Shared, args: &ReportArgs) -> Result<Value, String> {
+    let root = shared.context.user_config_dir.join("eval");
     let Ok(root) = root.canonicalize() else {
-        return Ok(json!({"root": root, "evaluations": [], "more": 0}));
+        return Ok(json!({"root": root, "evaluations": [], "more": 0, "groups": []}));
     };
-    let Some(dir) = dir else {
-        return list_evaluations(&root);
+    let dir = match (&args.dir, &args.group) {
+        (Some(_), Some(_)) => return Err("pass either dir or group".into()),
+        (None, Some(group)) => return groups::detail(shared, &root, group),
+        (None, None) => return list_evaluations(shared, &root),
+        (Some(dir), None) => dir,
     };
     let dir = evaluation_dir(&root, dir)?;
     let report_file = dir.join(output::REPORT_JSON_FILE);
@@ -752,6 +848,7 @@ fn read_report(user_config_dir: &Path, dir: Option<&str>) -> Result<Value, Strin
         "dir": dir,
         "thread_id": manifest.thread_id,
         "report": null,
+        "state": evaluation_state(&shared.groups.running_dirs(), &dir, &manifest),
         "progress": progress(&manifest),
         "note": format!("no report yet; once the runs finish, `evorch eval report --output {}` writes it", dir.display()),
     }))
@@ -764,7 +861,7 @@ impl Tool for ReadReport {
     }
 
     fn description(&self) -> &'static str {
-        "Without dir, list recent evaluations with their progress. With dir, summarize that evaluation's report: per-aspect results with the judge's reasons, run statuses and metrics, costs, warnings and the process analysis. Only directories under the evaluation directory can be read."
+        "Without arguments, list recent evaluations with their state and progress, and the groups eval_start launched. With group, show each of that group's evaluations with its state, progress or one-line result, and a per-thread table. With dir, summarize that evaluation's report: per-aspect results with the judge's reasons, run statuses and metrics, costs, warnings and the process analysis. Only directories under the evaluation directory can be read."
     }
 
     fn schema(&self) -> Value {
@@ -772,6 +869,7 @@ impl Tool for ReadReport {
             "type": "object",
             "properties": {
                 "dir": {"type": "string", "minLength": 1, "description": "An evaluation directory name as listed, or its path."},
+                "group": {"type": "string", "minLength": 1, "description": "A group id from eval_start or the listing."},
             },
             "additionalProperties": false,
         })
@@ -787,12 +885,11 @@ impl Tool for ReadReport {
 
     async fn execute(&self, args: Value) -> Result<ToolResult, ToolError> {
         let args: ReportArgs = parse(args)?;
-        let user_config_dir = self.0.context.user_config_dir.clone();
-        let result =
-            tokio::task::spawn_blocking(move || read_report(&user_config_dir, args.dir.as_deref()))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result);
+        let shared = Arc::clone(&self.0);
+        let result = tokio::task::spawn_blocking(move || read_report(&shared, &args))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
         Ok(respond(result))
     }
 }
