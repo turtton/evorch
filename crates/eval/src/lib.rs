@@ -6,6 +6,7 @@
 pub mod conversation;
 pub mod cost;
 pub mod driver;
+pub mod evaluator;
 mod git;
 pub mod judge;
 pub mod metrics;

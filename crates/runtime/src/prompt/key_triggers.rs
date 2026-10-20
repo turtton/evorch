@@ -49,11 +49,11 @@ pub fn render_key_triggers(sources: &[TriggerSource]) -> String {
     rendered
 }
 
-/// ADR 0002 の 8 ロールからデフォルトの keyTriggers を構築する。
+/// ADR 0002 の 9 ロールからデフォルトの keyTriggers を構築する。
 ///
 /// 各エントリはロール名と担当目的だけを持ち、ツール定義は含めない。
 pub fn default_role_triggers() -> Vec<TriggerSource> {
-    const ROLES: [agents::Role; 8] = [
+    const ROLES: [agents::Role; 9] = [
         agents::Role::Orchestrator,
         agents::Role::Explorer,
         agents::Role::Worker,
@@ -62,6 +62,7 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
         agents::Role::Planner,
         agents::Role::Advisor,
         agents::Role::MultimodalLooker,
+        agents::Role::Evaluator,
     ];
     ROLES
         .iter()
@@ -98,6 +99,9 @@ fn role_purpose(role: agents::Role) -> &'static str {
         }
         agents::Role::MultimodalLooker => {
             "画像・PDF・スクリーンショットなどの視覚情報を読み解く必要があるときに使う。内容の解釈を担当し、コードの変更は Worker に任せる"
+        }
+        agents::Role::Evaluator => {
+            "agent の振る舞いや構成（model・prompt・生成設定）についての相談に使う。記録済みの thread を調べて原因の仮説と差し替える role の候補を示し、評価のサンプルを固定する。実装や設定の変更は行わない"
         }
     }
 }
@@ -216,7 +220,7 @@ mod tests {
         assert_eq!(render_key_triggers(&sources), render_key_triggers(&sources));
     }
 
-    // Given: ADR 0002 の 8 ロール
+    // Given: ADR 0002 の 9 ロール
     // When: default_role_triggers を構築する
     // Then: 全ロール分のエントリがツール一覧なしの用途説明で固定順に並ぶ
     #[test]
@@ -234,7 +238,8 @@ mod tests {
                 "WebResearcher",
                 "Planner",
                 "Advisor",
-                "MultimodalLooker"
+                "MultimodalLooker",
+                "Evaluator"
             ]
         );
         for trigger in &triggers {

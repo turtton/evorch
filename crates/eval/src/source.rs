@@ -97,13 +97,63 @@ impl OriginalThread {
         if database.thread_goal_recorded(thread_id)? {
             return Err(SourceError::UsesThreadGoal(thread()));
         }
-        let root =
-            database
-                .run_context(&start.root_run_id)?
-                .ok_or_else(|| SourceError::MissingRoot {
-                    thread: thread(),
-                    run: start.root_run_id.clone(),
-                })?;
+        let chat = ChatThread::load(database, thread_id, &start.root_run_id)?;
+        let turns: Vec<UserTurn> = chat.turns.into_iter().map(|turn| turn.turn).collect();
+        if turns.first().map(|turn| turn.kind) != Some(UserTurnKind::InitialPrompt) {
+            return Err(SourceError::NoInitialPrompt(thread()));
+        }
+
+        let project_root = PathBuf::from(&start.project_root);
+        let source_toplevel = strip_prefix(&project_root, &snapshot.repo_prefix)?;
+        Ok(Self {
+            thread_id: thread(),
+            role: chat.role,
+            root_run_id: chat.root_run_id,
+            project_root,
+            source_toplevel,
+            captured_at_ns: start.captured_at_ns,
+            snapshot,
+            turns,
+        })
+    }
+}
+
+/// A user turn with when it was recorded and the question an answer replied to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedTurn {
+    pub at_ns: i64,
+    pub question_id: Option<String>,
+    pub turn: UserTurn,
+}
+
+/// A recorded chat thread's root, the runs that hold what the user said, and
+/// those turns, whether or not the thread can be replayed.
+#[derive(Debug, Clone)]
+pub struct ChatThread {
+    pub role: Role,
+    pub root_run_id: String,
+    /// The root and, for the latest finished turn, that run and its review
+    /// lineage; sorted.
+    pub lineage: Vec<String>,
+    pub turns: Vec<RecordedTurn>,
+}
+
+impl ChatThread {
+    /// # Errors
+    /// Refuses a root without a saved conversation or one that is not the
+    /// thread's chat root.
+    pub fn load(
+        database: &Database,
+        thread_id: &str,
+        root_run_id: &str,
+    ) -> Result<Self, SourceError> {
+        let thread = || thread_id.to_owned();
+        let root = database
+            .run_context(root_run_id)?
+            .ok_or_else(|| SourceError::MissingRoot {
+                thread: thread(),
+                run: root_run_id.to_owned(),
+            })?;
         let role = chat_role(&root.name, thread_id)
             .filter(|_| root.parent_run_id.is_none())
             .ok_or_else(|| SourceError::NotAChatRoot {
@@ -119,7 +169,7 @@ impl OriginalThread {
         }
         lineage.sort();
         lineage.dedup();
-        let turns: Vec<UserTurn> = database
+        let turns = database
             .review_evidence_for_lineage(&lineage)?
             .into_iter()
             .filter_map(|row| {
@@ -129,28 +179,22 @@ impl OriginalThread {
                     "user_answer" => UserTurnKind::Answer,
                     _ => return None,
                 };
-                Some(UserTurn {
-                    kind,
-                    text: row.text,
-                    question: row.in_reply_to_title,
-                    reference: row.reference_context,
+                Some(RecordedTurn {
+                    at_ns: row.created_at_ns,
+                    question_id: row.in_reply_to_question_id,
+                    turn: UserTurn {
+                        kind,
+                        text: row.text,
+                        question: row.in_reply_to_title,
+                        reference: row.reference_context,
+                    },
                 })
             })
             .collect();
-        if turns.first().map(|turn| turn.kind) != Some(UserTurnKind::InitialPrompt) {
-            return Err(SourceError::NoInitialPrompt(thread()));
-        }
-
-        let project_root = PathBuf::from(&start.project_root);
-        let source_toplevel = strip_prefix(&project_root, &snapshot.repo_prefix)?;
         Ok(Self {
-            thread_id: thread(),
             role,
             root_run_id: root.run_id,
-            project_root,
-            source_toplevel,
-            captured_at_ns: start.captured_at_ns,
-            snapshot,
+            lineage,
             turns,
         })
     }

@@ -2842,6 +2842,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "egui_plot",
+ "eval",
  "event-bus",
  "image",
  "mock-openai",

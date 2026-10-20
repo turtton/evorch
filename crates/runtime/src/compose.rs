@@ -1213,6 +1213,7 @@ const fn role_key(role: Role) -> &'static str {
         Role::Planner => "planner",
         Role::Advisor => "advisor",
         Role::MultimodalLooker => "multimodal_looker",
+        Role::Evaluator => "evaluator",
     }
 }
 

@@ -86,7 +86,7 @@ fn web_researcher_baseline_and_appendix_resolve_through_config() {
     let mut config = Config::default();
     config.agents.roles.web_researcher.preset = Some("category-research".into());
     let sources = config::resolve_prompt_sources(&config, None).expect("research prompt sources");
-    assert_eq!(sources.role_baselines.len(), 8);
+    assert_eq!(sources.role_baselines.len(), 9);
     assert!(sources.role_baselines["webresearcher"].contains("# WebResearcher"));
     assert_eq!(
         sources.appendices["category-research"],

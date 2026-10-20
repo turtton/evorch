@@ -13,6 +13,7 @@ use event_bus::{
 use serde::{Deserialize, Serialize};
 
 use crate::cost::{RequestUsage, Tokens};
+use crate::driver::DeniedRequest;
 use crate::output::Outcome;
 
 const LINE_CHARS: usize = 240;
@@ -69,6 +70,41 @@ impl RunRecord {
         Ok(Self { requests, events })
     }
 
+    /// The record of `run_ids` in the user's database: their usage ledger
+    /// rows, and up to `max_events` events from `from_ns` on. Also returns
+    /// whether events were left out.
+    ///
+    /// # Errors
+    /// Fails when the database cannot be read.
+    pub fn of_runs(
+        database: &storage::Database,
+        run_ids: &[String],
+        from_ns: i64,
+        max_events: usize,
+    ) -> Result<(Self, bool), storage::StorageError> {
+        let requests = database
+            .usage_requests_for_runs(run_ids)?
+            .iter()
+            .map(|row| RequestUsage::from_record(&row.record))
+            .collect();
+        let (events, truncated) = database.events_for_runs(run_ids, from_ns, max_events)?;
+        let events = events.into_iter().map(|stored| stored.event).collect();
+        Ok((Self { requests, events }, truncated))
+    }
+
+    /// Wall-clock time from the first to the last recorded event.
+    pub fn elapsed_ms(&self) -> u64 {
+        let (Some(first), Some(last)) = (self.events.first(), self.events.last()) else {
+            return 0;
+        };
+        last.meta
+            .wall_clock
+            .duration_since(first.meta.wall_clock)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
     pub fn agent_requests(&self) -> impl Iterator<Item = &RequestUsage> {
         self.requests
             .iter()
@@ -120,6 +156,22 @@ pub struct RunMetrics {
 
 impl RunMetrics {
     pub fn of(record: &RunRecord, outcome: &Outcome) -> Self {
+        Self::from_record(
+            record,
+            outcome.denied_requests.len(),
+            outcome.elapsed_ms,
+            outcome.user_turns,
+        )
+    }
+
+    /// Metrics of a record without a replay outcome, such as a thread read
+    /// from the user's database.
+    pub fn from_record(
+        record: &RunRecord,
+        denied_requests: usize,
+        elapsed_ms: u64,
+        user_turns: u32,
+    ) -> Self {
         let tokens = Tokens::of(record.agent_requests());
         let mut overhead: BTreeMap<String, Tokens> = BTreeMap::new();
         for request in record.overhead_requests() {
@@ -159,9 +211,9 @@ impl RunMetrics {
             provider_failures: tokens.failed_requests,
             provider_fallbacks: 0,
             delegations: Vec::new(),
-            denied_requests: outcome.denied_requests.len(),
-            elapsed_ms: outcome.elapsed_ms,
-            user_turns: outcome.user_turns,
+            denied_requests,
+            elapsed_ms,
+            user_turns,
         };
         for event in &record.events {
             match &event.kind {
@@ -196,7 +248,7 @@ impl RunMetrics {
     }
 }
 
-fn clip(text: &str, chars: usize) -> String {
+pub(crate) fn clip(text: &str, chars: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match text.char_indices().nth(chars) {
         Some((end, _)) => format!("{}…", &text[..end]),
@@ -215,6 +267,31 @@ fn input_text(input: Option<&serde_json::Value>) -> String {
         &input.map(ToString::to_string).unwrap_or_default(),
         INPUT_CHARS,
     )
+}
+
+/// Tool calls the policy or the user refused, with the input the approval
+/// request showed.
+pub fn denied_executions(record: &RunRecord) -> Vec<DeniedRequest> {
+    let mut inputs: HashMap<&str, String> = HashMap::new();
+    let mut denied = Vec::new();
+    for event in &record.events {
+        match &event.kind {
+            EventKind::Tool(ToolEvent::ApprovalRequested { call_id, input, .. }) => {
+                inputs.insert(call_id, input_text(input.as_ref()));
+            }
+            EventKind::Tool(ToolEvent::ExecutionDenied {
+                tool_name,
+                call_id,
+                reason,
+            }) => denied.push(DeniedRequest {
+                tool: tool_name.clone(),
+                input: inputs.get(call_id.as_str()).cloned().unwrap_or_default(),
+                reason: clip(reason, INPUT_CHARS),
+            }),
+            _ => {}
+        }
+    }
+    denied
 }
 
 /// Evidence that the replay needed something outside the evaluation
@@ -272,6 +349,11 @@ pub fn external_dependencies(record: &RunRecord, outcome: &Outcome) -> Vec<Strin
 /// delegations, tool calls with short inputs, durations and errors, turns,
 /// provider failures and notable diagnostics, after token totals per role.
 pub fn timeline(record: &RunRecord) -> Vec<String> {
+    timeline_within(record, TIMELINE_HEAD, TIMELINE_TAIL)
+}
+
+/// [`timeline`] keeping the first `head` and the last `tail` steps.
+pub fn timeline_within(record: &RunRecord, head: usize, tail: usize) -> Vec<String> {
     let mut by_role: BTreeMap<String, Tokens> = BTreeMap::new();
     for request in record.agent_requests() {
         by_role
@@ -410,10 +492,10 @@ pub fn timeline(record: &RunRecord) -> Vec<String> {
             steps.push(clip(&format!("+{:.1}s {line}", at(event)), LINE_CHARS));
         }
     }
-    if steps.len() > TIMELINE_HEAD + TIMELINE_TAIL {
-        let omitted = steps.len() - TIMELINE_HEAD - TIMELINE_TAIL;
-        let tail = steps.split_off(steps.len() - TIMELINE_TAIL);
-        steps.truncate(TIMELINE_HEAD);
+    if steps.len() > head + tail {
+        let omitted = steps.len() - head - tail;
+        let tail = steps.split_off(steps.len() - tail);
+        steps.truncate(head);
         steps.push(format!("[{omitted} events omitted]"));
         steps.extend(tail);
     }

@@ -690,7 +690,7 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
     Ok((cached.result, cached.usage))
 }
 
-fn clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     match text.char_indices().nth(limit) {
         Some((end, _)) => format!(
             "{}\n[... truncated: {} of {} characters shown ...]",
@@ -717,37 +717,37 @@ fn bounded_diff(diff: &str) -> String {
     )
 }
 
-fn bounded_conversation(entries: &[Entry]) -> Vec<serde_json::Value> {
+pub(crate) fn bounded_conversation(
+    entries: &[Entry],
+    head: usize,
+    tail: usize,
+    chars: usize,
+) -> Vec<serde_json::Value> {
     let clipped = |entry: &Entry| {
         let mut entry = entry.clone();
         match &mut entry {
             Entry::User { text } | Entry::Assistant { text } | Entry::Answer { text, .. } => {
-                *text = clip(text, ENTRY_CHARS);
+                *text = clip(text, chars);
             }
-            Entry::Question { title, .. } => *title = clip(title, ENTRY_CHARS),
+            Entry::Question { title, .. } => *title = clip(title, chars),
         }
         serde_json::to_value(entry).unwrap_or_default()
     };
-    if entries.len() <= CONVERSATION_HEAD + CONVERSATION_TAIL {
+    if entries.len() <= head + tail {
         return entries.iter().map(clipped).collect();
     }
-    let omitted = entries.len() - CONVERSATION_HEAD - CONVERSATION_TAIL;
-    entries[..CONVERSATION_HEAD]
+    let omitted = entries.len() - head - tail;
+    entries[..head]
         .iter()
         .map(clipped)
         .chain(std::iter::once(
             serde_json::json!({"kind": "omitted", "entries": omitted}),
         ))
-        .chain(
-            entries[entries.len() - CONVERSATION_TAIL..]
-                .iter()
-                .map(clipped),
-        )
+        .chain(entries[entries.len() - tail..].iter().map(clipped))
         .collect()
 }
 
-fn compact_metrics(run: &RunSummary) -> serde_json::Value {
-    let metrics = &run.metrics;
+pub(crate) fn compact_metrics(metrics: &RunMetrics) -> serde_json::Value {
     serde_json::json!({
         "input_tokens": metrics.tokens.input(),
         "cache_read_tokens": metrics.tokens.cache_read,
@@ -764,7 +764,7 @@ fn compact_metrics(run: &RunSummary) -> serde_json::Value {
     })
 }
 
-fn cost_value(cost: &Cost) -> serde_json::Value {
+pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
     serde_json::json!({
         "usd": cost.usd,
         "api_equivalent": cost.is_api_equivalent(),
@@ -777,10 +777,15 @@ fn side(run: &LoadedRun) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
-        "conversation": bounded_conversation(&run.conversation),
+        "conversation": bounded_conversation(
+            &run.conversation,
+            CONVERSATION_HEAD,
+            CONVERSATION_TAIL,
+            ENTRY_CHARS,
+        ),
         "diff": bounded_diff(&run.diff),
         "verification": run.summary.verification,
-        "metrics": compact_metrics(&run.summary),
+        "metrics": compact_metrics(&run.summary.metrics),
         "cost": cost_value(&run.summary.cost),
     })
 }
@@ -789,7 +794,7 @@ fn process_side(run: &LoadedRun) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
-        "metrics": compact_metrics(&run.summary),
+        "metrics": compact_metrics(&run.summary.metrics),
         "timeline": metrics::timeline(&run.record),
     })
 }

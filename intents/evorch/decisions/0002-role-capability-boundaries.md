@@ -60,3 +60,10 @@ Role を personality ではなく capability boundary とする。
 - 調査ツールは `read` / `grep` / `web_search` / `web_fetch`。書き込み・編集・shell・再委譲は不可。全ロール共通の ledger / user question 操作は引き続き利用できる。
 - delegate のロール解析・schema、設定のモデル解決、同梱の `role-webresearcher` 基準プロンプト、production prompt catalog、GUI のロール設定を接続する。Orchestrator の委譲案内に外部調査の担当として記載する。
 - role capability の `NetworkAccess::Allowed` はネットワーク利用能力の上限を示す。実行時は per-tool と session の各層の判定も必要。WebResearcher への委譲だけは session を既定 `Allowed` とし、明示 `OptIn` が選択された場合は呼び出しごとの承認を要する。Orchestrator および他 run の既定 session は `Denied`。
+
+## 2026-10-21 確定: Evaluator を追加する（ADR 0036）
+
+- agent の振る舞いや構成の相談を受ける読み取り専用ロールとして `Role::Evaluator` を追加する。delegate と設定の識別子は `evaluator`、設定バインディングは `[agents.roles.evaluator]`、同梱の基準プロンプトは `role-evaluator`。
+- ツールは `read` / `grep` と評価用の `eval_list_threads` / `eval_inspect_thread` / `eval_save_sample` / `eval_remove_sample` / `eval_report`。書き込み・編集・shell・再委譲・Web は不可。全ロール共通の ledger / user question 操作は引き続き利用できる。
+- 評価用ツールはユーザー DB と `<user config dir>/eval/` を読む host tool で、GUI プロセスが executor に登録し、run ごとの executor へ引き継ぐ。capability で Evaluator 以外には公開しない。サンプルの保存・解除は DB への書き込みとして `fs_write` を宣言し、副作用のあるツールとして並行実行しない。
+- Orchestrator は Evaluator へ委譲できる。headless 実行はユーザー DB を持たないため評価用ツールを登録しない。

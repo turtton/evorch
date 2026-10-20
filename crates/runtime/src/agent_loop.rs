@@ -405,6 +405,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                             state.shared.executor.approval_policy(),
                             crate::runtime::BrowserTools::Inherit(&state.shared.executor),
                         )
+                        .map(Arc::new)
                     })
             };
             match executor {

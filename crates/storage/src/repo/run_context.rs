@@ -169,3 +169,23 @@ pub fn invalidate(conn: &Connection, run_id: &str) -> Result<(), StorageError> {
     )?;
     Ok(())
 }
+
+/// `run_ids` and every run delegated from them, through the parent links of
+/// saved contexts and of the usage ledger.
+pub fn with_descendants(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<Vec<String>, StorageError> {
+    let ids = serde_json::to_string(run_ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "WITH RECURSIVE tree(run_id) AS (\
+         SELECT value FROM json_each(?1) \
+         UNION SELECT c.run_id FROM run_contexts c JOIN tree t ON c.parent_run_id = t.run_id \
+         UNION SELECT u.run_id FROM usage_requests u JOIN tree t ON u.parent_run_id = t.run_id \
+         WHERE u.run_id IS NOT NULL) \
+         SELECT run_id FROM tree ORDER BY run_id",
+    )?;
+    let rows = statement.query_map(params![ids], |row| row.get(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
