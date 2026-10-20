@@ -98,6 +98,7 @@ const ADDITIONAL_ROLE_KEYS: &[&str] = &[
     "planner",
     "advisor",
     "multimodal_looker",
+    "evaluator",
     "compactor",
 ];
 const RULES_KEYS: &[&str] = &[

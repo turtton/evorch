@@ -58,7 +58,7 @@ pub fn resolve_prompt_sources(
 }
 
 /// ロールとバインディングの対応表を返す。
-fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 8] {
+fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 9] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
@@ -68,6 +68,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 
         ("planner", &agents.roles.planner),
         ("advisor", &agents.roles.advisor),
         ("multimodallooker", &agents.roles.multimodal_looker),
+        ("evaluator", &agents.roles.evaluator),
     ]
 }
 

@@ -17,6 +17,13 @@ fn additional_roles_have_least_privilege_capabilities() {
         ),
         ("Advisor", vec!["read", "grep", "git_diff"]),
         ("MultimodalLooker", vec!["read"]),
+        (
+            "Evaluator",
+            ["read", "grep"]
+                .into_iter()
+                .chain(agents::EVALUATOR_TOOLS)
+                .collect::<Vec<_>>(),
+        ),
     ];
     for (name, tools) in cases {
         // When: a role is parsed at the boundary.
@@ -54,6 +61,7 @@ fn every_role_authorizes_scoped_memory_meta_ops() {
         Role::Planner,
         Role::Advisor,
         Role::MultimodalLooker,
+        Role::Evaluator,
     ] {
         let capabilities = role.capabilities();
         // When / Then: self-scoped memory and question operations are authorized.
@@ -100,5 +108,31 @@ fn existing_role_names_still_round_trip() {
 fn legacy_oracle_names_normalize_to_advisor() {
     for name in ["Oracle", "oracle", "Advisor", "advisor"] {
         assert_eq!(Role::from_name(name), Ok(Role::Advisor));
+    }
+}
+
+#[test]
+fn evaluator_cannot_change_files_run_commands_delegate_or_browse() {
+    // Given: the Evaluator's capability boundary (ADR 0036 §1).
+    let capabilities = Role::Evaluator.capabilities();
+    // When / Then: every mutation, shell, delegation and web tool is denied.
+    for tool in [
+        "write",
+        "edit",
+        "apply_patch",
+        "shell",
+        "git_diff",
+        "delegate",
+        "web_search",
+        "web_fetch",
+        "browser_navigate",
+    ] {
+        assert!(
+            matches!(
+                capabilities.check_tool(Role::Evaluator.name(), tool),
+                agents::CapabilityDecision::Denied { .. }
+            ),
+            "{tool}"
+        );
     }
 }

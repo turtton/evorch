@@ -2489,6 +2489,22 @@ pub fn production_executor_with_config(
     workspace_root: PathBuf,
     config: &config::Config,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    production_executor_with_host_tools(bus, policy, workspace_root, config, Vec::new())
+}
+
+/// The production executor with `host_tools` registered, which every executor a
+/// run composes from it inherits.
+///
+/// # Errors
+/// Fails like [`production_executor_with_config`], or when a host tool's schema
+/// does not compile.
+pub fn production_executor_with_host_tools(
+    bus: Arc<EventBus>,
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+    config: &config::Config,
+    host_tools: Vec<Arc<dyn tools::Tool>>,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let sandbox_error = |error: sandbox::SandboxError| RuntimeError::Sandbox {
         detail: error.to_string(),
     };
@@ -2505,7 +2521,10 @@ pub fn production_executor_with_config(
         &[workspace_root],
         sandbox::ApprovalPolicy::allow_all(),
         BrowserTools::Configure(&config.tools.browser),
-    )
+    )?
+    .with_host_tools(host_tools)
+    .map(Arc::new)
+    .map_err(RuntimeError::from)
 }
 
 /// Production executor composition, also used after a run builds its own sandbox.
@@ -2513,7 +2532,8 @@ pub fn production_executor_with_config(
 pub(crate) enum BrowserTools<'a> {
     /// Launch as `[tools.browser]` sets: the process's first executor.
     Configure(&'a config::BrowserToolsConfig),
-    /// Share the parent's browser, so one Chromium serves the process.
+    /// Share the parent's browser, so one Chromium serves the process, and
+    /// register the parent's host tools.
     Inherit(&'a ToolExecutor),
 }
 
@@ -2526,7 +2546,7 @@ pub(crate) fn configured_executor(
     forbidden_roots: &[PathBuf],
     approval_policy: sandbox::ApprovalPolicy,
     browser: BrowserTools<'_>,
-) -> Result<Arc<ToolExecutor>, RuntimeError> {
+) -> Result<ToolExecutor, RuntimeError> {
     let hook = tools::post_edit::CommentChecker::resolve_with_roots(
         Arc::clone(&sandbox),
         checker_config,
@@ -2543,13 +2563,15 @@ pub(crate) fn configured_executor(
     .with_web_tools()
     .and_then(|executor| match browser {
         BrowserTools::Configure(config) => executor.with_browser_tools(config),
-        BrowserTools::Inherit(parent) => Ok(executor.inherit_agent_browser(parent)),
+        BrowserTools::Inherit(parent) => Ok(executor
+            .inherit_agent_browser(parent)
+            .inherit_host_tools(parent)),
     })
     .map_err(|error| RuntimeError::NetworkGuard {
         detail: error.to_string(),
     })?;
     executor.set_file_boundary(boundary);
-    Ok(Arc::new(executor))
+    Ok(executor)
 }
 
 struct RunEntryView<'a> {
@@ -3500,6 +3522,51 @@ mod agent_browser_sharing_tests {
         }
     }
 
+    struct HostTool;
+
+    #[async_trait::async_trait]
+    impl tools::Tool for HostTool {
+        fn name(&self) -> &str {
+            "host_probe"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> tools::Permissions {
+            tools::Permissions::read_only()
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<tools::ToolResult, tools::ToolError> {
+            Ok(tools::ToolResult::success("probed"))
+        }
+    }
+
+    #[test]
+    fn run_executors_inherit_host_tools() {
+        // Given: a process executor carrying a host-provided tool.
+        let bus = Arc::new(EventBus::new(16));
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = ToolExecutor::new(Arc::clone(&bus))
+            .with_host_tools([Arc::new(HostTool) as Arc<dyn tools::Tool>])
+            .unwrap();
+
+        // When: a run composes its own executor from that parent, and then
+        // another run composes one from that run's executor.
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&parent));
+        let nested = compose(&bus, workspace.path(), BrowserTools::Inherit(&run));
+
+        // Then: both offer the host tool next to the standard tools.
+        for executor in [run, nested] {
+            assert!(executor.tool_permissions("host_probe").is_some());
+            assert!(executor.tool_permissions("read").is_some());
+        }
+    }
+
     fn compose(
         bus: &Arc<EventBus>,
         workspace: &std::path::Path,
@@ -3514,6 +3581,7 @@ mod agent_browser_sharing_tests {
             sandbox::ApprovalPolicy::allow_all(),
             browser,
         )
+        .map(Arc::new)
         .unwrap()
     }
 }

@@ -2,7 +2,13 @@ use config::Config;
 
 #[test]
 fn named_roles_reject_category_overrides_when_loaded() {
-    for role in ["planner", "advisor", "multimodal_looker", "compactor"] {
+    for role in [
+        "planner",
+        "advisor",
+        "multimodal_looker",
+        "evaluator",
+        "compactor",
+    ] {
         // Given: a named non-worker role with a category override.
         let directory = tempfile::tempdir().expect("temporary config directory");
         let doc = format!(
@@ -110,4 +116,29 @@ fn compactor_chain_loads_without_replacing_any_role() {
             .head_route(),
         "worker"
     );
+}
+
+#[test]
+fn evaluator_binds_like_other_named_roles() {
+    // Given: no evaluator binding, then an explicit one with a preset.
+    let defaults = config::AgentsConfig::default();
+    let configured: Config = toml::from_str(
+        "[agents.roles.evaluator]\nmodels = [{ route = 'judge-model' }]\npreset = 'role-evaluator'",
+    )
+    .expect("evaluator binding");
+
+    // When: resolving the role and its prompt baseline.
+    let implicit = defaults.binding_for("evaluator", None).expect("evaluator");
+    let explicit = configured
+        .agents
+        .binding_for("evaluator", None)
+        .expect("evaluator");
+    let sources = config::resolve_prompt_sources(&Config::default(), None).expect("sources");
+
+    // Then: the role name is the fallback route, an explicit chain wins, and the
+    // bundled baseline describes the role.
+    assert_eq!(implicit.head_route(), "evaluator");
+    assert_eq!(explicit.head_route(), "judge-model");
+    assert_eq!(explicit.preset.as_deref(), Some("role-evaluator"));
+    assert!(sources.role_baselines["evaluator"].contains("# Evaluator"));
 }

@@ -42,6 +42,10 @@ fn production_catalog_and_triggers_cover_additional_roles() {
     assert_ne!(planner_prompt, advisor_prompt);
     assert_ne!(planner_prompt, looker_prompt);
     assert_ne!(advisor_prompt, looker_prompt);
+    let evaluator_prompt = catalog
+        .system_prompt_for(Role::Evaluator, None, "generic")
+        .expect("Evaluator prompt");
+    assert!(evaluator_prompt.contains("# Evaluator"));
 
     // Then: each role has a purpose trigger without a duplicated tool roster.
     for role in [
@@ -49,6 +53,7 @@ fn production_catalog_and_triggers_cover_additional_roles() {
         Role::Planner,
         Role::Advisor,
         Role::MultimodalLooker,
+        Role::Evaluator,
     ] {
         let trigger = triggers
             .iter()
@@ -170,6 +175,6 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
     ] {
         assert!(reviewer.contains(contract), "{contract}");
     }
-    assert_eq!(triggers.len(), 8);
+    assert_eq!(triggers.len(), 9);
     assert!(!triggers.iter().any(|t| t.name == "Oracle"));
 }

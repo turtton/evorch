@@ -183,6 +183,25 @@ impl Database {
         crate::repo::thread_start::list_since(&self.conn, since_ns)
     }
 
+    /// The evaluation sample pinned for a thread.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn eval_sample(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::eval_sample::EvalSample>, StorageError> {
+        crate::repo::eval_sample::get(&self.conn, thread_id)
+    }
+
+    /// All evaluation samples, most recently updated first.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn eval_samples(&self) -> Result<Vec<crate::eval_sample::EvalSample>, StorageError> {
+        crate::repo::eval_sample::list(&self.conn)
+    }
+
     /// Return all ledger entries in global sequence order.
     ///
     /// # Errors
@@ -382,6 +401,41 @@ impl Database {
     /// SQLite 操作またはイベントの復元に失敗した場合にエラーを返します。
     pub fn events_all_ordered(&self) -> Result<Vec<StoredEvent>, StorageError> {
         event::list_all_ordered(&self.conn)
+    }
+
+    /// `run_ids` and every run delegated from them, sorted.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn runs_with_descendants(&self, run_ids: &[String]) -> Result<Vec<String>, StorageError> {
+        run_context::with_descendants(&self.conn, run_ids)
+    }
+
+    /// Usage ledger rows of `run_ids` in time order, joined with their owner.
+    /// Rows already rolled up into daily totals are not included.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn usage_requests_for_runs(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<crate::usage::UsageRequestRow>, StorageError> {
+        crate::repo::usage::list_requests_for_runs(&self.conn, run_ids)
+    }
+
+    /// Up to `limit` events at or after `from_ns` concerning `run_ids`, oldest
+    /// first, and whether more matched. An event concerns a run when a `run_id`
+    /// field names it or its approval call ID belongs to it.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn events_for_runs(
+        &self,
+        run_ids: &[String],
+        from_ns: i64,
+        limit: usize,
+    ) -> Result<(Vec<StoredEvent>, bool), StorageError> {
+        event::list_for_runs(&self.conn, run_ids, from_ns, limit)
     }
 
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。

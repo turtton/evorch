@@ -314,6 +314,7 @@ fn delegate_target_schema() -> Value {
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
             "advisor" | "oracle" => "Consult Advisor only when needed before deciding: compare design options or cause hypotheses; return options, trade-offs, recommendation, uncertainty, and information that would change the decision. No implementation (Worker), acceptance verdict (Reviewer), or detailed execution plan (Planner). Use a separate context for the final independent Reviewer, not the consulted Advisor. oracle is a legacy alias for advisor.".to_owned(),
             "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
+            "evaluator" => "Consult on agent behaviour or configuration (models, prompts, generation settings): inspect recorded threads, propose a cause and the roles to swap, and pin threads as evaluation samples. Pass the user's concern and any thread it refers to.".to_owned(),
             _ => unreachable!("registered delegate role"),
         };
         let mut branch = json!({

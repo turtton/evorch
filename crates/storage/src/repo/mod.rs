@@ -6,6 +6,7 @@
 pub mod agent_run;
 pub(crate) mod assistant_reference;
 pub mod catalog;
+pub(crate) mod eval_sample;
 pub mod event;
 pub(crate) mod memory;
 pub mod message;

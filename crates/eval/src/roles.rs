@@ -8,7 +8,8 @@ use catalog::ModelCatalog;
 use config::{ChainEntryConfig, Config, ModelEntryConfig, ProviderTypeConfig};
 use serde::{Deserialize, Serialize};
 
-const ROLES: [&str; 9] = [
+/// Every role address below `[agents]` a candidate can swap.
+pub const ROLES: [&str; 10] = [
     "orchestrator",
     "explorer",
     "worker",
@@ -17,6 +18,7 @@ const ROLES: [&str; 9] = [
     "roles.planner",
     "roles.advisor",
     "roles.multimodal_looker",
+    "roles.evaluator",
     "roles.compactor",
 ];
 
@@ -35,6 +37,18 @@ pub struct SwappedRole {
     pub role: String,
     pub baseline: Vec<ModelRef>,
     pub candidate: Vec<ModelRef>,
+}
+
+/// The address of a role given by its address (`roles.planner`), its key
+/// (`planner`) or its name (`Planner`, `WebResearcher`).
+pub fn address(role: &str) -> Option<&'static str> {
+    let key = |name: &str| {
+        name.trim_start_matches("roles.")
+            .replace('_', "")
+            .to_ascii_lowercase()
+    };
+    let wanted = key(role.trim());
+    ROLES.into_iter().find(|address| key(address) == wanted)
 }
 
 /// Roles whose binding, categories, referenced routes or presets differ.
@@ -81,6 +95,11 @@ fn chains(config: &Config, address: &str) -> RoleChains {
         "roles.multimodal_looker" => (
             to_json(&agents.roles.multimodal_looker),
             &agents.roles.multimodal_looker,
+            None,
+        ),
+        "roles.evaluator" => (
+            to_json(&agents.roles.evaluator),
+            &agents.roles.evaluator,
             None,
         ),
         _ => (
