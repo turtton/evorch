@@ -172,6 +172,7 @@ fn event_sequence() -> Vec<Event> {
                 model: "kimi-k3".to_owned(),
                 streaming: true,
                 run_id: Some("run-1".to_owned()),
+                reasoning_effort: None,
             },
         ),
         event(
