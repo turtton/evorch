@@ -136,6 +136,9 @@ pub(crate) struct LoopState {
     pub(crate) todo_context_deferred: bool,
     /// Model switches prepared since the last response; bounds a switch that never settles.
     model_switches: u32,
+    /// Whether this run's turn on its thread owner is open: begun at the loop head and
+    /// ended only by the checkpoint after a response's tools.
+    owner_turn_open: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -299,6 +302,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         todo_context_pending: true,
         todo_context_deferred,
         model_switches: 0,
+        owner_turn_open: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -717,11 +721,21 @@ impl LoopState {
                 self.finish_interrupted(kind);
                 return;
             }
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.begin_turn()
-            {
-                self.finish_error(error.to_string());
-                return;
+            // A model switch comes back here inside the turn it already began, and
+            // the owner rejects beginning a run's turn again before its checkpoint.
+            if let Some(permit) = &self.task.config.ownership {
+                let result = if self.owner_turn_open {
+                    // Still fence a stale generation, without opening a second turn or
+                    // rejecting a quiescing owner's already-active turn.
+                    permit.validate_mutation()
+                } else {
+                    permit.begin_turn()
+                };
+                if let Err(error) = result {
+                    self.finish_error(error.to_string());
+                    return;
+                }
+                self.owner_turn_open = true;
             }
             // Ordinary follow-ups wait for Stop unless the host explicitly
             // requests delivery at this safe (post-tools) turn boundary.
@@ -1013,6 +1027,7 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            self.owner_turn_open = false;
             self.save_checkpoint();
             if has_tool_uses {
                 self.budget.finish_round();

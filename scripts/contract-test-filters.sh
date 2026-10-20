@@ -31,6 +31,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=system_prompt_seam)
       | binary(=compaction_triggers)
       | binary(=model_switch_cache)
+      | binary(=owned_route_fallback)
       | binary(=builtin_git_skill)
       | binary(=skill_hot_reload_cache)))
   | (package(=tools) & binary(=bounded_output))
