@@ -2,7 +2,7 @@
 //! timestamps. Panes and view models use these helpers so the same quantity
 //! reads the same way everywhere in the workbench.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use std::time::{Duration, SystemTime};
 
 /// Count with K/M/B suffixes: `950`, `12.4K`, `1.23M`, `4.56B`.
@@ -95,6 +95,17 @@ pub fn utc_timestamp(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
+/// Absolute timestamp in the machine's time zone, e.g. `2026-10-09 21:00 +09:00`.
+pub fn local_timestamp(at: DateTime<Utc>) -> String {
+    offset_timestamp(at, *at.with_timezone(&Local).offset())
+}
+
+fn offset_timestamp(at: DateTime<Utc>, offset: FixedOffset) -> String {
+    at.with_timezone(&offset)
+        .format("%Y-%m-%d %H:%M %:z")
+        .to_string()
+}
+
 /// USD amount; sub-cent values keep four decimals so they don't read as zero.
 pub fn usd(cost: f64) -> String {
     if cost > 0.0 && cost < 0.01 {
@@ -153,6 +164,15 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000);
         assert_eq!(time_since(at, at + Duration::from_secs(312)), "5m 12s ago");
         assert_eq!(time_since(at + Duration::from_secs(5), at), "just now");
+    }
+
+    #[test]
+    fn local_timestamps_carry_their_offset() {
+        let at: DateTime<Utc> = "2026-10-09T12:00:00Z".parse().unwrap();
+        let tokyo = FixedOffset::east_opt(9 * 3_600).unwrap();
+        assert_eq!(offset_timestamp(at, tokyo), "2026-10-09 21:00 +09:00");
+        let utc = FixedOffset::east_opt(0).unwrap();
+        assert_eq!(offset_timestamp(at, utc), "2026-10-09 12:00 +00:00");
     }
 
     #[test]

@@ -294,7 +294,7 @@ impl LiveData {
                     let efficiency = &row.efficiency;
                     ui.label(&row.subscription);
                     ui.label(format!("{} · {}", row.window, row.resets_in))
-                        .on_hover_text(crate::format::utc_timestamp(row.resets_at));
+                        .on_hover_text(crate::format::local_timestamp(row.resets_at));
                     ui.label(format!("{:.0}%", efficiency.used_percent));
                     ui.label(compact_tokens(efficiency.totals.total_tokens()));
                     ui.label(format_cost(&efficiency.totals));
