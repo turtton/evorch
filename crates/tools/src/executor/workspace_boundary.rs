@@ -182,7 +182,7 @@ impl ToolExecutor {
             return Ok(());
         };
         let write = matches!(name, "write" | "edit");
-        let mut targets = Vec::new();
+        let mut outside = Vec::new();
         let mut violation = None;
         for path in keys
             .iter()
@@ -204,17 +204,22 @@ impl ToolExecutor {
                 Some(PathAccess::ReadOnly) => !write,
                 None => false,
             };
+            if allowed {
+                continue;
+            }
             let target = location.unwrap_or_else(|| path.to_path_buf());
-            if !allowed && violation.is_none() {
+            if violation.is_none() {
                 violation = Some((target.clone(), placement.is_some()));
             }
-            targets.push(target);
+            outside.push(target);
         }
+        // unsandboxed only lifts the path boundary, so a call that stays
+        // inside it has nothing to review and runs as if isolated.
+        let Some((path, read_only)) = violation else {
+            return Ok(());
+        };
         if !unsandboxed {
-            return match violation {
-                None => Ok(()),
-                Some((path, read_only)) => Err(boundary_denial(&path, read_only)),
-            };
+            return Err(boundary_denial(&path, read_only));
         }
         let justification = args
             .get(JUSTIFICATION)
@@ -233,7 +238,7 @@ impl ToolExecutor {
         };
         let request = FileAccessRequest {
             tool: name.to_owned(),
-            paths: targets,
+            paths: outside,
             write,
             justification: justification.to_owned(),
             change: requested_change(name, args),
