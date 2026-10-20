@@ -89,7 +89,6 @@ fn latest_columns_match_the_credential_free_schema() {
                 column("progress_json", "TEXT", 0, None, 0),
                 column("last_artifact_json", "TEXT", 0, None, 0),
                 column("failure_reason", "TEXT", 0, None, 0),
-                column("resume_cursor_json", "TEXT", 0, None, 0),
                 column("attempts", "INTEGER", 1, Some("0"), 0),
                 column("heartbeat_at_ns", "INTEGER", 0, None, 0),
             ],

@@ -33,7 +33,7 @@ impl LoopState {
                 return decision;
             }
         }
-        self.publish_durable_task(self.phase(), None);
+        self.update_durable_artifact();
         decision
     }
 }

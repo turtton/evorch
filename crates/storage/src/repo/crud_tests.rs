@@ -109,7 +109,6 @@ fn task_crud_supports_nullable_session_and_lists_by_session() {
         progress: None,
         last_artifact: None,
         failure_reason: None,
-        resume_cursor: None,
         attempts: 0,
         heartbeat_at: None,
         created_at: time(1),

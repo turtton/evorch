@@ -49,6 +49,8 @@ fn legacy_database(path: &Path, version: u32, already_allows_stopped: bool) {
     }
     conn.pragma_update(None, "user_version", version).unwrap();
     populate(&conn, already_allows_stopped);
+    conn.execute("UPDATE tasks SET resume_cursor_json = 'cursor'", [])
+        .unwrap();
     if !already_allows_stopped {
         assert_check_error(insert_status(&conn, "old-stopped", "stopped").unwrap_err());
     }
@@ -68,8 +70,10 @@ fn populate(conn: &Connection, include_stopped: bool) {
     .unwrap();
     for status in OLD_STATUSES {
         conn.execute(
-            "INSERT INTO tasks VALUES(?1,'s',?1,10,20,'parent','input','progress',
-             'artifact','reason','cursor',7,30)",
+            "INSERT INTO tasks (id, session_id, status, created_at_ns, updated_at_ns,
+             parent_run_id, input_json, progress_json, last_artifact_json, failure_reason,
+             attempts, heartbeat_at_ns) VALUES(?1,'s',?1,10,20,'parent','input','progress',
+             'artifact','reason',7,30)",
             [status],
         )
         .unwrap();
@@ -146,7 +150,11 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     let path = database_path(&dir);
     legacy_database(&path, version, already_allows_stopped);
     let conn = Connection::open(&path).unwrap();
-    let before_tasks = rows(&conn, "SELECT * FROM tasks ORDER BY id");
+    let mut before_tasks = rows(&conn, "SELECT * FROM tasks ORDER BY id");
+    // v22 deliberately removes the historical task-local cursor, preserving all else.
+    for row in &mut before_tasks {
+        row.remove(10);
+    }
     let before_links = rows(
         &conn,
         "SELECT * FROM task_links ORDER BY blocker_id, blocked_id",
@@ -155,7 +163,7 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     drop(conn);
 
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 21);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 22);
     assert_eq!(db.pragma_i64("foreign_keys").unwrap(), 1);
     let conn = Connection::open(&path).unwrap();
     let tables = schema_objects(&conn, "table");
@@ -189,24 +197,6 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
         schema_version
     );
     drop(reopened);
-
-    // The SQL itself can also be safely replayed, including persisted stopped rows.
-    let before_replay = rows(&conn, "SELECT * FROM tasks ORDER BY id");
-    let tx = conn.unchecked_transaction().unwrap();
-    tx.execute_batch(V10).unwrap();
-    tx.commit().unwrap();
-    assert_eq!(
-        rows(&conn, "SELECT * FROM tasks ORDER BY id"),
-        before_replay
-    );
-    assert_eq!(
-        rows(
-            &conn,
-            "SELECT * FROM task_links ORDER BY blocker_id, blocked_id"
-        ),
-        before_links
-    );
-    assert!(rows(&conn, "PRAGMA foreign_key_check").is_empty());
 }
 
 #[test]
@@ -229,11 +219,39 @@ fn fresh_open_accepts_stopped_and_rejects_invalid_status() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 21);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 22);
     let conn = Connection::open(&path).unwrap();
     populate(&conn, true);
     verify_constraints(&conn);
     assert_eq!(rows(&conn, "SELECT * FROM tasks").len(), 11);
+}
+
+#[test]
+fn v10_sql_replay_preserves_stopped_rows_in_its_own_schema() {
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    legacy_database(&path, 9, true);
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", true).unwrap();
+    let before_tasks = rows(&conn, "SELECT * FROM tasks ORDER BY id");
+    let before_links = rows(
+        &conn,
+        "SELECT * FROM task_links ORDER BY blocker_id, blocked_id",
+    );
+    for _ in 0..2 {
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute_batch(V10).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(rows(&conn, "SELECT * FROM tasks ORDER BY id"), before_tasks);
+        assert_eq!(
+            rows(
+                &conn,
+                "SELECT * FROM task_links ORDER BY blocker_id, blocked_id"
+            ),
+            before_links
+        );
+        assert!(rows(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
 }
 
 #[test]
