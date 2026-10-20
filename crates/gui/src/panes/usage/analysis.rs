@@ -8,7 +8,6 @@ use super::charts::{self, SERIES};
 use super::overview::share_list;
 use super::{compact_tokens, format_cost, key_label};
 use crate::model::telemetry::latency_label;
-use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::series::{self, LatencySample, Matrix, Share};
 use crate::model::usage_stats::{
     BreakdownRow, CostCalculator, CostMode, LocalDay, UsageDataset, UsageDimension, UsageFilter,
@@ -16,6 +15,7 @@ use crate::model::usage_stats::{
 };
 use crate::theme::text::muted;
 use crate::theme::tokens::palette;
+use recorder::pricing::UsagePricing;
 
 /// Requests drawn in the latency scatter; the most recent are kept.
 const LATENCY_POINTS: usize = 2_000;

@@ -98,7 +98,7 @@ fn events_appended_before_gui_close_survive_restart() {
     }
     storage.close();
     let storage = Storage::open(config.clone()).unwrap();
-    let mut bridge = gui::storage_bridge::StorageBridge::new(storage.handle(), "evorch-gui");
+    let mut bridge = recorder::storage_bridge::StorageBridge::new(storage.handle(), "evorch-gui");
     let mut original = state(dir.path());
     original.composer_mut().input = "new question".into();
     original.submit_composer();

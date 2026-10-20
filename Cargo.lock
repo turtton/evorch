@@ -2816,6 +2816,7 @@ dependencies = [
  "portable-pty",
  "providers",
  "pulldown-cmark",
+ "recorder",
  "routing",
  "runtime",
  "rusqlite",
@@ -5221,6 +5222,23 @@ dependencies = [
  "bytemuck",
  "font-types",
  "once_cell",
+]
+
+[[package]]
+name = "recorder"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "config",
+ "event-bus",
+ "runtime",
+ "serde",
+ "serde_json",
+ "storage",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::telemetry::pricing::UsagePricing;
+use crate::pricing::UsagePricing;
 use event_bus::{LifecycleEvent, ProviderEvent, ProviderFailureKind, RequestPurpose};
 use storage::usage::UsageStatus;
 use storage::{Database, Storage, StorageConfig};
@@ -16,7 +16,7 @@ fn fixture() -> (tempfile::TempDir, Storage, Database) {
 }
 
 /// $1/M uncached input, $10/M output, $0.1/M cache read and $2/M cache write.
-fn priced() -> crate::model::telemetry::pricing::SharedUsagePricing {
+fn priced() -> crate::pricing::SharedUsagePricing {
     let mut entry = config::ModelEntryConfig::enabled("model");
     entry.input_price = Some(1.0);
     entry.output_price = Some(10.0);

@@ -1,4 +1,4 @@
-//! GUI event persistence and downsampled usage delivery.
+//! Event persistence and downsampled usage delivery.
 
 use std::{future::Future, sync::Arc, task::Poll, time::Duration};
 
@@ -67,7 +67,7 @@ impl PersistencePolicy {
     }
 }
 
-/// Routes GUI events to the storage writer.
+/// Routes bus events to the storage writer.
 pub struct StorageBridge {
     storage: StorageHandle,
     session_id: &'static str,
@@ -116,10 +116,7 @@ impl StorageBridge {
 
     /// Record one usage ledger row per provider attempt, priced from `pricing`.
     /// Has no effect while metrics are disabled.
-    pub fn with_usage_ledger(
-        mut self,
-        pricing: crate::model::telemetry::pricing::SharedUsagePricing,
-    ) -> Self {
+    pub fn with_usage_ledger(mut self, pricing: crate::pricing::SharedUsagePricing) -> Self {
         self.ledger = self
             .policy
             .metrics_enabled

@@ -178,7 +178,7 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
   - 価格表は models.dev と、設定ファイルの価格の上書き（`input_price` など）から作る。
   - 取得時刻を report に残す。
   - baseline と candidate には同じ価格表を使う。
-- 価格の解決は現在 GUI（`crates/gui/src/model/pricing.rs`）にある。これを headless の runner からも使える crate へ移す。
+- 価格の解決は、GUI と headless の runner が共用する `crates/recorder`（`crates/recorder/src/pricing.rs`）にある。
 - fast（service tier `priority`）の料金と、入力量による段階料金は、request ごとに適用する（#276 で対応済み）。
   - usage の記録に service tier を残し、fast の request には models.dev の `experimental.modes.fast.cost` を使う。
   - models.dev の `cost.tiers` から、request ごとの入力量で段階を選ぶ。

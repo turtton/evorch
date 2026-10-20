@@ -243,11 +243,8 @@ impl ProviderSettingsModel {
     }
 
     /// Snapshot of the current profiles and catalog for request cost recording.
-    pub fn usage_pricing(&self) -> super::telemetry::pricing::UsagePricing {
-        super::telemetry::pricing::UsagePricing::new(
-            self.entries.clone(),
-            self.catalog.catalog.clone(),
-        )
+    pub fn usage_pricing(&self) -> recorder::pricing::UsagePricing {
+        recorder::pricing::UsagePricing::new(self.entries.clone(), self.catalog.catalog.clone())
     }
 
     pub fn model_entry(&self, profile: &str, model: &str) -> Option<&config::ModelEntryConfig> {

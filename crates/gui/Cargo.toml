@@ -40,6 +40,7 @@ model = { path = "../model" }
 portable-pty = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 providers = { path = "../providers" }
+recorder = { path = "../recorder" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 rusqlite = { workspace = true }

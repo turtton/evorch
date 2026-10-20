@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use event_bus::{Event, EventKind, LifecycleEvent, ProviderEvent, ProviderFailureKind};
 use storage::usage::{UsageRequestRecord, UsageStatus};
 
-use crate::model::telemetry::TokenUsage;
-use crate::model::telemetry::pricing::{SharedUsagePricing, speed};
+use crate::pricing::{SharedUsagePricing, TokenUsage, speed};
 
 /// Tracks the run tree and first-token latency the terminal event lacks, and
 /// prices each completed attempt at the rates in force when it is recorded.

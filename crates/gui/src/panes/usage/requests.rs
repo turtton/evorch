@@ -7,12 +7,12 @@ use workspace_ui::SidebarState;
 use super::charts;
 use super::{compact_tokens, key_label};
 use crate::model::telemetry::latency_label;
-use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::{
     CostCalculator, CostMode, UsageDataset, UsageDimension, UsageFact, UsageFilter,
 };
 use crate::theme::text::muted;
 use crate::theme::tokens::palette;
+use recorder::pricing::UsagePricing;
 
 /// Rows shown before "Show more".
 pub(super) const PAGE: usize = 200;

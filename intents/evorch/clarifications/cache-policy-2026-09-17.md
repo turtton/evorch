@@ -27,7 +27,7 @@
   を報告した場合のみ。履歴比率との差分による「急落」検知ではない。
   根拠: `crates/providers/src/observe/cache.rs:10-24,73-86,89-179`。
   GUI は `100 * cache_read / (input + cache_read + cache_write)` を表示する
-  （`crates/gui/src/model/pricing.rs:20-27`）。この表示値を診断の 0.5 と比較しない。
+  （`crates/recorder/src/pricing.rs` の `TokenUsage::cache_hit_rate`）。この表示値を診断の 0.5 と比較しない。
   OpenAI は `input = prompt_tokens` と cached subset を別々に保持するため
   （`crates/providers/src/wire/openai/response.rs:87-95`）、GUI の分母を全 provider 共通の
   正規化済み入力 token 数とは扱わない。表示・課金の正規化は別の実装課題である。
@@ -58,7 +58,7 @@
   [ADR 0012](../decisions/0012-metrics-architecture.md) の downsampled-only 原則を維持し、
   health 比率の永続化不足を全 request の生ログ保存で埋めない
   （`crates/providers/src/observe.rs:129-156`、`observe/cache.rs:89-109`、
-  `crates/gui/src/storage_bridge.rs:26-55`、`crates/storage/src/repo/metrics.rs:13-24`）。
+  `crates/recorder/src/storage_bridge.rs` の `PersistencePolicy`、`crates/storage/src/repo/metrics.rs:13-24`）。
 - `refresh_context`、cache lease/TTL-aware wait、環境全体の context snapshot、provider 固有
   compaction、cache 診断閾値の設定公開は未実装のまま残す。一般的な shell timeout は
   lease-aware return ではない（`crates/tools/src/tools/shell.rs:301-323`）。

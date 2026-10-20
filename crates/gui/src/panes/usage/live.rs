@@ -6,11 +6,11 @@ use egui_plot::{Bar, BarChart, Legend, Plot};
 
 use super::charts::{self, SERIES, TOKEN_LAYERS};
 use super::{compact_tokens, format_cost};
-use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::telemetry::quota::QuotaState;
 use crate::model::usage_stats::series::{self, Projection, QuotaEfficiency};
 use crate::model::usage_stats::{CostCalculator, CostMode, UsageDataset, UsageFilter, UsageTotals};
 use crate::theme::text::muted;
+use recorder::pricing::UsagePricing;
 
 /// Codex observations carry this provider label when no profile is known.
 const CODEX_PROVIDER: &str = "openai-codex";
@@ -334,8 +334,8 @@ mod tests {
     use providers::provider::codex::quota::{CodexQuota, QuotaSnapshot, QuotaSource, QuotaWindow};
 
     use super::*;
-    use crate::model::telemetry::TokenUsage;
     use crate::model::usage_stats::{LocalDay, UsageFact};
+    use recorder::pricing::TokenUsage;
 
     fn codex_fact(provider: &str, at: SystemTime, tokens: u64) -> UsageFact {
         UsageFact {

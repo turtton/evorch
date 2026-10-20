@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use event_bus::{
     AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
 };
+use recorder::pricing::TokenUsage;
 
 #[path = "pricing.rs"]
 pub mod pricing;
@@ -27,14 +28,6 @@ mod context_pressure;
 #[path = "thread_metrics.rs"]
 mod thread_metrics;
 pub use thread_metrics::latency_label;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TelemetryRow {
@@ -311,7 +304,7 @@ impl TelemetryOverlay {
                             profile: profile.clone(),
                             model: model.clone(),
                         },
-                        speed: pricing::speed(*service_tier),
+                        speed: recorder::pricing::speed(*service_tier),
                         usage: TokenUsage {
                             input: *input_tokens,
                             output: *output_tokens,

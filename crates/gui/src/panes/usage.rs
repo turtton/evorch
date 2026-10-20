@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use egui_extras::{Column, TableBuilder};
 use workspace_ui::SidebarState;
 
-use crate::model::telemetry::pricing::UsagePricing;
 use crate::model::usage_stats::{
     BreakdownRow, CostCalculator, CostMode, UsageDataset, UsageDimension, UsageFilter, UsageLoader,
     UsageRange, UsageTotals, breakdown, filter_options,
 };
 use crate::theme::text::{h3, muted};
+use recorder::pricing::UsagePricing;
 
 #[path = "usage/analysis.rs"]
 mod analysis;

@@ -30,6 +30,7 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 | `runtime` | agent / session / task / event の実行基盤。orchestration を内部モジュールとして保持 |
 | `event-bus` | in-process tokio broadcast の event bus（ADR 0017） |
 | `storage` | SQLite / events 永続化 |
+| `recorder` | event / usage を storage へ書く永続化 bridge と usage の価格解決。GUI と headless の runner が共用 |
 | `providers` | anthropic / openai / openai-codex / github-copilot / openrouter / openai-compatible |
 | `tools` | filesystem / shell / pty / git / search / code-intel |
 | `sandbox` | policy / macos / linux / windows の実行隔離 |

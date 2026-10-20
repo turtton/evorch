@@ -15,10 +15,10 @@ use gui::model::codex_auth_backend::{
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
-use gui::model::telemetry::pricing::SharedUsagePricing;
 use gui::pty::ShellSpawner;
 use gui::runtime_sink::{RuntimeCommandSink, STORAGE_SESSION_ID, derive_repo_slug};
-use gui::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
+use recorder::pricing::SharedUsagePricing;
+use recorder::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
 use runtime::{
@@ -869,10 +869,7 @@ fn run() -> Result<(), GuiError> {
     // closing SQLite, even while runtime owners still hold the event bus.
     // Seeded from static profile prices; the GUI adds the model catalog once loaded.
     let usage_pricing: SharedUsagePricing = Arc::new(std::sync::RwLock::new(
-        gui::model::telemetry::pricing::UsagePricing::new(
-            composition_config.providers.clone(),
-            None,
-        ),
+        recorder::pricing::UsagePricing::new(composition_config.providers.clone(), None),
     ));
     let storage = spawn_storage_bridge(
         Arc::clone(&bus),
