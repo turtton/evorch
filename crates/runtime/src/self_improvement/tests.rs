@@ -193,7 +193,10 @@ fn renders_marked_deterministic_review_only_drafts() {
     assert!(packet.contains("not a canonical packet; do not place under .intent-cli"));
     assert!(packet.contains("implementation_issue_packet:"));
     assert!(packet.contains("status: draft"));
-    assert!(packet.contains("TBD by reviewer"));
+    assert!(packet.contains("Reproduce the no-progress loop using evidence.fields"));
+    assert!(!packet.contains("TBD by reviewer"));
+    assert!(issue.contains("| occurrences | 1 |"));
+    assert!(issue.contains("draft-generation intake snapshot"));
     assert!(packet.contains(&format!("draft-si-{}", c.id)));
 }
 
@@ -580,6 +583,7 @@ fn escaped_json_and_metadata_fit_the_total_evidence_cap() {
     for limit in [0, 1, 16, 256, 2048, 65_536, u32::MAX] {
         f.settings.policy.evidence_max_bytes = limit;
         let text = f.collector().json_evidence(json!({
+            "fields": {"error": "\n\"🦀".repeat(10_000)},
             "detail": "\n\"🦀".repeat(10_000), "source": "s".repeat(8000), "run_id": "r".repeat(8000),
         }));
         assert!(text.len() <= limit.min(65_536) as usize);
@@ -599,6 +603,416 @@ fn sanitized_names_cannot_escape_draft_directory() {
     assert_eq!(issue, ".._.._unsafe__.issue.md");
     assert_eq!(packet, ".._.._unsafe__.packet.md");
     assert_eq!(f.draft_files().len(), 2);
+}
+
+#[test]
+fn titles_strip_call_and_run_ids() {
+    let f = Fixture::new();
+    let collector = f.collector();
+    for run in ["run-123", "run-01k6z3x2q4w8e9r0t1y2u3i4o5"] {
+        collector.handle_diagnostic(&DiagnosticEvent {
+            detail: format!(
+                "failed {run} thread-42 toolu_Abc123 call_xyz987 17 times\nsite=stable"
+            ),
+            ..diagnostic("NoProgress")
+        });
+    }
+    let rows = f.candidates();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].title,
+        "NoProgress: failed run-N thread-N <id> <id> N times"
+    );
+    assert_eq!(rows[0].dedup_key, "diag:test:NoProgress:stable");
+    assert_eq!(rows[0].occurrences, 2);
+}
+
+#[test]
+fn normalization_handles_identifiers_paths_whitespace_and_unicode() {
+    for (raw, expected) in [
+        ("run-123 thread-456", "run-N thread-N"),
+        ("run-01K6Z3X2Q4W8E9R0T1Y2U3I4O5", "run-N"),
+        ("toolu_abC12 call_x-y_123", "<id> <id>"),
+        ("0123456789abcdef0123456789abcdef", "<id>"),
+        ("550e8400-e29b-41d4-a716-446655440000", "<id>"),
+        (
+            "path=/home/user/file.rs:12 /var/tmp/foo",
+            "path=<path> <path>",
+        ),
+        ("\t 日本語 123\n🦀42\u{2003}done ", "日本語 N 🦀N done"),
+        ("v1.2 attempts=007", "vN.N attempts=N"),
+        ("run-abc thread-abc", "run-abc thread-abc"),
+        (
+            "mycall_abc abcdefabcdefabcdefabcdefabcdefabcdef",
+            "mycall_abc abcdefabcdefabcdefabcdefabcdefabcdef",
+        ),
+        ("", ""),
+    ] {
+        assert_eq!(normalize_variable_parts(raw), expected, "{raw}");
+    }
+}
+
+#[test]
+fn detail_key_value_lines_become_structured_evidence_and_summary() {
+    let f = Fixture::new();
+    let detail = "Repeated tool failures without progress\ntrigger=repeated_failures\ncount=5\ntool=read\npath=/tmp/example\ninput_sha256=abc123\nerror=failed: a=b\nsite=escalation:failure\n_key2=value\nempty=\nBad=ignored\n invalid=ignored\n1key=ignored\nbad-key=ignored\n=ignored";
+    f.collector().handle_diagnostic(&DiagnosticEvent {
+        detail: detail.into(),
+        ..diagnostic("NoProgress")
+    });
+    let c = f.candidates().remove(0);
+    let evidence: Value = serde_json::from_str(&c.evidence).unwrap();
+    assert_eq!(evidence["detail"], detail);
+    assert_eq!(
+        evidence["fields"],
+        json!({
+            "trigger": "repeated_failures", "count": "5", "tool": "read", "path": "/tmp/example",
+            "input_sha256": "abc123", "error": "failed: a=b", "site": "escalation:failure",
+            "_key2": "value", "empty": "",
+        })
+    );
+    assert_eq!(c.dedup_key, "diag:test:NoProgress:escalation:failure");
+    let issue = render_issue_draft(&c);
+    for row in [
+        "| tool | read |",
+        "| path | /tmp/example |",
+        "| count | 5 |",
+        "| trigger | repeated&#95;failures |",
+        "| occurrences | 1 |",
+    ] {
+        assert!(issue.contains(row), "{issue}");
+    }
+}
+
+#[test]
+fn nested_fields_remain_valid_and_bounded_and_markdown_is_inert() {
+    let f = Fixture::new();
+    let encoded = f.collector().json_evidence(json!({
+        "detail": "original", "fields": {"error": "🦀".repeat(3000)},
+    }));
+    assert!(encoded.len() <= 2048);
+    let evidence: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(evidence["detail"], "original");
+    assert!(
+        evidence["fields"]["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("…[truncated]")
+    );
+    f.collector().handle_diagnostic(&diagnostic("NoProgress"));
+    let mut c = f.candidates().remove(0);
+    c.evidence = json!({"fields": {"tool": "x|[click](url)<script>\n## injected"}}).to_string();
+    let issue = render_issue_draft(&c);
+    let summary = issue
+        .split("## Summary")
+        .nth(1)
+        .unwrap()
+        .split("## Evidence")
+        .next()
+        .unwrap();
+    assert!(summary.contains("x&#124;&#91;click&#93;(url)&lt;script&gt; ## injected"));
+    assert!(!summary.contains("\n## injected"));
+}
+
+#[test]
+fn run_error_classification_uses_exclusions_and_falls_back() {
+    use run_errors::classify_run_error;
+    for excluded in [
+        "cancelled",
+        "stopped",
+        "stopped: operator request",
+        "model stopped: unknown",
+        "model response reached length limit",
+        "model response was blocked by content filter",
+        "Goal cumulative budget exhausted",
+        "モデル呼び出しに失敗しました: timeout",
+        "provider error: rate limited",
+        "panicked: index out of bounds",
+        "panicked:",
+    ] {
+        assert_eq!(classify_run_error(excluded), None, "{excluded}");
+    }
+    for code in diagnostic_codes::ALL {
+        assert_eq!(
+            classify_run_error(&format!("{code}: detail")),
+            None,
+            "{code}"
+        );
+    }
+    for (reason, code) in [
+        ("database is locked", "storage_busy"),
+        (
+            "Cannot persist prepared context: database is locked",
+            "storage_busy",
+        ),
+        (
+            "thread has an active turn or needs a checkpoint",
+            "ownership",
+        ),
+        ("owner or generation no longer matches", "ownership"),
+        ("thread is not accepting new turns", "ownership"),
+        ("owner is not claimable", "ownership"),
+        ("generation exhausted", "ownership"),
+        (
+            "previous owner still responds or liveness could not be established",
+            "ownership",
+        ),
+        ("run ownership generation is stale: run-4", "ownership"),
+        ("Cannot persist prepared context: disk full", "persist"),
+        (
+            "Cannot record tool intent before execution: disk full",
+            "persist",
+        ),
+        (
+            "ContextWindowExhausted: context too large",
+            "context_window",
+        ),
+        ("scratch setup failed: permission denied", "scratch"),
+        ("runtime unavailable", "runtime"),
+        ("runtime is unavailable", "runtime"),
+        ("interactive inbox closed", "runtime"),
+        ("unexpected failure", "unclassified"),
+        ("NoProgress:without space", "unclassified"),
+    ] {
+        assert_eq!(
+            classify_run_error(reason),
+            Some(format!("RunError:{code}").as_str()),
+            "{reason}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_errors_are_collected_deduplicated_and_gated_on_the_bus() {
+    for enabled in [true, false] {
+        let mut f = Fixture::new();
+        f.settings.policy.collect_diagnostics = enabled;
+        let bus = EventBus::new(32);
+        let receiver = bus.subscribe();
+        let mut observed = None;
+        for (run_id, phase, reason) in [
+            (
+                "run-1",
+                AgentRunPhase::Error,
+                Some("database is locked for run-1 call_first"),
+            ),
+            (
+                "run-2",
+                AgentRunPhase::Error,
+                Some("database is locked for run-2 call_second"),
+            ),
+            ("run-3", AgentRunPhase::Error, Some("cancelled")),
+            (
+                "run-4",
+                AgentRunPhase::Error,
+                Some("BudgetExhausted: limit reached"),
+            ),
+            ("run-5", AgentRunPhase::Error, Some("unknown failure 123")),
+            ("run-6", AgentRunPhase::Done, Some("not an error")),
+            ("run-7", AgentRunPhase::Error, None),
+        ] {
+            let event = Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: run_id.into(),
+                from: AgentRunPhase::Running,
+                to: phase,
+                reason: reason.map(str::to_owned),
+            });
+            if run_id == "run-1" {
+                observed = Some(event.meta.wall_clock);
+            }
+            bus.emit(event);
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(300), f.collector().run(receiver)).await;
+        let rows = f.candidates();
+        if !enabled {
+            assert!(rows.is_empty());
+            assert!(f.draft_files().is_empty());
+            continue;
+        }
+        assert_eq!(rows.len(), 2);
+        let busy = rows
+            .iter()
+            .find(|c| c.code == "RunError:storage_busy")
+            .unwrap();
+        assert_eq!(busy.occurrences, 2);
+        assert_eq!(busy.severity, ImprovementSeverity::Warning);
+        assert_eq!(
+            busy.dedup_key,
+            "run-error:RunError:storage_busy:database is locked for run-N <id>"
+        );
+        assert_eq!(
+            busy.title,
+            "RunError:storage_busy: database is locked for run-N <id>"
+        );
+        let evidence: Value = serde_json::from_str(&busy.evidence).unwrap();
+        assert_eq!(
+            evidence["reason"],
+            "database is locked for run-1 call_first"
+        );
+        assert_eq!(evidence["normalized"], "database is locked for run-N <id>");
+        assert_eq!(evidence["run_id"], "run-1");
+        assert_eq!(evidence["observed_at_ns"], unix_ns(observed.unwrap()));
+        assert_eq!(evidence["build"], build_info());
+        assert!(rows.iter().any(|c| c.code == "RunError:unclassified"));
+    }
+}
+
+// Given: a panic reported as AgentRunPanicked followed by the run's "panicked:" Error
+// When: the collector observes both on the bus
+// Then: only the diagnostic becomes a candidate; the lifecycle failure is not doubled
+#[tokio::test]
+async fn panicked_run_error_is_not_a_second_candidate() {
+    let f = Fixture::new();
+    let bus = EventBus::new(32);
+    let receiver = bus.subscribe();
+    bus.emit(Event::new(DiagnosticEvent {
+        source: "agent_runtime".into(),
+        severity: DiagnosticSeverity::Error,
+        code: diagnostic_codes::AGENT_RUN_PANICKED.into(),
+        detail: "boom\nsite=crates/runtime/src/lib.rs:1:1".into(),
+        run_id: Some("run-9".into()),
+        thread_id: None,
+        call_id: None,
+    }));
+    bus.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "run-9".into(),
+        from: AgentRunPhase::Running,
+        to: AgentRunPhase::Error,
+        reason: Some("panicked: boom".into()),
+    }));
+    let _ = tokio::time::timeout(Duration::from_millis(300), f.collector().run(receiver)).await;
+    let rows = f.candidates();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].code, diagnostic_codes::AGENT_RUN_PANICKED);
+    assert!(!rows.iter().any(|c| c.code.starts_with("RunError:")));
+}
+
+#[test]
+fn run_error_keys_preserve_prefix_and_utf8_with_a_120_byte_cap() {
+    let f = Fixture::new();
+    f.collector().run_error_observed_at(
+        "run-1",
+        &format!("unexpected {}", "日本語🦀".repeat(300)),
+        SystemTime::now(),
+    );
+    let c = f.candidates().remove(0);
+    assert!(c.dedup_key.starts_with("run-error:RunError:unclassified:"));
+    assert!(c.dedup_key.len() <= 120);
+    assert!(c.evidence.len() <= 2048);
+    assert!(serde_json::from_str::<Value>(&c.evidence).is_ok());
+}
+
+#[test]
+fn run_error_daily_limit_is_independent_of_diagnostics() {
+    let f = Fixture::new();
+    let collector = f.collector();
+    for reason in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"] {
+        collector.run_error_observed_at("run-1", reason, SystemTime::now());
+    }
+    assert_eq!(
+        f.candidates().len(),
+        storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT as usize
+    );
+    collector.handle_diagnostic(&diagnostic("NoProgress"));
+    collector.run_error_observed_at("run-2", "alpha", SystemTime::now());
+    let rows = f.candidates();
+    assert_eq!(
+        rows.len(),
+        storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT as usize + 1
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|c| c.dedup_key == "run-error:RunError:unclassified:alpha")
+            .unwrap()
+            .occurrences,
+        2
+    );
+}
+
+#[test]
+fn reopened_candidate_rewrites_and_reattaches_latest_drafts() {
+    let mut f = Fixture::new();
+    f.settings.policy.duplicate_cooldown_secs = 0;
+    let collector = f.collector();
+    collector.handle_diagnostic(&diagnostic("NoProgress"));
+    let original = f.candidates().remove(0);
+    for _ in 0..2 {
+        assert!(
+            f.settings
+                .writer
+                .set_improvement_status(&original.id, ImprovementStatus::Dismissed)
+                .unwrap()
+        );
+        for suffix in ["issue.md", "packet.md"] {
+            fs::write(
+                f.settings
+                    .policy
+                    .draft_dir
+                    .as_ref()
+                    .unwrap()
+                    .join(format!("{}.{suffix}", original.id)),
+                "obsolete draft",
+            )
+            .unwrap();
+        }
+        collector.handle_diagnostic(&DiagnosticEvent {
+            detail: "latest observation\ntool=read\ncount=7".into(),
+            ..diagnostic("NoProgress")
+        });
+        let c = f.candidates().remove(0);
+        assert_eq!(c.id, original.id);
+        assert_eq!(c.status, ImprovementStatus::New);
+        assert_eq!(c.draft_path, original.draft_path);
+        assert!(c.reopened_count > 0);
+        for suffix in ["issue.md", "packet.md"] {
+            let text = fs::read_to_string(
+                f.settings
+                    .policy
+                    .draft_dir
+                    .as_ref()
+                    .unwrap()
+                    .join(format!("{}.{suffix}", original.id)),
+            )
+            .unwrap();
+            assert!(text.starts_with(drafts::DRAFT_MARKER));
+            assert!(text.contains("latest observation"));
+            assert!(!text.contains("obsolete draft"));
+        }
+    }
+    assert_eq!(f.draft_files().len(), 2);
+    assert_eq!(f.candidates()[0].occurrences, 3);
+}
+
+#[test]
+fn packet_acceptance_criteria_are_specific_to_the_code() {
+    let f = Fixture::new();
+    f.collector().handle_diagnostic(&diagnostic("NoProgress"));
+    let mut c = f.candidates().remove(0);
+    for (code, criterion) in [
+        (
+            "NoProgress",
+            "Reproduce the no-progress loop using evidence.fields",
+        ),
+        ("IdenticalToolCalls", "Reproduce identical tool calls"),
+        ("BudgetExhausted", "Reproduce budget exhaustion"),
+        (
+            "RunError:storage_busy",
+            "Reproduce the run failure using evidence.reason",
+        ),
+        (
+            "RunError:unclassified",
+            "Reproduce the run failure using evidence.reason",
+        ),
+        (
+            "FutureCode",
+            "Reproduce the observation using evidence.fields",
+        ),
+    ] {
+        c.code = code.into();
+        let packet = render_packet_draft(&c);
+        assert!(packet.contains(criterion), "{code}: {packet}");
+        assert!(!packet.contains("TBD by reviewer"));
+    }
 }
 
 struct NeverModel;

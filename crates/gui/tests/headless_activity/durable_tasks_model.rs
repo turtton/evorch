@@ -114,3 +114,28 @@ fn waiting_execution_does_not_block_its_running_task() {
     assert_eq!(model.rows().next().unwrap().status, TaskStatus::Running);
     assert_eq!(model.rows().next().unwrap().detail, "progress");
 }
+
+#[test]
+fn initial_input_title_survives_status_only_progress_and_replay() {
+    let initial = Event::new(OrchestratorEvent::TaskProgressed {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        progress: serde_json::json!({"status": "running", "input": "\n  Original task title\nfull prompt"}),
+        reason: "task execution boundary".into(),
+    });
+    let completed = progress("run-1", "completed", Some("result.txt"));
+    let mut live = DurableTasksModel::default();
+    live.apply_event(&initial);
+    live.apply_event(&completed);
+    let saved = serde_json::to_string(&[initial, completed]).unwrap();
+    let mut replay = DurableTasksModel::default();
+    for event in serde_json::from_str::<Vec<Event>>(&saved).unwrap() {
+        replay.apply_event(&event);
+    }
+    for model in [&live, &replay] {
+        let row = model.rows().next().expect("task");
+        assert_eq!(row.title, "Original task title");
+        assert_eq!(row.status, TaskStatus::Completed);
+        assert_eq!(row.last_artifact.as_deref(), Some("result.txt"));
+    }
+}

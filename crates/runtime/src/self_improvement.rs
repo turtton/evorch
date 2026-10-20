@@ -6,10 +6,13 @@
 mod crash;
 mod drafts;
 pub(crate) mod lifecycle;
+mod normalize;
+mod run_errors;
 
 pub(crate) use crash::compact_backtrace;
 pub use crash::{SpooledCrash, drain_crash_spool, install_crash_spool, spool_fault};
 pub use drafts::{render_issue_draft, render_packet_draft};
+pub use normalize::normalize_variable_parts;
 
 use std::{
     path::{Path, PathBuf},
@@ -18,7 +21,8 @@ use std::{
 
 use event_bus::event::diagnostic_codes;
 use event_bus::{
-    DiagnosticEvent, DiagnosticSeverity, EventKind, EventReceiver, FaultEvent, RecvError,
+    AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, EventKind, EventReceiver, FaultEvent,
+    LifecycleEvent, RecvError,
 };
 use serde_json::{Value, json};
 use storage::improvement::{
@@ -81,6 +85,7 @@ impl ImprovementPolicy {
         ImprovementWritePolicy {
             duplicate_cooldown: Duration::from_secs(self.duplicate_cooldown_secs),
             daily_limit: self.daily_limit,
+            run_error_daily_limit: storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT,
             max_candidates: self.max_candidates,
         }
     }
@@ -204,10 +209,15 @@ impl ImprovementCollector {
                 source: ImprovementSource::Diagnostic,
                 code: event.code.clone(),
                 severity,
-                title: title(&format!("{}: {}", event.code, first_line(&event.detail))),
+                title: title(&format!(
+                    "{}: {}",
+                    event.code,
+                    normalize_variable_parts(first_line(&event.detail))
+                )),
                 evidence: self.json_evidence(json!({
                     "source": event.source, "code": event.code, "severity": severity.as_str(),
                     "detail": bound_text(&event.detail, self.settings.policy.evidence_limit()),
+                    "fields": diagnostic_fields(&event.detail),
                     "run_id": event.run_id, "thread_id": event.thread_id, "call_id": event.call_id,
                     "observed_at_ns": unix_ns(observed),
                 })),
@@ -325,6 +335,14 @@ impl ImprovementCollector {
                     EventKind::Diagnostic(diagnostic) => {
                         self.diagnostic_observed_at(&diagnostic, event.meta.wall_clock)
                     }
+                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                        run_id,
+                        to: AgentRunPhase::Error,
+                        reason: Some(reason),
+                        ..
+                    }) if self.settings.policy.collect_diagnostics => {
+                        self.run_error_observed_at(&run_id, &reason, event.meta.wall_clock);
+                    }
                     EventKind::Fault(FaultEvent::SkillDiagnostic {
                         kind,
                         skill,
@@ -398,13 +416,7 @@ impl ImprovementCollector {
             if text.len() <= limit {
                 return text;
             }
-            let longest = value.as_object_mut().and_then(|object| {
-                object
-                    .values_mut()
-                    .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-                    .max_by_key(|v| v.as_str().map_or(0, str::len))
-            });
-            let Some(field) = longest else {
+            let Some(field) = longest_text_field(&mut value) else {
                 // Manually supplied policies can be smaller than the JSON key overhead.
                 return match limit {
                     0 => String::new(),
@@ -438,7 +450,9 @@ impl ImprovementCollector {
             candidate.clone(),
             self.settings.policy.write_policy(),
         )?;
-        if let ImprovementRecordOutcome::Stored { id } = outcome {
+        if let ImprovementRecordOutcome::Stored { id } | ImprovementRecordOutcome::Reopened { id } =
+            outcome
+        {
             // StorageHandle intentionally exposes no read connection. Render only the guarded
             // intake fields; the authoritative creation timestamp/status live in the database.
             let c = ImprovementCandidate {
@@ -457,6 +471,8 @@ impl ImprovementCollector {
                 run_id: candidate.run_id,
                 occurrences: 1,
                 last_seen_at_ns: 0,
+                reopened_count: 0,
+                reopened_at_ns: None,
             };
             let (issue, _) =
                 self.write_drafts(&id, &render_issue_draft(&c), &render_packet_draft(&c))?;
@@ -489,6 +505,42 @@ fn new_id(prefix: &str) -> Result<String, SelfImprovementError> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| SelfImprovementError::Identity)?;
     Ok(format!("{prefix}-{:032x}", u128::from_le_bytes(bytes)))
+}
+
+// Structured fields share the evidence cap with detail; oversized nested values must
+// shrink too, rather than causing the whole evidence object to fall back to `{}`.
+fn longest_text_field(value: &mut Value) -> Option<&mut Value> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(value),
+        Value::Object(fields) => fields
+            .values_mut()
+            .filter_map(longest_text_field)
+            .max_by_key(|value| value.as_str().map_or(0, str::len)),
+        Value::Array(values) => values
+            .iter_mut()
+            .filter_map(longest_text_field)
+            .max_by_key(|value| value.as_str().map_or(0, str::len)),
+        _ => None,
+    }
+}
+
+fn diagnostic_fields(detail: &str) -> serde_json::Map<String, Value> {
+    detail
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let mut bytes = key.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                || !bytes
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return None;
+            }
+            Some((key.to_owned(), Value::String(value.to_owned())))
+        })
+        .collect()
 }
 
 fn diagnostic_site(detail: &str) -> Option<&str> {

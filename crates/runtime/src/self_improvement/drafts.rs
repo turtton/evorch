@@ -10,11 +10,12 @@ pub(super) const DRAFT_MARKER: &str = "<!-- DRAFT — NOT FILED. Posting anywher
 pub fn render_issue_draft(c: &ImprovementCandidate) -> String {
     // Indented blocks keep untrusted evidence (including markdown fences) inert.
     format!(
-        "{DRAFT_MARKER}\n\n# Title\n\n{}\n\n## Summary\n\nPassive improvement candidate; not a validated defect.\n\nCode: {}\nSource: {}\nSeverity: {}\n\n## Evidence\n\n{}\n## Environment\n\nRecorded by: {}\nRecheck against the current build at filing time; crash evidence names the crashed build.\n\n## Suggested next steps\n\n- Review and reproduce the evidence; rule out configuration or external causes.\n- Define acceptance criteria and a minimal regression test.\n- Obtain explicit operator confirmation before posting anywhere.\n",
+        "{DRAFT_MARKER}\n\n# Title\n\n{}\n\n## Summary\n\nPassive improvement candidate; not a validated defect.\n\nCode: {}\nSource: {}\nSeverity: {}\n\n{}\n## Evidence\n\n{}\n## Environment\n\nRecorded by: {}\nRecheck against the current build at filing time; crash evidence names the crashed build.\n\n## Suggested next steps\n\n- Review and reproduce the evidence; rule out configuration or external causes.\n- Define acceptance criteria and a minimal regression test.\n- Obtain explicit operator confirmation before posting anywhere.\n",
         indent(&super::title(&c.title)),
         indent(&c.code),
         c.source.as_str(),
         c.severity.as_str(),
+        summary_fields(c),
         indent(&pretty_evidence(&c.evidence)),
         super::build_info(),
     )
@@ -27,7 +28,7 @@ pub fn render_packet_draft(c: &ImprovementCandidate) -> String {
     // candidate content cannot inject fields or a canonical-packet claim.
     let scalar = |text: &str| serde_json::Value::String(text.to_owned()).to_string();
     format!(
-        "{DRAFT_MARKER}\n<!-- DRAFT for review only — not a canonical packet; do not place under .intent-cli -->\n\n# Packet draft\n\n    # DRAFT for review only — not a canonical packet; do not place under .intent-cli\n    implementation_issue_packet:\n      id: {}\n      status: draft\n      issue_title: {}\n      issue_kind: improvement\n      problem: {}\n      code: {}\n      evidence: |\n{}      acceptance_criteria:\n        - \"TBD by reviewer\"\n",
+        "{DRAFT_MARKER}\n<!-- DRAFT for review only — not a canonical packet; do not place under .intent-cli -->\n\n# Packet draft\n\n    # DRAFT for review only — not a canonical packet; do not place under .intent-cli\n    implementation_issue_packet:\n      id: {}\n      status: draft\n      issue_title: {}\n      issue_kind: improvement\n      problem: {}\n      code: {}\n      evidence: |\n{}      acceptance_criteria:\n{}",
         scalar(&format!("draft-si-{}", c.id)),
         scalar(&super::title(&c.title)),
         scalar(&super::title(&c.title)),
@@ -36,7 +37,80 @@ pub fn render_packet_draft(c: &ImprovementCandidate) -> String {
             .lines()
             .map(|line| format!("        {line}\n"))
             .collect::<String>(),
+        acceptance_criteria(&c.code)
+            .iter()
+            .map(|criterion| format!("        - {}\n", scalar(criterion)))
+            .collect::<String>(),
     )
+}
+
+fn acceptance_criteria(code: &str) -> &'static [&'static str] {
+    match code {
+        "NoProgress" => &[
+            "Reproduce the no-progress loop using evidence.fields trigger, tool, path, count and input_sha256.",
+            "Add a regression test that detects repeated failures at the configured threshold while allowing genuine progress.",
+            "Verify the diagnostic preserves structured evidence and the run terminates or escalates without losing its checkpoint.",
+        ],
+        "IdenticalToolCalls" => &[
+            "Reproduce identical tool calls with the recorded tool and input; verify they stop at the configured threshold.",
+            "Add a regression test proving distinct tool inputs and successful progress are not incorrectly stopped.",
+        ],
+        "BudgetExhausted" => &[
+            "Reproduce budget exhaustion with the recorded limit and usage; distinguish configured limits from harness defects.",
+            "Add boundary tests proving the budget is enforced and the terminal reason and checkpoint are preserved.",
+        ],
+        code if code.starts_with("RunError:") => &[
+            "Reproduce the run failure using evidence.reason and normalized text; rule out cancellation and provider failures.",
+            "Add a regression test for the classified runtime failure, including recovery and preservation of durable run state.",
+            "Verify repeated equivalent failures deduplicate and the run-error daily limit remains enforced.",
+        ],
+        _ => &[
+            "Reproduce the observation using evidence.fields and the original evidence; distinguish harness faults from external causes.",
+            "Add a minimal regression test for the verified cause and confirm normal execution remains unchanged.",
+        ],
+    }
+}
+
+fn summary_fields(c: &ImprovementCandidate) -> String {
+    let mut table = String::from("| Field | Value |\n| --- | --- |\n");
+    table.push_str(&format!("| occurrences | {} |\n", c.occurrences));
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&c.evidence)
+        && let Some(fields) = value.get("fields").and_then(serde_json::Value::as_object)
+    {
+        for (key, value) in fields {
+            // Escape Markdown/HTML instead of letting evidence create links or table rows.
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            table.push_str(&format!(
+                "| {} | {} |\n",
+                table_cell(key),
+                table_cell(&value)
+            ));
+        }
+    }
+    table.push_str("\nCounts are a draft-generation intake snapshot, not the authoritative cumulative total; consult the database-backed GUI for current occurrences.\n");
+    table
+}
+
+fn table_cell(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '&' => "&amp;".into(),
+            '<' => "&lt;".into(),
+            '>' => "&gt;".into(),
+            '|' => "&#124;".into(),
+            '`' => "&#96;".into(),
+            '\\' => "&#92;".into(),
+            '[' => "&#91;".into(),
+            ']' => "&#93;".into(),
+            '*' => "&#42;".into(),
+            '_' => "&#95;".into(),
+            ch if ch.is_control() => " ".into(),
+            ch => ch.to_string(),
+        })
+        .collect()
 }
 
 fn pretty_evidence(evidence: &str) -> String {

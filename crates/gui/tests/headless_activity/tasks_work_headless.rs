@@ -25,7 +25,6 @@ fn task(id: &str) -> TaskRecord {
         progress: None,
         last_artifact: None,
         failure_reason: None,
-        resume_cursor: None,
         attempts: 0,
         heartbeat_at: None,
         created_at: UNIX_EPOCH,
