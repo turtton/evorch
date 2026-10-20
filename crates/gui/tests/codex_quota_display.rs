@@ -181,12 +181,8 @@ fn quota_snapshot_renders_compact_remaining_windows_with_hover_details() {
     harness.get_by_label("Codex · 75% 5h · 40% wk").hover();
     harness.run_steps(3);
     harness.get_by_label("Codex · plus · remaining quota");
-    harness.get_by_label(
-        "5h: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
-    harness.get_by_label(
-        "wk: 40.0% remaining · 60.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
+    harness.get_by_label("5h: 75.0% remaining · resets in 1d 5h 30m");
+    harness.get_by_label("wk: 40.0% remaining · resets in 1d 5h 30m");
 }
 
 #[test]
@@ -212,8 +208,21 @@ fn first_failure_shows_unavailable_without_fabricated_usage() {
     harness.run();
     harness.get_by_label("Codex · unavailable").hover();
     harness.run_steps(3);
+    harness.get_by_label("Codex quota unavailable");
     harness.get_by_label("quota request timed out");
     assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
+}
+
+#[test]
+fn footer_omits_codex_without_a_codex_subscription() {
+    let state =
+        gui::app::WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
+            .expect("workbench");
+    let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 800.0]);
+    harness.run();
+    assert!(harness.has_label("Usage"));
+    assert!(!harness.has_label("Codex · unavailable"));
+    assert!(!harness.has_label("Codex · loading…"));
 }
 
 fn codex_config() -> config::Config {
@@ -267,18 +276,10 @@ fn multiple_codex_subscriptions_show_first_usage_and_switch_from_details() {
     harness.get_by_label("work · Codex");
     harness.get_by_label("Codex · plus · remaining quota");
     harness.get_by_label("Codex · pro · remaining quota");
-    harness.get_by_label(
-        "5h: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
-    harness.get_by_label(
-        "wk: 40.0% remaining · 60.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
-    harness.get_by_label(
-        "5h: 10.0% remaining · 90.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
-    harness.get_by_label(
-        "Code review: 10.0% remaining · 90.0% used · resets in 1d 5h 30m (2026-09-13 12:00 UTC)",
-    );
+    harness.get_by_label("5h: 75.0% remaining · resets in 1d 5h 30m");
+    harness.get_by_label("wk: 40.0% remaining · resets in 1d 5h 30m");
+    harness.get_by_label("5h: 10.0% remaining · resets in 1d 5h 30m");
+    harness.get_by_label("Code review: 10.0% remaining · resets in 1d 5h 30m");
     harness.get_by_label("work · Codex").click();
     harness.run();
     harness.get_by_label("Codex · work · 10% 5h");

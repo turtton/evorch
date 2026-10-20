@@ -87,7 +87,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 if ui
                     .button("Self-improvement drafts")
-                    .on_hover_text("Settings for collecting improvement-candidate drafts (default off)")
+                    .on_hover_text(
+                        "Settings for collecting improvement-candidate drafts (default off)",
+                    )
                     .clicked()
                 {
                     self.open_self_improvement_settings();
@@ -118,11 +120,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.open_usage_tab();
             }
             let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
-            crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota, now);
-            if self.provider_settings.profiles.iter().any(|profile| profile.kind == crate::model::provider_settings::ProviderKind::ClaudeApi) {
-                ui.separator();
-                ui.label(crate::theme::text::muted("Claude API · quota unavailable"))
-                    .on_hover_text("Claude API-key rate limits are separate from subscription quotas. Subscription usage is shown after OAuth sign-in.");
+            if self.telemetry.quota.configured() {
+                crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota, now);
             }
             if !self
                 .telemetry
@@ -156,7 +155,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             if self.telemetry.kimi_quota.configured() {
                 ui.separator();
-                crate::panes::quota_footer::kimi_quota_footer(ui, &self.telemetry.kimi_quota.state, now);
+                crate::panes::quota_footer::kimi_quota_footer(
+                    ui,
+                    &self.telemetry.kimi_quota.state,
+                    now,
+                );
             }
         });
     }

@@ -52,9 +52,7 @@ fn kimi_footer_uses_bars_and_preserves_last_good_quota_on_failure() {
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
     bar.hover();
     harness.run_steps(3);
-    harness.get_by_label(
-        "wk: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
-    );
+    harness.get_by_label("wk: 75.0% remaining · resets in 1d 5h 30m");
     harness.get_by_label("Stale · quota refresh failed");
 }
 
@@ -184,12 +182,8 @@ fn multiple_kimi_subscriptions_show_first_usage_and_switch_from_details() {
     for profile in ["personal", "work", "unavailable"] {
         harness.get_by_label(&format!("{profile} · Kimi"));
     }
-    harness.get_by_label(
-        "wk: 75.0% remaining · 25.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
-    );
-    harness.get_by_label(
-        "wk: 20.0% remaining · 80.0% used · resets in 1d 5h 30m (2026-10-01 12:00 UTC)",
-    );
+    harness.get_by_label("wk: 75.0% remaining · resets in 1d 5h 30m");
+    harness.get_by_label("wk: 20.0% remaining · resets in 1d 5h 30m");
     harness.get_by_label("Stale · quota refresh failed");
     harness.get_by_label("Quota error: quota request timed out");
     harness.get_by_label("Kimi · unavailable");

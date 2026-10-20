@@ -24,7 +24,7 @@ alacritty_terminal = { workspace = true }
 ashpd = { workspace = true }
 async-trait = { workspace = true }
 catalog = { path = "../catalog" }
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 config = { path = "../config" }
 eframe = { workspace = true }
 egui = { workspace = true }

@@ -60,8 +60,7 @@ fn native_quota_displays_known_bars_unknown_spending_and_stale_errors() {
     assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
     bar.hover();
     harness.run_steps(3);
-    harness
-        .get_by_label("5h: 75.0% remaining · 25.0% used · resets in 5h 20m (2026-10-09 12:00 UTC)");
+    harness.get_by_label("5h: 75.0% remaining · resets in 5h 20m");
     harness.get_by_label("Extra usage: quota percentage unavailable · resets unknown");
     harness.get_by_label("$5.00 used; spending cap unavailable");
     harness.get_by_label("Stale · quota refresh failed");
@@ -95,4 +94,30 @@ fn native_quota_profile_picker_switches_remaining_values() {
             .numeric_value(),
         Some(20.0)
     );
+}
+
+#[test]
+fn quota_without_percentages_collapses_to_the_service_name() {
+    let mut state = QuotaState::default();
+    let mut only_spending = snapshot(75.0);
+    only_spending.windows.remove(0);
+    state.accept(Ok(only_spending));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            ui.ctx().global_style_mut(|style| {
+                style.interaction.tooltip_delay = 0.0;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+            ui.horizontal(|ui| {
+                gui::panes::quota_footer::subscription_quota_footer(ui, "Claude", &state, now())
+            });
+        });
+    harness.run();
+    harness
+        .get_by_label("Claude · percentage unavailable")
+        .hover();
+    harness.run_steps(3);
+    harness.get_by_label("Extra usage: quota percentage unavailable · resets unknown");
+    harness.get_by_label("$5.00 used; spending cap unavailable");
 }
