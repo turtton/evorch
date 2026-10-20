@@ -8,6 +8,8 @@ mod tests;
 
 pub(super) enum RunContinuation {
     Fresh,
+    /// The first root run of a new chat thread, which records the thread's start state.
+    FreshThread(String),
     Awaited,
     Handoff(RunHandoff),
     /// History reused by a host chat entry point alongside a new human prompt.
@@ -520,7 +522,13 @@ impl AgentRuntime {
                     )),
                 })?;
         }
-        let continuation = restored.map_or(RunContinuation::Fresh, RunContinuation::Restored);
+        let continuation = match restored {
+            Some(restored) => RunContinuation::Restored(restored),
+            None if self.shared.run_store.get().is_some() => {
+                RunContinuation::FreshThread(thread_id.to_owned())
+            }
+            None => RunContinuation::Fresh,
+        };
         self.bind_thread_root(thread_id, run_id).map_err(|reason| {
             RuntimeError::RunRestoreFailed {
                 run_id: run_id.to_string(),

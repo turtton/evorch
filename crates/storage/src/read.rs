@@ -122,14 +122,14 @@ impl Database {
         crate::repo::review_lineage::ancestors(&self.conn, run_id)
     }
 
-    /// Every run ID reserved by contexts, notes, questions, evidence or assistant references.
+    /// Every run ID reserved by contexts, notes, questions, evidence, assistant references or thread starts.
     ///
     /// # Errors
     /// Returns an error for unreadable rows.
     pub fn persisted_run_ids(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self
             .conn
-            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges UNION SELECT source_run_id FROM assistant_references")?;
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges UNION SELECT source_run_id FROM assistant_references UNION SELECT root_run_id FROM thread_start_states")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(ids.collect::<Result<_, _>>()?)
     }
@@ -159,6 +159,28 @@ impl Database {
         id: &str,
     ) -> Result<Option<crate::AssistantReferenceRow>, StorageError> {
         crate::repo::assistant_reference::get(&self.conn, id)
+    }
+
+    /// A thread's start state with its untracked entries.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn thread_start_state(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::thread_start::ThreadStartState>, StorageError> {
+        crate::repo::thread_start::get(&self.conn, thread_id)
+    }
+
+    /// Start states captured at or after `since_ns`, newest first, without contents.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn thread_start_states_since(
+        &self,
+        since_ns: i64,
+    ) -> Result<Vec<crate::thread_start::ThreadStartSummary>, StorageError> {
+        crate::repo::thread_start::list_since(&self.conn, since_ns)
     }
 
     /// Return all ledger entries in global sequence order.

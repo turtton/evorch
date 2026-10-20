@@ -50,6 +50,7 @@ enum Command {
     LatestRunLedger(String, ReplyTx<Option<crate::RunLedgerEntry>>),
     SaveAssistantReference(crate::AssistantReferenceRow, ReplyTx),
     AssistantReference(String, ReplyTx<Option<crate::AssistantReferenceRow>>),
+    SaveThreadStartState(crate::thread_start::ThreadStartState, ReplyTx<bool>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
     AnswerUserQuestion(String, String, ReplyTx),
@@ -267,6 +268,19 @@ impl StorageHandle {
         id: &str,
     ) -> Result<Option<crate::AssistantReferenceRow>, StorageError> {
         self.request(|reply| Command::AssistantReference(id.into(), reply))
+    }
+
+    /// Record a thread's start state; the first state of a thread wins and later
+    /// saves return `false`. Secret-bearing content is stored as not replayable.
+    ///
+    /// # Errors
+    /// Rejects content over the size limit, invalid paths, suspended writes or
+    /// persistence failure.
+    pub fn save_thread_start_state(
+        &self,
+        state: crate::thread_start::ThreadStartState,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::SaveThreadStartState(state, reply))
     }
 
     /// Replace the stored snapshot for a run; the last write wins.
@@ -581,8 +595,8 @@ impl StorageHandle {
         self.request(Command::FlushUsage)
     }
 
-    /// Run one maintenance tick: bounded 30-day diagnostic retention and
-    /// incremental vacuum, WAL checkpoint, size reevaluation and temp checks.
+    /// Run one maintenance tick: bounded 30-day diagnostic retention, thread start
+    /// retention and incremental vacuum, WAL checkpoint, size reevaluation and temp checks.
     ///
     /// # Errors
     ///

@@ -74,6 +74,8 @@ pub struct StorageConfig {
     /// usage ledger のリクエスト単位の行を保持する日数です。過ぎた行は日次集計へ
     /// 畳み込みます。0 は畳み込みを無効化します。
     pub usage_retention_days: u32,
+    /// thread 開始状態を保持する日数です。0 は削除を無効化します。
+    pub thread_start_retention_days: u32,
 }
 
 impl Default for StorageConfig {
@@ -89,6 +91,7 @@ impl Default for StorageConfig {
             vacuum_page_budget_per_tick: 256,
             temp_warn_bytes: 268_435_456,
             usage_retention_days: crate::usage::USAGE_RETENTION_DAYS,
+            thread_start_retention_days: crate::thread_start::THREAD_START_RETENTION_DAYS,
         }
     }
 }
@@ -131,5 +134,6 @@ mod tests {
         assert_eq!(config.vacuum_page_budget_per_tick, 256);
         assert_eq!(config.temp_warn_bytes, 268_435_456);
         assert_eq!(config.usage_retention_days, 90);
+        assert_eq!(config.thread_start_retention_days, 14);
     }
 }
