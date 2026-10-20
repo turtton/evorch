@@ -124,6 +124,7 @@ arena と `evorch benchmark` はこの仕組みで置き換え、削除する。
 - 元 thread で承認された escalation から、外部の状態に依存する thread を事前に判定する。
   - 対象は、GitHub 以外への通信やホスト上のパスの読み取り。
   - 該当する thread は report で「外部依存」と明示する。
+  - 再実行の結果でも、拒否した承認、失敗した web 系 tool、ネットワークや DNS の失敗に見える shell のエラーがあった実行は、report で外部依存の疑いとして示す。
 - provider への通信と web 系 tool だけが外部に出る通信になる。
 
 ### 5. ユーザー役を LLM が担う
@@ -158,13 +159,20 @@ arena と `evorch benchmark` はこの仕組みで置き換え、削除する。
 - ユーザーに見えた会話
 - イベントから集計した指標（費用、token の内訳、cache の命中率、tool 呼び出しの種類別件数、エラーとリトライ、delegation の木、拒否された承認、経過時間）
 - 指定があれば検証コマンドの結果（例: `cargo test --offline`）。検証コマンドは、同じネットワーク遮断のもとで各実行の最終状態に対して走らせる
+  - 再実行の tool と同じ sandbox で動かす。600 秒（`--verify-timeout`）で打ち切り、時間切れは失敗とする。
+  - 終了コードと、stdout / stderr の末尾（上限つき）を実行結果に残す。
+
+ユーザー役と採点の request は、実行の指標と費用から除き、評価の overhead として別に示す。
 
 採点は 2 種類行う。
 
 - **一対比較**
+  - 繰り返しの i 回目どうしで、baseline と candidate を組にする。
   - 元のユーザー要求に照らして、要求の充足・正しさ・範囲の守り方・効率の観点ごとに、A / B / 引き分けと理由を構造化して返させる。
-  - サンプルに付けた問題の記述を渡し、その問題が起きたか・直ったかを独立した観点として判定させる。
+  - サンプルに付けた問題の記述を渡し、その問題が起きたか・直ったかを独立した観点として判定させる。問題の記述がなければ、この観点は設けない。
   - 提示順を入れ替えて 2 回採点し、判定が食い違った観点は引き分けにする。
+  - 未完了や失敗の実行も、その状態を伝えたうえで採点する。
+  - 採点結果は出力ディレクトリの `judgments/` に組と提示順ごとに保存する。`eval report` を再実行しても採点し直さず、`--rejudge` を付けたときだけ採点し直す。
 - **過程の分析**
   - 実行ごとに、イベントを要約した時系列（生ログではなく上限つき）を渡す。
   - 時間と token がどこに使われたか、遠回りや重複した tool 呼び出し、delegation の妥当性、差し替えた role の振る舞いを分析させる。
@@ -192,6 +200,9 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
   - fast の料金は `fast_price`、段階料金は `price_tiers` で書く（#276 で追加済み）。
 - subscription の provider（Codex・Claude・Kimi のサブスク）では、対応する API model の公開価格で「API 換算の費用」を出し、そう明記する。
   対応付けは models.dev の provider 候補と設定で決め、plan の 0 円は使わない。
+  - Claude のサブスクは models.dev の `anthropic`、Codex は `openai`、Kimi は `moonshotai` の同じ model を使う。
+    見つからなければ、plan のエントリの `canonical_model_id` が指す model を使う。
+  - 既知の価格がすべて 0 になる場合は、価格を付けられない request として扱う。
 - 価格を付けられない request が 1 件でもあれば、その比較は「費用不完全」とし、該当する model を列挙する。0 円とはみなさない。
 - 2 つの実行が同じ model の同じ prompt 先頭を共有すると、provider の prompt cache が後の実行だけを安くする。
   これを避けるため、各実行の system prompt の先頭に実行ごとの識別子を入れ、実行をまたいだ cache の共有を断つ。
@@ -202,6 +213,11 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
 
 採点用とユーザー役用の model は評価設定で指定する。
 採点 model が比べる候補と同じ model family なら、自己優遇のおそれとして report に警告を出す。
+
+- `eval.judge` が未設定なら Orchestrator の binding を使い、どちらを使ったかを report に残す。
+  採点 model は、candidate ではなくユーザーの設定のもとで、Orchestrator の枠に binding を入れて呼ぶ。
+- 比べるのは、採点 model と、差し替えた role が baseline・candidate のどちらかで使う model である。
+  model family は models.dev の `family`（なければ provider の接頭辞を除いた model 名）の先頭の語（`claude`・`gpt` など）で比べる。
 回帰確認のサンプルを含めて複数 thread を走らせた場合は、thread ごとの勝ち・負け・引き分けの件数を並べる。
 費用も thread ごとに並べる。勝敗を総合順位には変換しない。
 
@@ -210,7 +226,11 @@ subscription の provider は価格が付かないか、plan の 0 円になる�
 - 普段の入口は Evaluator との相談（§1）とする。
 - その下で動く実行と report は CLI とする。Evaluator の tool もこれを別プロセスとして起動する。
   - `evorch eval run --thread <id> --candidate <overlay.toml> --output <dir>`
+    - `--problem <text>` で問題の記述、`--verify <command>` で検証コマンドを渡す。
+    - 終わると、同じディレクトリの report を作る（`--no-report` で省略）。
   - `evorch eval report --output <dir>`
+    - 各ディレクトリに `report.json` と `report.md` を書く。
+    - `--output` を複数渡すと、thread ごとの観点別の勝ち・負け・引き分けと費用の表も出す。
 - 出力ディレクトリには、各実行の storage DB、diff、会話、指標、採点結果を残す。
   `evorch inspect` を出力側の DB に向けて使えるようにする。
 - GUI では、評価の進行と report を表示する。表示の詳細は後続で決める。

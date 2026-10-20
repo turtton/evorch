@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use storage::thread_start::{ThreadStartSnapshot, UntrackedEntry, UntrackedKind};
 
 use crate::git::{self, GitError};
@@ -59,7 +59,7 @@ pub struct Workspace {
     origin_refs: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefChange {
     pub name: String,
     pub before: Option<String>,

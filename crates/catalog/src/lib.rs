@@ -44,6 +44,11 @@ impl ModelCatalog {
         Self::load_with(cache_dir, ENDPOINT, true).await
     }
 
+    /// When the data was fetched from models.dev, which a stale cache keeps.
+    pub fn fetched_at(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(self.fetched_at)
+    }
+
     pub fn find(&self, provider: &str, model: &str) -> Option<&ModelMetadata> {
         self.api.get(provider)?.models.get(model)
     }

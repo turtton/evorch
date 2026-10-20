@@ -2217,6 +2217,7 @@ dependencies = [
  "recorder",
  "routing",
  "runtime",
+ "rustix 1.1.4",
  "sandbox",
  "serde",
  "serde_json",

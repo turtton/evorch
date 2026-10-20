@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use runtime::Role;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use storage::thread_start::{ThreadStartCapture, ThreadStartSnapshot};
 use storage::{Database, StorageError};
 
@@ -36,7 +36,7 @@ pub enum SourceError {
     PrefixMismatch { root: String, prefix: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserTurnKind {
     InitialPrompt,
@@ -45,7 +45,7 @@ pub enum UserTurnKind {
 }
 
 /// One thing the original user said, in thread order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserTurn {
     pub kind: UserTurnKind,
     pub text: String,

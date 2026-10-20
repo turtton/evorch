@@ -8,11 +8,13 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use config::{EvalBudgetConfig, RoleBindingConfig};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::conversation::Entry;
 use crate::driver::{DeniedRequest, Status};
-use crate::source::OriginalThread;
+use crate::roles::SwappedRole;
+use crate::source::{OriginalThread, UserTurn};
+use crate::verify::Verification;
 use crate::workspace::RefChange;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -20,6 +22,9 @@ pub const DATABASE_FILE: &str = "evorch.db";
 pub const DIFF_FILE: &str = "diff.patch";
 pub const CONVERSATION_FILE: &str = "conversation.json";
 pub const OUTCOME_FILE: &str = "outcome.json";
+pub const REPORT_JSON_FILE: &str = "report.json";
+pub const REPORT_MARKDOWN_FILE: &str = "report.md";
+pub const JUDGMENTS_DIR: &str = "judgments";
 
 /// `<user config dir>/eval/<UTC YYYYmmdd-HHMMSS>-<thread id>`.
 pub fn default_dir(user_config_dir: &Path, thread_id: &str, now: SystemTime) -> PathBuf {
@@ -61,7 +66,7 @@ pub fn timestamp(at: SystemTime) -> String {
     DateTime::<Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSummary {
     pub project_root: PathBuf,
     pub repository: PathBuf,
@@ -88,15 +93,15 @@ impl StartSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SimulatorSummary {
-    /// Where the binding came from: `eval.user_simulator`, or the worker
-    /// binding because `eval.user_simulator` is unset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BindingSummary {
+    /// Where the binding came from: its `eval` key, or the role binding used
+    /// because that key is unset.
     pub source: String,
     pub binding: RoleBindingConfig,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunEntry {
     pub label: String,
     pub index: u32,
@@ -109,23 +114,35 @@ pub struct RunEntry {
     pub status: Option<Status>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub thread_id: String,
     pub source_db: PathBuf,
     pub start: StartSummary,
+    /// What the original user said, as the simulated user and the judge see it.
+    #[serde(default)]
+    pub original_turns: Vec<UserTurn>,
+    /// The problem the evaluation is about, judged as its own aspect.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// The verification command run in each replay's final workspace.
+    #[serde(default)]
+    pub verify: Option<String>,
     /// The candidate overlay as given, or `None` when only the baseline runs.
     pub candidate_overlay: Option<String>,
+    /// Roles the overlay changes, with the models each side resolves them to.
+    #[serde(default)]
+    pub swapped_roles: Vec<SwappedRole>,
     pub configurations: Vec<String>,
     pub repeat: u32,
-    pub simulator: SimulatorSummary,
+    pub simulator: BindingSummary,
     pub budget: EvalBudgetConfig,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub runs: Vec<RunEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outcome {
     pub status: Status,
     pub reason: String,
@@ -135,6 +152,8 @@ pub struct Outcome {
     pub elapsed_ms: u64,
     pub denied_requests: Vec<DeniedRequest>,
     pub pushed_refs: Vec<RefChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
 }
 
 /// Write `value` as pretty JSON through a temporary file, so a reader never

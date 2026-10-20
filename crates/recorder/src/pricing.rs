@@ -30,6 +30,79 @@ pub fn fallback_provider_type(provider: &str) -> Option<config::ProviderTypeConf
     }
 }
 
+/// Where a comparable price came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceBasis {
+    /// The provider's own prices.
+    Billed,
+    /// A subscription priced as the public API model it serves.
+    ApiEquivalent,
+}
+
+/// models.dev providers whose public API prices a subscription's models, or
+/// `None` for providers that bill by usage.
+pub fn api_equivalent_providers(
+    provider_type: config::ProviderTypeConfig,
+) -> Option<&'static [&'static str]> {
+    match provider_type {
+        config::ProviderTypeConfig::AnthropicSubscription => Some(&["anthropic"]),
+        config::ProviderTypeConfig::OpenAiCodex => Some(&["openai"]),
+        config::ProviderTypeConfig::KimiSubscription => Some(&["moonshotai", "moonshotai-cn"]),
+        _ => None,
+    }
+}
+
+/// The API model a subscription entry serves: an explicit reference to one of
+/// `providers`, the same id there, or the canonical id of the plan's entry.
+fn api_catalog_entry<'a>(
+    entry: &ModelEntryConfig,
+    provider_type: config::ProviderTypeConfig,
+    providers: &[&str],
+    catalog: &'a ModelCatalog,
+    profile: &str,
+) -> Option<&'a catalog::ModelMetadata> {
+    let in_api = |model: &str| {
+        providers
+            .iter()
+            .find_map(|provider| catalog.find(provider, model))
+    };
+    let referenced = entry
+        .metadata_ref
+        .as_deref()
+        .and_then(|reference| reference.split_once('/'))
+        .filter(|(provider, _)| providers.contains(provider))
+        .and_then(|(provider, model)| catalog.find(provider, model));
+    let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
+    referenced.or_else(|| in_api(model_id)).or_else(|| {
+        let plan = runtime::model_resolve::resolve_catalog_entry(
+            entry,
+            catalog,
+            Some(profile),
+            Some(provider_type),
+        )?;
+        let (provider, model) = plan.canonical_model_id.as_deref()?.split_once('/')?;
+        catalog.find(provider, model).or_else(|| in_api(model))
+    })
+}
+
+fn is_free(schedule: &PriceSchedule) -> bool {
+    let set_is_free = |set: &PriceSet| {
+        std::iter::once(set.base)
+            .chain(set.tiers.iter().map(PriceTier::pricing))
+            .flat_map(|prices| {
+                [
+                    prices.input,
+                    prices.output,
+                    prices.cache_read,
+                    prices.cache_write,
+                ]
+            })
+            .flatten()
+            .all(|price| price == 0.0)
+    };
+    set_is_free(&schedule.standard) && schedule.fast.as_ref().is_none_or(set_is_free)
+}
+
 /// Static TOML prices first, then the catalog entry the profile resolves to.
 pub fn resolve_model_pricing(
     entry: Option<&ModelEntryConfig>,
@@ -129,6 +202,42 @@ impl UsagePricing {
         resolve_model_pricing(entry, provider_type, self.catalog.as_deref(), name, model)
     }
 
+    /// Like [`Self::pricing`], except that a subscription is priced as the
+    /// public API model it serves. A plan whose every known price is zero is
+    /// unpriced rather than free.
+    pub fn comparable_pricing(
+        &self,
+        provider: &str,
+        profile: Option<&str>,
+        model: &str,
+    ) -> Option<(PriceSchedule, PriceBasis)> {
+        let name = profile.unwrap_or(provider);
+        let profile_config = self.entries.get(name);
+        let provider_type = profile_config
+            .map(|profile| profile.provider_type)
+            .or(fallback_provider_type(provider));
+        let Some((provider_type, providers)) = provider_type.and_then(|provider_type| {
+            api_equivalent_providers(provider_type).map(|providers| (provider_type, providers))
+        }) else {
+            return self
+                .pricing(provider, profile, model)
+                .map(|schedule| (schedule, PriceBasis::Billed));
+        };
+        let fallback = ModelEntryConfig::enabled(model);
+        let entry = profile_config
+            .and_then(|profile| profile.models.iter().find(|entry| entry.id == model))
+            .unwrap_or(&fallback);
+        let catalog = self
+            .catalog
+            .as_deref()
+            .and_then(|catalog| api_catalog_entry(entry, provider_type, providers, catalog, name))
+            .map(catalog_schedule);
+        entry
+            .pricing_for(catalog)
+            .filter(|schedule| !is_free(schedule))
+            .map(|schedule| (schedule, PriceBasis::ApiEquivalent))
+    }
+
     /// Whether a refresh would change any price, comparing the catalog by identity.
     pub fn same_source(&self, other: &Self) -> bool {
         self.entries == other.entries
@@ -187,3 +296,6 @@ impl TokenUsage {
         (has_known_price && cost.is_finite()).then_some(cost)
     }
 }
+
+#[cfg(test)]
+mod tests;
