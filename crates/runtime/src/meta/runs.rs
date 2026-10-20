@@ -13,7 +13,7 @@ pub(super) struct RunArgs {
 }
 
 pub(super) fn run_output(
-    state: &LoopState,
+    state: &mut LoopState,
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
@@ -26,7 +26,14 @@ pub(super) fn run_output(
         Err(message) => return error(message),
     };
     match runtime.run_output(state.caller_run_id(), run_id) {
-        Ok(output) => serialize(&output),
+        Ok(output) => {
+            // Only the first terminal result of a child is progress; repeated
+            // polling of the same finished child must remain detectable.
+            if serde_json::to_value(&output).is_ok_and(|value| waiting::terminal(&value)) {
+                state.budget.mark_child_completed(&run_id.to_string());
+            }
+            serialize(&output)
+        }
         Err(runtime_error) => {
             let code = match &runtime_error {
                 crate::RuntimeError::UnknownRun { .. } => "unknown_run",
