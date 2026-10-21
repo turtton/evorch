@@ -120,6 +120,7 @@ pub struct ToolExecutor {
         crate::tools::BrowserToolOptions,
     )>,
     browser_provider: Option<Arc<dyn browser::agent::PageProvider>>,
+    host_tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolExecutor {
@@ -137,6 +138,7 @@ impl ToolExecutor {
             file_escalation: RwLock::new(None),
             agent_browser: None,
             browser_provider: None,
+            host_tools: Vec::new(),
         }
     }
 
@@ -463,6 +465,34 @@ impl ToolExecutor {
             Some((browser, options)) => self.with_agent_browser(browser, options),
             None => self,
         }
+    }
+
+    /// Registers tools the host process provides, such as the Evaluator's
+    /// (ADR 0036). Executors composed later for a run inherit them through
+    /// [`ToolExecutor::inherit_host_tools`].
+    ///
+    /// # Errors
+    /// Returns [`ToolError::InvalidSchema`] when a tool's schema does not compile.
+    pub fn with_host_tools(
+        mut self,
+        tools: impl IntoIterator<Item = Arc<dyn Tool>>,
+    ) -> Result<Self, ToolError> {
+        for tool in tools {
+            self.register(Arc::clone(&tool))?;
+            self.host_tools.push(tool);
+        }
+        Ok(self)
+    }
+
+    /// Registers the same host tools as `parent`.
+    pub fn inherit_host_tools(mut self, parent: &ToolExecutor) -> Self {
+        for tool in &parent.host_tools {
+            // SAFE-EXPECT: the parent compiled the same schema when it registered the tool.
+            self.register(Arc::clone(tool))
+                .expect("inherited host tool schemas compile");
+            self.host_tools.push(Arc::clone(tool));
+        }
+        self
     }
 
     /// The agent browser registered by [`ToolExecutor::with_agent_browser`].

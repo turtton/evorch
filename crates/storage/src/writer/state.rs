@@ -210,6 +210,26 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::SaveEvalSample(sample, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "evaluation sample writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::eval_sample::save(&state.conn, &sample)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::DeleteEvalSample(thread_id, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "evaluation sample writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::eval_sample::delete(&state.conn, &thread_id)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::AnswerUserQuestionWithEvidence(id, answer, rows, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     // Plan A: the answer's checked UPDATE is the first-answer-wins

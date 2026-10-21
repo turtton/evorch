@@ -12,7 +12,7 @@ use crate::workspace::tests::Source;
 pub(crate) struct Recorded {
     pub(crate) source: Source,
     pub(crate) config: storage::StorageConfig,
-    storage: storage::Storage,
+    pub(crate) storage: storage::Storage,
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
 }

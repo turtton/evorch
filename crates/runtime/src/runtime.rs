@@ -64,6 +64,16 @@ pub struct AgentRuntime {
     pub(crate) shared: Arc<Shared>,
 }
 
+/// See [`AgentRuntime::downgrade`].
+#[derive(Clone)]
+pub struct WeakAgentRuntime(Weak<Shared>);
+
+impl WeakAgentRuntime {
+    pub fn upgrade(&self) -> Option<AgentRuntime> {
+        AgentRuntime::from_weak(&self.0)
+    }
+}
+
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
@@ -94,6 +104,8 @@ pub(crate) struct Shared {
     pub(crate) compaction: OnceLock<CompactionSettings>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
+    /// Contention budget of ownership checkpoints and turn starts; unset is the default.
+    pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
@@ -611,6 +623,11 @@ impl AgentRuntime {
         shared.upgrade().map(|shared| Self { shared })
     }
 
+    /// A handle for hosts the runtime's own tools hold, which must not keep it alive.
+    pub fn downgrade(&self) -> WeakAgentRuntime {
+        WeakAgentRuntime(Arc::downgrade(&self.shared))
+    }
+
     /// 共有イベントバス・ツール実行器・モデル境界からランタイムを生成する。
     pub fn new(
         bus: Arc<EventBus>,
@@ -645,6 +662,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -700,6 +718,16 @@ impl AgentRuntime {
             self.shared.run_ids.observe(latest);
         }
         let _ = self.shared.run_store.set(store);
+        self
+    }
+
+    /// Override the ownership registry contention budget (deadline, per-attempt
+    /// wait, backoff). For tests only: they shorten the budget so contention
+    /// that outlasts it does not take the production 10 s. Production keeps
+    /// [`crate::ownership::RetryPolicy::default`]. First setting wins.
+    #[doc(hidden)]
+    pub fn with_ownership_retry_policy(self, policy: crate::ownership::RetryPolicy) -> Self {
+        let _ = self.shared.ownership_retry.set(policy);
         self
     }
 
@@ -934,6 +962,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -1676,6 +1705,68 @@ impl AgentRuntime {
         text: String,
     ) -> Result<(), RuntimeError> {
         self.send_inbox_message(run_id, text, Vec::new(), false, None)
+    }
+
+    /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
+    /// first live interactive run among `run_id`, its ancestors and then newer
+    /// runs of the same conversation, so a run that would end without reading
+    /// it is skipped. The notice wakes a waiting run without user authority.
+    ///
+    /// # Errors
+    /// [`RuntimeError::UnknownRun`] for an unregistered run, otherwise the
+    /// last delivery error, [`RuntimeError::RunTerminated`] when none was tried.
+    pub fn deliver_notice(&self, run_id: RunId, text: &str) -> Result<RunId, RuntimeError> {
+        let candidates = {
+            let runs = lock_runs(&self.shared.runs);
+            if !runs.contains_key(&run_id) {
+                return Err(unknown_run(run_id));
+            }
+            let mut lineage = Vec::new();
+            let mut next = Some(run_id);
+            while let Some(id) = next {
+                let Some(entry) = runs.get(&id) else { break };
+                lineage.push(id);
+                next = entry.parent;
+            }
+            let conversation = lineage
+                .last()
+                .and_then(|root| runs.get(root))
+                .map(|root| root.name.clone())
+                .filter(|name| name.starts_with("chat:"));
+            let mut later: Vec<RunId> = runs
+                .iter()
+                .filter(|(id, entry)| {
+                    entry.parent.is_none()
+                        && Some(&entry.name) == conversation.as_ref()
+                        && !lineage.contains(id)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            later.sort_by(|a, b| b.cmp(a));
+            lineage
+                .into_iter()
+                .chain(later)
+                .filter(|id| {
+                    runs.get(id).is_some_and(|entry| {
+                        entry.config.interactive
+                            && !matches!(
+                                *entry.phase_rx.borrow(),
+                                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
+                            )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut failure = RuntimeError::RunTerminated {
+            run_id: run_id.to_string(),
+        };
+        for candidate in candidates {
+            match self.send_internal_message(candidate, text.to_owned()) {
+                Ok(()) => return Ok(candidate),
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
     }
 
     fn send_inbox_message(
@@ -2489,6 +2580,22 @@ pub fn production_executor_with_config(
     workspace_root: PathBuf,
     config: &config::Config,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    production_executor_with_host_tools(bus, policy, workspace_root, config, Vec::new())
+}
+
+/// The production executor with `host_tools` registered, which every executor a
+/// run composes from it inherits.
+///
+/// # Errors
+/// Fails like [`production_executor_with_config`], or when a host tool's schema
+/// does not compile.
+pub fn production_executor_with_host_tools(
+    bus: Arc<EventBus>,
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+    config: &config::Config,
+    host_tools: Vec<Arc<dyn tools::Tool>>,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let sandbox_error = |error: sandbox::SandboxError| RuntimeError::Sandbox {
         detail: error.to_string(),
     };
@@ -2505,7 +2612,10 @@ pub fn production_executor_with_config(
         &[workspace_root],
         sandbox::ApprovalPolicy::allow_all(),
         BrowserTools::Configure(&config.tools.browser),
-    )
+    )?
+    .with_host_tools(host_tools)
+    .map(Arc::new)
+    .map_err(RuntimeError::from)
 }
 
 /// Production executor composition, also used after a run builds its own sandbox.
@@ -2513,7 +2623,8 @@ pub fn production_executor_with_config(
 pub(crate) enum BrowserTools<'a> {
     /// Launch as `[tools.browser]` sets: the process's first executor.
     Configure(&'a config::BrowserToolsConfig),
-    /// Share the parent's browser, so one Chromium serves the process.
+    /// Share the parent's browser, so one Chromium serves the process, and
+    /// register the parent's host tools.
     Inherit(&'a ToolExecutor),
 }
 
@@ -2526,7 +2637,7 @@ pub(crate) fn configured_executor(
     forbidden_roots: &[PathBuf],
     approval_policy: sandbox::ApprovalPolicy,
     browser: BrowserTools<'_>,
-) -> Result<Arc<ToolExecutor>, RuntimeError> {
+) -> Result<ToolExecutor, RuntimeError> {
     let hook = tools::post_edit::CommentChecker::resolve_with_roots(
         Arc::clone(&sandbox),
         checker_config,
@@ -2543,13 +2654,15 @@ pub(crate) fn configured_executor(
     .with_web_tools()
     .and_then(|executor| match browser {
         BrowserTools::Configure(config) => executor.with_browser_tools(config),
-        BrowserTools::Inherit(parent) => Ok(executor.inherit_agent_browser(parent)),
+        BrowserTools::Inherit(parent) => Ok(executor
+            .inherit_agent_browser(parent)
+            .inherit_host_tools(parent)),
     })
     .map_err(|error| RuntimeError::NetworkGuard {
         detail: error.to_string(),
     })?;
     executor.set_file_boundary(boundary);
-    Ok(Arc::new(executor))
+    Ok(executor)
 }
 
 struct RunEntryView<'a> {
@@ -3500,6 +3613,51 @@ mod agent_browser_sharing_tests {
         }
     }
 
+    struct HostTool;
+
+    #[async_trait::async_trait]
+    impl tools::Tool for HostTool {
+        fn name(&self) -> &str {
+            "host_probe"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> tools::Permissions {
+            tools::Permissions::read_only()
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<tools::ToolResult, tools::ToolError> {
+            Ok(tools::ToolResult::success("probed"))
+        }
+    }
+
+    #[test]
+    fn run_executors_inherit_host_tools() {
+        // Given: a process executor carrying a host-provided tool.
+        let bus = Arc::new(EventBus::new(16));
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = ToolExecutor::new(Arc::clone(&bus))
+            .with_host_tools([Arc::new(HostTool) as Arc<dyn tools::Tool>])
+            .unwrap();
+
+        // When: a run composes its own executor from that parent, and then
+        // another run composes one from that run's executor.
+        let run = compose(&bus, workspace.path(), BrowserTools::Inherit(&parent));
+        let nested = compose(&bus, workspace.path(), BrowserTools::Inherit(&run));
+
+        // Then: both offer the host tool next to the standard tools.
+        for executor in [run, nested] {
+            assert!(executor.tool_permissions("host_probe").is_some());
+            assert!(executor.tool_permissions("read").is_some());
+        }
+    }
+
     fn compose(
         bus: &Arc<EventBus>,
         workspace: &std::path::Path,
@@ -3514,6 +3672,7 @@ mod agent_browser_sharing_tests {
             sandbox::ApprovalPolicy::allow_all(),
             browser,
         )
+        .map(Arc::new)
         .unwrap()
     }
 }

@@ -1,6 +1,17 @@
--- Reopen dismissed candidates in place, with durable audit metadata.
-ALTER TABLE improvement_candidates ADD COLUMN reopened_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE improvement_candidates ADD COLUMN reopened_at_ns INTEGER;
-
--- Resume state is carried by the durable run context, not a task-local cursor.
-ALTER TABLE tasks DROP COLUMN resume_cursor_json;
+-- Threads pinned as evaluation samples (ADR 0036 §1). A sample needs a
+-- replayable start state, and pins it: the start state is not deleted while
+-- the sample exists.
+CREATE TABLE eval_samples (
+    thread_id TEXT PRIMARY KEY REFERENCES thread_start_states(thread_id),
+    problem TEXT NOT NULL CHECK (problem <> ''),
+    -- JSON array of role config addresses.
+    focus_roles TEXT NOT NULL CHECK (json_valid(focus_roles) AND json_type(focus_roles) = 'array'),
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+CREATE TRIGGER eval_samples_replayable
+BEFORE INSERT ON eval_samples
+WHEN (SELECT replayable FROM thread_start_states WHERE thread_id = NEW.thread_id) IS NOT 1
+BEGIN
+    SELECT RAISE(ABORT, 'an evaluation sample requires a replayable thread start state');
+END;

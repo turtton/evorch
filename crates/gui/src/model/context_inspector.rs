@@ -11,7 +11,7 @@ use runtime::base_context::{
 };
 
 /// Roles a run can be started as, in display order.
-pub const ROLES: [Role; 8] = [
+pub const ROLES: [Role; 9] = [
     Role::Orchestrator,
     Role::Worker,
     Role::Explorer,
@@ -20,6 +20,7 @@ pub const ROLES: [Role; 8] = [
     Role::WebResearcher,
     Role::Advisor,
     Role::MultimodalLooker,
+    Role::Evaluator,
 ];
 
 /// The run shape the Preview view asks the runtime to compose.

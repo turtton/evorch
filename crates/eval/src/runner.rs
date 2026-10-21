@@ -15,14 +15,16 @@ use runtime::{
     AgentModel, ExecutionPolicy, ModelSource, ProjectTrust, Role, RunConfig, RunStore,
     RuntimeComposition, compose_runtime, production_executor_with_config,
 };
-use sandbox::DirectSandbox;
 use sandbox::credential::CredentialStore;
+use sandbox::{DirectSandbox, Sandbox};
 use tools::ToolExecutor;
 
 use crate::driver::{self, Replay, ReplayOutcome, Status};
-use crate::output::{self, Manifest, Outcome, RunEntry, SimulatorSummary, StartSummary};
+use crate::output::{self, BindingSummary, Manifest, Outcome, RunEntry, StartSummary};
+use crate::roles;
 use crate::simulator::UserSimulator;
 use crate::source::{OriginalThread, SourceError};
+use crate::verify::{self, Verification};
 use crate::workspace::{self, CommitIdentity, Workspace};
 
 const BUS_CAPACITY: usize = 65_536;
@@ -39,6 +41,12 @@ pub struct EvalArgs {
     pub output: Option<PathBuf>,
     pub db: Option<PathBuf>,
     pub user_config_dir: Option<PathBuf>,
+    /// The problem the evaluation is about, judged as its own aspect.
+    pub problem: Option<String>,
+    /// A command run in each replay's final workspace, such as `cargo test --offline`.
+    pub verify: Option<String>,
+    /// `None` uses [`verify::DEFAULT_TIMEOUT`].
+    pub verify_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +116,8 @@ struct Context {
     thread: OriginalThread,
     user_config_dir: Option<PathBuf>,
     budget: config::EvalBudgetConfig,
+    verify: Option<String>,
+    verify_timeout: Duration,
     simulator: Config,
     identity: CommitIdentity,
     trust: ProjectTrust,
@@ -156,6 +166,16 @@ pub async fn run(
         Some(path) => Some(read_overlay(path, user_config_dir.as_deref())?),
         None => None,
     };
+    let swapped_roles = match &overlay {
+        Some((_, value)) => {
+            let project = Some(thread.project_root.as_path());
+            let baseline = load_config(user_config_dir.as_deref(), project, None)?;
+            let candidate = load_config(user_config_dir.as_deref(), project, Some(value))
+                .map_err(|error| EvalError::Overlay(error.to_string()))?;
+            roles::swapped_roles(&baseline, &candidate)
+        }
+        None => Vec::new(),
+    };
     let repeat = args.repeat.unwrap_or(base.eval.repeat_target);
     if repeat == 0 {
         return Err(EvalError::Usage("--repeat must be at least 1".into()));
@@ -184,7 +204,11 @@ pub async fn run(
         thread_id: thread.thread_id.clone(),
         source_db,
         start: StartSummary::of(&thread),
+        original_turns: thread.turns.clone(),
+        problem: args.problem.clone(),
+        verify: args.verify.clone(),
         candidate_overlay: overlay.as_ref().map(|(text, _)| text.clone()),
+        swapped_roles,
         configurations: configurations
             .iter()
             .map(|(label, _)| (*label).to_owned())
@@ -204,6 +228,8 @@ pub async fn run(
         thread,
         user_config_dir,
         budget: base.eval.budget.clone(),
+        verify: args.verify,
+        verify_timeout: args.verify_timeout.unwrap_or(verify::DEFAULT_TIMEOUT),
         simulator,
         credentials,
         deps,
@@ -244,7 +270,7 @@ pub async fn run(
     Ok(Evaluation { dir, runs })
 }
 
-fn load_config(
+pub(crate) fn load_config(
     user_config_dir: Option<&Path>,
     project_dir: Option<&Path>,
     overlay: Option<&toml::Value>,
@@ -264,37 +290,44 @@ fn read_overlay(
 ) -> Result<(String, toml::Value), EvalError> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
-    let value: toml::Value = toml::from_str(&text)
+    let value = parse_overlay(&text, user_config_dir)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
+    Ok((text, value))
+}
+
+/// A candidate overlay as `eval run` accepts it: a TOML table that leaves the
+/// keys a candidate cannot change alone and loads over the user's configuration.
+pub(crate) fn parse_overlay(
+    text: &str,
+    user_config_dir: Option<&Path>,
+) -> Result<toml::Value, String> {
+    let value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let table = value
         .as_table()
-        .ok_or_else(|| EvalError::Overlay("the overlay must be a TOML table".into()))?;
+        .ok_or_else(|| "the overlay must be a TOML table".to_owned())?;
     if let Some(key) = OVERLAY_FORBIDDEN_KEYS
         .iter()
         .find(|key| table.contains_key(**key))
     {
-        return Err(EvalError::Overlay(format!(
-            "`{key}` cannot be changed by a candidate"
-        )));
+        return Err(format!("`{key}` cannot be changed by a candidate"));
     }
-    load_config(user_config_dir, None, Some(&value))
-        .map_err(|error| EvalError::Overlay(error.to_string()))?;
-    Ok((text, value))
+    load_config(user_config_dir, None, Some(&value)).map_err(|error| error.to_string())?;
+    Ok(value)
 }
 
 /// The simulated user runs on the user's configuration, never the candidate's,
 /// with its binding in the worker slot it is invoked through.
-fn simulator_config(base: &Config) -> (Config, SimulatorSummary) {
+fn simulator_config(base: &Config) -> (Config, BindingSummary) {
     let mut config = base.clone();
     let summary = match &base.eval.user_simulator {
         Some(binding) => {
             config.agents.worker.base = binding.clone();
-            SimulatorSummary {
+            BindingSummary {
                 source: "eval.user_simulator".into(),
                 binding: binding.clone(),
             }
         }
-        None => SimulatorSummary {
+        None => BindingSummary {
             source: "agents.worker (eval.user_simulator is unset)".into(),
             binding: base.agents.worker.base.clone(),
         },
@@ -359,6 +392,7 @@ async fn replay_once(
                 elapsed_ms: 0,
                 denied_requests: Vec::new(),
                 pushed_refs: Vec::new(),
+                verification: None,
             };
             output::write_run(run_dir, &outcome, &[], None)?;
             return Ok(outcome);
@@ -377,7 +411,12 @@ async fn replay_once(
             conversation: Vec::new(),
         },
     };
-    let (status, reason, diff, pushed_refs) = match workspace.finish() {
+    let finished = workspace.finish();
+    let verification = match &context.verify {
+        Some(command) => Some(verify_in(context, &workspace.project_dir, command).await),
+        None => None,
+    };
+    let (status, reason, diff, pushed_refs) = match finished {
         Ok(result) => (
             replay.status,
             replay.reason,
@@ -403,9 +442,43 @@ async fn replay_once(
         elapsed_ms: replay.elapsed_ms,
         denied_requests: replay.denied_requests,
         pushed_refs,
+        verification,
     };
     output::write_run(run_dir, &outcome, &replay.conversation, diff.as_deref())?;
     Ok(outcome)
+}
+
+fn shell_environment() -> Vec<(String, String)> {
+    vec![("CARGO_NET_OFFLINE".into(), "true".into())]
+}
+
+/// Run the verification command under the sandbox the replay's tools used.
+async fn verify_in(context: &Context, project: &Path, command: &str) -> Verification {
+    let sandbox: Arc<dyn Sandbox> = match context.deps.isolation {
+        Isolation::Production => {
+            match runtime::build_sandbox(
+                &ExecutionPolicy::for_role(context.thread.role),
+                project.to_path_buf(),
+            ) {
+                Ok(sandbox) => sandbox,
+                Err(error) => {
+                    return Verification::unstarted(
+                        command,
+                        format!("verification sandbox: {error}"),
+                    );
+                }
+            }
+        }
+        Isolation::DirectUnchecked => Arc::new(DirectSandbox::new_unchecked()),
+    };
+    verify::run(
+        sandbox.as_ref(),
+        command,
+        project,
+        shell_environment(),
+        context.verify_timeout,
+    )
+    .await
 }
 
 /// Compose a fresh runtime for the prepared clone, drive the replay, and
@@ -478,7 +551,7 @@ async fn drive_in(
             Isolation::Production => runtime.with_sandbox_root(project.clone()),
             Isolation::DirectUnchecked => runtime,
         }
-        .with_shell_environment(vec![("CARGO_NET_OFFLINE".into(), "true".into())])
+        .with_shell_environment(shell_environment())
         .with_system_prompt_preamble(format!("Run identifier: {nonce}"));
         runtime
             .set_project_root(project.clone())
@@ -516,26 +589,40 @@ fn simulator_model(context: &Context, bus: &Arc<EventBus>) -> Result<Arc<dyn Age
     if let Some(models) = &context.deps.models {
         return Ok((models.simulator)(bus));
     }
-    let user_dir = context
-        .user_config_dir
-        .clone()
+    configured_model(
+        &context.simulator,
+        context.user_config_dir.as_deref(),
+        &context.credentials,
+        &context.deps.env,
+        bus,
+    )
+    .map_err(|error| format!("user simulator: {error}"))
+}
+
+/// A routed model for an evaluation role bound into the user's configuration.
+pub(crate) fn configured_model(
+    config: &Config,
+    user_config_dir: Option<&Path>,
+    credentials: &Arc<dyn CredentialStore>,
+    env: &Arc<dyn EnvLookup>,
+    bus: &Arc<EventBus>,
+) -> Result<Arc<dyn AgentModel>, String> {
+    let user_dir = user_config_dir
+        .map(Path::to_path_buf)
         .or_else(config::user_config_dir);
     if user_dir.is_none()
-        && context.simulator.providers.values().any(|profile| {
+        && config.providers.values().any(|profile| {
             profile.provider_type == config::ProviderTypeConfig::AnthropicSubscription
         })
     {
-        return Err(
-            "user simulator: Claude installation identity requires a user configuration directory"
-                .into(),
-        );
+        return Err("Claude installation identity requires a user configuration directory".into());
     }
-    let model = runtime::compose::compose_routed_model(
-        &context.simulator,
+    runtime::compose::compose_routed_model(
+        config,
         routing::ComposeDeps {
-            credential_store: Arc::clone(&context.credentials),
+            credential_store: Arc::clone(credentials),
             event_bus: Some(Arc::clone(bus)),
-            env: Arc::clone(&context.deps.env),
+            env: Arc::clone(env),
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
                 claude_installation_id_path: user_dir
@@ -544,8 +631,8 @@ fn simulator_model(context: &Context, bus: &Arc<EventBus>) -> Result<Arc<dyn Age
             },
         },
     )
-    .map_err(|error| format!("user simulator: {error}"))?;
-    Ok(model)
+    .map(|model| model as Arc<dyn AgentModel>)
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

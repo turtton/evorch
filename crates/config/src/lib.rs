@@ -41,7 +41,9 @@ pub use save_codex::{
     CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
 };
 pub use save_role_profiles::{
-    delete_role_profile, save_project_role_profile, save_role_profile, save_role_profile_bindings,
+    RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings,
+    save_project_role_profile, save_role_profile, save_role_profile_bindings,
+    save_role_profiles_bindings,
 };
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;

@@ -69,6 +69,7 @@ pub fn role_settings_modal(
                             ("Planner", "planner", &mut agents.roles.planner, None),
                             ("Advisor", "advisor", &mut agents.roles.advisor, None),
                             ("Multimodal Looker", "multimodal_looker", &mut agents.roles.multimodal_looker, None),
+                            ("Evaluator", "evaluator", &mut agents.roles.evaluator, None),
                         ] {
                             ui.push_id(name, |ui| {
                                 ui.collapsing(badge(name), |ui| {

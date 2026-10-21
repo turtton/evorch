@@ -26,7 +26,7 @@ pub struct AgentsConfig {
 /// agents 内の明示的な route 参照 (チェーンの要素) を旧名→新名で置き換える。
 ///
 /// 各 role (orchestrator/explorer/worker/reviewer/roles.web_researcher/roles.planner/
-/// roles.advisor/roles.multimodal_looker) と worker.categories / reviewer.categories の全 category が対象。
+/// roles.advisor/roles.multimodal_looker/roles.evaluator) と worker.categories / reviewer.categories の全 category が対象。
 /// `models` が空 (暗黙の role 名参照) のものは変更しない。
 /// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
 pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
@@ -43,6 +43,7 @@ pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, S
         &mut agents.roles.planner.models,
         &mut agents.roles.advisor.models,
         &mut agents.roles.multimodal_looker.models,
+        &mut agents.roles.evaluator.models,
         &mut agents.roles.compactor.models,
     ]
     .into_iter()
@@ -120,6 +121,7 @@ pub fn chain_at_mut<'a>(
         "roles.planner" => &mut agents.roles.planner,
         "roles.advisor" => &mut agents.roles.advisor,
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker,
+        "roles.evaluator" => &mut agents.roles.evaluator,
         "roles.compactor" => &mut agents.roles.compactor,
         address => {
             let (categories, category) =
@@ -153,8 +155,8 @@ pub fn implicit_roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String>
         .collect()
 }
 
-/// 設定上のアドレスと全8ロール、および compactor のバインディングを列挙する。
-fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 9] {
+/// 設定上のアドレスと全9ロール、および compactor のバインディングを列挙する。
+fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 10] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
@@ -164,6 +166,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 9] {
         ("roles.planner", &agents.roles.planner),
         ("roles.advisor", &agents.roles.advisor),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
+        ("roles.evaluator", &agents.roles.evaluator),
         ("roles.compactor", &agents.roles.compactor),
     ]
 }
@@ -176,6 +179,7 @@ pub struct AdditionalRoleBindings {
     #[serde(alias = "oracle")]
     pub advisor: RoleBindingConfig,
     pub multimodal_looker: RoleBindingConfig,
+    pub evaluator: RoleBindingConfig,
     /// 要約 (compaction) にだけ使うチェーン。agent としては起動しない。
     /// `models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。
     pub compactor: RoleBindingConfig,
@@ -220,6 +224,7 @@ impl AgentsConfig {
             "planner" => &self.roles.planner,
             "advisor" => &self.roles.advisor,
             "multimodal_looker" => &self.roles.multimodal_looker,
+            "evaluator" => &self.roles.evaluator,
             other => {
                 return Err(ConfigError::UnknownAgentRole {
                     role: other.to_string(),
@@ -443,6 +448,7 @@ mod tests {
             "roles.planner",
             "roles.advisor",
             "roles.multimodal_looker",
+            "roles.evaluator",
         ]
         .into_iter()
         .map(String::from)
@@ -521,6 +527,7 @@ mod tests {
             ("planner", "roles.planner"),
             ("advisor", "roles.advisor"),
             ("multimodal_looker", "roles.multimodal_looker"),
+            ("evaluator", "roles.evaluator"),
         ] {
             // Then: only the role address is reported (not its inheriting categories).
             assert_eq!(implicit_roles_using(logical, &agents), [address]);
@@ -544,7 +551,7 @@ mod tests {
 
     #[test]
     fn rename_route_refs_updates_all_explicit_roles() {
-        // Given: 全 8 ロールと compactor が同じ論理モデルを明示的に指定する。
+        // Given: 全 9 ロールと compactor が同じ論理モデルを明示的に指定する。
         let doc = r#"
 [agents.orchestrator]
 models = [{ route = "old" }]
@@ -564,6 +571,8 @@ models = [{ route = "old" }]
 [agents.roles.advisor]
 models = [{ route = "old" }]
 [agents.roles.multimodal_looker]
+models = [{ route = "old" }]
+[agents.roles.evaluator]
 models = [{ route = "old" }]
 [agents.roles.compactor]
 models = [{ route = "old" }]
@@ -628,6 +637,7 @@ models = [{ route = "old" }]
             "planner",
             "advisor",
             "multimodal_looker",
+            "evaluator",
             "quick",
         ]
         .into_iter()
@@ -1085,6 +1095,8 @@ models = [{ route = "shared" }]
 models = [{ route = "shared" }]
 [agents.roles.multimodal_looker]
 models = [{ route = "shared" }]
+[agents.roles.evaluator]
+models = [{ route = "shared" }]
 "#;
         let config: Config = toml::from_str(doc).expect("agents 設定をパースできる");
 
@@ -1099,6 +1111,7 @@ models = [{ route = "shared" }]
                 "orchestrator",
                 "reviewer",
                 "roles.advisor",
+                "roles.evaluator",
                 "roles.multimodal_looker",
                 "roles.planner",
                 "roles.web_researcher",

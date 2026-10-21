@@ -21,13 +21,7 @@ pub fn remaining_fill(remaining_percent: f64) -> egui::Color32 {
 fn reset_text(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     resets_at.map_or_else(
         || "resets unknown".into(),
-        |at| {
-            format!(
-                "resets {} ({})",
-                format::time_until(at, now),
-                format::utc_timestamp(at)
-            )
-        },
+        |at| format!("resets {}", format::time_until(at, now)),
     )
 }
 
@@ -202,9 +196,8 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View, now: DateTime
                 window.duration_label()
             };
             details.push(format!(
-                "{duration}: {:.1}% remaining · {:.1}% used · {}",
+                "{duration}: {:.1}% remaining · {}",
                 window.remaining_percent,
-                window.used_percent,
                 reset_text(Some(window.resets_at), now)
             ));
             (duration, window.remaining_percent)
@@ -213,9 +206,8 @@ fn render_codex(ui: &mut egui::Ui, state: &QuotaState, view: View, now: DateTime
     if view == View::Details {
         if let Some(window) = &snapshot.quota.code_review {
             details.push(format!(
-                "Code review: {:.1}% remaining · {:.1}% used · {}",
+                "Code review: {:.1}% remaining · {}",
                 window.remaining_percent,
-                window.used_percent,
                 reset_text(Some(window.resets_at), now)
             ));
         }
@@ -248,10 +240,9 @@ fn render_kimi(
         .iter()
         .map(|window| {
             details.push(format!(
-                "{}: {:.1}% remaining · {:.1}% used · {}",
+                "{}: {:.1}% remaining · {}",
                 window.label,
                 window.remaining_percent,
-                window.used_percent,
                 reset_text(window.resets_at, now)
             ));
             (window.label.clone(), window.remaining_percent)
@@ -276,14 +267,23 @@ fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T
         // The profile picker already reads "<service> · <profile> · unavailable".
         return;
     }
-    let response = ui.label(muted(format!("{name} · {}", status(state))));
-    if let Some(error) = &state.error {
-        if view == View::Details {
+    if view == View::Details {
+        ui.label(muted(format!("{name} · {}", status(state))));
+        if let Some(error) = &state.error {
             ui.label(muted(format!("Quota error: {error}")));
-        } else {
-            response.on_hover_text(error.to_string());
         }
+        return;
     }
+    let mut details = vec![format!("{name} quota {}", status(state))];
+    details.extend(state.error.iter().map(ToString::to_string));
+    minimized(ui, name, &format!("{name} · {}", status(state)), &details);
+}
+
+/// Only the service name stays visible; `summary` remains its accessible name.
+fn minimized(ui: &mut egui::Ui, name: &str, summary: &str, details: &[String]) {
+    let response = ui.label(muted(name));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, summary));
+    response.on_hover_ui(|ui| show_details(ui, details));
 }
 
 fn show_expanded(
@@ -333,12 +333,7 @@ fn render(
         } else {
             format!("{name} · {}{suffix}", parts.join(" · "))
         };
-        let visible = if segments.is_empty() {
-            summary.clone()
-        } else {
-            format!("{name}{suffix}")
-        };
-        let response = ui.label(muted(visible));
+        let response = ui.label(muted(format!("{name}{suffix}")));
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &summary));
         response.on_hover_ui(|ui| show_details(ui, &details));
     } else if stale {
@@ -423,10 +418,10 @@ fn render_subscription(
     let mut segments = Vec::new();
     for window in &snapshot.windows {
         let reset = reset_text(window.resets_at, now);
-        match (window.remaining_percent, window.used_percent) {
-            (Some(remaining), Some(used)) => {
+        match window.remaining_percent {
+            Some(remaining) => {
                 details.push(format!(
-                    "{}: {remaining:.1}% remaining · {used:.1}% used · {reset}",
+                    "{}: {remaining:.1}% remaining · {reset}",
                     window.label
                 ));
                 segments.push((window.label.clone(), remaining));
@@ -444,9 +439,13 @@ fn render_subscription(
         show_expanded(ui, details, snapshot.stale, &state.error);
         return;
     }
-    if segments.is_empty() {
-        ui.label(muted(format!("{service} · percentage unavailable")))
-            .on_hover_ui(|ui| show_details(ui, &details));
+    if segments.is_empty() && view == View::Footer {
+        minimized(
+            ui,
+            service,
+            &format!("{service} · percentage unavailable"),
+            &details,
+        );
     }
     render(
         ui,
@@ -478,17 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_time_reads_as_remaining_time_with_absolute_instant() {
+    fn reset_time_reads_as_remaining_time() {
         let now: DateTime<Utc> = "2026-09-12T06:30:00Z".parse().unwrap();
         let reset = "2026-09-13T12:00:00Z".parse().ok();
-        assert_eq!(
-            reset_text(reset, now),
-            "resets in 1d 5h 30m (2026-09-13 12:00 UTC)"
-        );
-        assert_eq!(
-            reset_text(Some(now), now),
-            "resets now (2026-09-12 06:30 UTC)"
-        );
+        assert_eq!(reset_text(reset, now), "resets in 1d 5h 30m");
+        assert_eq!(reset_text(Some(now), now), "resets now");
         assert_eq!(reset_text(None, now), "resets unknown");
     }
 }

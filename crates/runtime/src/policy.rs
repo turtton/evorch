@@ -194,6 +194,7 @@ mod tests {
             Role::Planner,
             Role::Advisor,
             Role::MultimodalLooker,
+            Role::Evaluator,
         ] {
             assert_eq!(
                 ExecutionPolicy::for_role(role).allowed_access(),
@@ -317,6 +318,7 @@ mod tests {
             Role::Planner,
             Role::Advisor,
             Role::MultimodalLooker,
+            Role::Evaluator,
         ] {
             let baseline = ExecutionPolicy::for_role(role);
             let policy = baseline

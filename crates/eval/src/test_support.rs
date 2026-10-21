@@ -133,3 +133,71 @@ pub(crate) fn decision(action: &str, text: &str) -> Step {
         serde_json::json!({"action": action, "text": text, "reason": "scripted"}).to_string(),
     )
 }
+
+/// A models.dev catalog holding `api`, read from a fresh cache without network.
+pub(crate) async fn catalog(api: serde_json::Value) -> Arc<catalog::ModelCatalog> {
+    let dir = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let data = serde_json::json!({"fetched_at": now, "api": api});
+    std::fs::write(dir.path().join("models-dev.json"), data.to_string()).unwrap();
+    Arc::new(
+        catalog::ModelCatalog::load_or_refresh(dir.path())
+            .await
+            .unwrap(),
+    )
+}
+
+/// A completed request in a run's usage ledger.
+pub(crate) fn usage(
+    id: &str,
+    profile: &str,
+    model: &str,
+    purpose: &str,
+    input_tokens: u64,
+) -> storage::usage::UsageRequestRecord {
+    storage::usage::UsageRequestRecord {
+        request_id: id.into(),
+        at_ns: 1,
+        provider: profile.into(),
+        profile: Some(profile.into()),
+        model: model.into(),
+        run_id: Some("root".into()),
+        parent_run_id: None,
+        role: Some("worker".into()),
+        purpose: Some(purpose.into()),
+        status: storage::usage::UsageStatus::Ok,
+        failure: None,
+        finish_reason: Some("stop".into()),
+        input_tokens,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: None,
+        ttft_ms: None,
+        duration_ms: 1,
+        cost_usd: Some(1_000.0),
+        service_tier: None,
+    }
+}
+
+/// Write a run database holding `events` and `requests`, as a replay leaves it.
+pub(crate) fn write_run_db(
+    path: &std::path::Path,
+    events: &[Event],
+    requests: Vec<storage::usage::UsageRequestRecord>,
+) {
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: path.to_path_buf(),
+        ..storage::StorageConfig::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    for event in events {
+        handle.append_event(Some("eval"), event).unwrap();
+    }
+    handle.record_usage_requests(requests).unwrap();
+    drop(storage);
+}

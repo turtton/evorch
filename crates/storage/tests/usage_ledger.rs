@@ -89,7 +89,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
         "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
          ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
-         DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
+         DROP TABLE eval_samples; DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
          DROP TABLE assistant_references; DROP TABLE review_evidence; DROP TABLE review_lineage_edges;
          DROP TABLE usage_requests; DROP TABLE usage_run_threads; DROP TABLE usage_daily;
          DROP INDEX idx_memory_entries_scope_status;
@@ -324,7 +324,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
         "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
          ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
-         DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
+         DROP TABLE eval_samples; DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
          ALTER TABLE usage_requests DROP COLUMN service_tier;",
     )
     .unwrap();

@@ -25,6 +25,9 @@
           "compactor": {
             "generation": {}
           },
+          "evaluator": {
+            "generation": {}
+          },
           "multimodal_looker": {
             "generation": {}
           },
@@ -251,6 +254,12 @@
             "generation": {}
           }
         },
+        "evaluator": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
@@ -305,6 +314,9 @@
               "generation": {}
             },
             "compactor": {
+              "generation": {}
+            },
+            "evaluator": {
               "generation": {}
             },
             "multimodal_looker": {
@@ -1388,6 +1400,9 @@
                 "generation": {}
               },
               "compactor": {
+                "generation": {}
+              },
+              "evaluator": {
                 "generation": {}
               },
               "multimodal_looker": {

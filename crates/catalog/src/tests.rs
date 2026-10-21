@@ -226,6 +226,27 @@ fn canonical_model_id_is_read_and_blank_ids_are_absent() {
 }
 
 #[test]
+fn family_is_read_and_blank_families_are_absent() {
+    // Given: one model with a family and one with a blank family.
+    let catalog = catalog_with_models(
+        r#"{"anthropic": {"models": {
+            "claude-sonnet-9": {"id": "claude-sonnet-9", "family": "claude-sonnet"},
+            "claude-x": {"id": "claude-x", "family": ""}
+        }}}"#,
+    );
+
+    // When / Then: the family is kept, a blank one is unknown, and the fetch time is exposed.
+    let family = |model| {
+        catalog
+            .find("anthropic", model)
+            .and_then(|metadata| metadata.family.as_deref())
+    };
+    assert_eq!(family("claude-sonnet-9"), Some("claude-sonnet"));
+    assert_eq!(family("claude-x"), None);
+    assert_eq!(catalog.fetched_at(), UNIX_EPOCH);
+}
+
+#[test]
 fn context_tiers_and_fast_mode_prices_are_read() {
     // Given: models.dev pricing with a context tier, an unknown tier type, an unreadable
     // tier, a legacy over-200k object and fast-mode prices with their own tier.

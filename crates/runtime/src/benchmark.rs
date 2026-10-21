@@ -44,6 +44,7 @@ mod role_name {
             Role::Planner,
             Role::Advisor,
             Role::MultimodalLooker,
+            Role::Evaluator,
         ]
         .into_iter()
         .find(|role| {

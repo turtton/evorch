@@ -28,6 +28,17 @@ pub const BROWSER_TOOLS: [&str; 19] = [
     "browser_close",
 ];
 
+/// The Evaluator's evaluation tools (ADR 0036 §1), provided by the host process.
+pub const EVALUATOR_TOOLS: [&str; 7] = [
+    "eval_list_threads",
+    "eval_inspect_thread",
+    "eval_save_sample",
+    "eval_remove_sample",
+    "eval_start",
+    "eval_report",
+    "eval_apply_config",
+];
+
 /// v0.2 のエージェントロール (ADR 0002 の capability boundary)。
 ///
 /// # 境界の一覧
@@ -40,6 +51,7 @@ pub const BROWSER_TOOLS: [&str; 19] = [
 /// | Reviewer | read / grep / git_diff | 不可 |
 /// | Advisor | read / grep / git_diff | 不可 |
 /// | WebResearcher | read / grep / web_search / web_fetch / browser_* | 不可 |
+/// | Evaluator | read / grep / eval_* | 不可 |
 ///
 /// # 設計上の決定
 ///
@@ -73,6 +85,8 @@ pub enum Role {
     #[serde(alias = "Oracle", alias = "oracle")]
     Advisor,
     MultimodalLooker,
+    /// agent の振る舞いや構成の相談役。thread を調べ、評価を起動して採用した構成を反映する (ADR 0036)。
+    Evaluator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +113,7 @@ impl Role {
             "Planner" => Ok(Self::Planner),
             "Advisor" | "advisor" | "Oracle" | "oracle" => Ok(Self::Advisor),
             "MultimodalLooker" => Ok(Self::MultimodalLooker),
+            "Evaluator" => Ok(Self::Evaluator),
             _ => Err(UnknownRole {
                 name: name.to_owned(),
             }),
@@ -116,6 +131,7 @@ impl Role {
             Role::Planner => "Planner",
             Role::Advisor => "Advisor",
             Role::MultimodalLooker => "MultimodalLooker",
+            Role::Evaluator => "Evaluator",
         }
     }
 
@@ -176,6 +192,9 @@ impl Role {
             ),
             Role::Advisor => RoleCapabilities::new(["read", "grep", "git_diff"], false),
             Role::MultimodalLooker => RoleCapabilities::new(["read"], false),
+            Role::Evaluator => {
+                RoleCapabilities::new(["read", "grep"].into_iter().chain(EVALUATOR_TOOLS), false)
+            }
         };
         capabilities.allowed_tools.extend(
             [

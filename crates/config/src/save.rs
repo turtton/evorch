@@ -404,19 +404,7 @@ pub(crate) fn insert_profile(
 }
 
 pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), ConfigError> {
-    let text = doc.to_string();
-    let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
-        ConfigError::Migration(format!("failed to parse config before saving: {error}"))
-    })?;
-    let checked = crate::migrate::run(toml::Value::Table(table))?;
-    crate::strict::validate_strict(&checked)?;
-    let config: Config = checked.try_into().map_err(|error| {
-        ConfigError::Migration(format!(
-            "failed to deserialize config before saving: {error}"
-        ))
-    })?;
-    config.self_improvement.validate()?;
-
+    let text = checked_text(doc)?;
     let mut temporary_path = path.as_os_str().to_os_string();
     temporary_path.push(".tmp");
     let temporary_path = Path::new(&temporary_path);
@@ -431,6 +419,23 @@ pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), Confi
     drop(temporary);
     std::fs::rename(temporary_path, path)?;
     Ok(())
+}
+
+/// The document's text, validated as [`write_document`] validates it before saving.
+pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
+    let text = doc.to_string();
+    let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
+        ConfigError::Migration(format!("failed to parse config before saving: {error}"))
+    })?;
+    let checked = crate::migrate::run(toml::Value::Table(table))?;
+    crate::strict::validate_strict(&checked)?;
+    let config: Config = checked.try_into().map_err(|error| {
+        ConfigError::Migration(format!(
+            "failed to deserialize config before saving: {error}"
+        ))
+    })?;
+    config.self_improvement.validate()?;
+    Ok(text)
 }
 
 pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {

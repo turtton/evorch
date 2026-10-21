@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+mod observe;
 mod permit;
+mod retry;
 mod state;
+pub use observe::{DbOperation, DbPhase, TARGET as DB_TRACE_TARGET};
 pub use permit::OwnerPermit;
+pub use retry::RetryPolicy;
 pub use state::{OwnershipError, ThreadOwner};
 mod registry;
 pub use registry::{Registry, RegistryError};
@@ -13,6 +17,8 @@ pub mod ipc;
 #[cfg(unix)]
 pub use host::OwnerHost;
 
+#[cfg(test)]
+mod contention_tests;
 #[cfg(test)]
 mod tests;
 

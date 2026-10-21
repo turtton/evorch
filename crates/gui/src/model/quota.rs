@@ -156,6 +156,11 @@ impl<T: QuotaData> QuotaState<T> {
         self.in_flight
     }
 
+    /// Whether a subscription profile or an injected backend feeds this state.
+    pub fn configured(&self) -> bool {
+        self.injected || !self.subscriptions.is_empty()
+    }
+
     pub fn stop(&mut self) {
         for state in self.subscriptions.values_mut() {
             state.stop();

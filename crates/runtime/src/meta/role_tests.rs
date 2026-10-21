@@ -13,6 +13,8 @@ fn additional_role_names_are_case_insensitive() {
         ("oracle", Role::Advisor),
         ("multimodal_looker", Role::MultimodalLooker),
         ("MultimodalLooker", Role::MultimodalLooker),
+        ("evaluator", Role::Evaluator),
+        ("Evaluator", Role::Evaluator),
     ] {
         assert_eq!(parse_role(name), Ok(expected));
     }

@@ -231,7 +231,7 @@ impl MutationFences {
     }
 }
 
-fn event_run_ids(events: &[Event]) -> Vec<String> {
+pub(crate) fn event_run_ids(events: &[Event]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut run_ids = Vec::new();
     for event in events {

@@ -24,7 +24,7 @@ use routing::factory::DEFAULT_AUTH_BASE_URL;
 use runtime::{
     AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy, ModelSource,
     Role, RunConfig, RuntimeComposition, WorkspaceSeam, compose_runtime,
-    production_executor_with_config,
+    production_executor_with_host_tools,
 };
 use sandbox::{CredentialError, CredentialStore, Secret};
 use storage::{Database, Storage, StorageConfig};
@@ -387,6 +387,39 @@ fn latest_thread_goals(
     latest
 }
 
+type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+/// The Evaluator's tools are built before the runtime and the models they
+/// reach, so both are filled in once startup has composed them. The runtime
+/// owns these tools, so the host holds it weakly.
+#[derive(Default)]
+struct EvaluatorHost {
+    runtime: OnceLock<runtime::WeakAgentRuntime>,
+    reload: OnceLock<Reload>,
+}
+
+impl eval::evaluator::EvaluatorHost for EvaluatorHost {
+    fn deliver_notice(&self, run_id: &str, notice: &str) -> Result<String, String> {
+        let runtime = self
+            .runtime
+            .get()
+            .and_then(runtime::WeakAgentRuntime::upgrade)
+            .ok_or("the runtime is not running")?;
+        let run_id: runtime::RunId = run_id.parse().map_err(|error| format!("{error}"))?;
+        runtime
+            .deliver_notice(run_id, notice)
+            .map(|run| run.to_string())
+            .map_err(|error| error.to_string())
+    }
+
+    fn reload_config(&self) -> Result<(), String> {
+        self.reload
+            .get()
+            .ok_or_else(|| "the models are not composed yet".to_owned())
+            .and_then(|reload| reload())
+    }
+}
+
 fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
     let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
     match result {
@@ -611,15 +644,40 @@ fn run() -> Result<(), GuiError> {
             Arc::new(runtime::compose::SwitchableModel::new(initial)),
         )
     });
+    let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
+    let storage_config = StorageConfig {
+        db_path: storage_db_path,
+        usage_retention_days: composition_config.metrics.retention_days,
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(storage_config.clone())?;
+    // The Evaluator reads and pins threads of the same database the GUI records into.
+    let evaluator_host = Arc::new(EvaluatorHost::default());
+    let evaluator_tools = |user_config_dir: Option<PathBuf>, catalog_dir: Option<PathBuf>| {
+        user_config_dir
+            .map(|user_config_dir| {
+                eval::evaluator::tools(eval::evaluator::EvaluatorContext {
+                    database: storage_config.db_path.clone(),
+                    storage: storage.handle(),
+                    user_config_dir,
+                    catalog_dir,
+                    bus: Arc::clone(&bus),
+                    host: Arc::clone(&evaluator_host) as Arc<dyn eval::evaluator::EvaluatorHost>,
+                    cli: None,
+                })
+            })
+            .unwrap_or_default()
+    };
     let (runtime, agent_browser) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let seam = WorkspaceSeam::production(demo_repo.clone())?;
-            let executor = production_executor_with_config(
+            let executor = production_executor_with_host_tools(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
                 seam.project_root().to_path_buf(),
                 &composition_config,
+                evaluator_tools(Some(directory.path().to_path_buf()), None),
             )?;
             let agent_browser = executor.agent_browser();
             let demo_model: Arc<dyn AgentModel> = Arc::new(DemoScriptModel::new(Arc::clone(&bus)));
@@ -644,11 +702,15 @@ fn run() -> Result<(), GuiError> {
         }
         None => {
             let seam = WorkspaceSeam::production(effective_project_root.clone())?;
-            let executor = production_executor_with_config(
+            let executor = production_executor_with_host_tools(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
                 effective_project_root.clone(),
                 &composition_config,
+                evaluator_tools(
+                    config::user_config_dir(),
+                    Some(catalog::default_cache_dir()),
+                ),
             )?;
             let agent_browser = executor.agent_browser();
             let ComposedRuntime {
@@ -691,13 +753,6 @@ fn run() -> Result<(), GuiError> {
         runtime.with_sandbox_root(effective_project_root.clone())
     };
     let sandbox_runtime = runtime.clone();
-    let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
-    let storage_config = StorageConfig {
-        db_path: storage_db_path,
-        usage_retention_days: composition_config.metrics.retention_days,
-        ..StorageConfig::default()
-    };
-    let storage = Storage::open(storage_config.clone())?;
     let runtime = match runtime::RunStore::open(&storage_config, storage.handle()) {
         Ok(store) => runtime.with_run_store(store),
         Err(error) => {
@@ -884,6 +939,14 @@ fn run() -> Result<(), GuiError> {
             .map(|drafts| drafts.join("crash-spool")),
     )?;
     restore_thread_goals(&storage_config, &runtime);
+    let _ = evaluator_host.runtime.set(runtime.downgrade());
+    let _ = evaluator_host.reload.set({
+        let production = production_model.clone();
+        let projects = project_models.clone();
+        Box::new(move || {
+            gui::model::production::reload_models(production.as_ref(), projects.as_ref())
+        })
+    });
     restore_thread_todos(&storage_config, &runtime, &sidebar);
 
     let ownership_root = match demo_directory.as_ref() {

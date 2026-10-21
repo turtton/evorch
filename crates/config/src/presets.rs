@@ -26,6 +26,10 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../assets/presets/role-multimodallooker.md"),
     ),
     (
+        "role-evaluator",
+        include_str!("../assets/presets/role-evaluator.md"),
+    ),
+    (
         "role-orchestrator",
         include_str!("../assets/presets/role-orchestrator.md"),
     ),

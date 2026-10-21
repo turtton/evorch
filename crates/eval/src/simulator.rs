@@ -122,7 +122,8 @@ impl UserSimulator {
     }
 }
 
-fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, SimulatorError> {
+/// The JSON a structured answer holds, without a surrounding code fence.
+pub(crate) fn json_text(content: &[ContentBlock]) -> String {
     let text: String = content
         .iter()
         .filter_map(|block| match block {
@@ -130,14 +131,17 @@ fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, S
             _ => None,
         })
         .collect();
-    let json = text
-        .trim()
+    text.trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
-        .trim();
-    let mut decision: Decision =
-        serde_json::from_str(json).map_err(|error| SimulatorError::Invalid(error.to_string()))?;
+        .trim()
+        .to_owned()
+}
+
+fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, SimulatorError> {
+    let mut decision: Decision = serde_json::from_str(&json_text(content))
+        .map_err(|error| SimulatorError::Invalid(error.to_string()))?;
     decision.text = decision.text.trim().to_owned();
     if decision.action == Action::Answer && !question_pending {
         decision.action = Action::Reply;

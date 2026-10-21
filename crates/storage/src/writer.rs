@@ -51,6 +51,8 @@ enum Command {
     SaveAssistantReference(crate::AssistantReferenceRow, ReplyTx),
     AssistantReference(String, ReplyTx<Option<crate::AssistantReferenceRow>>),
     SaveThreadStartState(crate::thread_start::ThreadStartState, ReplyTx<bool>),
+    SaveEvalSample(crate::eval_sample::EvalSample, ReplyTx),
+    DeleteEvalSample(String, ReplyTx<bool>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
     AnswerUserQuestion(String, String, ReplyTx),
@@ -281,6 +283,27 @@ impl StorageHandle {
         state: crate::thread_start::ThreadStartState,
     ) -> Result<bool, StorageError> {
         self.request(|reply| Command::SaveThreadStartState(state, reply))
+    }
+
+    /// Pin a thread as an evaluation sample, or replace the problem and focus
+    /// roles of its existing sample.
+    ///
+    /// # Errors
+    /// Rejects threads without a replayable start state, an empty or
+    /// secret-bearing problem, suspended writes or persistence failure.
+    pub fn save_eval_sample(
+        &self,
+        sample: crate::eval_sample::EvalSample,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::SaveEvalSample(sample, reply))
+    }
+
+    /// Unpin a thread's evaluation sample; returns whether one existed.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn delete_eval_sample(&self, thread_id: &str) -> Result<bool, StorageError> {
+        self.request(|reply| Command::DeleteEvalSample(thread_id.into(), reply))
     }
 
     /// Replace the stored snapshot for a run; the last write wins.

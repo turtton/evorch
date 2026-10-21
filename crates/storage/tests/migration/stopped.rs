@@ -151,7 +151,7 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     legacy_database(&path, version, already_allows_stopped);
     let conn = Connection::open(&path).unwrap();
     let mut before_tasks = rows(&conn, "SELECT * FROM tasks ORDER BY id");
-    // v22 deliberately removes the historical task-local cursor, preserving all else.
+    // v23 deliberately removes the historical task-local cursor, preserving all else.
     for row in &mut before_tasks {
         row.remove(10);
     }
@@ -163,7 +163,7 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     drop(conn);
 
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 23);
     assert_eq!(db.pragma_i64("foreign_keys").unwrap(), 1);
     let conn = Connection::open(&path).unwrap();
     let tables = schema_objects(&conn, "table");
@@ -219,7 +219,7 @@ fn fresh_open_accepts_stopped_and_rejects_invalid_status() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 23);
     let conn = Connection::open(&path).unwrap();
     populate(&conn, true);
     verify_constraints(&conn);

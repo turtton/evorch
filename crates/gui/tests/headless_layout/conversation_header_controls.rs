@@ -50,7 +50,7 @@ fn diagnostics_info_button_sits_before_thread_title_and_opens_dialog() {
 }
 
 #[test]
-fn owner_controls_stay_above_conversation_while_settings_and_quota_stay_in_footer() {
+fn owner_controls_stay_above_conversation_while_settings_and_usage_stay_in_footer() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(
         OwnerHost::open(
@@ -78,12 +78,12 @@ fn owner_controls_stay_above_conversation_while_settings_and_quota_stay_in_foote
     let title = workbench.label_rects("Thread: Header controls")[0];
     let attach = workbench.label_rects("Attach (read-only)")[0];
     let settings = workbench.label_rects("⚙")[0];
-    let quota = workbench.label_rects("Codex · unavailable")[0];
+    let usage = workbench.label_rects("Usage")[0];
     assert!(
         owner.bottom() < title.top(),
         "owner={owner:?}, title={title:?}"
     );
     assert!((owner.center().y - attach.center().y).abs() < owner.height());
-    assert!(settings.right() < quota.left());
-    assert!(settings.top() > title.bottom() && quota.top() > title.bottom());
+    assert!(settings.right() < usage.left());
+    assert!(settings.top() > title.bottom() && usage.top() > title.bottom());
 }

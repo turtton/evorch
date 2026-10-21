@@ -60,7 +60,9 @@ fn claim_inner(
     request: ClaimRequest<'_>,
     settings: Option<&config::OwnershipConfig>,
 ) -> Result<ThreadOwner, RegistryError> {
-    registry.update(request.thread_id, |owner| {
+    // Recorded as a claim, not a generic update. Like every callback-driven
+    // update, a claim is never retried.
+    registry.update_as(super::DbOperation::Claim, request.thread_id, |owner| {
         owner.validate(request.expected)?;
         if owner.state != super::OwnerState::Released
             && endpoint_may_be_live(request.previous_socket)

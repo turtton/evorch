@@ -188,6 +188,23 @@ pub fn list_requests_in_days(
     )
 }
 
+/// Requests made by `run_ids` ordered by time, joined with their owner.
+pub fn list_requests_for_runs(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<Vec<UsageRequestRow>, StorageError> {
+    let ids = serde_json::to_string(run_ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    query_requests(
+        conn,
+        &format!(
+            "{REQUEST_COLUMNS} WHERE r.run_id IN (SELECT value FROM json_each(?1)) \
+             ORDER BY r.at_ns, r.rowid"
+        ),
+        params![ids],
+    )
+}
+
 /// Today's local day and its midnight bounds, on the same clock as the ledger days.
 pub fn local_clock(conn: &Connection) -> Result<crate::usage::LocalClock, StorageError> {
     Ok(conn.query_row(

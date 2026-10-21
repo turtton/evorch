@@ -204,6 +204,8 @@ pub mod diagnostic_codes {
     pub const BROWSER_ACTION_ERROR: &str = "browser.action_error";
     pub const BROWSER_DOM_DIFF: &str = "browser.dom_diff";
     pub const BROWSER_SCREENSHOT: &str = "browser.screenshot";
+    /// A background evaluation an Evaluator started has ended (ADR 0036).
+    pub const EVALUATION_FINISHED: &str = "EvaluationFinished";
 
     /// Every code above.
     pub const ALL: &[&str] = &[
@@ -237,6 +239,7 @@ pub mod diagnostic_codes {
         BROWSER_ACTION_ERROR,
         BROWSER_DOM_DIFF,
         BROWSER_SCREENSHOT,
+        EVALUATION_FINISHED,
     ];
 }
 

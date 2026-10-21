@@ -37,6 +37,7 @@ impl Fixture {
             output: Some(self.user.path().join("out")),
             db: Some(self.recorded.config.db_path.clone()),
             user_config_dir: Some(self.user.path().to_path_buf()),
+            ..EvalArgs::default()
         }
     }
 
@@ -179,6 +180,62 @@ async fn baseline_and_candidate_replays_each_leave_their_results() {
             "{inspected}"
         );
     }
+}
+
+#[tokio::test]
+async fn verification_runs_in_each_final_workspace_and_the_manifest_keeps_the_inputs() {
+    // Given: an agent that writes a file, a problem statement, a candidate that changes the
+    // reviewer, and verification commands that pass only on the replay's final state.
+    let fixture = Fixture::new().await;
+    let overlay = "[agents.reviewer.generation]\ntemperature = 0.2\n";
+    let steps = || {
+        vec![
+            tool(
+                "write",
+                serde_json::json!({"path": "notes.txt", "content": "replayed\n"}),
+            ),
+            text("wrote the notes"),
+        ]
+    };
+    let mut passing = fixture.args(Some(overlay));
+    passing.problem = Some("the notes were missing".into());
+    passing.verify = Some("grep -q replayed notes.txt".into());
+    let mut failing = fixture.args(None);
+    failing.output = Some(fixture.user.path().join("failing"));
+    failing.verify = Some("test -f missing.txt".into());
+
+    // When: both evaluations run.
+    let passed = run(
+        passing,
+        fixture.deps(steps(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let failed = run(
+        failing,
+        fixture.deps(steps(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // Then: every replay records its verification, and the manifest keeps what the report needs.
+    for report in &passed.runs {
+        let verification = report.outcome.verification.as_ref().unwrap();
+        assert!(verification.passed, "{verification:?}");
+        let outcome = read_json(&report.dir.join(output::OUTCOME_FILE));
+        assert_eq!(outcome["verification"]["exit_code"], 0);
+    }
+    let verification = failed.runs[0].outcome.verification.as_ref().unwrap();
+    assert!(!verification.passed);
+    assert_eq!(verification.exit_code, Some(1));
+    let manifest = read_json(&passed.dir.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["problem"], "the notes were missing");
+    assert_eq!(manifest["verify"], "grep -q replayed notes.txt");
+    assert_eq!(manifest["original_turns"][0]["text"], "fix the bug");
+    assert_eq!(manifest["swapped_roles"][0]["role"], "reviewer");
+    assert_eq!(manifest["swapped_roles"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -419,7 +419,7 @@ fn real_dock_conversation_and_footer_stay_inside_their_regions() {
         );
     }
     let settings = workbench.label_rects("⚙")[0];
-    let quota = workbench.label_rects("Codex · unavailable")[0];
-    assert!(settings.bottom() > 650.0 && quota.bottom() > 650.0);
-    assert!(settings.right() < quota.left());
+    let usage = workbench.label_rects("Usage")[0];
+    assert!(settings.bottom() > 650.0 && usage.bottom() > 650.0);
+    assert!(settings.right() < usage.left());
 }

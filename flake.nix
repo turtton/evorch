@@ -254,8 +254,10 @@
             cp -r ${cefDist}/. $app/
             chmod -R u+w $app
             rm -rf $app/include $app/archive.json
+            # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
-              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
+              --suffix PATH : "${evorch}/bin"
           '';
           doInstallCheck = true;
           installCheckPhase = ''

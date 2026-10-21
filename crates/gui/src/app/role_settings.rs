@@ -113,6 +113,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ("Planner", Role::Planner),
             ("Advisor", Role::Advisor),
             ("Multimodal Looker", Role::MultimodalLooker),
+            ("Evaluator", Role::Evaluator),
         ];
         let rows = roles
             .into_iter()

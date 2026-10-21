@@ -166,11 +166,13 @@ pub fn list_since(
 }
 
 /// Delete one bounded batch of states captured before `cutoff_ns`, with their
-/// untracked entries. Returns the number of states deleted.
+/// untracked entries. States pinned by an evaluation sample are kept. Returns
+/// the number of states deleted.
 pub fn delete_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, StorageError> {
     Ok(conn.execute(
         "DELETE FROM thread_start_states WHERE thread_id IN (\
          SELECT thread_id FROM thread_start_states WHERE captured_at_ns < ?1 \
+         AND thread_id NOT IN (SELECT thread_id FROM eval_samples) \
          ORDER BY captured_at_ns LIMIT ?2)",
         params![cutoff_ns, RETENTION_BATCH],
     )?)
