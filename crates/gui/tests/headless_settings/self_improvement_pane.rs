@@ -411,7 +411,9 @@ fn reopened_candidate_has_distinct_badge_and_moves_above_newer_candidates() {
         .with_size(egui::vec2(800.0, 600.0))
         .with_step_dt(0.01)
         .build_ui_state(
-            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            |ui, pane: &mut SelfImprovementPane| {
+                pane.render(ui, Some("p"));
+            },
             pane,
         );
     harness.run();

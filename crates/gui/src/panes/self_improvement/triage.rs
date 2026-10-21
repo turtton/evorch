@@ -127,6 +127,8 @@ mod tests {
             occurrences: 3,
             last_seen_at_ns: 0,
             recent_run_ids: Vec::new(),
+            reopened_count: 0,
+            reopened_at_ns: None,
         }
     }
 

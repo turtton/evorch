@@ -32,6 +32,7 @@ fn record(store: &Storage, id: &str, draft: Option<&str>) {
             ImprovementWritePolicy {
                 duplicate_cooldown: std::time::Duration::from_secs(60),
                 daily_limit: 20,
+                run_error_daily_limit: storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT,
                 max_candidates: 200,
             },
         )

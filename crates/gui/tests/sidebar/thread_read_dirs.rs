@@ -403,6 +403,7 @@ fn record_candidate(store: &storage::Storage, project: &str, id: &str) {
             ImprovementWritePolicy {
                 duplicate_cooldown: std::time::Duration::ZERO,
                 daily_limit: 20,
+                run_error_daily_limit: storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT,
                 max_candidates: 200,
             },
         )
