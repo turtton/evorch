@@ -237,11 +237,7 @@ impl OwnershipStatus {
                 self.invalidated = false;
             }
             Err(error) => {
-                let contention = matches!(
-                    &error,
-                    RegistryError::Sql(rusqlite::Error::SqliteFailure(error, _))
-                        if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-                );
+                let contention = error.is_contention();
                 self.failure = Some(ProbeFailure {
                     since: self.failure.as_ref().map_or(now, |failure| failure.since),
                     contention,

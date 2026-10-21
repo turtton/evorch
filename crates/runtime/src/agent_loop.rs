@@ -724,16 +724,18 @@ impl LoopState {
             }
             // A model switch comes back here inside the turn it already began, and
             // the owner rejects beginning a run's turn again before its checkpoint.
-            if let Some(permit) = &self.task.config.ownership {
+            if let Some(permit) = self.task.config.ownership.clone() {
                 let result = if self.owner_turn_open {
                     // Still fence a stale generation, without opening a second turn or
                     // rejecting a quiescing owner's already-active turn.
                     permit.validate_mutation()
                 } else {
-                    permit.begin_turn()
+                    permit
+                        .begin_turn_off_thread(self.ownership_retry(), self.interrupt_probe())
+                        .await
                 };
                 if let Err(error) = result {
-                    self.finish_error(error.to_string());
+                    self.finish_owner_error("begin_turn", error);
                     return;
                 }
                 self.owner_turn_open = true;
@@ -1022,10 +1024,18 @@ impl LoopState {
             {
                 return;
             }
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.checkpoint(&self.context.visible_messages())
+            if let Some(permit) = self.task.config.ownership.clone()
+                && let Err(error) = permit
+                    .checkpoint_off_thread(
+                        self.context.visible_messages(),
+                        self.ownership_retry(),
+                        self.interrupt_probe(),
+                    )
+                    .await
             {
-                self.finish_error(error.to_string());
+                // An interrupted checkpoint committed nothing; finalization
+                // checkpoints the run again before publishing its terminal state.
+                self.finish_owner_error("checkpoint", error);
                 return;
             }
             self.owner_turn_open = false;
@@ -1455,6 +1465,50 @@ impl LoopState {
 
     fn finish_error(&mut self, reason: String) {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
+    }
+
+    /// The runtime's ownership contention budget; the default unless a test set one.
+    fn ownership_retry(&self) -> crate::ownership::RetryPolicy {
+        self.runtime()
+            .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
+            .unwrap_or_default()
+    }
+
+    /// Lets blocking ownership retries observe Cancel/Stop without the loop.
+    fn interrupt_probe(&self) -> impl Fn() -> bool + Send + 'static {
+        let interrupts = self.channels.cancel_rx.clone();
+        move || interrupts.borrow().kind().is_some()
+    }
+
+    /// End the run on an ownership registry failure. A retry stopped by an
+    /// interrupt ends as that interrupt; other reasons keep the error text,
+    /// which names the registry operation and phase for SQLite failures.
+    fn finish_owner_error(&mut self, stage: &'static str, error: crate::ownership::RegistryError) {
+        if matches!(error, crate::ownership::RegistryError::Interrupted { .. })
+            && let Some(kind) = self.interrupted()
+        {
+            self.finish_interrupted(kind);
+            return;
+        }
+        if let crate::ownership::RegistryError::Database {
+            operation,
+            phase,
+            attempt,
+            ..
+        } = &error
+        {
+            tracing::warn!(
+                target: crate::ownership::DB_TRACE_TARGET,
+                run_id = %self.task.run_id,
+                stage,
+                operation = operation.as_str(),
+                phase = phase.as_str(),
+                attempt,
+                sqlite_code = ?error.sqlite_code(),
+                "ownership registry failure ends the run"
+            );
+        }
+        self.finish_error(error.to_string());
     }
 
     fn finish_stopped(&mut self) {

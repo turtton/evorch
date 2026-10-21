@@ -5556,6 +5556,7 @@ dependencies = [
  "tokio-rustls",
  "tools",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
 ]
