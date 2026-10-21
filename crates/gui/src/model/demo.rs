@@ -303,6 +303,7 @@ impl AgentModel for DemoScriptModel {
             streaming: false,
             run_id: Some(invocation.run_id.clone()),
             reasoning_effort: None,
+            purpose: None,
         }));
         match (marker, remaining_turns) {
             ("DEMO-ORCH", 2) => self.worker_message_sent.notify_one(),

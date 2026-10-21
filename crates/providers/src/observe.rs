@@ -124,6 +124,7 @@ impl AttemptObserver {
             streaming: self.streaming,
             run_id: self.observation_run_id(),
             reasoning_effort: self.reasoning_effort.clone(),
+            purpose: self.observation_purpose(),
         });
     }
 

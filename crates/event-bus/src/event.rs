@@ -933,6 +933,10 @@ pub enum ProviderEvent {
         /// wire に載せた reasoning effort。送らなかった attempt と旧形式ペイロードでは `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// 呼び出しの目的。observation context を持たない呼び出しと旧形式
+        /// ペイロードでは `None`。
+        #[serde(default)]
+        purpose: Option<RequestPurpose>,
     },
     /// ストリーミング attempt で最初の user-visible delta を観測した (TTFT)。
     ///
@@ -2071,6 +2075,7 @@ mod tests {
                     streaming: false,
                     run_id: None,
                     reasoning_effort: None,
+                    purpose: None,
                 },
             ),
             (
@@ -2457,6 +2462,7 @@ mod tests {
                 streaming: false,
                 run_id: None,
                 reasoning_effort: None,
+                purpose: None,
             })
         );
     }

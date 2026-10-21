@@ -90,6 +90,7 @@ fn request_started_custom(
             streaming: false,
             run_id: Some(run_id.to_owned()),
             reasoning_effort: None,
+            purpose: None,
         },
         seconds,
     )

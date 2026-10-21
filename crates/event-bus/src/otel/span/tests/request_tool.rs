@@ -20,6 +20,7 @@ fn chat_and_tool_spans_parent_to_known_agent() {
             streaming: true,
             run_id: Some("run-1".to_owned()),
             reasoning_effort: None,
+            purpose: None,
         },
         2,
     ));
@@ -94,6 +95,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             streaming: false,
             run_id: None,
             reasoning_effort: None,
+            purpose: None,
         },
         1,
     ));
@@ -116,6 +118,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             streaming: false,
             run_id: Some("absent".to_owned()),
             reasoning_effort: None,
+            purpose: None,
         },
         3,
     ));

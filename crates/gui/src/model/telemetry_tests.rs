@@ -10,6 +10,7 @@ fn request_started(run_id: Option<&str>) -> Event {
         streaming: true,
         run_id: run_id.map(str::to_owned),
         reasoning_effort: None,
+        purpose: None,
     })
 }
 

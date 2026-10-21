@@ -4,11 +4,12 @@
 //! `ProviderEvent::RequestCompleted` の値だけを使い、未知の provider/model は推測せず
 //! `None` のまま保持する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use event_bus::{
-    AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+    AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, RequestPurpose,
+    ToolEvent,
 };
 use recorder::pricing::TokenUsage;
 
@@ -125,6 +126,12 @@ fn protocol_summarizes_reasoning(protocol: &str) -> bool {
     protocol == "openai-codex-responses"
 }
 
+/// A sandbox escalation review shares the reviewed run's ID but runs another
+/// model: it is billed to the run without replacing the run's live request.
+fn is_side_request(purpose: Option<RequestPurpose>) -> bool {
+    purpose == Some(RequestPurpose::EscalationReview)
+}
+
 #[derive(Debug, Default)]
 pub struct TelemetryOverlay {
     pub quota: quota::QuotaState,
@@ -136,6 +143,7 @@ pub struct TelemetryOverlay {
     active_running_start: BTreeMap<String, Instant>,
     accumulated_running: BTreeMap<String, Duration>,
     context_order: u64,
+    side_requests: BTreeSet<String>,
 }
 
 /// Thread totals plus the conversation roots' latest and average request measurements.
@@ -198,6 +206,18 @@ impl TelemetryOverlay {
                     }
                 }
             }
+            EventKind::Provider(ProviderEvent::RequestStarted {
+                request_id,
+                purpose,
+                run_id: Some(_),
+                ..
+            }) if is_side_request(*purpose) => {
+                self.side_requests.insert(request_id.clone());
+            }
+            EventKind::Provider(
+                ProviderEvent::CacheReuseObserved { request_id, .. }
+                | ProviderEvent::FirstTokenObserved { request_id, .. },
+            ) if self.side_requests.contains(request_id) => {}
             EventKind::Provider(ProviderEvent::RequestStarted {
                 provider,
                 profile,
@@ -281,6 +301,7 @@ impl TelemetryOverlay {
                 }
             }
             EventKind::Provider(ProviderEvent::RequestCompleted {
+                request_id,
                 provider,
                 profile,
                 model,
@@ -293,6 +314,7 @@ impl TelemetryOverlay {
                 run_id: Some(run_id),
                 reasoning_tokens,
                 service_tier,
+                purpose,
                 ..
             }) => {
                 self.billed
@@ -317,6 +339,9 @@ impl TelemetryOverlay {
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);
                 row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
                 row.usage.cache_write = row.usage.cache_write.saturating_add(*cache_write_tokens);
+                if self.side_requests.remove(request_id) || is_side_request(*purpose) {
+                    return;
+                }
                 let reuse = row.pending_reuse.take().unwrap_or(RequestReuse::Unobserved);
                 row.cache_reuse.complete(reuse);
                 self.context_order = self.context_order.saturating_add(1);
@@ -351,6 +376,11 @@ impl TelemetryOverlay {
                     row.rated_duration = row.rated_duration.saturating_add(rated);
                 }
             }
+            EventKind::Provider(ProviderEvent::RequestFailed {
+                request_id,
+                purpose,
+                ..
+            }) if self.side_requests.remove(request_id) || is_side_request(*purpose) => {}
             EventKind::Provider(ProviderEvent::RequestFailed {
                 duration_ms,
                 run_id: Some(run_id),
