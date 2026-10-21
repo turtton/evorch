@@ -448,11 +448,13 @@ async fn exclusive_preflight_is_finalized_once_it_clears(
     // Release only after two exhausted 100 ms attempts: no sleep-based race,
     // and the preflight must use the injected budget rather than the old 2 s.
     wait_for_records(thread, |records| {
-        records
-            .iter()
-            .filter(|record| is_guard_failure(record))
-            .count()
-            >= 2
+        records.iter().any(|record| {
+            is_guard_failure(record)
+                && record
+                    .get("attempt")
+                    .and_then(|attempt| attempt.parse::<u32>().ok())
+                    .is_some_and(|attempt| attempt >= 2)
+        })
     })
     .await;
     harness.assert_unpublished(run).await;
