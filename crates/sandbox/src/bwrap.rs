@@ -169,7 +169,12 @@ impl BwrapSandbox {
         // The same directory at its host path lets file tools and unsandboxed
         // shells resolve `$TMPDIR` paths.
         args.extend(["--bind".to_owned(), scratch.clone(), scratch]);
-        for path in &boundary.read_only {
+        for path in boundary
+            .read_only
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(boundary.current_thread_read_directories())
+        {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
         }

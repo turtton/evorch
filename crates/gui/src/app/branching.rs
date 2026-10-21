@@ -207,6 +207,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             pinned: original.pinned,
             model_preference: original.model_preference.clone(),
             chat_role: original.chat_role,
+            // Branches keep the source's read-only grant; switching declares it (ADR 0037).
+            extra_read_dirs: original.extra_read_dirs.clone(),
             ..ThreadRecord::new(
                 id.clone(),
                 original.project_id.clone(),

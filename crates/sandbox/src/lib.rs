@@ -16,7 +16,9 @@ pub mod session;
 
 pub use approval::{ApprovalGate, ApprovalOutcome};
 
-pub use boundary::{AllowedRegions, BoundaryRegion, LivePaths, PathAccess, SandboxBoundary};
+pub use boundary::{
+    AllowedRegions, BoundaryRegion, LivePaths, PathAccess, SandboxBoundary, ThreadReadDirectory,
+};
 pub use bwrap::{BwrapConfig, BwrapSandbox};
 pub use composition::production_sandbox;
 pub use credential::{CredentialStore, FileCredentialStore, Secret, open_default};

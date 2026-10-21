@@ -1010,6 +1010,7 @@ fn run() -> Result<(), GuiError> {
             loaded_config.as_ref(),
             settings_store.clone(),
         ))
+        .with_memory_storage(storage_config.clone())
         .with_pump(pump)
         .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))
@@ -1054,7 +1055,6 @@ fn run() -> Result<(), GuiError> {
         state = state.with_save_path(path);
     }
     state = state
-        .with_memory_storage(storage_config.clone())
         .with_diagnostic_storage(storage.handle(), &storage_config)
         .with_self_improvement(
             storage.handle(),

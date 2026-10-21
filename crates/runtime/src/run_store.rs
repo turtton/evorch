@@ -9,6 +9,7 @@ use storage::{
 use crate::RunId;
 
 pub struct RunStore {
+    pub(crate) db_path: std::path::PathBuf,
     pub(crate) handle: StorageHandle,
     database: Mutex<Database>,
     /// Largest run ID already reserved in storage, so new IDs never reuse it.
@@ -77,6 +78,7 @@ impl RunStore {
             latest_run_id = latest_run_id.max(Some(id));
         }
         Ok(Self {
+            db_path: config.db_path.clone(),
             handle,
             database: Mutex::new(database),
             latest_run_id,

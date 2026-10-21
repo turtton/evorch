@@ -150,6 +150,9 @@ pub(crate) struct LoopState {
     /// The run project's live allowed directories with this run's access, read again
     /// by every command and file tool call. Benchmark runs have none.
     pub(crate) allowed_directories: Option<sandbox::AllowedRegions>,
+    /// The thread's read-only directories this run mounted when its sandbox was built
+    /// (ADR 0037); fixed for the run's lifetime.
+    pub(crate) thread_read_dirs: Vec<std::path::PathBuf>,
     pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
     pub(crate) allowed_instructions: crate::allowed_instructions::AllowedInstructions,
     /// Allowed directory each run-local skill came from, checked before every load.
@@ -312,6 +315,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         pending_terminal: None,
         scratch: None,
         allowed_directories: None,
+        thread_read_dirs: Vec::new(),
         told_directories,
         allowed_instructions,
         allowed_skill_origins: Default::default(),
@@ -364,16 +368,32 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                             paths: runtime.project_allowed_directories(&root),
                             access: state.policy.allowed_access(),
                         });
+                state.thread_read_dirs = state.thread_read_dirs_to_mount(&root);
                 let checker_config = state
                     .shared
                     .runtime
                     .upgrade()
                     .and_then(|shared| shared.comment_checker.get().cloned())
                     .unwrap_or_default();
+                let thread_ro_identities: Vec<_> = state
+                    .thread_read_dirs
+                    .iter()
+                    .filter_map(|path| {
+                        sandbox::ThreadReadDirectory::capture(path)
+                            .ok()
+                            .filter(|dir| dir.path() == path)
+                    })
+                    .collect();
+                // Failed captures never fall back to ordinary (un-pinned) binds.
+                state.thread_read_dirs = thread_ro_identities
+                    .iter()
+                    .map(|dir| dir.path().to_path_buf())
+                    .collect();
                 // Production's factory has the same fail-closed base config as build_sandbox.
                 let mounts = crate::WorkspaceMounts {
                     workspace_root: root.clone(),
-                    ro_binds: Vec::new(),
+                    ro_binds: state.thread_read_dirs.clone(),
+                    thread_ro_identities,
                     rw_binds: Vec::new(),
                     scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
                     allowed: state.allowed_directories.clone(),
@@ -519,10 +539,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         let inherited = state.task.config.allowed_skill_roots.clone();
         state.restore_allowed_skills(skill_roots.into_iter().chain(inherited));
         if !is_restored && !benchmark_replay {
-            let allowed = state
-                .allowed_directories
-                .as_ref()
-                .map_or_else(Vec::new, crate::allowed_directories::snapshot);
+            let allowed = crate::allowed_directories::told_list(
+                state.allowed_directories.as_ref(),
+                &state.thread_read_dirs,
+            );
             if let Err(error) = push_initial_system_message(
                 &state.shared,
                 &state.task,

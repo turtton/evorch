@@ -171,6 +171,23 @@ impl ContextInspectorPane {
         self.selection = Selection::None;
     }
 
+    /// Include the active thread in preview reuse keys, including requests
+    /// recorded by the preceding frame before a thread switch.
+    pub fn set_thread(&mut self, thread: Option<String>) {
+        for spec in [&mut self.spec, &mut self.left, &mut self.right] {
+            spec.thread_id.clone_from(&thread);
+        }
+        for slot in [
+            &mut self.preview,
+            &mut self.compare_left,
+            &mut self.compare_right,
+        ] {
+            if let Some(spec) = &mut slot.spec {
+                spec.thread_id.clone_from(&thread);
+            }
+        }
+    }
+
     /// Per-frame bookkeeping: collect previews and load what the last render asked for.
     pub fn update(&mut self, ctx: &egui::Context, sink: &dyn CommandSink, project: Option<&str>) {
         for slot in [

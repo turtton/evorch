@@ -26,6 +26,7 @@ pub const ROLES: [Role; 9] = [
 /// The run shape the Preview view asks the runtime to compose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewSpec {
+    pub thread_id: Option<String>,
     pub role: Role,
     pub category: Option<CategoryId>,
     pub conversation: bool,
@@ -35,6 +36,7 @@ pub struct PreviewSpec {
 impl PreviewSpec {
     pub fn new(role: Role) -> Self {
         Self {
+            thread_id: None,
             role,
             category: None,
             conversation: false,
@@ -44,6 +46,7 @@ impl PreviewSpec {
 
     pub fn request(&self) -> BaseContextRequest {
         BaseContextRequest {
+            thread_id: self.thread_id.clone(),
             category: self.category.map(|category| category.to_string()),
             conversation: self.conversation,
             child: self.child,

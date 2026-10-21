@@ -356,12 +356,10 @@ impl AgentRuntime {
 
     /// The bound thread of `run`'s delegation tree, else its root run.
     pub(crate) fn scratch_key(&self, run: RunId) -> ScratchKey {
-        self.goal_owner_for_run(run)
-            .and_then(|root| self.goal_thread(root))
-            .map_or_else(
-                || ScratchKey::Run(self.run_root(run).unwrap_or(run)),
-                ScratchKey::Thread,
-            )
+        self.thread_of_run(run).map_or_else(
+            || ScratchKey::Run(self.run_root(run).unwrap_or(run)),
+            ScratchKey::Thread,
+        )
     }
 }
 

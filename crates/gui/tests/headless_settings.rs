@@ -23,3 +23,5 @@ mod sandbox_settings_headless;
 mod self_improvement_pane;
 #[path = "headless_settings/self_improvement_tab_headless.rs"]
 mod self_improvement_tab_headless;
+#[path = "headless_settings/self_improvement_triage.rs"]
+mod self_improvement_triage;

@@ -28,7 +28,15 @@ pub(crate) fn sandbox_boundary(mounts: &WorkspaceMounts) -> Result<SandboxBounda
     })?;
     let mut boundary = SandboxBoundary::new(mounts.workspace_root.clone()).read_only(outputs);
     for path in &mounts.ro_binds {
-        boundary = boundary.read_only(path.clone());
+        boundary = if let Some(identity) = mounts
+            .thread_ro_identities
+            .iter()
+            .find(|dir| dir.path() == path)
+        {
+            boundary.with_thread_read_directory(identity.clone())
+        } else {
+            boundary.read_only(path.clone())
+        };
     }
     for path in &mounts.rw_binds {
         boundary = boundary.read_write(path.clone());
@@ -134,6 +142,7 @@ mod tests {
         let mounts = WorkspaceMounts {
             workspace_root: PathBuf::from("/project"),
             ro_binds: vec![PathBuf::from("/opt/reference")],
+            thread_ro_identities: Vec::new(),
             rw_binds: vec![PathBuf::from("/opt/shared")],
             scratch: Some(PathBuf::from("/var/tmp/evorch-scratch-test/t-1")),
             allowed: Some(sandbox::AllowedRegions {

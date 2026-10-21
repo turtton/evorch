@@ -125,6 +125,7 @@ fn fixture_with_model(
         pending_terminal: None,
         scratch: None,
         allowed_directories: None,
+        thread_read_dirs: Vec::new(),
         told_directories: Default::default(),
         allowed_instructions: Default::default(),
         allowed_skill_origins: Default::default(),

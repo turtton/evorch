@@ -435,6 +435,7 @@ fn band_harness(
                         phase_unread: false,
                         has_project: true,
                         active_thread_title: Some("A"),
+                        extra_read_dirs: &[],
                         parent_thread: None,
                         child_threads: Vec::new(),
                         thread_metrics: None,

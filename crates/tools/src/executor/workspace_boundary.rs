@@ -403,3 +403,28 @@ fn io_error(error: std::io::Error) -> ToolError {
         detail: error.to_string(),
     }
 }
+
+#[cfg(all(test, unix))]
+mod allowed_identity_compatibility_tests {
+    use super::*;
+
+    // Existing allowed directories remain live path grants in this PR. Unlike
+    // thread RO roots, place() follows a replaced allowed root on every use.
+    #[test]
+    fn project_allowed_root_still_follows_a_replacement_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed");
+        let other = temp.path().join("other");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let regions = vec![BoundaryRegion {
+            path: allowed.clone(),
+            access: PathAccess::ReadWrite,
+        }];
+        let file = other.canonicalize().unwrap().join("secret");
+        assert_eq!(place(&regions, Some(&file)), None);
+        std::fs::rename(&allowed, temp.path().join("old")).unwrap();
+        std::os::unix::fs::symlink(&other, &allowed).unwrap();
+        assert_eq!(place(&regions, Some(&file)), Some(PathAccess::ReadWrite));
+    }
+}

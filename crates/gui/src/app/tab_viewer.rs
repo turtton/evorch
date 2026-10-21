@@ -46,6 +46,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
+    pub(super) self_improvement_action:
+        &'a mut Option<crate::panes::self_improvement::SelfImprovementAction>,
     pub(super) transcripts: &'a TranscriptRegistry,
     pub(super) ledger: &'a crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
@@ -409,7 +411,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                                 .find(|project| &project.id == id)
                         })
                         .map(|project| project.repo_root.as_path());
-                    self.self_improvement.render_for_repo_root(ui, root);
+                    if let Some(action) = self.self_improvement.render_for_repo_root(ui, root) {
+                        *self.self_improvement_action = Some(action);
+                    }
                 } else {
                     self.memory.render(ui, project.as_deref());
                 }

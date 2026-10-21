@@ -7,6 +7,25 @@ use storage::{Database, StorageConfig, StorageHandle};
 
 const POLL_INTERVAL_SECS: f64 = 1.0;
 
+mod triage;
+pub(crate) use triage::read_directory_error;
+pub use triage::{TRIAGE_MAX_ROWS, triage_prompt};
+
+/// Label of the button that opens a draft triage thread (ADR 0037).
+pub const TRIAGE_BUTTON: &str = "Create triage thread (reads drafts)";
+
+/// A request the workbench carries out on the pane's behalf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfImprovementAction {
+    /// Open a thread whose runs may read `read_dirs`, never write them, with
+    /// `prompt` waiting in its composer for the operator to send.
+    CreateTriageThread {
+        title: String,
+        read_dirs: Vec<PathBuf>,
+        prompt: String,
+    },
+}
+
 pub struct SelfImprovementPane {
     pub config: Option<StorageConfig>,
     pub handle: Option<StorageHandle>,
@@ -15,6 +34,8 @@ pub struct SelfImprovementPane {
     /// Resolved by the app using `model::self_improvement_settings::resolve_draft_dir`,
     /// exactly as startup resolves the runtime policy. The pane never creates it.
     pub draft_dir: Option<PathBuf>,
+    /// Active project root: RW project paths cannot be promised as read-only.
+    pub project_root: Option<PathBuf>,
     pub status: Option<ImprovementStatus>,
     project: Option<String>,
     entries: Vec<ImprovementCandidate>,
@@ -37,6 +58,7 @@ impl Default for SelfImprovementPane {
             handle: None,
             enabled: false,
             draft_dir: None,
+            project_root: None,
             status: Some(ImprovementStatus::New),
             project: None,
             entries: Vec::new(),
@@ -66,10 +88,14 @@ fn status_icon(status: ImprovementStatus) -> (&'static str, egui::Color32) {
 impl SelfImprovementPane {
     /// Uses the same repository identity as the runtime collector, independently
     /// of sidebar display IDs. Resolve Git metadata only when selection changes.
-    pub fn render_for_repo_root(&mut self, ui: &mut egui::Ui, root: Option<&Path>) {
+    pub fn render_for_repo_root(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: Option<&Path>,
+    ) -> Option<SelfImprovementAction> {
+        self.project_root = root.map(Path::to_path_buf);
         if !self.enabled || self.config.is_none() || root.is_none() {
-            self.render(ui, None);
-            return;
+            return self.render(ui, None);
         }
         let root = root.expect("checked above");
         if self
@@ -82,21 +108,25 @@ impl SelfImprovementPane {
                 Some((root.to_owned(), crate::runtime_sink::derive_repo_slug(root)));
         }
         let project = self.resolved_project.as_ref().unwrap().1.clone();
-        self.render(ui, Some(&project));
+        self.render(ui, Some(&project))
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, project: Option<&str>) {
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: Option<&str>,
+    ) -> Option<SelfImprovementAction> {
         if !self.enabled {
             ui.label("Self-improvement drafts are disabled ([self_improvement] enabled=false). Candidates are not collected.");
-            return;
+            return None;
         }
         if self.config.is_none() {
             ui.label("Self-improvement storage is not connected.");
-            return;
+            return None;
         }
         let Some(project) = project else {
             ui.label("Select a project to browse improvement candidates.");
-            return;
+            return None;
         };
         let path = &self.config.as_ref().unwrap().db_path;
         let storage_changed = self.database_path.as_ref() != Some(path);
@@ -110,6 +140,9 @@ impl SelfImprovementPane {
             || self.loaded_status != self.status
             || self.refresh;
         self.project = Some(project.into());
+        // Checked before this frame's reload; a click is checked again after it.
+        let triage = self.triage_target();
+        let mut triage_clicked = false;
         ui.horizontal_wrapped(|ui| {
             ui.label("Status");
             let status_response = egui::ComboBox::from_id_salt("self_improvement_status")
@@ -129,6 +162,19 @@ impl SelfImprovementPane {
             status_response.response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Candidate status")
             });
+            let button = ui.add_enabled(triage.is_ok(), egui::Button::new(TRIAGE_BUTTON));
+            triage_clicked = match &triage {
+                Ok(dir) => button
+                    .on_hover_text(format!(
+                        "Opens a thread whose runs can read {} but not write it, with a triage prompt to review before sending",
+                        dir.display()
+                    ))
+                    .clicked(),
+                Err(reason) => {
+                    button.on_disabled_hover_text(reason.as_str());
+                    false
+                }
+            };
         });
         let now = ui.input(|input| input.time);
         if refresh || now >= self.next_poll_at {
@@ -159,6 +205,17 @@ impl SelfImprovementPane {
                 self.data_version = None;
             }
         }
+        let triage_action = if triage_clicked {
+            match self.triage_target() {
+                Ok(dir) => Some(self.triage_action(dir)),
+                Err(reason) => {
+                    self.error = Some(reason);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         ui.ctx()
             .request_repaint_after(Duration::from_secs_f64((self.next_poll_at - now).max(0.0)));
         if let Some(error) = &self.error {
@@ -308,6 +365,42 @@ impl SelfImprovementPane {
                 Err(error) => self.error = Some(error.to_string()),
             }
             ui.ctx().request_repaint();
+        }
+        triage_action
+    }
+
+    /// The canonical draft directory a triage thread would read, or why none may.
+    fn triage_target(&self) -> Result<PathBuf, String> {
+        let Some(dir) = self.draft_dir.as_deref() else {
+            return Err("Draft directory is not configured".into());
+        };
+        let Some(dir) = dir.canonicalize().ok().filter(|path| path.is_dir()) else {
+            return Err(format!("Draft directory does not exist: {}", dir.display()));
+        };
+        if let Some(reason) = read_directory_error(
+            &dir,
+            self.project_root.as_deref(),
+            self.config.as_ref().map(|config| config.db_path.as_path()),
+        ) {
+            return Err(reason);
+        }
+        if self.entries.is_empty() {
+            return Err("No candidates match the status filter".into());
+        }
+        Ok(dir)
+    }
+
+    fn triage_action(&self, dir: PathBuf) -> SelfImprovementAction {
+        let count = self
+            .entries
+            .iter()
+            .filter(|entry| self.status.is_none_or(|status| entry.status == status))
+            .count();
+        let status = self.status.map_or("all", ImprovementStatus::as_str);
+        SelfImprovementAction::CreateTriageThread {
+            title: format!("Triage drafts ({count} candidates, {status})"),
+            prompt: triage_prompt(&dir, &self.entries, self.status, TRIAGE_MAX_ROWS),
+            read_dirs: vec![dir],
         }
     }
 }

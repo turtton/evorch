@@ -206,3 +206,13 @@ fn preview_spec_defaults_delegated_roles_to_child_runs() {
     assert_eq!(compact_tokens(950), "950");
     assert_eq!(compact_tokens(12_400), "12.4K");
 }
+
+#[test]
+fn preview_thread_is_forwarded_and_part_of_the_reuse_key() {
+    let mut first = PreviewSpec::new(Role::Worker);
+    first.thread_id = Some("triage-a".into());
+    assert_eq!(first.request().thread_id.as_deref(), Some("triage-a"));
+    let mut second = first.clone();
+    second.thread_id = Some("triage-b".into());
+    assert_ne!(first, second);
+}

@@ -311,3 +311,32 @@ fn saved_oracle_context_is_displayed_as_advisor() {
     assert!(gui::model::context_inspector::ROLES.contains(&Role::Advisor));
     assert!(gui::model::context_inspector::categories_for(Role::Advisor).is_empty());
 }
+
+#[test]
+fn switching_active_thread_requests_a_new_thread_specific_preview() {
+    let requests = Requests::default();
+    let mut harness = harness(requests.clone());
+    let repo = tempfile::tempdir().unwrap();
+    let state = harness.state_mut();
+    let project = state.add_project(repo.path()).unwrap();
+    state.select_project(project).unwrap();
+    let first = state.create_thread("First").unwrap();
+    let second = state.create_thread("Second").unwrap();
+    state.switch_thread(first.clone()).unwrap();
+    state.open_context_tab(InspectorMode::Preview, None);
+    settle(&mut harness);
+    assert_eq!(
+        requests.lock().unwrap().last().unwrap().thread_id,
+        Some(first.to_string())
+    );
+    requests.lock().unwrap().clear();
+    harness.state_mut().switch_thread(second.clone()).unwrap();
+    settle(&mut harness);
+    let sent = requests.lock().unwrap();
+    assert_eq!(
+        sent.len(),
+        1,
+        "same role/project must not reuse another thread's preview"
+    );
+    assert_eq!(sent[0].thread_id, Some(second.to_string()));
+}

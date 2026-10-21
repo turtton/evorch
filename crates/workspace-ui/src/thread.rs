@@ -83,6 +83,9 @@ pub struct ThreadRecord {
     /// Inspected active root of the thread's runs.
     #[serde(default)]
     pub active_root: Option<PathBuf>,
+    /// Extra directories this thread's runs (including subagents) may read, never write (ADR 0037).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_read_dirs: Vec<PathBuf>,
     #[serde(default)]
     pub model_preference: Option<ModelPreference>,
     #[serde(default)]
@@ -140,6 +143,7 @@ impl ThreadRecord {
             run_ids: Vec::new(),
             root_run_id: None,
             active_root: None,
+            extra_read_dirs: Vec::new(),
             model_preference: None,
             chat_role: None,
             draft_input: String::new(),

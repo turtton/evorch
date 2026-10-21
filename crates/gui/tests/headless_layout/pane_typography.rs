@@ -75,6 +75,7 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     phase_unread: false,
                     has_project: true,
                     active_thread_title: Some("Chat"),
+                    extra_read_dirs: &[],
                     parent_thread: None,
                     child_threads: Vec::new(),
                     thread_metrics: None,

@@ -1,4 +1,5 @@
-//! What a run was told about its project's allowed directories (ADR 0032).
+//! What a run was told about its project's allowed directories (ADR 0032) and
+//! its thread's read-only directories (ADR 0037).
 //!
 //! The list a run starts with is a fixed section of its system message. Later
 //! changes are appended as `[workspace update]` messages at the next request
@@ -116,6 +117,32 @@ pub(crate) fn snapshot(regions: &sandbox::AllowedRegions) -> Vec<ToldDirectory> 
     list
 }
 
+/// What a run is told: the project's allowed directories and the thread's read-only
+/// directories the run mounted (ADR 0037), sorted by path. Thread directories are
+/// mounted after allowed ones, so an allowed directory equal to or inside one of
+/// them is listed read-only, which is the access the boundary gives it.
+pub(crate) fn told_list(
+    regions: Option<&sandbox::AllowedRegions>,
+    thread_read_dirs: &[PathBuf],
+) -> Vec<ToldDirectory> {
+    let mut list = regions.map_or_else(Vec::new, snapshot);
+    for entry in &mut list {
+        if thread_read_dirs
+            .iter()
+            .any(|dir| entry.path.starts_with(dir))
+        {
+            entry.access = DirectoryAccess::ReadOnly;
+        }
+    }
+    list.extend(thread_read_dirs.iter().map(|path| ToldDirectory {
+        path: path.clone(),
+        access: DirectoryAccess::ReadOnly,
+    }));
+    list.sort_by(|a, b| a.path.cmp(&b.path));
+    list.dedup_by(|a, b| a.path == b.path);
+    list
+}
+
 /// The system message section for a run starting with `list`; none when empty.
 pub(crate) fn section_text(list: &[ToldDirectory]) -> Option<String> {
     (!list.is_empty()).then(|| {
@@ -187,10 +214,10 @@ impl LoopState {
         if self.todo_context_deferred {
             return;
         }
-        let Some(regions) = &self.allowed_directories else {
+        if self.allowed_directories.is_none() && self.thread_read_dirs.is_empty() {
             return;
-        };
-        let current = snapshot(regions);
+        }
+        let current = told_list(self.allowed_directories.as_ref(), &self.thread_read_dirs);
         if let Some(text) = self.told_directories.update(current) {
             self.context.push_user(&text);
             self.publish_message_count();
@@ -310,6 +337,67 @@ mod tests {
         assert_eq!(
             snapshot(&regions),
             [told("/a", ReadOnly), told("/z", ReadOnly)]
+        );
+    }
+
+    fn writable(paths: &[&str]) -> sandbox::AllowedRegions {
+        sandbox::AllowedRegions {
+            paths: sandbox::LivePaths::new(paths.iter().map(PathBuf::from).collect()),
+            access: sandbox::PathAccess::ReadWrite,
+        }
+    }
+
+    // Given: a Worker's writable allowed directories and its thread's read-only ones,
+    //        overlapping on one path and covering another allowed directory
+    // When: building the list the run is told
+    // Then: thread directories are read-only, win where they cover an allowed directory,
+    //       and the list is sorted with one entry per path
+    #[test]
+    fn thread_directories_are_read_only_and_win_where_they_cover_allowed_ones() {
+        let regions = writable(&["/z", "/b/c", "/a", "/b"]);
+        let thread = [
+            PathBuf::from("/y"),
+            PathBuf::from("/b"),
+            PathBuf::from("/y"),
+        ];
+        assert_eq!(
+            told_list(Some(&regions), &thread),
+            [
+                told("/a", ReadWrite),
+                told("/b", ReadOnly),
+                told("/b/c", ReadOnly),
+                told("/y", ReadOnly),
+                told("/z", ReadWrite),
+            ]
+        );
+        assert_eq!(told_list(None, &thread[..1]), [told("/y", ReadOnly)]);
+        assert_eq!(told_list(None, &[]), []);
+        assert_eq!(told_list(Some(&regions), &[]), snapshot(&regions));
+    }
+
+    // Given: a run started with allowed and thread directories, saved and restored
+    // When: the same declarations are read again, then history is compacted
+    // Then: no update is appended, and the restatement keeps thread directories read-only
+    #[test]
+    fn a_restored_run_with_thread_directories_gets_no_false_update() {
+        let regions = writable(&["/allowed", "/shared"]);
+        let thread = [PathBuf::from("/shared"), PathBuf::from("/drafts")];
+        let started = ToldDirectories::started(told_list(Some(&regions), &thread));
+        let saved = serde_json::to_value(&started).unwrap();
+        let mut restored: ToldDirectories = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored, started);
+        assert_eq!(restored.update(told_list(Some(&regions), &thread)), None);
+        restored.rewrite_pending = true;
+        assert_eq!(
+            restored.update(told_list(Some(&regions), &thread)).unwrap(),
+            "[workspace update] Current allowed directories; this supersedes earlier lists.\n* /allowed (read-write)\n* /drafts (read-only)\n* /shared (read-only)"
+        );
+        // Restored again after a thread directory is withdrawn, the run is told only that.
+        assert_eq!(
+            restored
+                .update(told_list(Some(&regions), &thread[..1]))
+                .unwrap(),
+            "[workspace update] Allowed directories changed (+ added, - removed, ~ access changed):\n- /drafts"
         );
     }
 }
