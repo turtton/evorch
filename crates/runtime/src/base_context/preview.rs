@@ -144,13 +144,22 @@ impl AgentRuntime {
                     .map_or(root, |project| project.root.clone())
             });
         let own_sandbox = sandbox_root.is_some();
+        let thread_read_dirs = match (sandbox_root.as_deref(), request.thread_id.as_deref()) {
+            (Some(root), Some(thread)) => {
+                let scratch = self
+                    .thread_scratch()
+                    .ok()
+                    .map(|scratch| scratch.thread_dir(thread));
+                self.mountable_thread_read_only_directories(thread, root, scratch.as_deref())
+            }
+            _ => Vec::new(),
+        };
         let active_root = shared_active_root(shared.rules.as_deref(), sandbox_root);
         let allowed_directories = active_root.as_deref().map_or_else(Vec::new, |root| {
-            allowed_directories::snapshot(&allowed_directories::regions(
-                &self.shared,
-                root,
-                &policy,
-            ))
+            allowed_directories::told_list(
+                Some(&allowed_directories::regions(&self.shared, root, &policy)),
+                &thread_read_dirs,
+            )
         });
         let mut sections = compose_system_sections(
             &shared,

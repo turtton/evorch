@@ -487,6 +487,11 @@ impl AgentRuntime {
             None => (None, prepare()?),
         };
         let source_thread = goals.roots.get(&source).cloned();
+        if let Some(thread) = &source_thread {
+            // Copied before the child is announced, so a host mirroring it never races
+            // this copy. Lock order: goal, then thread read dirs.
+            self.inherit_thread_read_only_directories(thread, &child_thread);
+        }
         before_transfer(&owner);
         goals.roots.insert(target, child_thread.clone());
         if let Some(request) = goals.requests.remove(&source) {
@@ -566,6 +571,12 @@ impl AgentRuntime {
                 .find(|candidate| candidate.run_id == current)?
                 .parent_run_id?;
         }
+    }
+
+    /// The thread bound to the root of `run`'s delegation tree, if any.
+    pub(crate) fn thread_of_run(&self, run: RunId) -> Option<String> {
+        self.goal_owner_for_run(run)
+            .and_then(|root| self.goal_thread(root))
     }
 
     pub(crate) fn active_goal_children(&self, root: RunId) -> Vec<RunId> {

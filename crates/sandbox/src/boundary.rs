@@ -85,6 +85,46 @@ pub struct CacheMount {
     pub sandbox: PathBuf,
 }
 
+/// A thread-only read-only directory, pinned to its run-start identity.
+/// Revalidation is fail-closed, but is not an FD-pinned open/bind operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadReadDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl ThreadReadDirectory {
+    pub fn capture(path: &Path) -> std::io::Result<Self> {
+        let path = path.canonicalize()?;
+        let metadata = path.metadata()?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::other(
+                "thread read directory is not a directory",
+            ));
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            path,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn is_current(&self) -> bool {
+        Self::capture(&self.path).is_ok_and(|current| current == *self)
+    }
+}
+
 /// Read-write and read-only host paths of one run's sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxBoundary {
@@ -92,6 +132,7 @@ pub struct SandboxBoundary {
     pub(crate) system: Vec<PathBuf>,
     pub(crate) allowed: Option<AllowedRegions>,
     pub(crate) read_only: Vec<PathBuf>,
+    pub(crate) thread_read_only: Vec<ThreadReadDirectory>,
     pub(crate) read_write: Vec<PathBuf>,
     pub(crate) cargo_home: Option<PathBuf>,
     pub(crate) rustup_home: Option<PathBuf>,
@@ -106,6 +147,7 @@ impl SandboxBoundary {
             system: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
             allowed: None,
             read_only: Vec::new(),
+            thread_read_only: Vec::new(),
             read_write: Vec::new(),
             cargo_home: tool_home("CARGO_HOME", ".cargo"),
             rustup_home: tool_home("RUSTUP_HOME", ".rustup"),
@@ -125,6 +167,21 @@ impl SandboxBoundary {
     pub fn read_only(mut self, path: impl Into<PathBuf>) -> Self {
         self.read_only.push(path.into());
         self
+    }
+
+    /// Thread roots must still have the run-start identity at each use.
+    /// Ordinary RO binds and project allowed directories retain their semantics.
+    #[must_use]
+    pub fn with_thread_read_directory(mut self, directory: ThreadReadDirectory) -> Self {
+        self.thread_read_only.push(directory);
+        self
+    }
+
+    pub(crate) fn current_thread_read_directories(&self) -> impl Iterator<Item = &Path> {
+        self.thread_read_only
+            .iter()
+            .filter(|dir| dir.is_current())
+            .map(ThreadReadDirectory::path)
     }
 
     #[must_use]
@@ -210,6 +267,10 @@ impl SandboxBoundary {
         regions.extend(
             self.read_only
                 .iter()
+                .map(|path| region(path, PathAccess::ReadOnly)),
+        );
+        regions.extend(
+            self.current_thread_read_directories()
                 .map(|path| region(path, PathAccess::ReadOnly)),
         );
         regions.extend(
@@ -322,6 +383,36 @@ mod tests {
         assert_eq!(
             regions[index(&regions, "/srv/reference")].access,
             PathAccess::ReadWrite
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod thread_identity_tests {
+    use super::*;
+
+    #[test]
+    fn only_thread_ro_regions_are_identity_checked() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let identity = ThreadReadDirectory::capture(&root).unwrap();
+        let thread = SandboxBoundary::new("/project".into()).with_thread_read_directory(identity);
+        let ordinary = SandboxBoundary::new("/project".into()).read_only(&root);
+        let allowed = SandboxBoundary::new("/project".into())
+            .with_allowed(LivePaths::new(vec![root.clone()]), PathAccess::ReadWrite);
+        assert!(thread.regions().iter().any(|r| r.path == root));
+        std::fs::rename(&root, temp.path().join("old")).unwrap();
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+        assert!(!thread.regions().iter().any(|r| r.path == root));
+        assert!(ordinary.regions().iter().any(|r| r.path == root));
+        assert!(
+            allowed
+                .regions()
+                .iter()
+                .any(|r| r.path == root && r.access == PathAccess::ReadWrite)
         );
     }
 }

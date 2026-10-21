@@ -171,6 +171,10 @@ fn child(name: &str) -> bool {
         return true;
     }
     if Command::new("bwrap").arg("--version").output().is_err() {
+        assert!(
+            std::env::var_os("EVORCH_REQUIRE_BWRAP").is_none(),
+            "EVORCH_REQUIRE_BWRAP: bwrap is not installed"
+        );
         eprintln!("SKIP: bwrap is not installed");
         return false;
     }
@@ -191,6 +195,10 @@ fn child(name: &str) -> bool {
 async fn running_worker_scenario() {
     let dirs = Dirs::new();
     if let Err(error) = BwrapSandbox::detect(BwrapConfig::new(dirs.repo.clone())) {
+        assert!(
+            std::env::var_os("EVORCH_REQUIRE_BWRAP").is_none(),
+            "EVORCH_REQUIRE_BWRAP: {error}"
+        );
         eprintln!("SKIP: bwrap unavailable: {error}");
         return;
     }

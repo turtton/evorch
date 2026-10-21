@@ -3436,6 +3436,199 @@ async fn allowed_directories_are_restated_after_compaction_then_reuse_the_wire_p
     }
 }
 
+#[tokio::test]
+async fn thread_read_only_directories_restore_appends_only_a_real_change() {
+    for changed in [false, true] {
+        thread_read_dirs_restore_preserves_wire_prefix(changed).await;
+    }
+}
+
+// Given: a stopped Worker of a sandboxed thread told two read-only thread directories,
+//        one of them also a writable allowed directory of its project
+// When: it is restored with the same declarations, or after the thread withdrew the
+//       shared one (`changed`)
+// Then: the system message lists both read-only and stays byte-identical, an unchanged
+//       restore appends nothing, and a change is appended once after the restored input
+async fn thread_read_dirs_restore_preserves_wire_prefix(changed: bool) {
+    let review_storage = support::ReviewStorage::new();
+    let mut harness = harness(
+        vec![
+            text_response("Initial work"),
+            text_response("Continued after restore"),
+            text_response("Followed up"),
+        ],
+        1_000_000,
+    );
+    let root = harness._directory.path().canonicalize().unwrap();
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(root.clone()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .unwrap();
+    let repo = allowed_dir(&root, "repo");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+    ]);
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("thread-read-dirs-history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = AgentRuntime::with_sandbox_factory(
+        bus.clone(),
+        Arc::new(ToolExecutor::with_standard_tools(
+            bus,
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        )),
+        model,
+        Arc::new(DirectFactory),
+    )
+    .with_sequential_run_ids()
+    .with_system_prompts(contract_prompts())
+    .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap())
+    .with_sandbox_root(repo.clone());
+    harness
+        .runtime
+        .set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+            root.join("scratch"),
+        )));
+    let shared = allowed_dir(&root, "shared");
+    let drafts = allowed_dir(&root, "drafts");
+    harness
+        .runtime
+        .set_project_allowed_directories(repo.clone(), vec![shared.clone()]);
+    harness
+        .runtime
+        .set_thread_read_only_directories("thread", vec![drafts.clone(), shared.clone()]);
+    let run = harness.runtime.reserve_run_id();
+    harness.runtime.bind_thread_root("thread", run).unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Start work",
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    if changed {
+        harness
+            .runtime
+            .set_thread_read_only_directories("thread", vec![drafts.clone()]);
+    }
+    harness
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "After restore".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Followup".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    let systems = wire_texts(&requests[0], "system");
+    for request in &requests {
+        assert_eq!(
+            wire_texts(request, "system"),
+            systems,
+            "restoring never rewrites the system message"
+        );
+    }
+    let section = systems.join("\n");
+    for directory in [&drafts, &shared] {
+        assert!(
+            section.contains(&format!("* {} (read-only)", directory.display())),
+            "{section}"
+        );
+    }
+    assert!(workspace_updates(&requests[0]).is_empty());
+    for request in &requests[1..] {
+        let updates = workspace_updates(request);
+        assert_eq!(updates.len(), usize::from(changed), "changed={changed}");
+        if changed {
+            assert!(
+                updates[0].contains(&format!(
+                    "~ {} (read-write, was read-only)",
+                    shared.display()
+                )),
+                "{}",
+                updates[0]
+            );
+            assert!(!updates[0].contains(&drafts.display().to_string()));
+            let users = wire_texts(request, "user");
+            let update = users.iter().position(|text| text == &updates[0]).unwrap();
+            let restored = users
+                .iter()
+                .position(|text| text.contains("After restore"))
+                .unwrap();
+            assert_eq!(
+                update,
+                restored + 1,
+                "the update follows the restored input"
+            );
+        }
+    }
+}
+
 /// Reads by `path`, so a successful call names the file whose rules apply.
 struct PathRead;
 #[async_trait::async_trait]

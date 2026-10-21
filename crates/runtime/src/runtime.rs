@@ -131,6 +131,8 @@ pub(crate) struct Shared {
     pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
     /// Allowed directories per canonical project root; runs hold the same live list.
     pub(crate) allowed_directories: Mutex<HashMap<PathBuf, sandbox::LivePaths>>,
+    /// Read-only directories per thread id (ADR 0037), read when a run builds its sandbox.
+    pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
     next_reference_token: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
@@ -153,6 +155,8 @@ pub struct WorkspaceMounts {
     pub workspace_root: PathBuf,
     /// 読み取り専用で公開する path。
     pub ro_binds: Vec<PathBuf>,
+    /// Run-start identities for thread entries in `ro_binds`; ordinary binds stay live.
+    pub thread_ro_identities: Vec<sandbox::ThreadReadDirectory>,
     /// 読み書き可能で公開する path。
     pub rw_binds: Vec<PathBuf>,
     /// shell の `TMPDIR`。`None` なら sandbox ごとの一時領域を使う。
@@ -167,6 +171,7 @@ impl WorkspaceMounts {
         Self {
             workspace_root,
             ro_binds: Vec::new(),
+            thread_ro_identities: Vec::new(),
             rw_binds: Vec::new(),
             scratch: None,
             allowed: None,
@@ -682,6 +687,7 @@ impl AgentRuntime {
                 projects: Mutex::new(HashMap::new()),
                 project_trust: Mutex::new(HashMap::new()),
                 allowed_directories: Mutex::new(HashMap::new()),
+                thread_read_dirs: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
@@ -989,6 +995,7 @@ impl AgentRuntime {
                 projects: Mutex::new(HashMap::new()),
                 project_trust: Mutex::new(HashMap::new()),
                 allowed_directories: Mutex::new(HashMap::new()),
+                thread_read_dirs: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
