@@ -42,6 +42,8 @@ pub struct ConversationContext<'a> {
     pub phase_unread: bool,
     pub has_project: bool,
     pub active_thread_title: Option<&'a str>,
+    /// Directories the active thread's runs may read, never write (ADR 0037).
+    pub extra_read_dirs: &'a [std::path::PathBuf],
     pub parent_thread: Option<&'a workspace_ui::ThreadRecord>,
     pub child_threads: Vec<&'a workspace_ui::ThreadRecord>,
     pub thread_metrics: Option<crate::model::telemetry::ThreadMetrics>,
@@ -637,6 +639,7 @@ mod tests {
                         phase_unread: true,
                         has_project: true,
                         active_thread_title: Some("Chat"),
+                        extra_read_dirs: &[],
                         parent_thread: None,
                         child_threads: Vec::new(),
                         thread_metrics: None,

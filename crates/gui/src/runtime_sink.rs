@@ -269,6 +269,11 @@ impl CommandSink for RuntimeCommandSink {
             .set_project_allowed_directories(root, directories);
     }
 
+    fn set_thread_read_only_directories(&mut self, thread_id: String, directories: Vec<PathBuf>) {
+        self.runtime
+            .set_thread_read_only_directories(&thread_id, directories);
+    }
+
     fn start_background_run(&self, text: String) -> Option<RunId> {
         Some(RuntimeCommandSink::start_background_run(self, text))
     }

@@ -62,6 +62,30 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             drafts: self.question_drafts,
         });
         let default_model = self.composer.resolved_model.clone();
+        let extra_read_dirs: Vec<_> = active_thread
+            .into_iter()
+            .flat_map(|thread| &thread.extra_read_dirs)
+            .filter(|dir| {
+                let root = active_thread
+                    .and_then(|thread| {
+                        self.sidebar
+                            .projects
+                            .iter()
+                            .find(|project| project.id == thread.project_id)
+                    })
+                    .map(|project| project.repo_root.as_path());
+                crate::panes::self_improvement::read_directory_error(
+                    dir,
+                    root,
+                    self.memory
+                        .config
+                        .as_ref()
+                        .map(|config| config.db_path.as_path()),
+                )
+                .is_none()
+            })
+            .cloned()
+            .collect();
         let ctx = ConversationContext {
             todo: thread_id
                 .as_deref()
@@ -78,6 +102,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .any(|((id, _), ack)| id == tab && ack.is_unread()),
             has_project: self.sidebar.selected_project.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
+            extra_read_dirs: &extra_read_dirs,
             // Rewound versions are not parents or children: they share one row.
             parent_thread: active_thread
                 .and_then(|thread| workspace_ui::display_parent(&self.sidebar.threads, &thread.id))

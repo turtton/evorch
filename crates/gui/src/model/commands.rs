@@ -195,6 +195,15 @@ pub trait CommandSink: Send {
     ) {
     }
 
+    /// Declares the directories a thread's runs may read, never write (ADR 0037).
+    /// The list replaces the previous one; an empty list removes the declaration.
+    fn set_thread_read_only_directories(
+        &mut self,
+        _thread_id: String,
+        _directories: Vec<std::path::PathBuf>,
+    ) {
+    }
+
     fn start_background_run(&self, _text: String) -> Option<runtime::RunId> {
         None
     }

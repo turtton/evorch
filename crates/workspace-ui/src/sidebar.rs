@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +165,50 @@ impl SidebarState {
         Ok(())
     }
 
+    pub fn set_thread_extra_read_dirs(
+        &mut self,
+        id: &ThreadId,
+        dirs: &[PathBuf],
+    ) -> Result<(), ThreadError> {
+        let thread = self
+            .threads
+            .iter()
+            .find(|thread| &thread.id == id)
+            .ok_or(ThreadError::UnknownThread)?;
+        let root = &self
+            .projects
+            .iter()
+            .find(|project| project.id == thread.project_id)
+            .ok_or(ThreadError::UnknownProject)?
+            .repo_root;
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+
+        let mut normalized = Vec::new();
+        let mut unique = BTreeSet::new();
+        for path in dirs {
+            let canonical = canonical_directory(path).map_err(|error| {
+                ThreadError::InvalidReadDirectory(format!("'{}': {error}", path.display()))
+            })?;
+            if crate::project::is_too_broad(&canonical) {
+                return Err(ThreadError::InvalidReadDirectory(format!(
+                    "'{}' is too broad",
+                    path.display()
+                )));
+            }
+            if canonical.starts_with(&root) || root.starts_with(&canonical) {
+                return Err(ThreadError::InvalidReadDirectory(format!(
+                    "'{}' overlaps the project root",
+                    path.display()
+                )));
+            }
+            if unique.insert(canonical.clone()) {
+                normalized.push(canonical);
+            }
+        }
+        self.thread_mut(id)?.extra_read_dirs = normalized;
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), SidebarError> {
         if self.version != SIDEBAR_SCHEMA_VERSION {
             return Err(SidebarError::Validation(format!(
@@ -218,6 +262,17 @@ impl SidebarState {
                 return Err(SidebarError::Validation(format!(
                     "thread '{}' references unknown project",
                     thread.id
+                )));
+            }
+            if let Some(path) = thread
+                .extra_read_dirs
+                .iter()
+                .find(|path| !path.is_absolute())
+            {
+                return Err(SidebarError::Validation(format!(
+                    "thread '{}' has relative extra read directory '{}'",
+                    thread.id,
+                    path.display()
                 )));
             }
         }

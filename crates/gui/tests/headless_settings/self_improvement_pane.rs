@@ -37,7 +37,9 @@ fn disabled_pane_does_not_open_storage_or_expose_actions() {
         ..Default::default()
     });
     let mut harness = Harness::builder().build_ui_state(
-        |ui, pane: &mut SelfImprovementPane| pane.render_for_repo_root(ui, Some(dir.path())),
+        |ui, pane: &mut SelfImprovementPane| {
+            pane.render_for_repo_root(ui, Some(dir.path()));
+        },
         pane,
     );
     harness.run();
@@ -69,7 +71,9 @@ fn persisted_candidates_filter_review_dismiss_and_refresh_on_project_change() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(
-            |ui, state: &mut (SelfImprovementPane, String)| state.0.render(ui, Some(&state.1)),
+            |ui, state: &mut (SelfImprovementPane, String)| {
+                state.0.render(ui, Some(&state.1));
+            },
             (pane, "p".to_owned()),
         );
     harness.run();
@@ -151,7 +155,9 @@ fn copy_draft_emits_clipboard_command_and_read_failure_is_visible() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(
-            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            |ui, pane: &mut SelfImprovementPane| {
+                pane.render(ui, Some("p"));
+            },
             pane,
         );
     harness.run();
@@ -195,7 +201,9 @@ fn review_writer_errors_are_visible() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(
-            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            |ui, pane: &mut SelfImprovementPane| {
+                pane.render(ui, Some("p"));
+            },
             pane,
         );
     harness.run();
@@ -227,7 +235,9 @@ fn empty_pane_observes_new_candidates_status_and_drafts_without_clicks() {
         .with_size(egui::vec2(800.0, 600.0))
         .with_step_dt(0.01)
         .build_ui_state(
-            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            |ui, pane: &mut SelfImprovementPane| {
+                pane.render(ui, Some("p"));
+            },
             pane,
         );
     harness.run();
@@ -274,7 +284,9 @@ fn storage_replacement_and_failed_open_recover_automatically() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(
-            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            |ui, pane: &mut SelfImprovementPane| {
+                pane.render(ui, Some("p"));
+            },
             pane,
         );
     harness.run();
@@ -313,7 +325,9 @@ fn unselected_project_does_not_open_storage() {
         ..Default::default()
     });
     let mut harness = Harness::builder().build_ui_state(
-        |ui, pane: &mut SelfImprovementPane| pane.render_for_repo_root(ui, None),
+        |ui, pane: &mut SelfImprovementPane| {
+            pane.render_for_repo_root(ui, None);
+        },
         pane,
     );
     harness.run();
@@ -355,7 +369,9 @@ fn folded_duplicates_show_their_count_and_recent_runs() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui_state(
-            |ui, state: &mut (SelfImprovementPane, String)| state.0.render(ui, Some(&state.1)),
+            |ui, state: &mut (SelfImprovementPane, String)| {
+                state.0.render(ui, Some(&state.1));
+            },
             (pane, "p".to_owned()),
         );
     harness.run();

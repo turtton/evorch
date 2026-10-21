@@ -109,6 +109,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut tasks_action = None;
         let mut notifications_action = None;
         let mut request_action = None;
+        let mut self_improvement_action = None;
         let mut diagnostics_request = false;
         let mut context_request = false;
         let mut diff_request = None;
@@ -148,6 +149,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
+                self_improvement_action: &mut self_improvement_action,
                 usage: &mut self.usage,
                 context_inspector: &mut self.context_inspector,
                 shell_jobs: &mut self.shell_jobs,
@@ -244,6 +246,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(TasksAction::OpenRun(run_id)) = tasks_action {
             self.open_agent_pane(&run_id);
+        }
+        if let Some(crate::panes::self_improvement::SelfImprovementAction::CreateTriageThread {
+            title,
+            read_dirs,
+            prompt,
+        }) = self_improvement_action
+        {
+            match self.create_thread_with_read_dirs(title, read_dirs, prompt) {
+                Ok(_) => self.focus_panel("agent-main"),
+                Err(error) => self.push_notice(format!("Could not create triage thread: {error}")),
+            }
         }
         if let Some(action) = notifications_action {
             match action {

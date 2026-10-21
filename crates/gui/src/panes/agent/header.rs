@@ -5,7 +5,7 @@ use crate::theme::{
     icons,
     text::{h3, muted},
     tokens::*,
-    widgets::{copy_id_button, fill_label, ghost, icon_text, metric, metric_detailed},
+    widgets::{badge, copy_id_button, fill_label, ghost, icon_text, metric, metric_detailed},
 };
 
 pub(super) fn header_strip(
@@ -66,11 +66,22 @@ pub(super) fn header_strip(
                     {
                         *action = Some(AgentPaneAction::OpenContext);
                     }
-                    let response = fill_label(ui, h3(title), ROW_DENSE, egui::Sense::hover());
-                    let label = format!("Thread: {title}");
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
-                    });
+                    let title_label = |ui: &mut egui::Ui| {
+                        let response = fill_label(ui, h3(title), ROW_DENSE, egui::Sense::hover());
+                        let label = format!("Thread: {title}");
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
+                        });
+                    };
+                    if ctx.extra_read_dirs.is_empty() {
+                        title_label(ui);
+                    } else {
+                        // The title fills what the badge leaves on the right.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            read_dirs_badge(ui, ctx.extra_read_dirs);
+                            title_label(ui);
+                        });
+                    }
                 });
                 if let Some(cost) = ctx.thread_metrics.and_then(|metrics| metrics.cost) {
                     ui.label(muted(format!("Total cost (incl. subagents) {}", usd(cost))))
@@ -111,6 +122,31 @@ pub(super) fn header_strip(
         egui::Stroke::new(1.0, palette().BORDER),
     );
     ui.add_space(SP_1);
+}
+
+/// Names how many directories the thread's runs may read beyond the workspace;
+/// the tooltip lists them (ADR 0037).
+fn read_dirs_badge(ui: &mut egui::Ui, dirs: &[std::path::PathBuf]) {
+    let count = dirs.len();
+    let text = icons::with_icon(
+        icons::FOLDER_LOCK,
+        format!(
+            "+{count} read-only dir{}",
+            if count == 1 { "" } else { "s" }
+        ),
+    );
+    let response = badge(ui, text, palette().TEXT_MUTED, palette().SURFACE_RAISED);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Extra read-only directories")
+    });
+    let paths = dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    response.on_hover_text(format!(
+        "Runs in this thread can read, but not write:\n{paths}"
+    ));
 }
 
 /// `agent_focused` marks a focused subagent, whose cost includes its own

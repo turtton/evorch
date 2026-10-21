@@ -181,7 +181,7 @@ fn stored_identity(path: &Path) -> Result<PathBuf, ProjectError> {
 }
 
 /// Granting the filesystem root or the whole home directory would remove the boundary.
-fn is_too_broad(path: &Path) -> bool {
+pub(crate) fn is_too_broad(path: &Path) -> bool {
     path == Path::new("/")
         || std::env::var_os("HOME")
             .and_then(|home| PathBuf::from(home).canonicalize().ok())

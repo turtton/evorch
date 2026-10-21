@@ -26,6 +26,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.sync_project_allowed_directories();
+        self.sync_thread_read_only_directories();
     }
 
     /// Declares each project's approved allowed directories that still exist.
@@ -52,6 +53,70 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .set_project_allowed_directories(project.repo_root.clone(), present.clone());
             self.declared_allowed
                 .insert(project.repo_root.clone(), present);
+        }
+    }
+
+    /// Declares each thread's read-only directories that still exist (ADR 0037),
+    /// re-sending only changed lists. A declared thread whose list became empty
+    /// is sent an empty list once so the runtime drops it; threads that never had
+    /// any are not declared at all.
+    pub(super) fn sync_thread_read_only_directories(&mut self) {
+        let mut current = std::collections::BTreeMap::new();
+        for thread in &self.sidebar.threads {
+            let (present, missing): (Vec<_>, Vec<_>) =
+                thread.extra_read_dirs.iter().cloned().partition(|path| {
+                    let root = self
+                        .sidebar
+                        .projects
+                        .iter()
+                        .find(|project| project.id == thread.project_id)
+                        .map(|project| project.repo_root.as_path());
+                    crate::panes::self_improvement::read_directory_error(
+                        path,
+                        root,
+                        self.memory
+                            .config
+                            .as_ref()
+                            .map(|config| config.db_path.as_path()),
+                    )
+                    .is_none()
+                });
+            let id = thread.id.to_string();
+            if self
+                .declared_thread_read_dirs
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice)
+                != present.as_slice()
+            {
+                for path in &missing {
+                    tracing::warn!(
+                        thread = %id,
+                        directory = %path.display(),
+                        "thread read-only directory is missing or protected; not declared"
+                    );
+                }
+            }
+            if !present.is_empty() {
+                current.insert(id, present);
+            }
+        }
+        let cleared: Vec<String> = self
+            .declared_thread_read_dirs
+            .keys()
+            .filter(|id| !current.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in cleared {
+            self.declared_thread_read_dirs.remove(&id);
+            self.sink.set_thread_read_only_directories(id, Vec::new());
+        }
+        for (id, present) in current {
+            if self.declared_thread_read_dirs.get(&id) == Some(&present) {
+                continue;
+            }
+            self.sink
+                .set_thread_read_only_directories(id.clone(), present.clone());
+            self.declared_thread_read_dirs.insert(id, present);
         }
     }
 
@@ -156,6 +221,65 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn create_thread(&mut self, title: impl Into<String>) -> Result<ThreadId, WorkbenchError> {
+        let id = self.insert_thread(title)?;
+        self.switch_thread(id.clone())?;
+        Ok(id)
+    }
+
+    /// Opens a thread whose runs may read `dirs`, never write them (ADR 0037),
+    /// with `draft_input` waiting in the composer. Nothing is sent. Rejected
+    /// directories leave no thread behind.
+    pub fn create_thread_with_read_dirs(
+        &mut self,
+        title: impl Into<String>,
+        dirs: Vec<PathBuf>,
+        draft_input: String,
+    ) -> Result<ThreadId, WorkbenchError> {
+        let root = self
+            .sidebar
+            .selected_project
+            .as_ref()
+            .and_then(|id| {
+                self.sidebar
+                    .projects
+                    .iter()
+                    .find(|project| &project.id == id)
+            })
+            .map(|project| project.repo_root.as_path());
+        for dir in &dirs {
+            if let Some(reason) = crate::panes::self_improvement::read_directory_error(
+                dir,
+                root,
+                self.memory
+                    .config
+                    .as_ref()
+                    .map(|config| config.db_path.as_path()),
+            ) {
+                return Err(ThreadError::InvalidReadDirectory(reason).into());
+            }
+        }
+        let id = self.insert_thread(title)?;
+        if let Err(error) = self.sidebar.set_thread_extra_read_dirs(&id, &dirs) {
+            self.sidebar.threads.retain(|thread| thread.id != id);
+            return Err(error.into());
+        }
+        self.switch_thread(id.clone())?;
+        self.composer.input.clone_from(&draft_input);
+        if let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == id)
+        {
+            thread.draft_input = draft_input;
+        }
+        self.save_sidebar();
+        self.sync_thread_read_only_directories();
+        Ok(id)
+    }
+
+    /// Adds a thread to the selected project without opening it.
+    fn insert_thread(&mut self, title: impl Into<String>) -> Result<ThreadId, WorkbenchError> {
         let project_id = self
             .sidebar
             .selected_project
@@ -163,7 +287,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(ProjectError::UnknownProject)?;
         let id = ThreadId::new(format!("thread-{}", self.sidebar.threads.len() + 1));
         self.sidebar.create_thread(id.clone(), project_id, title)?;
-        self.switch_thread(id.clone())?;
         Ok(id)
     }
 

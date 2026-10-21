@@ -120,6 +120,8 @@ pub struct WorkbenchState<S> {
     pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
     /// Allowed directories last declared to the sink per project root.
     pub(super) declared_allowed: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
+    /// Read-only directories last declared to the sink per thread; absent means none.
+    pub(super) declared_thread_read_dirs: BTreeMap<String, Vec<PathBuf>>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
@@ -230,6 +232,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sink: Box::new(FixtureLoopAdapter::default()),
             declared_trust: std::collections::BTreeMap::new(),
             declared_allowed: std::collections::BTreeMap::new(),
+            declared_thread_read_dirs: BTreeMap::new(),
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
@@ -264,6 +267,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
         self.self_improvement.config = Some(config.clone());
         self.memory.config = Some(config);
+        // Startup may install storage after the sidebar; withdraw any stale
+        // declaration immediately when the current database location becomes known.
+        self.sync_thread_read_only_directories();
         for (id, kind) in [
             ("memory-main", PanelKind::Memory),
             // A GUI-local companion tab: PanelKind belongs to workspace-ui, so
@@ -352,6 +358,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.sidebar = sidebar;
         self.sync_subagent_thread_panes();
         self.refresh_active_thread_workspace();
+        // Restored threads regain their read-only directories from the sidebar record
+        // alone (ADR 0037), before the runtime can start any of their runs.
+        self.sync_thread_read_only_directories();
         self
     }
 
@@ -390,6 +399,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.sink = sink;
         self.declared_trust.clear();
         self.declared_allowed.clear();
+        self.declared_thread_read_dirs.clear();
         self
     }
 

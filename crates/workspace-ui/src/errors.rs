@@ -65,6 +65,8 @@ pub enum ThreadError {
     DuplicateThread,
     #[error("unknown thread")]
     UnknownThread,
+    #[error("invalid extra read directory: {0}")]
+    InvalidReadDirectory(String),
 }
 
 /// Sidebar persistence and validation errors.

@@ -78,6 +78,7 @@ fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
                     phase_unread: false,
                     has_project: true,
                     active_thread_title: Some("Chat"),
+                    extra_read_dirs: &[],
                     parent_thread: None,
                     child_threads: Vec::new(),
                     thread_metrics: None,

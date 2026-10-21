@@ -106,6 +106,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_ref()
             .map(ToString::to_string);
         self.context_inspector
+            .set_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
+        self.context_inspector
             .update(&ctx, self.sink.as_ref(), project.as_deref());
         self.telemetry
             .quota

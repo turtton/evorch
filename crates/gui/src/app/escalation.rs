@@ -30,6 +30,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             );
             child.archived = parent.archived;
             child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
+            // The runtime copies the declaration at handoff; the record keeps it
+            // across restarts (ADR 0037).
+            child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
             child.parent_thread_id = Some(parent.id.clone());
             child.escalation_source_run_id = Some(source_run_id.into());
             self.sidebar.threads.push(child);
