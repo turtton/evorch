@@ -215,6 +215,99 @@ fn no_activity_after_progress_increments_again() {
 }
 
 #[test]
+fn child_spawn_counts_as_progress_every_time() {
+    // Given: rounds that only start child runs.
+    let mut counters = BudgetCounters::default();
+    counters.finish_round();
+    for _ in 0..3 {
+        // When: each round successfully spawns a child.
+        counters.mark_child_spawned();
+        counters.finish_round();
+        // Then: every spawn resets the consecutive no-progress counter.
+        assert_eq!(counters.no_progress_rounds, 0);
+    }
+}
+
+#[test]
+fn child_completion_counts_once_per_child() {
+    // Given: a child whose terminal result is observed for the first time.
+    let mut counters = BudgetCounters::default();
+    counters.finish_round();
+    assert!(counters.mark_child_completed("run-child-a"));
+    counters.finish_round();
+    assert_eq!(counters.no_progress_rounds, 0);
+    // When: the same child result is observed again in later rounds.
+    assert!(!counters.mark_child_completed("run-child-a"));
+    counters.finish_round();
+    assert!(!counters.mark_child_completed("run-child-a"));
+    counters.finish_round();
+    // Then: repeated observation is not progress.
+    assert_eq!(counters.no_progress_rounds, 2);
+    // When: a different child completes.
+    assert!(counters.mark_child_completed("run-child-b"));
+    counters.finish_round();
+    // Then: the new completion counts as progress.
+    assert_eq!(counters.no_progress_rounds, 0);
+}
+
+#[test]
+fn repeated_child_completion_does_not_hide_other_progress() {
+    // Given: a child completion that was already counted.
+    let mut counters = BudgetCounters::default();
+    assert!(counters.mark_child_completed("run-child"));
+    counters.finish_round();
+    // When: a round re-observes it but also makes unrelated progress.
+    counters.mark_progress();
+    assert!(!counters.mark_child_completed("run-child"));
+    counters.finish_round();
+    // Then: the round still counts as progress.
+    assert_eq!(counters.no_progress_rounds, 0);
+}
+
+#[test]
+fn spawn_credits_run_out_without_an_observed_completion() {
+    // Given: a parent that only spawns children and never collects a result.
+    let mut counters = BudgetCounters::default();
+    for _ in 0..super::MAX_UNOBSERVED_SPAWN_CREDITS {
+        // When: spawns stay within the credit limit.
+        assert!(counters.mark_child_spawned());
+        counters.finish_round();
+        // Then: each still counts as progress.
+        assert_eq!(counters.no_progress_rounds, 0);
+    }
+    // When: further spawns exceed the limit.
+    for expected in 1..=3 {
+        assert!(!counters.mark_child_spawned());
+        counters.finish_round();
+        // Then: they no longer reset the no-progress counter.
+        assert_eq!(counters.no_progress_rounds, expected);
+    }
+}
+
+#[test]
+fn newly_observed_completion_restores_spawn_credits() {
+    // Given: exhausted spawn credits.
+    let mut counters = BudgetCounters::default();
+    for _ in 0..=super::MAX_UNOBSERVED_SPAWN_CREDITS {
+        counters.mark_child_spawned();
+    }
+    assert!(!counters.mark_child_spawned());
+    // When: a child completion is observed for the first time.
+    assert!(counters.mark_child_completed("run-child-a"));
+    // Then: the full credit limit is available again.
+    for _ in 0..super::MAX_UNOBSERVED_SPAWN_CREDITS {
+        assert!(counters.mark_child_spawned());
+    }
+    assert!(!counters.mark_child_spawned());
+    // When/Then: re-observing the same child does not restore credits ...
+    assert!(!counters.mark_child_completed("run-child-a"));
+    assert!(!counters.mark_child_spawned());
+    // ... but a different, newly observed child does.
+    assert!(counters.mark_child_completed("run-child-b"));
+    assert!(counters.mark_child_spawned());
+}
+
+#[test]
 fn runtime_default_allows_one_hundred_no_progress_rounds() {
     // Given/When: runtime defaults are constructed independently of config.
     let settings = BudgetSettings::default();

@@ -107,9 +107,9 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     let database = Database::open(&config_for(&path)).expect("fresh database must open");
 
-    // Then: v22 と定義済みテーブル・インデックスが作成される
+    // Then: v23 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -134,13 +134,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v22 のまま維持される
+    // Then: スキーマは重複せず v23 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        22
+        23
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -171,7 +171,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 22,
+            supported: 23,
         }
     );
 }
@@ -216,7 +216,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -286,7 +286,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let database = Database::open(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
     let columns: BTreeSet<String> = connection
         .prepare("PRAGMA table_info(tasks)")
         .unwrap()
@@ -300,12 +300,12 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
         "progress_json",
         "last_artifact_json",
         "failure_reason",
-        "resume_cursor_json",
         "attempts",
         "heartbeat_at_ns",
     ] {
         assert!(columns.contains(column), "missing {column}");
     }
+    assert!(!columns.contains("resume_cursor_json"));
     for status in [
         "pending",
         "queued",
@@ -348,7 +348,10 @@ fn v16_backfills_candidate_occurrence_tracking() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE IF EXISTS eval_samples;
+            "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+             ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+             ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+             DROP TABLE IF EXISTS eval_samples;
              DROP TABLE IF EXISTS thread_start_untracked;
              DROP TABLE IF EXISTS thread_start_states;
              DROP TABLE IF EXISTS assistant_references;
@@ -400,7 +403,10 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE IF EXISTS eval_samples;
+        "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+         ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+         ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+         DROP TABLE IF EXISTS eval_samples;
          DROP TABLE IF EXISTS thread_start_untracked;
          DROP TABLE IF EXISTS thread_start_states;
          DROP TABLE IF EXISTS assistant_references;
@@ -416,7 +422,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     // When: opening applies v17 and reopening is idempotent.
     for _ in 0..2 {
         let database = Database::open(&config_for(&path)).unwrap();
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
         assert_eq!(
             database.run_context("existing").unwrap().unwrap().name,
@@ -441,7 +447,10 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE eval_samples;
+        "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+         ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+         ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+         DROP TABLE eval_samples;
          DROP TABLE thread_start_untracked;
          DROP TABLE thread_start_states;
          DROP TABLE assistant_references;
@@ -451,7 +460,7 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     connection.pragma_update(None, "user_version", 17).unwrap();
     drop(connection);
     let database = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
     assert_eq!(
         database
             .latest_run_ledger("existing")
@@ -472,7 +481,10 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE eval_samples;
+            "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+             ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+             ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+             DROP TABLE eval_samples;
              DROP TABLE thread_start_untracked;
              DROP TABLE thread_start_states;
              INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('existing', 'keep me', 7);",
@@ -486,7 +498,7 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: earlier data stays and the thread start schema is complete.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
         assert!(database.thread_start_state("missing").unwrap().is_none());
         let connection = Connection::open(&path).unwrap();
@@ -510,7 +522,10 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE eval_samples;
+            "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+             ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+             ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+             DROP TABLE eval_samples;
              ALTER TABLE thread_start_states DROP COLUMN head_ref;
              INSERT INTO thread_start_states (thread_id, root_run_id, project_root, repo_prefix, \
              head_commit, diff, captured_at_ns, replayable, reason) \
@@ -525,7 +540,7 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: the earlier start reads back with an unknown head ref.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
         let state = database.thread_start_state("old").unwrap().unwrap();
         let storage::thread_start::ThreadStartCapture::Replayable(snapshot) = state.capture else {
             panic!("expected a replayable start");
@@ -544,7 +559,10 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE eval_samples;
+            "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+             ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+             ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+             DROP TABLE eval_samples;
              INSERT INTO thread_start_states (thread_id, root_run_id, project_root, repo_prefix, \
              head_commit, diff, captured_at_ns, replayable, reason) \
              VALUES ('old', 'run-1', '/repo', '', 'abc', x'', 7, 1, NULL);",
@@ -558,7 +576,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: the start stays and the sample schema is complete.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 22);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
         assert!(database.thread_start_state("old").unwrap().is_some());
         assert!(database.eval_samples().unwrap().is_empty());
         let connection = Connection::open(&path).unwrap();
@@ -567,5 +585,58 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
             EXPECTED_TABLES.into_iter().map(String::from).collect()
         );
         assert!(schema_objects(&connection, "trigger").contains("eval_samples_replayable"));
+    }
+}
+
+#[test]
+fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    drop(Database::open(&config_for(&path)).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(
+        "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+         ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
+         ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
+         INSERT INTO improvement_candidates
+           (candidate_id, project, created_at_ns, source, code, severity, title, evidence, dedup_key)
+         VALUES ('existing', 'p', 7, 'diagnostic', 'NoProgress', 'warning', 'title', 'evidence', 'key');
+         INSERT INTO tasks (id, status, created_at_ns, updated_at_ns, resume_cursor_json)
+         VALUES ('task', 'running', 1, 2, 'legacy-cursor');"
+    ).unwrap();
+    connection.pragma_update(None, "user_version", 22).unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let database = Database::open(&config_for(&path)).unwrap();
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 23);
+        let candidate = database.improvement_candidate("existing").unwrap().unwrap();
+        assert_eq!(candidate.reopened_count, 0);
+        assert_eq!(candidate.reopened_at_ns, None);
+        assert_eq!(candidate.evidence, "evidence");
+        let connection = Connection::open(&path).unwrap();
+        let columns: BTreeSet<String> = connection
+            .prepare("PRAGMA table_info(tasks)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!columns.contains("resume_cursor_json"));
+        let task: (String, i64, i64) = connection
+            .query_row(
+                "SELECT status, created_at_ns, updated_at_ns FROM tasks WHERE id = 'task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(task, ("running".into(), 1, 2));
+        let reopened_column: (String, i64, String) = connection.query_row(
+            "SELECT type, [notnull], dflt_value FROM pragma_table_info('improvement_candidates') WHERE name = 'reopened_count'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(reopened_column, ("INTEGER".into(), 1, "0".into()));
+        let timestamp_column: (String, i64) = connection.query_row(
+            "SELECT type, [notnull] FROM pragma_table_info('improvement_candidates') WHERE name = 'reopened_at_ns'", [],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(timestamp_column, ("INTEGER".into(), 0));
     }
 }

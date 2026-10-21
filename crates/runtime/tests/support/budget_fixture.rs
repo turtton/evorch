@@ -38,17 +38,11 @@ async fn budget_overrun_emits_budget_exhausted_once() {
         .expect("persisted exhaustion");
     let task: storage::entity::TaskContinuation =
         serde_json::from_value(progress.clone()).expect("typed continuation");
-    let cursor: Vec<providers::Message> =
-        serde_json::from_str(task.resume_cursor.as_deref().expect("cursor")).expect("messages");
-    let results: Vec<_> = cursor
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(|block| match block {
-            providers::ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(results, ["0", "1", "2", "3", "4"]);
+    assert!(
+        task.input.is_none(),
+        "only the initial event includes input"
+    );
+    assert!(progress.get("resume_cursor").is_none());
     let breach = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -167,4 +161,43 @@ async fn run_script(count: u32, mut config: RunConfig, batch: Option<bool>) -> V
         );
     }
     events
+}
+
+#[tokio::test]
+async fn progress_is_emitted_only_at_state_boundaries_across_tool_rounds() {
+    // Given: identical durable runs with different numbers of real tool rounds.
+    for rounds in [1, 8] {
+        let events = run_calls(rounds, RunConfig::default()).await;
+        // Pending is registration metadata, before LoopState owns the execution.
+        let transitions: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                    to,
+                    ..
+                }) if *to != AgentRunPhase::Pending => Some(*to),
+                _ => None,
+            })
+            .collect();
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Orchestrator(OrchestratorEvent::TaskProgressed { progress, .. }) => {
+                    Some(progress)
+                }
+                _ => None,
+            })
+            .collect();
+        // Then: budget accounting emits no progress events within any round.
+        assert_eq!(transitions, [AgentRunPhase::Running, AgentRunPhase::Done]);
+        assert_eq!(progress.len(), transitions.len());
+        assert_eq!(progress[0]["status"], "running");
+        assert_eq!(progress[1]["status"], "completed");
+        for (index, payload) in progress.iter().enumerate() {
+            let task: storage::entity::TaskContinuation =
+                serde_json::from_value((*payload).clone()).expect("typed progress");
+            assert_eq!(task.input.as_deref(), (index == 0).then_some("budget"));
+            assert!(payload.get("resume_cursor").is_none());
+        }
+    }
 }

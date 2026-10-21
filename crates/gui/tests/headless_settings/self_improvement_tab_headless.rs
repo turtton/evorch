@@ -52,6 +52,7 @@ fn companion_tab_uses_selected_repository_identity_and_updates_without_clicks() 
                 ImprovementWritePolicy {
                     duplicate_cooldown: std::time::Duration::ZERO,
                     daily_limit: 20,
+                    run_error_daily_limit: storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT,
                     max_candidates: 200,
                 },
             )

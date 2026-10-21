@@ -47,10 +47,9 @@ fn v8_upgrade_preserves_task_links_and_defaults() {
             task.progress,
             task.last_artifact,
             task.failure_reason,
-            task.resume_cursor,
             task.heartbeat_at
         ),
-        (None, None, None, None, None, None, None)
+        (None, None, None, None, None, None)
     );
     assert_eq!(db.task_dependencies("b").unwrap().blocked_by, vec!["a"]);
     let connection = Connection::open(&path).unwrap();

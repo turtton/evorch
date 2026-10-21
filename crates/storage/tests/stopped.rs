@@ -69,7 +69,6 @@ fn durable_projection_keeps_stopped_task_reopenable() {
     let mut task = TaskContinuation {
         status: TaskStatus::Running,
         input: Some("work".into()),
-        resume_cursor: Some("saved cursor".into()),
         last_artifact: Some("partial artifact".into()),
         failure_reason: None,
         attempts: 1,
@@ -98,9 +97,90 @@ fn durable_projection_keeps_stopped_task_reopenable() {
         let db = Database::open(&config).unwrap();
         let saved = db.task("task").unwrap().unwrap();
         assert_eq!(saved.status, status);
-        assert_eq!(saved.resume_cursor, task.resume_cursor);
         assert_eq!(saved.last_artifact, task.last_artifact);
         assert_eq!(saved.failure_reason, task.failure_reason);
     }
     storage.close();
+}
+
+#[test]
+fn status_only_progress_retains_initial_input_after_reopen_and_reconcile() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("input.db"),
+        ..Default::default()
+    };
+    let initial_input = "original prompt\n".repeat(4096);
+    for (index, status) in ["running", "stopped", "running", "completed"]
+        .into_iter()
+        .enumerate()
+    {
+        // Each boundary is handled by a reopened writer and replayed projection.
+        let storage = Storage::open(config.clone()).unwrap();
+        storage
+            .handle()
+            .append_event(
+                None,
+                &Event::new(OrchestratorEvent::TaskProgressed {
+                    task_id: "task".into(),
+                    run_id: "run-1".into(),
+                    progress: serde_json::json!({
+                        "status": status,
+                        "input": (index == 0).then_some(&initial_input),
+                        "last_artifact": "artifact",
+                    }),
+                    reason: "task execution boundary".into(),
+                }),
+            )
+            .unwrap();
+        storage.handle().reconcile().unwrap();
+        storage.close();
+        let db = Database::open(&config).unwrap();
+        let task = db.task("task").unwrap().unwrap();
+        assert_eq!(task.input.as_deref(), Some(initial_input.as_str()));
+        assert_eq!(task.status.as_str(), status);
+        let progress: serde_json::Value =
+            serde_json::from_str(task.progress.as_deref().unwrap()).unwrap();
+        assert!(progress.get("resume_cursor").is_none());
+        if index > 0 {
+            assert!(progress["input"].is_null());
+            assert!(task.progress.as_ref().unwrap().len() < 1024);
+        }
+    }
+}
+
+#[test]
+fn replay_does_not_restore_removed_cursor_in_progress_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("legacy-progress.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    storage
+        .handle()
+        .append_event(
+            None,
+            &Event::new(OrchestratorEvent::TaskProgressed {
+                task_id: "task".into(),
+                run_id: "run-1".into(),
+                progress: serde_json::json!({
+                    "status": "running",
+                    "input": "initial prompt",
+                    "resume_cursor": "old duplicated conversation".repeat(4096),
+                }),
+                reason: "task execution boundary".into(),
+            }),
+        )
+        .unwrap();
+    for _ in 0..2 {
+        storage.handle().reconcile().unwrap();
+        let db = Database::open(&config).unwrap();
+        let task = db.task("task").unwrap().unwrap();
+        let progress: serde_json::Value =
+            serde_json::from_str(task.progress.as_deref().unwrap()).unwrap();
+        assert!(progress.get("resume_cursor").is_none());
+        assert_eq!(task.input.as_deref(), Some("initial prompt"));
+        assert!(task.progress.as_ref().unwrap().len() < 1024);
+    }
 }

@@ -16,12 +16,12 @@ pub enum TaskStatus {
     Failed,
 }
 
-/// TaskProgressed の再開可能な payload。attempts は現在の run generation です。
+/// TaskProgressed の状態 payload。再開用の会話は run_contexts に保存します。
+/// input は最初のイベントのみ保持し、attempts は現在の run generation です。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskContinuation {
     pub status: TaskStatus,
     pub input: Option<String>,
-    pub resume_cursor: Option<String>,
     pub last_artifact: Option<String>,
     pub failure_reason: Option<String>,
     #[serde(default)]
@@ -53,7 +53,6 @@ pub struct TaskRecord {
     pub progress: Option<String>,
     pub last_artifact: Option<String>,
     pub failure_reason: Option<String>,
-    pub resume_cursor: Option<String>,
     pub attempts: u32,
     pub heartbeat_at: Option<SystemTime>,
     pub created_at: SystemTime,

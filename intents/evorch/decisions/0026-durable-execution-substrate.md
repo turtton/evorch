@@ -96,3 +96,24 @@ loop）と 5（`TaskRetryScheduled` と admission の generation 管理）も同
 
 削除した variant を含む既存 DB は、storage のイベント読み出しが復元できない行を
 警告付きで読み飛ばすことで、移行層なしで開ける。
+
+## Addendum（2026-10-20、TaskProgressed の書き込み量削減）
+
+会話全体を `resume_cursor` にシリアライズした `TaskProgressed` を予算チェックのたびに
+発行していたため、会話の成長とラウンド数の両方に応じて DB 書き込み量が増大し、
+日次書き込み上限（`DailyBytes`、256 MiB）を超過した。この重複を次の方針で除去する。
+
+- `TaskContinuation` / `TaskRecord` の `resume_cursor` と storage の読み書きを廃止し、
+  再開は `run_contexts` のチェックポイントに一本化する。prompt の JSON 行から旧
+  supervisor の continuation を復元する経路も削除する。
+- `TaskProgressed` は状態遷移時と終了時だけ発行する。`publish_budget()` は
+  `TaskCheckpoint` と予算診断を維持するが、`TaskProgressed` は発行しない。
+  失敗時に直前の有効な artifact を失わないためのメモリ内更新は維持する。
+- `input`（prompt 全文）は各 run の最初の `TaskProgressed` にだけ含め、以降は
+  `None` とする。storage projection は `None` で既存 input を上書きせず、GUI も
+  最初の input から得たタイトルを保持する。
+
+Decision の cursor persistence はこの Addendum で置き換える。会話履歴は進捗イベントに
+重複保存せず、進捗 payload は状態・artifact・失敗理由などの表示用データに限定する。
+初回 input と artifact 自体のサイズは保持しつつ、通常ラウンドの `TaskProgressed` は
+ゼロ件とし、長い会話を毎回 JSON 化する増幅をなくす。

@@ -5,9 +5,210 @@ mod tests {
     use std::path::PathBuf;
 
     use event_bus::EscalationTrigger;
+    use serde_json::json;
+    use tools::ToolError;
 
-    use super::{EscalationDetector, ToolObservation};
+    use super::{EscalationDetector, ToolErrorClass, ToolObservation, no_progress_detail};
     use crate::escalation::EscalationSettings;
+
+    // Given: 各種提案 / When: NoProgress 判定 / Then: 連続編集失敗のみが対象になる
+    #[test]
+    fn only_consecutive_edit_failures_are_no_progress_triggers() {
+        assert!(EscalationDetector::is_no_progress_trigger(
+            &EscalationTrigger::ConsecutiveEditFailures { count: 3 }
+        ));
+        assert!(!EscalationDetector::is_no_progress_trigger(
+            &EscalationTrigger::RepeatedFileRewrite {
+                path: "src/lib.rs".into(),
+                count: 5,
+            }
+        ));
+        assert!(!EscalationDetector::is_no_progress_trigger(
+            &EscalationTrigger::ToolCallThreshold { count: 200 }
+        ));
+    }
+
+    // Given: 識別子・編集本文と複数行エラー / When: detail 生成 / Then: 安定サマリと限定した evidence のみ
+    #[test]
+    fn no_progress_detail_has_stable_summary_and_structured_evidence() {
+        let input = json!({
+            "path": "src/lib.rs",
+            "old_string": "private old text",
+            "new_string": "private new text",
+            "call_id": "edit-2",
+            "run_id": "run-changing",
+        });
+        let detail = no_progress_detail(
+            &EscalationTrigger::ConsecutiveEditFailures { count: 2 },
+            "edit",
+            &input,
+            Some(ToolErrorClass::EditTargetNotFound),
+        );
+
+        assert_eq!(
+            detail,
+            concat!(
+                "consecutive edit failures reached threshold (tool=edit)\n",
+                "trigger=consecutive_edit_failures\n",
+                "count=2\n",
+                "tool=edit\n",
+                "path=src/lib.rs\n",
+                "input_sha256=0cbba5f8fbf63c2b\n",
+                "error=edit_target_not_found\n",
+                "site=consecutive_edit_failures",
+            )
+        );
+        for excluded in [
+            "edit-2",
+            "run-changing",
+            "private old text",
+            "private new text",
+        ] {
+            assert!(!detail.contains(excluded));
+        }
+        let other = no_progress_detail(
+            &EscalationTrigger::ConsecutiveEditFailures { count: 5 },
+            "edit",
+            &json!({"path": "another.rs", "call_id": "edit-5"}),
+            Some(ToolErrorClass::Other),
+        );
+        assert_eq!(detail.lines().next(), other.lines().next());
+        assert_eq!(detail.lines().last(), other.lines().last());
+    }
+
+    // Given: path のない成功結果 / When: detail 生成 / Then: path・error・入出力本文は含まれない
+    #[test]
+    fn no_progress_detail_omits_absent_path_and_success_content() {
+        let detail = no_progress_detail(
+            &EscalationTrigger::ConsecutiveEditFailures { count: 2 },
+            "write",
+            &json!({"content": "private file text"}),
+            None,
+        );
+
+        assert!(!detail.lines().any(|line| line.starts_with("path=")));
+        assert!(!detail.lines().any(|line| line.starts_with("error=")));
+        assert!(!detail.contains("private"));
+        assert!(detail.lines().any(|line| line == "tool=write"));
+        assert_eq!(
+            detail.lines().last(),
+            Some("site=consecutive_edit_failures")
+        );
+    }
+
+    // Given: 型付きエラー / When: 分類 / Then: 本文ではなく固定の分類名になる
+    #[test]
+    fn typed_tool_errors_map_to_fixed_classes() {
+        let sentinel = "PRIVATE_SENTINEL_typed".to_string();
+        for (error, expected) in [
+            (
+                ToolError::InvalidArgs {
+                    detail: sentinel.clone(),
+                },
+                "invalid_args",
+            ),
+            (
+                ToolError::InvalidPattern {
+                    detail: sentinel.clone(),
+                },
+                "invalid_args",
+            ),
+            (
+                ToolError::PathNotFound {
+                    path: sentinel.clone(),
+                },
+                "path_not_found",
+            ),
+            (
+                ToolError::EditTargetNotFound {
+                    path: sentinel.clone(),
+                },
+                "edit_target_not_found",
+            ),
+            (
+                ToolError::ExecutionDenied {
+                    tool_name: "edit".into(),
+                    reason: sentinel.clone(),
+                },
+                "permission_denied",
+            ),
+            (
+                ToolError::Io {
+                    detail: sentinel.clone(),
+                },
+                "other",
+            ),
+        ] {
+            let class = ToolErrorClass::from_tool_error(&error);
+            assert_eq!(class.as_str(), expected, "{error:?}");
+            // 型を失った同じ本文でも、既知 prefix のものは同じ分類になる。
+            if expected != "permission_denied" {
+                assert_eq!(
+                    ToolErrorClass::from_content(&error.to_string()),
+                    class,
+                    "{error:?}"
+                );
+            }
+        }
+    }
+
+    // Given: 自由形式・多行・空の失敗本文 / When: detail 生成 / Then: 本文は出ず固定値 other になる
+    #[test]
+    fn untyped_error_content_never_reaches_detail() {
+        for content in [
+            "PRIVATE_SENTINEL_free first line".to_string(),
+            "first\nPRIVATE_SENTINEL_second".into(),
+            "あ".repeat(300),
+            String::new(),
+            // 既知 prefix の途中にしか一致しない本文は分類しない。
+            "x ツールの引数が不正です: PRIVATE_SENTINEL".into(),
+        ] {
+            let class = ToolErrorClass::from_content(&content);
+            assert_eq!(class, ToolErrorClass::Other, "{content}");
+            let detail = no_progress_detail(
+                &EscalationTrigger::ConsecutiveEditFailures { count: 2 },
+                "edit",
+                &json!({"new_string": content}),
+                Some(class),
+            );
+            assert!(detail.lines().any(|line| line == "error=other"));
+            assert!(!detail.contains("PRIVATE_SENTINEL"));
+            assert!(!detail.contains('あ'));
+        }
+    }
+
+    // Given: 改行を含む tool/path / When: detail 生成 / Then: evidence 行を偽装できず site は固定名
+    #[test]
+    fn no_progress_detail_keeps_field_values_on_one_line_and_site_path_free() {
+        let detail = no_progress_detail(
+            &EscalationTrigger::RepeatedFileRewrite {
+                path: "trigger/path.rs".into(),
+                count: 5,
+            },
+            "edit\nsite=spoofed",
+            &json!({"path": "input/path.rs\r\nsite=spoofed"}),
+            None,
+        );
+        assert!(
+            detail
+                .lines()
+                .any(|line| line == "tool=edit\\nsite=spoofed")
+        );
+        assert!(
+            detail
+                .lines()
+                .any(|line| line == "path=input/path.rs\\r\\nsite=spoofed")
+        );
+        assert_eq!(
+            detail
+                .lines()
+                .filter(|line| line.starts_with("site="))
+                .count(),
+            1
+        );
+        assert_eq!(detail.lines().last(), Some("site=repeated_file_rewrite"));
+        assert!(!detail.contains("trigger/path.rs"));
+    }
 
     fn observation<'a>(tool: &'a str, path: Option<&str>, is_error: bool) -> ToolObservation<'a> {
         ToolObservation {
@@ -216,8 +417,124 @@ mod tests {
 use std::{collections::BTreeMap, path::PathBuf};
 
 use event_bus::EscalationTrigger;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tools::ToolError;
 
 use crate::{escalation::EscalationSettings, policy::is_meta_op};
+
+/// NoProgress evidence の `error=` に出す固定の失敗分類。
+///
+/// ツールの失敗本文 (スキーマ検証の表示など) は不正な入力値をそのまま含みうるため、
+/// 診断・候補 evidence・draft へは本文ではなくこの分類名だけを流す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolErrorClass {
+    /// 引数がスキーマや契約に適合しない。
+    InvalidArgs,
+    /// 対象パスが存在しない。
+    PathNotFound,
+    /// edit の置換対象が見つからない。
+    EditTargetNotFound,
+    /// 承認方針や応答により実行が拒否された。
+    PermissionDenied,
+    /// 上記以外、または分類できない失敗。
+    Other,
+}
+
+impl ToolErrorClass {
+    /// evidence に書く固定名。
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArgs => "invalid_args",
+            Self::PathNotFound => "path_not_found",
+            Self::EditTargetNotFound => "edit_target_not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::Other => "other",
+        }
+    }
+
+    /// 型付きのツールエラーから分類する。
+    pub(crate) const fn from_tool_error(error: &ToolError) -> Self {
+        match error {
+            ToolError::InvalidArgs { .. } | ToolError::InvalidPattern { .. } => Self::InvalidArgs,
+            ToolError::PathNotFound { .. } => Self::PathNotFound,
+            ToolError::EditTargetNotFound { .. } => Self::EditTargetNotFound,
+            ToolError::ExecutionDenied { .. } => Self::PermissionDenied,
+            _ => Self::Other,
+        }
+    }
+
+    /// 型を失った失敗本文を、[`ToolError`] の固定文言 prefix だけで分類する。
+    /// 本文そのものは返さず、一致しなければ [`Self::Other`] になる。
+    pub(crate) fn from_content(content: &str) -> Self {
+        [
+            ToolError::InvalidArgs {
+                detail: String::new(),
+            },
+            ToolError::InvalidPattern {
+                detail: String::new(),
+            },
+            ToolError::PathNotFound {
+                path: String::new(),
+            },
+            ToolError::EditTargetNotFound {
+                path: String::new(),
+            },
+        ]
+        .iter()
+        .find(|error| content.starts_with(&error.to_string()))
+        .map_or(Self::Other, Self::from_tool_error)
+    }
+}
+
+/// 安定したサマリと行単位の evidence を生成する。入力本文・失敗本文・実行識別子は含めない。
+/// `error` は失敗した呼び出しの固定分類で、成功時は `None`。
+pub(crate) fn no_progress_detail(
+    trigger: &EscalationTrigger,
+    tool: &str,
+    input: &Value,
+    error: Option<ToolErrorClass>,
+) -> String {
+    let (trigger_name, summary, count) = match trigger {
+        EscalationTrigger::ConsecutiveEditFailures { count } => (
+            "consecutive_edit_failures",
+            "consecutive edit failures reached threshold",
+            count,
+        ),
+        EscalationTrigger::RepeatedFileRewrite { count, .. } => (
+            "repeated_file_rewrite",
+            "repeated file rewrites reached threshold",
+            count,
+        ),
+        EscalationTrigger::ToolCallThreshold { count } => {
+            ("tool_call_threshold", "tool calls reached threshold", count)
+        }
+    };
+    // identical_calls.rs と同じ JSON 表現の SHA-256 先頭16桁。引数本文は保存しない。
+    let input_sha256: String = Sha256::digest(input.to_string().as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // 改行を含む値から別の evidence field が作られることを防ぐ。
+    let tool = tool.replace('\r', "\\r").replace('\n', "\\n");
+    let mut lines = vec![
+        format!("{summary} (tool={tool})"),
+        format!("trigger={trigger_name}"),
+        format!("count={count}"),
+        format!("tool={tool}"),
+    ];
+    if let Some(path) = input.get("path").and_then(Value::as_str) {
+        let path = path.replace('\r', "\\r").replace('\n', "\\n");
+        lines.push(format!("path={path}"));
+    }
+    lines.push(format!("input_sha256={input_sha256}"));
+    if let Some(error) = error {
+        lines.push(format!("error={}", error.as_str()));
+    }
+    lines.push(format!("site={trigger_name}"));
+    lines.join("\n")
+}
 
 /// 1回のツール実行について検出器へ渡す観測値。
 #[derive(Debug)]
@@ -241,11 +558,7 @@ pub(crate) struct EscalationDetector {
 
 impl EscalationDetector {
     pub(crate) const fn is_no_progress_trigger(trigger: &EscalationTrigger) -> bool {
-        matches!(
-            trigger,
-            EscalationTrigger::ConsecutiveEditFailures { .. }
-                | EscalationTrigger::RepeatedFileRewrite { .. }
-        )
+        matches!(trigger, EscalationTrigger::ConsecutiveEditFailures { .. })
     }
 
     pub(crate) const fn tool_calls(&self) -> u32 {

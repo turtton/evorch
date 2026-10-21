@@ -250,6 +250,18 @@ impl SelfImprovementPane {
                                 egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status)
                             });
                             response.on_hover_text(format!("Status: {status}"));
+                            if entry.reopened_count > 0 {
+                                ui.label(
+                                    crate::theme::text::badge(format!(
+                                        "Reopened ×{}",
+                                        entry.reopened_count
+                                    ))
+                                    .color(crate::theme::tokens::palette().WARNING_FG)
+                                    .background_color(
+                                        crate::theme::tokens::palette().WARNING_SURFACE,
+                                    ),
+                                );
+                            }
                             ui.monospace(&entry.id);
                             let (created, absolute) = timestamp(entry.created_at_ns, wall_clock);
                             ui.label(crate::theme::text::muted(created))

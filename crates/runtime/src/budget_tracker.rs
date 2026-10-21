@@ -6,7 +6,7 @@ use event_bus::{
 };
 use providers::Usage;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,6 +15,11 @@ use tokio::time::Instant;
 #[cfg(test)]
 #[path = "budget_tracker_tests.rs"]
 mod tests;
+
+/// Consecutive child spawns, without a newly observed child completion in
+/// between, that still count as progress. Bounds a parent that keeps delegating
+/// fresh children but never collects their results.
+pub(crate) const MAX_UNOBSERVED_SPAWN_CREDITS: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetSettings {
@@ -65,6 +70,10 @@ pub(crate) struct BudgetCounters {
     warned: bool,
     exhausted: Option<BudgetBreach>,
     round_changed: bool,
+    /// Children whose terminal result was already counted as progress.
+    observed_child_completions: BTreeSet<String>,
+    /// Spawns since the last newly observed child completion.
+    unobserved_spawns: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +109,8 @@ impl Default for BudgetCounters {
             warned: false,
             exhausted: None,
             round_changed: false,
+            observed_child_completions: BTreeSet::new(),
+            unobserved_spawns: 0,
         }
     }
 }
@@ -146,6 +157,33 @@ impl BudgetCounters {
 
     pub(crate) const fn mark_progress(&mut self) {
         self.round_changed = true;
+    }
+
+    /// A successfully started child run is progress, so a delegation-only
+    /// Orchestrator is not mistaken for a stalled loop. Delegation does not
+    /// consume `max_tool_calls`, so a loop that keeps spawning children without
+    /// ever collecting a result would otherwise never stop: after
+    /// [`MAX_UNOBSERVED_SPAWN_CREDITS`] spawns without a newly observed child
+    /// completion, further spawns are no longer progress. Returns whether it counted.
+    pub(crate) const fn mark_child_spawned(&mut self) -> bool {
+        self.unobserved_spawns = self.unobserved_spawns.saturating_add(1);
+        if self.unobserved_spawns > MAX_UNOBSERVED_SPAWN_CREDITS {
+            return false;
+        }
+        self.mark_progress();
+        true
+    }
+
+    /// Counts the first observed terminal result of a child run as progress and
+    /// restores the spawn credits. Re-observing the same child is neither;
+    /// returns whether it counted.
+    pub(crate) fn mark_child_completed(&mut self, run_id: &str) -> bool {
+        if !self.observed_child_completions.insert(run_id.to_owned()) {
+            return false;
+        }
+        self.unobserved_spawns = 0;
+        self.mark_progress();
+        true
     }
 
     pub(crate) fn finish_round(&mut self) {

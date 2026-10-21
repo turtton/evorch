@@ -47,7 +47,7 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                     continue;
                 };
                 // Stopped is not closed: subsequent explicit resume progress must
-                // still update the durable task and retain its saved cursor.
+                // still update the durable task.
                 if matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled) {
                     terminal.insert(task_id.clone());
                 }
@@ -55,12 +55,14 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                 let heartbeat = task
                     .heartbeat_at_ns
                     .and_then(|heartbeat| i64::try_from(heartbeat).ok());
+                let progress_json = serde_json::to_string(&task)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
                 conn.execute(
-                    "INSERT INTO tasks (id,session_id,status,created_at_ns,updated_at_ns,parent_run_id,input_json,progress_json,last_artifact_json,failure_reason,resume_cursor_json,attempts,heartbeat_at_ns)
-                     VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-                     ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated_at_ns=excluded.updated_at_ns,parent_run_id=excluded.parent_run_id,input_json=excluded.input_json,progress_json=excluded.progress_json,last_artifact_json=excluded.last_artifact_json,failure_reason=excluded.failure_reason,resume_cursor_json=excluded.resume_cursor_json,attempts=excluded.attempts,heartbeat_at_ns=excluded.heartbeat_at_ns",
+                    "INSERT INTO tasks (id,session_id,status,created_at_ns,updated_at_ns,parent_run_id,input_json,progress_json,last_artifact_json,failure_reason,attempts,heartbeat_at_ns)
+                     VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11)
+                     ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated_at_ns=excluded.updated_at_ns,parent_run_id=excluded.parent_run_id,input_json=COALESCE(excluded.input_json,tasks.input_json),progress_json=excluded.progress_json,last_artifact_json=excluded.last_artifact_json,failure_reason=excluded.failure_reason,attempts=excluded.attempts,heartbeat_at_ns=excluded.heartbeat_at_ns",
                     params![task_id, stored.session_id, task.status.as_str(), now, Option::<String>::None, task.input,
-                        progress.to_string(), task.last_artifact, task.failure_reason, task.resume_cursor, task.attempts, heartbeat],
+                        progress_json, task.last_artifact, task.failure_reason, task.attempts, heartbeat],
                 )?;
             }
             EventKind::Orchestrator(
