@@ -16,7 +16,6 @@ struct TaskRow {
     progress: Option<String>,
     last_artifact: Option<String>,
     failure_reason: Option<String>,
-    resume_cursor: Option<String>,
     attempts: u32,
     heartbeat_at_ns: Option<i64>,
 }
@@ -24,8 +23,8 @@ struct TaskRow {
 /// タスクを作成します。
 pub fn create(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError> {
     conn.execute(
-        "INSERT INTO tasks (id, session_id, status, created_at_ns, updated_at_ns, parent_run_id, input_json, progress_json, last_artifact_json, failure_reason, resume_cursor_json, attempts, heartbeat_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![record.id, record.session_id, record.status.as_str(), system_time_to_ns(record.created_at)?, system_time_to_ns(record.updated_at)?, record.parent_run_id, record.input, record.progress, record.last_artifact, record.failure_reason, record.resume_cursor, record.attempts, record.heartbeat_at.map(system_time_to_ns).transpose()?],
+        "INSERT INTO tasks (id, session_id, status, created_at_ns, updated_at_ns, parent_run_id, input_json, progress_json, last_artifact_json, failure_reason, attempts, heartbeat_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![record.id, record.session_id, record.status.as_str(), system_time_to_ns(record.created_at)?, system_time_to_ns(record.updated_at)?, record.parent_run_id, record.input, record.progress, record.last_artifact, record.failure_reason, record.attempts, record.heartbeat_at.map(system_time_to_ns).transpose()?],
     )?;
     Ok(())
 }
@@ -48,8 +47,8 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<TaskRecord>, StorageErr
 )]
 pub fn update(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError> {
     let changed = conn.execute(
-        "UPDATE tasks SET session_id = ?2, status = ?3, created_at_ns = ?4, updated_at_ns = ?5, parent_run_id = ?6, input_json = ?7, progress_json = ?8, last_artifact_json = ?9, failure_reason = ?10, resume_cursor_json = ?11, attempts = ?12, heartbeat_at_ns = ?13 WHERE id = ?1",
-        params![record.id, record.session_id, record.status.as_str(), system_time_to_ns(record.created_at)?, system_time_to_ns(record.updated_at)?, record.parent_run_id, record.input, record.progress, record.last_artifact, record.failure_reason, record.resume_cursor, record.attempts, record.heartbeat_at.map(system_time_to_ns).transpose()?],
+        "UPDATE tasks SET session_id = ?2, status = ?3, created_at_ns = ?4, updated_at_ns = ?5, parent_run_id = ?6, input_json = ?7, progress_json = ?8, last_artifact_json = ?9, failure_reason = ?10, attempts = ?11, heartbeat_at_ns = ?12 WHERE id = ?1",
+        params![record.id, record.session_id, record.status.as_str(), system_time_to_ns(record.created_at)?, system_time_to_ns(record.updated_at)?, record.parent_run_id, record.input, record.progress, record.last_artifact, record.failure_reason, record.attempts, record.heartbeat_at.map(system_time_to_ns).transpose()?],
     )?;
     if changed == 0 {
         return Err(StorageError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
@@ -94,7 +93,6 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<TaskRow> {
         progress: row.get("progress_json")?,
         last_artifact: row.get("last_artifact_json")?,
         failure_reason: row.get("failure_reason")?,
-        resume_cursor: row.get("resume_cursor_json")?,
         attempts: row.get("attempts")?,
         heartbeat_at_ns: row.get("heartbeat_at_ns")?,
     })
@@ -114,7 +112,6 @@ fn task_from_row(row: TaskRow) -> Result<TaskRecord, StorageError> {
         progress: row.progress,
         last_artifact: row.last_artifact,
         failure_reason: row.failure_reason,
-        resume_cursor: row.resume_cursor,
         attempts: row.attempts,
         heartbeat_at: row.heartbeat_at_ns.map(ns_to_system_time),
     })
@@ -139,7 +136,6 @@ mod tests {
             progress: Some("{\"step\":2}".into()),
             last_artifact: Some("{\"artifact\":3}".into()),
             failure_reason: Some("retry".into()),
-            resume_cursor: Some("{\"cursor\":4}".into()),
             attempts: 3,
             heartbeat_at: Some(timestamp),
             created_at: timestamp,
@@ -183,7 +179,6 @@ mod tests {
             progress: None,
             last_artifact: Some("{\"artifact\":5}".into()),
             failure_reason: None,
-            resume_cursor: None,
             attempts: u32::MAX,
             heartbeat_at: None,
             updated_at: UNIX_EPOCH + Duration::from_secs(40),

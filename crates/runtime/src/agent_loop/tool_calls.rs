@@ -15,7 +15,7 @@ use tools::executor::PreparedToolCall;
 use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
 use super::LoopState;
-use crate::escalation::detector::{EscalationDetector, ToolObservation};
+use crate::escalation::detector::{EscalationDetector, ToolErrorClass, ToolObservation};
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, InterruptKind, META_OPS, is_meta_op, meta, rules};
 
@@ -336,6 +336,9 @@ enum ReadyCall {
     Local,
     Rejected(ToolResult),
     Executed(ToolResult),
+    /// The executor returned a typed error; kept typed so diagnostics can classify it
+    /// without reading the error text, which may echo invalid input values.
+    Failed(tools::ToolError),
     Invalid(tools::ToolError),
 }
 
@@ -713,7 +716,7 @@ impl LoopState {
                     let bus = Arc::clone(&self.shared.bus);
                     let run_id = ctx.run_id.clone();
                     let handle = tasks.spawn(async move {
-                            let result = tokio::select! {
+                            let ready = tokio::select! {
                                 biased;
                                 interrupt = cancel.wait_for(|interrupt| interrupt.is_interrupted()) => {
                                     let reason = match interrupt.ok().and_then(|value| value.kind()) {
@@ -724,11 +727,14 @@ impl LoopState {
                                         tool_name: name.clone(), call_id: id.clone(), is_error: true,
                                         output: Some(reason.into()), detail: None, run_id: Some(run_id.clone()),
                                     }));
-                                    ToolResult::error(reason)
+                                    ReadyCall::Executed(ToolResult::error(reason))
                                 },
-                                result = call.execute() => result.unwrap_or_else(|error| ToolResult::error(error.to_string())),
+                                result = call.execute() => match result {
+                                    Ok(result) => ReadyCall::Executed(result),
+                                    Err(error) => ReadyCall::Failed(error),
+                                },
                             };
-                            (index, id, name, input, ReadyCall::Executed(result))
+                            (index, id, name, input, ready)
                         });
                     pending.insert(handle.id(), metadata);
                 }
@@ -794,10 +800,21 @@ impl LoopState {
                     // Runtime-owned ledger calls need the same transcript lifecycle,
                     // including calls rejected by preflight before dispatch.
                     self.ledger_tool_started(&name, &id, &input);
-                    let observed = matches!(&ready, ReadyCall::Executed(_) | ReadyCall::Invalid(_));
+                    let observed = matches!(
+                        &ready,
+                        ReadyCall::Executed(_) | ReadyCall::Failed(_) | ReadyCall::Invalid(_)
+                    );
+                    let typed_error_class = match &ready {
+                        ReadyCall::Failed(error) | ReadyCall::Invalid(error) => {
+                            Some(ToolErrorClass::from_tool_error(error))
+                        }
+                        _ => None,
+                    };
                     let result =
                         if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
                             result
+                        } else if let ReadyCall::Failed(error) = ready {
+                            ToolResult::error(error.to_string())
                         } else if let ReadyCall::Invalid(error) = ready {
                             self.shared.executor.report_invalid_call(
                                 &ctx,
@@ -876,7 +893,16 @@ impl LoopState {
                                 source: "escalation_detector".into(),
                                 severity: DiagnosticSeverity::Warning,
                                 code: diagnostic_codes::NO_PROGRESS.into(),
-                                detail: format!("escalation latched for tool call {id}"),
+                                detail: crate::escalation::detector::no_progress_detail(
+                                    &trigger,
+                                    &name,
+                                    &input,
+                                    result.is_error.then(|| {
+                                        typed_error_class.unwrap_or_else(|| {
+                                            ToolErrorClass::from_content(&result.content)
+                                        })
+                                    }),
+                                ),
                                 run_id: Some(run_id.clone()),
                                 thread_id: None,
                                 call_id: Some(id.clone()),

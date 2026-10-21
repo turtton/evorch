@@ -82,7 +82,6 @@ async fn learning_queue_completes_without_candidates_after_extractor_finishes() 
             progress: None,
             last_artifact: None,
             failure_reason: None,
-            resume_cursor: None,
             attempts: 0,
             heartbeat_at: None,
             created_at: std::time::UNIX_EPOCH,

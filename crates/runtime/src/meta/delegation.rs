@@ -222,6 +222,7 @@ pub(crate) fn spawn_delegate(
                 config,
             ) {
                 Ok(run_id) => {
+                    state.budget.mark_child_spawned();
                     state.record_background_delegate(run_id.to_string(), target);
                     success(run_id.to_string())
                 }
@@ -234,6 +235,7 @@ pub(crate) fn spawn_delegate(
             Ok(child) => child,
             Err(runtime_error) => return Err(error(runtime_error.to_string())),
         };
+    state.budget.mark_child_spawned();
     state.emit_delegated(&state.caller_run_id().to_string(), &child.to_string());
     Ok(child)
 }

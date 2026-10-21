@@ -125,6 +125,9 @@ pub(in crate::meta) async fn wait(
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }
+    if let Ok(result) = &result {
+        record_completions(state, result);
+    }
     match result {
         Ok(result)
             if request.legacy
@@ -140,6 +143,23 @@ pub(in crate::meta) async fn wait(
         }
         Ok(result) => serialize(&result),
         Err(message) => error(message),
+    }
+}
+
+/// Counts each newly received child result as progress, regardless of why the
+/// wait returned: a `mode="all"` wait can time out while still reporting
+/// children that finished for the first time. Waits whose completions were all
+/// observed before, or that returned only for a timeout, inbox, user input or
+/// attention, do not reset the no-progress counter, so polling loops are still
+/// detected. Deduplication by run ID lives in `mark_child_completed`.
+fn record_completions(state: &mut LoopState, result: &Value) {
+    for run_id in result["completed_run_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        state.budget.mark_child_completed(run_id);
     }
 }
 
@@ -232,7 +252,7 @@ async fn observe(
     }
 }
 
-fn terminal(run: &Value) -> bool {
+pub(in crate::meta) fn terminal(run: &Value) -> bool {
     matches!(
         run["status"].as_str(),
         Some("completed" | "cancelled" | "failed" | "stopped")

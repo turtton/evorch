@@ -127,21 +127,29 @@ pub struct ImprovementCandidate {
     pub draft_path: Option<String>,
     /// Run of the first occurrence.
     pub run_id: Option<String>,
-    /// Stored intake plus every duplicate folded into it during the cooldown.
+    /// Stored intake plus every folded duplicate or reopening.
     pub occurrences: u32,
     pub last_seen_at_ns: u64,
     /// Distinct runs of the most recent occurrences, oldest first, at most [`RECENT_RUN_IDS`].
     pub recent_run_ids: Vec<String>,
+    pub reopened_count: u32,
+    pub reopened_at_ns: Option<u64>,
 }
 
 /// Bound on [`ImprovementCandidate::recent_run_ids`].
 pub const RECENT_RUN_IDS: usize = 10;
 
+/// Default per-project daily allowance for new `run-error:` candidates.
+pub const DEFAULT_RUN_ERROR_DAILY_LIMIT: u32 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImprovementWritePolicy {
     pub duplicate_cooldown: Duration,
-    /// Per-project limit on stored intakes since the current UTC day began.
+    /// Per-project limit on non-RunError stores since the current UTC day began.
     pub daily_limit: u32,
+    /// Independent daily allowance for RunError stores; callers default to
+    /// [`DEFAULT_RUN_ERROR_DAILY_LIMIT`].
+    pub run_error_daily_limit: u32,
     /// Per-project retention cap; evict oldest resolved first, then oldest overall.
     pub max_candidates: u32,
 }
@@ -149,6 +157,7 @@ pub struct ImprovementWritePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImprovementRecordOutcome {
     Stored { id: String },
+    Reopened { id: String },
     Duplicate { existing_id: String },
     RateLimited,
 }
@@ -164,10 +173,10 @@ impl Database {
         let mut statement = self.conn.prepare(
             "SELECT candidate_id, project, created_at_ns, source, code, severity,
                     title, evidence, dedup_key, status, draft_path, run_id,
-                    occurrences, last_seen_at_ns, recent_run_ids
+                    occurrences, last_seen_at_ns, recent_run_ids, reopened_count, reopened_at_ns
              FROM improvement_candidates
              WHERE project = ?1 AND (?2 IS NULL OR status = ?2)
-             ORDER BY created_at_ns DESC, rowid DESC LIMIT ?3",
+             ORDER BY MAX(created_at_ns, COALESCE(reopened_at_ns, 0)) DESC, rowid DESC LIMIT ?3",
         )?;
         let mut rows = statement.query(params![
             project,
@@ -188,7 +197,7 @@ impl Database {
         let mut statement = self.conn.prepare(
             "SELECT candidate_id, project, created_at_ns, source, code, severity,
                     title, evidence, dedup_key, status, draft_path, run_id,
-                    occurrences, last_seen_at_ns, recent_run_ids
+                    occurrences, last_seen_at_ns, recent_run_ids, reopened_count, reopened_at_ns
              FROM improvement_candidates WHERE candidate_id = ?1",
         )?;
         let mut rows = statement.query([id])?;
@@ -218,6 +227,15 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> Result<ImprovementCandidate, Storag
             .map_err(|_| StorageError::OutOfRange("improvement last_seen_at_ns"))?,
         recent_run_ids: serde_json::from_str(&row.get::<_, String>(14)?)
             .map_err(|error| StorageError::Serialization(error.to_string()))?,
+        reopened_count: u32::try_from(row.get::<_, i64>(15)?)
+            .map_err(|_| StorageError::OutOfRange("improvement reopened_count"))?,
+        reopened_at_ns: row
+            .get::<_, Option<i64>>(16)?
+            .map(|ns| {
+                u64::try_from(ns)
+                    .map_err(|_| StorageError::OutOfRange("improvement reopened_at_ns"))
+            })
+            .transpose()?,
     })
 }
 
@@ -266,21 +284,23 @@ fn record_at(
     let now_ns = system_time_to_ns(now)?;
     // Lock before checking policy so separate storage instances cannot race these checks.
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let newest: Option<(String, i64)> = transaction
+    // Insertion order, not wall-clock order: a backwards clock jump must not
+    // make an older candidate authoritative. Reopening restarts its cooldown.
+    let newest: Option<(String, i64, String)> = transaction
         .query_row(
-            "SELECT candidate_id, created_at_ns FROM improvement_intake
-             WHERE project = ?1 AND dedup_key = ?2 AND outcome = 'stored'
-             ORDER BY seq DESC LIMIT 1",
+            "SELECT candidate_id, COALESCE(reopened_at_ns, created_at_ns), status
+             FROM improvement_candidates
+             WHERE project = ?1 AND dedup_key = ?2 ORDER BY rowid DESC LIMIT 1",
             params![project, candidate.dedup_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some((existing_id, created_at_ns)) = newest {
-        // A backwards clock jump must not bypass an active cooldown.
+    if let Some((existing_id, opened_at_ns, status)) = newest {
+        let status = ImprovementStatus::parse(&status)?;
         let age = now
-            .duration_since(ns_to_system_time(created_at_ns))
+            .duration_since(ns_to_system_time(opened_at_ns))
             .unwrap_or_default();
-        if age < policy.duplicate_cooldown {
+        if status == ImprovementStatus::New || age < policy.duplicate_cooldown {
             fold_duplicate(
                 &transaction,
                 &existing_id,
@@ -290,17 +310,67 @@ fn record_at(
             transaction.commit()?;
             return Ok(ImprovementRecordOutcome::Duplicate { existing_id });
         }
+        if status == ImprovementStatus::Dismissed {
+            fold_duplicate(
+                &transaction,
+                &existing_id,
+                candidate.run_id.as_deref(),
+                now_ns,
+            )?;
+            transaction.execute(
+                "UPDATE improvement_candidates
+                 SET status = 'new', reopened_count = reopened_count + 1,
+                     reopened_at_ns = ?2, evidence = ?3
+                 WHERE candidate_id = ?1",
+                params![existing_id, now_ns, candidate.evidence],
+            )?;
+            transaction.execute(
+                "INSERT INTO improvement_intake
+                 (project, dedup_key, created_at_ns, outcome, candidate_id)
+                 VALUES (?1, ?2, ?3, 'reopened', ?4)",
+                params![project, candidate.dedup_key, now_ns, existing_id],
+            )?;
+            transaction.commit()?;
+            return Ok(ImprovementRecordOutcome::Reopened { id: existing_id });
+        }
+    } else {
+        // Retention must not bypass cooldowns. Intake survives candidate eviction.
+        let newest_intake: Option<(String, i64)> = transaction
+            .query_row(
+                "SELECT candidate_id, created_at_ns FROM improvement_intake
+                 WHERE project = ?1 AND dedup_key = ?2 AND outcome IN ('stored', 'reopened')
+                 ORDER BY seq DESC LIMIT 1",
+                params![project, candidate.dedup_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_id, opened_at_ns)) = newest_intake {
+            let age = now
+                .duration_since(ns_to_system_time(opened_at_ns))
+                .unwrap_or_default();
+            if age < policy.duplicate_cooldown {
+                transaction.commit()?;
+                return Ok(ImprovementRecordOutcome::Duplicate { existing_id });
+            }
+        }
     }
 
     const DAY_NS: i64 = 86_400 * 1_000_000_000;
     let day_start_ns = now_ns - now_ns % DAY_NS;
+    let is_run_error = candidate.dedup_key.starts_with("run-error:");
+    let daily_limit = if is_run_error {
+        policy.run_error_daily_limit
+    } else {
+        policy.daily_limit
+    };
     let today_count: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM improvement_intake
-         WHERE project = ?1 AND created_at_ns >= ?2 AND outcome = 'stored'",
-        params![project, day_start_ns],
+         WHERE project = ?1 AND created_at_ns >= ?2 AND outcome = 'stored'
+           AND (dedup_key GLOB 'run-error:*') = ?3",
+        params![project, day_start_ns, is_run_error],
         |row| row.get(0),
     )?;
-    if today_count >= i64::from(policy.daily_limit) {
+    if today_count >= i64::from(daily_limit) {
         return Ok(ImprovementRecordOutcome::RateLimited);
     }
 
@@ -452,6 +522,7 @@ mod tests {
         ImprovementWritePolicy {
             duplicate_cooldown: Duration::from_secs(60),
             daily_limit: 100,
+            run_error_daily_limit: DEFAULT_RUN_ERROR_DAILY_LIMIT,
             max_candidates: 100,
         }
     }
@@ -517,11 +588,13 @@ mod tests {
         assert_eq!(row.run_id, input.run_id);
         assert_eq!(row.status, ImprovementStatus::New);
         assert_eq!(row.draft_path, None);
+        assert_eq!(row.reopened_count, 0);
+        assert_eq!(row.reopened_at_ns, None);
         assert!(db.improvement_candidate("missing").unwrap().is_none());
     }
 
     #[test]
-    fn dedup_uses_newest_project_row_and_zero_cooldown_disables_it() {
+    fn dedup_uses_newest_project_row_and_zero_cooldown_allows_reviewed_replacement() {
         let db = Database::open_in_memory().unwrap();
         record_test(&db, "first", 100, policy());
         let mut second = candidate("second");
@@ -532,6 +605,7 @@ mod tests {
                 existing_id: "first".into()
             }
         );
+        set_status(&db.conn, "first", ImprovementStatus::Reviewed).unwrap();
         let no_cooldown = ImprovementWritePolicy {
             duplicate_cooldown: Duration::ZERO,
             ..policy()
@@ -599,9 +673,10 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_expires_at_exact_boundary_and_handles_clock_rollback() {
+    fn reviewed_cooldown_expires_at_exact_boundary_and_handles_clock_rollback() {
         let db = Database::open_in_memory().unwrap();
         record_test(&db, "first", 100, policy());
+        set_status(&db.conn, "first", ImprovementStatus::Reviewed).unwrap();
         let mut second = candidate("second");
         second.dedup_key = candidate("first").dedup_key;
         for seconds in [99, 159] {
@@ -614,6 +689,260 @@ mod tests {
             record_at(&db.conn, "p", &second, policy(), at(160)).unwrap(),
             stored("second")
         );
+    }
+
+    #[test]
+    fn new_candidates_fold_even_after_cooldown_or_with_zero_cooldown() {
+        let db = Database::open_in_memory().unwrap();
+        record_test(&db, "first", 100, policy());
+        let duplicate = NewImprovementCandidate {
+            id: "duplicate".into(),
+            ..candidate("first")
+        };
+        for cooldown in [Duration::from_secs(60), Duration::ZERO] {
+            assert_eq!(
+                record_at(
+                    &db.conn,
+                    "p",
+                    &duplicate,
+                    ImprovementWritePolicy {
+                        duplicate_cooldown: cooldown,
+                        ..policy()
+                    },
+                    at(1_000)
+                )
+                .unwrap(),
+                ImprovementRecordOutcome::Duplicate {
+                    existing_id: "first".into()
+                }
+            );
+        }
+        assert_eq!(ids(&db, "p"), ["first"]);
+        assert_eq!(
+            db.improvement_candidate("first")
+                .unwrap()
+                .unwrap()
+                .occurrences,
+            3
+        );
+    }
+
+    #[test]
+    fn dismissed_candidates_reopen_in_place_after_cooldown_and_sort_first() {
+        let db = Database::open_in_memory().unwrap();
+        record_test(&db, "first", 100, policy());
+        record_test(&db, "second", 150, policy());
+        set_status(&db.conn, "first", ImprovementStatus::Dismissed).unwrap();
+        attach_draft(&db.conn, "first", "first.md").unwrap();
+        let repeated = NewImprovementCandidate {
+            id: "not-inserted".into(),
+            run_id: Some("run-2".into()),
+            evidence: "Updated evidence".into(),
+            ..candidate("first")
+        };
+        assert_eq!(
+            record_at(&db.conn, "p", &repeated, policy(), at(159)).unwrap(),
+            ImprovementRecordOutcome::Duplicate {
+                existing_id: "first".into()
+            }
+        );
+        let folded = db.improvement_candidate("first").unwrap().unwrap();
+        assert_eq!(folded.status, ImprovementStatus::Dismissed);
+        assert_eq!(folded.reopened_count, 0);
+        assert_eq!(folded.reopened_at_ns, None);
+        assert_eq!(
+            record_at(&db.conn, "p", &repeated, policy(), at(160)).unwrap(),
+            ImprovementRecordOutcome::Reopened { id: "first".into() }
+        );
+        let reopened = db.improvement_candidate("first").unwrap().unwrap();
+        assert_eq!(reopened.status, ImprovementStatus::New);
+        assert_eq!(reopened.reopened_count, 1);
+        assert_eq!(reopened.reopened_at_ns, Some(160_000_000_000));
+        assert_eq!(reopened.created_at_ns, 100_000_000_000);
+        assert_eq!(reopened.last_seen_at_ns, 160_000_000_000);
+        assert_eq!(reopened.occurrences, 3);
+        assert_eq!(reopened.recent_run_ids, ["run-1", "run-2"]);
+        assert_eq!(reopened.evidence, repeated.evidence);
+        assert_eq!(reopened.draft_path.as_deref(), Some("first.md"));
+        assert_eq!(ids(&db, "p"), ["first", "second"]);
+        assert_eq!(
+            db.improvement_candidates("p", Some(ImprovementStatus::New), 10)
+                .unwrap()[0]
+                .id,
+            "first"
+        );
+        let audit: (String, String) = db
+            .conn
+            .query_row(
+                "SELECT outcome, candidate_id FROM improvement_intake ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(audit, ("reopened".into(), "first".into()));
+        // A second dismissal starts from the most recent reopening, not creation.
+        set_status(&db.conn, "first", ImprovementStatus::Dismissed).unwrap();
+        assert_eq!(
+            record_at(&db.conn, "p", &repeated, policy(), at(219)).unwrap(),
+            ImprovementRecordOutcome::Duplicate {
+                existing_id: "first".into()
+            }
+        );
+        assert_eq!(
+            record_at(&db.conn, "p", &repeated, policy(), at(220)).unwrap(),
+            ImprovementRecordOutcome::Reopened { id: "first".into() }
+        );
+        let twice = db.improvement_candidate("first").unwrap().unwrap();
+        assert_eq!(twice.reopened_count, 2);
+        assert_eq!(twice.reopened_at_ns, Some(220_000_000_000));
+    }
+
+    #[test]
+    fn reopening_bypasses_full_daily_limit_and_does_not_spend_next_day_allowance() {
+        for prefix in ["key-", "run-error:"] {
+            let db = Database::open_in_memory().unwrap();
+            let limited = ImprovementWritePolicy {
+                daily_limit: 1,
+                run_error_daily_limit: 1,
+                ..policy()
+            };
+            let first = NewImprovementCandidate {
+                dedup_key: format!("{prefix}first"),
+                ..candidate("first")
+            };
+            record_at(&db.conn, "p", &first, limited, at(100)).unwrap();
+            for seconds in [160, 86_400] {
+                set_status(&db.conn, "first", ImprovementStatus::Dismissed).unwrap();
+                assert_eq!(
+                    record_at(&db.conn, "p", &first, limited, at(seconds)).unwrap(),
+                    ImprovementRecordOutcome::Reopened { id: "first".into() }
+                );
+            }
+            let second = NewImprovementCandidate {
+                dedup_key: format!("{prefix}second"),
+                ..candidate("second")
+            };
+            assert_eq!(
+                record_at(&db.conn, "p", &second, limited, at(86_401)).unwrap(),
+                stored("second")
+            );
+        }
+    }
+
+    #[test]
+    fn run_error_daily_limit_is_independent_configurable_and_defaults_to_five() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(DEFAULT_RUN_ERROR_DAILY_LIMIT, 5);
+        let limited = ImprovementWritePolicy {
+            daily_limit: 1,
+            max_candidates: 1,
+            ..policy()
+        };
+        let error = |id: &str| NewImprovementCandidate {
+            dedup_key: format!("run-error:{id}"),
+            ..candidate(id)
+        };
+        for index in 0..5 {
+            let id = format!("error-{index}");
+            assert_eq!(
+                record_at(&db.conn, "p", &error(&id), limited, at(86_399)).unwrap(),
+                stored(&id)
+            );
+        }
+        // Retention cannot refund either budget; RunError stores do not spend the normal budget.
+        record_test(&db, "normal", 86_399, limited);
+        assert_eq!(
+            record_at(
+                &db.conn,
+                "p",
+                &candidate("normal-over"),
+                limited,
+                at(86_399)
+            )
+            .unwrap(),
+            ImprovementRecordOutcome::RateLimited
+        );
+        assert_eq!(
+            record_at(&db.conn, "p", &error("error-over"), limited, at(86_399)).unwrap(),
+            ImprovementRecordOutcome::RateLimited
+        );
+        assert_eq!(
+            record_at(&db.conn, "other", &error("other"), limited, at(86_399)).unwrap(),
+            stored("other")
+        );
+        assert_eq!(
+            record_at(&db.conn, "p", &error("next-day"), limited, at(86_400)).unwrap(),
+            stored("next-day")
+        );
+        let zero = ImprovementWritePolicy {
+            run_error_daily_limit: 0,
+            ..limited
+        };
+        assert_eq!(
+            record_at(&db.conn, "p", &error("zero-limit"), zero, at(86_401)).unwrap(),
+            ImprovementRecordOutcome::RateLimited
+        );
+        // Matching is case-sensitive, exactly like the Rust prefix check.
+        let normal = NewImprovementCandidate {
+            dedup_key: "Run-error:not-special".into(),
+            ..candidate("case-sensitive")
+        };
+        assert_eq!(
+            record_at(&db.conn, "p", &normal, zero, at(86_401)).unwrap(),
+            stored("case-sensitive")
+        );
+    }
+
+    #[test]
+    fn evicted_reopened_candidates_still_obey_cooldown_then_can_be_stored() {
+        let db = Database::open_in_memory().unwrap();
+        record_test(&db, "first", 100, policy());
+        set_status(&db.conn, "first", ImprovementStatus::Dismissed).unwrap();
+        assert_eq!(
+            record_at(&db.conn, "p", &candidate("first"), policy(), at(160)).unwrap(),
+            ImprovementRecordOutcome::Reopened { id: "first".into() }
+        );
+        record_test(
+            &db,
+            "evict",
+            161,
+            ImprovementWritePolicy {
+                max_candidates: 1,
+                ..policy()
+            },
+        );
+        assert!(db.improvement_candidate("first").unwrap().is_none());
+        assert_eq!(
+            record_at(&db.conn, "p", &candidate("first"), policy(), at(219)).unwrap(),
+            ImprovementRecordOutcome::Duplicate {
+                existing_id: "first".into()
+            }
+        );
+        record_test(&db, "first", 220, policy());
+        assert_eq!(
+            db.improvement_candidate("first")
+                .unwrap()
+                .unwrap()
+                .reopened_count,
+            0
+        );
+    }
+
+    #[test]
+    fn failed_reopening_audit_rolls_back_all_candidate_changes() {
+        let db = Database::open_in_memory().unwrap();
+        record_test(&db, "first", 100, policy());
+        set_status(&db.conn, "first", ImprovementStatus::Dismissed).unwrap();
+        let before = db.improvement_candidate("first").unwrap().unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_reopen BEFORE INSERT ON improvement_intake
+            WHEN NEW.outcome = 'reopened' BEGIN SELECT RAISE(ABORT, 'test refusal'); END;",
+            )
+            .unwrap();
+        assert!(record_at(&db.conn, "p", &candidate("first"), policy(), at(160)).is_err());
+        assert_eq!(db.improvement_candidate("first").unwrap().unwrap(), before);
+        assert_eq!(intake_ids(&db), ["first"]);
     }
 
     #[test]
@@ -667,6 +996,7 @@ mod tests {
         let normal = ImprovementWritePolicy {
             duplicate_cooldown: Duration::from_secs(86_400),
             daily_limit: 20,
+            run_error_daily_limit: DEFAULT_RUN_ERROR_DAILY_LIMIT,
             max_candidates: 200,
         };
         for index in 0..20 {
@@ -691,6 +1021,7 @@ mod tests {
             }
         );
         record_test(&db, "next-day", 86_400, normal);
+        set_status(&db.conn, "candidate-0", ImprovementStatus::Reviewed).unwrap();
         let mut repeated = candidate("after-cooldown");
         repeated.dedup_key = candidate("candidate-0").dedup_key;
         assert_eq!(
@@ -701,9 +1032,10 @@ mod tests {
     }
 
     #[test]
-    fn dedup_uses_latest_intake_sequence_after_clock_rollback() {
+    fn dedup_uses_latest_candidate_after_clock_rollback() {
         let db = Database::open_in_memory().unwrap();
         record_test(&db, "first", 100, policy());
+        set_status(&db.conn, "first", ImprovementStatus::Reviewed).unwrap();
         let mut second = candidate("second");
         second.dedup_key = candidate("first").dedup_key;
         assert_eq!(
@@ -933,6 +1265,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let large = ImprovementWritePolicy {
             daily_limit: 2000,
+            run_error_daily_limit: DEFAULT_RUN_ERROR_DAILY_LIMIT,
             max_candidates: 2000,
             ..policy()
         };
@@ -1046,6 +1379,7 @@ mod tests {
         let limited = ImprovementWritePolicy {
             duplicate_cooldown: Duration::from_secs(60),
             daily_limit: 2,
+            run_error_daily_limit: DEFAULT_RUN_ERROR_DAILY_LIMIT,
             max_candidates: 1,
         };
         let outcomes: Vec<_> = ["A", "B", "A", "C", "D"]
@@ -1329,7 +1663,7 @@ mod tests {
             .unwrap();
         }
         let db = Database::open(&config).unwrap();
-        assert_eq!(db.pragma_i64("user_version").unwrap(), 22);
+        assert_eq!(db.pragma_i64("user_version").unwrap(), 23);
         assert_eq!(db.run_ledger_all().unwrap()[0].body, "preserved");
         assert!(ids(&db, "p").is_empty());
         let writer = Storage::open(config).unwrap();

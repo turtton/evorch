@@ -25,7 +25,6 @@ fn work_list_excludes_execution_projections_and_keeps_explicit_tasks_after_reope
             progress: None,
             last_artifact: None,
             failure_reason: None,
-            resume_cursor: None,
             attempts: 0,
             heartbeat_at: None,
             created_at: UNIX_EPOCH,

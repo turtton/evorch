@@ -25,83 +25,23 @@ impl LoopState {
                 Some(_) | None => TaskStatus::Failed,
             },
         };
-        let task = self.durable_task.get_or_insert_with(|| {
-            self.task
-                .config
-                .task_id
-                .as_ref()
-                .and_then(|_| {
-                    self.task
-                        .prompt
-                        .lines()
-                        .find_map(|line| serde_json::from_str::<TaskContinuation>(line).ok())
-                })
-                .unwrap_or_else(|| TaskContinuation {
-                    status,
-                    input: Some(self.task.prompt.clone()),
-                    resume_cursor: None,
-                    last_artifact: None,
-                    failure_reason: None,
-                    attempts: 0,
-                    heartbeat_at_ns: None,
-                })
+        self.durable_task.get_or_insert_with(|| TaskContinuation {
+            status,
+            input: Some(self.task.prompt.clone()),
+            last_artifact: None,
+            failure_reason: None,
+            attempts: 0,
+            heartbeat_at_ns: None,
         });
-        let has_output = self
-            .context
-            .messages
-            .iter()
-            .any(|message| message.role == providers::Role::Assistant);
-        if has_output
-            || !matches!(
-                (task.status, status),
-                (TaskStatus::Retrying, TaskStatus::Running)
-            )
-        {
-            task.status = status;
+        if !matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) {
+            self.update_durable_artifact();
         }
+        let task = self.durable_task.as_mut().expect("initialized above");
+        task.status = status;
         if phase == AgentRunPhase::Stopped {
             task.failure_reason = Some("stopped".into());
         } else if let Some(reason) = reason {
             task.failure_reason = Some(reason);
-        }
-        // Only publish a new cursor after this generation produced an assistant message.
-        // A fresh resumed generation must retain its inherited cursor while awaiting the model.
-        if has_output {
-            if let Ok(cursor) = serde_json::to_string(&self.context.visible_messages()) {
-                task.resume_cursor = Some(cursor);
-            }
-            if !matches!(status, TaskStatus::Failed | TaskStatus::Cancelled)
-                && let Some(artifact) = self
-                    .context
-                    .messages
-                    .iter()
-                    .rev()
-                    .filter(|message| message.role == providers::Role::Assistant)
-                    .find_map(|message| {
-                        let text = message
-                            .content
-                            .iter()
-                            .filter_map(|block| match block {
-                                ContentBlock::Text { text } => Some(text.as_str()),
-                                ContentBlock::Compaction { .. } => {
-                                    tracing::warn!(
-                                        "この処理では compaction block をスキップします"
-                                    );
-                                    None
-                                }
-                                ContentBlock::Image { .. }
-                                | ContentBlock::Reasoning { .. }
-                                | ContentBlock::Anthropic { .. }
-                                | ContentBlock::ToolUse { .. }
-                                | ContentBlock::ToolResult { .. } => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (!text.is_empty()).then_some(text)
-                    })
-            {
-                task.last_artifact = Some(artifact);
-            }
         }
         task.heartbeat_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -121,7 +61,7 @@ impl LoopState {
                     .map(|task| task.id.as_str())
             })
             .unwrap_or(&run_id);
-        if let Ok(progress) = serde_json::to_value(task) {
+        if let Ok(progress) = serde_json::to_value(&*task) {
             self.shared
                 .bus
                 .emit(Event::new(OrchestratorEvent::TaskProgressed {
@@ -130,6 +70,46 @@ impl LoopState {
                     progress,
                     reason: "task execution boundary".into(),
                 }));
+            // Input is immutable task metadata, not a repeated execution snapshot.
+            // The storage projection and GUI retain the first published value.
+            task.input = None;
+        }
+    }
+
+    /// Keep the last valid artifact without serializing or publishing conversation state.
+    /// Budget boundaries still call this before a later response can fail or be truncated.
+    pub(super) fn update_durable_artifact(&mut self) {
+        let Some(task) = self.durable_task.as_mut() else {
+            return;
+        };
+        if let Some(artifact) = self
+            .context
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == providers::Role::Assistant)
+            .find_map(|message| {
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Compaction { .. } => {
+                            tracing::warn!("この処理では compaction block をスキップします");
+                            None
+                        }
+                        ContentBlock::Image { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::Anthropic { .. }
+                        | ContentBlock::ToolUse { .. }
+                        | ContentBlock::ToolResult { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.is_empty()).then_some(text)
+            })
+        {
+            task.last_artifact = Some(artifact);
         }
     }
 }

@@ -137,6 +137,17 @@ async fn repeated_same_file_rewrites_propose_with_path() {
     wait_until_done(&runtime, run_id).await;
 
     let events = drain_events(&mut receiver).await;
+    let no_progress_count = events
+        .iter()
+        .filter(|event| matches!(
+            &event.kind,
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == diagnostic_codes::NO_PROGRESS
+        ))
+        .count();
+    assert_eq!(
+        no_progress_count, 0,
+        "正常な反復編集は NoProgress ではない: {events:?}"
+    );
     let proposals = proposals(&events);
     assert_eq!(proposals.len(), 1, "提案は 1 回だけ: {events:?}");
     assert_eq!(
@@ -345,5 +356,163 @@ async fn escalation_latch_also_emits_single_no_progress_diagnostic() {
         .collect();
     assert_eq!(diagnostics.len(), 1, "NoProgress は 1 件だけ: {events:?}");
     assert_eq!(diagnostics[0].call_id.as_deref(), Some("edit-2"));
+    let detail = &diagnostics[0].detail;
+    let summary = detail.lines().next().expect("安定したサマリ行がある");
+    assert_eq!(
+        summary,
+        "consecutive edit failures reached threshold (tool=edit)"
+    );
+    assert!(!summary.contains("edit-2"));
+    assert!(!summary.contains(&run_id.to_string()));
+    assert!(
+        detail
+            .lines()
+            .any(|line| line == "trigger=consecutive_edit_failures")
+    );
+    assert!(detail.lines().any(|line| line == "count=2"));
+    assert!(detail.lines().any(|line| line == "tool=edit"));
+    assert!(
+        detail
+            .lines()
+            .any(|line| line == format!("path={}", missing.display()))
+    );
+    assert!(detail.lines().any(
+        |line| line.strip_prefix("input_sha256=").is_some_and(
+            |digest| digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        )
+    ));
+    assert!(detail.lines().any(|line| line.starts_with("error=")));
+    assert_eq!(
+        detail.lines().last(),
+        Some("site=consecutive_edit_failures")
+    );
+    assert!(!detail.contains("old_string"));
+    assert!(!detail.contains("new_string"));
     assert_eq!(proposals(&events).len(), 1, "提案も維持される: {events:?}");
+}
+
+// Given: self-improvement intake and edits whose new_string violates the schema with a sentinel
+// When: the consecutive failures reach the NoProgress threshold
+// Then: the sentinel stays in the model-facing tool result but never reaches the
+//       diagnostic, the stored candidate evidence or either rendered draft
+#[tokio::test]
+async fn no_progress_evidence_never_contains_invalid_input_values() {
+    const SENTINEL: &str = "PRIVATE_SENTINEL_xyz";
+    let directory = tempfile::tempdir().expect("temp directory");
+    let target = directory.path().join("target.txt");
+    std::fs::write(&target, "x").expect("target file");
+    let storage_config = storage::StorageConfig {
+        db_path: directory.path().join("improvement.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).expect("storage");
+    let draft_dir = directory.path().join("drafts");
+    let invalid_edit = |id: &str| {
+        Ok(tool_response(
+            id,
+            "edit",
+            json!({ "path": target, "old_string": "x", "new_string": [SENTINEL] }),
+        ))
+    };
+    let model = Arc::new(ScriptedModel::new([
+        invalid_edit("edit-1"),
+        invalid_edit("edit-2"),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), Some(settings()));
+    let runtime = runtime.with_self_improvement(runtime::self_improvement::ImprovementSettings {
+        writer: storage.handle(),
+        project: "sentinel-project".into(),
+        policy: runtime::self_improvement::ImprovementPolicy {
+            draft_dir: Some(draft_dir.clone()),
+            ..Default::default()
+        },
+    });
+    runtime.start_self_improvement();
+    let mut receiver = bus.subscribe();
+
+    let run_id =
+        runtime.delegate_background(Role::Worker, "SENTINEL".to_string(), RunConfig::default());
+    wait_until_done(&runtime, run_id).await;
+
+    // The failure text itself echoes the invalid value, so this exercises the leak path.
+    let tool_results: Vec<String> = model
+        .observed()
+        .await
+        .iter()
+        .flatten()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            providers::ContentBlock::ToolResult { content, .. } => match content.first() {
+                Some(providers::ToolResultContent::Text { text }) => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_results.iter().any(|text| text.contains(SENTINEL)),
+        "ToolResult の本文は従来どおり: {tool_results:?}"
+    );
+
+    let events = drain_events(&mut receiver).await;
+    let details: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.code == diagnostic_codes::NO_PROGRESS =>
+            {
+                Some(diagnostic.detail.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(details.len(), 1, "NoProgress は 1 件: {events:?}");
+    assert!(!details[0].contains(SENTINEL), "{}", details[0]);
+    assert!(
+        details[0].lines().any(|line| line == "error=invalid_args"),
+        "{}",
+        details[0]
+    );
+
+    let candidate = timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = storage::Database::open(&storage_config)
+                .expect("database")
+                .improvement_candidates("sentinel-project", None, 100)
+                .expect("candidates");
+            if let Some(candidate) = rows
+                .into_iter()
+                .find(|c| c.code == diagnostic_codes::NO_PROGRESS && c.draft_path.is_some())
+            {
+                break candidate;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("NoProgress 候補が保存される");
+    assert!(
+        !candidate.evidence.contains(SENTINEL),
+        "{}",
+        candidate.evidence
+    );
+    assert!(!candidate.title.contains(SENTINEL));
+    let evidence: serde_json::Value =
+        serde_json::from_str(&candidate.evidence).expect("evidence JSON");
+    assert_eq!(evidence["fields"]["error"], "invalid_args", "{evidence}");
+
+    let issue = runtime::self_improvement::render_issue_draft(&candidate);
+    let packet = runtime::self_improvement::render_packet_draft(&candidate);
+    assert!(!issue.contains(SENTINEL), "{issue}");
+    assert!(!packet.contains(SENTINEL), "{packet}");
+    let drafts: Vec<_> = std::fs::read_dir(&draft_dir)
+        .expect("draft directory")
+        .map(|entry| entry.expect("draft entry").path())
+        .collect();
+    assert!(drafts.len() >= 2, "issue/packet の両 draft: {drafts:?}");
+    for path in drafts {
+        let text = std::fs::read_to_string(&path).expect("draft text");
+        assert!(!text.contains(SENTINEL), "{}: {text}", path.display());
+    }
 }

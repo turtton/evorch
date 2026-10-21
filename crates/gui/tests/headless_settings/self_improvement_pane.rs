@@ -23,6 +23,7 @@ fn policy() -> ImprovementWritePolicy {
     ImprovementWritePolicy {
         duplicate_cooldown: std::time::Duration::from_secs(60),
         daily_limit: 20,
+        run_error_daily_limit: storage::improvement::DEFAULT_RUN_ERROR_DAILY_LIMIT,
         max_candidates: 200,
     }
 }
@@ -367,4 +368,81 @@ fn folded_duplicates_show_their_count_and_recent_runs() {
     harness.run();
     harness.get_by_label("Copy run ID");
     harness.get_by_label("Recent runs: run-42, run-43, run-44");
+}
+
+#[test]
+fn reopened_candidate_has_distinct_badge_and_moves_above_newer_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("store.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let handle = store.handle();
+    handle
+        .record_improvement_candidate("p", candidate("older"), policy())
+        .unwrap();
+    handle
+        .set_improvement_status("older", ImprovementStatus::Dismissed)
+        .unwrap();
+    handle
+        .record_improvement_candidate("p", candidate("newer"), policy())
+        .unwrap();
+    let mut pane = SelfImprovementPane::default();
+    pane.enabled = true;
+    pane.config = Some(config.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 600.0))
+        .with_step_dt(0.01)
+        .build_ui_state(
+            |ui, pane: &mut SelfImprovementPane| pane.render(ui, Some("p")),
+            pane,
+        );
+    harness.run();
+    assert_eq!(harness.state().status, Some(ImprovementStatus::New));
+    harness.get_by_label("Candidate newer");
+    assert!(harness.query_by_label("Candidate older").is_none());
+    assert!(harness.query_by_label_contains("Reopened ×").is_none());
+    // No wall-clock sleep: zero cooldown permits immediate reopening of dismissal.
+    let immediate = ImprovementWritePolicy {
+        duplicate_cooldown: std::time::Duration::ZERO,
+        ..policy()
+    };
+    for count in 1..=2 {
+        if count > 1 {
+            handle
+                .set_improvement_status("older", ImprovementStatus::Dismissed)
+                .unwrap();
+        }
+        assert_eq!(
+            handle
+                .record_improvement_candidate(
+                    "p",
+                    NewImprovementCandidate {
+                        id: format!("repeat-{count}"),
+                        ..candidate("older")
+                    },
+                    immediate
+                )
+                .unwrap(),
+            storage::improvement::ImprovementRecordOutcome::Reopened { id: "older".into() }
+        );
+        advance_poll(&mut harness);
+        let badge = harness.get_by_label(&format!("Reopened ×{count}")).rect();
+        let older = harness.get_by_label("Candidate older").rect();
+        let newer = harness.get_by_label("Candidate newer").rect();
+        assert!(badge.top() < older.top());
+        assert!(older.top() < newer.top());
+        // The status icon is still separate from the reopening badge.
+        assert_eq!(harness.query_all_by_label("new").count(), 2);
+        assert_eq!(harness.state().status, Some(ImprovementStatus::New));
+        assert_eq!(
+            Database::open(&config)
+                .unwrap()
+                .improvement_candidates("p", None, 10)
+                .unwrap()[0]
+                .id,
+            "older"
+        );
+    }
 }
