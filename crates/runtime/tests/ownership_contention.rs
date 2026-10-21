@@ -429,3 +429,132 @@ async fn finalization_contention_past_its_deadline_ends_the_run_as_that_error() 
     assert!(owner.active_turn);
     assert_eq!(harness.payload(), None);
 }
+
+fn is_guard_failure(record: &Record) -> bool {
+    record.get("message").map(String::as_str) == Some("ownership registry operation failed")
+        && record.get("operation").map(String::as_str) == Some("guard")
+}
+
+async fn exclusive_preflight_is_finalized_once_it_clears(
+    thread: &str,
+    interrupt: Interrupt,
+    expected: (AgentRunPhase, &str),
+) {
+    let mut harness = harness(thread, long_budget());
+    let run = harness.start_gated().await;
+    let lock = rusqlite::Connection::open(&harness.path).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    harness.interrupt(run, interrupt);
+    // Release only after two exhausted 100 ms attempts: no sleep-based race,
+    // and the preflight must use the injected budget rather than the old 2 s.
+    wait_for_records(thread, |records| {
+        records
+            .iter()
+            .filter(|record| is_guard_failure(record))
+            .count()
+            >= 2
+    })
+    .await;
+    harness.assert_unpublished(run).await;
+    lock.execute_batch("ROLLBACK").unwrap();
+    let phase = timeout(Duration::from_secs(30), harness.runtime.wait(run))
+        .await
+        .expect("finalization retries the exclusive lock")
+        .expect("run");
+    assert_eq!(phase, expected.0);
+    assert_eq!(
+        harness.terminal_events(run),
+        [(expected.0, Some(expected.1.into()))]
+    );
+    let owner = harness.owner();
+    assert_eq!(owner.active_runs.iter().collect::<Vec<_>>(), [OTHER_RUN]);
+    assert!(owner.active_turn);
+    let checkpoint =
+        runtime::ownership::OwnerCheckpoint::decode(&harness.payload().unwrap()).unwrap();
+    assert_eq!(
+        checkpoint.boundary,
+        runtime::ownership::CheckpointBoundary::Terminal
+    );
+    assert!(checkpoint.runs.contains_key(&run.to_string()));
+    let records = thread_records(thread);
+    assert!(
+        records.iter().any(|record| {
+            record.get("message").map(String::as_str)
+                == Some("ownership registry operation succeeded after contention")
+                && record.get("operation").map(String::as_str) == Some("guard")
+        }),
+        "{records:?}"
+    );
+}
+
+// A single async worker also proves that the waiting SQLite read is off-thread:
+// this task must run to observe failures and release the exclusive lock.
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_during_exclusive_preflight_retries_and_releases_active() {
+    exclusive_preflight_is_finalized_once_it_clears(
+        "thread-exclusive-cancel",
+        Interrupt::Cancel,
+        (AgentRunPhase::Error, event_bus::CANCELLED_REASON),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_during_exclusive_preflight_retries_and_releases_active() {
+    exclusive_preflight_is_finalized_once_it_clears(
+        "thread-exclusive-stop",
+        Interrupt::Stop,
+        (AgentRunPhase::Stopped, "stopped"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn exclusive_preflight_past_its_deadline_retains_active_and_reports_contention() {
+    let thread = "thread-exclusive-expired";
+    let mut harness = harness(
+        thread,
+        RetryPolicy {
+            deadline: Duration::from_millis(350),
+            attempt_timeout: Duration::from_millis(100),
+            ..RetryPolicy::default()
+        },
+    );
+    let run = harness.start_gated().await;
+    let lock = rusqlite::Connection::open(&harness.path).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    harness.interrupt(run, Interrupt::Stop);
+    let phase = timeout(Duration::from_secs(30), harness.runtime.wait(run))
+        .await
+        .expect("finite preflight deadline")
+        .expect("run");
+    drop(lock);
+    assert_eq!(phase, AgentRunPhase::Error);
+    // The EXCLUSIVE lock also prevents the event bus from establishing its
+    // mutation guard. Keep that fence: wait() still observes the terminal
+    // phase, while diagnostics identify the exhausted guard operation.
+    assert_eq!(harness.terminal_events(run), []);
+    assert!(harness.owner().active_runs.contains(&run.to_string()));
+    assert_eq!(harness.payload(), None);
+    let records = thread_records(thread);
+    assert!(
+        records
+            .iter()
+            .filter(|record| is_guard_failure(record))
+            .count()
+            >= 2,
+        "{records:?}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.get("message").map(String::as_str)
+                    == Some("ownership registry contention outlasted the retry deadline")
+                    && record.get("operation").map(String::as_str) == Some("guard")
+            })
+            .count(),
+        1,
+        "{records:?}"
+    );
+}

@@ -1024,8 +1024,10 @@ impl LoopState {
             {
                 return;
             }
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.validate_generation()
+            if let Some(permit) = self.task.config.ownership.clone()
+                && let Err(error) = permit
+                    .validate_generation_off_thread(self.ownership_retry(), self.interrupt_probe())
+                    .await
             {
                 self.finish_owner_error("checkpoint preflight", error);
                 return;

@@ -66,8 +66,61 @@ impl OwnerPermit {
             Err(error) => Err(error),
         }
     }
+    /// Check generation with bounded contention retries, dropping each read
+    /// transaction before backoff. This is only a preflight: the eventual
+    /// owner write must still revalidate authority inside its transaction.
+    /// Blocks the calling thread; async callers use the blocking-pool variant.
     pub fn validate_generation(&self) -> Result<(), RegistryError> {
-        self.mutation_guard().map(drop)
+        self.validate_generation_with(&RetryPolicy::default(), &|| false)
+    }
+
+    pub fn validate_generation_with(
+        &self,
+        policy: &RetryPolicy,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), RegistryError> {
+        self.validate_generation_on(policy, &system_clock(), interrupted)
+    }
+
+    pub(super) fn validate_generation_on(
+        &self,
+        policy: &RetryPolicy,
+        clock: &std::sync::Arc<dyn Clock>,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), RegistryError> {
+        retry_contention(
+            &self.registry_path,
+            DbOperation::Guard,
+            &self.thread_id,
+            policy,
+            clock,
+            interrupted,
+            |attempt| {
+                let mut registry = Registry::open_attempt(
+                    &self.registry_path,
+                    Access::ReadOnly,
+                    Wait::Budget,
+                    DbOperation::Guard,
+                    &self.thread_id,
+                    attempt,
+                )?;
+                registry.guard_generation(self)
+            },
+        )
+    }
+
+    /// Retry a short generation preflight off-thread. A contended read is not
+    /// fencing; only a successful read can establish (or reject) authority.
+    pub(crate) async fn validate_generation_off_thread(
+        &self,
+        policy: RetryPolicy,
+        interrupted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<(), RegistryError> {
+        let permit = self.clone();
+        join_blocking(tokio::task::spawn_blocking(move || {
+            permit.validate_generation_with(&policy, &interrupted)
+        }))
+        .await
     }
     /// Begin a turn, retrying registry contention within the default policy.
     /// Blocks the calling thread; async code uses [`Self::begin_turn_off_thread`].

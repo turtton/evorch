@@ -18,8 +18,13 @@ impl LoopState {
                 false
             }
         };
-        let authority = if let Some(permit) = &self.task.config.ownership {
-            match permit.validate_generation() {
+        let authority = if let Some(permit) = self.task.config.ownership.clone() {
+            // Teardown must drain even after Stop/Cancel, but a real fence or
+            // contention past the finite budget still fails closed.
+            match permit
+                .validate_generation_off_thread(self.ownership_retry(), || false)
+                .await
+            {
                 Ok(()) => true,
                 Err(error) => {
                     self.finalization_error(error.to_string());
