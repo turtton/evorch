@@ -167,7 +167,6 @@ pub trait CommandSink: Send {
     fn preview_base_context(
         &self,
         _request: runtime::base_context::BaseContextRequest,
-        _project: Option<&str>,
     ) -> Option<ContextPreviewReceiver> {
         None
     }

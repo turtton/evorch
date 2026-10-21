@@ -394,28 +394,23 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 }
             }
             PanelKind::Memory => {
-                let project = self
+                let root = self
                     .sidebar
                     .selected_project
                     .as_ref()
-                    .map(ToString::to_string);
+                    .and_then(|id| {
+                        self.sidebar
+                            .projects
+                            .iter()
+                            .find(|project| &project.id == id)
+                    })
+                    .map(|project| project.repo_root.as_path());
                 if tab.as_str() == "self-improvement-main" {
-                    let root = self
-                        .sidebar
-                        .selected_project
-                        .as_ref()
-                        .and_then(|id| {
-                            self.sidebar
-                                .projects
-                                .iter()
-                                .find(|project| &project.id == id)
-                        })
-                        .map(|project| project.repo_root.as_path());
                     if let Some(action) = self.self_improvement.render_for_repo_root(ui, root) {
                         *self.self_improvement_action = Some(action);
                     }
                 } else {
-                    self.memory.render(ui, project.as_deref());
+                    self.memory.render(ui, root);
                 }
             }
             // Arena panels are dropped when a layout loads; the kind stays for deserialization.

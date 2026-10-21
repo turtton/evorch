@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use storage::memory::{MemoryEntry, MemoryStatus};
 use storage::{Database, StorageConfig};
 
@@ -6,14 +8,15 @@ pub struct MemoryPane {
     pub config: Option<StorageConfig>,
     pub query: String,
     pub status: Option<MemoryStatus>,
+    root: Option<PathBuf>,
     project: String,
     entries: Vec<MemoryEntry>,
     error: Option<String>,
 }
 
 impl MemoryPane {
-    pub fn render(&mut self, ui: &mut egui::Ui, project: Option<&str>) {
-        let Some(project) = project else {
+    pub fn render(&mut self, ui: &mut egui::Ui, repo_root: Option<&Path>) {
+        let Some(repo_root) = repo_root else {
             ui.label("Select a project to browse memory.");
             return;
         };
@@ -21,8 +24,12 @@ impl MemoryPane {
             ui.label("Memory storage is not connected.");
             return;
         }
-        let mut refresh = self.project != project;
-        self.project = project.into();
+        let mut refresh = self.root.as_deref() != Some(repo_root);
+        if refresh {
+            self.root = Some(repo_root.to_path_buf());
+            self.project = crate::runtime_sink::derive_repo_slug(repo_root);
+        }
+        let project = self.project.as_str();
         ui.horizontal_wrapped(|ui| {
             ui.label("Search");
             refresh |= ui.text_edit_singleline(&mut self.query).changed();

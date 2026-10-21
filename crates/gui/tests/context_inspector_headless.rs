@@ -63,11 +63,7 @@ fn report(role: Role) -> BaseContextReport {
 }
 
 impl CommandSink for StubSink {
-    fn preview_base_context(
-        &self,
-        request: BaseContextRequest,
-        _project: Option<&str>,
-    ) -> Option<ContextPreviewReceiver> {
+    fn preview_base_context(&self, request: BaseContextRequest) -> Option<ContextPreviewReceiver> {
         let (sender, receiver) = std::sync::mpsc::channel();
         sender.send(Ok(report(request.role))).unwrap();
         self.0.lock().unwrap().push(request);
@@ -241,11 +237,7 @@ impl LiveSink {
 }
 
 impl CommandSink for LiveSink {
-    fn preview_base_context(
-        &self,
-        request: BaseContextRequest,
-        _project: Option<&str>,
-    ) -> Option<ContextPreviewReceiver> {
+    fn preview_base_context(&self, request: BaseContextRequest) -> Option<ContextPreviewReceiver> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let report = self
             .tokio
