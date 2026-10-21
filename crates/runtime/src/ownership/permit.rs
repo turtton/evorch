@@ -219,7 +219,8 @@ impl OwnerPermit {
         }
     }
 
-    /// Checkpoint `messages`, retrying registry contention within the default
+    /// Compatibility checkpoint: messages are deliberately not persisted.
+    /// Retrying registry contention within the default
     /// policy. Blocks the calling thread; async code uses
     /// [`Self::checkpoint_off_thread`].
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
@@ -228,11 +229,43 @@ impl OwnerPermit {
 
     pub fn checkpoint_with(
         &self,
-        messages: &[providers::Message],
+        _messages: &[providers::Message],
         policy: &RetryPolicy,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
-        self.checkpoint_payload(messages, policy, &system_clock(), interrupted)
+        self.checkpoint_metadata_with(
+            if self.run_id.is_some() {
+                super::CheckpointBoundary::TurnEnd
+            } else {
+                super::CheckpointBoundary::Idle
+            },
+            super::SnapshotReference::none(super::SnapshotNoneReason::Skipped),
+            policy,
+            interrupted,
+        )
+    }
+
+    pub fn checkpoint_metadata(
+        &self,
+        boundary: super::CheckpointBoundary,
+        snapshot: super::SnapshotReference,
+    ) -> Result<(), RegistryError> {
+        self.checkpoint_metadata_with(boundary, snapshot, &RetryPolicy::default(), &|| false)
+    }
+
+    pub fn checkpoint_metadata_with(
+        &self,
+        boundary: super::CheckpointBoundary,
+        snapshot: super::SnapshotReference,
+        policy: &RetryPolicy,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), RegistryError> {
+        self.checkpoint_payload(
+            &super::checkpoint::CheckpointInput { boundary, snapshot },
+            policy,
+            &system_clock(),
+            interrupted,
+        )
     }
 
     /// The payload is serialized once, before any write transaction, and
@@ -255,17 +288,10 @@ impl OwnerPermit {
             interrupted,
             |attempt| {
                 let mut registry = self.open_write_attempt(DbOperation::Checkpoint, attempt)?;
-                // This read only fences early or skips a run that already
-                // checkpointed; it never grants the write below.
+                // This read only fences early; it never grants the write below.
+                // Terminal references can refresh a run already checkpointed.
                 let owner = registry.attach_as(DbOperation::Checkpoint, &self.thread_id)?;
                 owner.validate(&self.lease)?;
-                if self
-                    .run_id
-                    .as_ref()
-                    .is_some_and(|run| !owner.active_runs.contains(run))
-                {
-                    return Ok(());
-                }
                 let serialized = match &mut payload {
                     Some(serialized) => serialized,
                     slot => slot.insert(registry.serialize_checkpoint(self, messages)?),
@@ -279,13 +305,14 @@ impl OwnerPermit {
     /// further attempts; nothing is committed by an interrupted checkpoint.
     pub(crate) async fn checkpoint_off_thread(
         &self,
-        messages: Vec<providers::Message>,
+        boundary: super::CheckpointBoundary,
+        snapshot: super::SnapshotReference,
         policy: RetryPolicy,
         interrupted: impl Fn() -> bool + Send + 'static,
     ) -> Result<(), RegistryError> {
         let permit = self.clone();
         join_blocking(tokio::task::spawn_blocking(move || {
-            permit.checkpoint_with(&messages, &policy, &interrupted)
+            permit.checkpoint_metadata_with(boundary, snapshot, &policy, &interrupted)
         }))
         .await
     }

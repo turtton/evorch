@@ -339,15 +339,18 @@ async fn interrupted_contention_is_finalized_once_it_clears(
     );
     assert!(owner.active_turn, "the other run's turn stays open");
     let payload = harness.payload().expect("finalization checkpoint");
-    let messages: Vec<providers::Message> = serde_json::from_str(&payload).expect("messages");
-    assert!(
-        messages.iter().any(|message| message
-            .content
-            .iter()
-            .any(|block| matches!(block, providers::ContentBlock::ToolResult { .. }))),
-        "{payload}"
+    let checkpoint = runtime::ownership::OwnerCheckpoint::decode(&payload).expect("metadata");
+    assert_eq!(
+        checkpoint.boundary,
+        runtime::ownership::CheckpointBoundary::Terminal
     );
-    assert!(payload.contains(TOOL_OUTPUT), "{payload}");
+    assert_eq!(
+        checkpoint.runs[&run.to_string()].snapshot,
+        runtime::ownership::SnapshotReference::none(
+            runtime::ownership::SnapshotNoneReason::NoRunStore
+        )
+    );
+    assert!(!payload.contains(TOOL_OUTPUT), "{payload}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

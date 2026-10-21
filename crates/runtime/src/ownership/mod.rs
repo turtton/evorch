@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+mod checkpoint;
+pub use checkpoint::{
+    CheckpointBoundary, OwnerCheckpoint, RunCheckpoint, SnapshotNoneReason, SnapshotReference,
+};
 mod observe;
 mod permit;
 mod retry;

@@ -8,6 +8,7 @@ async fn cancelled_notification_waits_for_drain_and_precedes_terminal_error() {
     let (started, mut draining) = mpsc::unbounded_channel();
     let shell = Arc::new(GatedShell {
         shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+        after_execute: None,
         drains: AtomicUsize::new(0),
         started,
         gate: tokio::sync::Semaphore::new(0),

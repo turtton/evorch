@@ -7,6 +7,7 @@ use tools::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
 
 struct GatedShell {
     shell: tools::tools::Shell,
+    after_execute: Option<(mpsc::UnboundedSender<()>, tokio::sync::Semaphore)>,
     drains: AtomicUsize,
     started: mpsc::UnboundedSender<()>,
     gate: tokio::sync::Semaphore,
@@ -30,7 +31,12 @@ impl Tool for GatedShell {
         ctx: &ToolExecutionContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        self.shell.execute_with_context(ctx, args).await
+        let result = self.shell.execute_with_context(ctx, args).await;
+        if let Some((started, gate)) = &self.after_execute {
+            started.send(()).unwrap();
+            gate.acquire().await.unwrap().forget();
+        }
+        result
     }
     fn cancel_shell_jobs(&self, run: &str) {
         self.shell.cancel_shell_jobs(run);
@@ -66,6 +72,7 @@ async fn terminal_publication_waits_for_drain_and_same_id_continuation_keeps_new
     let (started, mut draining) = mpsc::unbounded_channel();
     let shell = Arc::new(GatedShell {
         shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+        after_execute: None,
         drains: AtomicUsize::new(0),
         started,
         gate: tokio::sync::Semaphore::new(0),
@@ -269,6 +276,7 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
     let (started, _draining) = mpsc::unbounded_channel();
     let shell = Arc::new(GatedShell {
         shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+        after_execute: None,
         drains: AtomicUsize::new(1),
         started,
         gate: tokio::sync::Semaphore::new(0),
@@ -334,4 +342,189 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
     }
     call.respond(text_response("observed", FinishReason::Stop));
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+}
+
+#[cfg(unix)]
+fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
+    use runtime::ownership::Registry;
+    use runtime::ownership::ipc::{Request, Response, request, serve_connection};
+    let socket = permit.registry_path.with_extension("sock");
+    let _ = std::fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let path = permit.registry_path.clone();
+    let server = std::thread::spawn(move || {
+        let mut registry = Registry::open_existing(&path).unwrap();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            serve_connection(&mut stream, &mut registry, 20).unwrap();
+        }
+    });
+    assert!(matches!(request(&socket, &Request::Quiesce {
+        thread_id: permit.thread_id.clone(), token: permit.lease.clone(),
+    }).unwrap(), Response::Status(owner) if owner.active_turn && owner.active_runs.len() == 1));
+    assert!(matches!(
+        request(
+            &socket,
+            &Request::Handoff {
+                thread_id: permit.thread_id.clone(),
+                token: permit.lease.clone(),
+                successor_id: "successor".into(),
+                settings: config::OwnershipConfig::default(),
+            }
+        )
+        .unwrap(),
+        Response::Rejected(_)
+    ));
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
+    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+    for mode in ["absent", "failed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let permit = OwnerPermit {
+            registry_path: dir.path().join("owners.db"),
+            thread_id: "thread".into(),
+            lease: Lease {
+                owner_id: "owner".into(),
+                generation: 1,
+                expires_at: u64::MAX,
+            },
+            run_id: None,
+        };
+        Registry::open(&permit.registry_path)
+            .unwrap()
+            .start(&ThreadOwner::new("thread".into(), permit.lease.clone()))
+            .unwrap();
+        let bus = Arc::new(EventBus::new(256));
+        let (executed, mut executing) = mpsc::unbounded_channel();
+        let (started, mut draining) = mpsc::unbounded_channel();
+        let shell = Arc::new(GatedShell {
+            shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+            after_execute: Some((executed, tokio::sync::Semaphore::new(0))),
+            drains: AtomicUsize::new(0),
+            started,
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let mut executor = ToolExecutor::new(bus.clone());
+        executor.register(shell.clone()).unwrap();
+        let executor = Arc::new(executor);
+        let (model, mut calls) = model();
+        let mut runtime = AgentRuntime::new(bus, executor.clone(), model);
+        if mode == "failed" {
+            runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        }
+        let run = runtime.delegate_background(
+            Role::Worker,
+            "unknown effects".into(),
+            RunConfig {
+                ownership: Some(permit.clone()),
+                ..Default::default()
+            },
+        );
+        next(&mut calls).await.respond(tool_response(
+            "start",
+            "shell",
+            json!({"command":"read reply", "yield_ms":0}),
+        ));
+        timeout(DEADLINE, executing.recv()).await.unwrap().unwrap();
+        if mode == "failed" {
+            rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER reject_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(ABORT, 'reject round and terminal'); END;").unwrap();
+        }
+        shell.after_execute.as_ref().unwrap().1.add_permits(1);
+        timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+        assert!(
+            executor.has_unobserved_shell_jobs(&run.to_string()),
+            "{mode}"
+        );
+        // Crucial: finalization has not persisted or released anything yet.
+        assert_handoff_blocked(&permit);
+        shell.gate.add_permits(1);
+        assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error, "{mode}");
+        assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+        assert!(!executor.has_running_shell_jobs(&run.to_string()));
+        assert_handoff_blocked(&permit);
+        assert!(
+            calls.try_recv().is_err(),
+            "no next model round after failed checkpoint"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_store_rejecting_assistant_reference_is_fatal_in_round_and_finalize() {
+    for path in ["round", "finalize"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER reject_reference BEFORE INSERT ON assistant_references BEGIN SELECT RAISE(ABORT, 'mandatory reference rejected'); END;").unwrap();
+        let bus = Arc::new(EventBus::new(256));
+        let (executed, mut executing) = mpsc::unbounded_channel();
+        let (started, mut draining) = mpsc::unbounded_channel();
+        let shell = Arc::new(GatedShell {
+            shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+            after_execute: Some((executed, tokio::sync::Semaphore::new(0))),
+            drains: AtomicUsize::new(0),
+            started,
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let mut executor = ToolExecutor::new(bus.clone());
+        executor.register(shell.clone()).unwrap();
+        let executor = Arc::new(executor);
+        let (model, mut calls) = model();
+        let runtime = AgentRuntime::new(bus, executor.clone(), model);
+        let run =
+            runtime.delegate_background(Role::Worker, "late store".into(), RunConfig::default());
+        let call = next(&mut calls).await;
+        if path == "round" {
+            runtime
+                .capture_pending_reference(run, "ephemeral reference".into())
+                .unwrap();
+            call.respond(tool_response(
+                "sync",
+                "shell",
+                json!({"command":"printf done", "yield_ms":1000}),
+            ));
+            timeout(DEADLINE, executing.recv()).await.unwrap().unwrap();
+        } else {
+            call.respond(text_response("ephemeral reference", FinishReason::Stop));
+            timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+        }
+        // AgentRuntime clones share the OnceLock, so this attaches to the running run.
+        let runtime = runtime
+            .clone()
+            .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        if path == "round" {
+            shell.after_execute.as_ref().unwrap().1.add_permits(1);
+            timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+        }
+        assert!(
+            !executor.has_unobserved_shell_jobs(&run.to_string()),
+            "no uncertain effects to mask Q2"
+        );
+        shell.gate.add_permits(1);
+        assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error, "{path}");
+        assert!(runtime.peek_pending_reference(run).unwrap().is_some());
+        assert!(
+            calls.try_recv().is_err(),
+            "mandatory save failure must stop round"
+        );
+        assert!(
+            storage::Database::open(&config)
+                .unwrap()
+                .run_context(&run.to_string())
+                .unwrap()
+                .is_none()
+        );
+    }
 }

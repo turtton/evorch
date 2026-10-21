@@ -106,7 +106,7 @@ fn ipc_delayed_heartbeat_uses_owner_settings() {
 
 #[cfg(unix)]
 #[test]
-fn idle_quiesce_creates_checkpoint_before_release() {
+fn idle_quiesce_creates_legacy_placeholder_before_release() {
     let directory = tempfile::tempdir().expect("directory");
     let bus = std::sync::Arc::new(event_bus::EventBus::new(16));
     let host = runtime::ownership::OwnerHost::open(
@@ -133,7 +133,7 @@ fn idle_quiesce_creates_checkpoint_before_release() {
 }
 
 #[test]
-fn idle_checkpoint_persists_transcript() {
+fn idle_checkpoint_persists_metadata_without_history() {
     // Given: a thread with no active turn.
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("owners.db");
@@ -166,7 +166,9 @@ fn idle_checkpoint_persists_transcript() {
             |row| row.get(0),
         )
         .expect("checkpoint row");
-    assert_eq!(payload, "[]");
+    let row = runtime::ownership::OwnerCheckpoint::decode(&payload).unwrap();
+    assert_eq!(row.boundary, runtime::ownership::CheckpointBoundary::Idle);
+    assert!(row.runs.is_empty());
 }
 
 #[test]
@@ -226,7 +228,7 @@ fn released_permit_rejects_mutations_before_successor_claims() {
 
 #[cfg(unix)]
 #[test]
-fn ipc_idle_quiesce_checkpoints_without_waiting_for_heartbeat() {
+fn ipc_idle_quiesce_commits_placeholder_without_waiting_for_heartbeat() {
     use runtime::ownership::ipc::{Request, Response, request, serve_connection};
     // Given: an idle owner served over IPC, without a heartbeat worker.
     let directory = tempfile::tempdir().expect("directory");

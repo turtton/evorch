@@ -191,15 +191,12 @@ fn a_busy_registry_commit_records_operation_phase_and_size_but_no_body() {
     assert_eq!(field(record, "sqlite_code"), Some("Some(DatabaseBusy)"));
     assert_eq!(field(record, "extended_code"), Some("5"));
     assert_eq!(field(record, "thread_id"), Some("thread-1"));
-    assert_eq!(
-        field(record, "payload_bytes"),
-        Some(
-            serde_json::to_string(&messages)
-                .unwrap()
-                .len()
-                .to_string()
-                .as_str()
-        )
+    assert!(
+        field(record, "payload_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            < 1024
     );
     assert!(
         field(record, "elapsed_ms")
@@ -312,14 +309,13 @@ fn claimed(owner: &ThreadOwner) -> ThreadOwner {
 // ---- (a) serialization outside the write transaction ----
 
 #[test]
-fn stored_checkpoint_is_the_serialized_message_history() {
+fn stored_checkpoint_has_metadata_not_message_history() {
     let fixture = fixture();
     let messages = messages();
     fixture.permit.checkpoint(&messages).expect("checkpoint");
-    assert_eq!(
-        stored_payload(&fixture.path),
-        Some(serde_json::to_string(&messages).unwrap())
-    );
+    let payload = stored_payload(&fixture.path).unwrap();
+    assert!(super::OwnerCheckpoint::decode(&payload).is_some());
+    assert!(!payload.contains(BODY_MARKER));
     let owner = owner_of(&fixture.path);
     assert!(owner.active_runs.is_empty());
     assert!(!owner.active_turn);
@@ -426,7 +422,13 @@ fn checkpoint_on(
     clock: &Arc<VirtualClock>,
     interrupted: &dyn Fn() -> bool,
 ) -> Result<(), RegistryError> {
-    permit.checkpoint_payload(messages, policy, &clock.shared(), interrupted)
+    let _ = messages;
+    permit.checkpoint_payload(
+        &super::checkpoint::CheckpointInput::default(),
+        policy,
+        &clock.shared(),
+        interrupted,
+    )
 }
 
 /// Run `action` once, from the sleep that reaches `at` on the virtual clock.
@@ -532,10 +534,9 @@ fn checkpoint_succeeds_when_a_reader_releases_during_retries() {
     });
     result.expect("contention that clears within the deadline succeeds");
     assert!(clock.elapsed() >= ms(2100), "{:?}", clock.elapsed());
-    assert_eq!(
-        stored_payload(&fixture.path),
-        Some(serde_json::to_string(&messages).unwrap())
-    );
+    let payload = stored_payload(&fixture.path).unwrap();
+    assert!(super::OwnerCheckpoint::decode(&payload).is_some());
+    assert!(!payload.contains(BODY_MARKER));
     assert!(owner_of(&fixture.path).active_runs.is_empty());
 
     let failures = records.find(|record| {
@@ -548,15 +549,12 @@ fn checkpoint_succeeds_when_a_reader_releases_during_retries() {
     assert_eq!(field(commit, "operation"), Some("checkpoint"));
     assert_eq!(field(commit, "attempt"), Some("1"));
     assert_eq!(field(commit, "sqlite_code"), Some("Some(DatabaseBusy)"));
-    assert_eq!(
-        field(commit, "payload_bytes"),
-        Some(
-            serde_json::to_string(&messages)
-                .unwrap()
-                .len()
-                .to_string()
-                .as_str()
-        )
+    assert!(
+        field(commit, "payload_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            < 1024
     );
     assert!(field(commit, "db").is_some_and(|db| db.ends_with("owners.db")));
     assert!(field(commit, "elapsed_ms").is_some());

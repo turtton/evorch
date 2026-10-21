@@ -18,18 +18,78 @@ impl LoopState {
                 false
             }
         };
+        let authority = if let Some(permit) = &self.task.config.ownership {
+            match permit.validate_generation() {
+                Ok(()) => true,
+                Err(error) => {
+                    self.finalization_error(error.to_string());
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        let uncertain = self.shared.executor.has_unobserved_shell_jobs(&run_id);
+        // ADR 0027 §5: drain -> persist uncertainty/terminal history -> release
+        // handles -> publish terminal. Ownership references commit after history.
+        let (snapshot, saved) = if authority {
+            match crate::restore::persist_terminal_snapshot(self) {
+                Ok(snapshot) => {
+                    let saved = matches!(
+                        snapshot,
+                        crate::ownership::SnapshotReference::RunContext { .. }
+                    );
+                    if saved {
+                        self.snapshot_saved_diagnostic();
+                    }
+                    (snapshot, saved)
+                }
+                Err(error) => {
+                    self.snapshot_diagnostic(&error);
+                    if uncertain
+                        || matches!(error, crate::restore::SnapshotError::AssistantReference(_))
+                    {
+                        self.finalization_error(format!(
+                            "terminal context snapshot failed: {error}"
+                        ));
+                    }
+                    (
+                        crate::ownership::SnapshotReference::none(
+                            crate::ownership::SnapshotNoneReason::WriteFailed,
+                        ),
+                        false,
+                    )
+                }
+            }
+        } else {
+            (
+                crate::ownership::SnapshotReference::none(
+                    crate::ownership::SnapshotNoneReason::Skipped,
+                ),
+                false,
+            )
+        };
+        if uncertain && !saved {
+            self.finalization_error(
+                "unobserved shell effects require a durable terminal snapshot; ownership retained"
+                    .into(),
+            );
+        }
+        // Never clear active authority when shell effects cannot be recorded.
         if drained
+            && authority
+            && (saved || !uncertain)
             && let Some(permit) = self.task.config.ownership.clone()
             && let Err(error) = permit
                 .checkpoint_off_thread(
-                    self.context.visible_messages(),
+                    crate::ownership::CheckpointBoundary::Terminal,
+                    snapshot,
                     self.ownership_retry(),
                     || false,
                 )
                 .await
         {
-            // Teardown runs after any interrupt, so its checkpoint keeps retrying
-            // within the policy deadline instead of observing that interrupt.
+            // Teardown ignores interrupts, but retains the same finite retry budget.
             if let crate::ownership::RegistryError::Database {
                 operation, phase, ..
             } = &error
@@ -45,24 +105,15 @@ impl LoopState {
                 );
             }
             self.finalization_error(error.to_string());
-        }
-        let uncertain = self.shared.executor.has_unobserved_shell_jobs(&run_id);
-        let saved = match crate::restore::persist_terminal_snapshot(self) {
-            Ok(()) => {
-                self.snapshot_saved_diagnostic();
-                true
-            }
-            Err(error) => {
+            // The initial terminal phase was provisional. No reference committed;
+            // best-effort correction preserves Error for recovery (Q3).
+            if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
                 self.snapshot_diagnostic(&error);
-                if uncertain {
-                    self.finalization_error(format!("terminal context snapshot failed: {error}"));
-                }
-                false
             }
-        };
+        }
         // Without unknown shell effects, snapshot failure remains a non-fatal
         // diagnostic and does not suppress ordinary completion or workspace cleanup.
-        let released = if drained && (saved || !uncertain) {
+        let released = if drained && authority && (saved || !uncertain) {
             match self.shared.executor.release_shell_jobs(&run_id) {
                 Ok(()) => true,
                 Err(error) => {
