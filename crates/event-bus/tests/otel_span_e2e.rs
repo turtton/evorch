@@ -173,6 +173,7 @@ fn event_sequence() -> Vec<Event> {
                 streaming: true,
                 run_id: Some("run-1".to_owned()),
                 reasoning_effort: None,
+                purpose: None,
             },
         ),
         event(

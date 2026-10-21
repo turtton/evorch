@@ -93,6 +93,7 @@ fn pressure_is_omitted_when_next_model_window_is_unknown() {
         streaming: true,
         run_id: Some("run-1".into()),
         reasoning_effort: None,
+        purpose: None,
     }));
     overlay.refresh_costs(&settings(Some(1000)));
     // Then: the previous model's window must not stand in for unknown metadata.

@@ -18,6 +18,7 @@ fn request_success_ends_with_usage_and_finish_reason_attributes() {
             streaming: false,
             run_id: Some("run-1".to_owned()),
             reasoning_effort: None,
+            purpose: None,
         },
         2,
     ));
@@ -76,6 +77,7 @@ fn request_failure_uses_stable_classification_without_raw_data() {
             streaming: false,
             run_id: Some("run-1".to_owned()),
             reasoning_effort: None,
+            purpose: None,
         },
         2,
     ));

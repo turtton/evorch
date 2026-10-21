@@ -53,6 +53,7 @@ fn started() -> Event {
         streaming: true,
         run_id: Some("run-1".into()),
         reasoning_effort: None,
+        purpose: None,
     })
 }
 

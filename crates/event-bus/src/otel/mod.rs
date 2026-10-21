@@ -909,6 +909,7 @@ mod tests {
                 streaming: false,
                 run_id: None,
                 reasoning_effort: None,
+                purpose: None,
             }),
             Event::new(UsageEvent::CacheStats {
                 provider: "anthropic".to_owned(),

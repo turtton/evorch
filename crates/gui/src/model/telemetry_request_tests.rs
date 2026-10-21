@@ -117,6 +117,7 @@ fn request_started(run: &str) -> Event {
         streaming: true,
         run_id: Some(run.into()),
         reasoning_effort: None,
+        purpose: None,
     })
 }
 
@@ -231,6 +232,7 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
             streaming: true,
             run_id: Some("run".into()),
             reasoning_effort: None,
+            purpose: None,
         }),
         start + Duration::from_secs(201),
     );
@@ -293,6 +295,7 @@ fn streaming_estimates_and_failed_requests_do_not_change_average_throughput() {
         streaming: true,
         run_id: Some("run".into()),
         reasoning_effort: None,
+        purpose: None,
     }));
     telemetry.apply_event(&Event::new(MessageEvent::MessageDelta {
         delta: "a".repeat(1_000),
@@ -448,6 +451,7 @@ fn provider_label_prefers_the_routing_profile_and_tokens_stay_compact() {
             streaming: true,
             run_id: Some("run".into()),
             reasoning_effort: None,
+            purpose: None,
         })
     };
     let mut telemetry = TelemetryOverlay::new();
@@ -468,4 +472,60 @@ fn provider_label_prefers_the_routing_profile_and_tokens_stay_compact() {
         telemetry.apply_event(&event);
     }
     assert_eq!(telemetry.row("run").unwrap().tokens_label(), "1.23M / 8.9K");
+}
+
+#[test]
+fn escalation_review_is_billed_without_replacing_the_live_request() {
+    let review = |mut event: Event| {
+        match &mut event.kind {
+            EventKind::Provider(
+                ProviderEvent::RequestStarted {
+                    request_id,
+                    model,
+                    purpose,
+                    ..
+                }
+                | ProviderEvent::RequestCompleted {
+                    request_id,
+                    model,
+                    purpose,
+                    ..
+                },
+            ) => {
+                *request_id = "review".into();
+                *model = "reviewer".into();
+                *purpose = Some(RequestPurpose::EscalationReview);
+            }
+            EventKind::Provider(ProviderEvent::FirstTokenObserved {
+                request_id, model, ..
+            }) => {
+                *request_id = "review".into();
+                *model = "reviewer".into();
+            }
+            _ => unreachable!(),
+        }
+        event
+    };
+    let mut telemetry = TelemetryOverlay::new();
+    // Given: the run's own request completed.
+    telemetry.apply_event(&request_started("run"));
+    for event in observed("run", 1_000, 0, 40, 200) {
+        telemetry.apply_event(&event);
+    }
+    let before = telemetry.row("run").unwrap().clone();
+    // When: a shell escalation review runs on another model under the same run.
+    telemetry.apply_event(&review(request_started("run")));
+    let [first_token, completed] = observed("run", 300, 0, 10, 900);
+    telemetry.apply_event(&review(first_token));
+    telemetry.apply_event(&review(completed));
+    // Then: the run keeps its own model and request metrics, but pays for the review.
+    let row = telemetry.row("run").unwrap();
+    assert_eq!(row.model.as_deref(), Some("model"));
+    assert_eq!(row.requests, before.requests);
+    assert_eq!(row.latest_ttft_ms(), before.latest_ttft_ms());
+    assert_eq!(row.request_duration, before.request_duration);
+    assert_eq!(row.latest_context, before.latest_context);
+    assert_eq!(row.usage.input, 1_300);
+    assert_eq!(telemetry.billed["run"].len(), 2);
+    assert!(telemetry.side_requests.is_empty());
 }
