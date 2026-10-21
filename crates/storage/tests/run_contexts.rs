@@ -197,3 +197,66 @@ fn invalidation_updates_only_restore_metadata_when_legacy_history_contains_secre
     assert_eq!(descriptor["non_restorable_reason"], "persist_failed");
     assert_eq!(db.run_context("other").unwrap().unwrap(), other);
 }
+
+#[test]
+fn receipt_identifies_committed_redacted_bytes_and_detects_replacement_or_loss() {
+    let temp = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: temp.path().join("receipts.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut input = record();
+    input.messages_json = r#"[ {"content":"hello"} ]"#.into();
+    let receipt = storage.handle().upsert_run_context_receipt(&input).unwrap();
+    let saved = Database::open(&config)
+        .unwrap()
+        .run_context("run")
+        .unwrap()
+        .unwrap();
+    assert!(receipt.matches(&saved));
+    assert!(
+        !receipt.matches(&input),
+        "digest is over persisted JSON, not caller's bytes"
+    );
+    let mut changed = saved.clone();
+    changed.updated_at_ns -= 1;
+    assert!(!receipt.matches(&changed));
+    changed = saved.clone();
+    changed.messages_json = "[]".into();
+    assert!(!receipt.matches(&changed));
+    assert_eq!(receipt.messages_end, 1);
+    storage.close();
+    assert!(
+        receipt.matches(
+            &Database::open(&config)
+                .unwrap()
+                .run_context("run")
+                .unwrap()
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn receipt_digest_is_computed_after_secret_redaction() {
+    let temp = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: temp.path().join("redacted-receipt.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut input = record();
+    let secret = format!("sk-proj-{}", "a".repeat(96));
+    input.messages_json =
+        serde_json::json!([{"role":"user","content":[{"type":"text","text":secret}]}]).to_string();
+    let receipt = storage.handle().upsert_run_context_receipt(&input).unwrap();
+    let saved = Database::open(&config)
+        .unwrap()
+        .run_context("run")
+        .unwrap()
+        .unwrap();
+    assert!(!saved.messages_json.contains(&secret));
+    assert!(receipt.matches(&saved));
+    assert!(!receipt.matches(&input));
+}
