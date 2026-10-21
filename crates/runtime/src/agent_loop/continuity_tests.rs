@@ -287,3 +287,85 @@ async fn seed_write_failure_does_not_publish_or_spawn_a_receiver() {
     assert_eq!(contexts, 0);
     runtime.cancel(source).unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkpoint_preflight_observes_stop_and_cancel_before_finalization_drains_active() {
+    use crate::ownership::{Lease, OwnerCheckpoint, OwnerPermit, Registry, ThreadOwner};
+    for (interrupt, expected) in [
+        (RunInterrupt::Stop, AgentRunPhase::Stopped),
+        (RunInterrupt::Cancel, AgentRunPhase::Error),
+    ] {
+        let (dir, _storage, runtime, mut state) = stored_fixture();
+        let run = state.caller_run_id();
+        state.transition(AgentRunPhase::Running, None).unwrap();
+        let (cancel, cancel_rx) = watch::channel(RunInterrupt::None);
+        state.channels.cancel_rx = cancel_rx;
+        let path = dir.path().join("owners.db");
+        let owner = ThreadOwner::new(
+            "thread".into(),
+            Lease {
+                owner_id: "owner".into(),
+                generation: 1,
+                expires_at: u64::MAX,
+            },
+        );
+        Registry::open(&path).unwrap().start(&owner).unwrap();
+        let permit = OwnerPermit {
+            registry_path: path.clone(),
+            thread_id: owner.thread_id,
+            lease: owner.lease,
+            run_id: Some(run.to_string()),
+        };
+        permit.begin_turn().unwrap();
+        state.task.config.ownership = Some(permit);
+        let lock = rusqlite::Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        cancel.send_replace(interrupt);
+        assert!(!state.checkpoint_preflight().await);
+        assert_eq!(state.phase(), expected);
+        drop(lock);
+        let owner = Registry::open_readonly(&path)
+            .unwrap()
+            .attach("thread")
+            .unwrap();
+        assert!(
+            owner.active_runs.contains(&run.to_string()),
+            "preflight commits nothing"
+        );
+        // The interrupt remains set. Finalization must ignore it, persist the
+        // terminal snapshot and checkpoint, and only then drain this run.
+        state.finalize().await;
+        assert_eq!(state.phase(), expected);
+        let owner = Registry::open_readonly(&path)
+            .unwrap()
+            .attach("thread")
+            .unwrap();
+        assert!(!owner.active_turn);
+        assert!(owner.active_runs.is_empty());
+        let payload: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT payload FROM owner_checkpoints WHERE thread_id='thread'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let checkpoint = OwnerCheckpoint::decode(&payload).unwrap();
+        let saved = runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_record(run)
+            .unwrap()
+            .unwrap();
+        assert!(
+            checkpoint.runs[&run.to_string()]
+                .snapshot
+                .available(Some(&saved))
+        );
+        assert_eq!(saved.terminal_phase, format!("{expected:?}"));
+        runtime.cancel(run).unwrap();
+        runtime.wait(run).await.unwrap();
+    }
+}

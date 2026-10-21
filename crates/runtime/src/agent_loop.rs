@@ -1024,12 +1024,7 @@ impl LoopState {
             {
                 return;
             }
-            if let Some(permit) = self.task.config.ownership.clone()
-                && let Err(error) = permit
-                    .validate_generation_off_thread(self.ownership_retry(), self.interrupt_probe())
-                    .await
-            {
-                self.finish_owner_error("checkpoint preflight", error);
+            if !self.checkpoint_preflight().await {
                 return;
             }
             let snapshot = match self.save_checkpoint() {
@@ -1517,6 +1512,18 @@ impl LoopState {
 
     fn finish_error(&mut self, reason: String) {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
+    }
+
+    async fn checkpoint_preflight(&mut self) -> bool {
+        if let Some(permit) = self.task.config.ownership.clone()
+            && let Err(error) = permit
+                .validate_generation_off_thread(self.ownership_retry(), self.interrupt_probe())
+                .await
+        {
+            self.finish_owner_error("checkpoint preflight", error);
+            return false;
+        }
+        true
     }
 
     /// The runtime's ownership contention budget; the default unless a test set one.
