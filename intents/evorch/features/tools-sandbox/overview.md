@@ -16,6 +16,7 @@ Tool は統一 interface（name / schema / permissions / execute）とし、Role
 - **許可ディレクトリ**（[ADR 0032](../../decisions/0032-project-allowed-directories.md)）: プロジェクトの trust 済み許可ディレクトリを bwrap にマウントする。アクセス権は role に従う
 - **worktree**（[ADR 0031](../../decisions/0031-remove-isolated-workspaces.md)）: runtime は worktree を作らない。エージェントが skill の手順で、sandbox が読み書き可でマウントしている場所（プロジェクトルートの中や読み書き可の許可ディレクトリの中）に worktree を作る。書き込み系ツールの前に撮っていたワークスペース snapshot とロックは廃止する
 - **ファイルツールの境界**（[ADR 0033](../../decisions/0033-file-tool-path-boundary.md)）: `read` / `grep` / `write` / `edit` が昇格なしで触れる範囲を、shell の sandbox から見える範囲（ホスト側のパス）にそろえる。境界の外は `sandbox_access: "unsandboxed"` と `justification` を付け、shell と同じ審査の gate を通す。`sandbox_access` の `"isolated"` は sandbox の中で実行するという意味で、廃止する isolated workspace とは別物。一時領域（`$TMPDIR`）は thread 単位で共有し、shell とファイルツールで同じホストのパスを使う。中身はその thread の owner プロセスが持っている間だけ残す
+- **thread 単位の読み取り専用ディレクトリ**（[ADR 0037](../../decisions/0037-thread-read-only-directories.md)）: thread が持つ `extra_read_dirs` を run の起動時に `WorkspaceMounts.ro_binds` へ合流させ、shell とファイルツールの両方から、role に関係なく常に read-only で読めるようにする。`/` と `$HOME` は拒否し、継承は子 run・escalation 先・fork/rewind に限る
 - **MCP**: rmcp を利用
 
 ## 脅威モデル（ADR 0008、2026-08-29 確定）
@@ -104,6 +105,7 @@ production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ�
 - [ADR 0031: isolated workspace とワークスペース snapshot を廃止する](../../decisions/0031-remove-isolated-workspaces.md)
 - [ADR 0032: プロジェクトの許可ディレクトリを runtime とエージェントに届ける](../../decisions/0032-project-allowed-directories.md)
 - [ADR 0033: 直接のファイルツールに shell と同じ境界と昇格の経路を持たせる](../../decisions/0033-file-tool-path-boundary.md)
+- [ADR 0037: thread 単位の読み取り専用ディレクトリで、self-improvement の draft を調査 agent に読ませる](../../decisions/0037-thread-read-only-directories.md)
 
 ## Open questions
 
