@@ -1,0 +1,112 @@
+{
+  "before_revision": "1d2cc55c",
+  "after_runtime_storage_source_sha256": "a897c92288aea7731881a174a6282ecc59f5dc58eb845ccf938362385ddcd3bb",
+  "seed": 3703,
+  "cases": [
+    [
+      "before",
+      100,
+      5
+    ],
+    [
+      "after",
+      0,
+      4
+    ],
+    [
+      "before",
+      100,
+      2
+    ],
+    [
+      "before",
+      0,
+      3
+    ],
+    [
+      "before",
+      0,
+      2
+    ],
+    [
+      "after",
+      100,
+      4
+    ],
+    [
+      "after",
+      0,
+      5
+    ],
+    [
+      "after",
+      100,
+      5
+    ],
+    [
+      "after",
+      100,
+      2
+    ],
+    [
+      "after",
+      100,
+      3
+    ],
+    [
+      "before",
+      0,
+      5
+    ],
+    [
+      "after",
+      0,
+      1
+    ],
+    [
+      "after",
+      0,
+      2
+    ],
+    [
+      "after",
+      0,
+      3
+    ],
+    [
+      "before",
+      0,
+      1
+    ],
+    [
+      "after",
+      100,
+      1
+    ],
+    [
+      "before",
+      100,
+      4
+    ],
+    [
+      "before",
+      100,
+      3
+    ],
+    [
+      "before",
+      0,
+      4
+    ],
+    [
+      "before",
+      100,
+      1
+    ]
+  ],
+  "plan_sha256": "396a663799127abe3de386292ca1ba303c6dce25b3826f48e78a64f1d75f840f",
+  "binaries": {
+    "before": "65d24b9ff14d01dfd402e2df7aee63050f939bef3596bcb2a87f29354245106f",
+    "after": "888587390884460fe30b3ec7bffef096fc2cacc91bc35b5d0b114636507c0fdc"
+  }
+}

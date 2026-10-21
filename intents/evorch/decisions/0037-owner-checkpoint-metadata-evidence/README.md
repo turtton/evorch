@@ -1,0 +1,162 @@
+# ADR 0037 計測・検証 evidence
+
+## 独立レビュー修正後の再検証・Q9 再測定（最終結果）
+
+2026-10-21 21:01–21:07 JST、レビュー修正後の最終 Rust ソースを release ビルドして再測定した。
+[事前固定計画](review-remeasurement-plan.md)、[driver](run-review.py)、[20反復全表](review-summary.md)、
+[生データ](review-acceptance.jsonl)、[manifest](review-manifest.json)、[負荷・process記録](review-host.jsonl)。
+各15秒×5反復、5,000,000 B、N=M=20、writer 0/100 ms休止、seed=3703。
+全て直列実行し、各ケース直前の cargo/rustc/nextest/ベンチ並行処理は0。
+開始時1分loadavgの範囲は4.28–8.02（24 logical CPU）であった。ただし稼働GUI等のサービスは
+停止しておらず、専用ホスト隔離や全測定中の外乱不在を保証するものではない。
+全20ケースで quick_check=ok、非contentionエラー0。before archived sourceは再度全2,263 blob一致を確認。
+
+| writer休止 | 実装 | writer失敗/総数 (%) | reader失敗/総数 (%) | writer/reader成功ops/s |
+|---|---|---:|---:|---:|
+| 0 ms | before | 1/3,760 (0.0266) | 17/33,948 (0.0501) | 47.70 / 430.59 |
+| 0 ms | after | 0/48,664 (0) | 18/25,230 (0.0713) | 638.36 / 330.72 |
+| 100 ms | before | 0/2,925 (0) | 58/42,417 (0.1367) | 36.00 / 521.28 |
+| 100 ms | after | 0/14,321 (0) | 0/382,701 (0) | 189.16 / 5,054.85 |
+
+**Q9 は無休止 reader 非悪化条件が未達。** 合算失敗率は0.0501%→0.0713%、rep1/2/3/5も悪化。
+100 ms休止は数値条件を満たし、無休止 writer の≤2%も満たすが、両モデル必須の契約を満たしたとはしない。
+0件失敗の片側95%上限は、after writer 無休止0.00616%、100 ms休止0.02092%、
+after reader 100 ms休止0.000783%。独立二項仮定であり、競合による相関・将来負荷を保証しない。
+各反復の失敗件数・throughput・reader p50/p99と上限は全表に記録し、p99の単純平均は使用しない。
+
+仮説（因果関係は未検証）: metadata短縮により無休止 writerの成功到着率が47.70→638.36 ops/s
+（13.38倍）へ増加し、SQLite rollback journalのwriter競合・reader待ちが頻発する。
+reader成功率だけでなくthroughputも430.59→330.72 ops/sへ低下、afterのp99は829–1,029 ms。
+100 ms休止でreader失敗0・大幅なthroughput改善となることは、この仮説と整合するが単独では立証しない。
+追加対策案は、(1) ownership writerのadmission/rate制御または公平な待機キュー、
+(2) writerの連続取得抑制とretry/backoffの公平性、(3) reader/writer到着率を固定した補助試験で原因分離。
+generation guardの削除やWALへの無条件変更、受け入れ条件の緩和は行っていない。
+
+実行の途中で、隔離環境のlibstdc++.so.6未設定により最初のbinary起動が失敗した（測定0件）。
+LD_LIBRARY_PATHを明示して復旧した。続いて最初の有効測定1件の後に部分集計driverの空群処理が失敗した。
+既存1件を破棄・再選別せず、同じbinary/plan/source hash・seed順序を検証して残り19件をappend再開した。
+Rust測定ソースと比較/集計方法は変更していない。
+
+最終検証: fmt --check、workspace/all-targets clippy -D warnings成功。
+指定5crateは3,436 passed / 0 failed / 38 ignored（291 suites）、cache契約253 passed、I/O契約45 passed。
+新規metadata6/crash3/contention3/shell14/storage7/maintenance2の計35件を各5反復、全て成功。
+実行ログは指定worktree `target/review-fix-validation/`。レビュー指摘1/2/4の回帰は
+未確認shellのラウンド終了前後active保持・IPC quiesce/handoff拒否、後付けstoreでの必須reference
+保存拒否（round/finalize、未確認shellなし）、子プロセスguardの正常/panic終了を含む。
+
+## 初回測定の前提と範囲（履歴）
+
+2026-10-21、同一 Linux / Ryzen 9 7900 (24 logical CPU) / ext4・NVMe ホスト。
+専用隔離ホストではなく、稼働 evorch・他処理が存在する。実環境DBにはアクセスせず、
+指定 worktree の `target/owner-checkpoint-bench/` に新規の一時DBを作成した。
+SQLite 3.53.2、rollback DELETE / synchronous=FULL、SHARED generation guard を維持する。
+
+- before: `1d2cc55c` (#293) の本番 `OwnerPermit::checkpoint`（5 MB全履歴）。
+- after: `1fb8b4c8` の本番 `OwnerPermit::checkpoint_metadata(Terminal)`（合成 receipt）。
+- baseline は `git archive 1d2cc55c` の展開。全2,263ファイルを Git blob と照合し一致。
+- 各 writer は別 thread 行、1 DB共有。reader は同じ permit の `mutation_guard()` を取得し即解放後1 ms休止。
+- writers は開始barrier以降、完了後0/100 ms休止。15秒で新規操作を停止し、in-flight retry終了まで待つ。
+- writerの失敗は本番10秒deadline/各attempt2秒を使い切った最終失敗。外側に追加retryはしない。
+- after の実run_contexts保存・hash/redaction・events DB I/Oと競合、active遷移のコストは含めない。
+  その順序とfenceは runtime/storage の別テストで確認する。
+- `payload_bytes` フィールドは入力履歴のserialized長であり、afterの保存metadataサイズではない。
+  after は run ID、時刻、messages_end、64桁digestだけを本番コードに渡す。
+- `busy_attempts` は戻ってきた最終contentionエラー数（内部attempt数ではない）。
+- `other_errors` は全ケースで空、`quick_check` は全ケース `ok`。
+- 各反復でばらつきがあり、合算だけで将来の失敗率は保証しない。特にacceptance無休止rep=1のreaderは悪化。
+
+## ファイル
+
+- `acceptance.jsonl`: 5,000,000 B、N=M=20、0/100 ms、各2反復の全8ケース。
+- `run-acceptance.py`: seed37で順序を混ぜたドライバ（前任の一時crate用）。
+- `before.rs` / `after.rs`: この計測で使用した一時crateの全入力ソース。
+- `matrix.jsonl`: 100,000 / 304,247 / 2,132,213 / 5,000,000 B × N=M=2/5/10/20 × 0/100 ms × before/after の補足各1反復（全64ケース）。引き継ぎ時点の28ケースを検証し、残り36ケースを同一binaryで再開・完了した。実行時間帯が分かれ、後半は隔離ホストではなくビルド等の他処理もあるため、単一セッションの均一負荷試験とはしない。
+- `matrix-summary.md`: 補足全32組のwriter/reader失敗数と率。5MB・N=M=20・無休止のreaderは0%→0.0578%で、この補足反復はQ9未達。主要計測の合算だけで安定した非悪化を主張しない。
+
+## 再実行
+
+指定 worktree に以下の配置を作る（ソースにROOT絶対パスが埋まっているため、別パスなら変更する）。
+
+```
+target/owner-checkpoint-bench/baseline/  # git archive 1d2cc55c | tar -x
+target/owner-checkpoint-bench/before/src/main.rs  # before.rs
+target/owner-checkpoint-bench/after/src/main.rs   # after.rs
+```
+
+before/after のCargo.tomlは各々別workspace、edition=2024、version=0.1.0、
+package名 `owner-checkpoint-bench-before` / `owner-checkpoint-bench-after`。
+依存runtime/providersはbeforeではbaseline/crates、afterではworktree/cratesへの絶対path、
+`rusqlite={version="0.40.2",features=["bundled"]}`, `serde_json="1"`。
+afterだけstorageもworktreeのpath依存にする。`[profile.release] debug=0`。
+
+```sh
+# worktreeで。ホストNix daemonと利用可能なPython3を使う
+TMPDIR=/tmp nix develop -c sh -c '
+  export CARGO_TARGET_DIR="$PWD/target/owner-checkpoint-bench/build"
+  cargo build --release --offline --manifest-path target/owner-checkpoint-bench/before/Cargo.toml &&
+  cargo build --release --offline --manifest-path target/owner-checkpoint-bench/after/Cargo.toml
+'
+# run-acceptance.py を target/owner-checkpoint-bench/run.py に配置して実行
+TMPDIR=/tmp nix develop -c python3 target/owner-checkpoint-bench/run.py
+# devshellにPythonが無い場合は利用可能なPython実体を指定する。Rust/SQLiteコードは同じ。
+```
+
+計測済みbinary SHA-256:
+
+- before: `f2f53ea6c6d8b1862700df4b90394b67aafdddd9edf14040e2ef8c5efbc67f47`
+- after: `69aa5caf845643bbea07f186f8538389f1fe98038f590061f3c2f94d76d61fde`
+
+## 検証
+
+初回は指定worktreeで `TMPDIR=/tmp nix develop` を使用し、引き継ぎ後も全検証を再実行した。
+最終コードの再検証は隔離環境で同じNix storeのtoolchainを使い、`TMPDIR=/tmp` と
+worktree内の `EVORCH_OUTPUT_DIR` を指定した。libclangとglibc headersはNix storeの絶対pathで与えた。
+詳細一時ログは前任分 `target/owner-checkpoint-validation/`、引き継ぎ分
+`target/owner-checkpoint-validation-takeover/` にあり、本書とADRに結果を永続記録する。
+
+| 検証 | 実際の結果 |
+|---|---|
+| cargo fmt --all -- --check | 成功 |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | 成功 |
+| cargo test --locked -p runtime -p event-bus -p gui -p recorder -p storage | 最終コードで3,433 passed / 0 failed / 38 ignored、290 suites（doctest含む）。追加境界テスト前は3,432 passed |
+| scripts/check-cache-contracts.sh | 253 passed、225 skipped |
+| scripts/check-io-contracts.sh | 45 passed、1,319 skipped |
+| metadata/crash/contention/shell_jobs + storage run_contexts ×5 | 最終コードで毎回32 passed / 0 failed（8+2+3+12+7）。前任時点は31 passed |
+| 最終観測修正後 ownership::contention_tests | 19 passed |
+
+初回旧配列assert2件失敗→metadata契約へ更新。次のshellキャンセルassert1件失敗は単独でも再現し、
+store不在では不確実性を永続化できずhandleを保持すべきため、本ADRの安全契約に沿って更新した。
+その後に上記全検証が通過した。引き継ぎ時にはdrain済みrunのidleが他runのactiveを無視して成功する
+no-opを拒否するよう補強し、snapshot準備中のquiesceからIPC handoffまでの境界テストを追加した。
+隔離環境での途中失敗はlibclang/headerの未設定、長いTMPDIRのSUN_LEN超過、共有artifact出力先の
+書込不可であり、環境変数とworktree内出力先を設定後、失敗したbenchmark_wireの単独再実行と全回帰が成功した。
+これら環境差を回避するために契約assertを弱めていない。実環境DBの掃除や電源断テストは実施していない。
+
+## 履歴整理と旧ハッシュの対応
+
+WIP/前任履歴は以下4単位に squash した。base は `1d2cc55c` のままであり、
+#293を別コミットとして再取り込みしていない。
+
+| 整理後 | 内容 | 旧ハッシュとの対応 |
+|---|---|---|
+| `2cbaec3b` | storage receipt API・redaction/digest・storageテスト | `6021cc29` のstorage部分 |
+| `393ef71e` | owner metadata/fencing、agent loop/finalize、回帰テスト | `6021cc29` のruntime部分、`eac72454`、`19116669`、`1fb8b4c8`、`bbe52144`、`33628214`、`82fdd214`、`cbba4552` のruntime/test部分 |
+| `8a3bc30e` | offline掃除コマンドと安全性テスト | `6021cc29` / `e06578bf` のmaintenance部分、`cbba4552` のtest分離 |
+| `docs(adr): record owner checkpoint contracts and review evidence`（本書を含むコミット） | ADR0024 Addendum・0037・evidence | `e06578bf` のdocs部分、`ad8ad68c`、`9ef10648`、`871825d2`、`51b99fbd`、`cbba4552` のplan/docs部分、`6d89137a` |
+
+したがって初回計測のafter=`1fb8b4c8`は、整理後`393ef71e`のowner metadata実装に対応するが、
+新しいruntime回帰修正前の計測として履歴を維持する。最終再測定のafterは`2cbaec3b`+
+`393ef71e`+`8a3bc30e`のRust tree（manifestのruntime/storage source SHA-256でも一致確認）。
+文書コミット自身のハッシュは自己参照できないためsubjectで識別する。
+
+整理前の最終WIP=`6d89137a`、tree=`f3fd1bdeafc81571841d94469cad351bbb41fe5e`。
+3コミット構築後にdocsを復元したindexのtreeがこの値と完全一致し、全差分0を確認した。
+その後の変更は本節（旧→新ハッシュ対応とコミット別検証記録）の追記だけであり、Rustコード・
+計測データ・受け入れ条件は変更していない。
+
+各コードコミットで `cargo check --workspace --all-targets --locked` が成功した。
+コミット1は `cargo test -p storage` 306 passed、コミット2はmetadata/crash/contention/recovery/shellと
+ownership unitの97 passed、コミット3はmaintenance2件がpassed、evorch CLI test targetのビルド・実行成功（unit test 0件）。
+文書コミットでもworkspace/all-targetsのcheck・clippy -D warnings、fmt --checkと
+metadata/crash/maintenance/storage run_contextsの18件を再検証した。
+全コミットは設定済みOpenPGP鍵で署名し、pre-commit hookのfmtを通した。push/PR作成はしていない。
