@@ -54,6 +54,16 @@ GUI を複数起動したり、GUI を閉じても作業を継続させたいと
 - 複数ホスト間での分散合意。
 - 常駐 daemon による中央管理への全面移行（既存の単一プロセス構成を置き換えない）。
 
+## Addendum（2026-10-21、ADR 0037）
+
+Decision 4 の checkpoint は、所有権側の active 状態と小さな snapshot 参照を同一トランザクションで
+確定するドレイン・バリアである。owner checkpoint は独立した会話履歴の復旧源ではない。
+履歴は先に `run_contexts` へ保存し、任意の run store の不在またはその snapshot の保存失敗では
+参照を none にして境界を確定する。副作用の安全上必要な保存・回収の失敗は致命のままである。
+詳細、旧形式との共存、offline の生履歴掃除は [ADR 0037](0037-owner-checkpoint-metadata.md) に従う。
+Decision 5 のうち `run_contexts` 書き込みへの generation fence は既存の未履行範囲として残り、
+ADR 0037 では追加しない。owner の参照 commit は従来どおり generation を検証する。
+
 ## Related
 
 - tmux: session / client の分離（attach/detach）

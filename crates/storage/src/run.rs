@@ -23,3 +23,22 @@ pub struct RunContextRecord {
     pub restorable: bool,
     pub updated_at_ns: i64,
 }
+
+/// Identity of the redacted, committed snapshot (not an authority token).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunContextReceipt {
+    pub updated_at_ns: i64,
+    pub messages_end: usize,
+    pub sha256: String,
+}
+
+impl RunContextReceipt {
+    /// Missing, replaced or power-loss-truncated snapshots are unavailable.
+    pub fn matches(&self, record: &RunContextRecord) -> bool {
+        use sha2::{Digest, Sha256};
+        self.updated_at_ns == record.updated_at_ns
+            && self.sha256 == format!("{:x}", Sha256::digest(record.messages_json.as_bytes()))
+            && serde_json::from_str::<Vec<serde_json::Value>>(&record.messages_json)
+                .is_ok_and(|messages| messages.len() == self.messages_end)
+    }
+}

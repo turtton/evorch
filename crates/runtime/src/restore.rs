@@ -221,6 +221,8 @@ impl RunRestoreDescriptor {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
+    #[error("unobserved shell effects require a durable checkpoint; ownership retained")]
+    UnrecordedShellEffects,
     #[error("assistant reference cannot be persisted: {0}")]
     AssistantReference(String),
     #[error("復元コンテキストを直列化できません: {0}")]
@@ -234,10 +236,14 @@ pub(crate) enum SnapshotError {
 }
 
 /// Persist only at a completed tool round; a failed write leaves the last snapshot intact.
-pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError> {
+pub(crate) fn persist_checkpoint(
+    state: &LoopState,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end != state.context.messages.len() {
-        return Ok(());
+        return Ok(crate::ownership::SnapshotReference::none(
+            crate::ownership::SnapshotNoneReason::Skipped,
+        ));
     }
     write_snapshot(state, "Checkpoint", end)
 }
@@ -245,7 +251,7 @@ pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError>
 pub(crate) fn persist_prepared_context(
     state: &LoopState,
     context: &crate::AgentContext,
-) -> Result<(), SnapshotError> {
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&context.messages);
     write_snapshot_with_context(state, context, "Checkpoint", end)
 }
@@ -253,24 +259,36 @@ pub(crate) fn persist_prepared_context(
 /// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
 /// Recovery never repeats an incomplete batch. Current-authority chat entrances
 /// retain history and report missing outcomes as errors on the next turn.
-pub(crate) fn persist_tool_intent(state: &LoopState) -> Result<(), SnapshotError> {
+pub(crate) fn persist_tool_intent(
+    state: &LoopState,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end == state.context.messages.len() {
-        return Ok(());
+        return Ok(crate::ownership::SnapshotReference::none(
+            crate::ownership::SnapshotNoneReason::Skipped,
+        ));
     }
     write_snapshot(state, "Checkpoint", end)
 }
 
-pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
+pub(crate) fn persist_terminal_snapshot(
+    state: &LoopState,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let phase = match state.run_state.phase() {
         AgentRunPhase::Done => "Done",
         AgentRunPhase::Error => "Error",
         AgentRunPhase::Stopped => "Stopped",
-        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return Ok(()),
+        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
+            return Ok(crate::ownership::SnapshotReference::none(
+                crate::ownership::SnapshotNoneReason::Skipped,
+            ));
+        }
     };
     let end = safe_context_end(&state.context.messages);
     if end == 0 {
-        return Ok(());
+        return Ok(crate::ownership::SnapshotReference::none(
+            crate::ownership::SnapshotNoneReason::Skipped,
+        ));
     }
     write_snapshot(state, phase, end)
 }
@@ -325,7 +343,7 @@ fn write_snapshot(
     state: &LoopState,
     terminal_phase: &str,
     end: usize,
-) -> Result<(), SnapshotError> {
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     write_snapshot_with_context(state, &state.context, terminal_phase, end)
 }
 
@@ -334,12 +352,16 @@ fn write_snapshot_with_context(
     context: &crate::AgentContext,
     terminal_phase: &str,
     end: usize,
-) -> Result<(), SnapshotError> {
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let Some(runtime) = state.runtime() else {
-        return Ok(());
+        return Ok(crate::ownership::SnapshotReference::none(
+            crate::ownership::SnapshotNoneReason::NoRunStore,
+        ));
     };
     let Some(store) = runtime.shared.run_store.get() else {
-        return Ok(());
+        return Ok(crate::ownership::SnapshotReference::none(
+            crate::ownership::SnapshotNoneReason::NoRunStore,
+        ));
     };
     let config = state.run_config();
     let mut unsupported = Vec::new();
@@ -497,8 +519,8 @@ fn write_snapshot_with_context(
         restorable: descriptor.restorable,
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
     };
-    store.handle.upsert_run_context(&record)?;
-    Ok(())
+    let receipt = store.handle.upsert_run_context_receipt(&record)?;
+    Ok(crate::ownership::SnapshotReference::RunContext { receipt })
 }
 
 fn interrupted_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolCall> {

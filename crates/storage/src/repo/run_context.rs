@@ -2,7 +2,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{RunContextRecord, StorageError};
 
-pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), StorageError> {
+pub fn upsert(
+    conn: &Connection,
+    record: &RunContextRecord,
+) -> Result<crate::RunContextReceipt, StorageError> {
+    use sha2::{Digest, Sha256};
     let redactor = secret_guard::SecretRedactor::from_env();
     let mut messages: serde_json::Value = serde_json::from_str(&record.messages_json)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
@@ -56,7 +60,11 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
     if count > 0 {
         tracing::info!(run_id = %record.run_id, redacted_spans = count, "run context saved with credential redactions");
     }
-    Ok(())
+    Ok(crate::RunContextReceipt {
+        updated_at_ns: record.updated_at_ns,
+        messages_end: messages.as_array().map_or(0, Vec::len),
+        sha256: format!("{:x}", Sha256::digest(messages_json.as_bytes())),
+    })
 }
 
 /// Only payloads are redacted: roles, tool IDs/names, and checkpoint ranges stay intact.

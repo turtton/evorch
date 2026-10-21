@@ -191,15 +191,12 @@ fn a_busy_registry_commit_records_operation_phase_and_size_but_no_body() {
     assert_eq!(field(record, "sqlite_code"), Some("Some(DatabaseBusy)"));
     assert_eq!(field(record, "extended_code"), Some("5"));
     assert_eq!(field(record, "thread_id"), Some("thread-1"));
-    assert_eq!(
-        field(record, "payload_bytes"),
-        Some(
-            serde_json::to_string(&messages)
-                .unwrap()
-                .len()
-                .to_string()
-                .as_str()
-        )
+    assert!(
+        field(record, "payload_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            < 1024
     );
     assert!(
         field(record, "elapsed_ms")
@@ -312,14 +309,13 @@ fn claimed(owner: &ThreadOwner) -> ThreadOwner {
 // ---- (a) serialization outside the write transaction ----
 
 #[test]
-fn stored_checkpoint_is_the_serialized_message_history() {
+fn stored_checkpoint_has_metadata_not_message_history() {
     let fixture = fixture();
     let messages = messages();
     fixture.permit.checkpoint(&messages).expect("checkpoint");
-    assert_eq!(
-        stored_payload(&fixture.path),
-        Some(serde_json::to_string(&messages).unwrap())
-    );
+    let payload = stored_payload(&fixture.path).unwrap();
+    assert!(super::OwnerCheckpoint::decode(&payload).is_some());
+    assert!(!payload.contains(BODY_MARKER));
     let owner = owner_of(&fixture.path);
     assert!(owner.active_runs.is_empty());
     assert!(!owner.active_turn);
@@ -426,7 +422,13 @@ fn checkpoint_on(
     clock: &Arc<VirtualClock>,
     interrupted: &dyn Fn() -> bool,
 ) -> Result<(), RegistryError> {
-    permit.checkpoint_payload(messages, policy, &clock.shared(), interrupted)
+    let _ = messages;
+    permit.checkpoint_payload(
+        &super::checkpoint::CheckpointInput::default(),
+        policy,
+        &clock.shared(),
+        interrupted,
+    )
 }
 
 /// Run `action` once, from the sleep that reaches `at` on the virtual clock.
@@ -532,10 +534,9 @@ fn checkpoint_succeeds_when_a_reader_releases_during_retries() {
     });
     result.expect("contention that clears within the deadline succeeds");
     assert!(clock.elapsed() >= ms(2100), "{:?}", clock.elapsed());
-    assert_eq!(
-        stored_payload(&fixture.path),
-        Some(serde_json::to_string(&messages).unwrap())
-    );
+    let payload = stored_payload(&fixture.path).unwrap();
+    assert!(super::OwnerCheckpoint::decode(&payload).is_some());
+    assert!(!payload.contains(BODY_MARKER));
     assert!(owner_of(&fixture.path).active_runs.is_empty());
 
     let failures = records.find(|record| {
@@ -548,15 +549,12 @@ fn checkpoint_succeeds_when_a_reader_releases_during_retries() {
     assert_eq!(field(commit, "operation"), Some("checkpoint"));
     assert_eq!(field(commit, "attempt"), Some("1"));
     assert_eq!(field(commit, "sqlite_code"), Some("Some(DatabaseBusy)"));
-    assert_eq!(
-        field(commit, "payload_bytes"),
-        Some(
-            serde_json::to_string(&messages)
-                .unwrap()
-                .len()
-                .to_string()
-                .as_str()
-        )
+    assert!(
+        field(commit, "payload_bytes")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            < 1024
     );
     assert!(field(commit, "db").is_some_and(|db| db.ends_with("owners.db")));
     assert!(field(commit, "elapsed_ms").is_some());
@@ -923,4 +921,143 @@ fn child_preparation_is_never_retried() {
     let failures = records
         .find(|record| field(record, "message") == Some("ownership registry operation failed"));
     assert_eq!(failures.len(), 1, "a single attempt: {failures:?}");
+}
+
+#[test]
+fn generation_preflight_retries_exclusive_contention_with_the_attempt_budget() {
+    let fixture = fixture();
+    let before = owner_of(&fixture.path);
+    let lock = exclusive_lock(&fixture.path);
+    let clock = VirtualClock::new();
+    let records = Records::default();
+    // The first 2 s attempt must fail; the second can read the same owner.
+    at(&clock, ms(2100), move |_| {
+        lock.execute_batch("ROLLBACK").unwrap();
+    });
+    tracing::dispatcher::with_default(&records.dispatch(), || {
+        fixture
+            .permit
+            .validate_generation_on(&RetryPolicy::default(), &clock.shared(), &|| false)
+    })
+    .expect("a transient lock is not fencing");
+    assert!(clock.elapsed() >= ms(2100));
+    assert!(clock.elapsed() < ms(10_000));
+    assert_eq!(
+        attempts_recorded(
+            &records,
+            "ownership registry operation succeeded after contention"
+        ),
+        ["2"]
+    );
+    assert_eq!(owner_of(&fixture.path), before);
+    assert_eq!(stored_payload(&fixture.path), None);
+    // No guard may survive the preflight (even a write can start now).
+    drop(exclusive_lock(&fixture.path));
+}
+
+#[test]
+fn generation_preflight_exclusive_contention_expires_at_the_injected_deadline() {
+    let fixture = fixture();
+    let before = owner_of(&fixture.path);
+    let lock = exclusive_lock(&fixture.path);
+    let clock = VirtualClock::new();
+    let policy = RetryPolicy {
+        deadline: ms(350),
+        attempt_timeout: ms(100),
+        initial_backoff: ms(10),
+        max_backoff: ms(10),
+    };
+    let error = fixture
+        .permit
+        .validate_generation_on(&policy, &clock.shared(), &|| false)
+        .expect_err("a lock past the deadline is still contention, not fencing");
+    assert!(is_busy(&error), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            RegistryError::Database {
+                operation: DbOperation::Guard,
+                attempt: 3..,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(clock.elapsed(), policy.deadline);
+    drop(lock);
+    assert_eq!(owner_of(&fixture.path), before);
+    assert_eq!(stored_payload(&fixture.path), None);
+}
+
+#[test]
+fn generation_preflight_observes_interrupt_after_a_busy_attempt() {
+    let fixture = fixture();
+    let lock = exclusive_lock(&fixture.path);
+    let clock = VirtualClock::new();
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let signal = interrupted.clone();
+    at(&clock, ms(50), move |_| {
+        signal.store(true, Ordering::SeqCst)
+    });
+    let error = fixture
+        .permit
+        .validate_generation_on(
+            &RetryPolicy {
+                attempt_timeout: ms(100),
+                ..RetryPolicy::default()
+            },
+            &clock.shared(),
+            &|| interrupted.load(Ordering::SeqCst),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RegistryError::Interrupted {
+                operation: DbOperation::Guard,
+                attempts: 1
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(clock.elapsed(), ms(100));
+    drop(lock);
+    assert!(owner_of(&fixture.path).active_runs.contains(RUN));
+}
+
+#[test]
+fn generation_preflight_rechecks_fencing_and_released_after_contention() {
+    for released in [false, true] {
+        let fixture = fixture();
+        let before = owner_of(&fixture.path);
+        let lock = exclusive_lock(&fixture.path);
+        let mut next = before.clone();
+        if released {
+            next.state = OwnerState::Released;
+        } else {
+            next.lease.generation += 1;
+        }
+        let committed = next.clone();
+        let clock = VirtualClock::new();
+        at(&clock, ms(2100), move |_| {
+            lock.execute(
+                "UPDATE thread_owners SET state=?1 WHERE thread_id='thread-1'",
+                [serde_json::to_string(&committed).unwrap()],
+            )
+            .unwrap();
+            lock.execute_batch("COMMIT").unwrap();
+        });
+        let error = fixture
+            .permit
+            .validate_generation_on(&RetryPolicy::default(), &clock.shared(), &|| false)
+            .unwrap_err();
+        assert!(
+            matches!(error, RegistryError::Ownership(OwnershipError::Fenced)),
+            "{error:?}"
+        );
+        assert!(clock.elapsed() >= ms(2100));
+        assert!(clock.elapsed() < ms(10_000));
+        assert_eq!(owner_of(&fixture.path), next);
+        assert_eq!(stored_payload(&fixture.path), None);
+    }
 }

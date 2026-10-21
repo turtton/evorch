@@ -16,6 +16,12 @@ fn main() -> ExitCode {
     runtime::panic_capture::install();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv
+        .first()
+        .is_some_and(|command| command == "owner-checkpoints-compact")
+    {
+        return compact_owner_checkpoints(&argv);
+    }
     if argv.first().is_some_and(|command| command == "benchmark") {
         return benchmark(argv);
     }
@@ -145,6 +151,25 @@ fn inspect(argv: Vec<String>) -> ExitCode {
         Err(error) => {
             eprintln!("{error}");
             ExitCode::from(1)
+        }
+    }
+}
+
+fn compact_owner_checkpoints(argv: &[String]) -> ExitCode {
+    if argv.len() != 4 || argv[1] != "--root" || argv[3] != "--all-owners-stopped" {
+        eprintln!(
+            "usage: evorch owner-checkpoints-compact --root <ownership-root> --all-owners-stopped\nStop ALL evorch processes first. Removes checkpoint payloads and VACUUMs owners.db. Requires up to twice the DB size in free space."
+        );
+        return ExitCode::FAILURE;
+    }
+    match runtime::ownership::compact_owner_checkpoints(std::path::Path::new(&argv[2]), true) {
+        Ok(rows) => {
+            println!("Cleared {rows} checkpoint payloads; VACUUM complete.");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }

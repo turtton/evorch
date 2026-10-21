@@ -57,7 +57,7 @@ enum Command {
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
     AnswerUserQuestion(String, String, ReplyTx),
     AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
-    UpsertRunContext(crate::RunContextRecord, ReplyTx),
+    UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
     RecordReviewEvidenceWithEdges(
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
@@ -311,6 +311,18 @@ impl StorageHandle {
     /// # Errors
     /// Returns an error for suspended writes, SQLite failure or a closed writer.
     pub fn upsert_run_context(&self, record: &crate::RunContextRecord) -> Result<(), StorageError> {
+        self.upsert_run_context_receipt(record).map(drop)
+    }
+
+    /// Persist and return the identity of redacted bytes after the SQLite commit.
+    /// The receipt does not fence later writes.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn upsert_run_context_receipt(
+        &self,
+        record: &crate::RunContextRecord,
+    ) -> Result<crate::RunContextReceipt, StorageError> {
         self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
     }
 

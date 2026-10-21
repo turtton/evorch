@@ -394,7 +394,10 @@ async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
     runtime.cancel(run).unwrap();
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
     assert_pid_reaped(&pid);
-    assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
+    assert!(
+        executor.has_unobserved_shell_jobs(&run.to_string()),
+        "without a run store, uncertain effects cannot be persisted; retain the handle"
+    );
     assert_eq!(runtime.run_result(run).unwrap(), None);
 }
 

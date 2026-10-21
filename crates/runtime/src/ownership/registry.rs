@@ -487,9 +487,17 @@ impl Registry {
     pub fn checkpoint_permit(
         &mut self,
         permit: &super::OwnerPermit,
-        messages: &[providers::Message],
+        _messages: &[providers::Message],
     ) -> Result<ThreadOwner, RegistryError> {
-        let payload = self.serialize_checkpoint(permit, messages)?;
+        let input = super::checkpoint::CheckpointInput {
+            boundary: if permit.run_id.is_some() {
+                super::CheckpointBoundary::TurnEnd
+            } else {
+                super::CheckpointBoundary::Idle
+            },
+            ..Default::default()
+        };
+        let payload = self.serialize_checkpoint(permit, &input)?;
         self.checkpoint_serialized(permit, &payload)
     }
 
@@ -519,7 +527,7 @@ impl Registry {
         let token = &permit.lease;
         let started = Instant::now();
         let db = self.connection.path().unwrap_or("").to_owned();
-        let site = Site {
+        let mut site = Site {
             db: &db,
             operation: DbOperation::Checkpoint,
             thread_id,
@@ -540,14 +548,46 @@ impl Registry {
             )
             .map_err(|error| site.sql(DbPhase::Read, error))?;
         let mut owner: ThreadOwner = serde_json::from_str(&json)?;
+        owner.validate(token)?;
+        if owner.state == super::OwnerState::Released {
+            return Err(OwnershipError::Fenced.into());
+        }
+        let input: super::checkpoint::CheckpointInput = serde_json::from_str(payload)?;
         match permit.run_id.as_deref() {
-            Some(run) => owner.checkpoint_run(token, run)?,
+            Some(run) if owner.active_runs.contains(run) => owner.checkpoint_run(token, run)?,
+            Some(_) if input.boundary != super::CheckpointBoundary::Terminal => {
+                // An idempotent run checkpoint must not report an idle barrier
+                // while another run still owns an active turn.
+                if input.boundary == super::CheckpointBoundary::Idle && owner.active_turn {
+                    return Err(OwnershipError::Active.into());
+                }
+                return Ok(owner);
+            }
+            Some(_) => {}
             None => owner.checkpoint(token)?,
         }
+        if input.boundary == super::CheckpointBoundary::Idle && !owner.active_runs.is_empty() {
+            return Err(OwnershipError::Active.into());
+        }
+        // Legacy arrays are never brought into the metadata merge.
+        let previous: Option<String> = transaction.query_row(
+            "SELECT CASE WHEN substr(ltrim(payload), 1, 1) = '{' THEN payload END FROM owner_checkpoints WHERE thread_id=?1",
+            [thread_id], |row| row.get(0),
+        ).optional().map_err(|error| site.sql(DbPhase::Read, error))?.flatten();
+        let row = super::OwnerCheckpoint::advance(
+            previous.as_deref(),
+            &owner,
+            permit,
+            input.boundary,
+            input.snapshot,
+        );
+        let payload =
+            serde_json::to_string(&row).map_err(|error| site.json(DbPhase::Serialize, error))?;
+        site.payload_bytes = Some(payload.len());
         transaction
             .execute(
                 "INSERT INTO owner_checkpoints VALUES (?1, ?2, ?3) ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation, payload=excluded.payload",
-                params![thread_id, token.generation.to_string(), payload],
+                params![thread_id, token.generation.to_string(), &payload],
             )
             .map_err(|error| site.sql(DbPhase::Upsert, error))?;
         transaction

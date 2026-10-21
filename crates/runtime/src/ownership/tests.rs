@@ -106,7 +106,7 @@ fn claim_fences_previous_generation() {
 }
 
 #[test]
-fn permit_checkpoints_messages_before_clearing_active_turn() {
+fn permit_commits_metadata_before_clearing_active_turn() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
@@ -130,7 +130,10 @@ fn permit_checkpoints_messages_before_clearing_active_turn() {
             |row| row.get(0),
         )
         .expect("checkpoint row");
-    assert_eq!(payload, "[]");
+    assert_eq!(
+        super::OwnerCheckpoint::decode(&payload).unwrap().boundary,
+        super::CheckpointBoundary::Idle
+    );
 }
 
 #[test]

@@ -1044,10 +1044,21 @@ impl LoopState {
             {
                 return;
             }
+            if !self.checkpoint_preflight().await {
+                return;
+            }
+            let snapshot = match self.save_checkpoint() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.finish_error(format!("Cannot persist required checkpoint state: {error}"));
+                    return;
+                }
+            };
             if let Some(permit) = self.task.config.ownership.clone()
                 && let Err(error) = permit
                     .checkpoint_off_thread(
-                        self.context.visible_messages(),
+                        crate::ownership::CheckpointBoundary::TurnEnd,
+                        snapshot,
                         self.ownership_retry(),
                         self.interrupt_probe(),
                     )
@@ -1059,7 +1070,6 @@ impl LoopState {
                 return;
             }
             self.owner_turn_open = false;
-            self.save_checkpoint();
             if has_tool_uses {
                 self.budget.finish_round();
                 match self.publish_budget() {
@@ -1320,12 +1330,49 @@ impl LoopState {
         u64::try_from(crate::restore::conversation_len(&self.context.messages)).ok()
     }
 
-    fn save_checkpoint(&self) {
-        if let Err(error) = crate::restore::persist_checkpoint(self) {
-            tracing::warn!(run_id = %self.task.run_id, %error, "context checkpoint failed");
-            self.snapshot_diagnostic(&error);
-        } else {
-            self.snapshot_saved_diagnostic();
+    fn save_checkpoint(
+        &self,
+    ) -> Result<crate::ownership::SnapshotReference, crate::restore::SnapshotError> {
+        let snapshot = self.save_checkpoint_reference()?;
+        // Unknown shell effects must be durable BEFORE TurnEnd clears active
+        // authority, including absent stores and skipped snapshots. Leave
+        // owner_turn_open set so finalization can retry without reopening a turn.
+        if self.task.config.ownership.is_some()
+            && self
+                .shared
+                .executor
+                .has_unobserved_shell_jobs(&self.task.run_id.to_string())
+            && !matches!(
+                snapshot,
+                crate::ownership::SnapshotReference::RunContext { .. }
+            )
+        {
+            return Err(crate::restore::SnapshotError::UnrecordedShellEffects);
+        }
+        Ok(snapshot)
+    }
+
+    fn save_checkpoint_reference(
+        &self,
+    ) -> Result<crate::ownership::SnapshotReference, crate::restore::SnapshotError> {
+        match crate::restore::persist_checkpoint(self) {
+            Ok(snapshot) => {
+                if matches!(
+                    snapshot,
+                    crate::ownership::SnapshotReference::RunContext { .. }
+                ) {
+                    self.snapshot_saved_diagnostic();
+                }
+                Ok(snapshot)
+            }
+            Err(error @ crate::restore::SnapshotError::AssistantReference(_)) => Err(error),
+            Err(error) => {
+                tracing::warn!(run_id = %self.task.run_id, %error, "context checkpoint failed");
+                self.snapshot_diagnostic(&error);
+                Ok(crate::ownership::SnapshotReference::none(
+                    crate::ownership::SnapshotNoneReason::WriteFailed,
+                ))
+            }
         }
     }
 
@@ -1485,6 +1532,18 @@ impl LoopState {
 
     fn finish_error(&mut self, reason: String) {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
+    }
+
+    async fn checkpoint_preflight(&mut self) -> bool {
+        if let Some(permit) = self.task.config.ownership.clone()
+            && let Err(error) = permit
+                .validate_generation_off_thread(self.ownership_retry(), self.interrupt_probe())
+                .await
+        {
+            self.finish_owner_error("checkpoint preflight", error);
+            return false;
+        }
+        true
     }
 
     /// The runtime's ownership contention budget; the default unless a test set one.
