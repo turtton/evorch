@@ -167,3 +167,71 @@ ownership unitの97 passed、コミット3はmaintenance2件がpassed、evorch C
 文書コミットでもworkspace/all-targetsのcheck・clippy -D warnings、fmt --checkと
 metadata/crash/maintenance/storage run_contextsの18件を再検証した。
 全コミットは設定済みOpenPGP鍵で署名し、pre-commit hookのfmtを通した。push/PR作成はしていない。
+
+## 再レビュー2件への追補（2026-10-21）
+
+上記の「最終再測定」とソースhashは、その測定時点の履歴である。今回、generation事前確認の
+retryを修正したが性能ベンチは再測定せず、測定値・元のQ9未達結果を変更していない。
+後日のユーザー受け入れ判断は冒頭およびADRのQ9節に記録した。
+
+### 指摘1: generation事前確認の競合
+
+- `validate_generation`にも既存の有限retryを適用し、各接続を`Wait::Budget`で開く。
+  各試行でgeneration/Releasedを再確認し、guard/接続を解放してからbackoffする。
+  SQLiteの一時競合だけを既存分類で再試行し、fencing/Releasedは再試行しない。
+- 通常ラウンドとfinalizeの事前確認はblocking poolで実行する。通常ラウンドではCancel/Stopを
+  観測し、finalizeは割り込みを無視するが有限予算を維持する。owner tx内の再検証は残す。
+- EXCLUSIVEロックと仮想時計で、2秒の単一試行を超えて2.1秒後に解消する競合、
+  注入した350 ms deadline/100 ms attempt、割り込み、競合後のgeneration変更/Releasedを検証した。
+- 単一async workerの統合テストは、注入予算でguardの第2試行失敗を観測してからロックを
+  解放し、Stop/Cancelの予定phase・terminal metadata・当該runだけのactive解放を確認する。
+  deadline超過ではError・競合期限超過診断・active保持を確認する。EXCLUSIVEロックが
+  event busのmutation guardも拒否するため、この失敗経路の終端イベントは公開されない。
+  通常ラウンドの割り込みからfinalizeへの試験では、terminal snapshotと参照の一致も確認した。
+
+### 最終ソースの検証結果
+
+全て指定worktree内で`TMPDIR=/tmp nix develop`を使用した。ログは
+`target/review-takeover-validation/`（最終ゲートは`final-*.log`）。
+
+| 検証 | 実際の結果 |
+|---|---|
+| `cargo fmt --all -- --check` | 成功 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 成功 |
+| `cargo test --locked -p runtime -p event-bus -p gui -p recorder -p storage` | 3,444 passed / 0 failed / 38 ignored、291 suites（doctest含む） |
+| `scripts/check-cache-contracts.sh` | 253 passed、225 skipped |
+| `scripts/check-io-contracts.sh` | 45 passed、1,324 skipped |
+| 新規・関連テスト5反復 | 各111 passed / 0 failed（計555成功） |
+
+反復対象はownership単体66、通常preflight/finalize境界1、metadata6、crash3、contention6、
+shell14、maintenance2、storage run_contexts7/redaction6。新規8件を含む。
+最初のEXCLUSIVE deadline試験では、既存のevent bus fenceを見落として終端イベントを期待した
+assertが失敗した。fenceを変更せず、上記のError/診断/active保持を検証するよう試験を修正した。
+
+### 履歴とコミット別検証
+
+当初はautosquashを予定したが、利用者が追加確認への回答で「rebaseせずfixupを残す」と指定した。
+そのため元の4コミットを変更せず、指摘1はruntime宛、指摘2はADR宛の署名付きfixupで保存した。
+同じworktree内で下記各コミットへ順に切り替え、**全8コミットで
+`cargo build --workspace --all-targets --locked`が成功**した後、元のbranchに戻った。
+
+| コミット | 関連テストの実際の結果 |
+|---|---|
+| `2cbaec3b` storage | storage全体306 passed |
+| `393ef71e` runtime | ownership/metadata/crash/contention/recovery/shell、97 passed |
+| `8a3bc30e` offline | maintenance2 passed、CLI test target成功（0件） |
+| `b2c5401f` ADR | fmt成功、contention/maintenance5 passed |
+| `315f9128` 指摘1: retry/off-thread・EXCLUSIVE回帰 | ownership/metadata/crash/contention/recovery/shell、104 passed |
+| `f32a8606` 指摘2: Q9ユーザー判断 | fmt成功、contention/maintenance8 passed |
+| `3bd99c17` 指摘1: 通常preflight/terminal保存境界 | 上記runtime関連と通常preflight、105 passed |
+| `76b10c6f` 指摘1: 第2試行の観測を明示 | 同上105 passed |
+
+`315f9128`の初回並列実行で、既存
+`a_begin_wait_and_a_commit_wait_share_one_attempt_budget`のtrace採取assertが1回失敗した
+（期待`["commit"]`に対し空配列）。DB予算・rollbackのassertは通過した。
+同じコミットのownership単体を直列化して全66件を再実行すると成功し、以降のコミット別単体も
+直列実行した。最終ソースの全テスト・5反復では再現していないが、trace欠落の原因は未特定である。
+失敗ログも`commit-5-first-attempt.log`に残した。この観測のために契約assertを弱めていない。
+
+追加コミットは既存OpenPGP鍵で署名し、pre-commit hookを実行した。
+実環境DBの操作、push、PR作成、履歴書換えは行っていない。
