@@ -98,30 +98,69 @@ can still be untrusted or removed.
 
 ### What runs are told
 
-A run's system message lists the allowed directories it started with, with its
-access, in an `Allowed directories (evorch): ` section right before the
-workspace note (the inspector shows the same section). An empty list adds no
-section. The section is never rewritten, not even on restore, so a change never
-invalidates the sent prefix. Delegated children start with the list current at
-their own start. Runs see the list whether or not they are sandboxed; benchmark
+A run's system message lists the allowed directories it started with and the
+thread read-only directories it mounted (ADR 0037), in an `Allowed directories
+(evorch): ` section right before the workspace note (the inspector shows the
+same section). Access labels explicitly describe **this run's own permissions**.
+Entries stay short, for example `* /srv/shared (read-only)`. An empty list adds
+no section. The section is never rewritten, not even on restore, so a change
+never invalidates the sent prefix. Delegated children start with the list current
+at their own start. Runs see the list whether or not they are sandboxed; benchmark
 runs see none.
+
+A run that can delegate, and whose delegated Workers would get different
+access, gets one extra sentence per message instead of a note on each entry.
+Its paths are not repeated: either every listed directory is writable for
+Workers, or the sentence names only the exceptions. For example, a read-only
+Orchestrator's section can say:
+
+```text
+Allowed directories (evorch): besides the workspace, you may use these directories. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except `/srv/drafts`, which stays read-only for them too. Changes arrive later as `[workspace update]` messages.
+* /srv/drafts (read-only)
+* /srv/shared (read-only)
+```
+
+The exceptions are the thread read-only directories (ADR 0037), including
+allowed directories equal to or inside them, which are read-only for delegated
+children too. Nested exceptions are folded into the outermost one, and a thread
+read-only directory inside an otherwise writable allowed directory is still
+named. Without exceptions the sentence ends at `all of them.` Runs that cannot
+delegate, runs whose Workers get the same access, and lists entirely covered by
+thread read-only directories get no such sentence.
 
 Changes are appended instead. After a complete tool round, right before the
 next provider request (never between a tool call and its result), a run whose
 list differs from the one it was last told gets one message:
 
 ```text
-[workspace update] Allowed directories changed (+ added, - removed, ~ access changed):
+[workspace update] Allowed directories changed (+ added, - removed, ~ access changed). Access labels describe this run's own permissions. Delegated Workers have read-write access to every added or changed directory.
 + /srv/shared (read-only)
 - /srv/old
 ```
 
-The last told list is saved in the restore snapshot, so a restored run is told
-only what changed while it was stopped; an interrupted request is first retried
-with its exact saved input. Compaction (including a model-switch compaction)
-and a fork replace history, so the next boundary restates the whole current
-list as `[workspace update] Current allowed directories; ...`, or says `none`
-when a run that once had directories has none left. Runs that never had any
+The two explanatory sentences cover only the lines with an access label (`+`
+and `~`); a message with only removals has neither. A change only to a Worker's
+access, such as a thread read-only directory newly covering an allowed one,
+restates the whole list instead of emitting a misleading
+`~ ... (read-only, was read-only)` line. The last told list, including any
+differing Worker access, is saved in the restore snapshot. Older snapshots
+without that information still load; a newly learned difference triggers one
+full restatement. Ordinary restore otherwise tells only what changed while
+stopped; an interrupted request is first retried with its exact saved input.
+Restore, chat restore and fork keep the saved System rather than rebuilding its
+allowed section.
+
+Compaction (including model-switch compaction) and a fork replace history, so
+the next boundary restates the whole current list as `[workspace update]
+Current allowed directories; ...`, unless that would only repeat the initial
+System. Compaction never summarizes the leading System and a fork keeps it. The
+restatement is skipped when that System carries exactly the section for the
+current list and the raw history (which keeps messages a checkpoint summarized,
+and for a fork ends at the cut) holds no directory update. A changed list, an
+older System wording, a missing System section, or any directory update in the
+history, even one later reverted, still causes one full restatement, since an
+old update or its summary could contradict System. When restating, a run that
+once had directories but has none left is told `none`; runs that never had any
 get no extra message.
 
 ### Instructions inside allowed directories

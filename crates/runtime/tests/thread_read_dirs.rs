@@ -239,6 +239,9 @@ async fn delegated_children_inherit_the_threads_directories_read_only() {
     let (factory, mounts) = recording_factory();
     let (runtime, _) = dirs.runtime(model.clone(), Some(factory));
     runtime.set_thread_read_only_directories("thread-a", vec![dirs.drafts.clone()]);
+    // The project also allows that exact directory: neither parent nor child may
+    // advertise it as writable for delegated Workers (ADR 0037 wins).
+    runtime.set_project_allowed_directories(dirs.repo.clone(), vec![dirs.drafts.clone()]);
 
     let root = start_in(&runtime, "thread-a", Role::Orchestrator, "COORDINATE");
     assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
@@ -255,6 +258,11 @@ async fn delegated_children_inherit_the_threads_directories_read_only() {
     assert_eq!(std::fs::read_to_string(&dirs.seed).unwrap(), SEED);
     let listed = format!("* {} (read-only)", dirs.drafts.display());
     assert!(system_text(&observed[1]).contains(&listed), "child system");
+    assert!(
+        !system_text(&observed[0]).contains("Delegated Workers"),
+        "parent must not promise writes"
+    );
+    assert!(!system_text(&observed[1]).contains("Delegated Workers"));
 }
 
 fn escalation_response() -> providers::ChatResponse {

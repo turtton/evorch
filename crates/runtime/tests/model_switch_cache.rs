@@ -162,7 +162,7 @@ summarizer = "structural"
     .runtime
     .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap())
     .with_compaction(config.compaction.clone());
-    // The run was told an allowed directory, which the boundary must restate (ADR 0032).
+    // The unchanged allowed section stays in protected System across the boundary.
     let root = directory.path().canonicalize().unwrap();
     let shared = root.join("shared");
     std::fs::create_dir(&shared).unwrap();
@@ -276,9 +276,15 @@ summarizer = "structural"
             .to_string()
             .contains(&listed)
     );
+    for request in &after {
+        assert_eq!(
+            request["messages"][0], before[0]["messages"][0],
+            "System retained byte-for-byte"
+        );
+    }
     assert_eq!(restatements(before.last().unwrap()), 0);
-    assert_eq!(restatements(&after[0]), usize::from(compacts));
-    assert_eq!(restatements(&after[1]), usize::from(compacts));
+    assert_eq!(restatements(&after[0]), 0);
+    assert_eq!(restatements(&after[1]), 0);
     let usage = events
         .iter()
         .filter_map(|event| match &event.kind {

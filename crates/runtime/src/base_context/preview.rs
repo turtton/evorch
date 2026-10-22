@@ -159,6 +159,7 @@ impl AgentRuntime {
             allowed_directories::told_list(
                 Some(&allowed_directories::regions(&self.shared, root, &policy)),
                 &thread_read_dirs,
+                &policy,
             )
         });
         let mut sections = compose_system_sections(

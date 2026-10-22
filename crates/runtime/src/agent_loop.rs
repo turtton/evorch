@@ -542,6 +542,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             let allowed = crate::allowed_directories::told_list(
                 state.allowed_directories.as_ref(),
                 &state.thread_read_dirs,
+                &state.policy,
             );
             if let Err(error) = push_initial_system_message(
                 &state.shared,
@@ -702,6 +703,14 @@ fn push_initial_system_message(
 }
 
 impl LoopState {
+    pub(crate) fn directory_list(&self) -> Vec<crate::allowed_directories::ToldDirectory> {
+        crate::allowed_directories::told_list(
+            self.allowed_directories.as_ref(),
+            &self.thread_read_dirs,
+            &self.policy,
+        )
+    }
+
     pub(crate) fn runtime(&self) -> Option<crate::AgentRuntime> {
         crate::AgentRuntime::from_weak(&self.shared.runtime)
     }
@@ -1705,6 +1714,7 @@ mod workspace_tests {
             crate::allowed_directories::ToldDirectory {
                 path: "/shared".into(),
                 access: crate::allowed_directories::DirectoryAccess::ReadOnly,
+                delegated_access: None,
             },
         ])
         .unwrap();
