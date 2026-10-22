@@ -48,10 +48,10 @@ fn card_opens_stored_artifacts_through_the_host_and_marks_missing_ones() {
             .query_by_label_contains("Artifact unavailable: artifact-gone")
             .is_some()
     );
-    // Only stored artifacts can be opened.
+    // Only stored artifacts can be opened; images open from their preview.
     let open = harness.query_all_by_label("Open").collect::<Vec<_>>();
-    assert_eq!(open.len(), 2);
-    open[1].click();
+    assert_eq!(open.len(), 1);
+    open[0].click();
     harness.run();
     assert_eq!(take_open_requests(&harness.ctx), vec![html]);
     assert!(take_open_requests(&harness.ctx).is_empty());
