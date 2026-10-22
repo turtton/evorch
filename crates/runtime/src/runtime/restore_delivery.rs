@@ -50,6 +50,9 @@ impl AgentRuntime {
                         }
                     }
                     self.authorize_restore(&runs, sender, (recipient, entry.parent), &message)?;
+                    if let Some(reason) = self.continuation_refusal(recipient, Some(entry)) {
+                        return Err(fail(reason));
+                    }
                     Some(Arc::clone(&entry.mailbox))
                 } else {
                     None
@@ -115,13 +118,6 @@ impl AgentRuntime {
                 .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
             let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-            if !record.restorable || !descriptor.restorable {
-                return Err(fail(RunRestoreFailure::UnsupportedConfig(
-                    descriptor
-                        .non_restorable_reason
-                        .unwrap_or_else(|| "実行設定".into()),
-                )));
-            }
             if descriptor.parent_run_id != parent || descriptor.role != record.role {
                 return Err(fail(RunRestoreFailure::CorruptContext(
                     "descriptor identity".into(),
@@ -129,7 +125,38 @@ impl AgentRuntime {
             }
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
-            let mut restored = RestoredState::from_record(&record)?;
+            // Only a direct parent renews execution authority, with its own
+            // current permit. Any other sender restores strictly from disk.
+            let parent_authority = (parent == Some(sender)).then(|| {
+                lock_runs(&self.shared.runs)
+                    .get(&sender)
+                    .and_then(|entry| entry.config.ownership.clone())
+            });
+            let (mut restored, ownership) = match parent_authority {
+                Some(permit) => {
+                    let restored =
+                        self.renewed_child_state(&record, &descriptor, permit.as_ref())?;
+                    let renewed = !(record.restorable && descriptor.restorable);
+                    (restored, permit.filter(|_| renewed))
+                }
+                None => {
+                    if !record.restorable || !descriptor.restorable {
+                        return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                            descriptor
+                                .non_restorable_reason
+                                .unwrap_or_else(|| "実行設定".into()),
+                        )));
+                    }
+                    (RestoredState::from_record(&record)?, None)
+                }
+            };
+            let _authority = ownership
+                .as_ref()
+                .map(crate::ownership::OwnerPermit::mutation_guard)
+                .transpose()
+                .map_err(|_| RuntimeError::StaleOwnership {
+                    run_id: recipient.to_string(),
+                })?;
             self.reserve_restored_shell_handles(recipient, &restored)?;
             descriptor.restorable = false;
             descriptor.non_restorable_reason = Some("snapshot_consumed".into());
@@ -147,6 +174,7 @@ impl AgentRuntime {
                 load_skills: descriptor.load_skills,
                 model_preference: descriptor.model_preference,
                 project_root: descriptor.project_root,
+                ownership,
                 ..RunConfig::default()
             };
             let mut runs = lock_runs(&self.shared.runs);
@@ -176,6 +204,9 @@ impl AgentRuntime {
             }
             let parent = runs.get(&recipient).map_or(parent, |entry| entry.parent);
             self.authorize_restore(&runs, sender, (recipient, parent), &message)?;
+            if let Some(reason) = self.continuation_refusal(recipient, runs.get(&recipient)) {
+                return Err(fail(reason));
+            }
             // The writer only upserts the already-read record; no storage read holds runs.
             store.handle.upsert_run_context(&record).map_err(|error| {
                 fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))

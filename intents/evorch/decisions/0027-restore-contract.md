@@ -151,3 +151,24 @@ blocking/securityの複合は引き続き拒否し、履歴から権限や未確
 `RunRestoreDescriptor` から `workspace_mode` / `workspace_branch` がなくなった。上の表の
 blocking にある `workspace_branch` は、拒否する対象そのものが存在しなくなったので、
 現在は該当しない。復元記述子は worktree を扱わない。
+
+## Addendum（2026-10-22、親による子の継続と利用者の停止）
+
+過去スレッドの調査で、親の ownership を継承した子のsnapshotがすべてownership-onlyとなり、
+第4節のとおり `restore_and_deliver` が親から終了済みの子へのメッセージを常に拒否していた
+ことを確認した。親は文脈を持つ子を継続できず、新しい子の作り直しを繰り返していた。
+質問回答も Done の子だけを継続し、失敗した子は親が使える復旧手段のない
+「explicit recovery」で拒否していた。利用者の承認（2026-10-22）により次のとおり改める。
+
+- 送信者が直接の親であるとき、`restore_and_deliver` は親の現在のpermitで
+  ownership-only記録を更新して子を継続する。質問回答による継続も同じ判定を使う。
+  親以外の送信者（子から親への送信を含む）はdisk descriptorだけで判定する従来の契約を保つ。
+- 親による子の継続では、第5節の `ToolExecutionOutcomeUnknown` 通知で未取得結果を伝えて
+  継続する。旧tool/jobは再実行しない。
+- 質問回答は Done に加えて、失敗（Error）で終わった子も継続する。
+- 利用者が停止した run は、その thread の root を利用者が再開するまで、親のメッセージや
+  回答で継続しない（`RunRestoreFailure::StoppedByOperator`）。root の再開は停止した木全体の
+  継続を許す。取り消し（cancel）された run は継続しない（`RunRestoreFailure::Cancelled`）。
+- blocking/securityの拒否理由、消費済みsnapshot、識別子の検証は変えない。
+
+検証: `crates/runtime/tests/subagent_continuation.rs`、`subagent_question_resume.rs`。
