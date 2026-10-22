@@ -127,11 +127,44 @@ pub(super) struct ThreadIndicators<'a> {
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Attention {
     question: bool,
     approval: bool,
     unread: bool,
+}
+
+/// What a collapsed row hides, so collapsing a family never hides work that
+/// needs the user.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Hidden {
+    count: usize,
+    running: bool,
+    attention: Attention,
+}
+
+/// Rolls up the descendants of `rows[index]`: the following rows deeper than it.
+fn hidden_descendants(
+    rows: &[(&ThreadRecord, usize)],
+    index: usize,
+    indicators: &ThreadIndicators<'_>,
+) -> Hidden {
+    let depth = rows[index].1;
+    rows[index + 1..]
+        .iter()
+        .take_while(|(_, next)| *next > depth)
+        .fold(Hidden::default(), |hidden, (thread, _)| Hidden {
+            count: hidden.count + 1,
+            running: hidden.running
+                || matches!(thread.state(indicators.phases), ThreadState::Running),
+            attention: Attention {
+                question: hidden.attention.question
+                    || indicators.question_threads.contains(&thread.id),
+                approval: hidden.attention.approval
+                    || indicators.approval_threads.contains(&thread.id),
+                unread: hidden.attention.unread || indicators.unread_threads.contains(&thread.id),
+            },
+        })
 }
 
 fn render_tree(
@@ -228,8 +261,13 @@ fn render_tree(
                     };
                     branch_kind_icon(ui, slot, response, kind);
                 }
+                let hidden = if has_children && !expansion.is_open() {
+                    hidden_descendants(rows, index, indicators)
+                } else {
+                    Hidden::default()
+                };
                 if archived {
-                    archived_row(ui, thread, display_root, action);
+                    archived_row(ui, thread, display_root, hidden.count, action);
                 } else {
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
@@ -247,6 +285,7 @@ fn render_tree(
                             approval: indicators.approval_threads.contains(&thread.id),
                             unread: indicators.unread_threads.contains(&thread.id),
                         },
+                        hidden,
                         family_running,
                         action,
                     );
@@ -396,13 +435,14 @@ fn active_row(
     (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
     attention: Attention,
+    hidden: Hidden,
     family_running: bool,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         // Runtime/question indicators stay at the trailing edge.
         ui.spacing_mut().item_spacing.x = SP_1;
-        thread_status_icon(ui, state, attention);
+        thread_status_icon(ui, state, attention, hidden.attention);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
         // The slot before Pin holds Archive, or the running spinner in its
@@ -424,7 +464,9 @@ fn active_row(
                 *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
             }
         } else if matches!(state, ThreadState::Running) {
-            running_spinner(ui);
+            running_spinner(ui, "Thread status: Running");
+        } else if hidden.running {
+            running_spinner(ui, "Running in a collapsed child thread");
         } else {
             ui.add_space(ACTION_SIZE);
         }
@@ -449,6 +491,7 @@ fn active_row(
             *action = Some(SidebarAction::TogglePin(thread.id.clone()));
         }
         ui.add_space(SP_1);
+        hidden_count_badge(ui, hidden.count);
         thread_title(ui, thread, !display_root, action);
     });
 }
@@ -457,6 +500,7 @@ fn archived_row(
     ui: &mut Ui,
     thread: &ThreadRecord,
     display_root: bool,
+    hidden_count: usize,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -464,8 +508,45 @@ fn archived_row(
         if display_root && restore_button(ui).clicked() {
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
+        hidden_count_badge(ui, hidden_count);
         thread_title(ui, thread, !display_root, action);
     });
+}
+
+/// A pill counting a collapsed row's descendants; nothing when none are hidden.
+fn hidden_count_badge(ui: &mut Ui, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let galley = ui.painter().layout_no_wrap(
+        count.to_string(),
+        egui::FontId::proportional(FONT_SMALL),
+        palette().TEXT_MUTED,
+    );
+    let size = egui::vec2(
+        (galley.size().x + SP_2).max(galley.size().y + SP_1),
+        galley.size().y + SP_1,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    ui.add_space(SP_1);
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same((size.y / 2.0) as u8),
+        rail_stroke(),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        palette().TEXT_MUTED,
+    );
+    let label = if count == 1 {
+        "1 hidden child thread".to_owned()
+    } else {
+        format!("{count} hidden child threads")
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    response.on_hover_text(label);
 }
 
 fn restore_button(ui: &mut Ui) -> egui::Response {
@@ -574,13 +655,20 @@ fn nested_threads<'a>(
     output
 }
 
-fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
+fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hidden: Attention) {
     // Runtime status retains the display aggregation; questions and approvals
     // are independent and must remain visible alongside either the spinner or
     // the error icon. The running spinner lives in the Archive slot instead
     // (see `running_spinner`); an unread report appears here once the work
-    // has finished.
-    let unread = attention.unread;
+    // has finished. `hidden` is what collapsed descendants need; the row's own
+    // state takes precedence, and the labels say where the rest comes from.
+    let unread = if attention.unread {
+        Some("Thread status: Unread report")
+    } else if hidden.unread {
+        Some("Unread report in a collapsed child thread")
+    } else {
+        None
+    };
     let status = if matches!(state, ThreadState::Running) {
         None
     } else if matches!(state, ThreadState::Error) {
@@ -593,12 +681,12 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
             .sense(Sense::hover()),
         );
         Some((response, "Thread status: Failed"))
-    } else if unread {
+    } else if let Some(label) = unread {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
         ui.painter()
             .circle_filled(rect.center(), SP_1 + 1.0, palette().ACCENT);
-        Some((response, "Thread status: Unread report"))
+        Some((response, label))
     } else {
         None
     };
@@ -608,12 +696,25 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
         });
         response.on_hover_text(label);
     }
-    if attention.question {
-        attention_dot(ui, "Answer needed: this thread has an unanswered question");
+    let question = if attention.question {
+        Some("Answer needed: this thread has an unanswered question")
+    } else if hidden.question {
+        Some("Answer needed: a collapsed child thread has an unanswered question")
+    } else {
+        None
+    };
+    if let Some(label) = question {
+        attention_dot(ui, label);
     }
-    if attention.approval {
-        let label = "Approval needed: a tool call is waiting";
-        if attention.question {
+    let approval = if attention.approval {
+        Some("Approval needed: a tool call is waiting")
+    } else if hidden.approval {
+        Some("Approval needed: a tool call is waiting in a collapsed child thread")
+    } else {
+        None
+    };
+    if let Some(label) = approval {
+        if question.is_some() {
             // Two identical dots would be indistinguishable, so an approval
             // beside a question uses its own glyph.
             let response = ui.add(
@@ -634,8 +735,7 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
     }
 }
 
-fn running_spinner(ui: &mut Ui) {
-    let label = "Thread status: Running";
+fn running_spinner(ui: &mut Ui, label: &str) {
     // add_sized reserves the whole Archive slot and centers the spinner in it.
     let response = ui.add_sized(
         egui::vec2(ACTION_SIZE, ACTION_SIZE),
@@ -668,10 +768,69 @@ mod tests {
     };
 
     use super::{
-        Attention, BranchKind, active_row, branch_kind, family_gap_before, family_has_running_runs,
-        limit_families, nested_threads, thread_family, tree_rails,
+        Attention, BranchKind, Hidden, ThreadIndicators, active_row, branch_kind,
+        family_gap_before, family_has_running_runs, hidden_descendants, limit_families,
+        nested_threads, thread_family, tree_rails,
     };
     use crate::panes::sidebar::SidebarAction;
+
+    #[test]
+    fn hidden_descendants_roll_up_the_whole_subtree_and_stop_at_the_next_sibling() {
+        // a / a1 / a1x / a2 / b / b1
+        let mut threads = records(6);
+        threads[2].run_ids.push("run-a1x".into());
+        threads[5].run_ids.push("run-b1".into());
+        let rows = rows_at(&threads, &[0, 1, 2, 1, 0, 1]);
+        let phases = BTreeMap::from([
+            ("run-a1x".into(), ThreadRunPhase::Pending),
+            ("run-b1".into(), ThreadRunPhase::Running),
+        ]);
+        let question_threads = BTreeSet::from([threads[2].id.clone()]);
+        let approval_threads = BTreeSet::from([threads[5].id.clone()]);
+        let unread_threads = BTreeSet::from([threads[3].id.clone(), threads[0].id.clone()]);
+        let indicators = ThreadIndicators {
+            phases: &phases,
+            question_threads: &question_threads,
+            approval_threads: &approval_threads,
+            unread_threads: &unread_threads,
+        };
+        // a hides a1, a1x and a2, but neither itself nor b's subtree.
+        assert_eq!(
+            hidden_descendants(&rows, 0, &indicators),
+            Hidden {
+                count: 3,
+                running: true,
+                attention: Attention {
+                    question: true,
+                    approval: false,
+                    unread: true,
+                },
+            }
+        );
+        assert_eq!(
+            hidden_descendants(&rows, 1, &indicators),
+            Hidden {
+                count: 1,
+                running: true,
+                attention: Attention {
+                    question: true,
+                    ..Attention::default()
+                },
+            }
+        );
+        assert_eq!(hidden_descendants(&rows, 3, &indicators), Hidden::default());
+        assert_eq!(
+            hidden_descendants(&rows, 4, &indicators),
+            Hidden {
+                count: 1,
+                running: true,
+                attention: Attention {
+                    approval: true,
+                    ..Attention::default()
+                },
+            }
+        );
+    }
 
     fn rows_at<'a>(
         threads: &'a [ThreadRecord],
@@ -782,6 +941,7 @@ mod tests {
                                 (&thread, true),
                                 ThreadState::Running,
                                 Attention::default(),
+                                Hidden::default(),
                                 true,
                                 action,
                             );

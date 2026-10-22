@@ -39,6 +39,11 @@ Child rows name why they are nested with a TEXT_MUTED marker: ARROW_FAT_LINE_UP
 the version group's original. A leaf child shows it in its empty caret slot;
 a child with children shows it after the caret. A family with children gets
 an extra SP_1 above and below; childless roots stay packed.
+A collapsed row shows a TEXT_MUTED pill counting its hidden descendants between
+its title and Pin ("3 hidden child threads"), and rolls up what they need:
+question, approval and unread indicators, and the running spinner in the
+Archive slot. The row's own indicators take precedence; rolled-up ones say
+"in a collapsed child thread" in their tooltip and accessible label.
 Pending tool approvals, including a subagent's, mark the owning thread with the
 question's WARNING_FG dot and "Approval needed" text; beside a question dot they
 use a SHIELD_WARNING glyph instead so both stay distinguishable.
