@@ -64,7 +64,7 @@ impl Tool for Edit {
     }
 
     fn description(&self) -> &str {
-        "Replace exact text in an existing file. Prefer this over shell sed -i, heredocs or scripts for changing files. Read the file first. Unless replace_all is true, old_string must match exactly one location; otherwise the call fails and the file is unchanged. Send several changes to one file together in edits: each is matched against the original contents, matches must not overlap, and either all are applied or none. Returns the diff. To create or replace a whole file, use write(path, content)."
+        "Replace exact text in an existing file. Prefer this over shell sed -i, heredocs or scripts for changing files. Read the file first. Unless replace_all is true, old_string must match exactly one location, counting overlapping matches; otherwise the call fails and the file is unchanged. Send several changes to one file together in edits: each is matched against the original contents, matches must not overlap, and either all are applied or none. Returns the diff. To create or replace a whole file, use write(path, content)."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -84,7 +84,7 @@ impl Tool for Edit {
                 "replace_all": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Replace every match of old_string instead of requiring exactly one."
+                    "description": "Replace every non-overlapping match of old_string, left to right, instead of requiring exactly one."
                 },
                 "edits": {
                     "type": "array",
@@ -331,6 +331,9 @@ fn replace_all(value: &Value, label: &str) -> Result<bool, ToolError> {
 }
 
 /// 置換する一致の開始位置を昇順で返す。
+///
+/// `replace_all` は `str::replace` と同じく左から重ならない一致を置換する。
+/// 一意性の判定と報告は、自身と重なる一致も数える。
 fn match_starts(
     content: &str,
     path: &str,
@@ -341,35 +344,42 @@ fn match_starts(
         path: path.to_owned(),
         edit: replacement.edit,
     };
-    let all = || {
-        content
+    if replacement.replace_all {
+        let starts: Vec<_> = content
             .match_indices(needle)
             .map(|(start, _)| start)
-            .collect::<Vec<_>>()
-    };
-    if replacement.replace_all {
-        let starts = all();
+            .collect();
         return if starts.is_empty() {
             Err(not_found())
         } else {
             Ok(starts)
         };
     }
-    let first = content.find(needle).ok_or_else(not_found)?;
-    // A second match may overlap the first, which match_indices would skip.
-    let after_first = first + content[first..].chars().next().map_or(1, char::len_utf8);
-    let Some(offset) = content[after_first..].find(needle) else {
+    let mut starts = overlapping_starts(content, needle);
+    let first = starts.next().ok_or_else(not_found)?;
+    let Some(second) = starts.next() else {
         return Ok(vec![first]);
     };
-    let mut starts = all();
-    if starts.len() == 1 {
-        starts.push(after_first + offset);
-    }
+    let reported: Vec<_> = [first, second]
+        .into_iter()
+        .chain(starts.by_ref().take(MAX_REPORTED_MATCHES - 2))
+        .collect();
     Err(ToolError::EditTargetNotUnique {
         path: path.to_owned(),
         edit: replacement.edit,
-        count: starts.len(),
-        lines: line_numbers(content, &starts[..starts.len().min(MAX_REPORTED_MATCHES)]),
+        count: reported.len() + starts.count(),
+        lines: line_numbers(content, &reported),
+    })
+}
+
+/// 自身と重なる一致も含めた、すべての一致の開始位置を昇順に返す。
+fn overlapping_starts<'a>(content: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        let start = from + content[from..].find(needle)?;
+        // The next match may begin inside this one, at its next character.
+        from = start + content[start..].chars().next().map_or(1, char::len_utf8);
+        Some(start)
     })
 }
 

@@ -356,50 +356,72 @@ fn boundary_denial(path: &Path, read_only: bool) -> String {
     )
 }
 
+/// Bytes of write content, or of an edit call's old/new texts together, shown
+/// to the reviewer.
 const MAX_CHANGE_BYTES: usize = 4000;
 
 fn requested_change(name: &str, args: &serde_json::Value) -> Option<String> {
-    fn text<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-        value.get(key)?.as_str()
-    }
-    let replace_all = |value: &serde_json::Value| {
-        value
-            .get("replace_all")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-    };
     match name {
-        "write" => text(args, "content").map(|content| bounded(content, MAX_CHANGE_BYTES)),
-        "edit" => {
-            let Some(edits) = args.get("edits").and_then(serde_json::Value::as_array) else {
-                let mut change = format!(
-                    "old_string:\n{}\nnew_string:\n{}",
-                    bounded(text(args, "old_string")?, MAX_CHANGE_BYTES / 2),
-                    bounded(text(args, "new_string")?, MAX_CHANGE_BYTES / 2)
-                );
-                if replace_all(args) {
-                    change.push_str("\nreplace_all: true");
-                }
-                return Some(change);
-            };
-            // Share the budget so a large first edit cannot hide later ones.
-            let budget = MAX_CHANGE_BYTES / (2 * edits.len().max(1));
-            let mut parts = Vec::with_capacity(edits.len());
-            for (index, edit) in edits.iter().enumerate() {
-                let mut part = format!(
-                    "edits[{index}].old_string:\n{}\nedits[{index}].new_string:\n{}",
-                    bounded(text(edit, "old_string")?, budget),
-                    bounded(text(edit, "new_string")?, budget)
-                );
-                if replace_all(edit) {
-                    part.push_str(&format!("\nedits[{index}].replace_all: true"));
-                }
-                parts.push(part);
-            }
-            Some(bounded(&parts.join("\n"), MAX_CHANGE_BYTES))
-        }
+        "write" => args
+            .get("content")?
+            .as_str()
+            .map(|content| bounded(content, MAX_CHANGE_BYTES)),
+        "edit" => edit_change(args),
         _ => None,
     }
+}
+
+/// What an edit approval covers. Only the old/new texts are cut, so a long
+/// text can never hide a later edit, its index or whether it replaces one
+/// match or all of them; the labels grow with the number of edits instead.
+fn edit_change(args: &serde_json::Value) -> Option<String> {
+    let (edits, indexed) = match args.get("edits").and_then(serde_json::Value::as_array) {
+        Some(edits) => (edits.as_slice(), true),
+        None => (std::slice::from_ref(args), false),
+    };
+    let mut texts = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let text = |key: &str| edit.get(key)?.as_str();
+        texts.push([text("old_string")?, text("new_string")?]);
+    }
+    let cap = shared_cap(
+        texts.iter().flatten().map(|text| text.len()).collect(),
+        MAX_CHANGE_BYTES,
+    );
+    let mut parts = Vec::with_capacity(edits.len() + 1);
+    if indexed {
+        parts.push(format!("edits: {}", edits.len()));
+    }
+    for (index, (edit, [old, new])) in edits.iter().zip(&texts).enumerate() {
+        let label = if indexed {
+            format!("edits[{index}].")
+        } else {
+            String::new()
+        };
+        let replace_all =
+            edit.get("replace_all").and_then(serde_json::Value::as_bool) == Some(true);
+        parts.push(format!(
+            "{label}replace_all: {replace_all}\n{label}old_string:\n{}\n{label}new_string:\n{}",
+            bounded(old, cap),
+            bounded(new, cap)
+        ));
+    }
+    Some(parts.join("\n"))
+}
+
+/// The largest length per text at which all `lengths` fit in `budget` bytes,
+/// so short texts leave their unused share to long ones.
+fn shared_cap(mut lengths: Vec<usize>, budget: usize) -> usize {
+    lengths.sort_unstable();
+    let mut remaining = budget;
+    for (fitted, &length) in lengths.iter().enumerate() {
+        let share = remaining / (lengths.len() - fitted);
+        if length > share {
+            return share;
+        }
+        remaining -= length;
+    }
+    usize::MAX
 }
 
 fn bounded(text: &str, max: usize) -> String {

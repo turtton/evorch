@@ -29,19 +29,86 @@ async fn edit_rejects_an_ambiguous_target_with_its_lines_and_leaves_the_file_unc
 }
 
 #[tokio::test]
-async fn edit_treats_a_self_overlapping_match_as_ambiguous() {
+async fn edit_reports_every_overlapping_match_with_its_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overlap.txt");
-    std::fs::write(&path, "}\n}\n}\n").unwrap();
+    let thirteen = "}\n".repeat(13);
+    for (content, old, count, lines) in [
+        ("}\n}\n}\n", "}\n}", 2, vec![1, 2]),
+        ("}\n}\n}\n}\n}\n", "}\n}", 4, vec![1, 2, 3, 4]),
+        // Overlapping matches alongside a separate one.
+        ("aaa\nb\naa\n", "aa", 3, vec![1, 1, 3]),
+        // Overlapping matches advance by one character, not one byte.
+        ("ああああ\nいあああ\n", "ああ", 5, vec![1, 1, 1, 2, 2]),
+        // The count covers every match; only the first ten lines are listed.
+        (thirteen.as_str(), "}\n}", 12, (1..=10).collect()),
+    ] {
+        std::fs::write(&path, content).unwrap();
+        let error = Edit
+            .execute(json!({"path": path, "old_string": old, "new_string": "x"}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ToolError::EditTargetNotUnique { count: actual, lines: listed, .. }
+                    if *actual == count && *listed == lines
+            ),
+            "{content:?}: {error:?}"
+        );
+        assert!(
+            error.to_string().contains(&format!("{count} 箇所")),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+}
+
+#[tokio::test]
+async fn edit_replace_all_replaces_non_overlapping_matches_from_the_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ababa.txt");
+    std::fs::write(&path, "ababa").unwrap();
+    // Without replace_all the overlapping matches at 0 and 2 are ambiguous.
     let error = Edit
-        .execute(json!({"path": path, "old_string": "}\n}", "new_string": "]"}))
+        .execute(json!({"path": path, "old_string": "aba", "new_string": "X"}))
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, ToolError::EditTargetNotUnique { count: 2, lines, .. } if *lines == [1, 2]),
+        matches!(&error, ToolError::EditTargetNotUnique { count: 2, lines, .. } if *lines == [1, 1]),
         "{error:?}"
     );
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "}\n}\n}\n");
+    // Like str::replace, replace_all takes the match at 0 and skips the one at 2.
+    Edit.execute(
+        json!({"path": path, "old_string": "aba", "new_string": "X", "replace_all": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xba");
+}
+
+#[tokio::test]
+async fn edits_check_overlaps_against_the_matches_replace_all_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ababa.txt");
+    let all = json!({"old_string": "aba", "new_string": "X", "replace_all": true});
+    // "aZ" overlaps only the skipped match at 2, so both edits apply.
+    std::fs::write(&path, "ababaZ").unwrap();
+    Edit.execute(json!({"path": path, "edits": [all, {"old_string": "aZ", "new_string": "Y"}]}))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "XbY");
+    // "abaZ" overlaps the replaced match at 0, so nothing is written.
+    std::fs::write(&path, "ababaZ").unwrap();
+    let error = Edit
+        .execute(json!({"path": path, "edits": [all, {"old_string": "abaZ", "new_string": "Y"}]}))
+        .await
+        .unwrap_err();
+    let ToolError::InvalidArgs { detail } = &error else {
+        panic!("expected InvalidArgs, got {error:?}");
+    };
+    assert!(detail.contains("edits[0] and edits[1] overlap"), "{detail}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ababaZ");
 }
 
 #[tokio::test]
