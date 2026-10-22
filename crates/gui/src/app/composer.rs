@@ -30,16 +30,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
     }
 
-    /// Explicit discard path; never used by Stop or Escape.
-    pub fn cancel_chat(&mut self) {
-        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
-            return;
-        };
-        self.submit_command(WorkbenchCommand::CancelChat {
-            thread_id: thread_id.to_string(),
-        });
-    }
-
     pub fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
         self.active_model()
             .map(|model| model.available_profiles())
@@ -172,9 +162,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             text: text.into(),
                             at: sent_at,
                         });
-                        // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
-                        self.transcripts
-                            .push_thread(TranscriptEntry::UserMessage { text: prompt });
+                        // A busy run reads follow-ups later; they wait above the composer
+                        // and join the transcript once delivered.
+                        let queued = self
+                            .follow_up_would_queue(&submission.thread_id)
+                            .then(|| submission.thread_id.clone());
+                        if queued.is_none() {
+                            // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
+                            self.transcripts.push_thread(TranscriptEntry::UserMessage {
+                                text: prompt.clone(),
+                            });
+                        }
                         self.save_sidebar();
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));
@@ -191,6 +189,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         });
                         if !rejected && let Some(chat) = title_chat {
                             self.start_auto_title(chat);
+                        }
+                        if let Some(thread) = queued {
+                            if rejected {
+                                self.transcripts
+                                    .push_thread(TranscriptEntry::UserMessage { text: prompt });
+                            } else {
+                                self.queue_follow_up(&thread, text.into(), prompt);
+                            }
                         }
                         for event in events {
                             self.apply_loop_event(event);

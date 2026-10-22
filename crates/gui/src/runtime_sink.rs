@@ -327,7 +327,6 @@ impl CommandSink for RuntimeCommandSink {
                 | WorkbenchCommand::StopChat { thread_id }
                 | WorkbenchCommand::StopRun { thread_id, .. }
                 | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
-                | WorkbenchCommand::CancelChat { thread_id }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
@@ -635,31 +634,6 @@ impl RuntimeCommandSink {
                     run_id: run_id.to_string(),
                     running_children,
                 }]
-            }
-            WorkbenchCommand::CancelChat { thread_id } => {
-                let Some(&run_id) = self
-                    .chat_runs
-                    .get(&thread_id)
-                    .or_else(|| self.goal_runs.get(&thread_id))
-                else {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: "No chat run to cancel".into(),
-                    }];
-                };
-                match self.runtime.cancel_subtree(run_id) {
-                    Ok(()) => {
-                        self.chat_runs.remove(&thread_id);
-                        self.stop_marked.remove(&thread_id);
-                        self.stopped_by_us.remove(&thread_id);
-                        self.running_children.remove(&thread_id);
-                        Vec::new()
-                    }
-                    Err(error) => vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: error.to_string(),
-                    }],
-                }
             }
             WorkbenchCommand::SubmitGoal(submission) => {
                 let thread_id = submission.thread_id.clone();
@@ -1813,54 +1787,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancel_chat_cancels_descendants_and_fences_late_spawns() {
-        let (rt, mut sink, runtime, _) = build_sink();
-        sink.submit(chat_command("discard"));
-        let root = sink.chat_runs["discard"];
-        let (child, grandchild) = rt.block_on(async {
-            let child = runtime
-                .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
-                .unwrap();
-            let grandchild = runtime
-                .delegate_background_as_child(
-                    child,
-                    Role::Worker,
-                    "grandchild",
-                    RunConfig::default(),
-                )
-                .unwrap();
-            (child, grandchild)
-        });
-        // Stage one has been requested but discard must still reach the descendants.
-        sink.stop_marked.insert("discard".into());
-        sink.stopped_by_us.insert("discard".into());
-        assert!(
-            sink.submit(WorkbenchCommand::CancelChat {
-                thread_id: "discard".into()
-            })
-            .is_empty()
-        );
-        assert!(!sink.chat_runs.contains_key("discard"));
-        assert!(!sink.stop_marked.contains("discard"));
-        assert!(!sink.stopped_by_us.contains("discard"));
-        rt.block_on(async {
-            let late = runtime.spawn_reserved(
-                runtime.reserve_run_id(),
-                Some(grandchild),
-                Role::Worker,
-                "late",
-                RunConfig::default(),
-            );
-            for run in [root, child, grandchild, late] {
-                assert_eq!(
-                    runtime.wait(run).await.unwrap(),
-                    event_bus::AgentRunPhase::Error
-                );
-            }
-        });
-    }
-
     struct AdmissionHeldModel;
 
     #[async_trait]
@@ -2517,35 +2443,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancel_chat_cancels_running_run_and_forgets_it() {
-        // Given: a model that holds the run until cancellation.
-        let (rt, mut sink, runtime, _) = build_sink();
-        let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
-            project_root: None,
-            fork_seed: None,
-            composer_role: crate::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
-            thread_id: "chat-thread".into(),
-            text: "hello".into(),
-            model_preference: None,
-        });
-        sink.submit(chat.clone());
-        let first = sink.chat_runs["chat-thread"];
-        // When: cancel and immediately submit again, before waiting for termination.
-        assert!(
-            sink.submit(WorkbenchCommand::CancelChat {
-                thread_id: "chat-thread".into(),
-            })
-            .is_empty()
-        );
-        sink.submit(chat);
-        // Then: the old run terminates and the next message uses a fresh run.
-        assert_ne!(sink.chat_runs["chat-thread"], first);
-        let phase = rt.block_on(async { runtime.wait(first).await.expect("run exists") });
-        assert_eq!(phase, event_bus::AgentRunPhase::Error);
-    }
-
     // A thread's chats work in its project even while another project is active,
     // including host follow-ups that carry no project of their own.
     #[test]
@@ -2581,39 +2478,22 @@ mod tests {
 
         sink.submit(chat(Some(thread_project.path().to_path_buf())));
         let first = sink.chat_runs["chat-thread"];
-        sink.submit(WorkbenchCommand::CancelChat {
+        // A stopped chat without saved context restarts as a fresh run.
+        sink.submit(WorkbenchCommand::StopChat {
             thread_id: "chat-thread".into(),
+        });
+        rt.block_on(async {
+            runtime.wait(first).await.unwrap();
         });
         sink.submit(chat(None));
         let second = sink.chat_runs["chat-thread"];
 
         assert_ne!(first, second);
         assert_eq!(*resolved.lock().unwrap(), [thread_project.path()]);
-        sink.submit(WorkbenchCommand::CancelChat {
-            thread_id: "chat-thread".into(),
-        });
+        runtime.cancel(second).unwrap();
         rt.block_on(async {
-            runtime.wait(first).await.unwrap();
             runtime.wait(second).await.unwrap();
         });
-    }
-
-    #[test]
-    fn cancel_bound_orchestrator_before_first_follow_up() {
-        let (rt, mut sink, runtime, _) = build_sink();
-        let root = rt.block_on(async {
-            runtime.delegate_background(Role::Orchestrator, "inspect".into(), RunConfig::default())
-        });
-        sink.bind_goal_context("child-thread", "project", &root.to_string());
-        assert!(
-            sink.submit(WorkbenchCommand::CancelChat {
-                thread_id: "child-thread".into()
-            })
-            .is_empty()
-        );
-        let phase = rt.block_on(async { runtime.wait(root).await.unwrap() });
-        assert_eq!(phase, event_bus::AgentRunPhase::Error);
-        assert_eq!(sink.goal_runs["child-thread"], root);
     }
 
     #[test]
@@ -2726,20 +2606,6 @@ mod tests {
         sink.submit(WorkbenchCommand::SubmitGoal(goal));
         // Then: the coordinator's prompt carries the lesson.
         assert!(published_prompt(&rt, &mut events).contains("Read lessons by repository slug"));
-    }
-
-    #[test]
-    fn cancel_chat_without_run_is_rejected() {
-        // Given
-        let (_rt, mut sink, _, _) = build_sink();
-        // When
-        let events = sink.submit(WorkbenchCommand::CancelChat {
-            thread_id: "missing".into(),
-        });
-        // Then
-        assert!(
-            matches!(events.as_slice(), [LoopEvent::ChatRejected { thread_id, .. }] if thread_id == "missing")
-        );
     }
 
     /// storage bridge をテスト用に起動する (本番と同一の session ID で永続化する)。

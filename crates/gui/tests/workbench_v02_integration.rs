@@ -543,7 +543,6 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::StopChat { .. }
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
-            | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. } => None,

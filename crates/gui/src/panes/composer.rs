@@ -27,7 +27,10 @@ pub enum ComposerAction {
     Send,
     Stop,
     DeliverNextTurn,
-    Discard,
+    /// Put an undelivered queued follow-up back into the input.
+    RestoreQueued(usize),
+    /// Drop an undelivered queued follow-up.
+    DismissQueued(usize),
     Complete(CompletionItem),
     ToggleRole,
     ModelPreference(Option<workspace_ui::ModelPreference>),
@@ -41,30 +44,11 @@ fn count(amount: usize, noun: &str) -> String {
 pub fn stopped_banner(running_children: usize) -> String {
     if running_children > 0 {
         format!(
-            "{} still running — press Stop all to stop them",
+            "{} still running — press Stop subagents to stop them",
             count(running_children, "subagent")
         )
     } else {
         "Stopped (resumable) — send a message or /continue to resume".into()
-    }
-}
-
-pub fn follow_up_banner(status: runtime::FollowUpStatus) -> String {
-    if status.closed {
-        format!(
-            "{} not delivered — the agent stopped or finished first",
-            count(status.pending, "message")
-        )
-    } else if status.next_turn_requested {
-        format!(
-            "{} queued — delivered on the next turn, after the current response and tools finish",
-            count(status.pending, "message")
-        )
-    } else {
-        format!(
-            "{} queued — not yet seen by the agent (usually delivered once it finishes answering)",
-            count(status.pending, "message")
-        )
     }
 }
 
@@ -149,25 +133,8 @@ pub fn composer_strip_within(
                 action = Some(selected);
             }
             if phase == Some(ThreadRunPhase::Stopped) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(stopped_banner(model.running_children))
-                        .color(palette().WARNING_FG));
-                    if ui.small_button("Discard").on_hover_text("Cancel this stopped run and its subagents. It can no longer be resumed with /continue.").clicked() {
-                        action = Some(ComposerAction::Discard);
-                    }
-                });
-            }
-            if model.follow_ups.pending > 0 {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(follow_up_banner(model.follow_ups))
-                        .color(palette().WARNING_FG));
-                    if ui.add_enabled(!model.follow_ups.closed && !model.follow_ups.next_turn_requested,
-                        egui::Button::new("Deliver next turn"))
-                        .on_hover_text("Doesn't interrupt the current model response or tools. Every queued message is delivered at the first safe point after they finish.")
-                        .clicked() {
-                        action = Some(ComposerAction::DeliverNextTurn);
-                    }
-                });
+                ui.label(egui::RichText::new(stopped_banner(model.running_children))
+                    .color(palette().WARNING_FG));
             }
             images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
@@ -175,7 +142,7 @@ pub fn composer_strip_within(
                 let can_stop = (phase == Some(ThreadRunPhase::Running) && items.is_empty())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
                 let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {
-                    Some(primary_button(ui, "Queue").on_hover_text("Queue this message for the agent (Enter). Afterwards you can choose Deliver next turn."))
+                    Some(primary_button(ui, "Queue").on_hover_text("Queue (Enter)"))
                 } else { None };
                 let send = if can_stop {
                     stop_button(ui, phase == Some(ThreadRunPhase::Stopped), model.running_children)
@@ -264,15 +231,15 @@ pub fn composer_strip_within(
 }
 
 /// Stop halts only the current run; once it is stopped with subagents still
-/// running, the same button becomes Stop all and halts the whole subtree.
+/// running, the same button becomes Stop subagents and halts the whole subtree.
 fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egui::Response {
     let (label, color, fill, hover) = if stopped {
         (
-            "Stop all",
+            "Stop subagents",
             palette().WARNING_FG,
             palette().SURFACE_RAISED,
             format!(
-                "Stop {} of this stopped run (Esc). The run itself stays resumable.",
+                "Stop {} of this stopped run (Esc). Everything stays resumable.",
                 if running_children == 1 {
                     "the running subagent".to_owned()
                 } else {
@@ -285,7 +252,7 @@ fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egu
             "Stop",
             palette().ERROR_FG,
             palette().ERROR_SURFACE,
-            "Stop the current run (Esc). Its subagents keep running until you press Stop all; resume with /continue or a new message.".to_owned(),
+            "Stop the current run (Esc). Its subagents keep running until you press Stop subagents; resume with /continue or a new message.".to_owned(),
         )
     };
     ui.add(egui::Button::new(egui::RichText::new(label).color(color)).fill(fill))
@@ -475,8 +442,8 @@ mod tests {
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 2;
         h.run();
-        h.get_by_label("2 subagents still running — press Stop all to stop them");
-        h.get_by_label("Stop all").click();
+        h.get_by_label("2 subagents still running — press Stop subagents to stop them");
+        h.get_by_label("Stop subagents").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Stop));
         assert_eq!(h.state().model.input, "draft");
@@ -484,7 +451,8 @@ mod tests {
         h.state_mut().action = None;
         h.run();
         h.get_by_label("Stopped (resumable) — send a message or /continue to resume");
-        assert!(h.query_by_label("Stop all").is_none());
+        assert!(h.query_by_label("Stop subagents").is_none());
+        assert!(h.query_by_label("Discard").is_none());
         h.get_by_label("Send").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Send));
@@ -497,56 +465,28 @@ mod tests {
         h.run();
         h.get_by_label("Stop").hover();
         h.run();
-        h.get_by_label("Stop the current run (Esc). Its subagents keep running until you press Stop all; resume with /continue or a new message.");
+        h.get_by_label("Stop the current run (Esc). Its subagents keep running until you press Stop subagents; resume with /continue or a new message.");
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 3;
         h.run();
-        h.get_by_label("Stop all").hover();
+        h.get_by_label("Stop subagents").hover();
         h.run();
-        h.get_by_label("Stop all 3 running subagents of this stopped run (Esc). The run itself stays resumable.");
+        h.get_by_label(
+            "Stop all 3 running subagents of this stopped run (Esc). Everything stays resumable.",
+        );
     }
 
     #[test]
-    fn queued_follow_ups_show_actual_delivery_boundary_and_explicit_action() {
+    fn queue_tooltip_names_only_the_shortcut() {
         let mut h = harness("draft");
         h.state_mut().phase = Some(ThreadRunPhase::Running);
         h.state_mut().model.follow_ups.pending = 2;
         h.run();
-        h.get_by_label("2 messages queued — not yet seen by the agent (usually delivered once it finishes answering)");
-        h.get_by_label("Deliver next turn").click();
+        h.get_by_label("Queue").hover();
         h.run();
-        assert_eq!(h.state().action, Some(ComposerAction::DeliverNextTurn));
-        assert_eq!(h.state().model.input, "draft");
-        h.state_mut().model.follow_ups.next_turn_requested = true;
-        h.run();
-        h.get_by_label("2 messages queued — delivered on the next turn, after the current response and tools finish");
-        assert!(
-            h.query_by_label("Deliver next turn")
-                .unwrap()
-                .accesskit_node()
-                .is_disabled()
-        );
-        h.state_mut().model.follow_ups.pending = 0;
-        h.run();
+        h.get_by_label("Queue (Enter)");
+        assert!(h.query_by_label_contains("queued").is_none());
         assert!(h.query_by_label("Deliver next turn").is_none());
-    }
-
-    #[test]
-    fn closed_inbox_reports_undelivered_input_instead_of_promising_delivery() {
-        let mut h = harness("");
-        h.state_mut().model.follow_ups = runtime::FollowUpStatus {
-            pending: 1,
-            closed: true,
-            next_turn_requested: true,
-        };
-        h.run();
-        h.get_by_label("1 message not delivered — the agent stopped or finished first");
-        assert!(
-            h.query_by_label("Deliver next turn")
-                .unwrap()
-                .accesskit_node()
-                .is_disabled()
-        );
     }
 
     #[test]
@@ -573,17 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_banner_discard_is_a_separate_action() {
-        let mut h = harness("");
-        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
-        h.run();
-        h.get_by_label("Discard").click();
-        h.run();
-        assert_eq!(h.state().action, Some(ComposerAction::Discard));
-    }
-
-    #[test]
-    fn escape_stops_children_but_does_not_discard_stopped_thread() {
+    fn escape_stops_children_and_is_inert_once_everything_stopped() {
         let mut h = harness("draft");
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 1;

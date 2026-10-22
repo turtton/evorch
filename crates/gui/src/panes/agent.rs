@@ -22,6 +22,7 @@ pub use branch::BranchContext;
 mod composer_panel;
 mod header;
 use header::header_strip;
+mod queue;
 mod sandbox_review;
 mod thinking;
 

@@ -56,31 +56,32 @@ const DETAILS_MAX_HEIGHT: f32 = 180.0;
 #[derive(Debug, Default)]
 pub(super) struct BandOutput {
     pub action: Option<GoalAction>,
+    /// A queued follow-up control pressed this frame.
+    pub queue_action: Option<crate::panes::composer::ComposerAction>,
     /// Height the details viewport occupied this frame (0 when collapsed).
     pub details_viewport: f32,
     /// Height the details want, capped at [`DETAILS_MAX_HEIGHT`].
     pub details_wanted: f32,
 }
 
-/// Goal controls and optional procedure tracking share one inset composer band.
-/// Expanded details scroll within `details_max` so the composer input below
-/// keeps its room.
+/// Queued follow-ups, then goal controls and optional procedure tracking,
+/// share one inset composer band. Expanded details scroll within
+/// `details_max` so the composer input below keeps its room.
 pub(super) fn progress_strip(
     ui: &mut egui::Ui,
     goal: Option<&ThreadGoalSnapshot>,
     todo: Option<&event_bus::ThreadTodoSnapshot>,
+    queue: super::queue::QueueBand<'_>,
     details_max: f32,
 ) -> BandOutput {
     let mut output = BandOutput::default();
-    let Some(thread) = goal
+    let thread = goal
         .map(|goal| goal.thread_id.as_str())
         .or_else(|| todo.map(|todo| todo.thread_id.as_str()))
-    else {
-        return output;
-    };
+        .unwrap_or_default();
     let expanded_id = ui.id().with(("progress-details", thread));
     let todo = todo.filter(|todo| !todo.items.is_empty());
-    if goal.is_none() && todo.is_none() {
+    if goal.is_none() && todo.is_none() && queue.items.is_empty() {
         ui.data_mut(|data| data.remove::<Detail>(expanded_id));
         return output;
     }
@@ -104,6 +105,12 @@ pub(super) fn progress_strip(
             .show(ui, |ui| {
                 ui.set_width((ui.available_width() - SP_3).max(80.0));
                 ui.vertical(|ui| {
+                    if !queue.items.is_empty() {
+                        output.queue_action = super::queue::rows(ui, queue);
+                        if goal.is_some() || todo.is_some() {
+                            ui.separator();
+                        }
+                    }
                     if let Some(goal) = goal {
                         output.action = goal_row(ui, goal, &mut expanded);
                     }
