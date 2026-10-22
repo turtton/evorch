@@ -160,6 +160,7 @@ impl AgentRuntime {
                 Some(&allowed_directories::regions(&self.shared, root, &policy)),
                 &thread_read_dirs,
                 &policy,
+                &thread_read_dirs,
             )
         });
         let mut sections = compose_system_sections(

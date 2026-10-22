@@ -101,18 +101,21 @@ can still be untrusted or removed.
 A run's system message lists the allowed directories it started with and the
 thread read-only directories it mounted (ADR 0037), in an `Allowed directories
 (evorch): ` section right before the workspace note (the inspector shows the
-same section). Access labels explicitly describe **this run's own permissions**.
-Entries stay short, for example `* /srv/shared (read-only)`. An empty list adds
-no section. The section is never rewritten, not even on restore, so a change
-never invalidates the sent prefix. Delegated children start with the list current
-at their own start. Runs see the list whether or not they are sandboxed; benchmark
+same section). Access labels are this run's own permissions, and entries stay
+short, for example `* /srv/shared (read-only)`. An empty list adds no section.
+The section is never rewritten, not even on restore, so a change never
+invalidates the sent prefix. Delegated children start with the list current at
+their own start. Runs see the list whether or not they are sandboxed; benchmark
 runs see none.
 
 A run that can delegate, and whose delegated Workers would get different
 access, gets one extra sentence per message instead of a note on each entry.
-Its paths are not repeated: either every listed directory is writable for
-Workers, or the sentence names only the exceptions. For example, a read-only
-Orchestrator's section can say:
+Only then does the message also say that the labels are **this run's own
+permissions**; Workers, runs that cannot delegate, and runs whose Workers get the
+same access everywhere (for example a list entirely covered by thread read-only
+directories) get neither. The paths are not repeated: either every listed
+directory has the stated access for Workers, or the sentence names only the
+exceptions. For example, a read-only Orchestrator's section can say:
 
 ```text
 Allowed directories (evorch): besides the workspace, you may use these directories. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except `/srv/drafts`, which stays read-only for them too. Changes arrive later as `[workspace update]` messages.
@@ -120,17 +123,34 @@ Allowed directories (evorch): besides the workspace, you may use these directori
 * /srv/shared (read-only)
 ```
 
-The exceptions are the thread read-only directories (ADR 0037), including
-allowed directories equal to or inside them, which are read-only for delegated
-children too. Nested exceptions are folded into the outermost one, and a thread
-read-only directory inside an otherwise writable allowed directory is still
-named. Without exceptions the sentence ends at `all of them.` Runs that cannot
-delegate, runs whose Workers get the same access, and lists entirely covered by
-thread read-only directories get no such sentence.
+The sentence describes a Worker delegated now. Such a Worker mounts the
+thread's current declaration, while the run keeps the mounts it started with,
+so the run follows the declaration at every request boundary (it is checked
+again only when it changes). Thread read-only directories, and allowed
+directories equal to or inside them, are read-only for that Worker too and are
+named as exceptions. A thread read-only directory the run mounted but whose
+declaration was withdrawn is writable for the Worker inside an allowed
+directory, and otherwise not mounted for it (``... except `/srv/ref`, which they
+cannot access.``). A directory declared since the run started inside a listed
+one, where the Worker gets other access than around it, joins the list with the
+run's own access there, so the sentence can name it (an Orchestrator gets
+`+ /srv/shared/locked (read-only)`). Exceptions nested in an entry where the
+Worker gets the same access are folded into it. Without exceptions the sentence
+ends at `all of them.`
 
 Changes are appended instead. After a complete tool round, right before the
 next provider request (never between a tool call and its result), a run whose
 list differs from the one it was last told gets one message:
+
+```text
+[workspace update] Allowed directories changed (+ added, - removed, ~ access changed):
++ /srv/shared (read-write)
+- /srv/old
+```
+
+A read-only Orchestrator whose Workers may write the added directory gets the
+same message with the sentence for the lines with an access label (`+` and
+`~`) instead of the colon:
 
 ```text
 [workspace update] Allowed directories changed (+ added, - removed, ~ access changed). Access labels describe this run's own permissions. Delegated Workers have read-write access to every added or changed directory.
@@ -138,17 +158,23 @@ list differs from the one it was last told gets one message:
 - /srv/old
 ```
 
-The two explanatory sentences cover only the lines with an access label (`+`
-and `~`); a message with only removals has neither. A change only to a Worker's
-access, such as a thread read-only directory newly covering an allowed one,
-restates the whole list instead of emitting a misleading
-`~ ... (read-only, was read-only)` line. The last told list, including any
-differing Worker access, is saved in the restore snapshot. Older snapshots
-without that information still load; a newly learned difference triggers one
-full restatement. Ordinary restore otherwise tells only what changed while
-stopped; an interrupted request is first retried with its exact saved input.
-Restore, chat restore and fork keep the saved System rather than rebuilding its
-allowed section.
+A message with only removals has no sentence. A change only to a Worker's
+access, such as a thread declaration newly covering an allowed directory or
+withdrawn from it, restates the whole list instead of emitting a misleading
+`~ ... (read-only, was read-only)` line. Once a run was told that Workers get
+different access, a later message whose entries do not differ says
+`Delegated Workers have the same access to all of them.` (or `to every added or
+changed directory.`), so the earlier sentence does not stand. A whole list
+supersedes earlier sentences, so after one without a difference nothing more is
+said; a change leaves the earlier sentence standing for the entries it does not
+label, so each later change whose labelled entries do not differ says it again.
+The last told list, including any differing Worker access and whether such a
+sentence still stands, is saved in the restore snapshot. Older snapshots without that
+information still load; a newly learned difference triggers one full
+restatement. Ordinary restore otherwise tells only what changed while stopped;
+an interrupted request is first retried with its exact saved input. Restore,
+chat restore and fork keep the saved System rather than rebuilding its allowed
+section.
 
 Compaction (including model-switch compaction) and a fork replace history, so
 the next boundary restates the whole current list as `[workspace update]

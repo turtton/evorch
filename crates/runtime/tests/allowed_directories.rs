@@ -230,9 +230,14 @@ async fn orchestrator_is_told_that_a_delegated_worker_can_write() {
         "the path is listed once, not repeated in the explanation"
     );
     assert_eq!(parent.matches("Delegated Workers").count(), 1);
+    assert_eq!(parent.matches("Access labels").count(), 1);
     let child = system(1);
     assert!(child.contains(&format!("* {} (read-write)", dirs.allowed.display())));
     assert!(!child.contains("Delegated Workers"));
+    assert!(
+        !child.contains("Access labels"),
+        "a Worker's own access is the only one"
+    );
     assert_eq!(
         std::fs::read_to_string(written).unwrap(),
         "delegated implementation"

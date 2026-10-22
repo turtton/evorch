@@ -173,12 +173,18 @@ async fn preview_and_run_carry_the_same_allowed_directories_section() {
         );
 
         let section = &report.sections[allowed].text;
-        assert!(section.contains("Access labels describe this run's own permissions."));
+        // Only an Orchestrator's Workers get different access, so only it is told whose
+        // access the labels describe.
+        let orchestrator = role == Role::Orchestrator;
+        assert_eq!(
+            section.contains("Access labels describe this run's own permissions."),
+            orchestrator
+        );
         assert_eq!(
             section.matches("Delegated Workers").count(),
-            usize::from(role == Role::Orchestrator)
+            usize::from(orchestrator)
         );
-        if role == Role::Orchestrator {
+        if orchestrator {
             assert!(section.contains("Delegated Workers have read-write access to all of them."));
         }
 
