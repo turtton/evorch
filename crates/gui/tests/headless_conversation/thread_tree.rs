@@ -193,8 +193,9 @@ fn thread_status_icons_follow_state_and_question_priority() {
 #[test]
 fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
     for width in [280.0, 600.0] {
+        // The running spinner sits in the Archive slot instead; see
+        // running_spinner_takes_the_archive_slot_beside_attention_dots.
         for (phase, question, label) in [
-            (ThreadRunPhase::Running, false, "Thread status: Running"),
             (ThreadRunPhase::Waiting, true, QUESTION_LABEL),
             (ThreadRunPhase::Error, false, "Thread status: Failed"),
         ] {
@@ -227,48 +228,78 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
 }
 
 #[test]
-fn question_blob_and_runtime_icon_share_the_trailing_edge() {
+fn question_blob_and_error_icon_share_the_trailing_edge() {
     for width in [280.0, 600.0] {
-        for (phase, status) in [
-            (ThreadRunPhase::Pending, "Thread status: Running"),
-            (ThreadRunPhase::Running, "Thread status: Running"),
-            (ThreadRunPhase::Error, "Thread status: Failed"),
-        ] {
-            let mut harness = status_fixture(Some(phase), true, width);
-            let title = harness.get_by_label("Status thread").rect();
-            let icon = harness.get_by_label(status).rect();
-            let blob = harness.get_by_label(QUESTION_LABEL).rect();
-            let action = trailing_action(&harness);
-            assert!(title.right() <= action.left(), "{title:?} {action:?}");
-            assert!(
-                action.right() + SP_1 <= blob.left() + 0.5,
-                "{action:?} {blob:?}"
-            );
-            assert!(
-                (icon.left() - blob.right() - SP_1).abs() <= 0.5,
-                "{blob:?} {icon:?}"
-            );
-            assert!((title.center().y - icon.center().y).abs() <= 0.5);
-            assert!((blob.center().y - icon.center().y).abs() <= 0.5);
-            let without_question = status_fixture(Some(phase), false, width);
-            assert_eq!(
-                icon.right(),
-                without_question.get_by_label(status).rect().right()
-            );
-            assert!(icon.right() <= width);
+        let (phase, status) = (ThreadRunPhase::Error, "Thread status: Failed");
+        let mut harness = status_fixture(Some(phase), true, width);
+        let title = harness.get_by_label("Status thread").rect();
+        let icon = harness.get_by_label(status).rect();
+        let blob = harness.get_by_label(QUESTION_LABEL).rect();
+        let action = trailing_action(&harness);
+        assert!(title.right() <= action.left(), "{title:?} {action:?}");
+        assert!(
+            action.right() + SP_1 <= blob.left() + 0.5,
+            "{action:?} {blob:?}"
+        );
+        assert!(
+            (icon.left() - blob.right() - SP_1).abs() <= 0.5,
+            "{blob:?} {icon:?}"
+        );
+        assert!((title.center().y - icon.center().y).abs() <= 0.5);
+        assert!((blob.center().y - icon.center().y).abs() <= 0.5);
+        let without_question = status_fixture(Some(phase), false, width);
+        assert_eq!(
+            icon.right(),
+            without_question.get_by_label(status).rect().right()
+        );
+        assert!(icon.right() <= width);
 
-            harness.get_by_label("Status thread").click();
-            harness.run_steps(3);
-            assert_eq!(
-                harness.state(),
-                &Some(SidebarAction::SwitchThread(ThreadId::new("status")))
-            );
-            harness.get_by_label("☆").click();
-            harness.run_steps(3);
-            assert_eq!(
-                harness.state(),
-                &Some(SidebarAction::TogglePin(ThreadId::new("status")))
-            );
+        harness.get_by_label("Status thread").click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state(),
+            &Some(SidebarAction::SwitchThread(ThreadId::new("status")))
+        );
+        harness.get_by_label("☆").click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state(),
+            &Some(SidebarAction::TogglePin(ThreadId::new("status")))
+        );
+    }
+}
+
+#[test]
+fn running_spinner_takes_the_archive_slot_beside_attention_dots() {
+    for width in [280.0, 600.0] {
+        for has_question in [false, true] {
+            // Given: the same row idle, then with a pending or running run.
+            let idle = status_fixture(None, has_question, width);
+            let idle_archive = idle.get_by_label("Archive").rect();
+            let idle_pin = idle.get_by_label("☆").rect();
+            for phase in [ThreadRunPhase::Pending, ThreadRunPhase::Running] {
+                let mut harness = status_fixture(Some(phase), has_question, width);
+                // Then: the spinner replaces Archive in place and Pin stays put.
+                let spinner = harness.get_by_label("Thread status: Running").rect();
+                assert!(harness.query_by_label("Archive").is_none());
+                assert_eq!(harness.get_by_label("☆").rect(), idle_pin);
+                assert!(
+                    (spinner.center() - idle_archive.center()).length() <= 0.5,
+                    "{idle_archive:?} {spinner:?}"
+                );
+                if has_question {
+                    let blob = harness.get_by_label(QUESTION_LABEL).rect();
+                    assert!(spinner.right() <= blob.left(), "{spinner:?} {blob:?}");
+                    assert!(blob.right() <= width);
+                }
+                // The spinner must not steal Pin's click target.
+                harness.get_by_label("☆").click();
+                harness.run_steps(3);
+                assert_eq!(
+                    harness.state(),
+                    &Some(SidebarAction::TogglePin(ThreadId::new("status")))
+                );
+            }
         }
     }
 }

@@ -343,6 +343,14 @@ fn thread_status_icon_color(
     harness: &egui_kittest::Harness<'_, WorkbenchState<DemoSource>>,
     title: &str,
 ) -> Option<egui::Color32> {
+    thread_status_icon_colors(harness, title).first().copied()
+}
+
+/// Status shapes painted on the title's row, from left to right.
+fn thread_status_icon_colors(
+    harness: &egui_kittest::Harness<'_, WorkbenchState<DemoSource>>,
+    title: &str,
+) -> Vec<egui::Color32> {
     use egui::epaint::{ColorMode, Shape};
     use gui::theme::tokens::{SP_1, palette};
     let label = harness
@@ -355,7 +363,7 @@ fn thread_status_icon_color(
         })
         .min_by(|a, b| a.pos.x.total_cmp(&b.pos.x))
         .expect("sidebar thread title is painted");
-    harness
+    let mut shapes: Vec<_> = harness
         .output()
         .shapes
         .iter()
@@ -373,11 +381,13 @@ fn thread_status_icon_color(
             }
             _ => None,
         })
-        .find_map(|(center, color)| {
-            (center.x > label.visual_bounding_rect().right()
-                && (center.y - label.visual_bounding_rect().center().y).abs() < 6.0)
-                .then_some(color)
+        .filter(|(center, _)| {
+            center.x > label.visual_bounding_rect().right()
+                && (center.y - label.visual_bounding_rect().center().y).abs() < 6.0
         })
+        .collect();
+    shapes.sort_by(|(a, _), (b, _)| a.x.total_cmp(&b.x));
+    shapes.into_iter().map(|(_, color)| color).collect()
 }
 
 #[test]
@@ -424,8 +434,12 @@ fn pending_user_question_keeps_blob_alongside_running_spinner() {
             question: question(),
         })]);
     harness.run_steps(3);
-    // A question adds a blob without replacing the owner's running spinner.
-    assert_eq!(thread_status_icon_color(&harness, "one"), running);
+    // A question adds a trailing blob beside the owner's running spinner,
+    // which stays in the Archive slot.
+    assert_eq!(
+        thread_status_icon_colors(&harness, "one"),
+        [palette().RUNNING, palette().WARNING_FG]
+    );
     assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
     assert_eq!(
         harness.query_all_by_label("Thread status: Running").count(),
