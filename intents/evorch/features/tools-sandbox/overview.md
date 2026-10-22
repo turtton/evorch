@@ -90,6 +90,8 @@ production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ�
 
 権限昇格を要求する場合は、実ユーザーの依頼を参照する既存 reviewer が `Auto` / `User` / `Off` 設定に従って審査する。理由不足、審査拒否、審査機構未接続時はプロセスを起動しない。隔離内実行の権限は従来どおりであり、マージだけに自動昇格を付与しない。この standard shell は通常会話と `/goal` 配下の Worker に共通である。supervisor 自身の delivery / merge-only allowlist と承認 token は専用経路の契約として維持し、モデル shell の追加条件にはしない。issue / intent-cli の host-state 操作に関する standard 制約は維持する。
 
+> 2026-10-22: issue / intent-cli の host-state 操作を名前で拒否する standard 契約は削除した（[orchestration](../orchestration/overview.md) の同日の注記）。モデル shell に、プログラム名による拒否の一覧はない。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること

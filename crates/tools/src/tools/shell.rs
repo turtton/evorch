@@ -17,7 +17,6 @@ use crate::executor::ToolExecutionContext;
 use crate::output::Capture;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
-use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 use crate::tools::shell_escalation::{
     EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
 };
@@ -112,26 +111,15 @@ mod tests {
         assert_eq!(lines, ["out", "err"]);
     }
 
-    // Given: denied command split over command and args / When: execute / Then: contract rejects it.
+    // Given: a command that formerly matched the hardcoded deny-list / When: execute
+    // Then: it runs like any other command, so the shell has no per-program deny-list.
     #[tokio::test]
-    async fn contract_checks_combined_command() {
-        let result = execute(json!({"command": "gh issue", "args": ["close", "123"]})).await;
-        assert!(result.is_error);
-        assert!(
-            result
-                .content
-                .starts_with("shell command denied by contract:")
-        );
-    }
-
-    // Given: command-only issue mutation / When: execute / Then: the existing denial is retained.
-    #[tokio::test]
-    async fn contract_denies_command_only_issue_mutation() {
-        let result = execute(json!({"command": "gh issue create --help"})).await;
-        assert!(
-            result
-                .content
-                .starts_with("shell command denied by contract:")
+    async fn issue_and_intent_cli_words_are_not_denied_by_name() {
+        let result =
+            execute(json!({"command": "echo gh issue close 1; echo intent-cli queue list"})).await;
+        assert_eq!(
+            result.content,
+            "exit_code: 0\ngh issue close 1\nintent-cli queue list\n"
         );
     }
 }
@@ -140,7 +128,6 @@ mod tests {
 #[derive(Clone)]
 pub struct Shell {
     sandbox: Arc<dyn Sandbox>,
-    contract: ShellCommandContract,
     extra_env: Arc<RwLock<Vec<(String, String)>>>,
     default_cwd: Arc<Mutex<Option<PathBuf>>>,
     escalation: Arc<RwLock<Option<ShellEscalation>>>,
@@ -149,37 +136,18 @@ pub struct Shell {
 
 impl Shell {
     /// 指定したサンドボックスでコマンドを実行する shell ツールを生成する。
-    ///
-    /// 契約は [`ShellCommandContract::standard`]（deny-list）が適用される。
     pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
-        Self::with_contract(sandbox, ShellCommandContract::standard())
+        Self::with_env(sandbox, Vec::new())
     }
 
-    /// 実行コマンドの可否を判定する契約を指定して shell ツールを生成する。
-    pub fn with_contract(sandbox: Arc<dyn Sandbox>, contract: ShellCommandContract) -> Self {
-        Self {
-            sandbox,
-            contract,
-            extra_env: Arc::default(),
-            default_cwd: Arc::new(Mutex::new(None)),
-            escalation: Arc::new(RwLock::new(None)),
-            jobs: Arc::new(jobs::JobRegistry::default()),
-        }
-    }
-
-    /// 契約と子プロセスへ追加で渡す環境変数を指定して shell ツールを生成する。
+    /// 子プロセスへ追加で渡す環境変数を指定して shell ツールを生成する。
     ///
     /// `extra_env` は [`CommandSpec::extra_env`] 経由で sandbox の
     /// 環境統合に渡される。隔離時は最小環境へ追加し、審査済みホスト実行では
     /// 継承したプロセス環境を上書きする。
-    pub fn with_contract_and_env(
-        sandbox: Arc<dyn Sandbox>,
-        contract: ShellCommandContract,
-        extra_env: Vec<(String, String)>,
-    ) -> Self {
+    pub fn with_env(sandbox: Arc<dyn Sandbox>, extra_env: Vec<(String, String)>) -> Self {
         Self {
             sandbox,
-            contract,
             extra_env: Arc::new(RwLock::new(extra_env)),
             default_cwd: Arc::new(Mutex::new(None)),
             escalation: Arc::new(RwLock::new(None)),
@@ -405,32 +373,8 @@ impl Tool for Shell {
                 detail: "timeout_ms must be positive".into(),
             });
         }
-        // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを
-        // 起動しない。拒否は Err ではなく is_error 付きの結果として返し、
-        // モデルへツールエラーとして見せる（計画 S9）。
         let command = build_shell_command(&args.command, &args.args);
-        for segment in command.split([';', '|', '&', '\n']) {
-            let mut tokens = segment.split_whitespace();
-            if let Some(program) = tokens.next() {
-                let tokens: Vec<String> = tokens.map(str::to_string).collect();
-                if let CommandVerdict::Deny { reason } = self.contract.evaluate(program, &tokens) {
-                    return Ok(ToolResult::error(format!(
-                        "shell command denied by contract: {reason}"
-                    )));
-                }
-            }
-        }
-        let shell_args = vec!["-c".to_string(), command.clone()];
-        for verdict in [
-            self.contract.evaluate(&args.command, &args.args),
-            self.contract.evaluate("sh", &shell_args),
-        ] {
-            if let CommandVerdict::Deny { reason } = verdict {
-                return Ok(ToolResult::error(format!(
-                    "shell command denied by contract: {reason}"
-                )));
-            }
-        }
+        let shell_args = vec!["-c".to_string(), command];
         let root = self
             .default_cwd
             .lock()

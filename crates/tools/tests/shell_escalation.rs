@@ -310,28 +310,6 @@ async fn merge_escalation_without_a_reviewer_fails_closed() {
     assert!(!fake.invocation().exists());
 }
 
-// Given: a contract-denied command / When: escalation is requested / Then: review is never invoked.
-#[tokio::test]
-async fn contract_denial_precedes_escalation_review_when_command_is_forbidden() {
-    for justification in ["host access", ""] {
-        let fixture = Fixture::new(None);
-        let result = fixture
-            .execute(json!({
-                "command": "gh issue", "args": ["close", "123"],
-                "sandbox_access": "unsandboxed", "justification": justification
-            }))
-            .await;
-        assert!(result.is_error);
-        assert!(
-            result
-                .content
-                .starts_with("shell command denied by contract:")
-        );
-        assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
-        fixture.assert_wraps(0, 0);
-    }
-}
-
 // Given: a merge request / When: access is isolated or omitted / Then: only the default sandbox wraps.
 #[tokio::test]
 async fn isolated_or_omitted_merge_access_uses_default_sandbox_without_review() {
