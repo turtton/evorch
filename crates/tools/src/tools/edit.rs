@@ -355,32 +355,70 @@ fn match_starts(
             Ok(starts)
         };
     }
-    let mut starts = overlapping_starts(content, needle);
-    let first = starts.next().ok_or_else(not_found)?;
-    let Some(second) = starts.next() else {
+    let Some(first) = content.find(needle) else {
+        return Err(not_found());
+    };
+    let next_from = first + content[first..].chars().next().map_or(1, char::len_utf8);
+    let Some(second) = content[next_from..]
+        .find(needle)
+        .map(|offset| next_from + offset)
+    else {
         return Ok(vec![first]);
     };
-    let reported: Vec<_> = [first, second]
-        .into_iter()
-        .chain(starts.by_ref().take(MAX_REPORTED_MATCHES - 2))
-        .collect();
+
+    // The common unique case remains two optimized `str::find` calls. Only once
+    // ambiguity is established do we count every (possibly overlapping) match.
+    let (count, reported) = overlapping_match_summary(content, needle);
+    debug_assert!(count >= 2);
+    debug_assert_eq!([first, second], [reported[0], reported[1]]);
     Err(ToolError::EditTargetNotUnique {
         path: path.to_owned(),
         edit: replacement.edit,
-        count: reported.len() + starts.count(),
+        count,
         lines: line_numbers(content, &reported),
     })
 }
 
-/// 自身と重なる一致も含めた、すべての一致の開始位置を昇順に返す。
-fn overlapping_starts<'a>(content: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
-    let mut from = 0;
-    std::iter::from_fn(move || {
-        let start = from + content[from..].find(needle)?;
-        // The next match may begin inside this one, at its next character.
-        from = start + content[start..].chars().next().map_or(1, char::len_utf8);
-        Some(start)
-    })
+/// 重複一致を KMP で線形時間に数え、先頭 10 件の開始位置だけを保存する。
+fn overlapping_match_summary(content: &str, needle: &str) -> (usize, Vec<usize>) {
+    let pattern = needle.as_bytes();
+    debug_assert!(!pattern.is_empty());
+
+    let mut prefix = vec![0; pattern.len()];
+    let mut prefix_len = 0;
+    for index in 1..pattern.len() {
+        while prefix_len > 0 && pattern[index] != pattern[prefix_len] {
+            prefix_len = prefix[prefix_len - 1];
+        }
+        if pattern[index] == pattern[prefix_len] {
+            prefix_len += 1;
+        }
+        prefix[index] = prefix_len;
+    }
+
+    let mut count = 0;
+    let mut reported = Vec::with_capacity(MAX_REPORTED_MATCHES);
+    let mut matched = 0;
+    for (index, &byte) in content.as_bytes().iter().enumerate() {
+        while matched > 0 && byte != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if byte == pattern[matched] {
+            matched += 1;
+        }
+        if matched == pattern.len() {
+            let start = index + 1 - pattern.len();
+            count += 1;
+            if reported.len() < MAX_REPORTED_MATCHES {
+                // Both strings are valid UTF-8 and the needle is non-empty: its
+                // first byte cannot be a continuation byte, so a byte match can
+                // only start at a UTF-8 character boundary in `content`.
+                reported.push(start);
+            }
+            matched = prefix[matched - 1];
+        }
+    }
+    (count, reported)
 }
 
 /// 昇順の開始位置それぞれの 1 始まりの行番号。

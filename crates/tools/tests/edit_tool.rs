@@ -65,6 +65,31 @@ async fn edit_reports_every_overlapping_match_with_its_line() {
 }
 
 #[tokio::test]
+async fn edit_counts_long_periodic_overlaps_in_linear_time_and_reports_first_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long-overlap.txt");
+    let needle = "a".repeat(4096);
+    let mut content = String::from("heading\n");
+    content.push_str(&"a".repeat(1_048_576));
+    let expected_count = 1_048_576 - needle.len() + 1;
+    std::fs::write(&path, &content).unwrap();
+
+    let error = Edit
+        .execute(json!({"path": path, "old_string": needle, "new_string": "x"}))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ToolError::EditTargetNotUnique { count, lines, .. }
+                if *count == expected_count && *lines == [2; 10]
+        ),
+        "expected {expected_count} overlapping matches and the first ten lines, got {error:?}"
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+}
+
+#[tokio::test]
 async fn edit_replace_all_replaces_non_overlapping_matches_from_the_left() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ababa.txt");
