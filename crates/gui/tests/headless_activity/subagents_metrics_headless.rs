@@ -179,3 +179,38 @@ fn subagents_cards_keep_unknown_metrics_distinct_from_zero() {
         assert_eq!(harness.query_all_by_label(label).count(), 2, "{label}");
     }
 }
+
+#[test]
+fn subagents_cards_show_their_own_running_time() {
+    let mut telemetry = TelemetryOverlay::new();
+    let start = std::time::Instant::now();
+    // run-1 runs 12s; run-2 runs 45s, waits, then runs 30s more.
+    for (run, spans) in [("run-1", &[(0, 12)][..]), ("run-2", &[(0, 45), (60, 90)])] {
+        for &(from, to) in spans {
+            for (at, (before, after)) in [
+                (from, (AgentRunPhase::Pending, AgentRunPhase::Running)),
+                (to, (AgentRunPhase::Running, AgentRunPhase::Waiting)),
+            ] {
+                telemetry.apply_event_at(
+                    &Event::new(LifecycleEvent::AgentRunStateChanged {
+                        run_id: run.into(),
+                        from: before,
+                        to: after,
+                        reason: None,
+                    }),
+                    start + std::time::Duration::from_secs(at),
+                );
+            }
+        }
+    }
+
+    let mut harness = harness(telemetry);
+    harness.run_steps(4);
+    let top = |label: &str| harness.get_by_label(label).rect().top();
+    let in_card = |label: &str, card: &str, other: &str| {
+        let metric = harness.get_by_label(label).rect();
+        metric.top() > top(card) && (top(other) < top(card) || metric.bottom() < top(other))
+    };
+    assert!(in_card("wall 12s", "worker-1", "worker-2"));
+    assert!(in_card("wall 1m 15s", "worker-2", "worker-1"));
+}
