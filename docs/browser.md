@@ -1,9 +1,9 @@
-# Embedded Browser (opt-in)
+# Embedded Browser
 
-Build/run with `cargo run -p gui --features browser --bin evorch-gui`.
 The Chromium session (launch, CDP, diagnostics) lives in `crates/browser` so
-runtime and tools can use it too. The GUI pane is behind the opt-in `browser`
-feature; default GUI builds do not link Chromiumoxide.
+runtime and tools can use it too. The GUI windows are behind the `browser`
+feature of `gui`, which is on by default; build with
+`--no-default-features` to leave them out. CEF builds include it.
 Install Chromium separately. No browser is downloaded or opened automatically.
 
 Open **Browser**, then choose **Start browser**. Headless is the default.
@@ -180,7 +180,7 @@ shown up to 40 characters. The window never sends input to the page.
 
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 
-- `cargo test -p gui --features browser --test browser`
+- `cargo test -p gui --test browser`
 - `cargo test -p browser`
 - With installed Chromium: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored`
 - With installed Chromium: `cargo test -p browser --lib tests::chromium_receives_the_session_switches -- --ignored`
@@ -191,12 +191,14 @@ It is ignored by the normal test run to avoid launching Chromium implicitly.
 See [gui-verification.md](gui-verification.md) for the full GUI verification
 layer matrix, where this test is layer L6.
 
-## In-app HTML preview (CEF, opt-in)
+## In-app HTML preview (CEF)
 
 The `cef` feature of `gui` opens presented HTML artifacts (`.html`/`.htm`) in
 an in-app window rendered off-screen by CEF (`crates/browser-cef`, ADR 0034 B).
 Other artifacts, and every artifact when CEF cannot start, still go to the XDG
-Portal. Builds without the feature are unchanged and never fetch CEF.
+Portal. The Nix default package includes it on x86_64-linux (see Building).
+The cargo feature stays off by default, so cargo builds without it never fetch
+CEF.
 
 The preview is offline. The artifact is served from
 `https://artifact.evorch.invalid` by a scheme handler, every other request and
@@ -267,10 +269,14 @@ writes a verbose CEF log.
 
 ### Building
 
-- Nix: `nix build .#evorch-gui-cef` (x86_64-linux) fetches the CEF build cef-rs
-  pins with a fixed hash, strips `libcef.so`, keeps the `en-US` and `ja`
-  locales, and installs `evorch-gui-cef` with the helper and CEF files in one
-  `libexec` directory. The default package does not include CEF.
+- Nix: on x86_64-linux, `nix build` (`packages.default`, also `.#evorch-gui`)
+  is the CLI and tools from `.#evorch` with `bin/evorch-gui` starting
+  `evorch-gui-cef`. Other systems get `.#evorch`, which has no CEF, and
+  `nix build .#evorch` still builds that version anywhere.
+  `nix build .#evorch-gui-cef` builds the CEF GUI alone. It fetches the CEF
+  build cef-rs pins with a fixed hash, strips `libcef.so`, keeps the `en-US`
+  and `ja` locales, and installs `evorch-gui-cef` with the helper and CEF files
+  in one `libexec` directory.
 - Development: `nix develop .#cef` sets `CEF_PATH` to that distribution and puts
   `target/debug` (where cef-dll-sys copies `libcef.so`) on `LD_LIBRARY_PATH`.
   Outside Nix, cef-dll-sys downloads CEF into `CEF_PATH` on the first build.

@@ -46,7 +46,3 @@ IO_CONTRACT_FILTER='
       | binary(=diagnostic_ledger)
       | binary(=ownership_close_headless)))
 '
-BROWSER_TEST_FILTER='
-  binary(=browser)
-  | binary(=evorch-gui)
-'

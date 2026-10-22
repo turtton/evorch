@@ -61,10 +61,10 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 - 役割: Chromium を起動せず、注入したフェイクソースでブラウザペインの
   フレーム描画・アクションログ・DOM diff 証跡を実 egui ラベル経由で検証する。
-- コマンド: `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1`
+- コマンド: `cargo test -j 1 -p gui --test browser -- --test-threads=1`
 - 例: `crates/gui/tests/browser.rs::pane_uploads_fake_frame_without_launching_browser`
 - 環境変数: なし
-- CI ジョブ: `ci` (browser フィーチャの clippy / test ステップ)
+- CI ジョブ: `ci` (`browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`--no-default-features` のビルドは clippy で確認する)
 
 ### L6: 実 Chromium E2E
 
@@ -207,7 +207,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
 | `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 40 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
-| `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
+| `cargo test -j 1 -p gui --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
 | `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |
 | `GUI_QA_MODE` / `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の fixture / 実アプリ、起動バイナリ、出力ディレクトリを指定する | L7 |
