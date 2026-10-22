@@ -43,6 +43,6 @@ pub use search::{
 pub use shell_handles::MAX_RESTORED_HANDLE_FLOOR;
 pub use tool::{Permissions, Tool, ToolExecutionMode};
 pub use tools::{
-    BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, CommandVerdict, Edit, GitDiff, Grep,
-    GuardPolicy, Read, Shell, ShellCommandContract, WebFetch, WebSearch, Write, browser_tools,
+    BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, Edit, GitDiff, Grep, GuardPolicy, Read,
+    Shell, WebFetch, WebSearch, Write, browser_tools,
 };

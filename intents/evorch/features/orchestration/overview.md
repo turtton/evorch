@@ -80,6 +80,8 @@ omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲�
 
 > 2026-10-14: [ADR 0031](../../decisions/0031-remove-isolated-workspaces.md) ② で旧 supervisor を削除し、その承認経路と delivery / merge-only の allowlist（`ShellCommandContract::delivery` / `merge_only`）も削除した。マージは上記の standard shell の経路だけになる。`gh issue create|edit|close` と intent-cli の host-state 操作に対する standard の制約は残る。
 
+> 2026-10-22: 利用者の判断で、`gh issue create|edit|close` と intent-cli の `queue` / `automation` / `issue` / `packet` / `publish` / `run` を名前で拒否する standard 契約（`ShellCommandContract`）を削除した。旧 supervisor の削除で delivery adapter がなくなり、これらの操作を evorch から行う経路が残っていなかったためである。モデル shell のコマンドは、ほかのコマンドと同じく sandbox と権限昇格の審査だけに従う。
+
 ## v0.2 prompt assembly / routing の実装確定（issue #49、PR #50、2026-09-02）
 
 - **config schema**（2026-09-16 更新）: `[agents]` セクションは `RoleBindingConfig{logical_model,preset,generation{temperature,top_p,max_tokens,reasoning_effort}}` を基礎とし、worker は `WorkerBindingConfig{base: RoleBindingConfig（serde flatten）,categories}`、reviewer は `CategorizedRoleBindingConfig{base: RoleBindingConfig（serde flatten）,categories}`。カテゴリは公開 worker 固定 6 種（quick / deep / high-reasoning / visual / writing / research）+ reviewer 公開 2 種（plan / tool-execution）+ internal lesson（worker）/ lesson_review（reviewer）。strict 検証と `binding_for(role,category)` は所属ロールに応じた worker/reviewer categories を受理し、他ロール（`agents.roles` 配下を含む）への categories 指定や所属不一致を拒否する。worker/reviewer とも per-field category-beats-role マージで `ResolvedAgentBinding` を返す。公開 delegate はカテゴリと所属 role の一致を要求し、internal カテゴリは公開しない。config version は 2 のまま。
