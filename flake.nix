@@ -237,8 +237,9 @@
           cargoExtraArgs = "-p gui -p browser-cef --features gui/cef,browser-cef/cef";
           CEF_PATH = cefDist;
         };
+        cefCargoArtifacts = craneLib.buildDepsOnly cefArgs;
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
-          cargoArtifacts = craneLib.buildDepsOnly cefArgs;
+          cargoArtifacts = cefCargoArtifacts;
           cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
           doCheck = false;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
@@ -328,6 +329,8 @@
           evorch-deps = cargoArtifacts;
         } // pkgs.lib.optionalAttrs isCefSystem {
           inherit evorch-gui-cef evorch-with-cef cefDist;
+          # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.
+          evorch-gui-cef-deps = cefCargoArtifacts;
         };
         checks.tests = tests;
         apps = {
