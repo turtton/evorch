@@ -1042,14 +1042,19 @@ mod tests {
     //       one it cannot access
     #[test]
     fn a_withdrawn_directory_inside_the_workers_usual_boundary_stays_readable_for_them() {
+        let system = tempfile::tempdir().unwrap();
+        let system_share = system.path().join("share");
+        std::fs::create_dir_all(&system_share).unwrap();
+
         let cargo = tempfile::tempdir().unwrap();
         let cargo_home = cargo.path().canonicalize().unwrap();
         let crate_source = cargo_home.join("registry/src/index/a-crate");
         std::fs::create_dir_all(&crate_source).unwrap();
-        let base =
-            sandbox::SandboxBoundary::new(PathBuf::from("/project")).cargo_cache(&cargo_home);
+        let base = sandbox::SandboxBoundary::new(PathBuf::from("/project"))
+            .read_only(&system_share)
+            .cargo_cache(&cargo_home);
         let mounted = [
-            PathBuf::from("/usr/share"),
+            system_share.clone(),
             crate_source.clone(),
             PathBuf::from("/ref"),
         ];
@@ -1059,10 +1064,7 @@ mod tests {
                 .find(|entry| entry.path == path)
                 .map(ToldDirectory::delegated)
         };
-        assert_eq!(
-            worker(Path::new("/usr/share")),
-            Some(DelegatedAccess::ReadOnly)
-        );
+        assert_eq!(worker(&system_share), Some(DelegatedAccess::ReadOnly));
         assert_eq!(worker(&crate_source), Some(DelegatedAccess::ReadOnly));
         assert_eq!(worker(Path::new("/ref")), Some(DelegatedAccess::NoAccess));
         // Withdrawing only those the Worker reads anyway changes nothing it is told.
