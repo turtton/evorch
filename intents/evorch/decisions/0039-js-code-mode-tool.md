@@ -4,6 +4,8 @@
 
 Proposed（2026-10-22、下書き）。利用者との相談で、目的と方向（JS のみ、npm 不要、計測してから採否を決める）に合意した。この ADR で決めるのは設計の方針である。採否は「評価」の節の A/B 比較で決める。
 
+2026-10-22 追記: 次の 3 つを加えた。コードに返す結果の形、エージェントへの説明、ターン数とトークン効率の検証。
+
 ## Context
 
 oh-my-pi（`omp`）と senpi は、agent が JS や Python のコードを実行する `eval` ツールを持つ。コードの中から agent 自身のツールを呼べる。
@@ -49,11 +51,13 @@ shell の中で書かれたスクリプトについて:
 
 - agent が書いた JS を実行し、その結果を返すツール `run_js` を加える。名前に `eval` を使わない。`crates/eval` と Evaluator ロールの「評価」と紛らわしいためである。
 - 対応する言語は JS（ES2023 相当）だけにする。Python などの他の言語には対応しない。npm パッケージと Node / Bun の API は提供しない。
+- 使えるのは ECMAScript 標準の組み込みである。文字列のメソッド、正規表現（名前付きグループ、後読み、`\p{…}`）、`JSON`、`Array` / `Map` / `Set` などが含まれる。
+- Intl は使えない。QuickJS-NG は Intl を実装しない方針である。そのため、`localeCompare` はコードポイント順で比較し、`toLocaleString` はロケールを無視し、`Intl.Segmenter` はない。`setTimeout`、`TextEncoder`、`URL` などの Web の API もない。
 - 引数は、コード（`code`）と、任意の時間の上限（`timeout_ms`）とする。コードはトップレベルの `await` を使える async 関数の本体として実行する。`return` した値と、`console.log` / `print` の出力を返す。
 
 ### エンジンは QuickJS を、sandbox の中の別プロセスで動かす
 
-- エンジンには QuickJS を、Rust のバインディングの rquickjs を通して使う。rquickjs は、メモリの上限、スタックの上限、割り込みのハンドラを持つ（`AsyncRuntime::set_memory_limit` / `set_max_stack_size` / `set_interrupt_handler`）。ビルドも軽い。
+- エンジンには QuickJS-NG（QuickJS のフォーク）を、Rust のバインディングの rquickjs を通して使う。rquickjs は、メモリの上限、スタックの上限、割り込みのハンドラを持つ（`AsyncRuntime::set_memory_limit` / `set_max_stack_size` / `set_interrupt_handler`）。ビルドも軽い。
 - エンジンは evorch のプロセスの中では動かさない。evorch のバイナリを JS worker のモード（例: `evorch js-worker`）で起動し、bwrap の中で動かす。この worker には次の制約を課す。
   - ネットワークを持たない（`--unshare-net`）。
   - ワークスペースを含むファイルシステムを見せない。空の tmpfs と、実行に必要な読み取り専用の領域だけを置く。
@@ -64,12 +68,58 @@ shell の中で書かれたスクリプトについて:
 ### 外の世界にはツールを通してだけ触れる
 
 - worker は、`tools.<name>(args)` を呼ぶと、ツール呼び出しの要求を stdio 経由で evorch 本体に送る。本体はその要求を、通常のツール呼び出しと同じ `ToolExecutor` で実行する。ロールの許可、パスの境界、network guard、承認、secret の秘匿、編集後のフックが、そのまま適用される。
-- `tools.<name>` は Promise を返す。結果は `{ ok, text, detail }` の形で、`ok` はツールのエラーで `false` になる。`Promise.all` で並行に呼べる。並行の可否は、ツールの `ToolExecutionMode` に従う。
+- `tools.<name>` は Promise を返す。結果の形は「コードに返す結果の形」の節で決める。`Promise.all` で並行に呼べる。並行の可否は、ツールの `ToolExecutionMode` に従う。
 - コードから呼べるツールは、次の 2 つの条件をどちらも満たすものだけにする。
   1. その run のロールに許可されている。
   2. コードからの呼び出しを許す一覧に入っている。第 1 段階の一覧は `read`、`grep`、`git_diff`、`edit`、`write`、`shell` とする。
 - コードからは、承認や審査が必要になる呼び出しを行わない。shell の `sandbox_access` は `isolated` だけを受け付け、`network` / `unsandboxed` はエラーで返す。承認が必要と判定された呼び出しもエラーにする。エラーの本文で、通常のツール呼び出しとして直接行うよう案内する。
 - 委譲、ユーザーへの質問、goal、todo、`present` などの meta 操作と、MCP のツールは、第 1 段階ではコードから呼べない。
+
+### コードに返す結果の形
+
+既存のツールの出力は、モデルが読むことを前提にしている。たとえば `read` は 300 行 / 16 KiB で打ち切り、本文の末尾に `[Output truncated … Continue with read(...)]` という案内を付ける（`crates/tools/src/tools/read.rs`）。コードがこの本文をそのまま扱うと、案内の文が処理対象に混ざる。そこで、コードに返す結果を次のように正規化する。
+
+- 結果は `{ ok, text, truncated, next, detail }` の形にする。
+  - `ok`: ツールのエラーで `false` になる。
+  - `text`: 本文だけを入れる。モデル向けの案内の文は付けない。
+  - `truncated` / `next`: 打ち切りの有無と、続きを取るための引数。`read` の `next_offset` / `next_byte_offset` などを、ツールごとに構造化する。
+  - `detail`: ツールが添えるメタデータ。
+- 正規化はツールごとの変換として、本体の側で行う。モデルに返す通常のツールの出力は変えない。
+- 補助の関数を 1 つ用意する。`readText(path)` は、`read` の続きを自動で読み進めて全文を返す。合計の上限（初期値 4 MiB）を超えたらエラーにする。各回の `read` は、通常の子の呼び出しとして記録する。
+- 補助の関数を増やすのは、評価で必要が示されたときに限る。
+
+### エージェントへの説明
+
+`run_js` の説明は、一般的なツールより長くなる。使える API と結果の形を示す必要があるためである。毎回のリクエストに載るので、次の方針で分量を抑える。
+
+- **API の型宣言は生成する。** その run で使えるツール（ロールの許可とコードからの呼び出しの一覧の積）について、各ツールの JSON schema から TypeScript の型宣言を生成し、説明に埋め込む。手で書かないのは、説明と実装を別々に変えないためである（ADR 0010 の 6）。ロールごとに内容が変わるので、プロンプトのキャッシュは run の構成ごとに効く。
+- **説明の本文は短くする。** 本文に含めるのは次の 5 つだけとする。
+  1. 使う場面と、使わない場面
+  2. 出力または `return` したものだけがコンテキストに入ること
+  3. 結果の形と、`Promise.all` での並行の呼び出し
+  4. 使えない API（fs、require、fetch、timers、Intl）と、コードから行えない呼び出し（承認が必要なもの、`isolated` 以外の shell）
+  5. 上限
+- **長い例は組み込みの skill に分ける。** 説明に載せる例は短いもの 1 つとする。長い使い方の例は組み込みの skill にして、必要なときに `skill_load` で読ませる。たとえば、まとめ読みと要約、複数ファイルの同じ規則での編集、テストログの集計である。
+- **他のツールとの使い分けを書く。** shell のガイダンスには、データの加工や複数か所の編集を shell の中のスクリプトで行わず、`run_js` を使うよう書く。
+
+説明の本文の下書き（他のツールに合わせて英語）:
+
+```text
+Run JavaScript (ES2023, QuickJS) that calls your tools, and return only what you print or return.
+Use it to batch several reads/searches, filter or aggregate their output, or apply the same edit
+across many places. Do not use it for a single tool call.
+- Tool results stay out of your context unless you print or return them, so print only the essentials.
+- `tools.<name>(args)` returns Promise<{ok, text, truncated, next, detail}>; run independent calls with Promise.all.
+  `readText(path)` returns a whole file.
+- Edits go through tools.edit / tools.write so they show as diffs. There is no fs, require, fetch, timers or Intl.
+- Calls needing approval or non-isolated shell fail here; make them as normal tool calls.
+- Limits: 30 s (timeout_ms up to 300000), 64 MiB, 200 tool calls.
+Available tools:
+<generated TypeScript declarations for this run>
+Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text.split("\n"); ...
+```
+
+説明の分量の見積もり: 本文が 250 トークン程度、型宣言がツール 1 つにつき 40〜80 トークン程度で、合計 600〜800 トークンになる。計測の期間の 1 リクエストあたりのプロンプトは平均 12.6 万トークン（入力とキャッシュの合計）なので、その 0.5〜0.6% にあたる。実際の値は評価で測る。
 
 ### コード内の呼び出しは子のツール呼び出しとして記録する
 
@@ -109,19 +159,34 @@ shell の中で書かれたスクリプトについて:
 - 付与するロールは、Worker と、読み取りのロール（Explorer、Reviewer、Advisor、Planner、WebResearcher）とする。コードから呼べるツールは、そのロールに許可されたものに限られる（`crates/agents/src/role.rs`）。そのため、読み取りのロールでは読み取りだけになる。
 - Orchestrator には付与しない（ADR 0002）。Evaluator と MultimodalLooker にも付与しない。
 - 設定で有効にしたときだけ付与する。既定は無効とし、評価の結果で既定を見直す。
-- ツールの説明では、使う場面を示す。たとえば、複数のファイルの読み取りと検索をまとめる、結果を集計・絞り込む、複数か所を同じ規則で編集する、といった場面である。1 回のツール呼び出しで済む操作には使わないよう書く。
-- shell のガイダンスには、データの加工や複数か所の編集を shell の中のスクリプトで行わず、`run_js` を使うよう書く。
+- 説明の内容は「エージェントへの説明」の節で決める。
 
 ### 評価
 
-- 計測の節の数値を基準値とする。
-- `crates/eval` の thread の再実行（ADR 0036）で、`run_js` の有無を比べる。題材は、読み取り専用のターンが長く続いた thread と、shell の中のスクリプトでファイルを書き換えた thread から選ぶ。
-- 比べる指標は次のとおりとする。
-  - 作業あたりのリクエスト数、プロンプトトークン、費用
+このツールの目的は、ターン数とトークンの効率を上げることである。説明が長くなる分の固定費を払っても、それを上回って減ることを確かめてから、既定で有効にする。
+
+- **基準値**: 計測の節の数値を基準値とする。
+- **A/B の比較**: `crates/eval` の thread の再実行（ADR 0036）で、`run_js` の有無を比べる。
+  - 題材は、読み取り専用のターンが長く続いた thread と、shell の中のスクリプトでファイルを書き換えた thread から選ぶ。加えて、`run_js` が役に立たないはずの thread（1 回の呼び出しで済む作業が中心のもの）も含める。説明の固定費だけが増える場合を測るためである。
+  - ロールのチェーンにある主なモデルごとに比べる。
+- **ターン数とトークン効率の指標**: 作業あたりで次を比べる。
+  - リクエスト数（ターン数）
+  - プロンプトトークン。入力、キャッシュの読み取り、キャッシュの書き込みを分けて記録する。
+  - 出力トークン
+  - 費用
+  - `run_js` の説明が占めるトークン（固定費）
+  - `run_js` の 1 回あたりの子の呼び出しの数と、コンテキストに戻した出力の大きさ
+- **品質と見やすさの指標**:
   - LLM による採点
   - shell の中のスクリプト（python / node / perl のヒアドキュメント）の数
   - スクリプトによるファイルの書き換えの数
-- 採点が下がらず、プロンプトトークンが題材の集合で 10% 以上減ることを、既定で有効にする条件の目安とする。
+- **説明の書き方も比べる。** 例の有無や本文の長さが違う説明の案を、同じ題材で比べる。
+- **既定で有効にする条件の目安**: 次のすべてを満たすこととする。
+  - 採点が下がらない。
+  - 題材の集合で、作業あたりのプロンプトトークンが 10% 以上減る。
+  - リクエスト数が増えない。
+  - `run_js` が役に立たないはずの題材で、トークンの増加が説明の固定費の範囲に収まる。
+- **導入後の確認**: 既定で有効にした後も、計測の節と同じ集計で本番の thread を定期的に確かめる。集計するのは、ターンあたりの呼び出し数、読み取りの連続、作業あたりのトークン、`run_js` の使用率である。効果が基準値に戻ったり、説明の固定費が上回ったりしたら、説明か既定値を見直す。
 
 ## Alternatives considered
 
@@ -141,6 +206,8 @@ shell の中で書かれたスクリプトについて:
 - `ToolStarted` / `ToolCompleted` に任意の `parent_call_id` が加わる。読む側（storage の投影、GUI、OTel、`crates/eval` の記録）は、子の呼び出しを扱えるようにする必要がある。
 - コードからは承認の必要な操作ができない。そのため、権限の昇格が必要な作業では、従来どおり通常のツール呼び出しを使う。
 - モデルが `run_js` を使いこなせるかは、モデルの系統によって差が出うる。評価は、ロールのチェーンにある主なモデルで行う。
+- `run_js` の説明は一般的なツールより長く、600〜800 トークン程度の固定費が毎回のリクエストにかかる。この固定費は、評価で効果と並べて測る。
+- コード向けの結果の正規化は、ツールごとの変換として保守する必要がある。ツールの出力の形を変えるときは、変換も合わせて変える。
 
 ## Open questions
 
@@ -150,3 +217,4 @@ shell の中で書かれたスクリプトについて:
 - `web_fetch` などネットワークを使うツールを、コードから呼べる一覧に加えるか。
 - `evorch inspect` に、この ADR の計測と同じ集計（ツール別の件数、読み取りの連続、shell の中のスクリプト）を出すサブコマンドを加えるか。今回は store を直接集計した。
 - 時間・メモリ・呼び出し回数の上限の値。
+- QuickJS-NG で使える組み込みは、ドキュメントで確かめただけである。実際に rquickjs で動かして、文字列の操作と正規表現の挙動を確かめる必要がある。
