@@ -573,3 +573,46 @@ fn finished_background_thread_shows_unread_report_until_opened() {
     harness.step();
     assert!(!harness.has_label("Thread status: Unread report"));
 }
+
+#[test]
+fn project_shows_five_thread_families_until_see_more_and_resets_on_collapse() {
+    // Given: twelve threads, with the oldest one open.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut sidebar = sidebar_with_project(temp.path());
+    for index in 1..=12 {
+        let id = ThreadId::new(format!("thread-{index:02}"));
+        sidebar
+            .create_thread(id, ProjectId::new("demo"), format!("Thread {index:02}"))
+            .expect("thread can be created");
+        sidebar.threads.last_mut().expect("created").created_at = index;
+    }
+    sidebar.active_thread = Some(ThreadId::new("thread-01"));
+    let mut harness = HeadlessWorkbench::new(state(MockSource::default(), sidebar), [800.0, 900.0]);
+    harness.run();
+    let shown = |harness: &HeadlessWorkbench<MockSource>| {
+        (1..=12)
+            .filter(|index| harness.has_label(&format!("Thread {index:02}")))
+            .collect::<Vec<_>>()
+    };
+
+    // Then: the five newest families show, plus the open thread beyond them.
+    assert_eq!(shown(&harness), [1, 8, 9, 10, 11, 12]);
+
+    // When: the operator asks for more.
+    harness.click_label("See more (6)");
+    harness.run();
+
+    // Then: five more families appear and only one stays hidden.
+    assert_eq!(shown(&harness), [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert!(harness.has_label("See more (1)"));
+
+    // When: the project is collapsed and expanded again.
+    harness.click_label("Collapse threads of demo");
+    harness.run();
+    harness.click_label("Expand threads of demo");
+    harness.run();
+
+    // Then: the list is back to its first page.
+    assert_eq!(shown(&harness), [1, 8, 9, 10, 11, 12]);
+    assert!(harness.has_label("See more (6)"));
+}

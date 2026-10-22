@@ -45,6 +45,8 @@ fn late_thread_is_reachable_when_scrolled_into_view() {
                 format!("Overflow thread {index:02}"),
             )
             .expect("overflow thread");
+        // Pinned threads bypass the per-project "See more" page.
+        sidebar.threads.last_mut().expect("overflow thread").pinned = true;
     }
     let state = fixture::populate(state(), sidebar);
     let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);

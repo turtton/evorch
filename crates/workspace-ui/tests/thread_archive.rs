@@ -154,3 +154,51 @@ fn main_list_orders_by_latest_activity_when_older_threads_are_updated() {
     assert_eq!(saved[0].last_activity(), 30);
     assert_eq!(titles(&saved), ["older", "newer"]);
 }
+
+#[test]
+fn main_list_lifts_family_when_a_child_thread_has_newer_activity() {
+    // Given: an older root with two escalation children and a newer root.
+    let project = ProjectId::new("p");
+    let mut threads: Vec<_> = ["older", "child-a", "child-b", "grandchild", "newer"]
+        .into_iter()
+        .map(|title| ThreadRecord::new(ThreadId::new(title), project.clone(), title))
+        .collect();
+    for (thread, created_at) in threads.iter_mut().zip([10, 11, 12, 13, 20]) {
+        thread.created_at = created_at;
+    }
+    for (child, parent) in [(1, "older"), (2, "older"), (3, "child-a")] {
+        threads[child].parent_thread_id = Some(ThreadId::new(parent));
+        threads[child].escalation_source_run_id = Some("run-worker".into());
+    }
+    let order = |threads: &[ThreadRecord], members: &[&str]| {
+        ThreadRecord::partition_for_project(threads, &project)
+            .0
+            .iter()
+            .map(|t| t.title.as_str())
+            .filter(|title| members.contains(title))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&threads, &["older", "newer"]), ["newer", "older"]);
+    assert_eq!(
+        order(&threads, &["child-a", "child-b"]),
+        ["child-a", "child-b"]
+    );
+    // When: the user replies in the grandchild after the newer root was created.
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    assert!(threads[3].touch(at(30)));
+    // Then: each of its ancestors rises above its own peers.
+    assert_eq!(order(&threads, &["older", "newer"]), ["older", "newer"]);
+    assert_eq!(
+        order(&threads, &["child-a", "child-b"]),
+        ["child-a", "child-b"]
+    );
+    // When: the other child gets a later reply.
+    assert!(threads[2].touch(at(40)));
+    // Then: it overtakes its sibling while its family stays first.
+    assert_eq!(
+        order(&threads, &["child-a", "child-b"]),
+        ["child-b", "child-a"]
+    );
+    assert_eq!(order(&threads, &["older", "newer"]), ["older", "newer"]);
+}
