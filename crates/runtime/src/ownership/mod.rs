@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-mod maintenance;
-pub use maintenance::compact_owner_checkpoints;
 mod checkpoint;
 pub use checkpoint::{
     CheckpointBoundary, OwnerCheckpoint, RunCheckpoint, SnapshotNoneReason, SnapshotReference,
