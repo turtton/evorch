@@ -7,6 +7,24 @@
   single line larger than the byte limit without splitting a UTF-8 character.
 - `write({path, content})` creates or fully replaces a file. `edit` replaces a
   nonempty `old_string` in an existing file. Empty search text is rejected.
+  Without `replace_all: true`, `old_string` must match exactly one location,
+  counting matches that overlap each other (`aba` matches `ababa` twice);
+  several matches fail with their count and line numbers and leave the file
+  unchanged. `replace_all: true` replaces non-overlapping matches from left to
+  right, like `str::replace`: replacing `aba` with `X` turns `ababa` into `Xba`.
+  `edits: [{old_string, new_string, replace_all?}]` applies several
+  replacements to one file in one call. Every `old_string` is matched against
+  the original contents, replaced ranges must not overlap, and either all are
+  written or none; errors name the failing `edits[i]`. A call sends either
+  `old_string`/`new_string` or `edits`, not both. In a file whose line breaks
+  are all CRLF, LF line breaks in `old_string` and `new_string` are treated as
+  CRLF. In a file that mixes CRLF and LF, a multi-line `old_string` written with
+  LF is matched as CRLF only when nothing matches as written, and its
+  `new_string` is then written with CRLF too. Other bytes, including a byte
+  order mark, are left as they are. An edit that leaves the contents unchanged
+  reports `No changes` without rewriting the file. Prefer `edit`/`write` to
+  shell `sed -i`, heredocs or scripts: only they return the diff and run the
+  post-edit comment checker.
 - Relative file paths and shell `cwd` (including `.`) resolve from the run's
   workspace. File tools do not change the application's process directory.
 
@@ -53,8 +71,10 @@ user (approval input `kind: "file_access"` with the tool, canonical `path`,
 `access`, justification and change), and `auto` asks the escalation reviewer,
 falling back to the user on a decline when configured. The reviewer and user
 see the tool, the canonicalized target paths and the justification, plus for
-`write` the first 4000 bytes of the content and for `edit` the old/new
-strings (2000 bytes each); existing outside files are not read for the review.
+`write` the first 4000 bytes of the content and for `edit` every edit with its
+`edits[i]` index and `replace_all` flag. Only the old/new strings are cut: they
+share 4000 bytes, so a long string never hides a later edit or its scope.
+Existing outside files are not read for the review.
 Approval covers that one call and lifts only the path boundary: role
 capabilities still decide which tools a run can call, so a read-only role
 cannot write through escalation.

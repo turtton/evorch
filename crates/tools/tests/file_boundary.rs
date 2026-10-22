@@ -497,7 +497,20 @@ async fn write_escalation_shows_bounded_change_to_the_reviewer() {
             &context(),
             "edit",
             "e",
-            json!({"path": layout.outside.join("notes.txt"), "old_string":"xx", "new_string":"yy", "sandbox_access":"unsandboxed", "justification":"user asked"}),
+            json!({"path": layout.outside.join("notes.txt"), "old_string":"xx", "new_string":"yy", "replace_all": true, "sandbox_access":"unsandboxed", "justification":"user asked"}),
+        )
+        .await
+        .unwrap();
+    std::fs::write(layout.outside.join("list.txt"), "first\nsecond\n").unwrap();
+    executor
+        .execute(
+            &context(),
+            "edit",
+            "m",
+            json!({"path": layout.outside.join("list.txt"), "edits": [
+                {"old_string":"first", "new_string":"1"},
+                {"old_string":"second", "new_string":"2"},
+            ], "sandbox_access":"unsandboxed", "justification":"user asked"}),
         )
         .await
         .unwrap();
@@ -512,12 +525,91 @@ async fn write_escalation_shows_bounded_change_to_the_reviewer() {
         "{change}"
     );
     let edit = requests[1].change.as_deref().unwrap();
-    assert!(edit.contains("old_string:\nxx") && edit.contains("new_string:\nyy"));
     assert!(
-        std::fs::read_to_string(layout.outside.join("notes.txt"))
-            .unwrap()
-            .starts_with("yy")
+        edit.contains("old_string:\nxx")
+            && edit.contains("new_string:\nyy")
+            && edit.contains("replace_all: true"),
+        "{edit}"
     );
+    assert_eq!(
+        std::fs::read_to_string(layout.outside.join("notes.txt")).unwrap(),
+        "y".repeat(10_000)
+    );
+    let edits = requests[2].change.as_deref().unwrap();
+    assert!(
+        edits.contains("edits[0].old_string:\nfirst\nedits[0].new_string:\n1")
+            && edits.contains("edits[1].old_string:\nsecond\nedits[1].new_string:\n2"),
+        "{edits}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layout.outside.join("list.txt")).unwrap(),
+        "1\n2\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_escalation_shows_every_edit_and_its_scope_however_long_the_texts() {
+    // Given: a declining gate and edits whose texts exceed the preview budget.
+    let layout = layout();
+    let (executor, _) = executor(&layout);
+    let gate = with_gate(&executor, false);
+    let long = |fill: &str| fill.repeat(10_000);
+    let many: Vec<_> = (0..200)
+        .map(|index| {
+            json!({"old_string": format!("old {index} {}", "o".repeat(100)),
+                "new_string": format!("new {index} {}", "n".repeat(100)),
+                "replace_all": index % 3 == 2})
+        })
+        .collect();
+
+    // When: each call asks to edit a file outside the boundary.
+    for edit in [
+        json!({"old_string": long("x"), "new_string": long("x"), "replace_all": true}),
+        json!({"edits": [
+            {"old_string": long("x"), "new_string": long("x")},
+            {"old_string": long("y"), "new_string": long("z"), "replace_all": true},
+        ]}),
+        json!({"edits": many}),
+    ] {
+        let mut args = edit;
+        args["path"] = json!(layout.outside.join("notes.txt"));
+        args["sandbox_access"] = json!("unsandboxed");
+        args["justification"] = json!("user asked");
+        denial(executor.execute(&context(), "edit", "e", args).await);
+    }
+
+    // Then: the texts are cut, but no edit, index or replace_all scope is.
+    let requests = gate.requests.lock().unwrap();
+    let change = |index: usize| requests[index].change.as_deref().unwrap();
+    let single = change(0);
+    assert!(
+        single.starts_with("replace_all: true\nold_string:\nxxx")
+            && single.contains("more bytes]\nnew_string:\nxxx")
+            && single.len() < 4_200,
+        "{single}"
+    );
+    let two = change(1);
+    assert!(
+        two.starts_with("edits: 2\nedits[0].replace_all: false\nedits[0].old_string:\nxxx")
+            && two.contains("more bytes]\nedits[1].replace_all: true\nedits[1].old_string:\nyyy")
+            && two.contains("more bytes]\nedits[1].new_string:\nzzz")
+            && two.ends_with("more bytes]")
+            && two.len() < 4_300,
+        "{two}"
+    );
+    let many = change(2);
+    assert!(many.starts_with("edits: 200\n"), "{many}");
+    for index in 0..200 {
+        let scope = format!(
+            "edits[{index}].replace_all: {}\nedits[{index}].old_string:\nold {index}",
+            index % 3 == 2
+        );
+        assert!(many.contains(&scope), "{scope} missing from {many}");
+        assert!(
+            many.contains(&format!("\nedits[{index}].new_string:\nnew {index}")),
+            "{many}"
+        );
+    }
 }
 
 #[tokio::test]

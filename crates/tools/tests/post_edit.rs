@@ -65,6 +65,7 @@ impl Fixture {
             content: Some("fn main() {}".into()),
             old_string: None,
             new_string: None,
+            edits: None,
         }
     }
     fn read(&self, path: &str) -> String {
@@ -449,7 +450,22 @@ async fn unsuccessful_edits_never_invoke_the_hook() {
                 .is_err()
         );
     }
+    assert!(
+        edit.execute(json!({"path": f.file(), "edits": [
+            {"old_string": "old", "new_string": "new"},
+            {"old_string": "not found", "new_string": "new"},
+        ]}))
+        .await
+        .is_err()
+    );
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), "old");
+    std::fs::write(f.file(), "old old").unwrap();
+    assert!(
+        edit.execute(json!({"path": f.file(), "old_string": "old", "new_string": "new"}))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), "old old");
     assert!(f.sandbox.0.lock().unwrap().is_empty());
     assert!(!f.dir.path().join("checker.calls").exists());
 }
@@ -605,7 +621,7 @@ async fn existing_write_uses_old_full_text_and_noops_never_start_checker() {
     assert!(f.sandbox.0.lock().unwrap().is_empty());
     let result = Edit
         .with_post_edit_hook(checker)
-        .execute(json!({"path": f.file(), "old_string": "old", "new_string": "old"}))
+        .execute(json!({"path": f.file(), "old_string": "fn old()", "new_string": "fn old()"}))
         .await
         .unwrap();
     assert!(result.detail.is_none());
@@ -658,6 +674,74 @@ async fn new_write_and_edit_check_only_new_or_changed_comments() {
         result.detail.unwrap()["comment_checker"]["outcome"],
         "warning"
     );
+}
+
+#[tokio::test]
+async fn multiple_edits_send_one_upstream_multiedit_input_with_only_changed_pairs() {
+    let f = Fixture::new();
+    let edit = Edit.with_post_edit_hook(f.checker(Some("comments")));
+    std::fs::write(f.file(), "// keep\nfn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    let result = edit
+        .execute(json!({"path": f.file(), "edits": [
+            {"old_string": "fn a()", "new_string": "fn a2()"},
+            {"old_string": "fn b()", "new_string": "fn b()"},
+            {"old_string": "fn c() {}", "new_string": "// added\nfn c() {}"},
+        ]}))
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert_eq!(
+        result.detail.unwrap()["comment_checker"]["outcome"],
+        "warning"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&f.read("checker.input")).unwrap(),
+        json!({"tool_name": "MultiEdit", "tool_input": {"file_path": f.file(), "edits": [
+            {"old_string": "fn a()", "new_string": "fn a2()"},
+            {"old_string": "fn c() {}", "new_string": "// added\nfn c() {}"},
+        ]}})
+    );
+    // One changed pair keeps the single-edit input.
+    let result = edit
+        .execute(json!({"path": f.file(), "edits": [
+            {"old_string": "fn a2()", "new_string": "fn a3()"},
+            {"old_string": "fn b()", "new_string": "fn b()"},
+        ]}))
+        .await
+        .unwrap();
+    assert!(result.detail.is_none());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&f.read("checker.input")).unwrap(),
+        json!({"tool_name": "Edit", "tool_input": {"file_path": f.file(), "old_string": "fn a2()", "new_string": "fn a3()"}})
+    );
+    assert_eq!(f.read("checker.calls").lines().count(), 2);
+}
+
+#[tokio::test]
+async fn multiple_edit_input_budget_counts_every_pair_without_spawning() {
+    use tools::post_edit::MAX_INPUT_BYTES;
+    let f = Fixture::new();
+    let quarter = MAX_INPUT_BYTES / 4;
+    let (a, c) = ("a".repeat(quarter), "c".repeat(quarter));
+    std::fs::write(f.file(), format!("{a}\n{c}")).unwrap();
+    let result = Edit
+        .with_post_edit_hook(f.checker(Some("warning")))
+        .execute(json!({"path": f.file(), "edits": [
+            {"old_string": a, "new_string": "b".repeat(quarter)},
+            {"old_string": c, "new_string": "d".repeat(quarter)},
+        ]}))
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert_eq!(
+        result.detail.unwrap()["comment_checker"]["reason"],
+        "input_too_large"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.file()).unwrap(),
+        format!("{}\n{}", "b".repeat(quarter), "d".repeat(quarter))
+    );
+    assert!(f.sandbox.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

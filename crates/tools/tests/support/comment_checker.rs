@@ -76,17 +76,34 @@ fn main() {
     let tool = root["tool_name"].as_str().unwrap();
     let fields = root["tool_input"].as_object().unwrap();
     assert!(fields["file_path"].is_string());
-    let (old, new) = match tool {
+    let pairs: Vec<(&str, &str)> = match tool {
         "Write" => {
             assert_eq!(fields.len(), 2);
-            ("", fields["content"].as_str().unwrap())
+            vec![("", fields["content"].as_str().unwrap())]
         }
         "Edit" => {
             assert_eq!(fields.len(), 3);
-            (
+            vec![(
                 fields["old_string"].as_str().unwrap(),
                 fields["new_string"].as_str().unwrap(),
-            )
+            )]
+        }
+        // Upstream v0.8.2 checks each edit's old/new pair separately.
+        "MultiEdit" => {
+            assert_eq!(fields.len(), 2);
+            let edits = fields["edits"].as_array().unwrap();
+            assert!(!edits.is_empty());
+            edits
+                .iter()
+                .map(|edit| {
+                    let edit = edit.as_object().unwrap();
+                    assert_eq!(edit.len(), 2);
+                    (
+                        edit["old_string"].as_str().unwrap(),
+                        edit["new_string"].as_str().unwrap(),
+                    )
+                })
+                .collect()
         }
         _ => panic!("upstream tool_name is case-sensitive: {tool}"),
     };
@@ -107,8 +124,11 @@ fn main() {
     if mode == "large-output" {
         std::process::exit(2);
     }
-    let added = comments(new).difference(&comments(old)).next().is_some();
-    if mode == "warning" || (mode == "comments" && added) || new.contains("fixture-warning") {
+    let added = pairs
+        .iter()
+        .any(|(old, new)| comments(new).difference(&comments(old)).next().is_some());
+    let fixture_warning = pairs.iter().any(|(_, new)| new.contains("fixture-warning"));
+    if mode == "warning" || (mode == "comments" && added) || fixture_warning {
         eprintln!("  explain why, not what  ");
         std::process::exit(2);
     }
