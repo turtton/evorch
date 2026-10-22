@@ -86,19 +86,21 @@ fn running_thread_archive_button_is_hidden_and_direct_action_is_noop() {
         let target = ThreadId::new("target");
         harness.run();
         let idle_archive = harness.label_rects("Archive")[0];
+        let idle_pin = harness.label_rects("☆")[0];
         set_thread_phase(harness.state_mut(), &target, phase);
         harness.run();
         let before = harness.state().sidebar().clone();
         let saved = std::fs::read(temp.path().join("sidebar.json")).unwrap();
         assert!(harness.has_label("Thread status: Running"));
 
-        // When: the row renders without its control, then the UI is bypassed.
+        // When: the spinner replaces the control, then the UI is bypassed.
         assert!(!harness.has_label("Archive"));
         let pin = harness.label_rects("☆")[0];
-        let status = harness.label_rects("Thread status: Running")[0];
+        let spinner = harness.label_rects("Thread status: Running")[0];
+        assert_eq!(pin, idle_pin, "Pin must not move when a run starts");
         assert!(
-            status.left() - pin.right() >= idle_archive.width() - 0.5,
-            "the hidden control keeps its space: archive={idle_archive:?}, pin={pin:?}, status={status:?}"
+            (spinner.center() - idle_archive.center()).length() <= 0.5,
+            "the spinner takes the Archive slot: archive={idle_archive:?}, spinner={spinner:?}"
         );
         harness.state_mut().toggle_archive(target).unwrap();
 

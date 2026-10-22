@@ -227,8 +227,9 @@ fn active_row(
         thread_status_icon(ui, state, attention);
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = 0.0;
-        // A running family hides Archive instead of showing a disabled control;
-        // the reserved space keeps every row's pin aligned.
+        // The slot before Pin holds Archive, or the running spinner in its
+        // place, so Pin stays put when a run starts or ends. A running family
+        // cannot be archived, so the two never compete for the slot.
         if display_root && !family_running {
             let can_archive = !thread.pinned;
             let archive = ui
@@ -244,6 +245,8 @@ fn active_row(
             if archive.clicked() {
                 *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
             }
+        } else if matches!(state, ThreadState::Running) {
+            running_spinner(ui);
         } else {
             ui.add_space(ACTION_SIZE);
         }
@@ -372,18 +375,12 @@ fn nested_threads<'a>(
 fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
     // Runtime status retains the display aggregation; questions and approvals
     // are independent and must remain visible alongside either the spinner or
-    // the error icon. An unread report takes the spinner's slot once the work
+    // the error icon. The running spinner lives in the Archive slot instead
+    // (see `running_spinner`); an unread report appears here once the work
     // has finished.
     let unread = attention.unread;
     let status = if matches!(state, ThreadState::Running) {
-        Some((
-            ui.add(
-                egui::Spinner::new()
-                    .size(FONT_SMALL)
-                    .color(palette().RUNNING),
-            ),
-            "Thread status: Running",
-        ))
+        None
     } else if matches!(state, ThreadState::Error) {
         let response = ui.add(
             egui::Label::new(
@@ -433,6 +430,20 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention) {
             attention_dot(ui, label);
         }
     }
+}
+
+fn running_spinner(ui: &mut Ui) {
+    let label = "Thread status: Running";
+    // add_sized reserves the whole Archive slot and centers the spinner in it.
+    let response = ui.add_sized(
+        egui::vec2(ACTION_SIZE, ACTION_SIZE),
+        egui::Spinner::new()
+            .size(FONT_SMALL)
+            .color(palette().RUNNING),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
+    response.on_hover_text(label);
 }
 
 fn attention_dot(ui: &mut Ui, label: &str) {

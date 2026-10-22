@@ -29,7 +29,8 @@ Thread archive uses a Painter-drawn box at Small text height, a 1.2pt stroke,
 a wider lid with a centered handle slit, and native interaction text color.
 Its native small Button reserves Small text height + SP_2 on each axis;
 pinned threads use egui's disabled painting and cannot activate Archive;
-families with a running or pending run hide Archive and keep its space.
+while a family has a running or pending run, Archive is hidden and a running
+row's spinner takes its slot, so Pin stays in place.
 Thread titles open a right-click menu with Copy thread ID / Copy thread title.
 Pending tool approvals, including a subagent's, mark the owning thread with the
 question's WARNING_FG dot and "Approval needed" text; beside a question dot they
