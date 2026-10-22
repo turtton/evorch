@@ -53,6 +53,7 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                         average_ttft: phase.map(|_| std::time::Duration::from_millis(400)),
                         tok_s: phase.map(|_| 40.0),
                         average_tok_s: phase.map(|_| 35.0),
+                        ..Default::default()
                     }),
                     phase,
                     next_thread_title: String::new(),

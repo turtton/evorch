@@ -134,6 +134,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 ConversationFocus::Agent(run_id) => {
                     let mut metrics = self.telemetry.thread_metrics(std::slice::from_ref(run_id));
                     metrics.conversation_cost = metrics.cost;
+                    metrics.conversation_cost_partial = metrics.cost_partial;
                     metrics
                 }
             }),

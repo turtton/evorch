@@ -54,12 +54,14 @@ impl TelemetryOverlay {
     pub fn thread_metrics_at(&self, run_ids: &[String], now: Instant) -> ThreadMetrics {
         let mut cost_total = 0.0;
         let mut has_cost = false;
+        let mut cost_partial = false;
         let mut wall_time = Duration::ZERO;
         for run_id in run_ids {
             if let Some(cost) = self.costs.get(run_id) {
                 cost_total += cost;
                 has_cost = true;
             }
+            cost_partial |= self.partially_priced.contains(run_id);
             if let Some(accumulated) = self.accumulated_running.get(run_id) {
                 wall_time += *accumulated;
             }
@@ -104,11 +106,13 @@ impl TelemetryOverlay {
         };
         let mut conversation_cost_total = 0.0;
         let mut has_conversation_cost = false;
+        let mut conversation_cost_partial = false;
         for run_id in &root_ids {
             if let Some(cost) = self.costs.get(*run_id) {
                 conversation_cost_total += cost;
                 has_conversation_cost = true;
             }
+            conversation_cost_partial |= self.partially_priced.contains(*run_id);
         }
         let mut usage = TokenUsage::default();
         let mut has_usage = false;
@@ -132,7 +136,9 @@ impl TelemetryOverlay {
         cache_reuse.latest = latest.and_then(|row| row.cache_reuse.latest);
         ThreadMetrics {
             cost: has_cost.then_some(cost_total),
+            cost_partial,
             conversation_cost: has_conversation_cost.then_some(conversation_cost_total),
+            conversation_cost_partial,
             cache_hit_rate: latest
                 .and_then(|row| row.latest_context.as_ref())
                 .map(|request| request.usage.cache_hit_rate()),
@@ -218,6 +224,34 @@ mod tests {
         let metrics = overlay.thread_metrics(&["child".into(), "first".into(), "continued".into()]);
         assert_eq!(metrics.conversation_cost, Some(3.0));
         assert_eq!(metrics.cost, Some(6.0));
+    }
+
+    #[test]
+    fn unpriced_child_marks_only_the_thread_total_partial() {
+        let mut overlay = TelemetryOverlay::new();
+        overlay.rows.insert(
+            "root".into(),
+            TelemetryRow {
+                conversation_root: true,
+                ..Default::default()
+            },
+        );
+        overlay.rows.insert(
+            "child".into(),
+            TelemetryRow {
+                parent_run_id: Some("root".into()),
+                ..Default::default()
+            },
+        );
+        overlay.costs.insert("root".into(), 1.0);
+        overlay.costs.insert("child".into(), 2.0);
+        overlay.partially_priced.insert("child".into());
+        let metrics = overlay.thread_metrics(&["root".into(), "child".into()]);
+        assert_eq!((metrics.cost, metrics.cost_partial), (Some(3.0), true));
+        assert_eq!(
+            (metrics.conversation_cost, metrics.conversation_cost_partial),
+            (Some(1.0), false)
+        );
     }
 
     #[test]
