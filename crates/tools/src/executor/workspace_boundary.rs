@@ -326,17 +326,7 @@ fn canonical_location(path: &Path) -> Option<PathBuf> {
 
 /// Like bwrap, the last mounted region covering a path decides its access.
 fn place(regions: &[BoundaryRegion], location: Option<&Path>) -> Option<PathAccess> {
-    let location = location?;
-    regions
-        .iter()
-        .rev()
-        .find(|region| {
-            region
-                .path
-                .canonicalize()
-                .is_ok_and(|root| location.starts_with(root))
-        })
-        .map(|region| region.access)
+    sandbox::region_access(regions, location?)
 }
 
 fn boundary_denial(path: &Path, read_only: bool) -> String {

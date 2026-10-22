@@ -130,13 +130,14 @@ again only when it changes). Thread read-only directories, and allowed
 directories equal to or inside them, are read-only for that Worker too and are
 named as exceptions. A thread read-only directory the run mounted but whose
 declaration was withdrawn is writable for the Worker inside an allowed
-directory, and otherwise not mounted for it (``... except `/srv/ref`, which they
-cannot access.``). A directory declared since the run started inside a listed
-one, where the Worker gets other access than around it, joins the list with the
-run's own access there, so the sentence can name it (an Orchestrator gets
-`+ /srv/shared/locked (read-only)`). Exceptions nested in an entry where the
-Worker gets the same access are folded into it. Without exceptions the sentence
-ends at `all of them.`
+directory, readable inside a path every Worker sandbox mounts read-only (system
+paths such as `/usr`, Cargo/rustup caches), and otherwise not mounted for it
+(``... except `/srv/ref`, which they cannot access.``). A directory declared
+since the run started inside a listed one, where the Worker gets other access
+than around it, joins the list with the run's own access there, so the sentence
+can name it (an Orchestrator gets `+ /srv/shared/locked (read-only)`).
+Exceptions nested in an entry where the Worker gets the same access are folded
+into it. Without exceptions the sentence ends at `all of them.`
 
 Changes are appended instead. After a complete tool round, right before the
 next provider request (never between a tool call and its result), a run whose
@@ -161,8 +162,12 @@ same message with the sentence for the lines with an access label (`+` and
 A message with only removals has no sentence. A change only to a Worker's
 access, such as a thread declaration newly covering an allowed directory or
 withdrawn from it, restates the whole list instead of emitting a misleading
-`~ ... (read-only, was read-only)` line. Once a run was told that Workers get
-different access, a later message whose entries do not differ says
+`~ ... (read-only, was read-only)` line. So does a removal after which the
+entry around the removed one gives Workers other access than they were told for
+it, such as withdrawing `/srv/shared/locked` from the declaration: a bare
+`- /srv/shared/locked` would not say that Workers can write there again. Once a
+run was told that Workers get different access, a later message whose entries
+do not differ says
 `Delegated Workers have the same access to all of them.` (or `to every added or
 changed directory.`), so the earlier sentence does not stand. A whole list
 supersedes earlier sentences, so after one without a difference nothing more is

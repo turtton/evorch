@@ -215,7 +215,11 @@ impl LoopState {
     /// declaration, which can differ from this run's own mounts. The result is checked
     /// again only when the declaration changes, not at every request boundary.
     pub(crate) fn thread_read_dirs_for_delegates(&mut self) -> Vec<PathBuf> {
-        let Some(root) = self.thread_mount_root.clone() else {
+        let Some(root) = self
+            .worker_base
+            .as_ref()
+            .map(|base| base.workspace_root().to_path_buf())
+        else {
             return Vec::new();
         };
         let Some(runtime) = self.runtime() else {

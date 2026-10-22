@@ -18,6 +18,7 @@ pub use approval::{ApprovalGate, ApprovalOutcome};
 
 pub use boundary::{
     AllowedRegions, BoundaryRegion, LivePaths, PathAccess, SandboxBoundary, ThreadReadDirectory,
+    region_access,
 };
 pub use bwrap::{BwrapConfig, BwrapSandbox};
 pub use composition::production_sandbox;

@@ -153,9 +153,10 @@ pub(crate) struct LoopState {
     /// The thread's read-only directories this run mounted when its sandbox was built
     /// (ADR 0037); fixed for the run's lifetime.
     pub(crate) thread_read_dirs: Vec<std::path::PathBuf>,
-    /// The root this run's sandbox mounts thread directories under, which its delegated
-    /// children share; none for runs without their own sandbox, which mount none.
-    pub(crate) thread_mount_root: Option<std::path::PathBuf>,
+    /// What a delegated Worker's sandbox gives besides allowed and thread directories:
+    /// system paths, caches, tool output, the thread's scratch and the project root that
+    /// thread directories are mounted under. None for runs without their own sandbox.
+    pub(crate) worker_base: Option<sandbox::SandboxBoundary>,
     pub(crate) delegated_thread_dirs: crate::thread_read_dirs::DelegatedThreadDirs,
     pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
     pub(crate) allowed_instructions: crate::allowed_instructions::AllowedInstructions,
@@ -320,7 +321,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         scratch: None,
         allowed_directories: None,
         thread_read_dirs: Vec::new(),
-        thread_mount_root: None,
+        worker_base: None,
         delegated_thread_dirs: Default::default(),
         told_directories,
         allowed_instructions,
@@ -375,7 +376,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                             access: state.policy.allowed_access(),
                         });
                 state.thread_read_dirs = state.thread_read_dirs_to_mount(&root);
-                state.thread_mount_root = Some(root.clone());
+                // A Worker it delegates gets the same base, sharing the thread's scratch.
+                state.worker_base = crate::network::sandbox_boundary(&crate::WorkspaceMounts {
+                    scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
+                    ..crate::WorkspaceMounts::shared(root.clone())
+                })
+                .ok();
                 let checker_config = state
                     .shared
                     .runtime
@@ -717,6 +723,7 @@ impl LoopState {
             &self.thread_read_dirs,
             &self.policy,
             &delegated_thread_dirs,
+            self.worker_base.as_ref(),
         )
     }
 

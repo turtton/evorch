@@ -46,8 +46,9 @@ impl From<sandbox::PathAccess> for DirectoryAccess {
 pub enum DelegatedAccess {
     ReadOnly,
     ReadWrite,
-    /// Not mounted for the Worker: a thread read-only directory this run mounted,
-    /// outside every allowed directory, whose declaration was withdrawn since.
+    /// Not mounted for the Worker: a thread read-only directory this run mounted, outside
+    /// every allowed directory and the Worker's usual boundary, whose declaration was
+    /// withdrawn since.
     NoAccess,
 }
 
@@ -121,14 +122,8 @@ impl ToldDirectories {
                 (self.mentioned || !current.is_empty()).then(|| restatement(&current, told_before)),
                 true,
             )
-        } else if current.iter().any(|entry| {
-            self.last.iter().any(|before| {
-                before.path == entry.path
-                    && before.access == entry.access
-                    && before.delegated_access != entry.delegated_access
-            })
-        }) {
-            // A delegation-only change must not produce "read-only, was read-only".
+        } else if workers_change_unlabelled(&self.last, &current) {
+            // A changes message would say "read-only, was read-only" or a bare removal.
             (Some(restatement(&current, told_before)), true)
         } else {
             (changes(&self.last, &current, told_before), false)
@@ -165,6 +160,25 @@ impl ToldDirectories {
             self.told(current.to_vec(), true);
         }
     }
+}
+
+/// Whether a Worker delegated now gets other access than told where no `+` or `~` line
+/// labels it: on an entry this run keeps with its own access, or on a removed entry
+/// inside another one that gives the Worker other access there, as when a directory
+/// listed only for Workers is no longer declared.
+fn workers_change_unlabelled(last: &[ToldDirectory], current: &[ToldDirectory]) -> bool {
+    last.iter().any(
+        |before| match current.iter().find(|entry| entry.path == before.path) {
+            Some(entry) => {
+                entry.access == before.access && entry.delegated_access != before.delegated_access
+            }
+            None => current
+                .iter()
+                .filter(|entry| before.path.starts_with(&entry.path))
+                .max_by_key(|entry| entry.path.components().count())
+                .is_some_and(|around| around.delegated() != before.delegated()),
+        },
+    )
 }
 
 /// Whether a Worker delegated now gets different access on some entry.
@@ -241,14 +255,17 @@ pub(crate) fn can_delegate(policy: &crate::ExecutionPolicy) -> bool {
 ///
 /// A run that can delegate is also told what a Worker delegated now would get. That
 /// Worker mounts `delegated_thread_dirs`, the thread's current declaration, which can
-/// differ from the run's own mounts fixed when it started. A declared directory inside
-/// a listed one, where the Worker gets other access than around it, is listed with the
-/// run's own access there so the sentence can name it.
+/// differ from the run's own mounts fixed when it started. Outside those and the allowed
+/// directories, its usual boundary `worker_base` decides, which still reads system paths
+/// and caches. A declared directory inside a listed one, where the Worker gets other
+/// access than around it, is listed with the run's own access there so the sentence can
+/// name it.
 pub(crate) fn told_list(
     regions: Option<&sandbox::AllowedRegions>,
     thread_read_dirs: &[PathBuf],
     policy: &crate::ExecutionPolicy,
     delegated_thread_dirs: &[PathBuf],
+    worker_base: Option<&sandbox::SandboxBoundary>,
 ) -> Vec<ToldDirectory> {
     let covered = |dirs: &[PathBuf], path: &Path| dirs.iter().any(|dir| path.starts_with(dir));
     let by_path = |list: &mut Vec<ToldDirectory>| {
@@ -278,7 +295,11 @@ pub(crate) fn told_list(
             } else if allowed.iter().any(|region| path.starts_with(&region.path)) {
                 worker_access
             } else {
-                DelegatedAccess::NoAccess
+                worker_base
+                    .and_then(|base| base.access(path))
+                    .map_or(DelegatedAccess::NoAccess, |access| {
+                        DirectoryAccess::from(access).into()
+                    })
             }
         };
         let mut declared_since = delegated_thread_dirs.to_vec();
@@ -639,7 +660,7 @@ mod tests {
         thread_read_dirs: &[PathBuf],
         policy: &crate::ExecutionPolicy,
     ) -> Vec<ToldDirectory> {
-        told_list(regions, thread_read_dirs, policy, thread_read_dirs)
+        told_list(regions, thread_read_dirs, policy, thread_read_dirs, None)
     }
 
     // Given: a read-only Orchestrator whose list mixes plain allowed directories with
@@ -885,7 +906,7 @@ mod tests {
         ];
         let workers = |declared: &[&str]| {
             let declared: Vec<_> = declared.iter().map(PathBuf::from).collect();
-            told_list(Some(&regions), &mounted, &orchestrator(), &declared)
+            told_list(Some(&regions), &mounted, &orchestrator(), &declared, None)
                 .into_iter()
                 .map(|entry| {
                     assert_eq!(entry.access, ReadOnly, "{}", entry.path.display());
@@ -920,13 +941,14 @@ mod tests {
             &mounted,
             &orchestrator(),
             &[PathBuf::from("/shared")],
+            None,
         );
         assert_eq!(
             section_text(&list).unwrap(),
             "Allowed directories (evorch): besides the workspace, you may use these directories. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except `/shared`, which stays read-only for them too, and `/ref`, which they cannot access. Changes arrive later as `[workspace update]` messages.\n* /allowed (read-only)\n* /allowed/inner (read-only)\n* /docs (read-only)\n* /ref (read-only)\n* /shared (read-only)"
         );
         // Without a writable entry, the sentence starts from what Workers cannot use.
-        let thread_only = told_list(None, &mounted[1..], &orchestrator(), &mounted[2..]);
+        let thread_only = told_list(None, &mounted[1..], &orchestrator(), &mounted[2..], None);
         assert_eq!(
             restatement(&thread_only, false),
             "[workspace update] Current allowed directories; this supersedes earlier lists. Access labels describe this run's own permissions. Delegated Workers cannot access any of them except `/shared`, which stays read-only for them too.\n* /ref (read-only)\n* /shared (read-only)"
@@ -942,7 +964,13 @@ mod tests {
             ..writable(&["/x/y"])
         };
         let mounted = [PathBuf::from("/x"), PathBuf::from("/x/y/z")];
-        let list = told_list(Some(&regions), &mounted, &orchestrator(), &mounted[1..]);
+        let list = told_list(
+            Some(&regions),
+            &mounted,
+            &orchestrator(),
+            &mounted[1..],
+            None,
+        );
         assert_eq!(
             restatement(&list, false),
             "[workspace update] Current allowed directories; this supersedes earlier lists. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except `/x/y/z`, which stays read-only for them too, and `/x`, which they cannot access.\n* /x (read-only)\n* /x/y (read-only)\n* /x/y/z (read-only)"
@@ -970,7 +998,7 @@ mod tests {
             "/allowed/locked",
         ]
         .map(PathBuf::from);
-        let list = told_list(Some(&regions), &mounted, &orchestrator(), &declared);
+        let list = told_list(Some(&regions), &mounted, &orchestrator(), &declared, None);
         assert_eq!(
             section_text(&list).unwrap(),
             "Allowed directories (evorch): besides the workspace, you may use these directories. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except `/allowed/locked`, `/ref`, which stay read-only for them too. Changes arrive later as `[workspace update]` messages.\n* /allowed (read-only)\n* /allowed/locked (read-only)\n* /ref (read-only)"
@@ -980,6 +1008,7 @@ mod tests {
             &mounted,
             &orchestrator(),
             &mounted,
+            None,
         ));
         assert_eq!(
             state.update(list).unwrap(),
@@ -991,6 +1020,7 @@ mod tests {
             &mounted,
             &orchestrator(),
             &[PathBuf::from("/ref/inner")],
+            None,
         );
         assert_eq!(
             restatement(&narrowed, true),
@@ -1000,8 +1030,88 @@ mod tests {
         let mut no_delegate = orchestrator();
         no_delegate.capabilities.can_delegate = false;
         assert_eq!(
-            told_list(Some(&regions), &mounted, &no_delegate, &declared),
+            told_list(Some(&regions), &mounted, &no_delegate, &declared, None),
             [told("/allowed", ReadOnly), told("/ref", ReadOnly)]
+        );
+    }
+
+    // Given: a read-only Orchestrator that mounted thread directories at start inside a
+    //        system path, inside a Cargo cache and elsewhere, all withdrawn since
+    // When: listing what a Worker delegated now would get
+    // Then: its usual boundary still lets it read the first two, so only the last is
+    //       one it cannot access
+    #[test]
+    fn a_withdrawn_directory_inside_the_workers_usual_boundary_stays_readable_for_them() {
+        let cargo = tempfile::tempdir().unwrap();
+        let cargo_home = cargo.path().canonicalize().unwrap();
+        let crate_source = cargo_home.join("registry/src/index/a-crate");
+        std::fs::create_dir_all(&crate_source).unwrap();
+        let base =
+            sandbox::SandboxBoundary::new(PathBuf::from("/project")).cargo_cache(&cargo_home);
+        let mounted = [
+            PathBuf::from("/usr/share"),
+            crate_source.clone(),
+            PathBuf::from("/ref"),
+        ];
+        let list = told_list(None, &mounted, &orchestrator(), &[], Some(&base));
+        let worker = |path: &Path| {
+            list.iter()
+                .find(|entry| entry.path == path)
+                .map(ToldDirectory::delegated)
+        };
+        assert_eq!(
+            worker(Path::new("/usr/share")),
+            Some(DelegatedAccess::ReadOnly)
+        );
+        assert_eq!(worker(&crate_source), Some(DelegatedAccess::ReadOnly));
+        assert_eq!(worker(Path::new("/ref")), Some(DelegatedAccess::NoAccess));
+        // Withdrawing only those the Worker reads anyway changes nothing it is told.
+        let readable = told_list(None, &mounted[..2], &orchestrator(), &[], Some(&base));
+        assert_eq!(
+            readable,
+            told_list(
+                None,
+                &mounted[..2],
+                &orchestrator(),
+                &mounted[..2],
+                Some(&base)
+            )
+        );
+        assert!(
+            !section_text(&readable)
+                .unwrap()
+                .contains("Delegated Workers")
+        );
+    }
+
+    // Given: an Orchestrator told that Workers can write its allowed directories, then
+    //        told a directory declared inside one while running, which Workers only read
+    // When: that declaration alone is withdrawn, and later a nested allowed directory goes
+    // Then: the list is restated so the write access Workers regain is said rather than
+    //       a bare removal; a removal that leaves Workers' access as told stays a removal
+    #[test]
+    fn withdrawing_a_directory_named_for_workers_restates_the_access_they_regain() {
+        let allowed = |paths: &[&str]| sandbox::AllowedRegions {
+            access: sandbox::PathAccess::ReadOnly,
+            ..writable(paths)
+        };
+        let list = |paths: &[&str], declared: &[PathBuf]| {
+            told_list(Some(&allowed(paths)), &[], &orchestrator(), declared, None)
+        };
+        let mut state = ToldDirectories::started(list(&["/a", "/a/sub"], &[]));
+        assert_eq!(
+            state
+                .update(list(&["/a", "/a/sub"], &[PathBuf::from("/a/locked")]))
+                .unwrap(),
+            "[workspace update] Allowed directories changed (+ added, - removed, ~ access changed). Delegated Workers have the same access to every added or changed directory.\n+ /a/locked (read-only)"
+        );
+        assert_eq!(
+            state.update(list(&["/a", "/a/sub"], &[])).unwrap(),
+            "[workspace update] Current allowed directories; this supersedes earlier lists. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them.\n* /a (read-only)\n* /a/sub (read-only)"
+        );
+        assert_eq!(
+            state.update(list(&["/a"], &[])).unwrap(),
+            "[workspace update] Allowed directories changed (+ added, - removed, ~ access changed):\n- /a/sub"
         );
     }
 
@@ -1018,7 +1128,7 @@ mod tests {
         };
         let shared = [PathBuf::from("/shared")];
         let list = |paths: &[&str], declared: &[PathBuf]| {
-            told_list(Some(&regions(paths)), &[], &orchestrator(), declared)
+            told_list(Some(&regions(paths)), &[], &orchestrator(), declared, None)
         };
         let mut state = ToldDirectories::started(list(&["/shared"], &[]));
         assert!(state.delegation_mentioned);

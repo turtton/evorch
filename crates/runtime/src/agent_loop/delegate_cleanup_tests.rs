@@ -126,7 +126,7 @@ fn fixture_with_model(
         scratch: None,
         allowed_directories: None,
         thread_read_dirs: Vec::new(),
-        thread_mount_root: None,
+        worker_base: None,
         delegated_thread_dirs: Default::default(),
         told_directories: Default::default(),
         allowed_instructions: Default::default(),

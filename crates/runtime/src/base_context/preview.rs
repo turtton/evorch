@@ -161,6 +161,7 @@ impl AgentRuntime {
                 &thread_read_dirs,
                 &policy,
                 &thread_read_dirs,
+                None,
             )
         });
         let mut sections = compose_system_sections(
