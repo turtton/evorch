@@ -90,9 +90,22 @@ fn completed_costs_accumulate_by_profile_and_model() {
     overlay.apply_event(&completed("model"));
     overlay.refresh_costs(&settings());
     assert!((overlay.cost("run-1").expect("cost") - 0.082316).abs() < 1e-10);
+    assert!(!overlay.cost_is_partial("run-1"));
     overlay.apply_event(&completed("unknown"));
     overlay.refresh_costs(&settings());
-    assert_eq!(overlay.cost("run-1"), None);
+    assert!((overlay.cost("run-1").expect("cost") - 0.082316).abs() < 1e-10);
+    assert!(overlay.cost_is_partial("run-1"));
+}
+
+/// A sandbox escalation review billed to the run with a model that has no price.
+fn unpriced_review() -> Event {
+    let mut event = completed("unknown");
+    if let event_bus::EventKind::Provider(ProviderEvent::RequestCompleted { purpose, .. }) =
+        &mut event.kind
+    {
+        *purpose = Some(event_bus::RequestPurpose::EscalationReview);
+    }
+    event
 }
 
 #[tokio::test]
@@ -148,6 +161,7 @@ fn telemetry_usage_renders_in_thread_subagents_pane() {
     tasks.refresh();
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed("model"));
+    overlay.apply_event(&unpriced_review());
     overlay.refresh_costs(&settings());
     let mut harness = Harness::new_ui(move |ui| {
         gui::panes::agents::subagents_pane(
@@ -159,7 +173,8 @@ fn telemetry_usage_renders_in_thread_subagents_pane() {
         );
     });
     harness.run();
-    for label in ["worker", "input 98300", "output 15400"] {
+    // The review adds its tokens, and its missing price leaves a lower-bound cost.
+    for label in ["worker", "input 196600", "output 30800", "$0.041*"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }

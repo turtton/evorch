@@ -140,6 +140,8 @@ pub struct TelemetryOverlay {
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, Vec<pricing::BilledRequest>>,
     costs: BTreeMap<String, f64>,
+    /// Runs whose cost leaves out requests without a known price.
+    partially_priced: BTreeSet<String>,
     active_running_start: BTreeMap<String, Instant>,
     accumulated_running: BTreeMap<String, Duration>,
     context_order: u64,
@@ -152,8 +154,12 @@ pub struct TelemetryOverlay {
 pub struct ThreadMetrics {
     /// Sum across the conversation and every subagent owned by this thread.
     pub cost: Option<f64>,
+    /// `cost` leaves out requests without a known price.
+    pub cost_partial: bool,
     /// Only the conversation roots, excluding launched subagents.
     pub conversation_cost: Option<f64>,
+    /// `conversation_cost` leaves out requests without a known price.
+    pub conversation_cost_partial: bool,
     /// Billed `cache_read / input` of the latest request, kept for tooltips.
     pub cache_hit_rate: Option<f64>,
     /// Billed `cache_read / input` across the conversation, kept for tooltips.

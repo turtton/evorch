@@ -1,5 +1,6 @@
 use super::{AgentIdentity, AgentPaneAction, ConversationContext};
 use crate::format::{duration, usd};
+use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
 use crate::panes::agents::AgentsAction;
 use crate::theme::{
     icons,
@@ -83,9 +84,19 @@ pub(super) fn header_strip(
                         });
                     }
                 });
-                if let Some(cost) = ctx.thread_metrics.and_then(|metrics| metrics.cost) {
-                    ui.label(muted(format!("Total cost (incl. subagents) {}", usd(cost))))
-                        .on_hover_text("Main agent and all of its subagents in this thread");
+                if let Some(metrics) = ctx.thread_metrics
+                    && let Some(cost) = metrics.cost
+                {
+                    let marker = partial_marker(metrics.cost_partial);
+                    let mut hint = "Main agent and all of its subagents in this thread".to_owned();
+                    if metrics.cost_partial {
+                        hint = format!("{hint}\n{PARTIAL_COST_HINT}");
+                    }
+                    ui.label(muted(format!(
+                        "Total cost (incl. subagents) {}{marker}",
+                        usd(cost)
+                    )))
+                    .on_hover_text(hint);
                 }
             }
             if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty())
@@ -156,13 +167,26 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>, age
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
-        let cost = metrics.conversation_cost.map_or_else(|| "$—".into(), usd);
+        let cost = metrics.conversation_cost.map_or_else(
+            || "$—".into(),
+            |cost| {
+                format!(
+                    "{}{}",
+                    usd(cost),
+                    partial_marker(metrics.conversation_cost_partial)
+                )
+            },
+        );
         let scope = if agent_focused {
             "This agent's cost (incl. its subagents)"
         } else {
             "Main agent cost (excludes subagents)"
         };
-        metric_detailed(ui, &cost, &format!("{scope}: {cost}"), false);
+        let mut hint = format!("{scope}: {cost}");
+        if metrics.conversation_cost_partial {
+            hint = format!("{hint}\n{PARTIAL_COST_HINT}");
+        }
+        metric_detailed(ui, &cost, &hint, false);
         metric_detailed(
             ui,
             &metrics.cache_label(),

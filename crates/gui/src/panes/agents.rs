@@ -1,5 +1,6 @@
 use crate::model::durable_tasks::DurableTasksModel;
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
+use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::icons;
@@ -79,7 +80,11 @@ pub fn agents_pane<S: AgentRunSource>(
                     let now = std::time::Instant::now();
                     ui.horizontal_wrapped(|ui| {
                         for (index, segment) in value
-                            .compact_segments_at(now, telemetry.cost(&run_id))
+                            .compact_segments_at(
+                                now,
+                                telemetry.cost(&run_id),
+                                telemetry.cost_is_partial(&run_id),
+                            )
                             .iter()
                             .enumerate()
                         {
@@ -466,12 +471,15 @@ fn role_label(row: &TaskRow) -> String {
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
-        metric(
-            ui,
-            &metrics
-                .cost
-                .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
+        let cost = metrics.cost.map_or_else(
+            || "$—".into(),
+            |cost| format!("${cost:.3}{}", partial_marker(metrics.cost_partial)),
         );
+        if metrics.cost_partial {
+            metric_detailed(ui, &cost, PARTIAL_COST_HINT, false);
+        } else {
+            metric(ui, &cost);
+        }
         metric_detailed(
             ui,
             &metrics.cache_reuse.average_label(),
