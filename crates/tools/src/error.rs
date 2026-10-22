@@ -38,10 +38,28 @@ pub enum ToolError {
         path: String,
     },
     /// edit ツールの置換対象文字列がファイル内に見つからない。
-    #[error("編集対象の文字列が見つかりません: {path}")]
+    #[error("編集対象の文字列が見つかりません: {path}{}", edit_label(.edit))]
     EditTargetNotFound {
         /// 置換対象が見つからなかったファイルのパス。
         path: String,
+        /// `edits` 形式で失敗した要素の添字（0 始まり）。単一置換では `None`。
+        edit: Option<usize>,
+    },
+    /// `replace_all` なしの edit で、置換対象文字列がファイル内の複数箇所に一致した。
+    #[error(
+        "編集対象の文字列が {count} 箇所に一致し一意に定まりません: {path}{} ({} 行目)。前後の行を old_string に含めて一意にするか、すべて置換する場合は replace_all: true を指定してください",
+        edit_label(.edit),
+        line_list(.lines, .count)
+    )]
+    EditTargetNotUnique {
+        /// 対象のファイルのパス。
+        path: String,
+        /// `edits` 形式で失敗した要素の添字（0 始まり）。単一置換では `None`。
+        edit: Option<usize>,
+        /// 一致した箇所の数。
+        count: usize,
+        /// 先頭から最大 10 箇所の一致の開始行（1 始まり）。
+        lines: Vec<usize>,
     },
     /// grep ツールの検索パターンが不正な正規表現。
     #[error("検索パターンが不正です: {detail}")]
@@ -91,6 +109,25 @@ pub enum ToolError {
     },
 }
 
+/// `edits` 形式の要素を示す接尾辞。単一置換では空文字列。
+fn edit_label(edit: &Option<usize>) -> String {
+    edit.map(|index| format!(" (edits[{index}])"))
+        .unwrap_or_default()
+}
+
+/// 一致行の一覧。省略した一致があれば末尾に `…` を付ける。
+fn line_list(lines: &[usize], count: &usize) -> String {
+    let mut list = lines
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if *count > lines.len() {
+        list.push_str(", …");
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,8 +170,34 @@ mod tests {
             (
                 ToolError::EditTargetNotFound {
                     path: "a.txt".to_string(),
+                    edit: None,
                 },
                 "編集対象の文字列が見つかりません: a.txt",
+            ),
+            (
+                ToolError::EditTargetNotFound {
+                    path: "a.txt".to_string(),
+                    edit: Some(2),
+                },
+                "編集対象の文字列が見つかりません: a.txt (edits[2])",
+            ),
+            (
+                ToolError::EditTargetNotUnique {
+                    path: "a.txt".to_string(),
+                    edit: None,
+                    count: 2,
+                    lines: vec![3, 9],
+                },
+                "編集対象の文字列が 2 箇所に一致し一意に定まりません: a.txt (3, 9 行目)。前後の行を old_string に含めて一意にするか、すべて置換する場合は replace_all: true を指定してください",
+            ),
+            (
+                ToolError::EditTargetNotUnique {
+                    path: "a.txt".to_string(),
+                    edit: Some(1),
+                    count: 12,
+                    lines: vec![1, 1, 2],
+                },
+                "編集対象の文字列が 12 箇所に一致し一意に定まりません: a.txt (edits[1]) (1, 1, 2, … 行目)。前後の行を old_string に含めて一意にするか、すべて置換する場合は replace_all: true を指定してください",
             ),
             (
                 ToolError::InvalidPattern {

@@ -122,6 +122,7 @@ mod tests {
             (
                 ToolError::EditTargetNotFound {
                     path: sentinel.clone(),
+                    edit: Some(1),
                 },
                 "edit_target_not_found",
             ),
@@ -479,6 +480,7 @@ impl ToolErrorClass {
             },
             ToolError::EditTargetNotFound {
                 path: String::new(),
+                edit: None,
             },
         ]
         .iter()

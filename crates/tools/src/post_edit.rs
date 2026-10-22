@@ -34,6 +34,15 @@ pub struct PostEditInput {
     pub content: Option<String>,
     pub old_string: Option<String>,
     pub new_string: Option<String>,
+    /// Pairs of an upstream `MultiEdit` input; `None` for `Write` and `Edit`.
+    pub edits: Option<Vec<PostEditReplacement>>,
+}
+
+/// One old/new pair of an upstream `MultiEdit` input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PostEditReplacement {
+    pub old_string: String,
+    pub new_string: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,20 +243,23 @@ fn payload(input: &PostEditInput) -> Result<Vec<u8>, PostEditOutcome> {
         old_string: &'a Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_string: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edits: &'a Option<Vec<PostEditReplacement>>,
     }
     #[derive(Serialize)]
     struct Payload<'a> {
         tool_name: &'static str,
         tool_input: ToolInput<'a>,
     }
-    if !input_fits(
-        &input.file_path,
-        &[
-            input.content.as_deref().unwrap_or_default(),
-            input.old_string.as_deref().unwrap_or_default(),
-            input.new_string.as_deref().unwrap_or_default(),
-        ],
-    ) {
+    let mut parts = vec![
+        input.content.as_deref().unwrap_or_default(),
+        input.old_string.as_deref().unwrap_or_default(),
+        input.new_string.as_deref().unwrap_or_default(),
+    ];
+    for edit in input.edits.iter().flatten() {
+        parts.extend([edit.old_string.as_str(), edit.new_string.as_str()]);
+    }
+    if !input_fits(&input.file_path, &parts) {
         return Err(unavailable(
             UnavailableReason::InputTooLarge,
             "checker input exceeds 2 MiB",
@@ -263,6 +275,7 @@ fn payload(input: &PostEditInput) -> Result<Vec<u8>, PostEditOutcome> {
                 content: &input.content,
                 old_string: &input.old_string,
                 new_string: &input.new_string,
+                edits: &input.edits,
             },
         },
     )

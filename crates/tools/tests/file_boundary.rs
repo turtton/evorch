@@ -497,7 +497,20 @@ async fn write_escalation_shows_bounded_change_to_the_reviewer() {
             &context(),
             "edit",
             "e",
-            json!({"path": layout.outside.join("notes.txt"), "old_string":"xx", "new_string":"yy", "sandbox_access":"unsandboxed", "justification":"user asked"}),
+            json!({"path": layout.outside.join("notes.txt"), "old_string":"xx", "new_string":"yy", "replace_all": true, "sandbox_access":"unsandboxed", "justification":"user asked"}),
+        )
+        .await
+        .unwrap();
+    std::fs::write(layout.outside.join("list.txt"), "first\nsecond\n").unwrap();
+    executor
+        .execute(
+            &context(),
+            "edit",
+            "m",
+            json!({"path": layout.outside.join("list.txt"), "edits": [
+                {"old_string":"first", "new_string":"1"},
+                {"old_string":"second", "new_string":"2"},
+            ], "sandbox_access":"unsandboxed", "justification":"user asked"}),
         )
         .await
         .unwrap();
@@ -512,11 +525,25 @@ async fn write_escalation_shows_bounded_change_to_the_reviewer() {
         "{change}"
     );
     let edit = requests[1].change.as_deref().unwrap();
-    assert!(edit.contains("old_string:\nxx") && edit.contains("new_string:\nyy"));
     assert!(
-        std::fs::read_to_string(layout.outside.join("notes.txt"))
-            .unwrap()
-            .starts_with("yy")
+        edit.contains("old_string:\nxx")
+            && edit.contains("new_string:\nyy")
+            && edit.contains("replace_all: true"),
+        "{edit}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layout.outside.join("notes.txt")).unwrap(),
+        "y".repeat(10_000)
+    );
+    let edits = requests[2].change.as_deref().unwrap();
+    assert!(
+        edits.contains("edits[0].old_string:\nfirst\nedits[0].new_string:\n1")
+            && edits.contains("edits[1].old_string:\nsecond\nedits[1].new_string:\n2"),
+        "{edits}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layout.outside.join("list.txt")).unwrap(),
+        "1\n2\n"
     );
 }
 

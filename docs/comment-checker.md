@@ -17,8 +17,11 @@ evorch does not download or bundle the CLI. Its standalone Rust integration
 remains MIT-licensed and does not require embedding the external checker.
 
 The integration contract was checked against upstream v0.8.2: `check --prompt`
-with upstream `Write`/`Edit`-shaped input. This is not a claim about npm's latest
-version; verify upstream packaging before choosing an installation method.
+with upstream `Write`/`Edit`/`MultiEdit`-shaped input. An `edit` call that
+changes one replacement sends `Edit`; one whose `edits` change several sends a
+single `MultiEdit` with only the changed `old_string`/`new_string` pairs. This
+is not a claim about npm's latest version; verify upstream packaging before
+choosing an installation method.
 
 ## Configure
 

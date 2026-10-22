@@ -359,14 +359,45 @@ fn boundary_denial(path: &Path, read_only: bool) -> String {
 const MAX_CHANGE_BYTES: usize = 4000;
 
 fn requested_change(name: &str, args: &serde_json::Value) -> Option<String> {
-    let text = |key: &str| args.get(key).and_then(serde_json::Value::as_str);
+    fn text<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        value.get(key)?.as_str()
+    }
+    let replace_all = |value: &serde_json::Value| {
+        value
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    };
     match name {
-        "write" => text("content").map(|content| bounded(content, MAX_CHANGE_BYTES)),
-        "edit" => Some(format!(
-            "old_string:\n{}\nnew_string:\n{}",
-            bounded(text("old_string")?, MAX_CHANGE_BYTES / 2),
-            bounded(text("new_string")?, MAX_CHANGE_BYTES / 2)
-        )),
+        "write" => text(args, "content").map(|content| bounded(content, MAX_CHANGE_BYTES)),
+        "edit" => {
+            let Some(edits) = args.get("edits").and_then(serde_json::Value::as_array) else {
+                let mut change = format!(
+                    "old_string:\n{}\nnew_string:\n{}",
+                    bounded(text(args, "old_string")?, MAX_CHANGE_BYTES / 2),
+                    bounded(text(args, "new_string")?, MAX_CHANGE_BYTES / 2)
+                );
+                if replace_all(args) {
+                    change.push_str("\nreplace_all: true");
+                }
+                return Some(change);
+            };
+            // Share the budget so a large first edit cannot hide later ones.
+            let budget = MAX_CHANGE_BYTES / (2 * edits.len().max(1));
+            let mut parts = Vec::with_capacity(edits.len());
+            for (index, edit) in edits.iter().enumerate() {
+                let mut part = format!(
+                    "edits[{index}].old_string:\n{}\nedits[{index}].new_string:\n{}",
+                    bounded(text(edit, "old_string")?, budget),
+                    bounded(text(edit, "new_string")?, budget)
+                );
+                if replace_all(edit) {
+                    part.push_str(&format!("\nedits[{index}].replace_all: true"));
+                }
+                parts.push(part);
+            }
+            Some(bounded(&parts.join("\n"), MAX_CHANGE_BYTES))
+        }
         _ => None,
     }
 }

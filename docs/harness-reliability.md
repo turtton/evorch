@@ -7,6 +7,21 @@
   single line larger than the byte limit without splitting a UTF-8 character.
 - `write({path, content})` creates or fully replaces a file. `edit` replaces a
   nonempty `old_string` in an existing file. Empty search text is rejected.
+  Without `replace_all: true`, `old_string` must match exactly one location;
+  several matches fail with their line numbers and leave the file unchanged.
+  `edits: [{old_string, new_string, replace_all?}]` applies several
+  replacements to one file in one call. Every `old_string` is matched against
+  the original contents, matches must not overlap, and either all are written
+  or none; errors name the failing `edits[i]`. A call sends either
+  `old_string`/`new_string` or `edits`, not both. In a file whose line breaks
+  are all CRLF, LF line breaks in `old_string` and `new_string` are treated as
+  CRLF. In a file that mixes CRLF and LF, a multi-line `old_string` written with
+  LF is matched as CRLF only when nothing matches as written, and its
+  `new_string` is then written with CRLF too. Other bytes, including a byte
+  order mark, are left as they are. An edit that leaves the contents unchanged
+  reports `No changes` without rewriting the file. Prefer `edit`/`write` to
+  shell `sed -i`, heredocs or scripts: only they return the diff and run the
+  post-edit comment checker.
 - Relative file paths and shell `cwd` (including `.`) resolve from the run's
   workspace. File tools do not change the application's process directory.
 

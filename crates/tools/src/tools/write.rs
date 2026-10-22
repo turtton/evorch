@@ -44,7 +44,7 @@ impl Tool for Write {
     }
 
     fn description(&self) -> &str {
-        "Create a UTF-8 file or replace its entire contents atomically using path and content. The parent directory must already exist. Use edit for targeted replacements in an existing file."
+        "Create a UTF-8 file or replace its entire contents atomically using path and content. Prefer this over shell heredocs, redirection or scripts for writing files. The parent directory must already exist. Use edit for targeted replacements in an existing file."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -114,6 +114,7 @@ impl Tool for Write {
                     content: None,
                     old_string: Some(previous),
                     new_string: Some(content.to_owned()),
+                    edits: None,
                 },
                 None => PostEditInput {
                     tool_name: "Write",
@@ -121,6 +122,7 @@ impl Tool for Write {
                     content: Some(content.to_owned()),
                     old_string: None,
                     new_string: None,
+                    edits: None,
                 },
             };
             apply_post_edit(hook.as_ref(), &input, &mut result).await;
