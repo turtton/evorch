@@ -366,13 +366,16 @@ async fn lessons_land_in_the_project_the_run_worked_in() {
 }
 
 #[tokio::test]
-async fn typed_rejection_keeps_lesson_as_candidate() {
+async fn typed_rejection_marks_lesson_rejected() {
+    // Given: a reviewer that submits a typed reject verdict.
     let fixture = Fixture::new(ReviewMode::Reject);
     let source = fixture.start().await;
+    // When: post-run learning completes.
     assert_eq!(fixture.learning(source).await, Ok(()));
+    // Then: the verdict is recorded, so the lesson no longer looks unreviewed.
     let entries = fixture.entries();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].status, MemoryStatus::Candidate);
+    assert_eq!(entries[0].status, MemoryStatus::Rejected);
 }
 
 #[tokio::test]

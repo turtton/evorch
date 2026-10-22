@@ -322,6 +322,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
+    /// Lets the Memory pane reject lessons through the shared storage writer.
+    pub fn with_memory_writer(mut self, handle: storage::StorageHandle) -> Self {
+        self.memory.handle = Some(handle);
+        self
+    }
+
     pub fn with_diagnostic_storage(
         mut self,
         handle: storage::StorageHandle,

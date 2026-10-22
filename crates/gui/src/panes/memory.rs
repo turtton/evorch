@@ -1,17 +1,22 @@
 use std::path::{Path, PathBuf};
 
 use storage::memory::{MemoryEntry, MemoryStatus};
-use storage::{Database, StorageConfig};
+use storage::{Database, StorageConfig, StorageHandle};
 
 #[derive(Default)]
 pub struct MemoryPane {
     pub config: Option<StorageConfig>,
+    /// Writer for rejecting lessons; without it the pane is read-only.
+    pub handle: Option<StorageHandle>,
     pub query: String,
     pub status: Option<MemoryStatus>,
     root: Option<PathBuf>,
     project: String,
     entries: Vec<MemoryEntry>,
     error: Option<String>,
+    /// Lesson awaiting confirmation, since rejection cannot be undone.
+    confirm_reject: Option<String>,
+    stale: bool,
 }
 
 impl MemoryPane {
@@ -24,8 +29,9 @@ impl MemoryPane {
             ui.label("Memory storage is not connected.");
             return;
         }
-        let mut refresh = self.root.as_deref() != Some(repo_root);
-        if refresh {
+        let mut refresh = std::mem::take(&mut self.stale);
+        if self.root.as_deref() != Some(repo_root) {
+            refresh = true;
             self.root = Some(repo_root.to_path_buf());
             self.project = crate::runtime_sink::derive_repo_slug(repo_root);
         }
@@ -76,6 +82,7 @@ impl MemoryPane {
             "{} lessons (up to 100)",
             self.entries.len()
         )));
+        let mut reject = None;
         egui::ScrollArea::vertical()
             .id_salt("memory_results")
             .show(ui, |ui| {
@@ -94,9 +101,40 @@ impl MemoryPane {
                             ui.label(&entry.lesson.evidence);
                             ui.monospace(&entry.lesson.task_id);
                         });
+                        if self.handle.is_some() && entry.status != MemoryStatus::Rejected {
+                            ui.horizontal(|ui| {
+                                if self.confirm_reject.as_ref() == Some(&entry.lesson.id) {
+                                    ui.label("Reject permanently?");
+                                    if ui.button("Confirm reject").clicked() {
+                                        reject = Some(entry.lesson.id.clone());
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        self.confirm_reject = None;
+                                    }
+                                } else if ui
+                                    .button("Reject")
+                                    .on_hover_text(
+                                        "Stop using this lesson in task prompts. Cannot be undone.",
+                                    )
+                                    .clicked()
+                                {
+                                    self.confirm_reject = Some(entry.lesson.id.clone());
+                                }
+                            });
+                        }
                         ui.separator();
                     });
                 }
             });
+        if let Some(id) = reject
+            && let Some(handle) = &self.handle
+        {
+            self.confirm_reject = None;
+            match handle.reject_lesson(&id) {
+                Ok(()) => self.stale = true,
+                Err(error) => self.error = Some(error.to_string()),
+            }
+            ui.ctx().request_repaint();
+        }
     }
 }

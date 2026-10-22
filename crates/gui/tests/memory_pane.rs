@@ -1,7 +1,7 @@
 use egui_kittest::{Harness, kittest::Queryable};
 use gui::panes::memory::MemoryPane;
 use storage::memory::{Lesson, MemoryStatus};
-use storage::{Storage, StorageConfig};
+use storage::{Database, Storage, StorageConfig};
 
 fn repo(root: &std::path::Path, origin: &str) {
     std::fs::create_dir_all(root).unwrap();
@@ -62,4 +62,67 @@ fn memory_pane_search_and_filter_use_persisted_projection() {
     harness.get_by_label("Refresh").click();
     harness.run();
     harness.get_by_label("Bound concurrency");
+}
+
+#[test]
+fn memory_pane_rejects_a_lesson_only_after_confirmation() {
+    // Given: a promoted lesson the pane can write through the storage writer.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("checkout");
+    repo(&root, "https://github.com/owner/name.git");
+    let config = StorageConfig {
+        db_path: dir.path().join("memory.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let handle = store.handle();
+    handle
+        .append_lesson(&Lesson {
+            id: "l".into(),
+            project: "owner/name".into(),
+            task_id: "t".into(),
+            content: "Always prefer tabs".into(),
+            evidence: "test:tabs".into(),
+            scope: storage::memory::LessonScope::User,
+        })
+        .unwrap();
+    handle.validate_lesson("l", "test:tabs").unwrap();
+    handle.promote_lesson("l").unwrap();
+    let mut pane = MemoryPane::default();
+    pane.config = Some(config.clone());
+    pane.handle = Some(handle);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(700.0, 500.0))
+        .build_ui_state(
+            move |ui, pane: &mut MemoryPane| pane.render(ui, Some(&root)),
+            pane,
+        );
+    let status = || {
+        Database::open(&config)
+            .unwrap()
+            .memory_history("l")
+            .unwrap()
+            .last()
+            .unwrap()
+            .status
+    };
+    harness.run();
+
+    // When: Reject is clicked and then cancelled.
+    harness.get_by_label("Reject").click();
+    harness.run();
+    harness.get_by_label("Cancel").click();
+    harness.run();
+    // Then: nothing is written.
+    assert_eq!(status(), MemoryStatus::Promoted);
+
+    // When: Reject is clicked and confirmed.
+    harness.get_by_label("Reject").click();
+    harness.run();
+    harness.get_by_label("Confirm reject").click();
+    harness.run();
+    // Then: the lesson is rejected and the pane no longer offers rejecting it.
+    assert_eq!(status(), MemoryStatus::Rejected);
+    harness.get_by_label("rejected");
+    assert!(harness.query_by_label("Reject").is_none());
 }
