@@ -213,12 +213,26 @@ impl Default for ProviderStatus {
     }
 }
 
+/// A follow-up accepted while its run was busy. It stays above the composer
+/// until the runtime reports it entered the agent's context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedFollowUp {
+    /// What the user typed; restoring it re-expands `@skill` mentions.
+    pub text: String,
+    /// The expanded prompt the agent receives and the transcript shows.
+    pub prompt: String,
+    /// The run ended first, so the runtime dropped it.
+    pub undelivered: bool,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
     /// Live descendants of the active conversation root, refreshed before rendering.
     pub running_children: usize,
     /// Refreshed from runtime receipt state for the active conversation only.
     pub follow_ups: runtime::FollowUpStatus,
+    /// The active conversation's queued follow-ups, oldest (next to send) first.
+    pub queued: Vec<QueuedFollowUp>,
     pub role: ComposerRole,
     /// The first chat submission fixes this thread's role until another thread is selected.
     pub role_locked: bool,

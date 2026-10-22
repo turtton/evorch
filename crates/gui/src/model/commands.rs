@@ -78,9 +78,6 @@ pub enum WorkbenchCommand {
     DeliverFollowUpsNextTurn {
         thread_id: String,
     },
-    CancelChat {
-        thread_id: String,
-    },
     SubmitGoal(GoalSubmission),
     SetGoalReview {
         thread_id: String,
@@ -260,8 +257,7 @@ impl CommandSink for FixtureLoopAdapter {
             WorkbenchCommand::ContinueChat(_) => vec![LoopEvent::CommandRejected {
                 reason: "No resumable conversation in demo mode".into(),
             }],
-            WorkbenchCommand::CancelChat { .. }
-            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }

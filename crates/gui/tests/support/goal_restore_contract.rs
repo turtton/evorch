@@ -1,20 +1,23 @@
 use super::*;
 
 #[test]
-fn composer_cancel_reaches_restored_goal_and_followup_restores_again() {
+fn composer_stop_reaches_restored_goal_and_followup_restores_again() {
     // Given: a terminal goal resumed through the composer.
     let mut fixture = Fixture::with_success(true);
     fixture.submit("/goal fixture");
     let root = fixture.wait_phase(AgentRunPhase::Done);
     fixture.submit("continue");
     assert_eq!(fixture.wait_phase(AgentRunPhase::Waiting), root);
-    // When: composer cancellation is followed by another ordinary follow-up.
-    let cancel = fixture.sink.submit(WorkbenchCommand::CancelChat {
+    // When: composer Stop is followed by another ordinary follow-up.
+    let stop = fixture.sink.submit(WorkbenchCommand::StopChat {
         thread_id: "thread-1".into(),
     });
-    assert!(cancel.is_empty(), "{cancel:?}");
+    assert!(
+        matches!(stop.as_slice(), [LoopEvent::ChatStopped { .. }]),
+        "{stop:?}"
+    );
     fixture.rt.block_on(fixture.runtime.wait(root)).unwrap();
-    let events = fixture.submit("continue after cancel");
+    let events = fixture.submit("continue after stop");
     // Then: the same root resumes with the complete history and no extra goal.
     assert!(
         matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string())

@@ -68,8 +68,21 @@ impl AgentModel for GatedModel {
     }
 }
 
+fn user_messages(h: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
+    h.state()
+        .transcripts()
+        .thread()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            gui::model::transcript::TranscriptEntry::UserMessage { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
+fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
     for goal in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -163,21 +176,23 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
         h.run();
         h.click_label("Queue");
         h.run();
-        assert!(h.has_label("1 message queued — not yet seen by the agent (usually delivered once it finishes answering)"));
+        assert!(h.has_label("Queued: queued follow-up"));
+        assert!(!user_messages(&h).contains(&"queued follow-up".to_owned()));
         assert_eq!(runtime.follow_up_status(run).unwrap().pending, 1);
         h.state_mut()
             .switch_thread(ThreadId::new("thread-2"))
             .unwrap();
         h.run();
-        assert!(!h.has_label("Deliver next turn"));
+        assert!(!h.has_label("Send sooner"));
+        assert!(!h.has_label("Queued: queued follow-up"));
         h.state_mut()
             .switch_thread(ThreadId::new("thread-1"))
             .unwrap();
         h.run();
-        h.click_label("Deliver next turn");
+        h.click_label("Send sooner");
         h.run();
         assert!(runtime.follow_up_status(run).unwrap().next_turn_requested);
-        assert!(h.has_label("1 message queued — delivered on the next turn, after the current response and tools finish"));
+        assert!(h.has_label("Sending after the current tools"));
         assert_eq!(model.calls.load(Ordering::SeqCst), 1);
         model.release[0].notify_one();
         rt.block_on(async {
@@ -186,7 +201,8 @@ fn gui_delivery_banner_and_action_track_chat_and_goal_receipts() {
                 .unwrap();
         });
         h.run();
-        assert!(!h.has_label("Deliver next turn"));
+        assert!(!h.has_label("Queued: queued follow-up"));
+        assert!(user_messages(&h).contains(&"queued follow-up".to_owned()));
         assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
         let messages = model.messages.lock().unwrap();
         assert!(

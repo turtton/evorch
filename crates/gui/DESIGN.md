@@ -80,7 +80,13 @@ transcript row stays visible. Only in-progress procedures use TEXT and a
 half-filled circle; pending (circle) and completed (check) use TEXT_MUTED.
 The sandbox button shows a shield and the escalation mode (auto review, ask me,
 always deny), explained on hover. Stop halts the current run; a stopped run with
-live subagents shows Stop all for the subtree. Both tooltips name the scope.
+live subagents shows Stop subagents for the subtree. Both tooltips name the scope.
+Stopped runs stay resumable; there is no separate discard control.
+Follow-ups sent while a run is busy wait in the band above goal and procedures,
+oldest first and in TEXT, later ones in TEXT_MUTED. Only the next one carries a
+return-key button (tooltip "Send sooner"), replaced by an hourglass once
+requested. They join the transcript when the runtime consumes them; ones a
+finished run dropped show a warning icon with edit and dismiss buttons.
 Self-improvement drafts settings sit in the ⚙ menu, not the composer.
 The thread header shows `Total cost (incl. subagents)`; the status strip cost
 covers the main agent only and says so on hover. Wall time uses format::duration.

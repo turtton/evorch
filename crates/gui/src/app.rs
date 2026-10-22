@@ -9,6 +9,7 @@ mod composer;
 mod conversation;
 mod escalation;
 mod external_commands;
+mod follow_ups;
 mod frame;
 mod history;
 mod input;

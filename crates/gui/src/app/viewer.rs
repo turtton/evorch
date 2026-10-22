@@ -47,6 +47,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_ref()
             .and_then(|id| self.sink.follow_up_status(&id.to_string()))
             .unwrap_or_default();
+        self.reconcile_follow_ups();
         self.composer.resolved_model = self
             .sidebar
             .threads
@@ -332,7 +333,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Stop => self.stop_chat(),
                 ComposerAction::DeliverNextTurn => self.deliver_follow_ups_next_turn(),
-                ComposerAction::Discard => self.cancel_chat(),
+                ComposerAction::RestoreQueued(index) => self.restore_queued_follow_up(index),
+                ComposerAction::DismissQueued(index) => self.dismiss_queued_follow_up(index),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
                 ComposerAction::Complete(item) => self.composer.apply_completion(&item),
