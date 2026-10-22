@@ -187,6 +187,21 @@ impl LearningQueue {
             else {
                 continue;
             };
+            let status = Database::open(&self.config)?
+                .memory_history(&lesson.id)?
+                .last()
+                .map(|entry| entry.status);
+            // Record an explicit rejection so it is not mistaken for an unreviewed
+            // candidate; request_update leaves the candidate as it is.
+            if review.verdict == LessonVerdict::Reject {
+                if matches!(
+                    status,
+                    Some(MemoryStatus::Candidate | MemoryStatus::Validated)
+                ) {
+                    self.writer.reject_lesson(&lesson.id)?;
+                }
+                continue;
+            }
             if review.verdict != LessonVerdict::Approve
                 || review
                     .evidence_refs
@@ -201,8 +216,7 @@ impl LearningQueue {
             {
                 continue;
             }
-            let history = Database::open(&self.config)?.memory_history(&lesson.id)?;
-            match history.last().map(|entry| entry.status) {
+            match status {
                 Some(MemoryStatus::Candidate) => {
                     self.writer.validate_lesson(&lesson.id, &lesson.evidence)?;
                     self.writer.promote_lesson(&lesson.id)?;

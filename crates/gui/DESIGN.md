@@ -84,7 +84,8 @@ Self-improvement drafts settings sit in the ⚙ menu, not the composer.
 The thread header shows `Total cost (incl. subagents)`; the status strip cost
 covers the main agent only and says so on hover. Wall time uses format::duration.
 Memory uses labeled search and status controls, result count, expandable evidence,
-explicit empty/error states and refresh. Tasks retains its existing grid.
+explicit empty/error states and refresh. Reject asks for an inline confirmation,
+because a rejected lesson cannot return. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
 textures. States are stopped, starting, streaming and error. Stop remains available.
 
