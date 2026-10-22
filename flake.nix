@@ -237,8 +237,9 @@
           cargoExtraArgs = "-p gui -p browser-cef --features gui/cef,browser-cef/cef";
           CEF_PATH = cefDist;
         };
+        cefCargoArtifacts = craneLib.buildDepsOnly cefArgs;
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
-          cargoArtifacts = craneLib.buildDepsOnly cefArgs;
+          cargoArtifacts = cefCargoArtifacts;
           cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
           doCheck = false;
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
@@ -272,6 +273,21 @@
           meta.platforms = [ "x86_64-linux" ];
         });
         isCefSystem = system == "x86_64-linux";
+        # The default package on CEF systems: the CLI and tools from `evorch`,
+        # with `evorch-gui` launching the CEF build so presented HTML opens in
+        # the app (ADR 0034 B). Other systems fall back to `evorch`.
+        evorch-with-cef = pkgs.runCommand "evorch-with-cef-${commonArgs.version}" {
+          meta.mainProgram = "evorch-gui";
+          meta.platforms = [ "x86_64-linux" ];
+        } ''
+          mkdir -p $out/bin
+          for binary in evorch headless_capture native_qa_window; do
+            ln -s ${evorch}/bin/$binary $out/bin/$binary
+          done
+          ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui
+          ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
+        '';
+        defaultPackage = if isCefSystem then evorch-with-cef else evorch;
         devShell = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
@@ -303,25 +319,28 @@
       in
       {
         packages = {
-          default = evorch;
+          default = defaultPackage;
+          # Without CEF on every system; CI smoke-tests this one.
           inherit evorch;
-          evorch-gui = evorch;
+          evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
           # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
           # バイナリとセットで push することで次回 run の deps build を skip させる。
           evorch-deps = cargoArtifacts;
         } // pkgs.lib.optionalAttrs isCefSystem {
-          inherit evorch-gui-cef cefDist;
+          inherit evorch-gui-cef evorch-with-cef cefDist;
+          # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.
+          evorch-gui-cef-deps = cefCargoArtifacts;
         };
         checks.tests = tests;
         apps = {
           default = {
             type = "app";
-            program = "${evorch}/bin/evorch-gui";
+            program = "${defaultPackage}/bin/evorch-gui";
           };
           evorch-gui = {
             type = "app";
-            program = "${evorch}/bin/evorch-gui";
+            program = "${defaultPackage}/bin/evorch-gui";
           };
           evorch = {
             type = "app";

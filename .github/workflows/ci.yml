@@ -68,7 +68,8 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy -p gui --all-targets --features browser -- -D warnings
+          # `browser` is a default GUI feature; keep the build without it compiling.
+          cargo clippy -p gui --all-targets --no-default-features -- -D warnings
           cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
           mkdir -p "$EVORCH_CI_METADATA_DIR"
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
@@ -95,14 +96,6 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         timeout-minutes: 10
         run: cargo test --workspace --doc
-      # The default GUI suite above retains default-feature coverage. Only the
-      # browser pane, its integration tests, and GUI startup need another run.
-      - name: GUI browser feature tests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: |
-          source scripts/contract-test-filters.sh
-          cargo nextest run -p gui --features browser --lib --test browser --bin evorch-gui -E "$BROWSER_TEST_FILTER" --no-tests fail
       # ADR 0023: retain the opt-in OTLP end-to-end coverage.
       - name: Event bus otel-exporter tests
         env:
@@ -113,11 +106,6 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         timeout-minutes: 10
         run: cargo test -p event-bus --features otel-exporter --doc
-      - name: GUI browser feature doctests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        timeout-minutes: 10
-        run: cargo test -p gui --features browser --doc
       # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
       - name: Check config schema artifact is up to date
         env:
@@ -157,6 +145,9 @@ jobs:
           # out-link を明示する。
           nix build -L .#evorch --out-link ./result-evorch
           nix build -L .#evorch-deps --out-link ./result-deps
+          # The default package adds the CEF GUI build on x86_64-linux (ADR 0034).
+          nix build -L .#default --out-link ./result-default
+          nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
       # PR 同士の並行 push が tailscaled ingress を詰まらせるため (issue #72)、
       # attic への push は main の push に限る。PR は main の closure を substitute する。
       - name: Push to attic
@@ -166,7 +157,7 @@ jobs:
           # vendored crate sources) が attic に入らず毎回再 build になるため、
           # 出力の runtime closure ごと push して次回 run で substitute させる。
           # tailscaled ingress stalls under concurrent large uploads (issue #72); retry with backoff
-          CLOSURE=$(nix path-info --recursive ./result-evorch ./result-deps)
+          CLOSURE=$(nix path-info --recursive ./result-evorch ./result-deps ./result-default ./result-cef-deps)
           for attempt in 1 2 3 4; do
             if echo "$CLOSURE" | xargs -r attic push home; then
               exit 0

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-18）。利用者との設計相談で方針に合意した。[ADR 0029](0029-conversation-artifacts.md) が保留した「egui内でのwebview埋め込みと、会話内での対話的なHTML表示」を閉じる。ADR 0029 段階2の「HTMLはChromiumのスナップショットを撮り、操作はBrowser paneで行う」のうち、Browser paneの実体をこのADRで決める。
+Accepted（2026-10-18）。利用者との設計相談で方針に合意した。[ADR 0029](0029-conversation-artifacts.md) が保留した「egui内でのwebview埋め込みと、会話内での対話的なHTML表示」を閉じる。ADR 0029 段階2の「HTMLはChromiumのスナップショットを撮り、操作はBrowser paneで行う」のうち、Browser paneの実体をこのADRで決める。→ 2026-10-22 に、利用者との相談で配布の方針を変更した。Nixの既定パッケージ（x86_64-linux）はCEFを含み、`gui`の`browser` featureは既定で有効にする。cargoの`cef` featureはopt-inのまま残す（下記「配布」）。
 
 ## Context
 
@@ -88,6 +88,9 @@ CEFは`ozone-platform=headless`ならWayland、X11、ディスプレイなしの
 ### 配布
 
 - CEFは当面cargo featureでopt-inにする。
+  - 2026-10-22改訂: cargoの`cef` featureはopt-inのまま残す。既定で有効にすると、Nixの外のcargoビルド（CIの各jobと各開発環境）がCEF（展開後約1.8 GB）の取得を必要とするためである。
+  - 代わりにNixの既定パッケージ（`packages.default`と`evorch-gui`）を、x86_64-linuxではCEF入りにする。CLIなどは`evorch`から取り、`evorch-gui`は`evorch-gui-cef`を起動する。CEFの配布物がない他のsystemでは、これまでの`evorch`のままとする。CEFを含まない版は`.#evorch`で引き続き取得できる。
+  - `gui`の`browser` feature（Browser windowとAgent browser window）は既定で有効にする。`runtime`と`tools`がすでに`browser` crateに依存しているので、依存は増えない。`cef` featureも`browser`を有効にする。
 - Nixでは、cef-rsが固定するversionのCEF配布物を`fetchurl`でhashを固定して取得する。`libcef.so`をstripし、localeを絞る。helperバイナリをevorch-guiと同じディレクトリに置く。
 - SUIDの`chrome-sandbox`は使わず、user namespaceのsandboxに頼る。
 - GPUは既定で無効にし、GPU経路は後で評価する。

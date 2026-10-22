@@ -31,7 +31,7 @@ run gui cargo test -p gui --test user_questions_headless --test goal_restore_aut
 if [[ "$mode" == full ]]; then
     run workspace cargo test --workspace --no-fail-fast
     run lint cargo clippy --workspace --all-targets -- -D warnings
-    run browser cargo test -p gui --features browser
+    run gui-no-default cargo clippy -p gui --all-targets --no-default-features -- -D warnings
     run otel cargo test -p event-bus --features otel-exporter
 fi
 printf 'Passed. Logs are temporary files in %s; remove this directory when no longer needed.\n' "$out"

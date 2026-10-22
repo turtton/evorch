@@ -10,10 +10,14 @@ publish = false
 name = "gui"
 
 [features]
-default = []
+# The Browser and Agent browser windows. Runtime and tools link `browser`
+# regardless, so enabling them by default costs no extra dependency.
+default = ["browser"]
 browser = ["dep:browser"]
 # In-app HTML artifact preview on CEF; needs the CEF distribution (docs/browser.md).
-cef = ["dep:browser", "dep:browser-cef", "browser-cef/cef"]
+# Off by default so cargo builds never download CEF; the Nix default package
+# enables it on x86_64-linux.
+cef = ["browser", "dep:browser-cef", "browser-cef/cef"]
 
 [dependencies]
 browser = { path = "../browser", optional = true }

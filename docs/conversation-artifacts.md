@@ -20,7 +20,8 @@ their result, and the Orchestrator presents them.
 `inspect_artifact` opens an HTML artifact of the caller's conversation in an
 offline CEF page. The agent reads the page as an accessibility outline, clicks
 or types by ref, and takes screenshots. Only `evorch-gui` built with the `cef`
-feature offers it ([browser.md](browser.md)). The agents that may capture or
+feature (the Nix default package on x86_64-linux) offers it
+([browser.md](browser.md)). The agents that may capture or
 present artifacts may use it.
 
 These conditions come from the runtime (category, root, purpose), not from model
@@ -54,9 +55,13 @@ owner, thread and source path. There is no size quota or cleanup yet.
 
 The conversation card shows the title and caption, a scaled preview for images,
 and an **Open** button. Open passes the stored file to the desktop's default
-application through the XDG Desktop Portal (`OpenFile`), so HTML mocks open in
-the browser rather than the in-app file viewer. A card whose stored file is
-missing shows "Artifact unavailable".
+application through the XDG Desktop Portal (`OpenFile`), so images open in the
+desktop's viewer. HTML mocks open in an in-app CEF preview, and their cards show
+a snapshot, in builds with the `cef` feature: the Nix default package on
+x86_64-linux ([browser.md](browser.md)). Other builds pass HTML to the Portal
+as well, so it opens in the browser rather than the in-app file viewer, and the
+card shows no preview. A card whose stored file is missing shows
+"Artifact unavailable".
 
 Presentations are `ToolEvent::ArtifactsPresented` events. Restored
 conversations replay them and show the same cards; replay grants no tool
