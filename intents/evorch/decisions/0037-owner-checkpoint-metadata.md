@@ -175,6 +175,12 @@ TMPDIR=/tmp nix develop -c cargo run --locked -p evorch --bin evorch -- \
 - 目的は容量回収と redaction 前の生コピー削除である。ただし filesystem snapshot/backup/SSD の物理消去は
   保証しない。コピーを取る場合も秘密を含むものとして管理し、不要な backup は別途廃棄する。
 
+> **Addendum（コマンド削除）:** 上記コマンドは旧形式 payload を一度だけ回収する移行用であった。
+> 利用者の実環境 owners.db が約 47.6 MB から 73,728 B に縮小していることから掃除済みと判断し（payload 内容は未検査）、利用者判断により
+> `owner-checkpoints-compact` と `runtime::ownership::compact_owner_checkpoints` およびその試験を削除した。
+> 以降の記述・検証記録は当時の経緯として残す。#296 より前の旧バイナリを再び動かして生履歴が
+> 再導入された場合は、本節の手順を参照して git 履歴（PR #296）から復元するか、同等の offline 手順を再実装する。
+
 ### 5. 他 ADR・範囲（Q7・Q8・Q10）
 
 ADR 0024 Decision 4 の checkpoint は本 ADR のドレイン境界であることを Addendum で明確化する。
