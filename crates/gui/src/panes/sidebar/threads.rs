@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use egui::{Align, Layout, Sense, Ui};
+use egui::{Align, Layout, Rect, Sense, Stroke, Ui};
 use workspace_ui::{
-    ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
+    LineageKind, ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase,
+    ThreadState,
 };
 
 use crate::theme::icons;
@@ -17,6 +18,12 @@ const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
 
 /// Top-level families a project shows before, and per, "See more".
 const FAMILY_PAGE: usize = 5;
+
+/// Horizontal step per tree level; also the width of the caret and kind slots.
+const INDENT: f32 = 16.0;
+
+/// Extra space separating a family with children from its neighbours.
+const FAMILY_GAP: f32 = SP_1;
 
 /// A root's family, including every rewound version and their forks.
 pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
@@ -135,6 +142,9 @@ fn render_tree(
     archived: bool,
     action: &mut Option<SidebarAction>,
 ) {
+    let rails = tree_rails(rows);
+    // Rails bridge the vertical gap between rows so a branch reads as one line.
+    let row_gap = ui.spacing().item_spacing.y;
     let mut collapsed_depth = None;
     for (index, (thread, depth)) in rows.iter().copied().enumerate() {
         if collapsed_depth.is_some_and(|hidden_depth| depth > hidden_depth) {
@@ -142,25 +152,31 @@ fn render_tree(
         }
         collapsed_depth = None;
         let has_children = rows.get(index + 1).is_some_and(|(_, next)| *next > depth);
+        if family_gap_before(rows, index) {
+            ui.add_space(FAMILY_GAP);
+        }
         // This ID deliberately excludes the active/archive section and parent
         // widget, so moving a family preserves each branch's expansion state.
         let id = egui::Id::new(("sidebar-thread-children", &thread.project_id, &thread.id));
         let mut expansion =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
+        let display_root = workspace_ui::display_parent(&sidebar.threads, &thread.id).is_none();
+        let kind = branch_kind(&sidebar.threads, thread).filter(|_| !display_root);
         ui.push_id(&thread.id, |ui| {
             compact_row(ui, active, |ui| {
                 ui.spacing_mut().item_spacing.x = SP_1;
                 ui.spacing_mut().button_padding.x = SP_1;
-                ui.add_space(depth as f32 * 16.0);
+                ui.add_space(depth as f32 * INDENT);
                 let (rect, toggle) = ui.allocate_exact_size(
-                    egui::vec2(16.0, ROW_DENSE),
+                    egui::vec2(INDENT, ROW_DENSE),
                     if has_children {
                         Sense::click()
                     } else {
                         Sense::hover()
                     },
                 );
+                paint_rails(ui, rect, &rails[index], row_gap);
                 if has_children {
                     if toggle.clicked() {
                         expansion.toggle(ui);
@@ -194,9 +210,24 @@ fn render_tree(
                         egui::FontId::proportional(FONT_SMALL),
                         color,
                     );
+                    if expansion.is_open() {
+                        // Starts the children's rail just below the caret.
+                        ui.painter().vline(
+                            ui.painter().round_to_pixel_center(rect.center().x),
+                            rect.center().y + FONT_SMALL / 2.0..=rect.bottom() + row_gap / 2.0,
+                            rail_stroke(),
+                        );
+                    }
                 }
-                let display_root =
-                    workspace_ui::display_parent(&sidebar.threads, &thread.id).is_none();
+                if let Some(kind) = kind {
+                    // A leaf reuses its empty caret slot; a parent needs its own.
+                    let (slot, response) = if has_children {
+                        ui.allocate_exact_size(egui::vec2(INDENT, ROW_DENSE), Sense::hover())
+                    } else {
+                        (rect, toggle)
+                    };
+                    branch_kind_icon(ui, slot, response, kind);
+                }
                 if archived {
                     archived_row(ui, thread, display_root, action);
                 } else {
@@ -240,6 +271,124 @@ fn render_tree(
             )));
         }
     }
+}
+
+/// Why a thread hangs under its parent in the tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchKind {
+    /// A worker run escalated its task to this orchestrator conversation.
+    Escalation,
+    /// The user forked the parent conversation.
+    Fork,
+}
+
+/// A rewind replaces its source in place, so the kind comes from the original
+/// conversation of the thread's version group.
+fn branch_kind(threads: &[ThreadRecord], thread: &ThreadRecord) -> Option<BranchKind> {
+    let original_id = workspace_ui::version_root(threads, &thread.id);
+    let original = threads
+        .iter()
+        .find(|candidate| candidate.id == original_id)
+        .unwrap_or(thread);
+    if original.escalation_source_run_id.is_some() {
+        Some(BranchKind::Escalation)
+    } else if original
+        .lineage
+        .as_ref()
+        .is_some_and(|lineage| lineage.kind == LineageKind::Fork)
+    {
+        Some(BranchKind::Fork)
+    } else {
+        None
+    }
+}
+
+fn branch_kind_icon(ui: &Ui, slot: Rect, response: egui::Response, kind: BranchKind) {
+    let (icon, label, hint) = match kind {
+        BranchKind::Escalation => (
+            icons::ARROW_FAT_LINE_UP,
+            "Escalated thread",
+            "Escalated: a worker run handed its task to this orchestrator thread",
+        ),
+        BranchKind::Fork => (
+            icons::GIT_FORK,
+            "Forked thread",
+            "Forked from its parent thread",
+        ),
+    };
+    ui.painter().text(
+        slot.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(FONT_SMALL),
+        palette().TEXT_MUTED,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+    response.on_hover_text(hint);
+}
+
+/// A family with children is set apart from the rows around it; childless
+/// roots stay packed together.
+fn family_gap_before(rows: &[(&ThreadRecord, usize)], index: usize) -> bool {
+    let starts_family = rows.get(index).is_some_and(|(_, depth)| *depth == 0);
+    let has_children = rows.get(index + 1).is_some_and(|(_, depth)| *depth > 0);
+    let follows_children = index
+        .checked_sub(1)
+        .and_then(|previous| rows.get(previous))
+        .is_some_and(|(_, depth)| *depth > 0);
+    starts_family && index > 0 && (has_children || follows_children)
+}
+
+/// Tree guides per row: entry `level - 1` tells whether the branch at `level`
+/// (1..=depth) continues below the row, i.e. a later row at that level follows
+/// before the tree climbs above it.
+fn tree_rails(rows: &[(&ThreadRecord, usize)]) -> Vec<Vec<bool>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, (_, depth))| {
+            (1..=*depth)
+                .map(|level| {
+                    rows[index + 1..]
+                        .iter()
+                        .map(|(_, next)| *next)
+                        .find(|next| *next <= level)
+                        == Some(level)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn rail_stroke() -> Stroke {
+    // BORDER nearly vanishes on the black sidebar; a dimmed muted text tone
+    // stays visible in both palettes without competing with titles.
+    Stroke::new(1.0, palette().TEXT_MUTED.gamma_multiply(0.45))
+}
+
+/// Paints the rails left of `slot` (the row's caret slot): pass-through lines
+/// for ancestor branches that continue, and an elbow joining this row to its
+/// parent's rail.
+fn paint_rails(ui: &Ui, slot: Rect, continues: &[bool], row_gap: f32) {
+    let Some((own, ancestors)) = continues.split_last() else {
+        return;
+    };
+    let painter = ui.painter();
+    let stroke = rail_stroke();
+    let depth = continues.len();
+    let top = slot.top() - row_gap / 2.0;
+    let bottom = slot.bottom() + row_gap / 2.0;
+    let middle = painter.round_to_pixel_center(slot.center().y);
+    let rail_x = |level: usize| {
+        painter.round_to_pixel_center(slot.left() - (depth - level) as f32 * INDENT - INDENT / 2.0)
+    };
+    for (index, continues) in ancestors.iter().enumerate() {
+        if *continues {
+            painter.vline(rail_x(index + 1), top..=bottom, stroke);
+        }
+    }
+    let x = rail_x(depth);
+    painter.vline(x, top..=if *own { bottom } else { middle }, stroke);
+    painter.hline(x..=slot.left(), middle, stroke);
 }
 
 fn active_row(
@@ -514,13 +663,107 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use egui_kittest::{Harness, kittest::Queryable};
-    use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};
+    use workspace_ui::{
+        LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord, ThreadRunPhase, ThreadState,
+    };
 
     use super::{
-        Attention, active_row, family_has_running_runs, limit_families, nested_threads,
-        thread_family,
+        Attention, BranchKind, active_row, branch_kind, family_gap_before, family_has_running_runs,
+        limit_families, nested_threads, thread_family, tree_rails,
     };
     use crate::panes::sidebar::SidebarAction;
+
+    fn rows_at<'a>(
+        threads: &'a [ThreadRecord],
+        depths: &[usize],
+    ) -> Vec<(&'a ThreadRecord, usize)> {
+        threads.iter().zip(depths.iter().copied()).collect()
+    }
+
+    fn records(count: usize) -> Vec<ThreadRecord> {
+        (0..count)
+            .map(|index| {
+                let id = format!("t{index}");
+                ThreadRecord::new(ThreadId::new(&id), ProjectId::new("demo"), id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rails_continue_only_while_a_later_sibling_follows() {
+        // root / a / a1 / a2 / b / b1 / other
+        let threads = records(7);
+        let rows = rows_at(&threads, &[0, 1, 2, 2, 1, 2, 0]);
+        assert_eq!(
+            tree_rails(&rows),
+            [
+                vec![],
+                // a continues to its sibling b.
+                vec![true],
+                // a1: level 1 passes through toward b; a2 follows at level 2.
+                vec![true, true],
+                // a2 is a's last child, while level 1 still runs to b.
+                vec![true, false],
+                // b is the root's last child.
+                vec![false],
+                // b1 is b's last child, and nothing continues past it.
+                vec![false, false],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn family_gap_sets_apart_only_families_with_children() {
+        // solo / solo / family(root, child) / solo / solo
+        let threads = records(6);
+        let rows = rows_at(&threads, &[0, 0, 0, 1, 0, 0]);
+        let gaps: Vec<_> = (0..rows.len())
+            .map(|index| family_gap_before(&rows, index))
+            .collect();
+        assert_eq!(gaps, [false, false, true, false, true, false]);
+        // A leading family needs no gap above the first row.
+        let rows = rows_at(&threads, &[0, 1, 0]);
+        assert!(!family_gap_before(&rows, 0));
+        assert!(family_gap_before(&rows, 2));
+    }
+
+    #[test]
+    fn branch_kind_names_escalations_and_forks_through_rewinds() {
+        let project = ProjectId::new("demo");
+        let root = ThreadRecord::new(ThreadId::new("root"), project.clone(), "Root");
+        let mut escalated = ThreadRecord::new(ThreadId::new("esc"), project.clone(), "Esc");
+        escalated.parent_thread_id = Some(root.id.clone());
+        escalated.escalation_source_run_id = Some("run-worker".into());
+        let mut rewound = ThreadRecord::new(ThreadId::new("esc-v2"), project.clone(), "Esc");
+        rewound.parent_thread_id = Some(escalated.id.clone());
+        rewound.lineage = Some(ThreadLineage {
+            kind: LineageKind::Rewind,
+            point: None,
+        });
+        let mut fork = ThreadRecord::new(ThreadId::new("fork"), project.clone(), "Fork");
+        fork.parent_thread_id = Some(root.id.clone());
+        fork.lineage = Some(ThreadLineage {
+            kind: LineageKind::Fork,
+            point: None,
+        });
+        let mut legacy = ThreadRecord::new(ThreadId::new("legacy"), project, "Legacy");
+        legacy.parent_thread_id = Some(root.id.clone());
+        let threads = [
+            root.clone(),
+            escalated.clone(),
+            rewound.clone(),
+            fork.clone(),
+            legacy.clone(),
+        ];
+        let kind = |thread: &ThreadRecord| branch_kind(&threads, thread);
+        assert_eq!(kind(&root), None);
+        assert_eq!(kind(&escalated), Some(BranchKind::Escalation));
+        // A rewind does not copy the escalation source, but replaces it in place.
+        assert_eq!(kind(&rewound), Some(BranchKind::Escalation));
+        assert_eq!(kind(&fork), Some(BranchKind::Fork));
+        assert_eq!(kind(&legacy), None);
+    }
 
     #[test]
     fn thread_rows_keep_status_and_pin_without_fork_controls() {

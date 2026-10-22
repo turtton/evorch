@@ -32,6 +32,13 @@ pinned threads use egui's disabled painting and cannot activate Archive;
 while a family has a running or pending run, Archive is hidden and a running
 row's spinner takes its slot, so Pin stays in place.
 Thread titles open a right-click menu with Copy thread ID / Copy thread title.
+The thread list draws 1pt tree rails in TEXT_MUTED at 45% from each expanded
+parent's caret down to its last child, with an elbow into every child row.
+Child rows name why they are nested with a TEXT_MUTED marker: ARROW_FAT_LINE_UP
+"Escalated thread" or GIT_FORK "Forked thread", resolved through rewinds from
+the version group's original. A leaf child shows it in its empty caret slot;
+a child with children shows it after the caret. A family with children gets
+an extra SP_1 above and below; childless roots stay packed.
 Pending tool approvals, including a subagent's, mark the owning thread with the
 question's WARNING_FG dot and "Approval needed" text; beside a question dot they
 use a SHIELD_WARNING glyph instead so both stay distinguishable.

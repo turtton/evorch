@@ -8,7 +8,10 @@ use gui::model::tasks::AgentRunSource;
 use gui::panes::sidebar::{SidebarAction, sidebar_pane};
 use gui::theme::tokens::{SP_1, palette};
 use runtime::{AgentInspection, AgentSummary, RunId};
-use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, UiSettings};
+use workspace_ui::{
+    LineageKind, ProjectId, SidebarState, ThreadId, ThreadLineage, ThreadRecord, ThreadRunPhase,
+    UiSettings,
+};
 
 struct EmptySource;
 
@@ -564,4 +567,163 @@ fn thread_context_menu_copies_the_full_thread_id_and_title() {
         assert!(harness.query_by_label(item).is_none(), "{item} menu closed");
         assert_eq!(harness.state(), &None);
     }
+}
+
+/// Solo B, Solo A, Parent { Escalated { Nested }, Fork }, Solo C, newest first.
+fn branch_fixture_with_width(width: f32) -> Harness<'static, Option<SidebarAction>> {
+    let root = tempfile::tempdir().unwrap();
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("project");
+    sidebar
+        .add_project(project.clone(), "Project", root.path())
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    for (id, parent, title, updated_at) in [
+        ("solo-b", None, "Solo B", 300),
+        ("solo-a", None, "Solo A", 200),
+        ("root", None, "Parent", 100),
+        ("esc", Some("root"), "Escalated", 90),
+        ("nested", Some("esc"), "Nested", 85),
+        ("fork", Some("root"), "Fork", 80),
+        ("solo-c", None, "Solo C", 50),
+    ] {
+        let mut thread = ThreadRecord::new(ThreadId::new(id), project.clone(), title);
+        thread.parent_thread_id = parent.map(ThreadId::new);
+        thread.created_at = updated_at;
+        thread.updated_at = updated_at;
+        if matches!(id, "esc" | "nested") {
+            thread.escalation_source_run_id = Some(format!("run-worker-{id}"));
+        }
+        if id == "fork" {
+            thread.lineage = Some(ThreadLineage {
+                kind: LineageKind::Fork,
+                point: None,
+            });
+        }
+        sidebar.threads.push(thread);
+    }
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(width, 360.0))
+        .build_ui_state(
+            move |ui, action| {
+                let _keep_root = &root;
+                gui::theme::install(ui.ctx());
+                if let Some(next) = sidebar_pane(
+                    ui,
+                    &sidebar,
+                    &Default::default(),
+                    &Default::default(),
+                    &Default::default(),
+                    &Default::default(),
+                ) {
+                    *action = Some(next);
+                }
+            },
+            None,
+        );
+    harness.run_steps(3);
+    harness
+}
+
+#[test]
+fn child_rows_name_why_they_are_nested_beside_their_titles() {
+    let harness = branch_fixture();
+    let rect = |label: &str| harness.get_by_label(label).rect();
+    let kind_rects = |label: &str| {
+        harness
+            .query_all_by_label(label)
+            .map(|node| node.rect())
+            .collect::<Vec<_>>()
+    };
+    // Roots carry no kind marker; each child names its origin.
+    let escalated = kind_rects("Escalated thread");
+    let forked = kind_rects("Forked thread");
+    assert_eq!((escalated.len(), forked.len()), (2, 1));
+    let in_row = |marker: &egui::Rect, title: egui::Rect| {
+        (marker.center().y - title.center().y).abs() <= 1.0 && marker.right() <= title.left()
+    };
+    // A parent child keeps its caret, then the marker, then the title.
+    let toggle = rect("Collapse children of esc");
+    let title = rect("↳ Escalated");
+    let marker = escalated.iter().find(|r| in_row(r, title)).unwrap();
+    assert!(toggle.right() <= marker.left(), "{toggle:?} {marker:?}");
+    // A leaf child shows its marker in the empty caret slot.
+    let nested = rect("↳ Nested");
+    let marker = escalated.iter().find(|r| in_row(r, nested)).unwrap();
+    assert!(marker.left() > toggle.left(), "{marker:?} {toggle:?}");
+    let fork = rect("↳ Fork");
+    assert!(in_row(&forked[0], fork));
+    assert!((forked[0].left() - toggle.left()).abs() <= 0.5);
+}
+
+#[test]
+fn families_with_children_are_spaced_apart_from_neighbouring_rows() {
+    let harness = branch_fixture();
+    let top = |label: &str| harness.get_by_label(label).rect().top();
+    let pitch = top("Solo A") - top("Solo B");
+    assert!(pitch > 0.0);
+    // Inside a family, rows keep the ordinary pitch.
+    assert!((top("↳ Escalated") - top("Parent") - pitch).abs() <= 0.5);
+    // Entering and leaving the family adds the family gap.
+    assert!((top("Parent") - top("Solo A") - (pitch + SP_1)).abs() <= 0.5);
+    assert!((top("Solo C") - top("↳ Fork") - (pitch + SP_1)).abs() <= 0.5);
+}
+
+#[test]
+fn tree_rails_join_children_to_their_parent_and_stop_at_the_last_child() {
+    let harness = branch_fixture();
+    let rect = |label: &str| harness.get_by_label(label).rect();
+    // Vertical segments drawn at `x`, merged top to bottom.
+    let rail = |x: f32| {
+        let mut spans: Vec<(f32, f32)> = harness
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                Shape::LineSegment { points: [a, b], .. }
+                    if (a.x - b.x).abs() < 0.01 && (a.x - x).abs() <= 0.5 =>
+                {
+                    Some((a.y.min(b.y), a.y.max(b.y)))
+                }
+                _ => None,
+            })
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!(!spans.is_empty(), "no rail at x={x}");
+        for pair in spans.windows(2) {
+            assert!(pair[1].0 - pair[0].1 <= 1.0, "rail gap {spans:?}");
+        }
+        (
+            spans[0].0,
+            spans.iter().map(|span| span.1).fold(f32::MIN, f32::max),
+        )
+    };
+    // The root's rail runs from its caret to the middle of its last child.
+    let root_toggle = rect("Collapse children of root");
+    let (top, bottom) = rail(root_toggle.center().x);
+    assert!(top > root_toggle.center().y && top < root_toggle.bottom());
+    assert!((bottom - rect("↳ Fork").center().y).abs() <= 1.0);
+    // The nested rail ends at Nested even though the root's continues past it.
+    let esc_toggle = rect("Collapse children of esc");
+    let (top, bottom) = rail(esc_toggle.center().x);
+    assert!(top > esc_toggle.center().y && top < esc_toggle.bottom());
+    assert!((bottom - rect("↳ Nested").center().y).abs() <= 1.0);
+}
+
+fn branch_fixture() -> Harness<'static, Option<SidebarAction>> {
+    branch_fixture_with_width(600.0)
+}
+
+#[test]
+#[ignore = "writes thread tree PNG evidence using an offscreen adapter"]
+fn capture_thread_tree_png_evidence() {
+    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/gui-evidence/thread-tree");
+    std::fs::create_dir_all(&output).expect("evidence directory");
+    let mut harness = branch_fixture_with_width(320.0);
+    harness.run_steps(2);
+    let image = harness.render().expect("offscreen adapter");
+    image
+        .save(output.join("thread-tree.png"))
+        .expect("thread tree PNG");
 }
