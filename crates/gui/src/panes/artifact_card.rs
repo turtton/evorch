@@ -90,7 +90,12 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
             icons::FILE_HTML
         };
         ui.label(medium(icons::with_icon(icon, &artifact.title)).color(palette().TEXT));
-        if available && ghost_icon_button(ui, icons::ARROW_SQUARE_OUT, "Open").clicked() {
+        // Images open in the in-app viewer from their preview; the desktop's
+        // application stays in the preview's context menu.
+        if available
+            && !artifact.is_image()
+            && ghost_icon_button(ui, icons::ARROW_SQUARE_OUT, "Open").clicked()
+        {
             request_open(ui.ctx(), path.to_path_buf());
         }
     });
@@ -110,13 +115,28 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
             crate::panes::file_viewer::install_image_loader(ui.ctx());
             ui.add_space(SP_1);
             let width = ui.available_width().min(PREVIEW_MAX_WIDTH);
-            ui.add(
-                egui::Image::new(uri)
-                    .max_width(width)
-                    .max_height(PREVIEW_MAX_HEIGHT)
-                    .maintain_aspect_ratio(true),
-            )
-            .on_hover_text(&artifact.title);
+            let preview = ui
+                .add(
+                    egui::Image::new(uri)
+                        .alt_text(format!("{} preview", artifact.title))
+                        .max_width(width)
+                        .max_height(PREVIEW_MAX_HEIGHT)
+                        .maintain_aspect_ratio(true)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::ZoomIn)
+                .on_hover_text(format!(
+                    "Enlarge {} (right-click to open it in another app)",
+                    artifact.title
+                ));
+            if preview.clicked() {
+                crate::panes::image_viewer::open(
+                    ui.ctx(),
+                    path.to_path_buf(),
+                    artifact.title.clone(),
+                );
+            }
+            crate::panes::image_viewer::context_menu(&preview, path);
         }
     } else if let Some(snapshots) = HtmlSnapshots::installed(ui.ctx()) {
         html_snapshot(ui, &snapshots, artifact, path);

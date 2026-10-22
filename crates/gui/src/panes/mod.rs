@@ -11,6 +11,7 @@ pub mod composer;
 pub mod context_inspector;
 pub mod diff;
 pub mod file_viewer;
+pub mod image_viewer;
 mod ledger;
 pub mod markdown_render;
 pub mod memory;

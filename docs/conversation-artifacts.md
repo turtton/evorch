@@ -53,15 +53,23 @@ input. Each tool checks them again when it runs.
 `blobs/<sha256>.<ext>` holds content and `meta/<artifact_id>.json` holds the
 owner, thread and source path. There is no size quota or cleanup yet.
 
-The conversation card shows the title and caption, a scaled preview for images,
-and an **Open** button. Open passes the stored file to the desktop's default
-application through the XDG Desktop Portal (`OpenFile`), so images open in the
-desktop's viewer. HTML mocks open in an in-app CEF preview, and their cards show
-a snapshot, in builds with the `cef` feature: the Nix default package on
-x86_64-linux ([browser.md](browser.md)). Other builds pass HTML to the Portal
-as well, so it opens in the browser rather than the in-app file viewer, and the
-card shows no preview. A card whose stored file is missing shows
-"Artifact unavailable".
+The conversation card shows the title and caption and a scaled preview for
+images.
+
+- Images: clicking the preview opens an in-app viewer over the workbench. The
+  wheel or a pinch zooms around the pointer, dragging pans, and double-click
+  switches between fitting the window and actual size (one image pixel per
+  screen pixel). The toolbar and the keys `+`, `-`, `0` (fit) and `1` (actual
+  size) do the same, and Esc closes it. **Open in external app** in the
+  preview's or the viewer's context menu passes the file to the desktop's
+  default application through the XDG Desktop Portal (`OpenFile`).
+- HTML mocks: an **Open** button opens them in an in-app CEF preview, and their
+  cards show a snapshot, in builds with the `cef` feature: the Nix default
+  package on x86_64-linux ([browser.md](browser.md)). Other builds pass HTML to
+  the Portal, so it opens in the browser rather than the in-app file viewer,
+  and the card shows no preview.
+
+A card whose stored file is missing shows "Artifact unavailable".
 
 Presentations are `ToolEvent::ArtifactsPresented` events. Restored
 conversations replay them and show the same cards; replay grants no tool

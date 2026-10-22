@@ -130,6 +130,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ownership_time = ownership_started.elapsed();
         let render_started = Instant::now();
         self.render(ui);
+        crate::panes::image_viewer::show(&ctx);
         self.open_requested_artifacts(&ctx);
         let render_time = render_started.elapsed();
         let draft_started = Instant::now();
