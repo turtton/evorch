@@ -232,7 +232,7 @@ fn run_detail_body(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if let Some(branch) = branch {
-                branch::start_versions(ui, branch, branch_action);
+                branch::start_versions(ui, model, branch, branch_action);
             }
             let entries = model.visible_entries();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
@@ -294,7 +294,7 @@ fn run_detail_body(
                 if let TranscriptEntry::UserMessage { text } = entry {
                     user_bubble(ui, text);
                     if let Some(branch) = branch {
-                        branch::edit_button(ui, model, entry_id, branch);
+                        branch::edit_row(ui, model, entry_id, branch, branch_action);
                     }
                     continue;
                 }

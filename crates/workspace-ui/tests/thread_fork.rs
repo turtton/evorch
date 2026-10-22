@@ -1,7 +1,7 @@
 use serde_json::json;
 use workspace_ui::{
-    ForkPoint, LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord, branch_versions,
-    display_parent, normalize_versions, show_version, visible_version,
+    ForkPoint, LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord, display_parent,
+    normalize_versions, point_versions, show_version, visible_version,
 };
 
 fn thread(id: &str) -> ThreadRecord {
@@ -72,7 +72,7 @@ fn rewind_versions_share_one_sidebar_row_and_switch_in_place() {
     );
     let point = threads[1].lineage.clone().unwrap().point;
     assert_eq!(
-        branch_versions(&threads, &ThreadId::new("root"), point.as_ref()),
+        point_versions(&threads, &ThreadId::new("root"), point.as_ref()),
         vec![ThreadId::new("root"), ThreadId::new("v2")]
     );
     // When: restoring the pre-rewind version.
@@ -85,6 +85,41 @@ fn rewind_versions_share_one_sidebar_row_and_switch_in_place() {
         .collect();
     assert_eq!(visible, ["root", "fork"]);
     assert_eq!(threads.len(), 4);
+}
+
+#[test]
+fn versions_at_one_point_include_rewinds_of_rewinds() {
+    // Given: a root rewound at turn 4, that version rewound at turn 4 again, and an
+    // unrelated rewind of the root at turn 2.
+    let threads = vec![
+        thread("root"),
+        branched("v2", "root", LineageKind::Rewind, 4),
+        branched("v3", "v2", LineageKind::Rewind, 4),
+        branched("v4", "root", LineageKind::Rewind, 2),
+    ];
+    let at = |context_len| ForkPoint {
+        run_id: "run-1".into(),
+        context_len,
+    };
+    let ids = |names: &[&str]| -> Vec<ThreadId> {
+        names.iter().map(|name| ThreadId::new(*name)).collect()
+    };
+    // Then: every version after turn 4 lists the same flat set, from any member.
+    for member in ["root", "v2", "v3"] {
+        assert_eq!(
+            point_versions(&threads, &ThreadId::new(member), Some(&at(4))),
+            ids(&["root", "v2", "v3"])
+        );
+    }
+    // And: other points keep their own versions; a thread without rewinds is alone.
+    assert_eq!(
+        point_versions(&threads, &ThreadId::new("v4"), Some(&at(2))),
+        ids(&["root", "v4"])
+    );
+    assert_eq!(
+        point_versions(&threads, &ThreadId::new("v3"), None),
+        ids(&["v3"])
+    );
 }
 
 #[test]

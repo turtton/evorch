@@ -20,7 +20,7 @@ pub use errors::{
     LayoutError, PersistError, ProjectError, SettingsError, SidebarError, ThreadError,
 };
 pub use lineage::{
-    branch_versions, display_parent, normalize_versions, show_version, version_members,
+    display_parent, normalize_versions, point_versions, show_version, version_members,
     version_root, visible_version,
 };
 pub use panels::{Panel, PanelId, PanelKind, default_panels, default_panels_v02};

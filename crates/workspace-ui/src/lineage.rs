@@ -53,26 +53,56 @@ pub fn display_parent(threads: &[ThreadRecord], id: &ThreadId) -> Option<ThreadI
         .or_else(|| Some(parent.clone()))
 }
 
-/// Versions branching from `parent` at `point`: the parent itself first, then its
-/// rewinds at that point in creation order.
-pub fn branch_versions(
+fn rewound_to(thread: &ThreadRecord, point: Option<&ForkPoint>) -> bool {
+    thread.is_rewind()
+        && thread
+            .lineage
+            .as_ref()
+            .and_then(|lineage| lineage.point.as_ref())
+            == point
+}
+
+/// The versions of what follows `point` in `id`'s conversation: the conversation
+/// that was first rewound there, then every rewind to `point` reached from it
+/// (rewinds of rewinds included) in creation order. `id` is always included.
+pub fn point_versions(
     threads: &[ThreadRecord],
-    parent: &ThreadId,
+    id: &ThreadId,
     point: Option<&ForkPoint>,
 ) -> Vec<ThreadId> {
-    let mut versions = vec![parent.clone()];
+    let mut anchor = id.clone();
+    let mut visited = BTreeSet::new();
+    while visited.insert(anchor.clone()) {
+        match find(threads, &anchor) {
+            Some(thread) if rewound_to(thread, point) => match &thread.parent_thread_id {
+                Some(parent) if find(threads, parent).is_some() => anchor = parent.clone(),
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    let mut members = BTreeSet::from([anchor.clone()]);
+    loop {
+        let before = members.len();
+        for thread in threads {
+            if rewound_to(thread, point)
+                && thread
+                    .parent_thread_id
+                    .as_ref()
+                    .is_some_and(|parent| members.contains(parent))
+            {
+                members.insert(thread.id.clone());
+            }
+        }
+        if members.len() == before {
+            break;
+        }
+    }
+    let mut versions = vec![anchor.clone()];
     versions.extend(
         threads
             .iter()
-            .filter(|thread| {
-                thread.is_rewind()
-                    && thread.parent_thread_id.as_ref() == Some(parent)
-                    && thread
-                        .lineage
-                        .as_ref()
-                        .and_then(|lineage| lineage.point.as_ref())
-                        == point
-            })
+            .filter(|thread| thread.id != anchor && members.contains(&thread.id))
             .map(|thread| thread.id.clone()),
     );
     versions

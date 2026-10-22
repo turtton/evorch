@@ -269,6 +269,123 @@ fn edit_from_a_message_rewinds_before_it_and_returns_it_to_the_composer() {
     assert_eq!(last_seed(&fresh), None);
 }
 
+/// Whether the single `b` sits on the same row as one of the `a` controls.
+fn same_row(harness: &HeadlessWorkbench<DemoSource>, a: &str, b: &str) -> bool {
+    let b = harness.label_rects(b);
+    b.len() == 1
+        && harness
+            .label_rects(a)
+            .iter()
+            .any(|a| (a.center().y - b[0].center().y).abs() < 1.0)
+}
+
+#[test]
+fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
+    // Given: two completed turns, each next turn started by an editable message.
+    let temp = tempfile::tempdir().unwrap();
+    let (gui, conversation) = two_turns(temp.path());
+    let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
+    harness.run();
+    // Then: editing covers every rewind, so no turn offers a separate one.
+    assert_eq!(harness.count_labels("ここから編集"), 2);
+    assert_eq!(harness.count_labels("ここまで巻き戻す"), 0);
+    // When: editing the second message, before resending anything.
+    let message = user_message(harness.state(), "second");
+    let version = harness
+        .state_mut()
+        .edit_from_message(ThreadId::new("one"), message)
+        .unwrap();
+    harness.run();
+    // Then: the versions switch on the fork row of the turn it returned to.
+    assert!(same_row(&harness, "ここから fork", "版 2 / 2"));
+    // When: the edited message is sent and answered.
+    conversation.turn(
+        harness.state_mut(),
+        (&version.to_string(), "run-2", true),
+        ("second, edited", "answer edited"),
+        4,
+    );
+    harness.run();
+    // Then: the switcher moves beside the edited message's edit action.
+    assert!(same_row(&harness, "ここから編集", "版 2 / 2"));
+    assert_eq!(harness.count_labels("ここから編集"), 2);
+    // When: editing that message again.
+    let message = user_message(harness.state(), "second, edited");
+    harness
+        .state_mut()
+        .edit_from_message(version.clone(), message)
+        .unwrap();
+    harness.run();
+    // Then: all three versions after the first turn form one list.
+    assert!(harness.has_label("版 3 / 3"));
+    harness.click_label("前の版");
+    harness.run();
+    assert_eq!(
+        harness.state().sidebar().active_thread.as_ref(),
+        Some(&version)
+    );
+    assert!(harness.has_label("版 2 / 3"));
+}
+
+#[test]
+fn versions_of_the_first_message_move_from_the_top_to_the_message() {
+    // Given: the first message was edited and nothing was resent yet.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut gui, conversation) = two_turns(temp.path());
+    let first = user_message(&gui, "first");
+    let version = gui.edit_from_message(ThreadId::new("one"), first).unwrap();
+    let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
+    harness.run();
+    // Then: the empty version offers its versions above the conversation.
+    assert!(harness.has_label("最初のメッセージを編集した版があります"));
+    assert!(harness.has_label("版 2 / 2"));
+    // When: the edited first message is sent.
+    conversation.turn(
+        harness.state_mut(),
+        (&version.to_string(), "run-2", true),
+        ("first, edited", "answer edited"),
+        2,
+    );
+    harness.run();
+    // Then: the versions switch beside that message instead.
+    assert!(!harness.has_label("最初のメッセージを編集した版があります"));
+    assert!(same_row(&harness, "ここから編集", "版 2 / 2"));
+}
+
+#[test]
+fn rewind_is_offered_only_before_a_turn_without_an_editable_message() {
+    // Given: a user turn followed by a turn the agent started on its own.
+    let temp = tempfile::tempdir().unwrap();
+    let conversation = Conversation::new(temp.path());
+    let mut gui = state(temp.path());
+    conversation.turn(&mut gui, ("one", "run-1", true), ("first", "answer one"), 2);
+    conversation.apply(
+        &mut gui,
+        vec![
+            phase("run-1", AgentRunPhase::Waiting, AgentRunPhase::Running),
+            Event::new(MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: "follow-up".into(),
+            }),
+            phase("run-1", AgentRunPhase::Running, AgentRunPhase::Waiting),
+            Event::new(LifecycleEvent::TurnCompleted {
+                run_id: "run-1".into(),
+                context_len: 4,
+            }),
+        ],
+    );
+    let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
+    harness.run();
+    // Then: only the boundary before the agent's own turn offers a rewind; the
+    // latest turn has nothing to drop.
+    assert_eq!(harness.count_labels("ここから fork"), 2);
+    assert_eq!(harness.count_labels("ここまで巻き戻す"), 1);
+    assert_eq!(harness.count_labels("ここから編集"), 1);
+    let forks = harness.label_rects("ここから fork");
+    let rewind = harness.label_rects("ここまで巻き戻す")[0];
+    assert!((forks[0].center().y - rewind.center().y).abs() < 1.0);
+}
+
 #[test]
 fn rewind_is_refused_while_a_turn_is_unfinished() {
     // Given: a completed turn followed by a mid-turn wait on the same run.
