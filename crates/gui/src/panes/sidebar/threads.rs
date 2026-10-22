@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{
-    ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
+    ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
 };
 
 use crate::theme::icons;
+use crate::theme::text::muted;
 use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{compact_row, ghost, icon_text, row_title};
 
@@ -13,6 +14,9 @@ use super::SidebarAction;
 
 /// Side of the square pin/archive action buttons.
 const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
+
+/// Top-level families a project shows before, and per, "See more".
+const FAMILY_PAGE: usize = 5;
 
 /// A root's family, including every rewound version and their forks.
 pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
@@ -67,7 +71,32 @@ pub(super) fn render(
         });
     }
 
-    render_tree(ui, sidebar, &project_threads, indicators, false, action);
+    let limit_id = family_limit_id(&project.id);
+    let limit = ui
+        .ctx()
+        .data(|data| data.get_temp::<usize>(limit_id))
+        .unwrap_or(FAMILY_PAGE);
+    let rows = nested_threads(&project_threads, &sidebar.threads);
+    let (rows, hidden) = limit_families(&rows, limit, |thread| {
+        thread.pinned
+            || sidebar.active_thread.as_ref() == Some(&thread.id)
+            || indicators.question_threads.contains(&thread.id)
+            || indicators.approval_threads.contains(&thread.id)
+            || indicators.unread_threads.contains(&thread.id)
+    });
+    render_tree(ui, sidebar, &rows, indicators, false, action);
+    if hidden > 0 {
+        ui.indent(("more-threads-indent", &project.id), |ui| {
+            if ui
+                .add(ghost(muted(format!("See more ({hidden})"))))
+                .on_hover_text(format!("Show up to {FAMILY_PAGE} more threads"))
+                .clicked()
+            {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(limit_id, limit + FAMILY_PAGE));
+            }
+        });
+    }
 
     if !archived.is_empty() {
         // Nested under the project row, level with its thread titles.
@@ -75,7 +104,8 @@ pub(super) fn render(
             egui::CollapsingHeader::new(format!("Archived ({})", archived.len()))
                 .id_salt(("archived-threads", &project.id))
                 .show(ui, |ui| {
-                    render_tree(ui, sidebar, &archived, indicators, true, action);
+                    let rows = nested_threads(&archived, &sidebar.threads);
+                    render_tree(ui, sidebar, &rows, indicators, true, action);
                 });
         });
     }
@@ -100,12 +130,11 @@ struct Attention {
 fn render_tree(
     ui: &mut Ui,
     sidebar: &SidebarState,
-    threads: &[&ThreadRecord],
+    rows: &[(&ThreadRecord, usize)],
     indicators: &ThreadIndicators<'_>,
     archived: bool,
     action: &mut Option<SidebarAction>,
 ) {
-    let rows = nested_threads(threads, &sidebar.threads);
     let mut collapsed_depth = None;
     for (index, (thread, depth)) in rows.iter().copied().enumerate() {
         if collapsed_depth.is_some_and(|hidden_depth| depth > hidden_depth) {
@@ -324,6 +353,30 @@ fn thread_title(
     }
 }
 
+/// Keeps the first `limit` top-level families plus any later family with a
+/// member matching `keep`; returns the kept rows and the hidden family count.
+fn limit_families<'a>(
+    rows: &[(&'a ThreadRecord, usize)],
+    limit: usize,
+    keep: impl Fn(&ThreadRecord) -> bool,
+) -> (Vec<(&'a ThreadRecord, usize)>, usize) {
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut hidden = 0;
+    let families = rows.chunk_by(|_, (_, depth)| *depth > 0);
+    for (index, family) in families.enumerate() {
+        if index < limit || family.iter().any(|(thread, _)| keep(thread)) {
+            kept.extend_from_slice(family);
+        } else {
+            hidden += 1;
+        }
+    }
+    (kept, hidden)
+}
+
+pub(super) fn family_limit_id(project: &ProjectId) -> egui::Id {
+    egui::Id::new(("sidebar-project-family-limit", project))
+}
+
 fn nested_threads<'a>(
     threads: &[&'a ThreadRecord],
     all: &[ThreadRecord],
@@ -452,7 +505,10 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable};
     use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};
 
-    use super::{Attention, active_row, family_has_running_runs, nested_threads, thread_family};
+    use super::{
+        Attention, active_row, family_has_running_runs, limit_families, nested_threads,
+        thread_family,
+    };
     use crate::panes::sidebar::SidebarAction;
 
     #[test]
@@ -580,5 +636,38 @@ mod tests {
                 ("grandchild".into(), 2)
             ]
         );
+    }
+
+    #[test]
+    fn family_limit_keeps_whole_families_and_flagged_ones_beyond_the_page() {
+        let project = ProjectId::new("demo");
+        let threads: Vec<_> = ["a", "a-child", "b", "c", "c-child"]
+            .into_iter()
+            .map(|id| ThreadRecord::new(ThreadId::new(id), project.clone(), id))
+            .collect();
+        let rows: Vec<_> = threads.iter().zip([0, 1, 0, 0, 1]).collect();
+        let ids = |rows: &[(&ThreadRecord, usize)]| {
+            rows.iter()
+                .map(|(thread, _)| thread.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let (kept, hidden) = limit_families(&rows, 1, |_| false);
+        assert_eq!(
+            (ids(&kept), hidden),
+            (vec!["a".into(), "a-child".into()], 2)
+        );
+
+        let (kept, hidden) = limit_families(&rows, 1, |thread| thread.id.to_string() == "c-child");
+        assert_eq!(
+            (ids(&kept), hidden),
+            (
+                vec!["a".into(), "a-child".into(), "c".into(), "c-child".into()],
+                1
+            )
+        );
+
+        let (kept, hidden) = limit_families(&rows, 5, |_| false);
+        assert_eq!((kept.len(), hidden), (rows.len(), 0));
     }
 }

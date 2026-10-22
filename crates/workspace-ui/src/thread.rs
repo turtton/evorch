@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -167,6 +167,8 @@ impl ThreadRecord {
         changed
     }
 
+    /// Both lists run newest first by the latest activity in each thread's
+    /// displayed subtree, so a reply in a child thread lifts its whole family.
     pub fn partition_for_project<'a>(
         threads: &'a [Self],
         project: &ProjectId,
@@ -175,20 +177,21 @@ impl ThreadRecord {
             .iter()
             .filter(|thread| &thread.project_id == project && !thread.superseded)
             .partition(|thread| thread.archived);
-        let newest_first = |left: &&Self, right: &&Self| {
-            right
-                .last_activity()
-                .cmp(&left.last_activity())
+        let newest_first = |activity: &BTreeMap<&ThreadId, i64>, left: &Self, right: &Self| {
+            activity[&right.id]
+                .cmp(&activity[&left.id])
                 .then_with(|| left.title.cmp(&right.title))
                 .then_with(|| left.id.cmp(&right.id))
         };
+        let activity = subtree_activity(&main, threads);
         main.sort_by(|left, right| {
             right
                 .pinned
                 .cmp(&left.pinned)
-                .then_with(|| newest_first(left, right))
+                .then_with(|| newest_first(&activity, left, right))
         });
-        archived.sort_by(newest_first);
+        let activity = subtree_activity(&archived, threads);
+        archived.sort_by(|left, right| newest_first(&activity, left, right));
         (main, archived)
     }
 
@@ -260,6 +263,34 @@ impl ThreadRecord {
             ThreadState::Active
         }
     }
+}
+
+fn subtree_activity<'a>(
+    section: &[&'a ThreadRecord],
+    all: &[ThreadRecord],
+) -> BTreeMap<&'a ThreadId, i64> {
+    let mut activity: BTreeMap<&ThreadId, i64> = section
+        .iter()
+        .map(|thread| (&thread.id, thread.last_activity()))
+        .collect();
+    let parents: BTreeMap<&ThreadId, ThreadId> = section
+        .iter()
+        .filter_map(|thread| Some((&thread.id, crate::display_parent(all, &thread.id)?)))
+        .collect();
+    for thread in section {
+        let at = thread.last_activity();
+        // Cyclic parent links stop at the first repeated ancestor.
+        let mut seen = BTreeSet::from([&thread.id]);
+        let mut current = &thread.id;
+        while let Some(parent) = parents.get(current)
+            && let Some((&ancestor, &latest)) = activity.get_key_value(parent)
+            && seen.insert(ancestor)
+        {
+            activity.insert(ancestor, latest.max(at));
+            current = ancestor;
+        }
+    }
+    activity
 }
 
 fn unix_seconds(at: std::time::SystemTime) -> i64 {

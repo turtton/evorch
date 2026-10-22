@@ -48,6 +48,9 @@ pub fn render(
         expansion.store(ui.ctx());
         if expansion.is_open() {
             ui.push_id(("threads", &project.id), |ui| threads(ui, project, action));
+        } else {
+            let limit = super::threads::family_limit_id(&project.id);
+            ui.ctx().data_mut(|data| data.remove::<usize>(limit));
         }
     }
 
