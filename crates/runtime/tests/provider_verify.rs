@@ -211,15 +211,15 @@ async fn identical_endpoint_and_auth_share_verification() {
     assert_eq!(server.recorded_requests().len(), 1);
 }
 
-#[tokio::test]
-async fn codex_verification_uses_stored_oauth_and_account() {
-    // Given: a Codex endpoint requiring its catalog headers and stored credentials.
-    let server = wiremock::MockServer::start().await;
+/// An ID token for account `account` that expires far in the future.
+const FRESH_ID_TOKEN: &str = "e30.eyJleHAiOjQwMDAwMDAwMDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50In19.sig";
+
+async fn mount_codex_catalog(server: &wiremock::MockServer, access_token: &str) {
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/models"))
         .and(wiremock::matchers::header(
             "authorization",
-            "Bearer access-token",
+            format!("Bearer {access_token}"),
         ))
         .and(wiremock::matchers::header("chatgpt-account-id", "account"))
         .and(wiremock::matchers::query_param(
@@ -231,25 +231,29 @@ async fn codex_verification_uses_stored_oauth_and_account() {
                 .set_body_json(serde_json::json!({"models": [{"slug": "gpt-4o"}]})),
         )
         .expect(1)
-        .mount(&server)
+        .mount(server)
         .await;
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .and(wiremock::matchers::path("/releases"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"tag_name":"rust-v0.156.1","draft":false,"prerelease":false}
-            ])),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let directory = tempfile::tempdir().unwrap();
-    let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
+}
+
+fn codex_model(
+    server: &wiremock::MockServer,
+    store: Arc<FileCredentialStore>,
+    id_token: &str,
+) -> Arc<RoutedModel> {
     use sandbox::credential::CredentialStore;
-    store.set("codex", &sandbox::credential::Secret::from(serde_json::json!({
-        "access_token": "access-token", "refresh_token": "refresh-token",
-        "id_token": "e30.eyJleHAiOjQwMDAwMDAwMDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50In19.sig"
-    }).to_string())).unwrap();
+    store
+        .set(
+            "codex",
+            &sandbox::credential::Secret::from(
+                serde_json::json!({
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "id_token": id_token,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
     let mut config = Config::default();
     config.providers.insert(
         "codex".into(),
@@ -266,22 +270,71 @@ async fn codex_verification_uses_stored_oauth_and_account() {
             default_model: "gpt-4o".into(),
         },
     );
-    let model = compose_routed_model(
+    compose_routed_model(
         &config,
         ComposeDeps {
             credential_store: store,
             event_bus: None,
             env: Arc::new(MapEnv::from_iter([] as [(&str, &str); 0])),
             catalog: model::ModelCatalog::new(),
-            factory: routing::factory::FactoryOptions::default(),
+            factory: routing::factory::FactoryOptions {
+                auth_base_url_override: Some(server.uri()),
+                codex_client_version: Some(providers::CodexClientVersion::Fixed(
+                    providers::CodexCatalogVersion {
+                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                        warning: None,
+                    },
+                )),
+                ..Default::default()
+            },
         },
     )
     .unwrap()
-    .with_codex_version_resolver(Arc::new(providers::CodexCatalogVersionResolver::new(
-        format!("{}/releases", server.uri()),
-    )));
+}
+
+#[tokio::test]
+async fn codex_verification_uses_stored_oauth_and_account() {
+    // Given: a Codex endpoint requiring its catalog headers and stored, unexpired credentials.
+    let server = wiremock::MockServer::start().await;
+    mount_codex_catalog(&server, "access-token").await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
+    let model = codex_model(&server, store, FRESH_ID_TOKEN);
     // When: checking the Codex profile.
     let verified = model.verify_candidates().await;
     // Then: OAuth-authenticated discovery verifies it.
     assert_eq!(verified, BTreeSet::from(["codex".into()]));
+}
+
+#[tokio::test]
+async fn codex_verification_refreshes_expired_credentials() {
+    // Given: stored Codex credentials whose ID token has expired, as on an idle fallback profile.
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/oauth/token"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({"grant_type": "refresh_token", "refresh_token": "refresh-token"}),
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "fresh-access",
+                "refresh_token": "fresh-refresh",
+                "id_token": FRESH_ID_TOKEN,
+            })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_codex_catalog(&server, "fresh-access").await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
+    let expired = "e30.eyJleHAiOjEsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50In19.sig";
+    let model = codex_model(&server, Arc::clone(&store), expired);
+    // When: checking the Codex profile.
+    let verified = model.verify_candidates().await;
+    // Then: discovery uses the refreshed token and keeps the rotated bundle for requests.
+    assert_eq!(verified, BTreeSet::from(["codex".into()]));
+    use sandbox::credential::CredentialStore;
+    let stored = store.get("codex").unwrap().unwrap();
+    assert!(stored.expose().contains("fresh-refresh"));
 }

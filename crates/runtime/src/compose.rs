@@ -233,9 +233,9 @@ pub struct RoutedModel {
     effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     verification:
         tokio::sync::OnceCell<BTreeMap<String, Result<Vec<String>, providers::ProviderError>>>,
-    codex_version_resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
+    /// Admission reports unverified routes other than the selected one once per composition.
+    unverified_reported: std::sync::atomic::AtomicBool,
     event_bus: Option<Arc<EventBus>>,
-    credential_store: Option<Arc<dyn CredentialStore>>,
     provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
     image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
     metadata_catalog: tokio::sync::OnceCell<Option<catalog::ModelCatalog>>,
@@ -277,9 +277,8 @@ impl RoutedModel {
             configured_windows: BTreeMap::new(),
             effort_levels: BTreeMap::new(),
             verification: tokio::sync::OnceCell::new(),
-            codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
+            unverified_reported: std::sync::atomic::AtomicBool::new(false),
             event_bus: None,
-            credential_store: None,
             provider_configs: BTreeMap::new(),
             image_input: tokio::sync::OnceCell::new(),
             metadata_catalog: tokio::sync::OnceCell::new(),
@@ -323,18 +322,6 @@ impl RoutedModel {
         self.router = self.router.with_health(Arc::clone(&self.health));
         self.tool_router = self.tool_router.with_health(Arc::clone(&self.health));
         self
-    }
-
-    /// Codex カタログ検証に使う client バージョン解決を差し替える (offline tests)。
-    #[must_use]
-    pub fn with_codex_version_resolver(
-        self: std::sync::Arc<Self>,
-        resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
-    ) -> std::sync::Arc<Self> {
-        let mut model =
-            std::sync::Arc::into_inner(self).expect("freshly composed model has a single owner");
-        model.codex_version_resolver = resolver;
-        std::sync::Arc::new(model)
     }
 
     fn router_for(&self, requires_tools: bool) -> &routing::Router {
@@ -643,10 +630,28 @@ impl RoutedModel {
                     detail.replace(&provider.auth.api_key, "***")
                 };
                 let detail: String = detail.chars().take(500).collect();
+                let next = match (chain.as_ref(), position) {
+                    (Some(chain), Some(failed)) => {
+                        let step = FallbackAttempt {
+                            failed,
+                            from: &route,
+                            failure: routing::FailureKind::Other,
+                            transient: false,
+                            retry_after: None,
+                        };
+                        self.advance_fallback(router, chain, &mut cycle, step, invocation, bus)
+                            .await
+                    }
+                    _ => None,
+                };
                 if let Some(bus) = bus.or(self.event_bus.as_deref()) {
                     bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
                         source: "runtime::compose".into(),
-                        severity: event_bus::DiagnosticSeverity::Error,
+                        severity: if next.is_some() {
+                            event_bus::DiagnosticSeverity::Warning
+                        } else {
+                            event_bus::DiagnosticSeverity::Error
+                        },
                         code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
                         detail: detail.clone(),
                         run_id: Some(invocation.run_id.clone()),
@@ -655,9 +660,16 @@ impl RoutedModel {
                     }));
                 }
                 failures.push(detail);
-                return Err(RuntimeError::Model {
-                    reason: failures.join("; fell back to "),
-                });
+                let (Some(chain), Some(next)) = (chain.as_ref(), next) else {
+                    return Err(RuntimeError::Model {
+                        reason: failures.join("; fell back to "),
+                    });
+                };
+                let member = chain.member(next);
+                route = member.target.clone();
+                reasoning_effort = member.reasoning_effort.clone();
+                position = Some(next);
+                continue;
             }
             let model_allows_tools = match self
                 .router
@@ -788,46 +800,79 @@ impl RoutedModel {
             if !fallback::eligible(&error) {
                 return Err(exhausted());
             }
-            let cycle = cycle.get_or_insert_with(|| routing::FallbackCycle::new(chain, failed));
-            cycle.record_failure(
+            let step = FallbackAttempt {
                 failed,
-                routing::is_transient(&error),
-                routing::retry_after(&error),
-            );
-            let next = loop {
-                match cycle.next(router, chain, self.max_retry_after_wait) {
-                    routing::FallbackStep::Try(next) => break next,
-                    routing::FallbackStep::Wait(wait) => {
-                        tracing::info!(run_id = %invocation.run_id, wait = ?wait,
-                            "waiting for Retry-After before retrying the route pool");
-                        tokio::time::sleep(wait).await;
-                    }
-                    routing::FallbackStep::Exhausted => return Err(exhausted()),
-                }
+                from: &route,
+                failure,
+                transient: routing::is_transient(&error),
+                retry_after: routing::retry_after(&error),
+            };
+            let Some(next) = self
+                .advance_fallback(router, chain, &mut cycle, step, invocation, bus)
+                .await
+            else {
+                return Err(exhausted());
             };
             let member = chain.member(next);
-            tracing::warn!(run_id = %invocation.run_id, from_provider = %route.profile,
-            from_model = %route.model_id, to_provider = %member.target.profile,
-            to_model = %member.target.model_id, "provider fallback triggered");
-            if let Some(bus) = bus.or(self.event_bus.as_deref()) {
-                bus.emit(event_bus::Event::new(
-                    event_bus::ProviderEvent::FallbackTriggered {
-                        from_provider: route.profile.clone(),
-                        from_model: Some(route.model_id.clone()),
-                        to_provider: member.target.profile.clone(),
-                        to_model: member.target.model_id.clone(),
-                        logical_model: member.route.clone(),
-                        session_id: invocation.run_id.clone(),
-                        failure: failure.into(),
-                        request_id: None,
-                    },
-                ));
-            }
             route = member.target.clone();
             reasoning_effort = member.reasoning_effort.clone();
             position = Some(next);
         }
     }
+
+    /// Records `step` in this request's one-pass fallback and returns the next member,
+    /// or `None` once the pool is exhausted.
+    async fn advance_fallback(
+        &self,
+        router: &routing::Router,
+        chain: &routing::Chain,
+        cycle: &mut Option<routing::FallbackCycle>,
+        step: FallbackAttempt<'_>,
+        invocation: &AgentInvocationContext,
+        bus: Option<&EventBus>,
+    ) -> Option<usize> {
+        let cycle = cycle.get_or_insert_with(|| routing::FallbackCycle::new(chain, step.failed));
+        cycle.record_failure(step.failed, step.transient, step.retry_after);
+        let next = loop {
+            match cycle.next(router, chain, self.max_retry_after_wait) {
+                routing::FallbackStep::Try(next) => break next,
+                routing::FallbackStep::Wait(wait) => {
+                    tracing::info!(run_id = %invocation.run_id, wait = ?wait,
+                        "waiting for Retry-After before retrying the route pool");
+                    tokio::time::sleep(wait).await;
+                }
+                routing::FallbackStep::Exhausted => return None,
+            }
+        };
+        let member = chain.member(next);
+        let from = step.from;
+        tracing::warn!(run_id = %invocation.run_id, from_provider = %from.profile,
+        from_model = %from.model_id, to_provider = %member.target.profile,
+        to_model = %member.target.model_id, "provider fallback triggered");
+        if let Some(bus) = bus.or(self.event_bus.as_deref()) {
+            bus.emit(event_bus::Event::new(
+                event_bus::ProviderEvent::FallbackTriggered {
+                    from_provider: from.profile.clone(),
+                    from_model: Some(from.model_id.clone()),
+                    to_provider: member.target.profile.clone(),
+                    to_model: member.target.model_id.clone(),
+                    logical_model: member.route.clone(),
+                    session_id: invocation.run_id.clone(),
+                    failure: step.failure.into(),
+                    request_id: None,
+                },
+            ));
+        }
+        Some(next)
+    }
+}
+
+struct FallbackAttempt<'a> {
+    failed: usize,
+    from: &'a routing::ResolvedRoute,
+    failure: routing::FailureKind,
+    transient: bool,
+    retry_after: Option<std::time::Duration>,
 }
 
 #[async_trait]
@@ -1256,7 +1301,6 @@ pub fn compose_routed_model(
     deps: ComposeDeps,
 ) -> Result<Arc<RoutedModel>, CompositionError> {
     let event_bus = deps.event_bus.clone();
-    let credential_store = Arc::clone(&deps.credential_store);
     let composed = routing::compose_providers(config, deps).map_err(|error| match error {
         RoutingError::NoProviders => CompositionError::NoProvidersConfigured,
         other => CompositionError::Routing(other),
@@ -1290,6 +1334,5 @@ pub fn compose_routed_model(
     model.provider_configs = config.providers.clone();
     model.model_presets = config.model_presets.clone();
     model.event_bus = event_bus;
-    model.credential_store = Some(credential_store);
     Ok(Arc::new(model))
 }
