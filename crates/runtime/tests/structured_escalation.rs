@@ -32,16 +32,6 @@ async fn server(codex: bool) -> MockServer {
         }))
         .mount(&server)
         .await;
-    if codex {
-        Mock::given(method("GET"))
-            .and(path("/releases"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                {"tag_name":"rust-v0.156.1","draft":false,"prerelease":false}
-            ])))
-            .expect(1)
-            .mount(&server)
-            .await;
-    }
     server
 }
 

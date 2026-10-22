@@ -81,8 +81,8 @@ struct Reported {
 }
 
 impl AgentPage {
-    /// Loads `html` and waits up to `timeout` for it; `timeout` also bounds
-    /// every later DevTools command.
+    /// Loads `html` and waits up to `timeout` for it to load and paint;
+    /// `timeout` also bounds every later DevTools command.
     pub fn open(html: Vec<u8>, timeout: Duration) -> Result<Self, String> {
         let context = ArtifactContext::create(ArtifactBundle::html(html))?;
         let log = Arc::clone(&context.log);
@@ -93,9 +93,9 @@ impl AgentPage {
             1.0,
             Dialogs::Suppress,
         )?;
-        if !browser.wait_loaded(Some(timeout)) {
-            return Err("the artifact did not finish loading".into());
-        }
+        browser
+            .wait_settled(timeout)
+            .map_err(|error| format!("the artifact did not settle: {error}"))?;
         let target = Arc::new(CefTarget {
             devtools: DevTools::attach(&browser)?,
             shared: Arc::clone(&browser.shared),

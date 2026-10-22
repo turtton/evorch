@@ -18,13 +18,6 @@ pub(super) async fn model(
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models":[{"slug":MODEL}]})))
         .mount(server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"tag_name":"rust-v0.156.1", "draft":false, "prerelease":false}
-        ])))
-        .mount(server)
-        .await;
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     store.set("offline-account", &Secret::from(json!({
@@ -93,10 +86,7 @@ pub(super) async fn model(
             },
         },
     )
-    .unwrap()
-    .with_codex_version_resolver(Arc::new(providers::CodexCatalogVersionResolver::new(
-        format!("{}/releases", server.uri()),
-    )));
+    .unwrap();
     (
         Arc::new(runtime::compose::SwitchableModel::new(model)),
         directory,

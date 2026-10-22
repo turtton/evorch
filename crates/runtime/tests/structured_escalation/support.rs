@@ -140,13 +140,6 @@ fn harness_with_model(
         },
     )
     .expect("routed model");
-    let model = if codex {
-        model.with_codex_version_resolver(Arc::new(providers::CodexCatalogVersionResolver::new(
-            format!("{base_url}/releases"),
-        )))
-    } else {
-        model
-    };
     Harness {
         _directory: directory,
         // Production UI wraps routed models; structured requests must cross this seam.

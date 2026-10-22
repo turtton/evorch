@@ -94,6 +94,8 @@ pub struct CodexClient {
     /// Compaction は通常生成より長い無応答期限と、本文受信までの全体期限を使う。
     compaction_http_client: reqwest::Client,
     endpoint: String,
+    /// Catalog discovery appends `/models` to the configured base URL as given.
+    catalog_base_url: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
     profile: Option<String>,
@@ -118,6 +120,7 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
+            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
@@ -148,6 +151,7 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
+            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
@@ -284,6 +288,31 @@ impl CodexClient {
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    /// Discovery goes through the request session so an idle profile refreshes its token,
+    /// and uses the catalog version its requests send.
+    async fn list_models(&self, _: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {
+        let token = self.session.current().await?;
+        let client_version = self
+            .resolved_client_version
+            .get_or_init(|| self.client_version.resolve())
+            .await;
+        crate::list_codex_models(
+            &self.catalog_base_url,
+            &ProviderAuth::new(token.access_token),
+            &token.chatgpt_account_id,
+            &client_version.version,
+        )
+        .await
+        .map(|models| Some(models.into_iter().map(|model| model.slug).collect()))
+        .map_err(|error| match error {
+            ProviderError::Http { status, .. } => ProviderError::Http {
+                status,
+                body: "catalog verification failed".into(),
+            },
+            other => other,
+        })
+    }
+
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         Some(self)
     }

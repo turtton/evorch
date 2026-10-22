@@ -204,21 +204,116 @@ async fn unadvertised_selected_model_creates_no_worker_or_completion() {
 }
 
 #[tokio::test]
-async fn unavailable_fallback_blocks_primary_before_registration() {
+async fn unverified_fallback_does_not_block_admission() {
     // Given: primary is advertised, but a configured fallback cannot be verified.
-    let primary =
-        StreamingMockOpenAi::spawn_with_models(vec![], WriteMode::default(), vec!["gpt-4o".into()]);
+    let primary = StreamingMockOpenAi::spawn_with_models(
+        vec![mock_openai::ScriptedResponse::text_stream(
+            "reply",
+            "gpt-4o",
+            ["primary"],
+        )],
+        WriteMode::default(),
+        vec!["gpt-4o".into()],
+    );
     let fallback = StreamingMockOpenAi::spawn(vec![]);
-    assert_rejected(
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = runtime(
         &[
             ("primary", primary.base_url()),
             ("fallback", format!("{}/unavailable", fallback.base_url())),
         ],
-        None,
-    )
-    .await;
-    for server in [&primary, &fallback] {
-        assert_eq!(server.recorded_requests().len(), 1);
-        assert_eq!(server.recorded_requests()[0].method, "GET");
+        &bus,
+    );
+    let mut events = bus.subscribe();
+    // When: running a worker whose selected route is the primary.
+    let run = runtime.delegate_background(Role::Worker, "hello".into(), RunConfig::default());
+    // Then: the run completes on the primary and the fallback is only reported.
+    assert_eq!(
+        runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Done
+    );
+    assert_eq!(runtime.run_result(run).unwrap().as_deref(), Some("primary"));
+    let diagnostics = diagnostics_until_sentinel(&bus, &mut events).await;
+    assert!(
+        diagnostics.iter().any(|event| {
+            event.code == "ProviderUnavailable"
+                && event.severity == event_bus::DiagnosticSeverity::Warning
+                && event.detail.contains("profile=fallback")
+        }),
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|event| event.severity == event_bus::DiagnosticSeverity::Error),
+        "{diagnostics:?}"
+    );
+    assert_eq!(fallback.recorded_requests().len(), 1);
+    assert_eq!(fallback.recorded_requests()[0].method, "GET");
+}
+
+#[tokio::test]
+async fn request_fallback_skips_unverified_member() {
+    // Given: a failing primary, an unverifiable second member and an advertised third.
+    let primary =
+        StreamingMockOpenAi::spawn_with_models(vec![], WriteMode::default(), vec!["gpt-4o".into()]);
+    let unverified = StreamingMockOpenAi::spawn(vec![]);
+    let third = StreamingMockOpenAi::spawn_with_models(
+        vec![mock_openai::ScriptedResponse::text_stream(
+            "reply",
+            "gpt-4o",
+            ["third"],
+        )],
+        WriteMode::default(),
+        vec!["gpt-4o".into()],
+    );
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = runtime(
+        &[
+            ("primary", primary.base_url()),
+            (
+                "unverified",
+                format!("{}/unavailable", unverified.base_url()),
+            ),
+            ("third", third.base_url()),
+        ],
+        &bus,
+    );
+    // When: the primary's completion fails.
+    let run = runtime.delegate_background(Role::Worker, "hello".into(), RunConfig::default());
+    // Then: fallback passes over the unverified member without sending to it.
+    assert_eq!(
+        runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Done
+    );
+    assert_eq!(runtime.run_result(run).unwrap().as_deref(), Some("third"));
+    assert!(
+        unverified
+            .recorded_requests()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+async fn diagnostics_until_sentinel(
+    bus: &EventBus,
+    events: &mut event_bus::bus::EventReceiver,
+) -> Vec<event_bus::DiagnosticEvent> {
+    bus.emit(Event::new(MessageEvent::MessageDelta {
+        delta: "sentinel".into(),
+        run_id: None,
+    }));
+    let mut diagnostics = Vec::new();
+    loop {
+        match events.recv().await.unwrap().kind {
+            EventKind::Message(MessageEvent::MessageDelta {
+                delta,
+                run_id: None,
+            }) if delta == "sentinel" => {
+                return diagnostics;
+            }
+            EventKind::Diagnostic(event) => diagnostics.push(event),
+            _ => {}
+        }
     }
 }

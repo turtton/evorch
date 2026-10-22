@@ -263,6 +263,15 @@ impl OsrBrowser {
     /// The first frame painted after the page finished loading. A repaint is
     /// forced once loading ends, so the frame reflects the loaded document.
     pub fn capture_settled(&self, timeout: Duration) -> Result<egui::ColorImage, String> {
+        self.wait_settled(timeout)?;
+        lock(&self.shared.frame)
+            .frame()
+            .ok_or_else(|| "no frame was painted".into())
+    }
+
+    /// Waits for the page to load and then paint. Chromium routes input by the
+    /// hit-test data a painted frame carries, so input sent earlier can be lost.
+    pub fn wait_settled(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now().checked_add(timeout);
         let remaining =
             || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
@@ -278,9 +287,7 @@ impl OsrBrowser {
         {
             return Err("the page did not paint after loading".into());
         }
-        lock(&self.shared.frame)
-            .frame()
-            .ok_or_else(|| "no frame was painted".into())
+        Ok(())
     }
 
     /// Waits until the document has loaded and nothing is loading; false if
