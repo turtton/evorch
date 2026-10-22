@@ -5,6 +5,34 @@ use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Continue a thread's saved conversation, as `/continue` does. `automatic`
+    /// marks a resume the runtime requested to deliver held subagent reports.
+    pub(super) fn chat_continuation(
+        &self,
+        thread_id: &workspace_ui::ThreadId,
+        automatic: bool,
+    ) -> ChatContinuation {
+        ChatContinuation {
+            project_root: self
+                .thread_project(thread_id)
+                .map(|project| project.repo_root.clone()),
+            thread_id: thread_id.to_string(),
+            composer_role: self.composer.role,
+            model_preference: self
+                .sidebar
+                .threads
+                .iter()
+                .find(|thread| &thread.id == thread_id)
+                .and_then(|thread| thread.model_preference.as_ref())
+                .map(|preference| runtime::ModelPreference {
+                    profile: preference.profile.clone(),
+                    model: preference.model.clone(),
+                    reasoning_effort: preference.reasoning_effort.clone(),
+                }),
+            automatic,
+        }
+    }
+
     pub fn load_external_commands(&mut self, executable: std::path::PathBuf) {
         self.start_external(async move {
             crate::model::composer::SlashCommandRegistry::discover(executable)
@@ -237,24 +265,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.push_notice(guidance.clone());
                         return;
                     }
-                    let command = WorkbenchCommand::ContinueChat(ChatContinuation {
-                        project_root: self
-                            .thread_project(thread_id)
-                            .map(|project| project.repo_root.clone()),
-                        thread_id: thread_id.to_string(),
-                        composer_role: self.composer.role,
-                        model_preference: self
-                            .sidebar
-                            .threads
-                            .iter()
-                            .find(|thread| &thread.id == thread_id)
-                            .and_then(|thread| thread.model_preference.as_ref())
-                            .map(|preference| runtime::ModelPreference {
-                                profile: preference.profile.clone(),
-                                model: preference.model.clone(),
-                                reasoning_effort: preference.reasoning_effort.clone(),
-                            }),
-                    });
+                    let command =
+                        WorkbenchCommand::ContinueChat(self.chat_continuation(thread_id, false));
                     self.submit_command(command);
                     self.composer.input.clear();
                 }

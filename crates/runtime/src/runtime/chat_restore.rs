@@ -25,13 +25,15 @@ pub(super) enum RunContinuation {
 enum ChatContinuation {
     Followup(String),
     Resume,
+    /// A resume the runtime requested for held messages, not by the user.
+    Wake,
 }
 
 impl ChatContinuation {
     fn prompt(&self) -> Option<&str> {
         match self {
             Self::Followup(prompt) => Some(prompt),
-            Self::Resume => None,
+            Self::Resume | Self::Wake => None,
         }
     }
 }
@@ -41,14 +43,29 @@ impl AgentRuntime {
     /// A completed turn returns to input waiting; an unfinished turn continues.
     /// Already live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
-    pub fn resume_chat(
+    pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        // An explicit continue renews the automatic-wake budget.
+        self.reset_auto_wakes(run_id);
+        self.resume(run_id, ChatContinuation::Resume, authority)
+    }
+
+    /// Resume a root the runtime asked the host to wake
+    /// ([`event_bus::LifecycleEvent::RootWakeRequested`]) so that it receives
+    /// the messages held for it. Like [`Self::resume_chat`] it reuses saved
+    /// history under current authority, but it is not user input.
+    pub fn wake_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        self.resume(run_id, ChatContinuation::Wake, authority)
+    }
+
+    fn resume(
         &self,
         run_id: RunId,
+        continuation: ChatContinuation,
         mut authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
         authority.images.clear();
         authority.initial_thread_goal = None;
-        self.continue_chat(run_id, ChatContinuation::Resume, authority)
+        self.continue_chat(run_id, continuation, authority)
     }
 
     /// Continue a goal root in place, including after process restart.
@@ -71,6 +88,7 @@ impl AgentRuntime {
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
         let prompt = continuation.prompt();
+        let operator_resume = !matches!(continuation, ChatContinuation::Wake);
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: run_id.to_string(),
             reason,
@@ -302,8 +320,11 @@ impl AgentRuntime {
         if let Some(request) = pending_request {
             self.remember_thread_request(run_id, &request);
         }
-        // Resuming the root is the operator's go-ahead for the tree they stopped.
-        self.lift_operator_stops(run_id);
+        // Resuming the root is the operator's go-ahead for the tree they
+        // stopped. A wake requested by the runtime is not.
+        if operator_resume {
+            self.lift_operator_stops(run_id);
+        }
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

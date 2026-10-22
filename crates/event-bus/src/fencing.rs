@@ -325,6 +325,8 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             | LifecycleEvent::AgentRunStarted { run_id, .. }
             | LifecycleEvent::TaskPromptPublished { run_id, .. }
             | LifecycleEvent::AgentRunRestored { run_id, .. }
+            | LifecycleEvent::RootWakeRequested { run_id }
+            | LifecycleEvent::AutoContinuationPaused { run_id, .. }
             | LifecycleEvent::AgentRunStateChanged { run_id, .. }
             | LifecycleEvent::TurnCompleted { run_id, .. }
             | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
