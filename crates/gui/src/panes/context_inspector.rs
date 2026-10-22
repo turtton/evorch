@@ -71,7 +71,7 @@ impl PreviewSlot {
     }
 
     /// Collect a finished preview and start the wanted one when it changed.
-    fn update(&mut self, ctx: &egui::Context, sink: &dyn CommandSink, project: Option<&str>) {
+    fn update(&mut self, ctx: &egui::Context, sink: &dyn CommandSink) {
         if let Some((spec, receiver)) = &self.pending {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -96,7 +96,7 @@ impl PreviewSlot {
         if current == Some(wanted) {
             return;
         }
-        match sink.preview_base_context(wanted.request(), project) {
+        match sink.preview_base_context(wanted.request()) {
             Some(receiver) => {
                 self.pending = Some((wanted.clone(), receiver));
                 ctx.request_repaint_after(POLL_INTERVAL);
@@ -189,13 +189,13 @@ impl ContextInspectorPane {
     }
 
     /// Per-frame bookkeeping: collect previews and load what the last render asked for.
-    pub fn update(&mut self, ctx: &egui::Context, sink: &dyn CommandSink, project: Option<&str>) {
+    pub fn update(&mut self, ctx: &egui::Context, sink: &dyn CommandSink) {
         for slot in [
             &mut self.preview,
             &mut self.compare_left,
             &mut self.compare_right,
         ] {
-            slot.update(ctx, sink, project);
+            slot.update(ctx, sink);
         }
         if let Some(run) = self.wanted_run.take() {
             self.run_view = Some((run.clone(), sink.run_context_view(&run)));

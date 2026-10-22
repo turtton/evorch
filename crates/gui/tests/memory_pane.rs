@@ -3,10 +3,28 @@ use gui::panes::memory::MemoryPane;
 use storage::memory::{Lesson, MemoryStatus};
 use storage::{Storage, StorageConfig};
 
+fn repo(root: &std::path::Path, origin: &str) {
+    std::fs::create_dir_all(root).unwrap();
+    for args in [vec!["init"], vec!["remote", "add", "origin", origin]] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn memory_pane_search_and_filter_use_persisted_projection() {
-    // Given: a persisted candidate and a connected Memory pane.
+    // Given: a candidate learned under the repository slug, not the checkout directory name.
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("checkout");
+    repo(&root, "https://github.com/owner/name.git");
     let config = StorageConfig {
         db_path: dir.path().join("memory.db"),
         ..Default::default()
@@ -16,7 +34,7 @@ fn memory_pane_search_and_filter_use_persisted_projection() {
         .handle()
         .append_lesson(&Lesson {
             id: "l".into(),
-            project: "p".into(),
+            project: "owner/name".into(),
             task_id: "t".into(),
             content: "Bound concurrency".into(),
             evidence: "test:bound".into(),
@@ -29,7 +47,10 @@ fn memory_pane_search_and_filter_use_persisted_projection() {
     pane.status = Some(MemoryStatus::Candidate);
     let mut harness = Harness::builder()
         .with_size(egui::vec2(700.0, 500.0))
-        .build_ui_state(|ui, pane: &mut MemoryPane| pane.render(ui, Some("p")), pane);
+        .build_ui_state(
+            move |ui, pane: &mut MemoryPane| pane.render(ui, Some(&root)),
+            pane,
+        );
     // When: render the filtered pane.
     harness.run();
     // Then: persisted lesson and explicit state are visible.

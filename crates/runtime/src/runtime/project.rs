@@ -194,6 +194,12 @@ impl AgentRuntime {
         let _ = self.shared.project_slugs.set(resolver);
         self
     }
+
+    /// The name a run in `root` files its learned memory under, so the host
+    /// reads lessons back from the same partition; `None` without a resolver.
+    pub fn project_slug(&self, root: &std::path::Path) -> Option<String> {
+        self.shared.project_slug(root)
+    }
 }
 
 /// Project-keyed state (trust, contexts, allowed directories) is keyed by the

@@ -127,6 +127,19 @@ impl RuntimeCommandSink {
         self
     }
 
+    /// Lessons are keyed by the slug post-run learning stores them under, not the sidebar id.
+    fn capture_memory(&self, root: Option<&Path>) -> Option<runtime::memory::MemoryBoundary> {
+        let config = self.memory_config.as_ref()?;
+        let root = root.or(self.shell_cwd.as_deref())?;
+        let project = self
+            .runtime
+            .project_slug(root)
+            .unwrap_or_else(|| derive_repo_slug(root));
+        runtime::memory::MemoryBoundary::capture(config, &project)
+            .inspect_err(|error| tracing::warn!(%error, %project, "memory read failed"))
+            .ok()
+    }
+
     fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
         (self.stop_marked.contains(thread) || self.stopped_by_us.contains(thread))
             && matches!(
@@ -209,14 +222,9 @@ impl CommandSink for RuntimeCommandSink {
     fn preview_base_context(
         &self,
         mut request: runtime::base_context::BaseContextRequest,
-        project: Option<&str>,
     ) -> Option<crate::model::commands::ContextPreviewReceiver> {
-        if let (Some(config), Some(project)) = (&self.memory_config, project) {
-            // Chat runs capture lessons the same way; a read failure only hides the section.
-            request.memory = runtime::memory::MemoryBoundary::capture(config, project)
-                .inspect_err(|error| tracing::debug!(%error, "context preview memory read failed"))
-                .ok();
-        }
+        // Chat runs capture lessons the same way; a read failure only hides the section.
+        request.memory = self.capture_memory(request.project_root.as_deref());
         let (sender, receiver) = std::sync::mpsc::channel();
         let runtime = self.runtime.clone();
         self.handle.spawn(async move {
@@ -682,17 +690,6 @@ impl RuntimeCommandSink {
                         runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
                     initial.delegation_value = Some(value);
                     initial.finding_store = Some(config.db_path.clone());
-                    initial.memory = match runtime::memory::MemoryBoundary::capture(
-                        config,
-                        &submission.project_id,
-                    ) {
-                        Ok(memory) => Some(memory),
-                        Err(error) => {
-                            return vec![LoopEvent::CommandRejected {
-                                reason: error.to_string(),
-                            }];
-                        }
-                    };
                 }
                 initial.initial_thread_goal = Some((objective, criteria));
                 let mut events = self.submit_chat_config(
@@ -789,10 +786,6 @@ impl RuntimeCommandSink {
                 .into(),
         );
         authority.finding_store = Some(config.db_path.clone());
-        authority.memory = Some(
-            runtime::memory::MemoryBoundary::capture(config, project)
-                .map_err(|error| error.to_string())?,
-        );
         Ok(())
     }
 
@@ -854,6 +847,7 @@ impl RuntimeCommandSink {
         if initial.project_root.is_none() {
             initial.project_root = self.thread_roots.get(&thread_id).cloned();
         }
+        initial.memory = self.capture_memory(initial.project_root.as_deref());
         if resume_only {
             if !self.chat_runs.contains_key(&thread_id) && !self.goal_runs.contains_key(&thread_id)
             {
@@ -941,15 +935,6 @@ impl RuntimeCommandSink {
                     submission.text.clone()
                 });
                 authority.finding_store = Some(config.db_path.clone());
-                authority.memory = match runtime::memory::MemoryBoundary::capture(config, project) {
-                    Ok(memory) => Some(memory),
-                    Err(error) => {
-                        return vec![LoopEvent::ChatRejected {
-                            thread_id,
-                            reason: error.to_string(),
-                        }];
-                    }
-                };
             }
             let _guard = self.handle.enter();
             let continuation = if resume_only {
@@ -2653,6 +2638,94 @@ mod tests {
         ));
         rt.block_on(model.started.notified());
         assert_eq!(runtime.team_tasks().len(), 1);
+    }
+
+    fn sink_with_promoted_lesson() -> (
+        tokio::runtime::Runtime,
+        RuntimeCommandSink,
+        Arc<EventBus>,
+        tempfile::TempDir,
+    ) {
+        let (rt, sink, _, bus) = build_sink_with(
+            tokio::runtime::Runtime::new().unwrap(),
+            Arc::new(HeldModel::default()),
+            |runtime| runtime.with_project_slugs(Arc::new(|_| "owner/name".into())),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("memory.db"),
+            ..Default::default()
+        };
+        let store = Storage::open(config.clone()).unwrap();
+        store
+            .handle()
+            .append_lesson(&storage::memory::Lesson {
+                id: "l".into(),
+                project: "owner/name".into(),
+                task_id: "t".into(),
+                content: "Read lessons by repository slug".into(),
+                evidence: "test:slug".into(),
+                scope: storage::memory::LessonScope::Project,
+            })
+            .unwrap();
+        store.handle().validate_lesson("l", "test:slug").unwrap();
+        store.handle().promote_lesson("l").unwrap();
+        let sink = sink
+            .with_memory_storage(config)
+            .with_team_writer(store.handle());
+        (rt, sink, bus, dir)
+    }
+
+    fn published_prompt(
+        rt: &tokio::runtime::Runtime,
+        events: &mut event_bus::EventReceiver,
+    ) -> String {
+        rt.block_on(async {
+            loop {
+                if let EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
+                    prompt,
+                    ..
+                }) = events.recv().await.unwrap().kind
+                {
+                    return prompt;
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn chat_prompt_carries_lessons_learned_under_the_project_slug() {
+        // Given: a promoted lesson filed under the slug, not the sidebar project id.
+        let (rt, mut sink, bus, dir) = sink_with_promoted_lesson();
+        let mut events = bus.subscribe();
+        // When: an ordinary chat starts in that project.
+        sink.submit(WorkbenchCommand::SendChat(
+            crate::model::commands::ChatSubmission {
+                project_root: Some(dir.path().to_path_buf()),
+                fork_seed: None,
+                composer_role: crate::model::composer::ComposerRole::Worker,
+                images: Vec::new(),
+                thread_id: "chat-thread".into(),
+                text: "hello".into(),
+                model_preference: None,
+            },
+        ));
+        // Then: the lesson reaches the run's first prompt.
+        assert!(published_prompt(&rt, &mut events).contains("Read lessons by repository slug"));
+    }
+
+    #[test]
+    fn team_goal_prompt_carries_lessons_learned_under_the_project_slug() {
+        // Given: a promoted lesson under the slug while the sidebar names the project `evorch`.
+        let (rt, mut sink, bus, dir) = sink_with_promoted_lesson();
+        let mut events = bus.subscribe();
+        let mut goal = submission("implement independent tasks", vec![], vec![]);
+        goal.project_root = Some(dir.path().to_path_buf());
+        goal.delegation_value = Some("independent paths".into());
+        // When: a team goal starts.
+        sink.submit(WorkbenchCommand::SubmitGoal(goal));
+        // Then: the coordinator's prompt carries the lesson.
+        assert!(published_prompt(&rt, &mut events).contains("Read lessons by repository slug"));
     }
 
     #[test]
