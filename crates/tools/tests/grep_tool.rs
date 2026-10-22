@@ -5,6 +5,12 @@ use std::fs;
 use tempfile::tempdir;
 use tools::{Grep, Tool, ToolError};
 
+/// Output lines carry the hit's path, so a long `TMPDIR` (as in `nix develop`)
+/// reaches the byte cap before the 200-line cap these fixtures exercise.
+fn short_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in("/tmp").expect("tempdir")
+}
+
 // Given: invalid UTF-8 after the output cap / When: searching a file / Then: validation still fails.
 #[tokio::test]
 async fn grep_rejects_invalid_utf8_after_cap() {
@@ -60,7 +66,7 @@ async fn grep_respects_gitignore() {
 // Given: far more hits than the cap / When: searching / Then: output stays bounded.
 #[tokio::test]
 async fn grep_many_matches_are_bounded() {
-    let dir = tempdir().expect("tempdir");
+    let dir = short_tempdir();
     fs::write(dir.path().join("a"), "hit\n".repeat(100_000)).expect("fixture");
     let result = Grep
         .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
@@ -75,7 +81,7 @@ async fn grep_many_matches_are_bounded() {
 // Given: 201 hits / When: searching / Then: the summary fits within 200 lines.
 #[tokio::test]
 async fn grep_output_truncates_over_max_lines() {
-    let dir = tempdir().expect("tempdir");
+    let dir = short_tempdir();
     let path = dir.path().join("a");
     fs::write(&path, "hit\n".repeat(201)).expect("fixture");
     let result = Grep
