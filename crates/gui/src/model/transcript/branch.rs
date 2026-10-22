@@ -92,6 +92,46 @@ impl TranscriptModel {
         }
     }
 
+    /// The user message starting the turn after the completed turn `entry_id`,
+    /// when editing it rewinds to that same boundary; it then offers that rewind.
+    pub fn edit_after_turn(&self, entry_id: usize) -> Option<usize> {
+        let point = self.fork_point(entry_id)?;
+        let index = entry_id - self.first_entry_id;
+        let next = self.entries[index + 1..].iter().position(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::UserMessage { .. } | TranscriptEntry::TurnEnd { .. }
+            )
+        })?;
+        let next_id = entry_id + 1 + next;
+        (self.edit_point(next_id) == Some(Some(point))).then_some(next_id)
+    }
+
+    /// Whether anything but branch markers follows `entry_id`: a rewind to it
+    /// would drop something.
+    pub fn continues_after(&self, entry_id: usize) -> bool {
+        entry_id
+            .checked_sub(self.first_entry_id)
+            .is_some_and(|index| {
+                self.entries
+                    .iter()
+                    .skip(index + 1)
+                    .any(|entry| !matches!(entry, TranscriptEntry::Branch { .. }))
+            })
+    }
+
+    /// The first user message, when editing it restarts the conversation.
+    pub fn start_edit_message(&self) -> Option<usize> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::UserMessage { .. } | TranscriptEntry::TurnEnd { .. }
+            )
+        })?;
+        let id = self.first_entry_id + index;
+        (self.edit_point(id) == Some(None)).then_some(id)
+    }
+
     /// Text of a user message by absolute id.
     /// The typed text, without skill bodies inlined at send time.
     pub fn user_text(&self, entry_id: usize) -> Option<&str> {
