@@ -1,0 +1,66 @@
+implementation_issue_packet:
+  issue_title: "ADR 0038 ①: render_artifact が一時領域のファイルを受け付け、HTML の相対パス画像を埋め込む"
+  issue_kind: feature
+  source_execution_unit: v15-a-artifact-scratch-inline-images
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/config/assets/presets/ docs/ intents/"
+  target_part: "ADR 0038 の render_artifact の拡張。取り込み元をワークスペースとその thread の一時領域（$TMPDIR）に広げ、HTML の取り込み時に相対パスの画像参照（img src と CSS url()）を data URI に置き換えて自己完結した HTML として保存する"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0038（intents/evorch/decisions/0038-image-generation.md）と ADR 0029 で方針合意済み。ADR 0029 は取り込み元を workspace または scratch 配下としていたが、実装は workspace だけである"
+    - "crates/runtime/src/artifacts.rs の read_workspace_file が canonicalize 後に workspace 内か判定し、拡張子・マジックバイト・上限（画像 8 MiB、HTML 2 MiB）を検査する。上限は take(limit + 1) で読み込み自体を制限している"
+    - "ArtifactStore::capture は HTML に secret_guard を通してから content-addressed に保存する"
+    - "run の一時領域は LoopState::scratch_dir()（crates/runtime/src/scratch.rs）で得られる。ファイルツールの境界も同じ一時領域を読み書き可としている（ADR 0033）"
+    - "inspect_artifact は保存済みの HTML を offline の CEF で開く。data URI の画像はそのまま表示できる"
+    - "workspace に HTML 書き換え用の依存はない。scraper（0.27）は解析専用で、元の位置を返さない"
+  intent_references:
+    - intents/evorch/decisions/0038-image-generation.md
+    - intents/evorch/decisions/0029-conversation-artifacts.md
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "render_artifact はワークスペースとその run の thread の一時領域の中にある通常ファイルを受け付け、それ以外（別 thread の一時領域、許可ディレクトリ、境界の外、symlink による脱出）を拒否する。相対パスは従来どおりワークスペースから解決する"
+    - "HTML の取り込みでは、img 要素の src と、style 要素・style 属性の CSS url() にある相対パスの画像参照を、HTML ファイルのあるディレクトリから解決して data URI に置き換えて保存する"
+    - "置き換える画像は png / jpeg / gif / webp で、拡張子とマジックバイトが一致し、1 枚 8 MiB 以下でなければならない。参照先はワークスペースか同じ一時領域の中でなければならない"
+    - "境界の外・存在しない・形式が合わない・上限超過の参照が 1 件でもあれば、該当する参照の一覧を示して取り込みを拒否し、何も保存しない"
+    - "http: / https: / data: / フラグメントだけの参照と、絶対 URL のスキームを持つ参照は書き換えない"
+    - "元の HTML は 2 MiB 以下、埋め込み後の HTML は 8 MiB 以下とし、超えた場合は拒否する。secret_guard は元の HTML に対して従来どおり適用する"
+    - "保存したメタデータに、埋め込んだ画像の元パスと sha256 を記録する"
+    - "埋め込みのない HTML と画像の取り込みは、従来と同じ内容で保存される"
+    - "render_artifact の tool 説明と category-visual overlay に、HTML から相対パスで画像を参照すれば取り込み時に埋め込まれること、一時領域のファイルも取り込めることを記載する"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0038-image-generation.md
+  supporting_intents:
+    - intents/evorch/decisions/0029-conversation-artifacts.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0038 の render_artifact の拡張の節が方針であり、ADR 0029 の Status に変更の参照を追記済み"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0038 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/conversation-artifacts.md
+    summary: "取り込み元に一時領域が加わったこと、相対パス画像の埋め込みの規則と上限を記載する"
+closeout_learning:
+  expected: "取り込み元の境界がファイルツールと同じ一時領域の判定に揃い、HTML モックに画像を組み込んでも自己完結した artifact として保存できることがテストで確認できる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - "crates/runtime/src/artifacts.rs の render_artifact の ToolSpec 説明"
+    - "crates/config/assets/presets/category-visual.md"

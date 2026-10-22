@@ -1,0 +1,86 @@
+implementation_issue_packet:
+  issue_title: "ADR 0038 ③: Codex / OpenAI の画像生成 capability と generate_image ツール（生成・編集）"
+  issue_kind: feature
+  source_execution_unit: v15-c-generate-image-tool
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/providers/ crates/event-bus/ crates/storage/ crates/runtime/ crates/tools/ crates/config/assets/presets/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0038 の画像生成。ProviderClient に任意の image_generation capability を加え、Codex（ChatGPT ログイン）は {codex}/images/generations と /images/edits、OpenAI（API キー）は {base_url}/images/generations と /images/edits を呼ぶ。runtime に generate_image meta op を加え、agents.roles.image_generator のチェーンで解決した候補で生成・編集し、ワークスペースか一時領域に保存して縮小版とプレビュー画像を返す"
+  dependencies:
+    - v15-a-artifact-scratch-inline-images
+    - v15-b-image-model-kind
+  technical_baseline:
+    - "ADR 0038（intents/evorch/decisions/0038-image-generation.md）で方針合意済み"
+    - "Codex 本家の画像 endpoint（codex-rs/codex-api/src/endpoint/images.rs、2026-10-22 時点の main）: POST {codex}/images/generations の JSON 本文は {prompt, model, background?, quality?, size?, n?}、/images/edits は images: [{image_url: data URL} | {file_id}] を加える。応答は非ストリームの JSON {created, background?, data: [{b64_json, generation_id?}], output_format?, quality?, size?, usage?}。応答ヘッダー x-codex-imagegen-request-id を持つことがある"
+    - "Codex 本家の画像ツール（codex-rs/ext/image-generation/src/tool.rs）はモデルを gpt-image-2 に固定し、quality と size に auto を送り、透過背景を background で指定する。参照画像は 5 枚まで、生成画像は 32 MiB までとしている"
+    - "OpenAI 公開 API の /v1/images/generations と /v1/images/edits は同じ JSON の形を受け付け（edits は images[].image_url に data URL）、GPT image モデルは常に b64_json を返す。output_format（png / jpeg / webp）を受け付ける"
+    - "CodexClient::post_response（crates/providers/src/provider/codex/client.rs）が ChatGPT のセッション、chatgpt-account-id / originator / version / User-Agent / session-id などのヘッダーを付ける。resolve_endpoint が base_url を …/backend-api/codex/responses に正規化する"
+    - "OpenAiClient（crates/providers/src/provider/openai.rs）は API キーで base_url（既定 https://api.openai.com/v1）を呼ぶ"
+    - "任意 capability の前例は ProviderClient::hosted_web_search と compactor（crates/providers/src/client.rs）、HostedWebSearch の Codex 実装（provider/codex/client/web_search.rs）。AttemptObserver と UsageEmitter で観測と使用量を記録し、RequestPurpose（event-bus）で用途を区別する"
+    - "RoutedModel::resolve_summary_invocation（crates/runtime/src/compose.rs）が、agent でないロールのチェーンを router で解決する前例"
+    - "meta op は crates/runtime/src/meta/registry.rs の define_meta_ops! で登録する。inspect_artifact が画像（スクリーンショット）を tool 結果で返す前例。ToolResultContent::Image で model に画像を返せる"
+    - "may_render（crates/runtime/src/artifacts.rs）が visual category の Worker と conversation category の root Worker を判定する。ExecutionPolicy::for_run_config（crates/runtime/src/policy.rs）がこれで render_artifact を付与している"
+    - "tools crate は image crate（png / jpeg / gif / webp）に依存している"
+    - "v15-a で取り込み元に一時領域が加わり、HTML の相対パス画像が取り込み時に埋め込まれる。v15-b で ModelKind、agents.roles.image_generator、種別の検査、固定の画像モデル一覧が入る"
+  intent_references:
+    - intents/evorch/decisions/0038-image-generation.md
+    - intents/evorch/decisions/0029-conversation-artifacts.md
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0033-file-tool-path-boundary.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "ProviderClient に任意の image_generation() を加え、生成と編集の要求・応答を provider 共通の型にする。openai-codex と openai の client だけが Some を返す"
+    - "Codex の実装は、ChatGPT のセッションと既存の送信ヘッダーで {codex}/images/generations と /images/edits に JSON を送り、data[].b64_json を復号する。base_url の正規化は resolve_endpoint と同じ規則に従う"
+    - "OpenAI の実装は、API キーで {base_url}/images/generations と /images/edits に JSON を送り、output_format に png を指定する"
+    - "どちらの実装も、応答本文を 48 MiB まで（超えたら失敗）、全体の時間を 5 分までに制限し、data が空・base64 が不正・png でない応答を失敗にする。usage は既存の使用量イベントに RequestPurpose::ImageGeneration で 1 回だけ記録する"
+    - "認証・利用上限・レート制限・一時的な失敗・endpoint の非対応（404 など）はチェーンのフォールバックとクールダウンの対象になり、内容の拒否（安全性の判定）と不正な要求は次の候補へ進まずに理由を model に返す"
+    - "generate_image は may_render と同じ条件（visual category の Worker、conversation category の root Worker）で、かつ run の開始時に agents.roles.image_generator のチェーンが空でない場合だけ公開される。policy と dispatch の両方で確かめ、条件や category を model の入力から決めない"
+    - "generate_image は agents.roles.image_generator のチェーンを router で解決し、解決した候補が image_generation で画像 capability を持つことを確かめてから送る"
+    - "引数は prompt（必須）、output_path（必須、.png）、reference_image_paths（任意、1〜5 件）、transparent_background（任意）、variant（任意、max_side と format の jpeg / png）、size と quality（任意）とする。size と quality が Codex で無視されうることを tool 説明に書く"
+    - "output_path と reference_image_paths は、ワークスペースかその run の thread の一時領域の中でなければならない（canonicalize 後の判定、symlink による脱出を拒否）。output_path への書き込みは write と同じ境界と ownership の mutation 検査を通し、一時ファイルからの rename で行う。既存のファイルは上書きする"
+    - "参照画像は png / jpeg / gif / webp の拡張子とマジックバイトが一致し 8 MiB 以下のものだけを受け付け、長辺 2048 px を超えるものは縮小してから data URL で送る"
+    - "variant を指定した場合は、長辺を max_side（64〜2048）以下に縮小した画像を、format で保存する。jpeg と transparent_background の組み合わせは拒否する。保存先は output_path と同じディレクトリの <stem>.<max_side>.<ext>"
+    - "tool 結果は、保存したパス、縮小版のパス、幅・高さ、使った profile とモデル、参照画像を送ったかどうかのテキストと、長辺 1024 px 以下に縮小したプレビュー画像（ToolResultContent::Image）を返す。参照画像を使った場合は、OpenAI に送信したことを結果に明記する"
+    - "tool 説明に、生成・編集の送り先が OpenAI であること、参照画像が送信されること、画像は利用枠を多く消費すること、採用するか参考にとどめるかは agent が判断してよいことを書く"
+    - "category-visual と category-conversation の overlay に、素材を generate_image で作って縮小版を HTML から相対パスで参照し render_artifact で取り込む手順と、UI 本体は HTML で作り生成画像を UI モックの代わりにしないことを書く"
+    - "生成の途中で run が取り消されたら、要求を中断し、ファイルを書かない"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0038-image-generation.md
+  supporting_intents:
+    - intents/evorch/decisions/0029-conversation-artifacts.md
+    - intents/evorch/decisions/0030-role-model-chains.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0038 の provider の capability と generate_image ツールの節が方針であり、ADR 0029 の成果物の流れと ADR 0030 のチェーンに載せる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0038 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/image-generation.md
+      - docs/conversation-artifacts.md
+      - docs/providers.md
+    summary: "generate_image の付与条件・引数・保存先・送信先・利用枠、Codex と OpenAI の経路と設定例、素材をモックに組み込む流れを記載する"
+closeout_learning:
+  expected: "Codex サブスクリプションと OpenAI API キーのどちらでも、visual Worker と会話の root Worker が素材を生成・編集し、HTML モックに組み込んで提示できることがテストで確認できる。Codex の非公開 endpoint への依存と、未確認の項目（model / size / quality の反映、利用規約）が記録されている"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - "crates/runtime/src/meta/registry.rs の generate_image の ToolSpec 説明"
+    - "crates/config/assets/presets/category-visual.md"
+    - "crates/config/assets/presets/category-conversation.md"

@@ -1,0 +1,74 @@
+implementation_issue_packet:
+  issue_title: "ADR 0038 ②: モデルの種別タグ（chat / image_generation）と画像生成ロールのチェーン"
+  issue_kind: feature
+  source_execution_unit: v15-b-image-model-kind
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/runtime/ crates/gui/ docs/ intents/"
+  target_part: "ADR 0038 のモデルの種別。ModelEntryConfig に kind を加え、省略時は固定の名前一覧から推定する。agents.roles.image_generator のチェーンを追加し、通常のロールとカテゴリは chat、image_generator は image_generation の候補だけを使えるよう両方向に検査する。GUI はモデル追加時に推定した種別を書き込み、ロール設定と route 編集で種別に合う候補だけを示す"
+  dependencies: []
+  technical_baseline:
+    - "ADR 0038（intents/evorch/decisions/0038-image-generation.md）と ADR 0030 で方針合意済み"
+    - "ModelEntryConfig（crates/config/src/types/provider.rs）は id / enabled / metadata / 価格などを持つ。TOML では文字列だけの要素も許す。strict.rs の validate_models と MODEL_ENTRY_KEYS が許可するキーを検査する"
+    - "RouteCandidateConfig は profile / model? / auto を持ち、model 省略時は profile の default_model を使う"
+    - "agents.roles.compactor（crates/config/src/types/agents.rs）が agent として起動しないロールのチェーンの前例。role_bindings / explicit_refs / implicit_roles_using が compactor を特別扱いする"
+    - "Config::validate_chain_routes（crates/config/src/types/role_profile.rs）がトップレベルとロールプロファイルのチェーンを検査し、load.rs で厳格な読み込みはエラー、通常の読み込みは警告にしている"
+    - "自動グルーピングの GroupKey（crates/runtime/src/model_grouping.rs）は canonical id と tier からなる"
+    - "GUI のモデル追加は provider_model_entries.rs の add_model / apply_fetched_selection と provider_codex_models.rs の apply_fetched_selection が ModelEntryConfig::enabled(id) を使う。reconcile_default が default_model を整える"
+    - "GUI のロール設定（crates/gui/src/panes/role_settings.rs）は compactor のチェーンを chain_editor で編集する。route の候補は routing_settings で編集する"
+    - "Codex のカタログ（/codex/models）は会話用モデルの slug を返す。画像モデルは載らない見込みで、Codex 本家も画像モデルを固定値（gpt-image-2）で扱う"
+    - "OpenAI API キーの profile は GUI が /v1/models を絞り込まずに取得するため、gpt-image-* などが会話用モデルとして登録されうる"
+  intent_references:
+    - intents/evorch/decisions/0038-image-generation.md
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "ModelEntryConfig は kind（chat / image_generation）を任意で持ち、省略した設定と文字列だけの要素は従来どおり読み込める。設定の移行は要らない"
+    - "モデルの実効の種別は、明示した kind があればそれ、なければ固定の一覧による推定（gpt-image- / chatgpt-image- / dall-e- で始まれば image_generation、それ以外は chat）である。推定は 1 か所の関数にまとめる"
+    - "route の候補の実効の種別は、model を明示した場合はその profile のモデル登録（無ければ名前の推定）から、省略した場合は default_model から決まる"
+    - "default_model が image_generation のモデルを指す profile は検査でエラー（通常の読み込みでは警告）になる"
+    - "agents.roles.image_generator とロールプロファイルの同じ項目を追加する。models が空なら画像生成は無効で、ロール名の route への暗黙のフォールバックはしない"
+    - "通常のロール・カテゴリ・compactor のチェーンに image_generation の候補があれば、image_generator のチェーンに chat の候補か openai-codex / openai 以外の provider の候補があれば、1 つの route に種別の違う候補が混ざっていれば、厳格な読み込みでエラー、通常の読み込みで警告になり、該当するチェーンを使う時点で失敗する"
+    - "runtime は会話の送信と要約のチェーンを解決したとき、解決した候補が chat であることを確かめ、違えば送信せずに失敗する"
+    - "自動グルーピングは種別の違うモデルを同じ route に加えない"
+    - "GUI でモデルを追加したとき（取得した一覧からの選択と手入力）、推定した種別を kind として明示的に書き込む。利用者は kind を変更できる"
+    - "GUI の Codex profile の編集で、固定の一覧の画像モデル（gpt-image-2）を追加の候補として示す"
+    - "GUI の default_model の選択と reconcile_default は image_generation のモデルを選ばない"
+    - "GUI のロール設定に Image generator のチェーンの編集を加える。通常のロール・カテゴリ・compactor には chat の route だけ、Image generator には image_generation の route だけを候補として示す。route の編集では種別の違う候補を混ぜられない"
+    - "設定のスキーマ（docs/config の JSON schema）を再生成する"
+    - "cargo fmt --check / cargo clippy --workspace --all-targets -- -D warnings / 変更範囲の cargo nextest / scripts/check-cache-contracts.sh / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/decisions/0038-image-generation.md
+  supporting_intents:
+    - intents/evorch/decisions/0030-role-model-chains.md
+    - intents/evorch/features/provider-routing/overview.md
+  new_intent_needed: false
+  placement_rationale: "ADR 0038 のモデルの種別と画像生成ロールの節が方針であり、ADR 0030 のチェーンの仕組みに載せる"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "実装で ADR 0038 と矛盾する判断が生じた場合だけ ADR を更新する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/providers.md
+      - docs/config/
+    summary: "モデルの kind、名前からの推定、agents.roles.image_generator、種別の検査を記載し、スキーマを再生成する"
+closeout_learning:
+  expected: "画像モデルが通常のロールに入らないこと、画像生成ロールに会話用モデルが入らないことが、設定の検査・実行時の確認・GUI の候補の 3 か所でテストにより確認できる"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
