@@ -570,7 +570,20 @@ fn thread_context_menu_copies_the_full_thread_id_and_title() {
 }
 
 /// Solo B, Solo A, Parent { Escalated { Nested }, Fork }, Solo C, newest first.
+/// Thread IDs per indicator for [`branch_fixture_with`].
+#[derive(Default)]
+struct BranchFlags {
+    running: &'static [&'static str],
+    questions: &'static [&'static str],
+    approvals: &'static [&'static str],
+    unread: &'static [&'static str],
+}
+
 fn branch_fixture_with_width(width: f32) -> Harness<'static, Option<SidebarAction>> {
+    branch_fixture_with(width, BranchFlags::default())
+}
+
+fn branch_fixture_with(width: f32, flags: BranchFlags) -> Harness<'static, Option<SidebarAction>> {
     let root = tempfile::tempdir().unwrap();
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
@@ -600,22 +613,30 @@ fn branch_fixture_with_width(width: f32) -> Harness<'static, Option<SidebarActio
                 point: None,
             });
         }
+        thread.run_ids.push(format!("run-{id}"));
         sidebar.threads.push(thread);
     }
+    let ids =
+        |ids: &[&str]| -> BTreeSet<ThreadId> { ids.iter().copied().map(ThreadId::new).collect() };
+    let phases: BTreeMap<String, ThreadRunPhase> = flags
+        .running
+        .iter()
+        .map(|id| (format!("run-{id}"), ThreadRunPhase::Running))
+        .collect();
+    let (questions, approvals, unread) = (
+        ids(flags.questions),
+        ids(flags.approvals),
+        ids(flags.unread),
+    );
     let mut harness = Harness::builder()
         .with_size(egui::vec2(width, 360.0))
         .build_ui_state(
             move |ui, action| {
                 let _keep_root = &root;
                 gui::theme::install(ui.ctx());
-                if let Some(next) = sidebar_pane(
-                    ui,
-                    &sidebar,
-                    &Default::default(),
-                    &Default::default(),
-                    &Default::default(),
-                    &Default::default(),
-                ) {
+                if let Some(next) =
+                    sidebar_pane(ui, &sidebar, &phases, &questions, &approvals, &unread)
+                {
                     *action = Some(next);
                 }
             },
@@ -714,16 +735,153 @@ fn branch_fixture() -> Harness<'static, Option<SidebarAction>> {
     branch_fixture_with_width(600.0)
 }
 
+/// Work that needs the user, all inside Parent's subtree.
+fn flagged_children() -> BranchFlags {
+    BranchFlags {
+        running: &["nested"],
+        questions: &["nested"],
+        approvals: &["fork"],
+        unread: &["fork"],
+    }
+}
+
+const CHILD_QUESTION: &str = "Answer needed: a collapsed child thread has an unanswered question";
+const CHILD_APPROVAL: &str = "Approval needed: a tool call is waiting in a collapsed child thread";
+const CHILD_RUNNING: &str = "Running in a collapsed child thread";
+const CHILD_UNREAD: &str = "Unread report in a collapsed child thread";
+
+fn collapse(harness: &mut Harness<'static, Option<SidebarAction>>, id: &str) {
+    harness
+        .get_by_label(&format!("Collapse children of {id}"))
+        .click();
+    // Spinners keep repainting; don't wait for the harness to settle.
+    harness.run_steps(3);
+}
+
+fn same_row(harness: &Harness<'_, Option<SidebarAction>>, label: &str, title: &str) -> bool {
+    let title = harness.get_by_label(title).rect();
+    harness
+        .query_all_by_label(label)
+        .any(|node| (node.rect().center().y - title.center().y).abs() <= 1.0)
+}
+
+#[test]
+fn collapsed_parent_rolls_up_what_its_hidden_children_need() {
+    let mut harness = branch_fixture_with(600.0, flagged_children());
+    // Given: expanded, each child carries its own indicators.
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
+    assert_eq!(
+        harness.query_all_by_label("Thread status: Running").count(),
+        1
+    );
+    for label in [CHILD_QUESTION, CHILD_APPROVAL, CHILD_RUNNING, CHILD_UNREAD] {
+        assert!(harness.query_by_label(label).is_none(), "{label}");
+    }
+    assert!(harness.query_by_label("3 hidden child threads").is_none());
+
+    // When: Parent is collapsed.
+    collapse(&mut harness, "root");
+
+    // Then: Parent's row carries a count and everything its children need.
+    assert!(harness.query_by_label("↳ Nested").is_none());
+    assert!(harness.query_by_label(QUESTION_LABEL).is_none());
+    assert!(harness.query_by_label("Thread status: Running").is_none());
+    for label in [
+        CHILD_QUESTION,
+        CHILD_APPROVAL,
+        CHILD_RUNNING,
+        CHILD_UNREAD,
+        "3 hidden child threads",
+    ] {
+        assert_eq!(harness.query_all_by_label(label).count(), 1, "{label}");
+        assert!(same_row(&harness, label, "Parent"), "{label}");
+    }
+    // A question and an approval stay distinguishable: dot plus shield glyph.
+    let shields = harness
+        .output()
+        .shapes
+        .iter()
+        .filter(|shape| {
+            matches!(&shape.shape, Shape::Text(text)
+                if text.galley.text() == gui::theme::icons::SHIELD_WARNING)
+        })
+        .count();
+    assert_eq!(shields, 1);
+    // The spinner takes Parent's Archive slot; childless roots keep Archive.
+    let spinner = harness.get_by_label(CHILD_RUNNING).rect();
+    let archive = harness.query_all_by_label("Archive").next().unwrap().rect();
+    assert_eq!(harness.query_all_by_label("Archive").count(), 3);
+    assert_eq!(spinner.width(), archive.width());
+    // The count sits between the title and Pin.
+    let badge = harness.get_by_label("3 hidden child threads").rect();
+    let title = harness.get_by_label("Parent").rect();
+    let pin = harness
+        .query_all_by_label("☆")
+        .map(|node| node.rect())
+        .find(|pin| (pin.center().y - title.center().y).abs() <= 1.0)
+        .unwrap();
+    assert!(title.right() <= badge.left(), "{title:?} {badge:?}");
+    assert!(badge.right() <= pin.left(), "{badge:?} {pin:?}");
+
+    // When: Parent is expanded again, the children speak for themselves.
+    harness.get_by_label("Expand children of root").click();
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
+    for label in [CHILD_QUESTION, CHILD_APPROVAL, CHILD_RUNNING, CHILD_UNREAD] {
+        assert!(harness.query_by_label(label).is_none(), "{label}");
+    }
+    assert!(harness.query_by_label("3 hidden child threads").is_none());
+}
+
+#[test]
+fn a_collapsed_child_rolls_up_only_its_own_subtree() {
+    let mut harness = branch_fixture_with(600.0, flagged_children());
+    collapse(&mut harness, "esc");
+    assert_eq!(
+        harness.query_all_by_label("1 hidden child thread").count(),
+        1
+    );
+    for label in ["1 hidden child thread", CHILD_QUESTION, CHILD_RUNNING] {
+        assert!(same_row(&harness, label, "↳ Escalated"), "{label}");
+    }
+    // Fork is still visible, so its approval and unread report stay its own.
+    for label in [CHILD_APPROVAL, CHILD_UNREAD] {
+        assert!(harness.query_by_label(label).is_none(), "{label}");
+    }
+    assert!(same_row(&harness, APPROVAL_LABEL, "↳ Fork"));
+    assert!(!same_row(&harness, CHILD_QUESTION, "Parent"));
+}
+
+#[test]
+fn a_row_s_own_attention_takes_precedence_over_its_hidden_children() {
+    let mut harness = branch_fixture_with(
+        600.0,
+        BranchFlags {
+            questions: &["root", "nested"],
+            ..BranchFlags::default()
+        },
+    );
+    collapse(&mut harness, "root");
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
+    assert!(same_row(&harness, QUESTION_LABEL, "Parent"));
+    assert!(harness.query_by_label(CHILD_QUESTION).is_none());
+}
+
 #[test]
 #[ignore = "writes thread tree PNG evidence using an offscreen adapter"]
 fn capture_thread_tree_png_evidence() {
     let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/gui-evidence/thread-tree");
     std::fs::create_dir_all(&output).expect("evidence directory");
-    let mut harness = branch_fixture_with_width(320.0);
+    let mut harness = branch_fixture_with(320.0, flagged_children());
     harness.run_steps(2);
     let image = harness.render().expect("offscreen adapter");
     image
         .save(output.join("thread-tree.png"))
         .expect("thread tree PNG");
+    collapse(&mut harness, "root");
+    let image = harness.render().expect("offscreen adapter");
+    image
+        .save(output.join("thread-tree-collapsed.png"))
+        .expect("collapsed thread tree PNG");
 }
