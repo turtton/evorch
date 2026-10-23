@@ -142,7 +142,11 @@ async fn preview_and_run_carry_the_same_allowed_directories_section() {
     let fixture = Fixture::new();
     let shared = tempfile::tempdir().unwrap();
     let shared_path = shared.path().canonicalize().unwrap();
-    for (role, access) in [(Role::Worker, "read-write"), (Role::Explorer, "read-only")] {
+    for (role, access) in [
+        (Role::Worker, "read-write"),
+        (Role::Explorer, "read-only"),
+        (Role::Orchestrator, "read-only"),
+    ] {
         let model = Arc::new(ScriptedModel::new([Ok(text_response(
             "done",
             FinishReason::Stop,
@@ -167,6 +171,22 @@ async fn preview_and_run_carry_the_same_allowed_directories_section() {
                 .text
                 .contains(&format!("* {} ({access})", shared_path.display()))
         );
+
+        let section = &report.sections[allowed].text;
+        // Only an Orchestrator's Workers get different access, so only it is told whose
+        // access the labels describe.
+        let orchestrator = role == Role::Orchestrator;
+        assert_eq!(
+            section.contains("Access labels describe this run's own permissions."),
+            orchestrator
+        );
+        assert_eq!(
+            section.matches("Delegated Workers").count(),
+            usize::from(orchestrator)
+        );
+        if orchestrator {
+            assert!(section.contains("Delegated Workers have read-write access to all of them."));
+        }
 
         let run = runtime.delegate_background(role, "TASK".into(), RunConfig::default());
         assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));

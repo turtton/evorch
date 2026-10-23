@@ -5,6 +5,8 @@
 //! the shell sandbox and the direct file tools both get it through the one
 //! boundary (ADR 0033). Delegated children resolve the thread the way scratch
 //! does and stay read-only; an escalation copies the list to its child thread.
+//! A run that can delegate also follows later declarations, only to tell what a
+//! Worker it delegates next would mount; its own mounts stay fixed.
 
 use std::path::{Path, PathBuf};
 
@@ -73,8 +75,23 @@ impl AgentRuntime {
         workspace_root: &Path,
         scratch: Option<&Path>,
     ) -> Vec<PathBuf> {
-        let declared = self
-            .thread_read_only_directories(thread_id)
+        self.mountable_declared_directories(
+            thread_id,
+            self.thread_read_only_directories(thread_id),
+            workspace_root,
+            scratch,
+        )
+    }
+
+    /// [`Self::mountable_thread_read_only_directories`] for an already read declaration.
+    fn mountable_declared_directories(
+        &self,
+        thread_id: &str,
+        declared: Vec<PathBuf>,
+        workspace_root: &Path,
+        scratch: Option<&Path>,
+    ) -> Vec<PathBuf> {
+        let declared = declared
             .into_iter()
             .filter(|dir| match dir.canonicalize() {
                 Ok(real) if &real == dir && real.is_dir() => true,
@@ -192,6 +209,47 @@ impl LoopState {
             })
             .unwrap_or_default()
     }
+
+    /// The thread's read-only directories a Worker this run delegated now would mount.
+    /// It resolves the same thread and mounts under the same root, but reads the current
+    /// declaration, which can differ from this run's own mounts. The result is checked
+    /// again only when the declaration changes, not at every request boundary.
+    pub(crate) fn thread_read_dirs_for_delegates(&mut self) -> Vec<PathBuf> {
+        let Some(root) = self
+            .worker_base
+            .as_ref()
+            .map(|base| base.workspace_root().to_path_buf())
+        else {
+            return Vec::new();
+        };
+        let Some(runtime) = self.runtime() else {
+            return Vec::new();
+        };
+        let Some(thread) = runtime.thread_of_run(self.task.run_id) else {
+            return Vec::new();
+        };
+        let declared = runtime.thread_read_only_directories(&thread);
+        if self.delegated_thread_dirs.declared.as_ref() != Some(&declared) {
+            let mountable = runtime.mountable_declared_directories(
+                &thread,
+                declared.clone(),
+                &root,
+                self.scratch_dir(),
+            );
+            self.delegated_thread_dirs = DelegatedThreadDirs {
+                declared: Some(declared),
+                mountable,
+            };
+        }
+        self.delegated_thread_dirs.mountable.clone()
+    }
+}
+
+/// The mountable part of the thread declaration it was computed from.
+#[derive(Debug, Default)]
+pub(crate) struct DelegatedThreadDirs {
+    declared: Option<Vec<PathBuf>>,
+    mountable: Vec<PathBuf>,
 }
 
 /// GUI preflight for a proposed thread RO grant. The runtime repeats these

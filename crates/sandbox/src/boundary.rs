@@ -286,6 +286,26 @@ impl SandboxBoundary {
         regions.push(region(&self.workspace_root, PathAccess::ReadWrite));
         regions
     }
+
+    /// The access this boundary grants at the canonical `path`; `None` outside it.
+    pub fn access(&self, path: &Path) -> Option<PathAccess> {
+        region_access(&self.regions(), path)
+    }
+}
+
+/// The access `regions` grant at the canonical `path`. Like bwrap, the last mounted
+/// region covering it decides; a region whose path does not resolve covers nothing.
+pub fn region_access(regions: &[BoundaryRegion], path: &Path) -> Option<PathAccess> {
+    regions
+        .iter()
+        .rev()
+        .find(|region| {
+            region
+                .path
+                .canonicalize()
+                .is_ok_and(|root| path.starts_with(root))
+        })
+        .map(|region| region.access)
 }
 
 fn tool_home(variable: &str, default: &str) -> Option<PathBuf> {
@@ -384,6 +404,29 @@ mod tests {
             regions[index(&regions, "/srv/reference")].access,
             PathAccess::ReadWrite
         );
+    }
+
+    // Given: an allowed directory mounted read-write with a read-only bind inside it, and
+    //        a project root that does not exist
+    // When: asking what the boundary grants inside, beside and outside them
+    // Then: the last mounted region covering a path that resolves decides, like bwrap
+    #[test]
+    fn the_last_mounted_region_covering_a_path_decides_its_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().canonicalize().unwrap();
+        let locked = shared.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let boundary = SandboxBoundary::new(shared.join("missing"))
+            .with_allowed(LivePaths::new(vec![shared.clone()]), PathAccess::ReadWrite)
+            .read_only(&locked);
+        for (path, access) in [
+            (shared.join("a.txt"), Some(PathAccess::ReadWrite)),
+            (locked.join("a.txt"), Some(PathAccess::ReadOnly)),
+            (shared.join("missing/a.txt"), Some(PathAccess::ReadWrite)),
+            (PathBuf::from("/evorch-missing/a.txt"), None),
+        ] {
+            assert_eq!(boundary.access(&path), access, "{}", path.display());
+        }
     }
 }
 

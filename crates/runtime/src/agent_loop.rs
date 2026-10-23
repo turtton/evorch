@@ -153,6 +153,11 @@ pub(crate) struct LoopState {
     /// The thread's read-only directories this run mounted when its sandbox was built
     /// (ADR 0037); fixed for the run's lifetime.
     pub(crate) thread_read_dirs: Vec<std::path::PathBuf>,
+    /// What a delegated Worker's sandbox gives besides allowed and thread directories:
+    /// system paths, caches, tool output, the thread's scratch and the project root that
+    /// thread directories are mounted under. None for runs without their own sandbox.
+    pub(crate) worker_base: Option<sandbox::SandboxBoundary>,
+    pub(crate) delegated_thread_dirs: crate::thread_read_dirs::DelegatedThreadDirs,
     pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
     pub(crate) allowed_instructions: crate::allowed_instructions::AllowedInstructions,
     /// Allowed directory each run-local skill came from, checked before every load.
@@ -316,6 +321,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         scratch: None,
         allowed_directories: None,
         thread_read_dirs: Vec::new(),
+        worker_base: None,
+        delegated_thread_dirs: Default::default(),
         told_directories,
         allowed_instructions,
         allowed_skill_origins: Default::default(),
@@ -369,6 +376,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                             access: state.policy.allowed_access(),
                         });
                 state.thread_read_dirs = state.thread_read_dirs_to_mount(&root);
+                // A Worker it delegates gets the same base, sharing the thread's scratch.
+                state.worker_base = crate::network::sandbox_boundary(&crate::WorkspaceMounts {
+                    scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
+                    ..crate::WorkspaceMounts::shared(root.clone())
+                })
+                .ok();
                 let checker_config = state
                     .shared
                     .runtime
@@ -539,10 +552,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         let inherited = state.task.config.allowed_skill_roots.clone();
         state.restore_allowed_skills(skill_roots.into_iter().chain(inherited));
         if !is_restored && !benchmark_replay {
-            let allowed = crate::allowed_directories::told_list(
-                state.allowed_directories.as_ref(),
-                &state.thread_read_dirs,
-            );
+            let allowed = state.directory_list();
             if let Err(error) = push_initial_system_message(
                 &state.shared,
                 &state.task,
@@ -702,6 +712,21 @@ fn push_initial_system_message(
 }
 
 impl LoopState {
+    pub(crate) fn directory_list(&mut self) -> Vec<crate::allowed_directories::ToldDirectory> {
+        let delegated_thread_dirs = if crate::allowed_directories::can_delegate(&self.policy) {
+            self.thread_read_dirs_for_delegates()
+        } else {
+            Vec::new()
+        };
+        crate::allowed_directories::told_list(
+            self.allowed_directories.as_ref(),
+            &self.thread_read_dirs,
+            &self.policy,
+            &delegated_thread_dirs,
+            self.worker_base.as_ref(),
+        )
+    }
+
     pub(crate) fn runtime(&self) -> Option<crate::AgentRuntime> {
         crate::AgentRuntime::from_weak(&self.shared.runtime)
     }
@@ -1705,6 +1730,7 @@ mod workspace_tests {
             crate::allowed_directories::ToldDirectory {
                 path: "/shared".into(),
                 access: crate::allowed_directories::DirectoryAccess::ReadOnly,
+                delegated_access: None,
             },
         ])
         .unwrap();

@@ -3186,6 +3186,12 @@ async fn delegated_child_starts_with_the_current_list_while_the_parent_only_appe
     let added = format!("+ {} (read-only)", shared.display());
     let child = &requests[2];
     assert!(wire_texts(child, "system").join("\n").contains(&listed));
+    assert!(
+        !wire_texts(child, "system")
+            .join("\n")
+            .contains("Delegated Workers"),
+        "a Planner cannot delegate"
+    );
     assert!(workspace_updates(child).is_empty());
     let parent_system = wire_texts(&requests[0], "system");
     assert!(
@@ -3201,6 +3207,10 @@ async fn delegated_child_starts_with_the_current_list_while_the_parent_only_appe
         let updates = workspace_updates(&requests[index]);
         assert_eq!(updates.len(), 1);
         assert!(updates[0].contains(&added));
+        assert_eq!(updates[0].matches("Delegated Workers").count(), 1);
+        assert!(updates[0].contains(
+            "Delegated Workers have read-write access to every added or changed directory."
+        ));
     }
 }
 
@@ -3323,11 +3333,11 @@ async fn allowed_restore_preserves_wire_prefix(changed: bool) {
     }
 }
 
-// Given: a conversation told one allowed directory, then given a second one
+// Given: a conversation told one allowed directory, optionally given a second one
 // When: the next turn crosses a successful compaction boundary
-// Then: the whole current list is restated once after that boundary, and later
-//       turns preserve the new prefix with the system message and tools unchanged
-async fn allowed_compaction_restates_the_list(reason: CompactionReason) {
+// Then: an unchanged initial System needs no duplicate; a changed list is restated
+//       once, and later turns preserve the new prefix with System and tools unchanged
+async fn allowed_compaction_restates_the_list(reason: CompactionReason, changed: bool) {
     let automatic = reason == CompactionReason::Automatic;
     let old_reply =
         "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
@@ -3369,9 +3379,11 @@ async fn allowed_compaction_restates_the_list(reason: CompactionReason) {
         )
         .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
-    harness
-        .runtime
-        .set_project_allowed_directories(root.clone(), vec![first.clone(), second.clone()]);
+    if changed {
+        harness
+            .runtime
+            .set_project_allowed_directories(root.clone(), vec![first.clone(), second.clone()]);
+    }
     if reason == CompactionReason::Manual {
         harness.runtime.compact(run).unwrap();
     }
@@ -3399,15 +3411,26 @@ async fn allowed_compaction_restates_the_list(reason: CompactionReason) {
         .into_iter()
         .filter(|text| text.contains("Current allowed directories"))
         .collect();
-    assert_eq!(restatements.len(), 1, "{reason:?}: restated once");
-    for directory in [&first, &second] {
-        assert!(restatements[0].contains(&format!("* {} ({access})", directory.display())));
+    assert_eq!(
+        restatements.len(),
+        usize::from(changed),
+        "{reason:?}: changed={changed}"
+    );
+    if changed {
+        for directory in [&first, &second] {
+            assert!(restatements[0].contains(&format!("* {} ({access})", directory.display())));
+        }
+    } else {
+        assert!(
+            workspace_updates(final_request).is_empty(),
+            "unchanged initial System is sufficient"
+        );
     }
     let systems = wire_texts(&requests[0], "system");
     for request in &requests {
         assert_eq!(wire_texts(request, "system"), systems);
     }
-    if reason == CompactionReason::Agent {
+    if reason == CompactionReason::Agent && changed {
         let messages = final_request["messages"].as_array().unwrap();
         let result = messages
             .iter()
@@ -3432,7 +3455,9 @@ async fn allowed_directories_are_restated_after_compaction_then_reuse_the_wire_p
         CompactionReason::Automatic,
         CompactionReason::Agent,
     ] {
-        allowed_compaction_restates_the_list(reason).await;
+        for changed in [false, true] {
+            allowed_compaction_restates_the_list(reason, changed).await;
+        }
     }
 }
 
@@ -4071,7 +4096,8 @@ async fn restored_runs_keep_allowed_instructions_without_appending_them_again() 
 // Given: a source chat that received an allowed directory's instructions in its first turn
 // When: a new thread forks at that turn and touches the directory again
 // Then: the fork appends them once more after its own tool round, because a fork
-//       replaces history, and keeps the source's system message
+//       replaces history, and keeps the source's system message; its unchanged
+//       allowed directories need no restatement beside that inherited System
 #[tokio::test]
 async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
     let outside = tempfile::tempdir().unwrap();
@@ -4139,6 +4165,12 @@ async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
 
     let requests = chat_requests(&harness);
     assert_eq!(requests.len(), 4);
+    for request in &requests[2..] {
+        assert!(
+            workspace_updates(request).is_empty(),
+            "an unchanged list stays told by the inherited System, without a restatement"
+        );
+    }
     assert_instructions_follow(&requests[1], "source-read");
     let again = assert_instructions_follow(&requests[3], "fork-read");
     assert!(again.contains("shared-root-rule"));

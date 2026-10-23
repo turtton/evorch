@@ -239,6 +239,9 @@ async fn delegated_children_inherit_the_threads_directories_read_only() {
     let (factory, mounts) = recording_factory();
     let (runtime, _) = dirs.runtime(model.clone(), Some(factory));
     runtime.set_thread_read_only_directories("thread-a", vec![dirs.drafts.clone()]);
+    // The project also allows that exact directory: neither parent nor child may
+    // advertise it as writable for delegated Workers (ADR 0037 wins).
+    runtime.set_project_allowed_directories(dirs.repo.clone(), vec![dirs.drafts.clone()]);
 
     let root = start_in(&runtime, "thread-a", Role::Orchestrator, "COORDINATE");
     assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
@@ -255,6 +258,338 @@ async fn delegated_children_inherit_the_threads_directories_read_only() {
     assert_eq!(std::fs::read_to_string(&dirs.seed).unwrap(), SEED);
     let listed = format!("* {} (read-only)", dirs.drafts.display());
     assert!(system_text(&observed[1]).contains(&listed), "child system");
+    assert!(
+        !system_text(&observed[0]).contains("Delegated Workers"),
+        "parent must not promise writes"
+    );
+    assert!(!system_text(&observed[1]).contains("Delegated Workers"));
+    for request in [0, 1] {
+        assert!(
+            !system_text(&observed[request]).contains("Access labels"),
+            "the same access for parent and child needs no explanation"
+        );
+    }
+}
+
+fn workspace_updates(request: &[Message]) -> Vec<String> {
+    request
+        .iter()
+        .filter(|message| message.role == providers::Role::User)
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if text.starts_with("[workspace update]") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// Given: an Orchestrator started with an allowed directory and a thread-only read-only one,
+//        and the thread's declaration changed twice while it runs
+// When: it delegates a Worker before, between and after the changes
+// Then: each time it is told what a newly delegated Worker gets, and each Worker gets that
+#[tokio::test]
+async fn a_running_orchestrator_learns_what_workers_delegated_after_a_declaration_change_get() {
+    let dirs = Dirs::new();
+    let reference_temp = tempfile::tempdir().unwrap();
+    let reference = reference_temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("reference");
+    std::fs::create_dir(&reference).unwrap();
+    let reference_seed = reference.join("seed.txt");
+    std::fs::write(&reference_seed, SEED).unwrap();
+    let write = |id: &str, name: &str| {
+        Ok(tool_response(
+            id,
+            "write",
+            json!({"path": dirs.drafts.join(name), "content": id}),
+        ))
+    };
+    let delegate = |prompt: &str| {
+        Ok(tool_response(
+            prompt,
+            "delegate",
+            json!({"target": {"role": "worker"}, "prompt": prompt}),
+        ))
+    };
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            delegate("CHILD ONE"),
+            write("one-write", "one.txt"),
+            Ok(text_response("one done", FinishReason::Stop)),
+            delegate("CHILD TWO"),
+            write("two-write", "two.txt"),
+            Ok(text_response("two done", FinishReason::Stop)),
+            delegate("CHILD THREE"),
+            write("three-write", "three.txt"),
+            Ok(tool_response(
+                "three-read",
+                "read",
+                json!({"path": reference_seed}),
+            )),
+            Ok(text_response("three done", FinishReason::Stop)),
+            Ok(tool_response("finish", "finish", json!({"result": "done"}))),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (factory, mounts) = recording_factory();
+    let (runtime, _) = dirs.runtime(model.clone(), Some(factory));
+    runtime.set_project_allowed_directories(dirs.repo.clone(), vec![dirs.drafts.clone()]);
+    runtime.set_thread_read_only_directories("thread-a", vec![reference.clone()]);
+    let root = start_in(&runtime, "thread-a", Role::Orchestrator, "COORDINATE");
+
+    // Requests run one at a time; a gate holds one permit, so each response is released
+    // only once its request waits. A declaration changed while a child's last request
+    // waits is seen by the parent's next boundary and by the next child's sandbox.
+    let answer = async |request: usize| {
+        model.wait_for_request(request).await;
+        gate.notify_one();
+    };
+    for request in 0..2 {
+        answer(request).await;
+    }
+    model.wait_for_request(2).await;
+    runtime
+        .set_thread_read_only_directories("thread-a", vec![reference.clone(), dirs.drafts.clone()]);
+    for request in 2..5 {
+        answer(request).await;
+    }
+    model.wait_for_request(5).await;
+    runtime.set_thread_read_only_directories("thread-a", Vec::new());
+    for request in 5..11 {
+        answer(request).await;
+    }
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+
+    assert_eq!(
+        ro_binds(&mounts),
+        vec![
+            vec![reference.clone()],
+            vec![reference.clone()],
+            vec![reference.clone(), dirs.drafts.clone()],
+            Vec::new(),
+        ],
+        "the parent, then each child with the declaration current at its start"
+    );
+    let observed = model.observed().await;
+    let mut entries = [
+        format!("* {} (read-only)", dirs.drafts.display()),
+        format!("* {} (read-only)", reference.display()),
+    ];
+    entries.sort();
+    let entries = entries.join("\n");
+    let reference = format!("`{}`", reference.display());
+
+    // Before any change: Workers may write the allowed directory but not the thread one.
+    assert!(
+        system_text(&observed[0]).contains(&format!("Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except {reference}, which stays read-only for them too.")),
+        "{}",
+        system_text(&observed[0])
+    );
+    assert!(workspace_updates(&observed[0]).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dirs.drafts.join("one.txt")).unwrap(),
+        "one-write"
+    );
+
+    // Declared read-only for the thread: Workers now get the parent's own access.
+    assert_eq!(
+        workspace_updates(&observed[3]),
+        [format!(
+            "[workspace update] Current allowed directories; this supersedes earlier lists. Delegated Workers have the same access to all of them.\n{entries}"
+        )]
+    );
+    let refused = tool_output(&observed, "two-write");
+    assert!(refused.contains("is read-only for file tools"), "{refused}");
+    assert!(!dirs.drafts.join("two.txt").exists());
+
+    // Withdrawn: Workers write the allowed directory again and no longer see the other.
+    let updates = workspace_updates(&observed[6]);
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert_eq!(
+        updates[1],
+        format!(
+            "[workspace update] Current allowed directories; this supersedes earlier lists. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them except {reference}, which they cannot access.\n{entries}"
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirs.drafts.join("three.txt")).unwrap(),
+        "three-write"
+    );
+    let hidden = tool_output(&observed, "three-read");
+    assert!(hidden.contains("outside the sandbox boundary"), "{hidden}");
+    assert_eq!(workspace_updates(&observed[10]), updates);
+}
+
+// Given: an Orchestrator told that Workers may write its allowed directory
+// When: a directory inside it is declared read-only for the thread while it runs, it
+//       delegates a Worker that writes inside and beside that directory, and once the
+//       declaration is withdrawn it delegates another that writes inside it
+// Then: it is told, as an addition, that Workers get its own read-only access there,
+//       which is what the first Worker finds, and then that Workers can write the whole
+//       allowed directory again, which is what the second finds. Each Worker is told
+//       only its own access
+#[tokio::test]
+async fn a_directory_declared_inside_an_allowed_one_while_running_is_named_for_workers() {
+    let dirs = Dirs::new();
+    let locked = dirs.drafts.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let write = |id: &str, path: PathBuf| {
+        Ok(tool_response(
+            id,
+            "write",
+            json!({"path": path, "content": id}),
+        ))
+    };
+    let delegate = |prompt: &str| {
+        Ok(tool_response(
+            prompt,
+            "delegate",
+            json!({"target": {"role": "worker"}, "prompt": prompt}),
+        ))
+    };
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            delegate("CHILD"),
+            write("inside", locked.join("inside.txt")),
+            write("beside", dirs.drafts.join("beside.txt")),
+            Ok(text_response("child done", FinishReason::Stop)),
+            delegate("CHILD TWO"),
+            write("inside-again", locked.join("again.txt")),
+            Ok(text_response("child two done", FinishReason::Stop)),
+            Ok(tool_response("finish", "finish", json!({"result": "done"}))),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (factory, mounts) = recording_factory();
+    let (runtime, _) = dirs.runtime(model.clone(), Some(factory));
+    runtime.set_project_allowed_directories(dirs.repo.clone(), vec![dirs.drafts.clone()]);
+    let root = start_in(&runtime, "thread-a", Role::Orchestrator, "COORDINATE");
+
+    // The declaration changes while the parent's first request waits, so its next
+    // boundary and the first child's sandbox both see it. It is withdrawn while the
+    // parent's second request waits, which it was told in, so its third boundary and
+    // the second child's sandbox see that.
+    let answer = async |request: usize| {
+        model.wait_for_request(request).await;
+        gate.notify_one();
+    };
+    model.wait_for_request(0).await;
+    runtime.set_thread_read_only_directories("thread-a", vec![locked.clone()]);
+    for request in 0..4 {
+        answer(request).await;
+    }
+    model.wait_for_request(4).await;
+    runtime.set_thread_read_only_directories("thread-a", Vec::new());
+    for request in 4..8 {
+        answer(request).await;
+    }
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+
+    assert_eq!(
+        ro_binds(&mounts),
+        vec![Vec::new(), vec![locked.clone()], Vec::new()]
+    );
+    let observed = model.observed().await;
+    assert!(
+        system_text(&observed[0])
+            .contains("Delegated Workers have read-write access to all of them."),
+        "{}",
+        system_text(&observed[0])
+    );
+    let added = format!(
+        "[workspace update] Allowed directories changed (+ added, - removed, ~ access changed). Delegated Workers have the same access to every added or changed directory.\n+ {} (read-only)",
+        locked.display()
+    );
+    assert_eq!(
+        workspace_updates(&observed[4]),
+        std::slice::from_ref(&added)
+    );
+    let child = system_text(&observed[1]);
+    assert!(child.contains(&format!("* {} (read-only)", locked.display())));
+    assert!(!child.contains("Delegated Workers") && !child.contains("Access labels"));
+    let refused = tool_output(&observed, "inside");
+    assert!(refused.contains("is read-only for file tools"), "{refused}");
+    assert!(!locked.join("inside.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dirs.drafts.join("beside.txt")).unwrap(),
+        "beside"
+    );
+
+    // Withdrawn: the whole list is restated rather than a bare `- locked` line.
+    assert_eq!(
+        workspace_updates(&observed[7]),
+        [
+            added,
+            format!(
+                "[workspace update] Current allowed directories; this supersedes earlier lists. Access labels describe this run's own permissions. Delegated Workers have read-write access to all of them.\n* {} (read-only)",
+                dirs.drafts.display()
+            )
+        ]
+    );
+    let second = system_text(&observed[5]);
+    assert!(second.contains(&format!("* {} (read-write)", dirs.drafts.display())));
+    assert!(!second.contains(&locked.display().to_string()), "{second}");
+    assert_eq!(
+        std::fs::read_to_string(locked.join("again.txt")).unwrap(),
+        "inside-again"
+    );
+}
+
+// Given: an Orchestrator whose thread declared a system directory read-only, which its
+//        Workers' usual sandbox mounts read-only anyway
+// When: the declaration is withdrawn while it runs, and it then delegates a Worker that
+//       reads there
+// Then: it is never told that Workers lost access, and the Worker does read the file
+#[tokio::test]
+async fn withdrawing_a_system_directory_changes_nothing_workers_are_told_or_read() {
+    let dirs = Dirs::new();
+    let system = PathBuf::from("/etc");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            Ok(tool_response(
+                "CHILD",
+                "delegate",
+                json!({"target": {"role": "worker"}, "prompt": "CHILD"}),
+            )),
+            Ok(tool_response(
+                "system-read",
+                "read",
+                json!({"path": system.join("passwd")}),
+            )),
+            Ok(text_response("child done", FinishReason::Stop)),
+            Ok(tool_response("finish", "finish", json!({"result": "done"}))),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (factory, mounts) = recording_factory();
+    let (runtime, _) = dirs.runtime(model.clone(), Some(factory));
+    runtime.set_thread_read_only_directories("thread-a", vec![system.clone()]);
+    let root = start_in(&runtime, "thread-a", Role::Orchestrator, "COORDINATE");
+
+    // Withdrawn while the parent's first request waits, so its next boundary and the
+    // child's sandbox both see it.
+    model.wait_for_request(0).await;
+    runtime.set_thread_read_only_directories("thread-a", Vec::new());
+    for request in 0..4 {
+        model.wait_for_request(request).await;
+        gate.notify_one();
+    }
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+
+    assert_eq!(ro_binds(&mounts), vec![vec![system.clone()], Vec::new()]);
+    let observed = model.observed().await;
+    let parent = system_text(&observed[0]);
+    assert!(parent.contains("* /etc (read-only)"), "{parent}");
+    assert!(!parent.contains("Delegated Workers"), "{parent}");
+    assert_eq!(workspace_updates(&observed[3]), Vec::<String>::new());
+    assert!(tool_output(&observed, "system-read").contains("root"));
 }
 
 fn escalation_response() -> providers::ChatResponse {

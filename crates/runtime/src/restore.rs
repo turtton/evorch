@@ -667,6 +667,7 @@ mod tests {
                 crate::allowed_directories::ToldDirectory {
                     path: "/shared".into(),
                     access: crate::allowed_directories::DirectoryAccess::ReadWrite,
+                    delegated_access: None,
                 },
             ]);
         let json = serde_json::to_string(&descriptor).unwrap();

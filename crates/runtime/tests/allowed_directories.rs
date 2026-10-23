@@ -166,6 +166,84 @@ async fn runs_use_their_project_list_with_the_access_of_their_role() {
     assert!(other.contains("outside the sandbox boundary"), "{other}");
 }
 
+// Given a read-only Orchestrator and its project's allowed directory
+// When it delegates implementation to a Worker
+// Then one parent explanation distinguishes their access and the child really writes.
+#[tokio::test]
+async fn orchestrator_is_told_that_a_delegated_worker_can_write() {
+    let dirs = Dirs::new();
+    let written = dirs.allowed.join("delegated.txt");
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "delegate",
+            "delegate",
+            json!({
+                "target": {"role": "worker"}, "prompt": "WRITE SHARED FILE"
+            }),
+        )),
+        Ok(tool_response(
+            "write",
+            "write",
+            json!({"path": written, "content": "delegated implementation"}),
+        )),
+        Ok(text_response("child done", FinishReason::Stop)),
+        Ok(tool_response("finish", "finish", json!({"result": "done"}))),
+    ]));
+    let bus = Arc::new(EventBus::new(512));
+    let (factory, _) = recording_factory();
+    let runtime = AgentRuntime::with_sandbox_factory(
+        Arc::clone(&bus),
+        Arc::new(ToolExecutor::with_standard_tools(
+            Arc::clone(&bus),
+            Arc::new(DirectSandbox::new_unchecked()),
+        )),
+        model.clone(),
+        factory,
+    )
+    .with_sequential_run_ids()
+    .with_sandbox_root(dirs.repo.clone());
+    runtime.set_thread_scratch(Arc::clone(&dirs.scratch));
+    runtime.set_project_allowed_directories(dirs.repo.clone(), vec![dirs.allowed.clone()]);
+    assert_eq!(
+        run_in(&runtime, "thread", Role::Orchestrator, &dirs.repo).await,
+        AgentRunPhase::Done
+    );
+    let observed = model.observed().await;
+    let system = |request: usize| {
+        observed[request]
+            .iter()
+            .filter(|message| message.role == providers::Role::System)
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let parent = system(0);
+    assert!(parent.contains(&format!("* {} (read-only)", dirs.allowed.display())));
+    assert!(parent.contains("Delegated Workers have read-write access to all of them."));
+    assert_eq!(
+        parent.matches(&dirs.allowed.display().to_string()).count(),
+        1,
+        "the path is listed once, not repeated in the explanation"
+    );
+    assert_eq!(parent.matches("Delegated Workers").count(), 1);
+    assert_eq!(parent.matches("Access labels").count(), 1);
+    let child = system(1);
+    assert!(child.contains(&format!("* {} (read-write)", dirs.allowed.display())));
+    assert!(!child.contains("Delegated Workers"));
+    assert!(
+        !child.contains("Access labels"),
+        "a Worker's own access is the only one"
+    );
+    assert_eq!(
+        std::fs::read_to_string(written).unwrap(),
+        "delegated implementation"
+    );
+}
+
 fn child(name: &str) -> bool {
     if std::env::var_os("EVORCH_BWRAP_CHILD").is_some() {
         return true;
