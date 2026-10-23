@@ -49,8 +49,10 @@ jobs:
       - name: Install linker, search, and Claude transport build dependencies
         # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
         # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
-        timeout-minutes: 10
-        run: sudo apt-get update && sudo apt-get install -y mold ripgrep cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 25
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
       # Keep CARGO_TARGET_DIR scoped to Cargo steps below: the cache action's
@@ -192,40 +194,15 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The Azure Ubuntu mirror once served this job at tens of kB/s for over an
-      # hour (2026-10-23). The downloaded .debs are cached so a slow mirror
-      # only costs the index update; dpkg still installs them normally.
-      - name: Restore cached apt downloads
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/apt-archives
-          key: apt-offscreen-${{ runner.os }}-${{ env.ImageOS }}-latest
-          restore-keys: apt-offscreen-${{ runner.os }}-${{ env.ImageOS }}-
+      # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
+      # hour (2026-10-23). Every job restores one shared .deb cache; this job's
+      # package set covers the others', so only it saves (on main).
       - name: Install headless rendering and isolated X11/Wayland deps
-        timeout-minutes: 10
-        run: |
-          if compgen -G "$HOME/apt-archives/*.deb" > /dev/null; then
-            sudo cp "$HOME"/apt-archives/*.deb /var/cache/apt/archives/
-          fi
-          sudo apt-get update
-          # Recommends pulled in ~120 unused packages (codecs, speech data, fonts).
-          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
-          # Drop superseded versions so the cache does not grow across updates.
-          sudo apt-get autoclean -y
-          rm -rf "$HOME/apt-archives"
-          mkdir -p "$HOME/apt-archives"
-          if compgen -G "/var/cache/apt/archives/*.deb" > /dev/null; then
-            cp /var/cache/apt/archives/*.deb "$HOME/apt-archives/"
-          fi
-          du -sh "$HOME/apt-archives"
-          echo "APT_ARCHIVES_KEY=$(find "$HOME/apt-archives" -name '*.deb' -printf '%f\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      # A new key only when the set of .debs changed; main only, like rust-cache.
-      - name: Save apt downloads
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
+        timeout-minutes: 25
+        uses: ./.github/actions/apt-install
         with:
-          path: ~/apt-archives
-          key: apt-offscreen-${{ runner.os }}-${{ env.ImageOS }}-${{ env.APT_ARCHIVES_KEY }}
+          packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
+          save: ${{ github.ref == 'refs/heads/main' }}
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - uses: taiki-e/install-action@v2
@@ -295,8 +272,10 @@ jobs:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 10
-        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 25
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
       - name: Locate Chrome/Chromium executable
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
@@ -343,8 +322,10 @@ jobs:
           shared-key: ${{ runner.os }}-cef
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 10
-        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 25
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
       # Chromium's sandbox needs unprivileged user namespaces; the SUID
       # chrome-sandbox is never used (ADR 0034).
       - name: Allow unprivileged user namespaces
