@@ -2161,23 +2161,22 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Fence the run's events by the in-process authority record, never by a
+    /// registry transaction per event: contention must neither block an emitter
+    /// nor drop a live generation's events (for example its terminal state).
+    /// Registry accesses that observe a lost generation record it there.
     fn install_run_ownership_guard(&self, run_id: RunId, config: &mut RunConfig) {
         if let Some(permit) = &mut config.ownership {
             permit.run_id = Some(run_id.to_string());
             let token = permit.clone();
-            let nonblocking_token = permit.clone();
-            self.shared.bus.register_nonblocking_mutation_guard(
+            self.shared.bus.register_mutation_fence(
                 run_id.to_string(),
                 Arc::new(move || {
-                    token
-                        .mutation_guard()
-                        .ok()
-                        .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
-                }),
-                Arc::new(move || match nonblocking_token.try_mutation_guard() {
-                    Ok(Some(guard)) => event_bus::MutationGuardAttempt::Acquired(Box::new(guard)),
-                    Ok(None) => event_bus::MutationGuardAttempt::Busy,
-                    Err(_) => event_bus::MutationGuardAttempt::Rejected,
+                    !crate::ownership::authority::is_fenced(
+                        &token.registry_path,
+                        &token.thread_id,
+                        &token.lease,
+                    )
                 }),
             );
         }

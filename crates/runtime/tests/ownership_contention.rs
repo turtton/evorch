@@ -295,7 +295,7 @@ impl Harness {
 
 fn long_budget() -> RetryPolicy {
     RetryPolicy {
-        deadline: Duration::from_secs(120),
+        deadline: Some(Duration::from_secs(120)),
         attempt_timeout: Duration::from_millis(100),
         ..RetryPolicy::default()
     }
@@ -381,7 +381,7 @@ async fn finalization_contention_past_its_deadline_ends_the_run_as_that_error() 
     let mut harness = harness(
         thread,
         RetryPolicy {
-            deadline: Duration::from_millis(300),
+            deadline: Some(Duration::from_millis(300)),
             attempt_timeout: Duration::from_millis(100),
             ..RetryPolicy::default()
         },
@@ -517,7 +517,7 @@ async fn exclusive_preflight_past_its_deadline_retains_active_and_reports_conten
     let mut harness = harness(
         thread,
         RetryPolicy {
-            deadline: Duration::from_millis(350),
+            deadline: Some(Duration::from_millis(350)),
             attempt_timeout: Duration::from_millis(100),
             ..RetryPolicy::default()
         },
@@ -532,10 +532,13 @@ async fn exclusive_preflight_past_its_deadline_retains_active_and_reports_conten
         .expect("run");
     drop(lock);
     assert_eq!(phase, AgentRunPhase::Error);
-    // The EXCLUSIVE lock also prevents the event bus from establishing its
-    // mutation guard. Keep that fence: wait() still observes the terminal
-    // phase, while diagnostics identify the exhausted guard operation.
-    assert_eq!(harness.terminal_events(run), []);
+    // Event fences no longer read the registry: the lock that outlasted the
+    // test's finite budget cannot also hide the terminal phase from subscribers.
+    let terminal = harness.terminal_events(run);
+    let [(AgentRunPhase::Error, Some(reason))] = terminal.as_slice() else {
+        panic!("one terminal error: {terminal:?}");
+    };
+    assert!(reason.starts_with("ownership guard failed at "), "{reason}");
     assert!(harness.owner().active_runs.contains(&run.to_string()));
     assert_eq!(harness.payload(), None);
     let records = thread_records(thread);
@@ -559,4 +562,112 @@ async fn exclusive_preflight_past_its_deadline_retains_active_and_reports_conten
         1,
         "{records:?}"
     );
+}
+
+fn is_validate_failure_from(record: &Record, attempt: u32) -> bool {
+    record.get("message").map(String::as_str) == Some("ownership registry operation failed")
+        && record.get("operation").map(String::as_str) == Some("validate")
+        && record
+            .get("attempt")
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|value| value >= attempt)
+}
+
+/// Under load, a registry locked past one attempt ended runs with `ownership
+/// validate failed at read (attempt 1): database is locked`, and the same lock
+/// dropped their events, so a terminal phase could never reach the GUI. A
+/// live owner keeps its authority under contention: the run must wait, and
+/// every event must arrive.
+#[tokio::test(flavor = "current_thread")]
+async fn contention_never_ends_a_run_or_drops_its_events() {
+    let thread = "thread-unbounded";
+    let mut harness = harness(
+        thread,
+        RetryPolicy {
+            attempt_timeout: Duration::from_millis(100),
+            ..RetryPolicy::unbounded()
+        },
+    );
+    let run = harness.start_gated().await;
+    let lock = rusqlite::Connection::open(&harness.path).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    // The tool returns into a registry locked for readers and writers alike.
+    harness.proceed.notify_one();
+    wait_for_records(thread, |records| {
+        records
+            .iter()
+            .any(|record| is_validate_failure_from(record, 3))
+    })
+    .await;
+
+    let events = harness.events.drain_pending_snapshot();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, run_id, .. })
+                if call_id == "gate-call" && run_id.as_deref() == Some(&*run.to_string())
+        )),
+        "the tool's completion is published while the registry is locked"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. })
+                if *run_id == run.to_string()
+                    && matches!(to, AgentRunPhase::Error | AgentRunPhase::Done)
+        )),
+        "contention alone ends nothing: {events:?}"
+    );
+
+    lock.execute_batch("ROLLBACK").unwrap();
+    let phase = timeout(Duration::from_secs(30), harness.runtime.wait(run))
+        .await
+        .expect("the run continues once the registry is free")
+        .expect("run");
+    assert_eq!(phase, AgentRunPhase::Done);
+    let terminal = harness.terminal_events(run);
+    assert!(
+        matches!(terminal.as_slice(), [(AgentRunPhase::Done, _)]),
+        "{terminal:?}"
+    );
+    assert_eq!(
+        harness.owner().active_runs.iter().collect::<Vec<_>>(),
+        [OTHER_RUN]
+    );
+}
+
+/// Only a proven fence revokes a run's events. Once the run's own registry
+/// access observes another generation, its later events (the terminal phase
+/// included) are rejected without another registry read.
+#[tokio::test(flavor = "current_thread")]
+async fn a_generation_observed_as_fenced_rejects_its_later_events() {
+    let thread = "thread-fenced";
+    let mut harness = harness(
+        thread,
+        RetryPolicy {
+            attempt_timeout: Duration::from_millis(100),
+            ..RetryPolicy::unbounded()
+        },
+    );
+    let run = harness.start_gated().await;
+    let mut claimed = harness.owner();
+    claimed.lease.owner_id = "successor".into();
+    claimed.lease.generation += 1;
+    claimed.active_runs.clear();
+    claimed.active_turn = false;
+    rusqlite::Connection::open(&harness.path)
+        .unwrap()
+        .execute(
+            "UPDATE thread_owners SET state = ?1 WHERE thread_id = ?2",
+            rusqlite::params![serde_json::to_string(&claimed).unwrap(), thread],
+        )
+        .unwrap();
+    harness.proceed.notify_one();
+    let phase = timeout(Duration::from_secs(30), harness.runtime.wait(run))
+        .await
+        .expect("a fenced run ends")
+        .expect("run");
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(harness.terminal_events(run), []);
+    assert_eq!(harness.owner(), claimed, "the old generation wrote nothing");
 }

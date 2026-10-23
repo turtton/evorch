@@ -177,7 +177,7 @@ pub fn serve_connection_with_bus(
     serve_connection_inner(stream, registry, now_ms, Some(bus), &|_, _| {})
 }
 
-/// Like [`serve_connection_with_bus`], calling `released(thread, previous owner)`
+/// Like [`serve_connection_with_bus`], calling `released(thread, previous lease)`
 /// when a request releases or hands off a thread, before the requester can
 /// observe the transition.
 pub(super) fn serve_connection_releasing(
@@ -185,7 +185,7 @@ pub(super) fn serve_connection_releasing(
     registry: &mut Registry,
     now_ms: u64,
     bus: &EventBus,
-    released: &dyn Fn(&str, &str),
+    released: &dyn Fn(&str, &Lease),
 ) -> Result<(), IpcError> {
     serve_connection_inner(stream, registry, now_ms, Some(bus), released)
 }
@@ -195,14 +195,12 @@ fn serve_connection_inner(
     registry: &mut Registry,
     now_ms: u64,
     bus: Option<&EventBus>,
-    released: &dyn Fn(&str, &str),
+    released: &dyn Fn(&str, &Lease),
 ) -> Result<(), IpcError> {
     timeouts(stream)?;
     let request: Request = read_frame(stream)?;
     let previous_owner = match &request {
-        Request::Quiesce { token, .. } | Request::Handoff { token, .. } => {
-            Some(token.owner_id.clone())
-        }
+        Request::Quiesce { token, .. } | Request::Handoff { token, .. } => Some(token.clone()),
         Request::Attach { .. } | Request::Heartbeat { .. } => None,
     };
     let action = match &request {

@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::observe::DbOperation;
 use super::registry::{ATTEMPT_TIMEOUT, Access, Wait};
 use super::retry::{Clock, RetryPolicy, retry_contention, system_clock};
-use super::{Lease, OwnerState, OwnershipError, Registry, RegistryError, ThreadOwner};
+use super::{Lease, OwnerState, OwnershipError, Registry, RegistryError, ThreadOwner, authority};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerPermit {
@@ -20,13 +20,15 @@ impl OwnerPermit {
         thread_id: &str,
         prepare: impl FnOnce() -> Result<T, String>,
     ) -> Result<(Self, T), String> {
-        let (child, prepared) = Registry::open_existing(&self.registry_path)
-            .and_then(|mut registry| {
+        let (child, prepared) = authority::observe(
+            self,
+            Registry::open_existing(&self.registry_path).and_then(|mut registry| {
                 registry.prepare_child(self, thread_id, now_ms(), || {
                     prepare().map_err(RegistryError::Preparation)
                 })
-            })
-            .map_err(|error| error.to_string())?;
+            }),
+        )
+        .map_err(|error| error.to_string())?;
         Ok((
             Self {
                 registry_path: self.registry_path.clone(),
@@ -39,16 +41,21 @@ impl OwnerPermit {
     }
 
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
-        let mut registry = Registry::open_attempt(
-            &self.registry_path,
-            Access::ReadOnly,
-            Wait::Timeout(ATTEMPT_TIMEOUT),
-            DbOperation::Guard,
-            &self.thread_id,
-            1,
-        )?;
-        registry.guard_generation(self)?;
-        Ok(registry)
+        authority::observe(
+            self,
+            Registry::open_attempt(
+                &self.registry_path,
+                Access::ReadOnly,
+                Wait::Timeout(ATTEMPT_TIMEOUT),
+                DbOperation::Guard,
+                &self.thread_id,
+                1,
+            )
+            .and_then(|mut registry| {
+                registry.guard_generation(self)?;
+                Ok(registry)
+            }),
+        )
     }
 
     /// Attempt a generation guard without waiting for a SQLite writer. None
@@ -60,7 +67,7 @@ impl OwnerPermit {
             registry.guard_generation(self)?;
             Ok::<_, RegistryError>(registry)
         };
-        match attempt() {
+        match authority::observe(self, attempt()) {
             Ok(registry) => Ok(Some(registry)),
             Err(error) if error.is_contention() => Ok(None),
             Err(error) => Err(error),
@@ -88,24 +95,27 @@ impl OwnerPermit {
         clock: &std::sync::Arc<dyn Clock>,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
-        retry_contention(
-            &self.registry_path,
-            DbOperation::Guard,
-            &self.thread_id,
-            policy,
-            clock,
-            interrupted,
-            |attempt| {
-                let mut registry = Registry::open_attempt(
-                    &self.registry_path,
-                    Access::ReadOnly,
-                    Wait::Budget,
-                    DbOperation::Guard,
-                    &self.thread_id,
-                    attempt,
-                )?;
-                registry.guard_generation(self)
-            },
+        authority::observe(
+            self,
+            retry_contention(
+                &self.registry_path,
+                DbOperation::Guard,
+                &self.thread_id,
+                policy,
+                clock,
+                interrupted,
+                |attempt| {
+                    let mut registry = Registry::open_attempt(
+                        &self.registry_path,
+                        Access::ReadOnly,
+                        Wait::Budget,
+                        DbOperation::Guard,
+                        &self.thread_id,
+                        attempt,
+                    )?;
+                    registry.guard_generation(self)
+                },
+            ),
         )
     }
 
@@ -147,23 +157,26 @@ impl OwnerPermit {
         clock: &std::sync::Arc<dyn Clock>,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
-        retry_contention(
-            &self.registry_path,
-            DbOperation::BeginTurn,
-            &self.thread_id,
-            policy,
-            clock,
-            interrupted,
-            |attempt| {
-                let mut registry = self.open_write_attempt(DbOperation::BeginTurn, attempt)?;
-                registry.update_as(DbOperation::BeginTurn, &self.thread_id, |owner| match self
-                    .run_id
-                    .as_deref()
-                {
-                    Some(run) => owner.begin_run(&self.lease, run, now_ms()),
-                    None => owner.begin_turn(&self.lease, now_ms()),
-                })
-            },
+        authority::observe(
+            self,
+            retry_contention(
+                &self.registry_path,
+                DbOperation::BeginTurn,
+                &self.thread_id,
+                policy,
+                clock,
+                interrupted,
+                |attempt| {
+                    let mut registry = self.open_write_attempt(DbOperation::BeginTurn, attempt)?;
+                    registry.update_as(DbOperation::BeginTurn, &self.thread_id, |owner| match self
+                        .run_id
+                        .as_deref()
+                    {
+                        Some(run) => owner.begin_run(&self.lease, run, now_ms()),
+                        None => owner.begin_turn(&self.lease, now_ms()),
+                    })
+                },
+            ),
         )
         .map(drop)
     }
@@ -198,6 +211,9 @@ impl OwnerPermit {
         )
     }
 
+    /// A single attempt: SQLite waits [`ATTEMPT_TIMEOUT`] per lock, then
+    /// contention is returned. Runs use the blocking-pool variant, which
+    /// retries contention instead.
     pub fn validate_mutation(&self) -> Result<(), RegistryError> {
         self.validate_mutation_with_clock(now_ms)
     }
@@ -206,13 +222,72 @@ impl OwnerPermit {
         &self,
         clock: impl Fn() -> u64,
     ) -> Result<(), RegistryError> {
+        authority::observe(
+            self,
+            self.validate_mutation_attempt(Wait::Timeout(ATTEMPT_TIMEOUT), 1, &clock),
+        )
+    }
+
+    /// Validate (and renew an expired lease of) the active run, retrying
+    /// contention within `policy`. Retrying is safe: the renewal is a pure
+    /// transition revalidated inside each attempt's write transaction.
+    /// Blocks the calling thread; async code uses the blocking-pool variant.
+    pub fn validate_mutation_with(
+        &self,
+        policy: &RetryPolicy,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<(), RegistryError> {
+        self.validate_mutation_on(policy, &system_clock(), interrupted, &now_ms)
+    }
+
+    pub(super) fn validate_mutation_on(
+        &self,
+        policy: &RetryPolicy,
+        clock: &std::sync::Arc<dyn Clock>,
+        interrupted: &dyn Fn() -> bool,
+        now: &dyn Fn() -> u64,
+    ) -> Result<(), RegistryError> {
+        authority::observe(
+            self,
+            retry_contention(
+                &self.registry_path,
+                DbOperation::Validate,
+                &self.thread_id,
+                policy,
+                clock,
+                interrupted,
+                |attempt| self.validate_mutation_attempt(Wait::Budget, attempt, now),
+            ),
+        )
+    }
+
+    /// [`Self::validate_mutation_with`] on the blocking pool, so contention
+    /// never stalls an async worker. `interrupted` stops further attempts.
+    pub(crate) async fn validate_mutation_off_thread(
+        &self,
+        policy: RetryPolicy,
+        interrupted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<(), RegistryError> {
+        let permit = self.clone();
+        join_blocking(tokio::task::spawn_blocking(move || {
+            permit.validate_mutation_with(&policy, &interrupted)
+        }))
+        .await
+    }
+
+    fn validate_mutation_attempt(
+        &self,
+        wait: Wait,
+        attempt: u32,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<(), RegistryError> {
         let owner = Registry::open_attempt(
             &self.registry_path,
             Access::ReadOnly,
-            Wait::Timeout(ATTEMPT_TIMEOUT),
+            wait,
             DbOperation::Validate,
             &self.thread_id,
-            1,
+            attempt,
         )?
         .attach_as(DbOperation::Validate, &self.thread_id)?;
         self.validate_active(&owner)?;
@@ -226,10 +301,10 @@ impl OwnerPermit {
         Registry::open_attempt(
             &self.registry_path,
             Access::ReadWrite,
-            Wait::Timeout(ATTEMPT_TIMEOUT),
+            wait,
             DbOperation::Validate,
             &self.thread_id,
-            1,
+            attempt,
         )?
         .update_as(DbOperation::Validate, &self.thread_id, |owner| {
             self.validate_active(owner)?;
@@ -332,7 +407,7 @@ impl OwnerPermit {
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
         let mut payload: Option<String> = None;
-        retry_contention(
+        let result = retry_contention(
             &self.registry_path,
             DbOperation::Checkpoint,
             &self.thread_id,
@@ -351,7 +426,8 @@ impl OwnerPermit {
                 };
                 registry.checkpoint_serialized(self, serialized).map(drop)
             },
-        )
+        );
+        authority::observe(self, result)
     }
 
     /// [`Self::checkpoint_with`] on the blocking pool. `interrupted` stops

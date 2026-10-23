@@ -109,6 +109,8 @@ pub(crate) struct LoopShared {
 /// Model switches the loop prepares before a response arrives (ADR 0030). Each one
 /// moves the pin along the chain, so more than this means availability keeps flapping.
 const MAX_MODEL_SWITCHES: u32 = 16;
+/// A registry wait this long is reported as the run's owner-registry activity.
+const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(crate) struct LoopState {
     pub(crate) turn: providers::RequestTurnContext,
@@ -139,6 +141,8 @@ pub(crate) struct LoopState {
     /// Whether this run's turn on its thread owner is open: begun at the loop head and
     /// ended only by the checkpoint after a response's tools.
     owner_turn_open: bool,
+    /// The activity last reported, restored after an owner-registry wait.
+    current_activity: std::sync::Mutex<event_bus::RunActivity>,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -311,6 +315,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         todo_context_deferred,
         model_switches: 0,
         owner_turn_open: false,
+        current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -773,11 +778,13 @@ impl LoopState {
                 let result = if self.owner_turn_open {
                     // Still fence a stale generation, without opening a second turn or
                     // rejecting a quiescing owner's already-active turn.
-                    permit.validate_mutation()
+                    self.validate_owner_mutation().await
                 } else {
-                    permit
-                        .begin_turn_off_thread(self.ownership_retry(), self.interrupt_probe())
-                        .await
+                    self.await_ownership(
+                        permit
+                            .begin_turn_off_thread(self.ownership_retry(), self.interrupt_probe()),
+                    )
+                    .await
                 };
                 if let Err(error) = result {
                     self.finish_owner_error("begin_turn", error);
@@ -1010,10 +1017,8 @@ impl LoopState {
                 return;
             }
             self.observe_retracted_delegates(&tool_uses);
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.validate_mutation()
-            {
-                self.finish_error(error.to_string());
+            if let Err(error) = self.validate_owner_mutation().await {
+                self.finish_owner_error("validate", error);
                 return;
             }
             // Keep a complete observational copy: display/storage subscribers can
@@ -1080,13 +1085,13 @@ impl LoopState {
                 }
             };
             if let Some(permit) = self.task.config.ownership.clone()
-                && let Err(error) = permit
-                    .checkpoint_off_thread(
+                && let Err(error) = self
+                    .await_ownership(permit.checkpoint_off_thread(
                         crate::ownership::CheckpointBoundary::TurnEnd,
                         snapshot,
                         self.ownership_retry(),
                         self.interrupt_probe(),
-                    )
+                    ))
                     .await
             {
                 // An interrupted checkpoint committed nothing; finalization
@@ -1561,8 +1566,13 @@ impl LoopState {
 
     async fn checkpoint_preflight(&mut self) -> bool {
         if let Some(permit) = self.task.config.ownership.clone()
-            && let Err(error) = permit
-                .validate_generation_off_thread(self.ownership_retry(), self.interrupt_probe())
+            && let Err(error) = self
+                .await_ownership(
+                    permit.validate_generation_off_thread(
+                        self.ownership_retry(),
+                        self.interrupt_probe(),
+                    ),
+                )
                 .await
         {
             self.finish_owner_error("checkpoint preflight", error);
@@ -1571,11 +1581,64 @@ impl LoopState {
         true
     }
 
-    /// The runtime's ownership contention budget; the default unless a test set one.
+    /// Fence a stale generation (and renew a delayed lease) before the run
+    /// changes anything. Contention is retried under [`Self::ownership_retry`].
+    pub(super) async fn validate_owner_mutation(
+        &self,
+    ) -> Result<(), crate::ownership::RegistryError> {
+        let Some(permit) = self.task.config.ownership.clone() else {
+            return Ok(());
+        };
+        self.await_ownership(
+            permit.validate_mutation_off_thread(self.ownership_retry(), self.interrupt_probe()),
+        )
+        .await
+    }
+
+    /// Await an ownership registry operation. Contention is not loss of
+    /// authority, so the run waits rather than failing; once the wait is
+    /// noticeable it reports the owner-registry activity (and records one
+    /// diagnostic), then returns to the activity it interrupted.
+    pub(super) async fn await_ownership<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, crate::ownership::RegistryError>>,
+    ) -> Result<T, crate::ownership::RegistryError> {
+        let mut operation = std::pin::pin!(operation);
+        tokio::select! {
+            biased;
+            result = &mut operation => return result,
+            () = tokio::time::sleep(OWNERSHIP_WAIT_NOTICE) => {}
+        }
+        let resume = self.current_activity();
+        self.activity(event_bus::RunActivity::Ownership);
+        self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
+            source: "ownership".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: diagnostic_codes::OWNERSHIP_REGISTRY_WAIT.into(),
+            detail: format!(
+                "The owner registry stayed locked for over {} s; the run waits for it instead of failing.",
+                OWNERSHIP_WAIT_NOTICE.as_secs()
+            ),
+            run_id: Some(self.task.run_id.to_string()),
+            thread_id: self
+                .task
+                .config
+                .ownership
+                .as_ref()
+                .map(|permit| permit.thread_id.clone()),
+            call_id: None,
+        }));
+        let result = operation.await;
+        self.activity(resume);
+        result
+    }
+
+    /// The ownership contention budget: none in production, so registry
+    /// contention never ends a run by itself. Tests may set a bounded one.
     fn ownership_retry(&self) -> crate::ownership::RetryPolicy {
         self.runtime()
             .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
-            .unwrap_or_default()
+            .unwrap_or_else(crate::ownership::RetryPolicy::unbounded)
     }
 
     /// Lets blocking ownership retries observe Cancel/Stop without the loop.

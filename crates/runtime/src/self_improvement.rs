@@ -145,6 +145,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         CACHE_REGRESSION => TransientOrExternal,
         // providers/stream: model output or stream assembly; the two are indistinguishable.
         TOOL_ARGUMENTS_MALFORMED => TransientOrExternal,
+        // ownership: load-dependent registry contention; the run waits and keeps
+        // its authority. Recorded to measure contention, not filed as a defect.
+        OWNERSHIP_REGISTRY_WAIT => TransientOrExternal,
         // compaction: every failure comes from the summary model, provider-side
         // compaction, or summary size limits; the structural summarizer cannot fail.
         COMPACTION_FAILED => TransientOrExternal,
