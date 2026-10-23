@@ -1,3 +1,4 @@
+use egui::accesskit::Role;
 use egui_kittest::{Harness, kittest::Queryable};
 use gui::panes::memory::MemoryPane;
 use storage::memory::{Lesson, MemoryStatus};
@@ -65,6 +66,58 @@ fn memory_pane_search_and_filter_use_persisted_projection() {
 }
 
 #[test]
+fn memory_pane_opens_on_promoted_lessons() {
+    // Given: a promoted lesson and a candidate lesson for the same project.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("checkout");
+    repo(&root, "https://github.com/owner/name.git");
+    let config = StorageConfig {
+        db_path: dir.path().join("memory.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let handle = store.handle();
+    for (id, content) in [("p", "Always prefer tabs"), ("c", "Bound concurrency")] {
+        handle
+            .append_lesson(&Lesson {
+                id: id.into(),
+                project: "owner/name".into(),
+                task_id: "t".into(),
+                content: content.into(),
+                evidence: "test:default".into(),
+                scope: storage::memory::LessonScope::Project,
+            })
+            .unwrap();
+    }
+    handle.validate_lesson("p", "test:default").unwrap();
+    handle.promote_lesson("p").unwrap();
+    let mut pane = MemoryPane::default();
+    pane.config = Some(config);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(700.0, 500.0))
+        .build_ui_state(
+            move |ui, pane: &mut MemoryPane| pane.render(ui, Some(&root)),
+            pane,
+        );
+
+    // When: the default pane renders.
+    harness.run();
+    // Then: only the lesson task prompts receive is listed.
+    harness.get_by_label("Always prefer tabs");
+    assert!(harness.query_by_label("Bound concurrency").is_none());
+    harness.get_by_label("1 lessons (up to 100)");
+
+    // When: the status filter is widened to all statuses.
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    harness.get_by_label("All statuses").click();
+    harness.run();
+    // Then: the candidate is listed too.
+    harness.get_by_label("Bound concurrency");
+    harness.get_by_label("Always prefer tabs");
+}
+
+#[test]
 fn memory_pane_rejects_a_lesson_only_after_confirmation() {
     // Given: a promoted lesson the pane can write through the storage writer.
     let dir = tempfile::tempdir().unwrap();
@@ -91,6 +144,8 @@ fn memory_pane_rejects_a_lesson_only_after_confirmation() {
     let mut pane = MemoryPane::default();
     pane.config = Some(config.clone());
     pane.handle = Some(handle);
+    // All statuses, so the rejected lesson stays listed after the refresh.
+    pane.status = None;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(700.0, 500.0))
         .build_ui_state(
