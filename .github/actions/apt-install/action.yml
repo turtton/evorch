@@ -21,7 +21,7 @@ runs:
     - id: key
       shell: bash
       run: echo "prefix=apt-debs-${RUNNER_OS}-${ImageOS}-" >> "$GITHUB_OUTPUT"
-    - uses: actions/cache/restore@v4
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/apt-archives
         key: ${{ steps.key.outputs.prefix }}latest
@@ -60,7 +60,7 @@ runs:
         exit "$status"
     # A new key only when the set of .debs changed.
     - if: ${{ (success() || failure()) && inputs.save == 'true' && steps.install.outputs.hash != '' }}
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/apt-archives
         key: ${{ steps.key.outputs.prefix }}${{ steps.install.outputs.hash }}
