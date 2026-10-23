@@ -1,0 +1,101 @@
+name: apt-install
+description: >-
+  Install Ubuntu packages without Recommends, reusing .deb downloads cached
+  across runs so a slow mirror costs only the index update.
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+  save:
+    description: >-
+      "true" to save the downloads. Only the job with the largest package set
+      saves, so every job shares one cache entry.
+    default: "false"
+  timeout-seconds:
+    description: Bound for each apt-get call on the fallback mirror.
+    default: "600"
+  primary-timeout-seconds:
+    description: >-
+      Bound for the install on the runner's default mirror before switching to
+      archive.ubuntu.com. A normal install takes well under a minute.
+    default: "180"
+runs:
+  using: composite
+  steps:
+    # ImageOS is a runner environment variable, not part of the env context.
+    - id: key
+      shell: bash
+      run: echo "prefix=apt-debs-${RUNNER_OS}-${ImageOS}-" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.prefix }}latest
+        restore-keys: ${{ steps.key.outputs.prefix }}
+    - id: install
+      shell: bash
+      env:
+        APT_PACKAGES: ${{ inputs.packages }}
+        APT_TIMEOUT: ${{ inputs.timeout-seconds }}
+        APT_PRIMARY_TIMEOUT: ${{ inputs.primary-timeout-seconds }}
+      run: |
+        set -u
+        archives="$HOME/apt-archives"
+        if compgen -G "$archives/*.deb" > /dev/null; then
+          sudo cp "$archives"/*.deb /var/cache/apt/archives/
+        fi
+        apt_install() {
+          local limit=$1 status=0
+          timeout --kill-after=30s "$limit" sudo apt-get update || status=$?
+          if [ "$status" -eq 0 ]; then
+            # shellcheck disable=SC2086 # word splitting is the package list
+            timeout --kill-after=30s "$limit" \
+              sudo apt-get install -y --no-install-recommends $APT_PACKAGES || status=$?
+          fi
+          return "$status"
+        }
+        status=0
+        apt_install "$APT_PRIMARY_TIMEOUT" || status=$?
+        if [ "$status" -ne 0 ]; then
+          # The Azure mirror can trickle at tens of kB/s for hours while
+          # archive.ubuntu.com stays fast; apt's mirror list only falls back on
+          # errors, so drop the Azure entry and retry. Completed .debs stay in
+          # /var/cache/apt/archives and are not downloaded again.
+          echo "::warning::apt-get on the default mirror failed or timed out (status $status); retrying on archive.ubuntu.com"
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            cat /etc/apt/apt-mirrors.txt
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            if ! grep -q . /etc/apt/apt-mirrors.txt; then
+              echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+            fi
+          fi
+          for sources in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$sources" ] || continue
+            sudo sed -i 's#http://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' "$sources"
+          done
+          # A timeout during unpacking leaves dpkg half-configured.
+          sudo dpkg --configure -a || true
+          status=0
+          apt_install "$APT_TIMEOUT" || status=$?
+        fi
+        if [ "$status" -eq 0 ]; then
+          # Drop superseded versions so the cache does not grow across updates.
+          sudo apt-get autoclean -y
+        fi
+        # Keep whatever finished downloading, even after a timeout, so the
+        # next run resumes instead of starting over.
+        mkdir -p "$archives"
+        find "$archives" -name '*.deb' -delete
+        if compgen -G "/var/cache/apt/archives/*.deb" > /dev/null; then
+          cp /var/cache/apt/archives/*.deb "$archives/"
+        fi
+        du -sh "$archives"
+        hash=$(find "$archives" -name '*.deb' -printf '%f\n' | sort | sha256sum | cut -c1-16)
+        echo "hash=$hash" >> "$GITHUB_OUTPUT"
+        [ "$status" -eq 0 ] || echo "::error::apt-get failed or timed out (status $status)"
+        exit "$status"
+    # A new key only when the set of .debs changed.
+    - if: ${{ (success() || failure()) && inputs.save == 'true' && steps.install.outputs.hash != '' }}
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.prefix }}${{ steps.install.outputs.hash }}

@@ -14,6 +14,8 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # Normal runs take ~13 min; a cold dependency cache roughly doubles that.
+    timeout-minutes: 60
     # workspace 全体 + browser feature + otel-exporter feature のビルドで
     # runner のディスクが枯渇したため (2026-09-11 No space left on device)、
     # docs/browser.md の低リソース指定を job 全体に適用し未使用ツールを削除する。
@@ -25,7 +27,7 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       EVORCH_CI_METADATA_DIR: target/ci-metadata
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Claude compatibility skill offline tools
         run: node --test .agents/skills/claude-code-compatibility/scripts/inspect-client-hello.test.mjs
       # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
@@ -40,24 +42,27 @@ jobs:
           fi
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
           components: rustfmt,clippy
       - name: Install linker, search, and Claude transport build dependencies
         # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
         # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
-        run: sudo apt-get update && sudo apt-get install -y mold ripgrep cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
       # Keep CARGO_TARGET_DIR scoped to Cargo steps below: the cache action's
       # restore key and post-save cargo metadata both need it to be absent.
       # The action recursively caches target/, including target/ci-shared.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
       - run: cargo fmt --all --check
@@ -122,8 +127,10 @@ jobs:
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
   nix-build:
     runs-on: ubuntu-latest
+    # A cold deps build takes ~35-45 min and the attic push retries add ~30.
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Connect to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
         with:
@@ -174,22 +181,31 @@ jobs:
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
   offscreen-gate:
     runs-on: ubuntu-latest
+    # Warm runs took 10-23 min; leave room for a cold rust-cache.
+    timeout-minutes: 60
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
+      # hour (2026-10-23). Every job restores one shared .deb cache; this job's
+      # package set covers the others', so only it saves (on main).
       - name: Install headless rendering and isolated X11/Wayland deps
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
+          save: ${{ github.ref == 'refs/heads/main' }}
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
       - name: Run all ignored GUI tests (required real render)
@@ -224,13 +240,13 @@ jobs:
           cp 'target/gui-evidence/high-contrast/demo-1280x720@1.0.png' target/gui-pr-preview/06-high-contrast.png
           jq -n --argjson pr "$PR_NUMBER" --arg sha "$PR_HEAD_SHA" --argjson run "$GITHUB_RUN_ID" \
             '{pr: $pr, head_sha: $sha, run_id: $run}' > target/gui-pr-preview/pr.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.event_name == 'pull_request'
         with:
           name: gui-pr-preview
           if-no-files-found: error
           path: target/gui-pr-preview
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: gui-evidence
@@ -243,24 +259,28 @@ jobs:
 
   browser-e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
       - name: Locate Chrome/Chromium executable
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
           echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
       - name: Run agent browser test
@@ -271,28 +291,32 @@ jobs:
   # distribution (~1.8 GB) would crowd the repository cache.
   cef-e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       CEF_PATH: ${{ github.workspace }}/../cef-dist
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-cef
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        run: sudo apt-get update && sudo apt-get install -y mold cmake clang libclang-dev ninja-build perl git
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
       # Chromium's sandbox needs unprivileged user namespaces; the SUID
       # chrome-sandbox is never used (ADR 0034).
       - name: Allow unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
       - name: Lint the CEF feature
