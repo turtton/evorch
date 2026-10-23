@@ -167,6 +167,9 @@ pub mod diagnostic_codes {
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
     pub const TOOL_ARGUMENTS_MALFORMED: &str = "ToolArgumentsMalformed";
+    /// A run waited noticeably for a contended thread owner registry. It keeps
+    /// its authority and continues once the registry is available.
+    pub const OWNERSHIP_REGISTRY_WAIT: &str = "OwnershipRegistryWait";
     /// An attempted context compaction failed (provider call, summary, or limits).
     pub const COMPACTION_FAILED: &str = "CompactionFailed";
     /// Post-run lesson extraction or review failed.
@@ -217,6 +220,7 @@ pub mod diagnostic_codes {
         PROVIDER_UNAVAILABLE,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
+        OWNERSHIP_REGISTRY_WAIT,
         COMPACTION_FAILED,
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
@@ -394,6 +398,8 @@ pub enum RunActivity {
     User,
     Compaction,
     Idle,
+    /// Waiting for a contended thread owner registry; the run keeps its authority.
+    Ownership,
 }
 
 /// Estimated request composition in serialized UTF-8 bytes / 4 (not billed tokens).

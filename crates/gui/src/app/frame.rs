@@ -297,6 +297,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
                 }
             }
+            EventKind::Ownership(event_bus::OwnershipEvent {
+                thread_id,
+                owner_id,
+                action: event_bus::OwnershipAction::Claimed | event_bus::OwnershipAction::Handoff,
+                ..
+            }) if self
+                .ownership
+                .as_ref()
+                .is_some_and(|host| host.owner_id() == owner_id) =>
+            {
+                self.reconcile_claimed_thread(thread_id);
+            }
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)
             | EventKind::Message(_)

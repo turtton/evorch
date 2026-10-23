@@ -19,10 +19,12 @@ impl LoopState {
             }
         };
         let authority = if let Some(permit) = self.task.config.ownership.clone() {
-            // Teardown must drain even after Stop/Cancel, but a real fence or
-            // contention past the finite budget still fails closed.
-            match permit
-                .validate_generation_off_thread(self.ownership_retry(), || false)
+            // Teardown must drain even after Stop/Cancel. Contention is waited
+            // out (it never revokes authority); a real fence fails closed.
+            match self
+                .await_ownership(
+                    permit.validate_generation_off_thread(self.ownership_retry(), || false),
+                )
                 .await
             {
                 Ok(()) => true,
@@ -85,16 +87,16 @@ impl LoopState {
             && authority
             && (saved || !uncertain)
             && let Some(permit) = self.task.config.ownership.clone()
-            && let Err(error) = permit
-                .checkpoint_off_thread(
+            && let Err(error) = self
+                .await_ownership(permit.checkpoint_off_thread(
                     crate::ownership::CheckpointBoundary::Terminal,
                     snapshot,
                     self.ownership_retry(),
                     || false,
-                )
+                ))
                 .await
         {
-            // Teardown ignores interrupts, but retains the same finite retry budget.
+            // Teardown ignores interrupts and waits out contention like the run.
             if let crate::ownership::RegistryError::Database {
                 operation, phase, ..
             } = &error

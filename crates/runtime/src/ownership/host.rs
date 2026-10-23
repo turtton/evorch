@@ -10,7 +10,8 @@ use std::time::Duration;
 use event_bus::{Event, EventBus, OwnershipAction, OwnershipEvent};
 
 use super::{
-    Lease, OwnerPermit, OwnerState, Registry, RegistryError, ThreadOwner, ipc, permit::now_ms,
+    Lease, OwnerPermit, OwnerState, Registry, RegistryError, ThreadOwner, authority, ipc,
+    permit::now_ms,
 };
 use crate::scratch::ThreadScratch;
 
@@ -57,16 +58,20 @@ impl OwnerHost {
         let worker_bus = Arc::clone(&bus);
         let release_deferred = Arc::new(AtomicBool::new(false));
         let worker_deferred = Arc::clone(&release_deferred);
+        let worker_db = root.join("owners.db");
         let worker = std::thread::spawn(move || {
             serve(
                 registry,
                 listener,
                 receiver,
-                &id,
-                &worker_settings,
-                &worker_bus,
-                &worker_deferred,
-                &worker_scratch,
+                Worker {
+                    db: &worker_db,
+                    id: &id,
+                    settings: &worker_settings,
+                    bus: &worker_bus,
+                    release_deferred: &worker_deferred,
+                    scratch: &worker_scratch,
+                },
             )
         });
         Ok(Self {
@@ -84,6 +89,11 @@ impl OwnerHost {
 
     pub fn attach(&self, thread_id: &str) -> Result<ThreadOwner, RegistryError> {
         self.reader()?.attach(thread_id)
+    }
+
+    /// This process's owner identity, as recorded in leases it holds.
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
     }
 
     pub fn start(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {
@@ -117,6 +127,7 @@ impl OwnerHost {
             },
             &self.settings,
         )?;
+        authority::record_fenced(&self.db(), &expected.thread_id, &expected.lease);
         self.scratch.reset_thread(&owner.thread_id);
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
@@ -145,6 +156,7 @@ impl OwnerHost {
             owner.settings = successor.settings.clone();
             owner.claim(&permit.lease, &successor.owner_id, now_ms(), 0)
         })?;
+        authority::record_fenced(&self.db(), &permit.thread_id, &permit.lease);
         self.scratch.release_thread(&owner.thread_id);
         successor.scratch.reset_thread(&owner.thread_id);
         emit(&successor.bus, &owner, OwnershipAction::Handoff);
@@ -190,6 +202,7 @@ impl OwnerHost {
             if owner.state == OwnerState::Quiescing && !owner.active_turn {
                 let released =
                     registry.update(&owner.thread_id, |state| state.release(&owner.lease))?;
+                authority::record_fenced(&self.db(), &owner.thread_id, &owner.lease);
                 self.scratch.release_thread(&released.thread_id);
                 emit(&self.bus, &released, OwnershipAction::Released);
             }
@@ -225,11 +238,15 @@ impl OwnerHost {
 
     fn permit(&self, owner: &ThreadOwner) -> OwnerPermit {
         OwnerPermit {
-            registry_path: self.root.join("owners.db"),
+            registry_path: self.db(),
             thread_id: owner.thread_id.clone(),
             lease: owner.lease.clone(),
             run_id: None,
         }
+    }
+
+    fn db(&self) -> PathBuf {
+        self.root.join("owners.db")
     }
 }
 
@@ -290,18 +307,35 @@ fn emit(bus: &EventBus, owner: &ThreadOwner, action: OwnershipAction) {
     }));
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What the heartbeat worker needs besides its registry connection.
+struct Worker<'a> {
+    db: &'a Path,
+    id: &'a str,
+    settings: &'a config::OwnershipConfig,
+    bus: &'a EventBus,
+    release_deferred: &'a AtomicBool,
+    scratch: &'a ThreadScratch,
+}
+
 fn serve(
     mut registry: Registry,
     listener: UnixListener,
     stop: mpsc::Receiver<()>,
-    id: &str,
-    settings: &config::OwnershipConfig,
-    bus: &EventBus,
-    release_deferred: &AtomicBool,
-    scratch: &ThreadScratch,
+    worker: Worker<'_>,
 ) {
+    let Worker {
+        db,
+        id,
+        settings,
+        bus,
+        release_deferred,
+        scratch,
+    } = worker;
     let mut heartbeat = std::time::Instant::now();
+    // Generations this host held at its last scan. One that is gone from a
+    // later scan was taken over (after this process stopped answering) or
+    // released; either way its runs lost authority.
+    let mut held = std::collections::BTreeMap::<String, Lease>::new();
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -311,7 +345,8 @@ fn serve(
                     now_ms(),
                     bus,
                     &|thread, previous| {
-                        if previous == id {
+                        if previous.owner_id == id {
+                            authority::record_fenced(db, thread, previous);
                             scratch.release_thread(thread);
                         }
                     },
@@ -323,9 +358,21 @@ fn serve(
         if heartbeat.elapsed() >= Duration::from_millis(settings.heartbeat_ms.get()) {
             match registry.list() {
                 Ok(owners) => {
-                    for owner in owners.into_iter().filter(|owner| {
-                        owner.lease.owner_id == id && owner.state != OwnerState::Released
-                    }) {
+                    let owned: Vec<_> = owners
+                        .into_iter()
+                        .filter(|owner| {
+                            owner.lease.owner_id == id && owner.state != OwnerState::Released
+                        })
+                        .collect();
+                    for (thread, lease) in &held {
+                        if !owned.iter().any(|owner| {
+                            owner.thread_id == *thread && owner.lease.generation == lease.generation
+                        }) {
+                            authority::record_fenced(db, thread, lease);
+                        }
+                    }
+                    held.clear();
+                    for owner in owned {
                         let result = registry.update(&owner.thread_id, |state| {
                             state.validate(&owner.lease)?;
                             if state.state == OwnerState::Quiescing
@@ -338,10 +385,18 @@ fn serve(
                             }
                             Ok(())
                         });
-                        if let Ok(changed) = &result
-                            && changed.state == OwnerState::Released
-                        {
-                            scratch.release_thread(&changed.thread_id);
+                        match &result {
+                            Ok(changed) if changed.state == OwnerState::Released => {
+                                authority::record_fenced(db, &owner.thread_id, &owner.lease);
+                                scratch.release_thread(&changed.thread_id);
+                            }
+                            Err(error) if error.is_fenced() => {
+                                authority::record_fenced(db, &owner.thread_id, &owner.lease);
+                            }
+                            // Contention keeps the generation: only a fence revokes it.
+                            Ok(_) | Err(_) => {
+                                held.insert(owner.thread_id.clone(), owner.lease.clone());
+                            }
                         }
                         match result {
                             Ok(changed) => emit(

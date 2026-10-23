@@ -439,10 +439,8 @@ impl LoopState {
             }
             let mut validated = Vec::with_capacity(segment.len());
             for (id, name, input) in segment {
-                if let Some(permit) = &self.task.config.ownership
-                    && let Err(error) = permit.validate_mutation()
-                {
-                    self.finish_error(error.to_string());
+                if let Err(error) = self.validate_owner_mutation().await {
+                    self.finish_owner_error("validate", error);
                     return false;
                 }
                 let local = is_meta_op(&name)
@@ -577,11 +575,9 @@ impl LoopState {
                     let mut children = Vec::with_capacity(wave.len());
                     let mut spawned = Vec::with_capacity(wave.len());
                     for call in wave {
-                        if let Some(permit) = &self.task.config.ownership
-                            && let Err(error) = permit.validate_mutation()
-                        {
+                        if let Err(error) = self.validate_owner_mutation().await {
                             meta::cleanup_delegates(&runtime, spawned).await;
-                            self.finish_error(error.to_string());
+                            self.finish_owner_error("validate", error);
                             return false;
                         }
                         if let Some(kind) = self.interrupted() {
@@ -621,10 +617,8 @@ impl LoopState {
                         self.finish_interrupted(kind);
                         return false;
                     }
-                    if let Some(permit) = &self.task.config.ownership
-                        && let Err(error) = permit.validate_mutation()
-                    {
-                        self.finish_error(error.to_string());
+                    if let Err(error) = self.validate_owner_mutation().await {
+                        self.finish_owner_error("validate", error);
                         return false;
                     }
                     continue;
@@ -642,10 +636,8 @@ impl LoopState {
                 let mut prepared_wave = Vec::with_capacity(wave.len());
                 let search_usage = Arc::new(std::sync::Mutex::new(Vec::<providers::Usage>::new()));
                 for (index, call) in wave.into_iter().enumerate() {
-                    if let Some(permit) = &self.task.config.ownership
-                        && let Err(error) = permit.validate_mutation()
-                    {
-                        self.finish_error(error.to_string());
+                    if let Err(error) = self.validate_owner_mutation().await {
+                        self.finish_owner_error("validate", error);
                         return false;
                     }
                     if let Some(kind) = self.interrupted() {
@@ -791,10 +783,9 @@ impl LoopState {
                         self.identical_calls.end_stalled();
                     }
                     if matches!(&ready, ReadyCall::Local)
-                        && let Some(permit) = &self.task.config.ownership
-                        && let Err(error) = permit.validate_mutation()
+                        && let Err(error) = self.validate_owner_mutation().await
                     {
-                        self.finish_error(error.to_string());
+                        self.finish_owner_error("validate", error);
                         return false;
                     }
                     // Runtime-owned ledger calls need the same transcript lifecycle,
@@ -955,10 +946,8 @@ impl LoopState {
                     self.finish_interrupted(kind);
                     return false;
                 }
-                if let Some(permit) = &self.task.config.ownership
-                    && let Err(error) = permit.validate_mutation()
-                {
-                    self.finish_error(error.to_string());
+                if let Err(error) = self.validate_owner_mutation().await {
+                    self.finish_owner_error("validate", error);
                     return false;
                 }
             }

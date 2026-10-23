@@ -380,6 +380,46 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    /// This process has just claimed `thread_id`. A run executes only under
+    /// its thread's owner, so a run of that thread unknown to this process's
+    /// runtime cannot be running anywhere: its terminal event was lost (for
+    /// example while the previous owner shut down) or its process ended.
+    /// History reconciliation left it alone because the previous owner could
+    /// still have been live; now it is shown as Stopped, like an orphaned
+    /// checkpoint, instead of keeping the thread running forever.
+    pub(super) fn reconcile_claimed_thread(&mut self, thread_id: &str) {
+        use workspace_ui::ThreadRunPhase;
+        let Some(thread) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id.to_string() == thread_id)
+        else {
+            return;
+        };
+        for run_id in &thread.run_ids {
+            let Some(phase) = self.phases.get_mut(run_id) else {
+                continue;
+            };
+            if !matches!(
+                phase,
+                ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
+            ) {
+                continue;
+            }
+            let live = run_id
+                .parse::<runtime::RunId>()
+                .ok()
+                .and_then(|run| self.tasks.inspect(run))
+                .is_some();
+            if live {
+                continue;
+            }
+            tracing::warn!(%run_id, %thread_id, from = ?phase, "reconciled an orphaned run of a claimed thread");
+            *phase = ThreadRunPhase::Stopped;
+        }
+    }
+
     fn restore_user_message(&mut self, message: UserMessage) {
         self.transcripts.select_thread(Some(message.thread_id));
         self.transcripts
