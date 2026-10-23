@@ -515,6 +515,25 @@ fn io_failed(error: impl std::fmt::Display) -> ToolError {
     }
 }
 
+/// Start the command in its own session, which is also its own process group.
+///
+/// A command left in evorch's session sits in a background process group of
+/// evorch's controlling terminal: reading `/dev/tty` (a git credential or ssh
+/// password prompt) stops it with SIGTTIN, and it never finishes. Without a
+/// controlling terminal, opening `/dev/tty` fails and the command reports the
+/// error instead. The group id equals the child pid, as with `process_group(0)`,
+/// so killing the group keeps working.
+fn detach_from_terminal(command: &mut tokio::process::Command) {
+    // SAFETY: between fork and exec the closure makes one async-signal-safe
+    // system call and allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+}
+
 /// 非対話モード: tokio::process で子プロセスを実行する。
 async fn run_process(
     wrapped: &WrappedCommand,
@@ -531,7 +550,7 @@ async fn run_process(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-    command.process_group(0);
+    detach_from_terminal(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| spawn_failed(&wrapped.program, error))?;

@@ -1,5 +1,5 @@
 //! Process and PTY supervision for shell jobs.
-use super::super::{ProcessGroup, PtyKiller, io_failed, spawn_failed};
+use super::super::{ProcessGroup, PtyKiller, detach_from_terminal, io_failed, spawn_failed};
 use super::{Completion, Input, Job};
 use crate::ToolError;
 use sandbox::WrappedCommand;
@@ -30,8 +30,8 @@ pub(super) async fn run_pipe(
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::piped())
-        .process_group(0);
+        .stdin(std::process::Stdio::piped());
+    detach_from_terminal(&mut command);
     if let Some(cwd) = &wrapped.cwd {
         command.current_dir(cwd);
     }
