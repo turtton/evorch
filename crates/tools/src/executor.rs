@@ -274,6 +274,9 @@ impl ToolExecutor {
 
     /// Resolve relative file arguments against this run's workspace, never global cwd.
     fn scoped_args(&self, name: &str, mut args: serde_json::Value) -> serde_json::Value {
+        if name == "edit" {
+            canonicalize_edit_names(&mut args);
+        }
         let root = self
             .default_cwd
             .read()
@@ -898,6 +901,37 @@ fn capabilities_of(permissions: &Permissions) -> Capabilities {
         fs_write: permissions.fs_write,
         process_spawn: permissions.process_spawn,
         network: permissions.network,
+    }
+}
+
+/// Rename str_replace-style `old_str`/`new_str` to edit's names, at the top level and in `edits`.
+///
+/// Models trained on `str_replace` tools send these names. They stay out of the schema
+/// because models that fill every listed property would then send both names. A name next
+/// to its canonical counterpart is left alone so schema validation rejects the call.
+fn canonicalize_edit_names(args: &mut serde_json::Value) {
+    fn rename(object: &mut serde_json::Map<String, serde_json::Value>) {
+        for (alias, canonical) in [("old_str", "old_string"), ("new_str", "new_string")] {
+            if !object.contains_key(canonical)
+                && let Some(value) = object.remove(alias)
+            {
+                object.insert(canonical.into(), value);
+            }
+        }
+    }
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+    rename(object);
+    if let Some(edits) = object
+        .get_mut("edits")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for edit in edits {
+            if let Some(edit) = edit.as_object_mut() {
+                rename(edit);
+            }
+        }
     }
 }
 

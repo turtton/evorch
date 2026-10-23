@@ -409,6 +409,41 @@ async fn edit_rejects_ambiguous_argument_shapes_without_touching_file() {
 }
 
 #[tokio::test]
+async fn edits_ignore_placeholder_single_fields_and_say_so() {
+    // Given: calls recorded from a model that fills every schema property, putting the real
+    // replacement in edits and a placeholder in the single-replacement fields.
+    for placeholder in ["x", "unused", "SHOULD NOT USE", " "] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "x status: local branch only\n").unwrap();
+        let args = json!({
+            "path": path,
+            "edits": [{"old_string": "local branch only", "new_string": "PR #655", "replace_all": false}],
+            "old_string": placeholder,
+            "new_string": "",
+            "replace_all": false,
+        });
+
+        // When: the edit runs.
+        let result = Edit.execute(args).await.unwrap();
+
+        // Then: only edits is applied and the result names the ignored fields.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "x status: PR #655\n",
+            "{placeholder:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("ignored old_string/new_string/replace_all"),
+            "{}",
+            result.content
+        );
+    }
+}
+
+#[tokio::test]
 async fn edit_matches_lf_text_in_a_crlf_file_and_writes_crlf() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crlf.txt");
