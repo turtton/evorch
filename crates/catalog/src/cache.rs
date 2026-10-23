@@ -13,7 +13,9 @@ struct Cached {
 pub(crate) async fn read(dir: &Path) -> Result<ModelCatalog, CatalogError> {
     let path = dir.join("models-dev.json");
     tokio::task::spawn_blocking(move || {
-        let cached: Cached = serde_json::from_reader(File::open(path)?)?;
+        // The catalog is several MB; an unbuffered from_reader issues one
+        // read(2) per byte, which took tens of seconds on CI runners.
+        let cached: Cached = serde_json::from_slice(&std::fs::read(path)?)?;
         Ok(ModelCatalog {
             api: cached.api,
             fetched_at: cached.fetched_at,
