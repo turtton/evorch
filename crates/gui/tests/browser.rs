@@ -1,136 +1,47 @@
 #![cfg(feature = "browser")]
 
 use egui_kittest::kittest::Queryable;
-use gui::browser::{BrowserAction, BrowserPane, FakeFrameSource, FrameSource};
+use gui::browser::{Activity, AgentBrowserPane, FakeAgentView};
+use gui::panes::agent_browser::{AgentBrowserSurface, BrowserRun, BrowserTabView};
 
-#[test]
-fn click_displays_action_log_and_dom_diff() {
-    let source = FakeFrameSource {
-        reports: [gui::browser::BrowserReport {
-            action: "click".into(),
-            error: None,
-            removed: "before".into(),
-            inserted: "after".into(),
-        }]
-        .into(),
-        ..Default::default()
-    };
-    let mut harness = egui_kittest::Harness::builder().build_ui_state(
-        |ui, pane: &mut BrowserPane<FakeFrameSource>| pane.render(ui),
-        BrowserPane::new(source),
-    );
-    harness.get_by_label("Click element").click();
-    harness.run();
-    assert!(harness.query_by_label("click: completed").is_some());
-    assert!(harness.query_by_label("- before").is_some());
-    assert!(harness.query_by_label("+ after").is_some());
+/// What the workbench hands the pane each frame.
+#[derive(Default)]
+struct Tab {
+    runs: Vec<BrowserRun>,
+    selected: Option<String>,
+    picked: Vec<String>,
 }
 
-#[test]
-fn fake_delivers_each_frame_once() {
-    // Given: a scripted source with one decoded frame.
-    let mut source = FakeFrameSource::default();
-    source
-        .frames
-        .push_back(egui::ColorImage::filled([2, 2], egui::Color32::RED));
-    // When: the frame is polled.
-    let frame = source.poll_frame().expect("frame");
-    // Then: it is delivered once with unchanged dimensions.
-    assert_eq!(frame.size, [2, 2]);
-    assert!(source.poll_frame().is_none());
+fn run(id: &str, label: &str) -> BrowserRun {
+    BrowserRun {
+        run_id: id.into(),
+        label: label.into(),
+    }
 }
 
-#[test]
-fn pane_uploads_fake_frame_without_launching_browser() {
-    // Given: an injected fake, not Chromium.
-    let mut source = FakeFrameSource::default();
-    source
-        .frames
-        .push_back(egui::ColorImage::filled([2, 3], egui::Color32::RED));
-    let mut pane = BrowserPane::new(source);
-    let ctx = egui::Context::default();
-    // When: a real egui frame renders the pane.
-    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| pane.render(ui));
-    // Then: the JPEG-decoded pixel seam reaches an egui texture.
-    assert_eq!(pane.texture_size(), Some([2, 3]));
-    assert!(!output.textures_delta.set.is_empty());
-    output.textures_delta.clear();
-}
+type Harness = egui_kittest::Harness<'static, (AgentBrowserPane<FakeAgentView>, Tab)>;
 
-#[test]
-fn fake_records_action_without_external_side_effects() {
-    // Given: an idle fake.
-    let mut source = FakeFrameSource::default();
-    // When: a navigation is submitted.
-    source
-        .submit(BrowserAction::Navigate(
-            "https://example.org/".parse().expect("URL"),
-        ))
-        .expect("submit");
-    // Then: the action is observable without any browser process.
-    assert_eq!(source.actions.len(), 1);
-}
-
-#[test]
-fn file_navigation_is_rejected_before_submission() {
-    let mut source = FakeFrameSource::default();
-    let result = source.submit(BrowserAction::Navigate(
-        "file:///etc/passwd".parse().expect("URL"),
-    ));
-    assert!(matches!(result, Err(gui::browser::BrowserError::UrlScheme)));
-    assert!(source.actions.is_empty());
-}
-
-#[test]
-fn failed_action_keeps_dom_evidence_visible_across_frames() {
-    let source = FakeFrameSource {
-        reports: [gui::browser::BrowserReport {
-            action: "click #submit".into(),
-            error: Some("element detached".into()),
-            removed: "<button id=submit>Send</button>".into(),
-            inserted: "<p>retry</p>".into(),
-        }]
-        .into(),
-        ..Default::default()
-    };
-    let mut harness = egui_kittest::Harness::builder().build_ui_state(
-        |ui, pane: &mut BrowserPane<FakeFrameSource>| pane.render(ui),
-        BrowserPane::new(source),
-    );
-    harness.get_by_label("Click element").click();
-    harness.run();
-    harness.run_steps(3);
-    assert!(
-        harness
-            .query_by_label("click #submit: element detached")
-            .is_some()
-    );
-    assert!(
-        harness
-            .query_by_label("- <button id=submit>Send</button>")
-            .is_some()
-    );
-    assert!(harness.query_by_label("+ <p>retry</p>").is_some());
-}
-
-fn agent_pane(
-    view: gui::browser::FakeAgentView,
-) -> egui_kittest::Harness<'static, gui::browser::AgentBrowserPane<gui::browser::FakeAgentView>> {
+fn agent_pane(view: FakeAgentView, tab: Tab) -> Harness {
     egui_kittest::Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .build_ui_state(
-            |ui, pane: &mut gui::browser::AgentBrowserPane<gui::browser::FakeAgentView>| {
-                pane.render(ui)
+            |ui, (pane, tab): &mut (AgentBrowserPane<FakeAgentView>, Tab)| {
+                let view = BrowserTabView {
+                    runs: &tab.runs,
+                    selected: tab.selected.as_deref(),
+                };
+                if let Some(picked) = pane.render(ui, view) {
+                    tab.picked.push(picked);
+                }
             },
-            gui::browser::AgentBrowserPane::new(view),
+            (AgentBrowserPane::new(view), tab),
         )
 }
 
 #[test]
-fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
+fn agent_pane_screencasts_the_selected_run_with_its_activity_overlaid() {
     // Given: two runs with open pages, a frame and recent activity.
-    use gui::browser::Activity;
-    let view = gui::browser::FakeAgentView {
+    let view = FakeAgentView {
         pages: vec!["run-a".into(), "run-b".into()],
         frames: [egui::ColorImage::filled([320, 200], egui::Color32::GRAY)].into(),
         activity: vec![
@@ -147,14 +58,20 @@ fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
         tab: Some("t2".into()),
         ..Default::default()
     };
+    let tab = Tab {
+        runs: vec![run("run-a", "Conversation"), run("run-b", "WebResearcher")],
+        selected: Some("run-b".into()),
+        ..Default::default()
+    };
 
     // When: the pane renders.
-    let mut harness = agent_pane(view);
+    let mut harness = agent_pane(view, tab);
     harness.run();
 
-    // Then: only the first run is observed, and its frame and activity show.
-    assert_eq!(harness.state().view().observed, [Some("run-a".to_owned())]);
-    assert_eq!(harness.state().texture_size(), Some([320, 200]));
+    // Then: only the selected run is observed, and its frame and activity show.
+    let (pane, _) = harness.state();
+    assert_eq!(pane.view().observed, [Some("run-b".to_owned())]);
+    assert_eq!(pane.texture_size("run-b"), Some([320, 200]));
     assert!(harness.query_by_label("click e5").is_some());
     assert!(harness.query_by_label("press Enter failed: boom").is_some());
     assert!(
@@ -170,33 +87,104 @@ fn agent_pane_screencasts_the_first_run_with_its_activity_overlaid() {
 }
 
 #[test]
-fn agent_pane_switches_runs_and_stops_when_the_page_closes() {
-    // Given: a pane observing the first of two runs.
-    let view = gui::browser::FakeAgentView {
+fn agent_pane_reports_the_run_the_user_picks() {
+    // Given: a pane showing the first of two runs, labelled by agent.
+    let view = FakeAgentView {
         pages: vec!["run-a".into(), "run-b".into()],
         ..Default::default()
     };
-    let mut harness = agent_pane(view);
+    let tab = Tab {
+        runs: vec![run("run-a", "Conversation"), run("run-b", "WebResearcher")],
+        selected: Some("run-a".into()),
+        ..Default::default()
+    };
+    let mut harness = agent_pane(view, tab);
     harness.run();
 
-    // When: the user picks the other run, and then its page closes.
+    // When: the user picks the other run.
     harness.get_by_label("Run").click();
     harness.run();
-    harness.get_by_label("run-b").click();
-    harness.run();
-    let switched = harness.state().selected().map(str::to_owned);
-    harness.state_mut().view_mut().pages.clear();
+    harness.get_by_label("WebResearcher").click();
     harness.run();
 
-    // Then: observation moved to run-b and stopped once nothing is open.
-    assert_eq!(switched.as_deref(), Some("run-b"));
-    assert_eq!(
-        harness.state().view().observed,
-        [Some("run-a".to_owned()), Some("run-b".to_owned()), None]
-    );
+    // Then: the pick goes to the workbench, which owns the selection.
+    assert_eq!(harness.state().1.picked, ["run-b".to_owned()]);
+}
+
+#[test]
+fn a_closed_page_keeps_its_last_frame_and_says_so() {
+    // Given: a pane that received a frame of run-a's page.
+    let view = FakeAgentView {
+        pages: vec!["run-a".into()],
+        frames: [egui::ColorImage::filled([4, 3], egui::Color32::RED)].into(),
+        activity: vec![Activity::Action {
+            label: "navigate https://example.test/".into(),
+            error: None,
+        }],
+        ..Default::default()
+    };
+    let tab = Tab {
+        runs: vec![run("run-a", "WebResearcher")],
+        selected: Some("run-a".into()),
+        ..Default::default()
+    };
+    let mut harness = agent_pane(view, tab);
+    harness.run();
+
+    // When: the page closes.
+    harness.state_mut().0.view_mut().pages.clear();
+    harness.run();
+
+    // Then: the last frame and activity stay, with a closed notice and no
+    // further observation requests.
+    let (pane, _) = harness.state();
+    assert_eq!(pane.texture_size("run-a"), Some([4, 3]));
+    assert_eq!(pane.view().observed, [Some("run-a".to_owned())]);
+    assert!(harness.query_by_label("The page was closed.").is_some());
     assert!(
         harness
-            .query_by_label_contains("No agent page is open")
+            .query_by_label("navigate https://example.test/")
             .is_some()
     );
+}
+
+#[test]
+fn stopping_ends_the_screencast_and_showing_again_resumes_it() {
+    // Given: a pane screencasting run-a.
+    let view = FakeAgentView {
+        pages: vec!["run-a".into()],
+        ..Default::default()
+    };
+    let tab = Tab {
+        runs: vec![run("run-a", "WebResearcher")],
+        selected: Some("run-a".into()),
+        ..Default::default()
+    };
+    let mut harness = agent_pane(view, tab);
+    harness.run();
+
+    // When: the tab goes out of sight, and later draws again.
+    let ctx = harness.ctx.clone();
+    harness.state_mut().0.stop(&ctx);
+    let stopped = harness.state().0.observing().map(str::to_owned);
+    harness.run();
+
+    // Then: observation stopped, then resumed for the same run.
+    assert_eq!(stopped, None);
+    assert_eq!(
+        harness.state().0.view().observed,
+        [Some("run-a".to_owned()), None, Some("run-a".to_owned())]
+    );
+}
+
+#[test]
+fn a_conversation_without_pages_shows_the_empty_state() {
+    let mut harness = agent_pane(FakeAgentView::default(), Tab::default());
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("No agent page is open in this conversation")
+            .is_some()
+    );
+    assert!(harness.state().0.view().observed.is_empty());
 }

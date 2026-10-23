@@ -51,6 +51,8 @@ pub enum PanelKind {
     ContextInspector,
     /// Output of the active conversation's background shell jobs.
     ShellJobs,
+    /// The pages the active conversation's agents opened with the browser tools.
+    AgentBrowser,
 }
 
 impl PanelKind {
@@ -74,6 +76,7 @@ impl PanelKind {
             Self::Usage => "Usage",
             Self::ContextInspector => "Context",
             Self::ShellJobs => "Shell jobs",
+            Self::AgentBrowser => "Browser",
         }
     }
 }

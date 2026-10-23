@@ -1026,6 +1026,12 @@ fn run() -> Result<(), GuiError> {
         Ok(sink) => state = state.with_system_notifications(Arc::new(sink)),
         Err(error) => tracing::warn!(%error, "system notification worker unavailable"),
     }
+    #[cfg(feature = "browser")]
+    if let Some(browser) = agent_browser {
+        state.set_agent_browser(Box::new(gui::browser::AgentBrowserPane::new(
+            gui::browser::LiveAgentView::new(browser, handle.clone()),
+        )));
+    }
     if let Some(path) = ui_settings_path(&arguments) {
         if let Some(parent) = path
             .parent()
@@ -1112,11 +1118,6 @@ fn run() -> Result<(), GuiError> {
             }
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
-                #[cfg(feature = "browser")]
-                browser: gui::browser::BrowserWindow::new(bus.clone(), handle.clone()),
-                #[cfg(feature = "browser")]
-                agent_browser: agent_browser
-                    .map(|browser| gui::browser::AgentBrowserWindow::new(browser, handle.clone())),
                 #[cfg(feature = "cef")]
                 html_previews,
                 _storage: storage_resources,
@@ -1128,10 +1129,6 @@ fn run() -> Result<(), GuiError> {
 
 struct GuiApp {
     workbench: WorkbenchApp<AgentRuntime>,
-    #[cfg(feature = "browser")]
-    browser: gui::browser::BrowserWindow,
-    #[cfg(feature = "browser")]
-    agent_browser: Option<gui::browser::AgentBrowserWindow>,
     #[cfg(feature = "cef")]
     html_previews: gui::html_preview::HtmlPreviewWindows,
     _storage: GuiStorageResources,
@@ -1176,12 +1173,6 @@ impl eframe::App for GuiApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        #[cfg(feature = "browser")]
-        self.browser.render(ui);
-        #[cfg(feature = "browser")]
-        if let Some(agent_browser) = &mut self.agent_browser {
-            agent_browser.render(ui);
-        }
         self.workbench.0.ui(ui, frame);
         // After the workbench, so artifacts opened this frame show without a
         // second repaint.

@@ -263,22 +263,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Run Chromium browser evidence test
-        run: cargo nextest run -p browser --lib -E 'test(=tests::chromium_screencast_and_action_evidence)' --run-ignored only --success-output immediate --no-tests fail
-        env:
-          # Cargo runs tests from the crate directory, not the workspace root.
-          EVORCH_BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/target/browser-evidence
-      - name: Run browser switch test
-        run: cargo nextest run -p browser --lib -E 'test(=tests::chromium_receives_the_session_switches)' --run-ignored only --success-output immediate --no-tests fail
       - name: Run agent browser test
         run: cargo nextest run -p browser --test agent_chromium --run-ignored only --success-output immediate --no-tests fail
-      - uses: actions/upload-artifact@v4
-        with:
-          name: browser-e2e-evidence
-          path: target/browser-evidence
-          # Fail loudly when the evidence contract breaks instead of uploading
-          # an empty artifact (issue #114).
-          if-no-files-found: error
 
   # ADR 0034 B: the opt-in CEF HTML preview. cef-dll-sys downloads the CEF
   # build cef-rs pins into CEF_PATH; it is not cached because the extracted

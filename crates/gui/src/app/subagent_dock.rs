@@ -227,7 +227,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         equalize_subagent_fractions(self.dock.main_surface_mut(), &leaves);
     }
 
-    fn subagent_leaves(&self) -> Vec<NodeIndex> {
+    pub(super) fn subagent_leaves(&self) -> Vec<NodeIndex> {
         let tree = self.dock.main_surface();
         let mut pending = vec![NodeIndex::root()];
         let mut leaves = Vec::new();
@@ -257,7 +257,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         leaves
     }
 
-    fn subagent_focus_snapshot(&self) -> Option<Vec<PanelId>> {
+    pub(super) fn subagent_focus_snapshot(&self) -> Option<Vec<PanelId>> {
         self.dock
             .focused_leaf()
             .or_else(|| {
@@ -273,7 +273,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .map(|leaf| leaf.tabs.clone())
     }
 
-    fn restore_subagent_focus(&mut self, focus: Option<Vec<PanelId>>) {
+    pub(super) fn restore_subagent_focus(&mut self, focus: Option<Vec<PanelId>>) {
         // Resolve saved tab identities after reindexing; a vanished leaf stays
         // unfocused rather than transferring focus to a new or parked pane.
         match focus {

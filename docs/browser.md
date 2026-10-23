@@ -1,34 +1,21 @@
 # Embedded Browser
 
-The Chromium session (launch, CDP, diagnostics) lives in `crates/browser` so
-runtime and tools can use it too. The GUI windows are behind the `browser`
-feature of `gui`, which is on by default; build with
-`--no-default-features` to leave them out. CEF builds include it.
+The agent browser (launch, CDP, network guard) lives in `crates/browser` so
+runtime and tools can use it. The GUI tab that watches it is behind the
+`browser` feature of `gui`, which is on by default; build with
+`--no-default-features` to leave it out. CEF builds include it.
 Install Chromium separately. No browser is downloaded or opened automatically.
 
-Open **Browser**, then choose **Start browser**. Headless is the default.
-**Headful (starts minimized)** applies only to the next session: Stop, change
-the toggle, then Start. Headful creates a background, minimized window; evorch
-never calls an activation/bring-to-front API. The desktop compositor owns
-final focus policy. Closing the pane stops the session.
+The GUI used to have a manual **Browser** window (navigate a URL, click a CSS
+selector and record `browser.action`, `browser.screenshot` and
+`browser.dom_diff` diagnostics). It predated the agent tools and the CEF
+preview and was removed; presented HTML opens in the in-app preview (below),
+and agent pages show in the agent browser tab. The diagnostic codes stay
+defined so that events stored by older versions still read.
 
-Enter an HTTP(S) URL and Navigate. A CSS selector plus Click element executes
-an element click. This is a screencast inspection pane, not full keyboard or
-pointer forwarding. Each session uses a unique temporary Chromium profile.
-The Chrome sandbox and TLS certificate checks are not disabled.
-
-`EventKind::Diagnostic` records `browser.action`, `browser.screenshot` and
-`browser.dom_diff`; screenshot detail contains JPEG base64, and diff detail
-contains a Unicode character prefix plus removed/inserted text. Changes larger
-than 16,384 characters are marked truncated. Before/after refer to command
-completion, not network-idle or arbitrary application animation completion.
-Diagnostics flow through the existing event bus/storage bridge. Screenshots
-and DOM can contain sensitive page data: use only sessions suitable for local
-diagnostic retention. Do not navigate to confidential pages unintentionally.
-
-Memory is bounded by an eight-command queue and one latest decoded frame;
-screencasts are limited to 1280x720 and decoded with image allocation limits.
-No screenshot is logged on every video frame, only around explicit actions.
+The agent browser keeps memory bounded: screencasts are limited to 1280x720
+and decoded with image allocation limits, and only the latest decoded frame of
+the watched page is kept.
 
 ## Agent browser tools
 
@@ -165,25 +152,40 @@ outline cannot name, such as a canvas; refs stay the default.
 
 ### Watching the agent browser
 
-In GUI builds with the `browser` feature, **Agent browser** opens a read-only
-window onto the runtime's agent pages. Every executor of the process, including
-the ones runs build for their own sandbox, shares one agent browser, so the
-window lists every run that has an open page. Only the selected run's active
-tab is screencast, and only while the window is open; closing the window stops
-it. When the run switches or closes tabs, the window follows its active tab and
-names it above the frame.
+In GUI builds with the `browser` feature, a read-only **Browser** tab shows
+the agent pages of the open conversation. Every executor of the process,
+including the ones runs build for their own sandbox, shares one agent browser.
+
+- When a run of a conversation opens its first page, the tab appears in that
+  conversation's subagent region (beside the Subagents tab) and comes to the
+  front of it. Keyboard focus stays where it was.
+- The tab belongs to its conversation: opening another conversation takes it
+  out of the dock, and coming back puts it back, in front only if it was in
+  front when the conversation was left.
+- It shows the run that last used a browser tool. When several runs of the
+  conversation opened pages, a Run picker switches between them.
+- Each `browser_*` tool card has a **View** button that shows that run's page
+  in the tab, opening the tab again if it was closed. Closing the tab hides it
+  until a run of the conversation opens another page or View is used.
+- Only the shown run's active tab is screencast, and only while the Browser
+  tab is drawn; a tab behind another one or out of the dock stops it. When the
+  run switches or closes tabs, the view follows its active tab and names it
+  above the frame.
+- A page that closed keeps its last frame with "The page was closed." The last
+  frames of up to eight runs are kept. Pages do not survive a restart, so a
+  saved layout does not bring the tab back.
+
 The latest actions (every browser tool call, with failures), refused requests
 and closed dialogs are laid over the frame. Typed text is
-shown up to 40 characters. The window never sends input to the page.
+shown up to 40 characters. The tab never sends input to the page.
 
 ## Low-memory verification
 
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 
 - `cargo test -p gui --test browser`
+- `cargo test -p gui --test agent_browser_workbench`
 - `cargo test -p browser`
-- With installed Chromium: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored`
-- With installed Chromium: `cargo test -p browser --lib tests::chromium_receives_the_session_switches -- --ignored`
 - With installed Chromium: `cargo test -p browser --test agent_chromium -- --ignored`
 
 The Chromium integration test uses only an ephemeral localhost HTTP fixture.

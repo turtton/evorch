@@ -59,21 +59,21 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 ### L5: ブラウザ fake-source テスト
 
-- 役割: Chromium を起動せず、注入したフェイクソースでブラウザペインの
-  フレーム描画・アクションログ・DOM diff 証跡を実 egui ラベル経由で検証する。
-- コマンド: `cargo test -j 1 -p gui --test browser -- --test-threads=1`
-- 例: `crates/gui/tests/browser.rs::pane_uploads_fake_frame_without_launching_browser`
+- 役割: Chromium を起動せず、注入したフェイクビューで Agent browser タブの
+  フレーム描画・操作履歴の重ね表示・閉じたページの最後のフレーム保持・
+  スレッドごとのタブ表示と View ボタンを実 egui ラベル経由で検証する。
+- コマンド: `cargo test -j 1 -p gui --test browser --test agent_browser_workbench -- --test-threads=1`
+- 例: `crates/gui/tests/browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`
 - 環境変数: なし
 - CI ジョブ: `ci` (`browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`--no-default-features` のビルドは clippy で確認する)
 
 ### L6: 実 Chromium E2E
 
-- 役割: 実 Chromium のヘッドレスセッションを起動し、localhost フィクスチャに
-  対するスクリーンキャストとアクション証跡を検証する。通常実行では ignored。
-- コマンド: `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture`
-- 環境変数: `EVORCH_BROWSER_EVIDENCE_DIR` (証跡出力先)、
-  `CHROME` (chromiumoxide の実行ファイル検出が参照。CI で設定)
-- CI ジョブ: `browser-e2e` (アーティファクト `browser-e2e-evidence`)
+- 役割: 実 Chromium をヘッドレスで起動し、localhost フィクスチャに対して
+  agent browser tools の操作・タブ・ネットワーク遮断を検証する。通常実行では ignored。
+- コマンド: `cargo test -p browser --test agent_chromium -- --ignored --nocapture`
+- 環境変数: `CHROME` (chromiumoxide の実行ファイル検出が参照。CI で設定)
+- CI ジョブ: `browser-e2e`
 
 ### L7: Linux 仮想 X11 実ウィンドウ操作
 
@@ -187,7 +187,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | Diff | L2 | `diff_headless.rs::diff_pane_shows_loading_then_ready_from_fixture`, `diff_headless.rs::empty_diff_shows_explicit_empty_state`, `diff_headless.rs::git_error_is_shown_and_ui_keeps_rendering` |
 | Terminal | L2 | `terminal_headless.rs::terminal_pane_renders_buffer_lines`, `terminal_headless.rs::terminal_pane_renders_cjk_lines`, `terminal_headless.rs::terminal_pane_renders_empty_buffer`, `terminal_headless.rs::terminal_content_labels_within_viewport`, `layout_v02.rs::undock_to_floating_and_reload_preserves_v02_panels` (terminal タブのドック操作) |
 | Tasks / Memory / Team ペイン | L2 | `workbench.rs::tasks_row_updates_after_state_change_event`, `memory_pane.rs::memory_pane_search_and_filter_use_persisted_projection`, `team_pane.rs::team_pane_shows_claim_owner_and_ready_tasks` |
-| Browser ペイン | L5, L6 | `browser.rs::pane_uploads_fake_frame_without_launching_browser`, `browser.rs::click_displays_action_log_and_dom_diff`, `browser.rs::failed_action_keeps_dom_evidence_visible_across_frames`, `crates/browser/src/tests.rs::chromium_screencast_and_action_evidence` |
+| Agent browser タブ | L1, L5, L6 | `crates/gui/src/app/agent_browser_tests.rs`, `browser.rs::agent_pane_screencasts_the_selected_run_with_its_activity_overlaid`, `browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`, `agent_browser_workbench.rs::a_page_opens_the_browser_tab_and_view_reopens_it_after_closing`, `transcript_tool.rs::browser_tool_card_view_asks_to_show_its_runs_page`, `crates/browser/tests/agent_chromium.rs` |
 | Loop ステータス | L2 | `loop_status_headless.rs::loop_state_tracks_stage_and_rejections_from_bus_events`, `loop_status_headless.rs::state_controls_issue_pause_and_resume_goal_commands_once` |
 | テーマ | L2 | `theme_headless.rs::install_applies_dark_design_tokens`, `theme_headless.rs::workbench_installs_theme_on_first_frame`, `theme_headless.rs::dock_style_distinguishes_tab_states` |
 | Dock レイアウト | L2 | `dock_roundtrip.rs::workspace_dock_workspace_round_trip_preserves_nested_structure`, `dock_roundtrip.rs::complex_nested_split_round_trip_preserves_tree_and_active_tabs`, `layout_v02.rs::default_layout_is_sidebar_center_right_tabs`, `layout_v02.rs::v1_layout_file_loads_via_migration_into_workbench` |
@@ -203,13 +203,12 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | --- | --- | --- | --- |
 | `EVORCH_REQUIRE_ADAPTER` | 環境変数 | `1` でオフスクリーンアダプタ未取得を skip ではなく失敗にする (`gui::evidence::AdapterPolicy`)。CI の offscreen-gate で設定 | L4 |
 | `EVORCH_METADATA_EVIDENCE` | 環境変数 | `model_metadata_capture.rs::capture_model_metadata` の証跡出力先ディレクトリ | L4 |
-| `EVORCH_BROWSER_EVIDENCE_DIR` | 環境変数 | 実 Chromium E2E の証跡出力先。未設定時は一時ディレクトリ | L6 |
 | `CHROME` | 環境変数 | chromiumoxide の実行ファイル検出が参照する Chromium パス。browser-e2e で設定 | L6 |
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
 | `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 40 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
-| `cargo test -j 1 -p gui --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
-| `cargo test -p browser --lib tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
+| `cargo test -j 1 -p gui --test browser --test agent_browser_workbench -- --test-threads=1` | コマンド | Agent browser タブのフェイクビューテスト | L5 |
+| `cargo test -p browser --test agent_chromium -- --ignored --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |
 | `GUI_QA_MODE` / `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の fixture / 実アプリ、起動バイナリ、出力ディレクトリを指定する | L7 |
 | `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L8 |

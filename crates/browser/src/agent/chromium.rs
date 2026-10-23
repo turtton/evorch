@@ -146,7 +146,7 @@ impl AgentBrowser {
             loop {
                 tokio::select! {
                     Some(frame) = incoming.recv() => {
-                        match crate::cdp::decode_jpeg(frame["data"].as_str().unwrap_or_default(), WINDOW) {
+                        match crate::jpeg::decode_jpeg(frame["data"].as_str().unwrap_or_default(), WINDOW) {
                             Ok(image) => {
                                 frames_tx.send_replace(Some(image));
                             }

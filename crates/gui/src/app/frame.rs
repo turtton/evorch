@@ -205,6 +205,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.save_sidebar();
         }
         self.bind_goal_event(event);
+        self.fold_agent_browser_event(event);
         self.sink.observe_lifecycle(event);
         self.apply_runtime_event(event);
         self.pending_approvals.apply_event(

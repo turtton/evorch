@@ -1,6 +1,6 @@
 [package]
 name = "browser"
-description = "Chromium sessions driven over CDP, shared by the GUI and agent tools"
+description = "The agent browser: Chromium driven over CDP for the agent browser tools"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,6 @@ async-tungstenite = { version = "0.32", default-features = false, features = ["t
 base64.workspace = true
 bytes.workspace = true
 chromiumoxide = { version = "0.9", default-features = false }
-event-bus = { path = "../event-bus" }
 futures-util.workspace = true
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
@@ -20,7 +19,6 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 image = { workspace = true, default-features = false, features = ["jpeg"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

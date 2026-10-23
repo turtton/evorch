@@ -11,7 +11,7 @@ use crate::model::transcript::{ToolReview, ToolStatus, TranscriptEntry};
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
 use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette};
-use crate::theme::widgets::{icon_button, soft_frame};
+use crate::theme::widgets::{ghost_icon_button, icon_button, soft_frame};
 
 mod header;
 mod orchestration;
@@ -20,6 +20,8 @@ mod sticky;
 pub use orchestration::agent_name;
 
 const LIVE_TAIL_LINES: usize = 4;
+/// Room kept in a browser tool card's header for its View button.
+const VIEW_BUTTON_WIDTH: f32 = 64.0;
 
 use header::ToolHeader;
 
@@ -287,7 +289,16 @@ pub fn tool_card_group(
                         .color(palette().RUNNING),
                 );
             }
-            let reserved = if job.is_some() { ROW_DENSE } else { 0.0 };
+            let browser_run = run_id.as_deref().filter(|_| {
+                crate::panes::agent_browser::is_browser_tool(tool_name)
+                    && crate::panes::agent_browser::available(ui.ctx())
+            });
+            let reserved = if job.is_some() { ROW_DENSE } else { 0.0 }
+                + if browser_run.is_some() {
+                    VIEW_BUTTON_WIDTH
+                } else {
+                    0.0
+                };
             let width = ui.available_width() - ui.spacing().button_padding.x * 2.0 - reserved;
             let layout = fitted_header_job(ui, glyph, color, &header, width);
             let button =
@@ -295,10 +306,19 @@ pub fn tool_card_group(
             button.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
             });
-            if let Some(job) = job {
+            if job.is_some() || browser_run.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, icons::SCROLL, "Open shell job log").clicked() {
+                    if let Some(job) = job
+                        && icon_button(ui, icons::SCROLL, "Open shell job log").clicked()
+                    {
                         crate::panes::shell_jobs::request_open(ui.ctx(), &job.key);
+                    }
+                    if let Some(run) = browser_run
+                        && ghost_icon_button(ui, icons::BROWSER, "View")
+                            .on_hover_text("Show this run's page in the Browser tab")
+                            .clicked()
+                    {
+                        crate::panes::agent_browser::request_open(ui.ctx(), run);
                     }
                 });
             }
