@@ -12,8 +12,13 @@ inputs:
       saves, so every job shares one cache entry.
     default: "false"
   timeout-seconds:
-    description: Bound for each apt-get call.
+    description: Bound for each apt-get call on the fallback mirror.
     default: "600"
+  primary-timeout-seconds:
+    description: >-
+      Bound for the install on the runner's default mirror before switching to
+      archive.ubuntu.com. A normal install takes well under a minute.
+    default: "180"
 runs:
   using: composite
   steps:
@@ -31,18 +36,48 @@ runs:
       env:
         APT_PACKAGES: ${{ inputs.packages }}
         APT_TIMEOUT: ${{ inputs.timeout-seconds }}
+        APT_PRIMARY_TIMEOUT: ${{ inputs.primary-timeout-seconds }}
       run: |
         set -u
         archives="$HOME/apt-archives"
         if compgen -G "$archives/*.deb" > /dev/null; then
           sudo cp "$archives"/*.deb /var/cache/apt/archives/
         fi
+        apt_install() {
+          local limit=$1 status=0
+          timeout --kill-after=30s "$limit" sudo apt-get update || status=$?
+          if [ "$status" -eq 0 ]; then
+            # shellcheck disable=SC2086 # word splitting is the package list
+            timeout --kill-after=30s "$limit" \
+              sudo apt-get install -y --no-install-recommends $APT_PACKAGES || status=$?
+          fi
+          return "$status"
+        }
         status=0
-        timeout --kill-after=30s "$APT_TIMEOUT" sudo apt-get update || status=$?
+        apt_install "$APT_PRIMARY_TIMEOUT" || status=$?
+        if [ "$status" -ne 0 ]; then
+          # The Azure mirror can trickle at tens of kB/s for hours while
+          # archive.ubuntu.com stays fast; apt's mirror list only falls back on
+          # errors, so drop the Azure entry and retry. Completed .debs stay in
+          # /var/cache/apt/archives and are not downloaded again.
+          echo "::warning::apt-get on the default mirror failed or timed out (status $status); retrying on archive.ubuntu.com"
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            cat /etc/apt/apt-mirrors.txt
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            if ! grep -q . /etc/apt/apt-mirrors.txt; then
+              echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+            fi
+          fi
+          for sources in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$sources" ] || continue
+            sudo sed -i 's#http://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' "$sources"
+          done
+          # A timeout during unpacking leaves dpkg half-configured.
+          sudo dpkg --configure -a || true
+          status=0
+          apt_install "$APT_TIMEOUT" || status=$?
+        fi
         if [ "$status" -eq 0 ]; then
-          # shellcheck disable=SC2086 # word splitting is the package list
-          timeout --kill-after=30s "$APT_TIMEOUT" \
-            sudo apt-get install -y --no-install-recommends $APT_PACKAGES || status=$?
           # Drop superseded versions so the cache does not grow across updates.
           sudo apt-get autoclean -y
         fi

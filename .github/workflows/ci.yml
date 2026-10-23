@@ -49,7 +49,7 @@ jobs:
       - name: Install linker, search, and Claude transport build dependencies
         # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
         # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
-        timeout-minutes: 25
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
@@ -198,7 +198,7 @@ jobs:
       # hour (2026-10-23). Every job restores one shared .deb cache; this job's
       # package set covers the others', so only it saves (on main).
       - name: Install headless rendering and isolated X11/Wayland deps
-        timeout-minutes: 25
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
@@ -259,7 +259,7 @@ jobs:
 
   browser-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
@@ -272,7 +272,7 @@ jobs:
           shared-key: ${{ runner.os }}-cargo
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 25
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: mold cmake clang libclang-dev ninja-build perl git
@@ -308,7 +308,7 @@ jobs:
           shared-key: ${{ runner.os }}-cef
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install linker and Claude transport build dependencies
-        timeout-minutes: 25
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: mold cmake clang libclang-dev ninja-build perl git
