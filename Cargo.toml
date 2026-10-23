@@ -81,6 +81,12 @@ debug = false
 # Named GUI dependency overrides live in .cargo/config.toml so dependency
 # caches include their optimization settings in the cache key.
 
+# The release profile stays at Cargo's defaults. Measured on the shipped
+# binaries (2026-10, `-p evorch -p gui`): lto = "thin" grew them ~1.3% and made
+# a workspace-only rebuild ~7x slower; lto = "fat" cut ~24% but made that
+# rebuild ~50x slower. Symbols stay because panic capture records backtraces,
+# and panic = "abort" is ruled out by the runtime's catch_unwind boundaries.
+
 # Escape hatch for debugger sessions (gdb/lldb with variable inspection):
 #   cargo build --profile debugging
 #   cargo test  --profile debugging

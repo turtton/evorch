@@ -56,6 +56,15 @@
           src = pkgs.lib.cleanSource ./.;
           cargoExtraArgs = "--workspace";
           strictDeps = true;
+          # reproducible-builds.sh derives -frandom-seed from each derivation's
+          # out path, and bindgenHook copies NIX_CFLAGS_COMPILE into
+          # BINDGEN_EXTRA_CLANG_ARGS, which bindgen's build script tracks. A
+          # per-derivation seed therefore rebuilt bindgen and btls-sys
+          # (BoringSSL) on top of the cached deps; one seed keeps them fresh.
+          NIX_OUTPATH_USED_AS_RANDOM_SEED = "evorch-cargo";
+          # Keep every input of the packages here, not only in buildPackage:
+          # buildInputs feed NIX_CFLAGS_COMPILE / BINDGEN_EXTRA_CLANG_ARGS /
+          # PKG_CONFIG_PATH, which build scripts track as well.
           nativeBuildInputs = [
             pkgs.pkg-config
             pkgs.makeWrapper
@@ -63,11 +72,18 @@
             pkgs.perl
             pkgs.git
             pkgs.rustPlatform.bindgenHook
-          ];
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
           dontUseCmakeConfigure = true;
-          buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ];
+          # BoringSSL's C++ runtime must remain resolvable outside the build shell.
+          buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ] ++ runtimeLibraries;
         };
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        # The deps build only feeds `cargo build` / `cargo test` derivations, so
+        # the default `cargo check --all-targets` pass would only add minutes
+        # and metadata-only artifacts to the cached (and attic-pushed) output.
+        depsOnlyArgs = {
+          cargoCheckCommand = "true";
+        };
+        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
         tests = craneLib.cargoTest (commonArgs // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--workspace";
@@ -143,12 +159,10 @@
         });
         evorch = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "-p evorch -p gui";
+          # Only the shipped programs; the QA fixtures (headless_capture,
+          # native_qa_window) are built with cargo where they are used.
+          cargoExtraArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
           doCheck = false;
-          nativeBuildInputs = commonArgs.nativeBuildInputs
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
-          # BoringSSL's C++ runtime must remain resolvable outside the build shell.
-          buildInputs = commonArgs.buildInputs ++ runtimeLibraries;
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
@@ -166,7 +180,7 @@
             test "$helpStatus" -eq 1
             grep -q '^usage: evorch ' evorch-help.txt
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              for binary in evorch .evorch-gui-wrapped headless_capture native_qa_window; do
+              for binary in evorch .evorch-gui-wrapped; do
                 env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
                   ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/$binary"
               done
@@ -236,14 +250,18 @@
           pname = "evorch-gui-cef";
           cargoExtraArgs = "-p gui -p browser-cef --features gui/cef,browser-cef/cef";
           CEF_PATH = cefDist;
+          # Shared with the deps build so build-script fingerprints (pkg-config
+          # for x11-dl/winit, bindgen) match and the cached deps are reused.
+          buildInputs = commonArgs.buildInputs ++ cefRuntimeLibraries;
         };
-        cefCargoArtifacts = craneLib.buildDepsOnly cefArgs;
+        # No derivation runs the CEF tests, so dev-dependencies are not cached.
+        cefCargoArtifacts = craneLib.buildDepsOnly (cefArgs // depsOnlyArgs // {
+          doCheck = false;
+        });
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
           cargoArtifacts = cefCargoArtifacts;
           cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
           doCheck = false;
-          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
-          buildInputs = commonArgs.buildInputs ++ runtimeLibraries ++ cefRuntimeLibraries;
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           # CEF resolves its paks, locales and the helper beside the executable,
           # so everything shares one libexec directory behind the wrapper.
@@ -281,9 +299,7 @@
           meta.platforms = [ "x86_64-linux" ];
         } ''
           mkdir -p $out/bin
-          for binary in evorch headless_capture native_qa_window; do
-            ln -s ${evorch}/bin/$binary $out/bin/$binary
-          done
+          ln -s ${evorch}/bin/evorch $out/bin/evorch
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
         '';
