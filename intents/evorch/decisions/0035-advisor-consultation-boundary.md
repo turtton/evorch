@@ -1,6 +1,6 @@
 # ADR 0035: Oracle を相談専用 Advisor に改称する
 
-Status: Accepted
+Status: Accepted → 2026-10-23 に [ADR 0040](0040-advisor-stuck-point-triggers.md) で、Advisor を起用する 3 つの場面（再レビュー後も残る指摘・Worker と Reviewer の食い違い、仕様では決まらない技術判断、絞りきれない原因仮説）を定めた。
 
 ## Context
 

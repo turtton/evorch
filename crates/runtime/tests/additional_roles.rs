@@ -178,3 +178,36 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
     assert_eq!(triggers.len(), 9);
     assert!(!triggers.iter().any(|t| t.name == "Oracle"));
 }
+
+/// ADR 0040: Advisor は 3 つの行き詰まりの場面で起用され、権限や意図の確認には使わない。
+#[test]
+fn advisor_is_consulted_at_the_three_stuck_points_named_in_every_surface() {
+    let advisor = config::PresetStore::resolve("role-advisor", None).unwrap();
+    let orchestrator = config::PresetStore::resolve("role-orchestrator", None).unwrap();
+    let triggers = runtime::prompt::default_role_triggers();
+    let guidance = &triggers
+        .iter()
+        .find(|t| t.name == "Advisor")
+        .unwrap()
+        .description;
+    for trigger in [
+        "再レビュー",
+        "食い違",
+        "仕様では決まらない",
+        "仮説を絞りきれない",
+        "権限",
+    ] {
+        assert!(advisor.contains(trigger), "advisor preset: {trigger}");
+        assert!(guidance.contains(trigger), "trigger guidance: {trigger}");
+        assert!(
+            orchestrator.contains(trigger),
+            "orchestrator preset: {trigger}"
+        );
+    }
+    assert!(orchestrator.contains("Advisor"));
+    // 読み取り専用のため、原因の相談では実行せず次の確認を提案する。
+    for contract in ["仮説を見分ける", "実行しない"] {
+        assert!(advisor.contains(contract), "advisor preset: {contract}");
+        assert!(guidance.contains(contract), "trigger guidance: {contract}");
+    }
+}
