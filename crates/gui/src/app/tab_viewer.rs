@@ -44,6 +44,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
+    pub(super) agent_browser: &'a mut super::agent_browser::AgentBrowserTabs,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
     pub(super) self_improvement_action:
@@ -164,6 +165,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::Usage => icons::CHART_BAR,
         PanelKind::ContextInspector => icons::STACK,
         PanelKind::ShellJobs => icons::TERMINAL,
+        PanelKind::AgentBrowser => icons::BROWSER,
     }
 }
 
@@ -241,8 +243,16 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         | PanelKind::Usage
                         | PanelKind::ContextInspector
                         | PanelKind::ShellJobs
+                        | PanelKind::AgentBrowser
                 )
             })
+    }
+
+    fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::widgets::tab_viewer::OnCloseResponse {
+        if tab.as_str() == super::agent_browser::PANEL {
+            self.agent_browser.closed_by_user();
+        }
+        egui_dock::widgets::tab_viewer::OnCloseResponse::Close
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -430,6 +440,20 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::ShellJobs => {
                 let jobs = self.active_shell_jobs();
                 self.shell_jobs.render(ui, &jobs);
+            }
+            PanelKind::AgentBrowser => {
+                let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
+                let (rows, threads, transcripts) =
+                    (self.tasks.rows(), &self.sidebar.threads, self.transcripts);
+                self.agent_browser.render(ui, thread.as_deref(), |run| {
+                    if transcripts.is_thread_root(run) {
+                        "Conversation".to_owned()
+                    } else {
+                        crate::model::tasks::run_display_name(rows, threads, run)
+                            .unwrap_or(run)
+                            .to_owned()
+                    }
+                });
             }
             PanelKind::ContextInspector => {
                 let choices = self.context_run_choices();

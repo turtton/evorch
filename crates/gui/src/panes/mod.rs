@@ -1,6 +1,7 @@
 //! egui ペイン描画モジュール。
 
 pub mod agent;
+pub mod agent_browser;
 pub mod agent_transcript;
 pub mod agents;
 mod agents_columns;

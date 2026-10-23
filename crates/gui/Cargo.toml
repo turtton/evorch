@@ -10,7 +10,7 @@ publish = false
 name = "gui"
 
 [features]
-# The Browser and Agent browser windows. Runtime and tools link `browser`
+# The agent browser tab. Runtime and tools link `browser`
 # regardless, so enabling them by default costs no extra dependency.
 default = ["browser"]
 browser = ["dep:browser"]

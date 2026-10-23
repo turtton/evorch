@@ -61,7 +61,8 @@ pub(super) fn attention_for(
         | PanelKind::Arena
         | PanelKind::Usage
         | PanelKind::ContextInspector
-        | PanelKind::ShellJobs => PaneAttention::None,
+        | PanelKind::ShellJobs
+        | PanelKind::AgentBrowser => PaneAttention::None,
     }
 }
 
@@ -166,7 +167,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 | PanelKind::Arena
                 | PanelKind::Usage
                 | PanelKind::ContextInspector
-                | PanelKind::ShellJobs => Vec::new(),
+                | PanelKind::ShellJobs
+                | PanelKind::AgentBrowser => Vec::new(),
             };
             for (run, phase) in runs {
                 observed.insert((id.clone(), run), phase);

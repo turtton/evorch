@@ -129,6 +129,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             escalate_to_user_on_deny: self.sandbox_settings.config.escalate_to_user_on_deny,
             enabled: !self.settings_save_in_progress(),
         };
+        self.sync_agent_browser(&ctx);
         {
             let rewind_block = self
                 .sidebar
@@ -154,6 +155,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 usage: &mut self.usage,
                 context_inspector: &mut self.context_inspector,
                 shell_jobs: &mut self.shell_jobs,
+                agent_browser: &mut self.agent_browser,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -192,6 +194,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
         }
+        self.finish_agent_browser_frame(&ctx);
         if self.usage.take_conversation_request() {
             self.focus_panel("agent-main");
         }
