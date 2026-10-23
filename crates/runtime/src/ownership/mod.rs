@@ -4,6 +4,7 @@ mod checkpoint;
 pub use checkpoint::{
     CheckpointBoundary, OwnerCheckpoint, RunCheckpoint, SnapshotNoneReason, SnapshotReference,
 };
+pub(crate) mod authority;
 mod observe;
 mod permit;
 mod retry;

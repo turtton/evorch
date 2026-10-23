@@ -16,6 +16,7 @@ impl TelemetryRow {
             Some(RunActivity::Children) => "agents".into(),
             Some(RunActivity::User) => "user input".into(),
             Some(RunActivity::Compaction) => "compaction".into(),
+            Some(RunActivity::Ownership) => "waiting for owner registry".into(),
             Some(RunActivity::Idle) | None => {
                 self.current_tool.clone().unwrap_or_else(|| "idle".into())
             }

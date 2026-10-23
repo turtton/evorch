@@ -55,7 +55,8 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
                 | PanelKind::Arena
                 | PanelKind::Usage
                 | PanelKind::ContextInspector
-                | PanelKind::ShellJobs,
+                | PanelKind::ShellJobs
+                | PanelKind::AgentBrowser,
                 None,
             ) => {}
             (PanelKind::Agent, Some(_))
@@ -75,7 +76,8 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
                 | PanelKind::Arena
                 | PanelKind::Usage
                 | PanelKind::ContextInspector
-                | PanelKind::ShellJobs,
+                | PanelKind::ShellJobs
+                | PanelKind::AgentBrowser,
                 Some(_),
             ) => {
                 return Err(LayoutError::UnexpectedTarget {

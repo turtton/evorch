@@ -169,11 +169,17 @@ when focused local cache validation is needed.
 - Do not weaken or remove this contract to make a new feature pass. Intentional
   invalidation requires a documented boundary and tests for reuse after it.
 
-## Current role boundary (ADR 0035)
+## Current role boundary (ADR 0035, ADR 0040)
 
 - Advisor (formerly Oracle) is an optional, read-only consultant before a decision,
   not a mandatory stage. Return options, trade-offs, a recommendation, uncertainty,
   and information that would change the decision.
+- The Orchestrator consults Advisor when it needs a step back: a must finding
+  persists after re-review or Worker and Reviewer disagree; a child's technical
+  question is not settled by the requirements and the Orchestrator lacks grounds
+  to decide it alone; or collected evidence does not narrow the cause hypotheses
+  (Advisor proposes the checks that discriminate them; it runs nothing).
+  Permission and user-intent questions go to the user, not Advisor.
 - Implementation belongs to Worker; detailed execution plans belong to Planner.
   Comparing implementation results or plans against requirements and issuing an
   acceptance verdict belongs exclusively to Reviewer.

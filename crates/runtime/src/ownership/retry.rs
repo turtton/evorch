@@ -11,6 +11,12 @@
 //! which every statement of that attempt shares: a BEGIN that waited 1.5 s of
 //! a 2 s attempt leaves its COMMIT 0.5 s. Each attempt ends no later than the
 //! operation deadline, and no attempt starts once that deadline is too close.
+//!
+//! A policy without an operation deadline ([`RetryPolicy::unbounded`]) retries
+//! contention until it clears, the caller is interrupted or the attempt fails
+//! for another reason. Runs use it: contention says nothing about authority,
+//! since another process can claim a thread only while its owner does not
+//! answer, so waiting cannot let a stale generation write.
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,8 +30,9 @@ use super::registry::ATTEMPT_TIMEOUT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Total lock-wait budget from the first attempt. No attempt waits past
-    /// it and none starts once less than a minimal attempt remains.
-    pub deadline: Duration,
+    /// it and none starts once less than a minimal attempt remains. `None`
+    /// retries contention until it clears or the caller is interrupted.
+    pub deadline: Option<Duration>,
     /// Combined SQLite lock wait of one attempt, across all of its
     /// statements. Bounds how long an interrupt waits for the attempt in
     /// progress.
@@ -37,13 +44,26 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            deadline: Duration::from_secs(10),
+            deadline: Some(Duration::from_secs(10)),
             attempt_timeout: ATTEMPT_TIMEOUT,
             initial_backoff: Duration::from_millis(25),
             max_backoff: Duration::from_millis(500),
         }
     }
 }
+
+impl RetryPolicy {
+    /// The default attempt and backoff, without an operation deadline.
+    pub fn unbounded() -> Self {
+        Self {
+            deadline: None,
+            ..Self::default()
+        }
+    }
+}
+
+/// A wait that lasts this long is logged, and again at most this often.
+const WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Time source of retry budgets. Tests substitute virtual time.
 pub(super) trait Clock: Send + Sync {
@@ -149,10 +169,11 @@ pub(super) fn retry_contention<T>(
     mut attempt: impl FnMut(u32) -> Result<T, RegistryError>,
 ) -> Result<T, RegistryError> {
     let started = clock.now();
-    let deadline = started + policy.deadline;
+    let deadline = policy.deadline.map(|deadline| started + deadline);
     let mut backoff = policy.initial_backoff;
-    let mut attempts = 0;
+    let mut attempts: u32 = 0;
     let mut last_error = None;
+    let mut next_report = started + WAIT_REPORT_INTERVAL;
     let interrupt = |attempts| {
         tracing::info!(
             target: TARGET,
@@ -176,7 +197,7 @@ pub(super) fn retry_contention<T>(
             thread_id,
             attempts,
             elapsed_ms = millis(clock.now().saturating_duration_since(started)),
-            deadline_ms = millis(policy.deadline),
+            deadline_ms = policy.deadline.map(millis),
             sqlite_code = ?error.sqlite_code(),
             "ownership registry contention outlasted the retry deadline"
         );
@@ -190,15 +211,16 @@ pub(super) fn retry_contention<T>(
         // Backoff (or rescheduling afterwards) may overshoot the deadline.
         // Keep the last DB error and its count rather than starting a new
         // connection/transaction with no useful budget left.
-        if deadline.saturating_duration_since(now) < MIN_ATTEMPT
+        if deadline.is_some_and(|deadline| deadline.saturating_duration_since(now) < MIN_ATTEMPT)
             && let Some(error) = last_error.take()
         {
             return Err(expire(error, attempts));
         }
-        attempts += 1;
+        attempts = attempts.saturating_add(1);
+        let attempt_end = now + policy.attempt_timeout;
         let result = {
             let _scope = BudgetScope::enter(AttemptBudget {
-                until: deadline.min(now + policy.attempt_timeout),
+                until: deadline.map_or(attempt_end, |deadline| deadline.min(attempt_end)),
                 clock: Arc::clone(clock),
             });
             attempt(attempts)
@@ -225,13 +247,33 @@ pub(super) fn retry_contention<T>(
         if interrupted() {
             return Err(interrupt(attempts));
         }
-        let remaining = deadline.saturating_duration_since(clock.now());
-        let Some(spare) = remaining
-            .checked_sub(MIN_ATTEMPT)
-            .filter(|spare| !spare.is_zero())
-        else {
-            return Err(expire(error, attempts));
+        let now = clock.now();
+        let spare = match deadline {
+            Some(deadline) => {
+                let Some(spare) = deadline
+                    .saturating_duration_since(now)
+                    .checked_sub(MIN_ATTEMPT)
+                    .filter(|spare| !spare.is_zero())
+                else {
+                    return Err(expire(error, attempts));
+                };
+                spare
+            }
+            None => Duration::MAX,
         };
+        if now >= next_report {
+            tracing::warn!(
+                target: TARGET,
+                db = %db.display(),
+                operation = operation.as_str(),
+                thread_id,
+                attempts,
+                elapsed_ms = millis(now.saturating_duration_since(started)),
+                sqlite_code = ?error.sqlite_code(),
+                "ownership registry contention persists; still retrying"
+            );
+            next_report = now + WAIT_REPORT_INTERVAL;
+        }
         if !sleep_unless(clock.as_ref(), jitter(backoff).min(spare), interrupted) {
             return Err(interrupt(attempts));
         }
@@ -369,7 +411,7 @@ mod tests {
 
     fn policy(deadline_ms: u64, attempt_ms: u64) -> RetryPolicy {
         RetryPolicy {
-            deadline: Duration::from_millis(deadline_ms),
+            deadline: Some(Duration::from_millis(deadline_ms)),
             attempt_timeout: Duration::from_millis(attempt_ms),
             initial_backoff: Duration::from_millis(25),
             max_backoff: Duration::from_millis(500),
@@ -396,8 +438,77 @@ mod tests {
     #[test]
     fn default_policy_bounds_retries_near_ten_seconds() {
         let policy = RetryPolicy::default();
-        assert_eq!(policy.deadline, Duration::from_secs(10));
+        assert_eq!(policy.deadline, Some(Duration::from_secs(10)));
         assert_eq!(policy.attempt_timeout, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_unbounded_policy_outlasts_any_deadline_until_contention_clears() {
+        let clock = VirtualClock::new();
+        let policy = RetryPolicy::unbounded();
+        assert_eq!(policy.deadline, None);
+        let clears_after = Duration::from_secs(120);
+        let mut budgets = Vec::new();
+        let result = run(&clock, &policy, &|| false, |_| {
+            budgets.push(clock.attempt_remaining().unwrap());
+            if clock.elapsed() < clears_after {
+                wait_out_the_attempt();
+                Err(busy())
+            } else {
+                Ok("committed")
+            }
+        });
+        assert_eq!(result.unwrap(), "committed");
+        assert!(clock.elapsed() >= clears_after);
+        // Every attempt keeps its own bounded wait, so interrupts stay prompt.
+        assert!(
+            budgets
+                .iter()
+                .all(|budget| *budget == policy.attempt_timeout)
+        );
+    }
+
+    #[test]
+    fn an_unbounded_policy_still_ends_at_an_interrupt() {
+        let clock = VirtualClock::new();
+        let interrupted = AtomicBool::new(false);
+        let mut attempts = 0;
+        let result: Result<(), _> = run(
+            &clock,
+            &RetryPolicy::unbounded(),
+            &|| interrupted.load(Ordering::SeqCst),
+            |number| {
+                attempts = number;
+                wait_out_the_attempt();
+                if clock.elapsed() >= Duration::from_secs(60) {
+                    interrupted.store(true, Ordering::SeqCst);
+                }
+                Err(busy())
+            },
+        );
+        assert!(
+            matches!(result, Err(RegistryError::Interrupted { attempts: n, .. }) if n == attempts),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_policy_does_not_retry_other_errors() {
+        let clock = VirtualClock::new();
+        let mut calls = 0;
+        let result: Result<(), _> = run(&clock, &RetryPolicy::unbounded(), &|| false, |_| {
+            calls += 1;
+            Err(RegistryError::Ownership(
+                super::super::OwnershipError::Fenced,
+            ))
+        });
+        assert!(matches!(
+            result,
+            Err(RegistryError::Ownership(
+                super::super::OwnershipError::Fenced
+            ))
+        ));
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -488,10 +599,11 @@ mod tests {
     #[test]
     fn backoff_overshoot_does_not_start_another_attempt() {
         let policy = policy(300, 100);
+        let deadline = policy.deadline.unwrap();
         for elapsed_after_sleep in [
-            policy.deadline - MIN_ATTEMPT + Duration::from_millis(1),
-            policy.deadline,
-            policy.deadline + Duration::from_millis(1),
+            deadline - MIN_ATTEMPT + Duration::from_millis(1),
+            deadline,
+            deadline + Duration::from_millis(1),
         ] {
             let clock = VirtualClock::new();
             let sleeping_clock = Arc::downgrade(&clock);
@@ -532,7 +644,10 @@ mod tests {
         let policy = policy(300, 100);
         let sleeping_clock = Arc::downgrade(&clock);
         clock.on_sleep(move |_| {
-            sleeping_clock.upgrade().unwrap().advance(policy.deadline);
+            sleeping_clock
+                .upgrade()
+                .unwrap()
+                .advance(policy.deadline.unwrap());
         });
         let checked_after_sleep = AtomicBool::new(false);
         let mut calls = Vec::new();
@@ -542,7 +657,7 @@ mod tests {
             &|| {
                 // The last check inside sleep_unless sees no interrupt; it
                 // arrives just before the next attempt's admission check.
-                clock.elapsed() > policy.deadline
+                clock.elapsed() > policy.deadline.unwrap()
                     && checked_after_sleep.swap(true, Ordering::SeqCst)
             },
             |number| {

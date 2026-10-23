@@ -375,3 +375,50 @@ fn agent_messages_name_their_peer_and_keep_the_run_id_copyable() {
     assert_eq!(harness.query_all_by_label("Copy run ID").count(), 2);
     assert!(harness.query_by_label_contains(unknown).is_none());
 }
+
+fn browser_card(available: bool) -> Harness<'static> {
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "browser_navigate".into(),
+        call_id: "browse-1".into(),
+        input: Some(serde_json::json!({"url": "https://example.test/"})),
+        run_id: Some("run-7".into()),
+    }));
+    model.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "browser_navigate".into(),
+        call_id: "browse-1".into(),
+        is_error: false,
+        output: Some("- heading \"Example\"".into()),
+        detail: None,
+        run_id: Some("run-7".into()),
+    }));
+    let mut harness = Harness::new_ui(move |ui| {
+        gui::theme::install(ui.ctx());
+        gui::panes::agent_browser::set_available(ui.ctx(), available);
+        gui::panes::agent::transcript_body(ui, &model);
+    });
+    harness.run_steps(2);
+    harness
+}
+
+#[test]
+fn browser_tool_card_view_asks_to_show_its_runs_page() {
+    // Given: a browser tool card while the agent browser is available.
+    let mut harness = browser_card(true);
+
+    // When: View is clicked.
+    harness.get_by_label("View").click();
+    harness.run();
+
+    // Then: the workbench is asked to show that run's page.
+    assert_eq!(
+        gui::panes::agent_browser::take_open_request(&harness.ctx).as_deref(),
+        Some("run-7")
+    );
+}
+
+#[test]
+fn browser_tool_card_has_no_view_without_an_agent_browser() {
+    let harness = browser_card(false);
+    assert!(harness.query_by_label("View").is_none());
+}

@@ -205,6 +205,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.save_sidebar();
         }
         self.bind_goal_event(event);
+        self.fold_agent_browser_event(event);
         self.sink.observe_lifecycle(event);
         self.apply_runtime_event(event);
         self.pending_approvals.apply_event(
@@ -295,6 +296,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                     AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
                 }
+            }
+            EventKind::Ownership(event_bus::OwnershipEvent {
+                thread_id,
+                owner_id,
+                action: event_bus::OwnershipAction::Claimed | event_bus::OwnershipAction::Handoff,
+                ..
+            }) if self
+                .ownership
+                .as_ref()
+                .is_some_and(|host| host.owner_id() == owner_id) =>
+            {
+                self.reconcile_claimed_thread(thread_id);
             }
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)

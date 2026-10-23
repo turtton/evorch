@@ -1,6 +1,7 @@
 //! eframe App とフレーム駆動の WorkbenchState を実装します。
 
 mod actions;
+mod agent_browser;
 mod attention;
 mod auto_grouping;
 pub mod auto_title;

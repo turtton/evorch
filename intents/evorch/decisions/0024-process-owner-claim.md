@@ -64,6 +64,49 @@ Decision 4 の checkpoint は、所有権側の active 状態と小さな snapsh
 Decision 5 のうち `run_contexts` 書き込みへの generation fence は既存の未履行範囲として残り、
 ADR 0037 では追加しない。owner の参照 commit は従来どおり generation を検証する。
 
+## Addendum（2026-10-23、registry 競合で run を止めない）
+
+### Context
+
+高負荷時に `ownership validate failed at read (attempt 1): database is locked` などで run が Error に
+なり続けた。owners.db は rollback journal（DELETE）で、待機中の writer が新しい reader を止める。
+run の確認（`validate_mutation`）は 2 秒の単一試行、turn 開始・checkpoint・終了処理は 10 秒の
+deadline で打ち切っていた。さらに event bus の run fence はイベントごとに registry の読み取り
+トランザクションを張り、競合を拒否と同じに扱ってイベントを捨てていた。終端の
+`AgentRunStateChanged` も捨てられ、GUI のスレッドが実行中のまま残った。
+
+### Decision
+
+1. **競合は権限の喪失ではない。** 他プロセスが claim できるのは owner のソケットが応答しない
+   ときだけ（Decision 3）で、lease の期限切れだけでは generation を失わない。run の registry
+   操作（turn 開始、mutation 前の確認、checkpoint、終了処理）は競合を期限なしで再試行する
+   （`RetryPolicy::unbounded`）。各試行はトランザクション内で generation を再検証し、
+   終了させるのは fence（owner/generation の不一致または Released）、Stop/Cancel、
+   その他のエラーだけとする。待機は blocking pool で行い、数秒続いたら run の activity を
+   `Ownership` にし、`OwnershipRegistryWait` 診断を 1 回記録する。
+2. **run イベントの fence はプロセス内の記録で判定する。** generation は一度失えば戻らない
+   （claim/handoff は必ず generation を進め、release は最終）。registry へのアクセスが fence を
+   観測したら、その generation をプロセス内の記録に残す。run 許可の各操作、heartbeat 走査
+   （前回保持していた generation が消えた場合）、release、handoff、claim が記録する。
+   event bus の run fence はこの記録だけを読み、registry を開かない。競合でイベントが
+   ブロックされることも捨てられることもない。
+3. ADR 0037 の「既存 generation guard を弱めない」制約は、run イベントの fence については
+   本 addendum で置き換える。GUI のイベントバッチも run イベントについては同じ記録で判定し、
+   registry のトランザクションを保持しない。永続書き込みの guard（todo/artifact のツール、
+   GUI コマンドの `mutation_guard`）は従来どおり registry の読み取りトランザクションを保持する。
+4. GUI は、このプロセスが claim したスレッドで、ローカルの runtime にない
+   Running/Pending/Waiting の run を Stopped と表示する。履歴の照合時に前の owner が
+   生きていて保護された run も、claim の時点で解消する。
+
+### Consequences
+
+- 高負荷だけを理由に run が止まらない。registry が長く使えない間、run は待ち続ける
+  （Stop/Cancel で中断できる）。
+- 応答しなくなったプロセスが他に claim された後、そのプロセスが自分の fence を観測する
+  まで（heartbeat の次の走査、または run の次の registry 確認まで）は、旧 generation の
+  イベントが bus に流れうる。永続書き込みと owner の commit は従来どおり generation を検証する。
+- 負荷そのもの（heartbeat のスレッドごとの書き込み、操作ごとの接続オープン）は別途削減する。
+
 ## Related
 
 - tmux: session / client の分離（attach/detach）

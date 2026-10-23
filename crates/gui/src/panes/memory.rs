@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use storage::memory::{MemoryEntry, MemoryStatus};
 use storage::{Database, StorageConfig, StorageHandle};
 
-#[derive(Default)]
 pub struct MemoryPane {
     pub config: Option<StorageConfig>,
     /// Writer for rejecting lessons; without it the pane is read-only.
@@ -17,6 +16,25 @@ pub struct MemoryPane {
     /// Lesson awaiting confirmation, since rejection cannot be undone.
     confirm_reject: Option<String>,
     stale: bool,
+}
+
+impl Default for MemoryPane {
+    /// Opens on the promoted lessons, which are the ones task prompts receive;
+    /// the other statuses are a filter away.
+    fn default() -> Self {
+        Self {
+            config: None,
+            handle: None,
+            query: String::new(),
+            status: Some(MemoryStatus::Promoted),
+            root: None,
+            project: String::new(),
+            entries: Vec::new(),
+            error: None,
+            confirm_reject: None,
+            stale: false,
+        }
+    }
 }
 
 impl MemoryPane {

@@ -33,6 +33,7 @@ impl LoopState {
     }
 
     pub(crate) fn activity(&self, activity: RunActivity) {
+        self.note_activity(activity);
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::RunProgress {
@@ -41,6 +42,21 @@ impl LoopState {
                 context: None,
             }));
     }
+
+    pub(super) fn current_activity(&self) -> RunActivity {
+        *self
+            .current_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn note_activity(&self, activity: RunActivity) {
+        *self
+            .current_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = activity;
+    }
+
     pub(super) fn publish_context(
         &self,
         messages: &[Message],
@@ -68,6 +84,7 @@ impl LoopState {
                     .saturating_add(tokens(message).saturating_sub(outputs));
             }
         }
+        self.note_activity(RunActivity::Model);
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::RunProgress {

@@ -472,7 +472,7 @@ fn a_begin_wait_and_a_commit_wait_share_one_attempt_budget() {
     });
     let records = Records::default();
     let policy = RetryPolicy {
-        deadline: ms(2000),
+        deadline: Some(ms(2000)),
         ..RetryPolicy::default()
     };
     let result = tracing::dispatcher::with_default(&records.dispatch(), || {
@@ -634,7 +634,7 @@ fn the_system_clock_bounds_a_real_attempt() {
     let fixture = fixture();
     let lock = exclusive_lock(&fixture.path);
     let policy = RetryPolicy {
-        deadline: ms(300),
+        deadline: Some(ms(300)),
         attempt_timeout: ms(100),
         ..RetryPolicy::default()
     };
@@ -748,7 +748,7 @@ fn an_interrupt_during_the_last_busy_wait_ends_as_the_interrupt() {
     });
     // The busy COMMIT also exhausts the whole operation budget.
     let policy = RetryPolicy {
-        deadline: ms(2000),
+        deadline: Some(ms(2000)),
         ..RetryPolicy::default()
     };
     let result = checkpoint_on(&fixture.permit, &messages(), &policy, &clock, &|| {
@@ -962,7 +962,7 @@ fn generation_preflight_exclusive_contention_expires_at_the_injected_deadline() 
     let lock = exclusive_lock(&fixture.path);
     let clock = VirtualClock::new();
     let policy = RetryPolicy {
-        deadline: ms(350),
+        deadline: Some(ms(350)),
         attempt_timeout: ms(100),
         initial_backoff: ms(10),
         max_backoff: ms(10),
@@ -983,7 +983,7 @@ fn generation_preflight_exclusive_contention_expires_at_the_injected_deadline() 
         ),
         "{error:?}"
     );
-    assert_eq!(clock.elapsed(), policy.deadline);
+    assert_eq!(Some(clock.elapsed()), policy.deadline);
     drop(lock);
     assert_eq!(owner_of(&fixture.path), before);
     assert_eq!(stored_payload(&fixture.path), None);

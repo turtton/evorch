@@ -3,9 +3,13 @@ use std::sync::Arc;
 use ::browser::agent::{Activity, AgentBrowser, AgentError, Screencast};
 use tokio::sync::{oneshot, watch};
 
+use crate::panes::agent_browser::{AgentBrowserSurface, BrowserTabView};
 use crate::theme::{text::muted, tokens::palette, widgets::pane_root};
 
 const OVERLAY_LINES: usize = 6;
+/// Last frames kept, one per recently shown run, so switching back or a
+/// closed page still shows something; each is up to 1280x720.
+const KEPT_FRAMES: usize = 8;
 
 /// What [`AgentBrowserPane`] reads. [`LiveAgentView`] wraps the runtime's
 /// [`AgentBrowser`]; tests use a scripted fake.
@@ -123,18 +127,22 @@ impl AgentView for LiveAgentView {
 
 /// Watches one agent page at a time: its screencast with the latest actions
 /// and refused requests laid over it. Read-only; nothing here drives the page.
+/// The workbench picks the run (see [`AgentBrowserSurface`]); a run whose page
+/// closed keeps its last frame.
 pub struct AgentBrowserPane<V> {
     view: V,
-    selected: Option<String>,
-    texture: Option<egui::TextureHandle>,
+    /// The run whose page is screencast, if any.
+    observing: Option<String>,
+    /// The last frame of each recently shown run, oldest first.
+    frames: std::collections::VecDeque<(String, egui::TextureHandle)>,
 }
 
 impl<V: AgentView> AgentBrowserPane<V> {
     pub fn new(view: V) -> Self {
         Self {
             view,
-            selected: None,
-            texture: None,
+            observing: None,
+            frames: std::collections::VecDeque::new(),
         }
     }
 
@@ -146,70 +154,113 @@ impl<V: AgentView> AgentBrowserPane<V> {
         &mut self.view
     }
 
-    pub fn selected(&self) -> Option<&str> {
-        self.selected.as_deref()
+    /// The run being screencast.
+    pub fn observing(&self) -> Option<&str> {
+        self.observing.as_deref()
     }
 
-    pub fn texture_size(&self) -> Option<[usize; 2]> {
-        self.texture.as_ref().map(egui::TextureHandle::size)
+    /// The size of the last frame kept for `run`.
+    pub fn texture_size(&self, run: &str) -> Option<[usize; 2]> {
+        self.frame(run).map(egui::TextureHandle::size)
     }
 
-    pub fn stop(&mut self, ctx: &egui::Context) {
-        if self.selected.take().is_some() {
-            self.view.observe(None, ctx);
+    fn frame(&self, run: &str) -> Option<&egui::TextureHandle> {
+        self.frames
+            .iter()
+            .find(|(key, _)| key == run)
+            .map(|(_, texture)| texture)
+    }
+
+    fn observe(&mut self, run: Option<&str>, ctx: &egui::Context) {
+        if self.observing.as_deref() != run {
+            self.view.observe(run, ctx);
+            self.observing = run.map(str::to_owned);
         }
-        self.texture = None;
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+    fn keep_frame(&mut self, run: &str, image: egui::ColorImage, ctx: &egui::Context) {
+        if let Some((_, texture)) = self.frames.iter_mut().find(|(key, _)| key == run) {
+            texture.set(image, egui::TextureOptions::LINEAR);
+            return;
+        }
+        if self.frames.len() == KEPT_FRAMES {
+            self.frames.pop_front();
+        }
+        let texture = ctx.load_texture(
+            format!("agent-browser-{run}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.frames.push_back((run.to_owned(), texture));
+    }
+}
+
+impl<V: AgentView> AgentBrowserSurface for AgentBrowserPane<V> {
+    fn pages(&mut self, ctx: &egui::Context) -> Vec<String> {
+        self.view.pages(ctx)
+    }
+
+    fn render(&mut self, ui: &mut egui::Ui, tab: BrowserTabView<'_>) -> Option<String> {
         let ctx = ui.ctx().clone();
+        let mut picked = None;
         pane_root(ui, "Agent browser", |ui| {
-            let pages = self.view.pages(&ctx);
-            let current = self
-                .selected
-                .clone()
-                .filter(|key| pages.contains(key))
-                .or_else(|| pages.first().cloned());
-            if current != self.selected {
-                self.select(current, &ctx);
-            }
-            let Some(selected) = self.selected.clone() else {
+            let Some(selected) = tab.selected else {
+                self.observe(None, &ctx);
                 ui.label(muted(
-                    "No agent page is open. A run's page appears here when it uses the browser tools.",
+                    "No agent page is open in this conversation. A page appears here when an agent uses the browser tools.",
                 ));
                 return;
             };
-            egui::ComboBox::from_label("Run")
-                .selected_text(selected.as_str())
-                .show_ui(ui, |ui| {
-                    for key in &pages {
-                        if ui.selectable_label(*key == selected, key).clicked() && *key != selected
-                        {
-                            self.select(Some(key.clone()), &ctx);
+            let open = self.view.pages(&ctx).iter().any(|run| run == selected);
+            if open {
+                self.observe(Some(selected), &ctx);
+            } else if self.observing.as_deref() != Some(selected) {
+                // A run that is still observed keeps its ended screencast, and
+                // with it the activity of its last page.
+                self.observe(None, &ctx);
+            }
+            if tab.runs.len() > 1 {
+                let label = |run: &str| {
+                    tab.runs
+                        .iter()
+                        .find(|entry| entry.run_id == run)
+                        .map_or_else(|| run.to_owned(), |entry| entry.label.clone())
+                };
+                egui::ComboBox::from_label("Run")
+                    .selected_text(label(selected))
+                    .show_ui(ui, |ui| {
+                        for run in tab.runs {
+                            if ui
+                                .selectable_label(run.run_id == selected, &run.label)
+                                .clicked()
+                                && run.run_id != selected
+                            {
+                                picked = Some(run.run_id.clone());
+                            }
                         }
-                    }
-                });
-            if let Some(tab) = self.view.tab() {
-                ui.label(muted(format!("Showing the active tab {tab}")));
+                    });
             }
-            if let Some(error) = self.view.error() {
-                ui.colored_label(palette().ERROR_FG, error);
-            }
-            if let Some(image) = self.view.poll_frame() {
-                match &mut self.texture {
-                    Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.texture = Some(ctx.load_texture(
-                            "agent-browser-screencast",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
+            let watched = self.observing.as_deref() == Some(selected);
+            if open {
+                if let Some(tab) = self.view.tab() {
+                    ui.label(muted(format!("Showing the active tab {tab}")));
                 }
+                if let Some(error) = self.view.error() {
+                    ui.colored_label(palette().ERROR_FG, error);
+                }
+            } else {
+                ui.label(muted("The page was closed."));
             }
-            let activity = self.view.activity();
+            if watched && let Some(image) = self.view.poll_frame() {
+                self.keep_frame(selected, image, &ctx);
+            }
+            let activity = if watched {
+                self.view.activity()
+            } else {
+                Vec::new()
+            };
             let recent = &activity[activity.len().saturating_sub(OVERLAY_LINES)..];
-            match &self.texture {
+            match self.frame(selected) {
                 Some(texture) => {
                     let image = ui.add(
                         egui::Image::new(texture)
@@ -221,17 +272,18 @@ impl<V: AgentView> AgentBrowserPane<V> {
                     }
                 }
                 None => {
-                    ui.label(muted("Waiting for the first frame of this page..."));
+                    if open {
+                        ui.label(muted("Waiting for the first frame of this page..."));
+                    }
                     activity_lines(ui, recent);
                 }
             }
         });
+        picked
     }
 
-    fn select(&mut self, key: Option<String>, ctx: &egui::Context) {
-        self.view.observe(key.as_deref(), ctx);
-        self.selected = key;
-        self.texture = None;
+    fn stop(&mut self, ctx: &egui::Context) {
+        self.observe(None, ctx);
     }
 }
 
@@ -265,35 +317,6 @@ fn activity_lines(ui: &mut egui::Ui, recent: &[Activity]) {
             egui::Color32::WHITE
         };
         ui.add(egui::Label::new(egui::RichText::new(text).color(color).monospace()).truncate());
-    }
-}
-
-/// The "Agent browser" toggle and its window. The screencast runs only while
-/// the window is open.
-pub struct AgentBrowserWindow {
-    pane: AgentBrowserPane<LiveAgentView>,
-    open: bool,
-}
-
-impl AgentBrowserWindow {
-    pub fn new(browser: Arc<AgentBrowser>, runtime: tokio::runtime::Handle) -> Self {
-        Self {
-            pane: AgentBrowserPane::new(LiveAgentView::new(browser, runtime)),
-            open: false,
-        }
-    }
-
-    pub fn render(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Agent browser").clicked() {
-            self.open = !self.open;
-        }
-        egui::Window::new("Agent browser")
-            .open(&mut self.open)
-            .default_size([960.0, 680.0])
-            .show(ui.ctx(), |ui| self.pane.render(ui));
-        if !self.open {
-            self.pane.stop(ui.ctx());
-        }
     }
 }
 

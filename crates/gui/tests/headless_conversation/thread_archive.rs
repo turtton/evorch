@@ -876,3 +876,92 @@ fn unreadable_ownership_never_reconciles_restored_runs() {
         assert!(!state.sidebar().threads[0].archived);
     }
 }
+
+/// A subagent whose terminal event was lost keeps a thread's row spinning.
+/// History reconciliation must leave it alone while the previous owner may
+/// still be live, but once this window claims the thread, a run its runtime
+/// does not know cannot be running anywhere and is shown as Stopped.
+#[test]
+fn claiming_a_thread_stops_its_orphaned_runs() {
+    use workspace_ui::ThreadRunPhase as P;
+    for own_claim in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        persisted_archive_run(
+            &storage,
+            "run-target",
+            "target",
+            AgentRunPhase::Done,
+            Some("Done"),
+            false,
+        );
+        for event in [
+            Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: "run-orphan-child".into(),
+                parent_run_id: Some("run-target".into()),
+                agent_name: "reviewer".into(),
+                role: "reviewer".into(),
+            }),
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-orphan-child".into(),
+                from: AgentRunPhase::Pending,
+                to: AgentRunPhase::Running,
+                reason: None,
+            }),
+        ] {
+            storage.handle().append_event(Some("gui"), &event).unwrap();
+        }
+        storage.close();
+        let previous = runtime::ownership::OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            std::sync::Arc::new(event_bus::EventBus::new(32)),
+        )
+        .unwrap();
+        let permit = previous.start("target").unwrap();
+        let this_window = std::sync::Arc::new(
+            runtime::ownership::OwnerHost::open(
+                dir.path(),
+                Default::default(),
+                std::sync::Arc::new(event_bus::EventBus::new(32)),
+            )
+            .unwrap(),
+        );
+        let mut state = fixture_state(dir.path(), false, false).with_ownership(this_window.clone());
+        state
+            .restore_history_with_ownership(
+                &storage::Database::open(&config).unwrap(),
+                &permit.registry_path,
+            )
+            .unwrap();
+        assert_eq!(
+            state.thread_phases()["run-orphan-child"],
+            P::Running,
+            "a live previous owner protects the run"
+        );
+
+        // The previous window exits; this one claims the thread.
+        drop(previous);
+        let owner = this_window.attach("target").unwrap();
+        let claimed = this_window.claim(&owner).unwrap();
+        state.apply_events([Event::new(event_bus::OwnershipEvent {
+            thread_id: "target".into(),
+            owner_id: if own_claim {
+                this_window.owner_id().into()
+            } else {
+                "another-window".into()
+            },
+            generation: claimed.lease.generation,
+            action: event_bus::OwnershipAction::Claimed,
+        })]);
+        assert_eq!(
+            state.thread_phases()["run-orphan-child"],
+            if own_claim { P::Stopped } else { P::Running }
+        );
+        assert_eq!(state.thread_phases()["run-target"], P::Done);
+    }
+}

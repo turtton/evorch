@@ -66,6 +66,12 @@ impl RegistryError {
         )
     }
 
+    /// The registry showed that the generation lost authority: another owner
+    /// or generation holds the thread, or it was released. Contention never is.
+    pub fn is_fenced(&self) -> bool {
+        matches!(self, Self::Ownership(OwnershipError::Fenced))
+    }
+
     /// Transient contention after which a rolled-back transaction may run
     /// again. `SQLITE_BUSY` (including a busy `COMMIT`, which commits nothing)
     /// qualifies. Of `SQLITE_LOCKED`, only shared-cache table locks held by

@@ -134,6 +134,7 @@ pub struct WorkbenchState<S> {
     /// Runs whose latest lifecycle event completed a turn: safe rewind points.
     pub(super) idle_turns: std::collections::BTreeSet<String>,
     pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
+    pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -243,6 +244,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             unread_threads: std::collections::BTreeSet::new(),
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
+            agent_browser: super::agent_browser::AgentBrowserTabs::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
         let arenas: Vec<PanelId> = state
@@ -257,6 +259,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             state.panels.remove(&arena);
         }
+        state.drop_saved_agent_browser();
         state.tasks.refresh();
         state.register_work_panels();
         Ok(state)
