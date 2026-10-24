@@ -30,6 +30,7 @@ pub(crate) fn persist_escalation_seed(
         return Ok(());
     };
     let descriptor = RunRestoreDescriptor {
+        admission_reservation_id: None,
         turn: None,
         boundary_pending: true,
         continuity: continuity.clone(),

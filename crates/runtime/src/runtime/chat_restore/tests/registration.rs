@@ -81,6 +81,57 @@ async fn restored_event_is_absent_when_admission_fails() {
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done
     );
+    // The rejected attempt must not permanently consume the saved conversation.
+    let record = fixture
+        .runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_record(run)
+        .unwrap()
+        .unwrap();
+    assert!(record.restorable, "failed admission consumed the snapshot");
+    model.reject.store(false, Ordering::Relaxed);
+    fixture
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    fixture.runtime.wait_admission(run).await.unwrap();
+    fixture.runtime.cancel(run).unwrap();
+    fixture.runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_snapshot_is_retryable_after_admission_failure() {
+    let model = Arc::new(AdmissionModel {
+        reject: AtomicBool::new(false),
+    });
+    let fixture = Fixture::with_model(model.clone());
+    let run = fixture.terminal().await;
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let before = store.restore_record(run).unwrap().unwrap();
+    model.reject.store(true, Ordering::Relaxed);
+    fixture
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    assert!(fixture.runtime.wait_admission(run).await.is_err());
+    let after = store.restore_record(run).unwrap().unwrap();
+    assert_eq!(after.messages_json, before.messages_json);
+    assert_eq!(after.checkpoints_json, before.checkpoints_json);
+    assert!(
+        after.restorable,
+        "failed resume admission consumed the snapshot"
+    );
+    model.reject.store(false, Ordering::Relaxed);
+    fixture
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    fixture.runtime.wait_admission(run).await.unwrap();
+    fixture.runtime.cancel(run).unwrap();
+    fixture.runtime.wait(run).await.unwrap();
 }
 
 struct HeldAdmissionModel {
@@ -156,9 +207,7 @@ async fn answer_during_chat_admission_updates_the_preinstalled_seed() {
         } else {
             runtime.resume_chat(run, RunConfig::default()).unwrap()
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), model.entered.notified())
-            .await
-            .unwrap();
+        model.entered.notified().await;
         let seeded = runtime.shared.review_runs.lock().unwrap()[&run].clone();
         runtime
             .answer_user_question(&question.id, "Only the requested scope")

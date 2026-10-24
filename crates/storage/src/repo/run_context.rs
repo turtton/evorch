@@ -168,6 +168,20 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, 
         .optional()?)
 }
 
+pub fn compare_and_swap_restore_state(
+    conn: &Connection,
+    run_id: &str,
+    expected_config: &str,
+    retry_config: &str,
+    retry_restorable: bool,
+) -> Result<bool, StorageError> {
+    Ok(conn.execute(
+        "UPDATE run_contexts SET config_json = ?3, restorable = ?4 \
+         WHERE run_id = ?1 AND config_json = ?2 AND restorable = 0",
+        params![run_id, expected_config, retry_config, retry_restorable],
+    )? == 1)
+}
+
 pub fn invalidate(conn: &Connection, run_id: &str) -> Result<(), StorageError> {
     conn.execute(
         "UPDATE run_contexts SET restorable = 0, \

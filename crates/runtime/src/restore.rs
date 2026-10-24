@@ -19,6 +19,8 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    /// Admission owns this reservation until registration commits consumption.
+    pub(crate) admission_reservation: Option<crate::runtime::SnapshotReservation>,
     pub(crate) turn: Option<providers::RequestTurnContext>,
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) continuity: crate::continuity::Continuity,
@@ -79,6 +81,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            admission_reservation: None,
             turn: descriptor.turn,
             continuity: descriptor.continuity,
             pending_reference_id: descriptor.pending_reference_id,
@@ -129,6 +132,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Identifies one unregistered chat attempt for conditional consumption release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_reservation_id: Option<String>,
     /// Explicit input provenance, never reconstructed by counting canonical history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<providers::RequestTurnContext>,
@@ -460,6 +466,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        admission_reservation_id: None,
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),
