@@ -88,27 +88,43 @@ impl TelemetryRow {
 }
 
 impl TelemetryOverlay {
+    /// Resolves only rows marked stale, with one resolution per model; see
+    /// [`TelemetryOverlay::refresh_costs`], which invalidates both on change.
     pub(super) fn refresh_context_windows(&mut self, settings: &ProviderSettingsModel) {
+        if self.stale_context.is_empty() {
+            return;
+        }
         let sources = MetadataSources {
             presets: &settings.model_presets,
             catalog: settings.catalog.catalog.as_deref(),
         };
-        for row in self.rows.values_mut() {
-            row.context_window = row.latest_context.as_ref().and_then(|request| {
-                let key = &request.key;
-                let fallback = config::ModelEntryConfig::enabled(&key.model);
-                let entry = settings
-                    .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
-                    .unwrap_or(&fallback);
-                let provider_type = key.provider_type(settings);
-                sources
-                    .resolve(
-                        entry,
-                        key.profile.as_deref().unwrap_or(&key.provider),
-                        provider_type,
-                    )
-                    .context_window
-            });
+        for run_id in std::mem::take(&mut self.stale_context) {
+            let Some(row) = self.rows.get_mut(&run_id) else {
+                continue;
+            };
+            let Some(request) = row.latest_context.as_ref() else {
+                row.context_window = None;
+                continue;
+            };
+            let key = &request.key;
+            if let Some(window) = self.context_windows.get(key) {
+                row.context_window = *window;
+                continue;
+            }
+            let fallback = config::ModelEntryConfig::enabled(&key.model);
+            let entry = settings
+                .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
+                .unwrap_or(&fallback);
+            let provider_type = key.provider_type(settings);
+            let window = sources
+                .resolve(
+                    entry,
+                    key.profile.as_deref().unwrap_or(&key.provider),
+                    provider_type,
+                )
+                .context_window;
+            self.context_windows.insert(key.clone(), window);
+            row.context_window = window;
         }
     }
 }

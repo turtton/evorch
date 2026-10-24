@@ -142,6 +142,14 @@ pub struct TelemetryOverlay {
     costs: BTreeMap<String, f64>,
     /// Runs whose cost leaves out requests without a known price.
     partially_priced: BTreeSet<String>,
+    /// Settings and catalog that `schedules` and `context_windows` were resolved from.
+    pricing_source: Option<pricing::PricingSource>,
+    schedules: BTreeMap<pricing::ModelKey, Option<config::types::provider::PriceSchedule>>,
+    context_windows: BTreeMap<pricing::ModelKey, Option<u64>>,
+    /// Runs billed since their cost was last summed.
+    stale_costs: BTreeSet<String>,
+    /// Rows whose latest request changed since their context window was resolved.
+    stale_context: BTreeSet<String>,
     active_running_start: BTreeMap<String, Instant>,
     accumulated_running: BTreeMap<String, Duration>,
     context_order: u64,
@@ -248,6 +256,7 @@ impl TelemetryOverlay {
                     if context.key != key {
                         context.key = key;
                         row.context_window = None;
+                        self.stale_context.insert(run_id.clone());
                     }
                 }
                 row.requests = row.requests.saturating_add(1);
@@ -340,6 +349,7 @@ impl TelemetryOverlay {
                             cache_write: *cache_write_tokens,
                         },
                     });
+                self.stale_costs.insert(run_id.clone());
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.usage.input = row.usage.input.saturating_add(*input_tokens);
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);
@@ -366,6 +376,7 @@ impl TelemetryOverlay {
                     },
                 });
                 row.context_window = None;
+                self.stale_context.insert(run_id.clone());
                 row.in_flight = false;
                 row.last_finish_reason = Some(finish_reason.clone());
                 row.output_tokens = *output_tokens;
