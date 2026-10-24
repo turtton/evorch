@@ -384,6 +384,12 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 回帰テスト: 旧形式の 8,192 文字切り詰め済み pending escalation と新形式の全文を保存し、fresh runtime で新入力なし／follow-up ありの 4 通りを復元。別プロジェクトの `thread-1` が許可されないこと、follow-up の `thread-20` は許可されること、新形式の完全入力が維持されることを確認。関連 12 件すべて成功。
 - **R2** — `ee858c0a` (`fix(runtime): authorize search cursor positions before use`): DB rowid の cursor 参照位置を caller の共通 visibility ゲートで再認可してから使用し、不存在・不可視・解決不能はすべて同じ `thread_cursor_invalid` にする。候補の系譜に含まれる不可視 fork 行は cursor 発行前に除外し、発行済み cursor が自身の認可チェックで拒否されるのを防ぐ。cursor は認可証拠にはしない。
   - 回帰テスト: 可視集合が空の caller と自プロジェクトを持つ caller から、他プロジェクトの実在 rowid と不存在 rowid が同一エラーとなること、可視時に使えた cursor も認可を失うと拒否されること、110 件の不可視 fork 候補を cursor として発行しないことを確認。`thread_read` の cursor は認可済み run 内の位置だけを検証し、`thread_grep` は数値 offset のみで DB/run の参照解決をしないことを確認し、実在する不可視／不存在の run ref と target の拒否を回帰テストに追加。thread 関連 29 件すべて成功（既存の 2,106 スレッドの検索継続も含む）。
+- 最終検証（コード最終 `ee858c0a`、ADR 対応記録を含む対象 HEAD `3b4afbd2`）: 権限昇格、`CARGO_BUILD_JOBS=4`、`CARGO_TARGET_DIR=$PWD/target`（この worktree のみ）、`TMPDIR=/tmp/evt`（`mkdir -p` 済み）で実行。
+  - `cargo nextest run -p storage -p runtime -p agents -p gui --locked -j 4`: 3,532 件すべて成功、42 件 skip（nextest run `1489a46b-152d-4620-8b23-8f8f15432f85`）。
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`: 成功、警告なし。
+  - `cargo fmt --all --check`: 成功、差分なし。
+  - `scripts/check-cache-contracts.sh -j 4`: 263 件すべて成功（`thread_tools_cache` 2 件を含む。nextest run `426d9fb3-3a4e-422f-9107-b2f1b4ef6198`）。
+  - 今回の検証ではコード起因・環境起因の失敗ともになし。実 store は不使用。R1 / R2 と ADR 対応記録の 3 コミットは GitHub API で `verified=true, reason=valid` を確認済み。
 - 両修正は署名付きコミット・通常の fast-forward push 済み。fmt / pre-push clippy フック成功。`crates/tools` と ADR の触らない範囲は変更していない。
 
 ### 触らない範囲
