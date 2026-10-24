@@ -98,15 +98,10 @@ impl AgentRuntime {
                 reason: RunRestoreFailure::CorruptContext(reason),
             }
         })?;
-        // Fence intents, pending admission and registered runs together, in the
-        // same lock order as spawning: intents, admissions, then runs.
+        // Fence pending admission and registered runs together, in the same
+        // lock order as spawning: admissions, then runs.
         let stopped = record.terminal_phase == "Stopped";
         {
-            let intents = self
-                .shared
-                .spawn_intents
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let admissions = self
                 .shared
                 .admissions
@@ -124,27 +119,22 @@ impl AgentRuntime {
                 .iter()
                 .filter_map(|(id, admission)| admission.snapshot().result.is_none().then_some(*id));
             for id in active.chain(pending) {
-                let in_subtree = belongs_to_subtree(id, root, |candidate| {
-                    runs.get(&candidate)
-                        .and_then(|run| run.parent)
-                        .or_else(|| {
+                // An operator stop deliberately leaves descendants running, so
+                // only a live incarnation of the root itself conflicts. Other
+                // terminal snapshots keep the strict descendant gate. Runs
+                // outside this tree never share its history and never block.
+                let conflicts = if stopped {
+                    id == root
+                } else {
+                    belongs_to_subtree(id, root, |candidate| {
+                        runs.get(&candidate).and_then(|run| run.parent).or_else(|| {
                             admissions
                                 .get(&candidate)
                                 .and_then(|admission| admission.snapshot().parent)
                         })
-                        .or_else(|| {
-                            // Preserve the legacy ancestry rules for other snapshots.
-                            if stopped {
-                                intents.get(&candidate).and_then(|intent| intent.parent)
-                            } else {
-                                None
-                            }
-                        })
-                });
-                // Only an explicit operator stop may retain live descendants.
-                // It never authorizes unrelated execution; ordinary terminal
-                // snapshots retain their strict descendant reconciliation gate.
-                if (stopped && !in_subtree) || (!stopped && in_subtree) {
+                    })
+                };
+                if conflicts {
                     return Err(RuntimeError::RunRestoreFailed {
                         run_id: record.run_id.clone(),
                         reason: RunRestoreFailure::UnsupportedConfig(format!(
@@ -321,24 +311,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_record_allows_live_grandchild_via_intents() {
+    async fn stopped_record_allows_live_descendants_and_unrelated_runs() {
+        // Given: an operator-stopped root whose grandchild (via an unregistered
+        // intermediate) and an unrelated thread's run are both still live.
         let fixture = Fixture::new("Stopped").await;
         let intermediate = fixture.runtime.reserve_run_id();
         fixture
             .runtime
             .seed_spawn_intent(intermediate, &fixture.root.to_string());
         fixture.spawn(Some(intermediate));
-        assert!(!lock_runs(&fixture.runtime.shared.runs).contains_key(&intermediate));
+        fixture.spawn(None);
+        let foreign = fixture.runtime.reserve_run_id();
+        fixture.spawn(Some(foreign));
+        // When/Then: resuming the stopped conversation is not blocked by them.
         fixture.validate().unwrap();
     }
 
     #[tokio::test]
-    async fn stopped_record_rejects_live_foreign_run() {
+    async fn stopped_record_rejects_a_live_incarnation_of_its_root() {
         let fixture = Fixture::new("Stopped").await;
-        fixture.spawn(Some(fixture.root));
-        let foreign = fixture.runtime.reserve_run_id();
-        fixture.spawn(Some(foreign));
+        fixture
+            .runtime
+            .entry(fixture.root)
+            .unwrap()
+            .phase_tx
+            .send_replace(AgentRunPhase::Running);
         fixture.assert_reconciliation();
+    }
+
+    #[tokio::test]
+    async fn rejected_stopped_restore_keeps_snapshot_while_its_root_awaits_admission() {
+        // Given: an earlier start of the stopped root still awaits provider
+        // admission under the same run ID.
+        let fixture = Fixture::new("Stopped").await;
+        fixture
+            .runtime
+            .entry(fixture.root)
+            .unwrap()
+            .phase_tx
+            .send_replace(AgentRunPhase::Stopped);
+        fixture
+            .model
+            .admission_pending
+            .store(true, Ordering::Relaxed);
+        fixture.runtime.spawn_reserved(
+            fixture.root,
+            None,
+            Role::Orchestrator,
+            "root",
+            RunConfig::default(),
+        );
+        assert!(
+            fixture
+                .runtime
+                .admission_snapshot(fixture.root)
+                .unwrap()
+                .result
+                .is_none()
+        );
+        // When: the operator continues the same conversation again.
+        let error = fixture
+            .runtime
+            .continue_goal(fixture.root, "continue".into(), RunConfig::default())
+            .unwrap_err();
+        // Then: the second start is refused without consuming the snapshot.
+        assert!(
+            matches!(&error, RuntimeError::RunRestoreFailed {
+                reason: RunRestoreFailure::UnsupportedConfig(reason), ..
+            } if reason.starts_with("root_reconciliation_required")),
+            "{error}"
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .restore_record(fixture.root)
+                .unwrap(),
+            Some(fixture.record)
+        );
     }
 
     #[tokio::test]
@@ -498,25 +551,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_stopped_restore_does_not_consume_snapshot() {
+    async fn stopped_goal_resumes_while_an_unrelated_thread_is_running() {
+        // Given: another thread's root is still running.
         let fixture = Fixture::new("Stopped").await;
-        fixture.spawn(None);
-        assert!(
-            fixture
+        fixture
+            .runtime
+            .entry(fixture.root)
+            .unwrap()
+            .phase_tx
+            .send_replace(AgentRunPhase::Stopped);
+        let unrelated = fixture.spawn(None);
+        // When: the operator continues the stopped conversation.
+        let resumed = fixture
+            .runtime
+            .continue_goal(fixture.root, "continue".into(), RunConfig::default())
+            .unwrap();
+        // Then: it resumes in place and the unrelated run is left alone.
+        assert_eq!(resumed, fixture.root);
+        assert_eq!(
+            *fixture
                 .runtime
-                .continue_goal(fixture.root, "continue".into(), RunConfig::default())
-                .is_err()
+                .entry(fixture.root)
+                .unwrap()
+                .phase_rx
+                .borrow(),
+            AgentRunPhase::Pending
         );
         assert_eq!(
-            fixture
-                .runtime
-                .shared
-                .run_store
-                .get()
-                .unwrap()
-                .restore_record(fixture.root)
-                .unwrap(),
-            Some(fixture.record)
+            fixture.runtime.entry(unrelated).unwrap().parent,
+            None,
+            "the unrelated run is not adopted into the resumed tree"
         );
     }
 
