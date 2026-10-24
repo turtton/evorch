@@ -272,6 +272,13 @@ fn read_source_file(
 
 /// Read the resolved `source` as `kind`. Errors complete a sentence about the file.
 fn read_limited(source: &Path, kind: ArtifactKind) -> Result<Vec<u8>, String> {
+    // Check before opening too: opening a FIFO for reading blocks until a writer appears.
+    let regular = std::fs::metadata(source)
+        .map_err(|error| format!("cannot be opened: {error}"))?
+        .is_file();
+    if !regular {
+        return Err("is not a regular file".into());
+    }
     let file = std::fs::File::open(source).map_err(|error| format!("cannot be opened: {error}"))?;
     let metadata = file
         .metadata()

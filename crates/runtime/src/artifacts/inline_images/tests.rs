@@ -406,6 +406,28 @@ fn any_reference_that_cannot_be_inlined_rejects_the_whole_capture() {
     assert_eq!(fixture.stored_count(), (0, 0));
 }
 
+// Given: a FIFO named like an image / When: capturing it or HTML that references it /
+// Then: both are refused as not regular files instead of waiting for a writer
+#[test]
+fn fifos_are_refused_without_blocking() {
+    let fixture = Fixture::new();
+    let root = &fixture.workspace;
+    let status = std::process::Command::new("mkfifo")
+        .arg(root.join("pipe.png"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    fixture.write(&root.join("mock.html"), "<img src=pipe.png>");
+
+    let error = fixture.capture("pipe.png").unwrap_err();
+    assert!(error.ends_with("pipe.png is not a regular file"), "{error}");
+    let error = fixture.capture("mock.html").unwrap_err();
+    assert!(
+        error.contains("\n- \"pipe.png\" is not a regular file"),
+        "{error}"
+    );
+}
+
 // Given: more failing references than a rejection lists, the first one very long /
 // When: capturing / Then: the first ones are quoted, shortened, and the rest counted
 #[test]
