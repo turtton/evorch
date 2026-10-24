@@ -144,68 +144,41 @@ jobs:
           nix run --inputs-from . nixpkgs#attic-client -- use home
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+      - name: Build patched attic client
+        run: |
+          # Build on PRs too so changes to the upload timeout patch are checked.
+          nix build -L .#attic-client --out-link ./result-attic
+      - name: Build CLI dependencies
+        run: nix build -L .#evorch-deps --out-link ./result-deps
+      - name: Cache PR CLI dependencies in attic
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          # Cache completed deps before later builds can fail or be cancelled.
+          if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-deps; then
+            echo "::warning::PR CLI dependency upload failed or timed out; continuing the build"
+          fi
+      - name: Build CEF dependencies
+        run: nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
+      - name: Cache PR CEF dependencies in attic
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-cef-deps; then
+            echo "::warning::PR CEF dependency upload failed or timed out; continuing the build"
+          fi
       # The package also checks CLI startup and ELF linkage after runtime fixup.
       - name: Build and smoke-test flake package in the Nix sandbox
         run: |
-          # 複数 installable を一度に build すると out-link 命名が不定になるため
-          # out-link を明示する。
+          # Explicit out-links keep multiple installables' output names stable.
           nix build -L .#evorch --out-link ./result-evorch
-          nix build -L .#evorch-deps --out-link ./result-deps
           # The default package adds the CEF GUI build on x86_64-linux (ADR 0034).
           nix build -L .#default --out-link ./result-default
-          nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
-          # The patched attic client the push step uploads with (flake.nix
-          # atticClient). Built on every run so a pull request catches a patch
-          # that no longer applies; main pushes it, so later runs substitute it.
-          nix build -L .#attic-client --out-link ./result-attic
-      # PR 同士の並行 push が tailscaled ingress を詰まらせるため (issue #72)、
-      # attic への push は main の push に限る。PR は main の closure を substitute する。
       - name: Push to attic
         if: success() && github.ref == 'refs/heads/main'
         timeout-minutes: 60
         run: |
-          set -o pipefail
-          # 最終 out のみでは build-time 依存 (crane cargoArtifacts / fenix toolchain /
-          # vendored crate sources) が attic に入らず毎回再 build になるため、
-          # 出力の runtime closure ごと push して次回 run で substitute させる。
-          # tailscaled ingress stalls under concurrent large uploads (issue #72).
-          # Every main push since #309 failed with upload-path requests ending
-          # in "Connection timed out (os error 110)" (runs 39813604265 ..
-          # 40058104188): nixpkgs' attic client inherits reqwest 0.13's Linux
-          # TCP_USER_TIMEOUT of 30 s, so the kernel aborted every upload that
-          # atticd left unread for 30 s while it stored new chunks. The flake's
-          # attic-client raises that limit to 5 minutes; the login above still
-          # uses nixpkgs' client, which shares its config.
-          # attic streams the whole NAR on every attempt and deduplicates only
-          # on the server, so a retry resends it. Upload one NAR at a time: a
-          # result rarely adds more than one or two new large NARs, so parallel
-          # jobs save little, while concurrent uploads compete for atticd's
-          # database and storage, which is what leaves bodies unread. Push the
-          # shipped packages before the deps archives and retry each set on its
-          # own so a stalled deps archive no longer discards the others.
-          # `timeout` still ends an attempt whose server stays connected but
-          # never answers, which no TCP timeout detects.
           # How the runner reaches attic (direct or DERP relay) bounds throughput.
           timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          attic="$PWD/result-attic/bin/attic"
-          status=0
-          for result in ./result-attic ./result-evorch ./result-default ./result-deps ./result-cef-deps; do
-            for attempt in 1 2 3 4; do
-              if nix path-info --recursive "$result" |
-                timeout 20m "$attic" push --stdin --jobs 1 home; then
-                break
-              fi
-              if [ "$attempt" -eq 4 ]; then
-                echo "::error::attic push of $result failed after 4 attempts"
-                status=1
-                break
-              fi
-              delay=$((attempt * 60 + RANDOM % 60))
-              echo "attic push of $result failed (attempt $attempt/4); retrying in ${delay}s"
-              sleep "$delay"
-            done
-          done
-          exit "$status"
+          scripts/push-attic.sh ./result-attic ./result-evorch ./result-default ./result-deps ./result-cef-deps
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
