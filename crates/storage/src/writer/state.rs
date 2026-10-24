@@ -263,6 +263,28 @@ pub(super) fn run_writer(
                 });
                 let _ = reply.send(result);
             }
+            Ok(Command::CompareAndSwapRunContextRestoreState(
+                run_id,
+                expected,
+                retry,
+                restorable,
+                reply,
+            )) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "run context writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::run_context::compare_and_swap_restore_state(
+                        &state.conn,
+                        &run_id,
+                        &expected,
+                        &retry,
+                        restorable,
+                    )
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::InvalidateRunContext(run_id, reply)) => {
                 let _ = reply.send(crate::repo::run_context::invalidate(&state.conn, &run_id));
             }

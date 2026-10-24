@@ -30,6 +30,7 @@ pub(crate) fn persist_escalation_seed(
         return Ok(());
     };
     let descriptor = RunRestoreDescriptor {
+        admission_reservation_id: None,
         turn: None,
         boundary_pending: true,
         continuity: continuity.clone(),
@@ -50,6 +51,7 @@ pub(crate) fn persist_escalation_seed(
         non_restorable_reason: None,
         renewable_team: None,
         interrupted_tool_calls: vec![],
+        outcome_notices_persisted: false,
         durable_task_id: None,
         selected_model: None,
         tool_names: vec![],

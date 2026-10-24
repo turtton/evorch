@@ -32,8 +32,9 @@ impl RestoredState {
             serde_json::to_string(&history_descriptor).expect("restore descriptor is serializable");
         let mut restored = Self::from_record(&history_record)?;
         for call in &descriptor.interrupted_tool_calls {
-            if call.call_id == "unobserved-shell-jobs"
-                || !has_outcome_notice(&restored.messages, call)
+            if !descriptor.outcome_notices_persisted
+                && (call.call_id == "unobserved-shell-jobs"
+                    || !has_outcome_notice(&restored.messages, call))
             {
                 restored.turn_completed = false;
                 restored.messages.push(Message {
