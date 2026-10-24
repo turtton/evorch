@@ -433,3 +433,13 @@ without candidates fit either), a configured route of the other kind stays
 visible and is flagged, and saving role or routing settings is refused while a
 chain or route mixes kinds. In routing settings, a candidate's model override
 offers only models of the kind the route's other candidates share.
+
+GUI provider, role-chain and routing saves validate the final candidate file in
+its effective layered configuration (including `config.d`, environment and CLI
+overrides, and inactive role profiles) before writing. Model registrations and
+chains may live in different files. Route deletion, renaming and reference
+updates are all applied before this check; an incompatible chain or provider
+leaves the original file untouched. A Codex GUI edit must retain an explicit
+chat default, so changing or deleting its last chat model is rejected before
+saving. The standalone config API can still omit both `models` and
+`default_model` to opt into the built-in Codex defaults.

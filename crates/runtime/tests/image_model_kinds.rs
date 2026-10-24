@@ -63,6 +63,7 @@ models = [{{ route = "chat" }}, {{ route = "art" }}]
             catalog: model::ModelCatalog::new(),
             factory: FactoryOptions::default(),
         },
+        None,
     )
     .expect("composition succeeds");
     let error = model

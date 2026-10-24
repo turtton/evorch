@@ -191,8 +191,7 @@ fn save_openai_compatible_provider_edit_inner(
     profile.insert("default_model", value(input.default_model.as_str()));
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
-    validate_effective_model_kinds(path, &doc, options)?;
-    write_document(path, &doc)
+    write_document_with_options(path, &doc, options)
 }
 
 pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigError> {
@@ -441,7 +440,16 @@ pub(crate) fn insert_profile(
 }
 
 pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), ConfigError> {
-    let text = checked_text(doc)?;
+    write_document_with_options(path, doc, None)
+}
+
+/// Check the final document in its effective configuration before opening any file.
+pub(crate) fn write_document_with_options(
+    path: &Path,
+    doc: &DocumentMut,
+    options: Option<&crate::LoadOptions>,
+) -> Result<(), ConfigError> {
+    let text = checked_text_for_save(path, doc, options)?;
     let mut temporary_path = path.as_os_str().to_os_string();
     temporary_path.push(".tmp");
     let temporary_path = Path::new(&temporary_path);
@@ -458,7 +466,18 @@ pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), Confi
     Ok(())
 }
 
-/// The document's text, validated as [`write_document`] validates it before saving.
+pub(crate) fn checked_text_for_save(
+    path: &Path,
+    doc: &DocumentMut,
+    options: Option<&crate::LoadOptions>,
+) -> Result<String, ConfigError> {
+    let text = checked_text(doc)?;
+    validate_effective_model_kinds(path, &text, options)?;
+    Ok(text)
+}
+
+/// Validate file-local structure only. Cross-layer model registrations and chains
+/// must be checked against the effective configuration at the save boundary.
 pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
     let text = doc.to_string();
     let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
@@ -472,28 +491,33 @@ pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
         ))
     })?;
     config.self_improvement.validate()?;
-    if let Some(problem) = config.model_kind_problems().into_iter().next() {
-        return Err(problem);
-    }
     Ok(text)
 }
 
 /// Validate the exact candidate file through the same layers the GUI reloads. Do not
 /// apply the selected role profile: every profile, including inactive ones, must fit.
-pub(crate) fn validate_effective_model_kinds(
+fn validate_effective_model_kinds(
     path: &Path,
-    doc: &DocumentMut,
+    text: &str,
     options: Option<&crate::LoadOptions>,
 ) -> Result<(), ConfigError> {
-    let Some(options) = options else {
-        return Ok(());
-    };
-    let mut options = options.clone();
-    let candidate = toml::from_str(&checked_text(doc)?).map_err(|error| {
+    let candidate: toml::Value = toml::from_str(text).map_err(|error| {
         ConfigError::Migration(format!("failed to parse config before saving: {error}"))
     })?;
-    options.file_overrides.insert(path.to_path_buf(), candidate);
-    let effective = Config::load_unresolved(&options)?;
+    let effective: Config = if let Some(options) = options {
+        let mut options = options.clone();
+        options.file_overrides.insert(path.to_path_buf(), candidate);
+        Config::load_unresolved(&options)?
+    } else {
+        // Legacy callers without layer information validate the standalone file.
+        crate::migrate::run(candidate)?
+            .try_into()
+            .map_err(|error| {
+                ConfigError::Migration(format!(
+                    "failed to deserialize config before saving: {error}"
+                ))
+            })?
+    };
     effective
         .model_kind_problems()
         .into_iter()

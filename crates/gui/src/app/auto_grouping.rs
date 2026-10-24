@@ -70,7 +70,7 @@ pub(crate) fn group_saved_provider(
         if plan.additions.is_empty() {
             continue;
         }
-        let (added, blocked) = write_additions(path, &merged, &scope, &plan.additions)?;
+        let (added, blocked) = write_additions(path, &merged, &scope, &plan.additions, options)?;
         outcome
             .added
             .extend(added.into_iter().map(|addition| (scope.clone(), addition)));
@@ -93,6 +93,7 @@ pub(crate) fn write_additions(
     merged: &config::Config,
     scope: &str,
     additions: &[AutoAddition],
+    options: &config::LoadOptions,
 ) -> Result<(Vec<AutoAddition>, Vec<AutoAddition>), String> {
     let (merged_routing, merged_agents) = scopes(merged)
         .into_iter()
@@ -116,8 +117,14 @@ pub(crate) fn write_additions(
         {
             return Err(problem.to_string());
         }
-        config::save_role_profile_bindings(path, Some(scope), Some(&file_routing), None)
-            .map_err(|error| error.to_string())?;
+        config::save_role_profile_bindings_with_options(
+            path,
+            Some(scope),
+            Some(&file_routing),
+            None,
+            options,
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok((added, blocked))
 }
@@ -201,7 +208,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.provider_job(move || {
             let merged =
                 config::Config::load_unresolved(&options).map_err(|error| error.to_string())?;
-            let (added, blocked) = write_additions(&path, &merged, &conflict.scope, &[addition])?;
+            let (added, blocked) =
+                write_additions(&path, &merged, &conflict.scope, &[addition], &options)?;
             Ok(AutoGroupOutcome {
                 added: added
                     .into_iter()
@@ -363,7 +371,18 @@ mod tests {
                     auto: true,
                 },
             };
-            let error = write_additions(&path, &config, scope, &[addition]).unwrap_err();
+            let error = write_additions(
+                &path,
+                &config,
+                scope,
+                &[addition],
+                &config::LoadOptions {
+                    user_config_dir: Some(directory.path().to_path_buf()),
+                    read_env: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
             assert!(error.contains("cannot generate images"), "{error}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
         }

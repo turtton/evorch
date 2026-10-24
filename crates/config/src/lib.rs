@@ -44,7 +44,7 @@ pub use save_codex::{
 pub use save_role_profiles::{
     RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings,
     save_project_role_profile, save_role_profile, save_role_profile_bindings,
-    save_role_profiles_bindings,
+    save_role_profile_bindings_with_options, save_role_profiles_bindings,
 };
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;

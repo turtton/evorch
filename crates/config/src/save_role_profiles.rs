@@ -33,6 +33,29 @@ pub fn save_role_profile_bindings(
     )
 }
 
+/// Save final agents / routing edits after checking all layers and role profiles.
+/// No file is opened for writing until model-kind and provider constraints pass.
+///
+/// # Errors
+/// Fails like [`save_role_profile_bindings`], or on incompatible effective chains.
+pub fn save_role_profile_bindings_with_options(
+    path: &Path,
+    profile: Option<&str>,
+    routing: Option<&RoutingConfig>,
+    agents: Option<&AgentsConfig>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    let doc = bindings_document(
+        path,
+        &[RoleProfileBindings {
+            profile,
+            routing,
+            agents,
+        }],
+    )?;
+    crate::save::write_document_with_options(path, &doc, Some(options))
+}
+
 /// One profile's sections for [`save_role_profiles_bindings`].
 #[derive(Debug, Clone, Copy)]
 pub struct RoleProfileBindings<'a> {
@@ -63,7 +86,7 @@ pub fn preview_role_profiles_bindings(
     path: &Path,
     changes: &[RoleProfileBindings<'_>],
 ) -> Result<String, ConfigError> {
-    crate::save::checked_text(&bindings_document(path, changes)?)
+    crate::save::checked_text_for_save(path, &bindings_document(path, changes)?, None)
 }
 
 fn bindings_document(

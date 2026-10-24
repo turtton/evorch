@@ -156,11 +156,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             RoleProfileJob::Save,
             Box::new(move |path, current| {
                 if renames.is_empty() {
-                    return config::save_role_profile_bindings(
+                    return config::save_role_profile_bindings_with_options(
                         path,
                         Some(&profile),
                         Some(&routing),
                         None,
+                        &options,
                     )
                     .map_err(|error| error.to_string());
                 }
@@ -279,8 +280,9 @@ fn save_renamed_routes(
         toml::Value::try_from(&file_agents).map_err(|error| error.to_string())?,
     );
     let mut candidate_options = options.clone();
-    candidate_options.file_overrides =
-        std::collections::BTreeMap::from([(path.to_path_buf(), toml::Value::Table(candidate))]);
+    candidate_options
+        .file_overrides
+        .insert(path.to_path_buf(), toml::Value::Table(candidate));
     let effective = profile_view(
         &config::Config::load_unresolved(&candidate_options).map_err(|error| error.to_string())?,
         profile,
@@ -305,8 +307,14 @@ fn save_renamed_routes(
             blocked.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    config::save_role_profile_bindings(path, Some(profile), Some(routing), Some(&file_agents))
-        .map_err(|error| error.to_string())
+    config::save_role_profile_bindings_with_options(
+        path,
+        Some(profile),
+        Some(routing),
+        Some(&file_agents),
+        options,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The table holding `profile`'s agents and routing inside a raw config table.

@@ -37,7 +37,8 @@ pub fn save_codex_provider_edit(
     save_codex_provider_edit_inner(path, input, original_name, None)
 }
 
-/// Save a Codex edit after validating all effective role profiles.
+/// Save a Codex GUI edit after validating all effective role profiles.
+/// An explicit chat default is required, even when the edited model list is empty.
 ///
 /// # Errors
 /// Rejects invalid input or effective model kinds before writing anything.
@@ -98,6 +99,21 @@ fn save_codex_provider_edit_inner(
             crate::save::DEFAULT_MODEL_KIND_MESSAGE,
         ));
     }
+    // Explicit model edits must retain an enabled chat default. The standalone
+    // API alone may omit both fields to opt into Codex's built-in defaults; a GUI
+    // edit that deletes every model must not silently opt into those defaults.
+    if (options.is_some() || !models.is_empty() || !input.default_model.is_empty())
+        && !models.iter().any(|model| {
+            model.id == input.default_model
+                && model.enabled
+                && model.effective_kind() == crate::ModelKind::Chat
+        })
+    {
+        return Err(invalid_field(
+            "providers.default_model",
+            "Codex edits require an enabled chat default_model; add a chat model before saving",
+        ));
+    }
     let mut doc = read_document(path)?;
     let mut profile = Table::new();
     profile.insert("type", value("openai-codex"));
@@ -116,8 +132,7 @@ fn save_codex_provider_edit_inner(
     }
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
-    crate::save::validate_effective_model_kinds(path, &doc, options)?;
-    write_document(path, &doc)
+    crate::save::write_document_with_options(path, &doc, options)
 }
 
 /// Remove only the named profile. The caller owns credential-store cleanup.
