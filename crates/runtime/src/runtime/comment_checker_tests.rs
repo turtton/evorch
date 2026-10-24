@@ -111,7 +111,7 @@ async fn per_run_composition_honors_config_trust_and_policy_without_dialogs() {
         .with_policy(policy);
         let runtime =
             AgentRuntime::with_sandbox_factory(bus, Arc::new(baseline), model.clone(), factory)
-                .with_model_resolution(&config, None)
+                .with_model_resolution(&config, None, Some(test_support::model_catalog_dir()))
                 .with_sandbox_root(repo.clone());
         let run =
             runtime.delegate_background(Role::Worker, "edit file".into(), RunConfig::default());

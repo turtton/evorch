@@ -31,5 +31,6 @@ tools = { path = "../tools" }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 mock-openai = { path = "../mock-openai" }
 rusqlite = { workspace = true }

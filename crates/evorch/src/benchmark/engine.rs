@@ -58,6 +58,7 @@ impl Session {
 pub(super) async fn compose(
     workspace: &Path,
     user_config_dir: Option<PathBuf>,
+    model_catalog_dir: Option<PathBuf>,
     env: Arc<dyn EnvLookup>,
     sandbox: SandboxChoice,
     role: Role,
@@ -92,6 +93,7 @@ pub(super) async fn compose(
             .await??;
     let runtime = compose_runtime(RuntimeComposition {
         config: &config,
+        model_catalog_dir,
         user_config_dir: user_config_dir.clone(),
         bus: bus.clone(),
         executor: executor.clone(),

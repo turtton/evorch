@@ -91,6 +91,7 @@ title-route = [{{ profile = "local", model = "fast" }}]
         )
         .unwrap();
         let context = ProductionModel {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
             load_options: config::LoadOptions {
                 project_dir: Some(root.path().into()),
                 user_config_dir: Some(root.path().join(config::PROJECT_CONFIG_DIR)),

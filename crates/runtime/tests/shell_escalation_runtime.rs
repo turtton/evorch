@@ -158,6 +158,7 @@ async fn composed_executor_escalates_when_auto_reviewer_approves() {
     let dir = tempfile::tempdir().expect("credentials");
     let config = config::Config::default();
     let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         bus,

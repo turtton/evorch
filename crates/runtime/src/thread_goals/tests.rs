@@ -342,7 +342,8 @@ async fn configured_review_round_limit_is_snapshotted_and_blocks_at_that_limit()
     let (runtime, _, _) = harness(root_steps, vec![Step::Review(false); 5]);
     let mut config = config::Config::default();
     config.orchestration.max_review_rounds = std::num::NonZeroU32::new(5).unwrap();
-    let runtime = runtime.with_model_resolution(&config, None);
+    let runtime =
+        runtime.with_model_resolution(&config, None, Some(test_support::model_catalog_dir()));
     let root = start(&runtime, Role::Worker, false);
     started.notified().await;
     let goal = runtime.thread_goal("thread").unwrap();

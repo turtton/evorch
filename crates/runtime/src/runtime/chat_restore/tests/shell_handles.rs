@@ -36,6 +36,7 @@ impl tools::Tool for ReservingShell {
 
 #[tokio::test]
 async fn quoted_huge_handles_restore_without_replaying_shell_or_rewriting_history() {
+    test_support::isolated_state_dir();
     for entry in ["same_run", "new_chat", "fork"] {
         for (raw, summary) in [
             ("job-12", "job-99, job-184467440737095516160"),
@@ -182,6 +183,7 @@ async fn quoted_huge_handles_restore_without_replaying_shell_or_rewriting_histor
 #[tokio::test]
 async fn legacy_history_is_reserved_before_same_run_resume_or_new_chat_and_failures_refuse_restore()
 {
+    test_support::isolated_state_dir();
     for same_run in [true, false] {
         let fixture = Fixture::new();
         let shell = Arc::new(ReservingShell::default());

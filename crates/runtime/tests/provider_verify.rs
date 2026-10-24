@@ -45,6 +45,7 @@ fn model(urls: &[(&str, String)], bus: Arc<EventBus>) -> Arc<RoutedModel> {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap()
 }
@@ -288,6 +289,7 @@ fn codex_model(
                 ..Default::default()
             },
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap()
 }

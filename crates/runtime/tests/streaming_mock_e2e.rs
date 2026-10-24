@@ -52,6 +52,7 @@ async fn streaming_deltas_reach_bus_before_completion() {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .expect("model");
     let invocation = AgentInvocationContext {
@@ -140,6 +141,7 @@ fn composition<'a>(
     let credential_store: Arc<dyn CredentialStore> =
         Arc::new(FileCredentialStore::open(root.join("credentials")).expect("credential store"));
     RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(root.join("empty-user-config")),
         config,
         bus,
