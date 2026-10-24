@@ -30,11 +30,11 @@ fn capture_keeps_the_content_seen_at_capture_time() {
     let source = workspace.path().join("mock.png");
     std::fs::write(&source, PNG).unwrap();
     let first = store
-        .capture(workspace.path(), Path::new("mock.png"), request("v1"))
+        .capture(workspace.path(), None, Path::new("mock.png"), request("v1"))
         .unwrap();
     std::fs::write(&source, b"\x89PNG\r\n\x1a\nsecond revision").unwrap();
     let second = store
-        .capture(workspace.path(), &source, request("v2"))
+        .capture(workspace.path(), None, &source, request("v2"))
         .unwrap();
     std::fs::remove_file(&source).unwrap();
 
@@ -80,7 +80,7 @@ fn capture_rejects_files_outside_or_unlike_supported_artifacts() {
         (Path::new("large.html"), "2 MiB"),
         (Path::new("missing.png"), "cannot open"),
     ] {
-        let error = store.capture(root, path, request("x")).unwrap_err();
+        let error = store.capture(root, None, path, request("x")).unwrap_err();
         assert!(error.contains(reason), "{}: {error}", path.display());
     }
     assert_eq!(
@@ -100,7 +100,12 @@ fn html_with_credentials_is_not_captured() {
     )
     .unwrap();
     let error = store
-        .capture(workspace.path(), Path::new("mock.html"), request("mock"))
+        .capture(
+            workspace.path(),
+            None,
+            Path::new("mock.html"),
+            request("mock"),
+        )
         .unwrap_err();
     assert!(error.contains("credential"), "{error}");
     assert_eq!(
@@ -269,6 +274,38 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::build(|bus, executor, model, _| AgentRuntime::new(bus, executor, model))
+    }
+
+    /// Runs get their own sandbox, unisolated here, and share `scratch` per thread
+    /// as their `$TMPDIR`, as in production.
+    fn sandboxed(scratch: Arc<crate::scratch::ThreadScratch>) -> Self {
+        struct Unisolated;
+        impl crate::SandboxFactory for Unisolated {
+            fn build(
+                &self,
+                _: &crate::ExecutionPolicy,
+                _: &crate::WorkspaceMounts,
+            ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
+                Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
+            }
+        }
+        let harness = Self::build(|bus, executor, model, workspace| {
+            AgentRuntime::with_sandbox_factory(bus, executor, model, Arc::new(Unisolated))
+                .with_sandbox_root(workspace.to_path_buf())
+        });
+        harness.runtime.set_thread_scratch(scratch);
+        harness
+    }
+
+    fn build(
+        runtime: impl FnOnce(
+            Arc<event_bus::EventBus>,
+            Arc<::tools::ToolExecutor>,
+            Arc<dyn AgentModel>,
+            &Path,
+        ) -> AgentRuntime,
+    ) -> Self {
         let model = Arc::new(Model {
             scripts: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
@@ -286,7 +323,7 @@ impl Harness {
         let executor = ::tools::ToolExecutor::new(bus.clone());
         executor.set_default_cwd(workspace.path().to_path_buf());
         let store_dir = tempfile::tempdir().unwrap();
-        let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
+        let runtime = runtime(bus, Arc::new(executor), model.clone(), workspace.path())
             .with_artifact_store(Arc::new(ArtifactStore::new(store_dir.path()).unwrap()));
         Self {
             runtime,
@@ -583,3 +620,4 @@ async fn orchestrator_cannot_capture_and_missing_store_fails_closed() {
 }
 
 mod inspect;
+mod scratch;
