@@ -947,3 +947,97 @@ async fn executor_shell_environment_reaches_pipe_and_pty_commands() {
         );
     }
 }
+
+/// Records the arguments it receives after schema validation.
+struct ArgsSpy {
+    received: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl Tool for ArgsSpy {
+    fn name(&self) -> &'static str {
+        "args_spy"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "count": {"type": "integer", "minimum": 1},
+                "nullable": {"type": ["string", "null"]},
+                "untyped": {},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "flag": {"type": "boolean"}},
+                        "required": ["name"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["text"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permissions(&self) -> Permissions {
+        Permissions::read_only()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        *self.received.lock().expect("spy lock") = Some(args);
+        Ok(ToolResult::success("spy"))
+    }
+}
+
+// Given: a tool with required, typed, nullable and untyped properties / When: a call sends
+// null for them / Then: only nulls the schema can never accept in optional fields are
+// dropped, at every depth, and required fields stay for validation to reject.
+#[tokio::test]
+async fn executor_reads_null_in_optional_typed_fields_as_omitted() {
+    let received = Arc::new(Mutex::new(None));
+    let mut executor = ToolExecutor::new(Arc::new(EventBus::new(16)));
+    executor
+        .register(Arc::new(ArgsSpy {
+            received: Arc::clone(&received),
+        }))
+        .expect("register");
+
+    executor
+        .execute(
+            &test_ctx("run-1"),
+            "args_spy",
+            "call-1",
+            serde_json::json!({
+                "text": "kept", "count": null, "nullable": null, "untyped": null,
+                "items": [{"name": "a", "flag": null}, {"name": "b", "flag": true}],
+            }),
+        )
+        .await
+        .expect("null optional fields are read as omitted");
+    assert_eq!(
+        received.lock().expect("spy lock").take(),
+        Some(serde_json::json!({
+            "text": "kept", "nullable": null, "untyped": null,
+            "items": [{"name": "a"}, {"name": "b", "flag": true}],
+        }))
+    );
+
+    for args in [
+        serde_json::json!({"text": null}),
+        serde_json::json!({"text": "kept", "items": [{"name": null}]}),
+        serde_json::json!({"text": "kept", "unknown": null}),
+    ] {
+        let error = executor
+            .execute(&test_ctx("run-1"), "args_spy", "call-2", args.clone())
+            .await
+            .expect_err("required and undeclared fields are left to validation");
+        assert!(
+            matches!(error, ToolError::InvalidArgs { .. }),
+            "{args}: {error:?}"
+        );
+    }
+    assert_eq!(received.lock().expect("spy lock").take(), None);
+}

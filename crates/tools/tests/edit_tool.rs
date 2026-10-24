@@ -444,6 +444,154 @@ async fn edits_ignore_placeholder_single_fields_and_say_so() {
 }
 
 #[tokio::test]
+async fn edits_ignore_a_single_replacement_that_repeats_an_edit_and_say_so() {
+    // Given: calls from a model that fills every property, copying a replacement from edits
+    // into the single-replacement fields.
+    for (edits, single) in [
+        (
+            json!([{"old_string": "local branch only", "new_string": "PR #655", "replace_all": false}]),
+            json!({"old_string": "local branch only", "new_string": "PR #655", "replace_all": false}),
+        ),
+        // An absent replace_all is false on either side, and any edit may be repeated.
+        (
+            json!([
+                {"old_string": "x status", "new_string": "y status"},
+                {"old_string": "local branch only", "new_string": "PR #655"},
+            ]),
+            json!({"old_string": "local branch only", "new_string": "PR #655", "replace_all": false}),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "x status: local branch only\n").unwrap();
+        let mut args = single.clone();
+        args["path"] = json!(path);
+        args["edits"] = edits.clone();
+
+        // When: the edit runs.
+        let result = Edit.execute(args).await.unwrap();
+
+        // Then: the repeated replacement is applied once, through edits, and the result says so.
+        let expected = if edits.as_array().unwrap().len() == 2 {
+            "y status: PR #655\n"
+        } else {
+            "x status: PR #655\n"
+        };
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            expected,
+            "{single}"
+        );
+        assert!(
+            result
+                .content
+                .contains("ignored old_string/new_string/replace_all"),
+            "{}",
+            result.content
+        );
+    }
+}
+
+#[tokio::test]
+async fn edits_ignore_a_single_replacement_that_changes_nothing_and_say_so() {
+    // Given: single-replacement fields that would replace a text with itself.
+    for single in [
+        json!({"old_string": "status", "new_string": "status", "replace_all": false}),
+        json!({"old_string": "anything", "new_string": "anything", "replace_all": true}),
+        json!({"old_string": "anything", "new_string": "anything"}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "x status: local branch only\n").unwrap();
+        let mut args = single.clone();
+        args["path"] = json!(path);
+        args["edits"] = json!([{"old_string": "local branch only", "new_string": "PR #655"}]);
+
+        // When: the edit runs.
+        let result = Edit.execute(args).await.unwrap();
+
+        // Then: only edits is applied and the result names the ignored fields.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "x status: PR #655\n",
+            "{single}"
+        );
+        assert!(
+            result
+                .content
+                .contains("ignored old_string/new_string/replace_all"),
+            "{}",
+            result.content
+        );
+    }
+}
+
+/// The JSON example a mixed-shape rejection shows, taken from its message.
+fn example_in(message: &str) -> serde_json::Value {
+    let start = message.find('{').expect("the message shows a JSON example");
+    let end = message.rfind('}').expect("the example is a JSON object") + 1;
+    serde_json::from_str(&message[start..end]).expect("the example is valid JSON")
+}
+
+#[tokio::test]
+async fn a_placeholder_in_edits_next_to_a_real_single_replacement_is_rejected_with_a_usable_example()
+ {
+    // Given: a placeholder moved into edits while the real replacement fills the single fields;
+    // the file contains the placeholder text, so applying edits would change it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    let original = "UNUSED\nstatus: local branch only\n";
+    std::fs::write(&path, original).unwrap();
+    let args = json!({
+        "path": path,
+        "edits": [{"old_string": "UNUSED", "new_string": "", "replace_all": false}],
+        "old_string": "local branch only",
+        "new_string": "PR #655",
+        "replace_all": false,
+    });
+
+    // When: the edit runs.
+    let error = Edit.execute(args).await.unwrap_err();
+
+    // Then: nothing is guessed, the file is unchanged, and the message shows a call shape
+    // that a model sending every property can follow.
+    assert!(matches!(error, ToolError::InvalidArgs { .. }), "{error:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let message = error.to_string();
+    assert!(message.contains("nothing was changed"), "{message}");
+    let mut example = example_in(&message);
+    for key in ["path", "edits", "old_string", "new_string", "replace_all"] {
+        assert!(example.get(key).is_some(), "{key} missing from {example}");
+    }
+    // The example passes the schema and runs as shown on a file holding its text.
+    let validator = jsonschema::validator_for(&Edit.schema()).unwrap();
+    assert!(validator.is_valid(&example), "{example}");
+    let old = example["edits"][0]["old_string"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let new = example["edits"][0]["new_string"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target = dir.path().join("example.txt");
+    std::fs::write(&target, format!("before {old} after\n")).unwrap();
+    example["path"] = json!(target);
+    let result = Edit.execute(example).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        format!("before {new} after\n")
+    );
+    assert!(
+        result
+            .content
+            .contains("ignored old_string/new_string/replace_all"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn edit_matches_lf_text_in_a_crlf_file_and_writes_crlf() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crlf.txt");
