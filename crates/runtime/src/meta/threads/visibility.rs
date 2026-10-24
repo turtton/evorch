@@ -381,6 +381,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_requests_never_authorize_a_truncated_id_prefix() {
+        let f = Fixture::new();
+        let caller = f.caller("hello", true).await;
+        f.row("thread-1", Some(f.other.path()));
+        f.row("thread-10", Some(f.other.path()));
+        // 8192 would end in thread-1, and the goal continuation's original
+        // and latest display slices would do the same at 4096 and 4064.
+        for boundary in [8192, 4096, 4064] {
+            let text = format!("{} thread-10", "a".repeat(boundary - 9));
+            f.runtime.remember_thread_request(caller.run_id, &text);
+            assert!(f.resolve(&caller, "thread-1").is_err(), "{boundary}");
+            assert!(f.resolve(&caller, "thread-10").is_ok(), "{boundary}");
+            f.runtime.goal_user_input(caller.run_id, &text);
+            assert!(f.resolve(&caller, "thread-1").is_err(), "{boundary}");
+            assert!(f.resolve(&caller, "thread-10").is_ok(), "{boundary}");
+            for combined in [
+                crate::thread_goals::continued_thread_request(&text, "latest"),
+                crate::thread_goals::continued_thread_request("original", &text),
+            ] {
+                f.runtime.remember_thread_request(caller.run_id, &combined);
+                assert!(f.resolve(&caller, "thread-1").is_err(), "{boundary}");
+                assert!(f.resolve(&caller, "thread-10").is_ok(), "{boundary}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn escalation_both_directions_and_fork_parent_are_visible() {
         let f = Fixture::new();
         let caller = f.caller("hello", true).await;

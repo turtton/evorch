@@ -452,10 +452,10 @@ impl AgentRuntime {
         self.goal_lock().requests.get(&root).cloned()
     }
 
+    /// Complete human input, never the bounded goal display text: truncation can
+    /// turn a prefix of an ID into a different authorization token.
     pub(crate) fn remember_thread_request(&self, root: RunId, request: &str) {
-        self.goal_lock()
-            .requests
-            .insert(root, bounded(request, MAX_TEXT));
+        self.goal_lock().requests.insert(root, request.to_owned());
     }
 
     /// Commit the trusted handoff with no fallible work after public terminal
@@ -634,7 +634,7 @@ impl AgentRuntime {
             let Some(thread) = goals.roots.get(&root).cloned() else {
                 return;
             };
-            goals.requests.insert(root, bounded(text, MAX_TEXT));
+            goals.requests.insert(root, text.to_owned());
             let Some(entry) = goals.goals.get_mut(&thread) else {
                 return;
             };
@@ -807,6 +807,11 @@ fn invalidate(entry: &mut GoalEntry) {
 }
 fn bounded(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// Combine complete trusted input for handoff/authorization, not goal display.
+pub(crate) fn continued_thread_request(original: &str, latest: &str) -> String {
+    format!("{original}\nLatest user instruction: {latest}")
 }
 
 pub(crate) fn continued_request(original: &str, latest: &str) -> String {

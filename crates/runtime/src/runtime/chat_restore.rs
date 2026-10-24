@@ -168,9 +168,9 @@ impl AgentRuntime {
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
             match (pending.trusted_request.as_deref(), prompt) {
-                (Some(original), Some(prompt)) => {
-                    Some(crate::thread_goals::continued_request(original, prompt))
-                }
+                (Some(original), Some(prompt)) => Some(
+                    crate::thread_goals::continued_thread_request(original, prompt),
+                ),
                 (Some(original), None) => Some(original.into()),
                 (None, Some(prompt)) => Some(prompt.into()),
                 (None, None) => None,
