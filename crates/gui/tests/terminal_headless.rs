@@ -114,10 +114,11 @@ fn run_until(
     wake: &mpsc::Receiver<()>,
     done: impl Fn(&HeadlessWorkbench<Source>) -> bool,
 ) {
+    // Leave room for shared CI load, but report the screen before nextest's 180s cutoff.
     run_until_before(
         harness,
         wake,
-        Instant::now() + Duration::from_secs(10),
+        Instant::now() + Duration::from_secs(60),
         done,
     );
 }
