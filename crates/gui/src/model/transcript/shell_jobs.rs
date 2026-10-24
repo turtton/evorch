@@ -302,10 +302,10 @@ fn bound(text: &mut String) -> bool {
         return false;
     }
     let mut cut = text.len() - LOG_BYTES;
-    cut = text[cut..].find('\n').map_or(cut, |index| cut + index + 1);
     while !text.is_char_boundary(cut) {
         cut += 1;
     }
+    cut = text[cut..].find('\n').map_or(cut, |index| cut + index + 1);
     text.drain(..cut);
     true
 }
@@ -408,5 +408,54 @@ mod tests {
         assert!(job.log().len() <= LOG_BYTES);
         assert!(job.log().starts_with('x'));
         assert!(job.log_truncated());
+    }
+
+    fn assert_output_log(output: &str, expected: &str, truncated: bool) {
+        for live in [true, false] {
+            let mut jobs = ShellJobs::default();
+            if live {
+                jobs.apply_live(
+                    ShellJobKey::new(None, "job", None),
+                    0,
+                    output,
+                    "running",
+                    None,
+                );
+            } else {
+                jobs.apply_result(
+                    None,
+                    Some(output),
+                    Some(&json!({"shell_job": {"job_id": "job", "status": "running"}})),
+                );
+            }
+            let job = jobs.get("job").unwrap();
+            assert_eq!(job.log(), expected, "live: {live}");
+            assert_eq!(job.log_truncated(), truncated, "live: {live}");
+            assert!(job.log().len() <= LOG_BYTES);
+        }
+    }
+
+    #[test]
+    fn logs_truncate_safely_inside_multibyte_characters() {
+        for character in ['✓', 'é', '😀'] {
+            for cut_in_character in 1..character.len_utf8() {
+                let suffix_len = LOG_BYTES + cut_in_character - character.len_utf8();
+                let prefix = "x".repeat(8057) + &character.to_string();
+                let suffix = "x".repeat(suffix_len);
+                assert_output_log(&(prefix.clone() + &suffix), &suffix, true);
+
+                let retained = "x".repeat(suffix_len - "discarded\n".len());
+                let output = prefix + "discarded\n" + &retained;
+                assert_output_log(&output, &retained, true);
+            }
+        }
+    }
+
+    #[test]
+    fn logs_at_the_byte_limit_preserve_multibyte_characters() {
+        for character in ['é', '✓', '😀'] {
+            let output = "x".repeat(LOG_BYTES - character.len_utf8()) + &character.to_string();
+            assert_output_log(&output, &output, false);
+        }
     }
 }
