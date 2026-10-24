@@ -216,10 +216,11 @@ mod tests {
     #[test]
     fn target_at_root_never_walks_above_root() {
         let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let root = tmp.path().join("project");
+        write(&root.join("AGENTS.md"));
         write(&tmp.path().join("AGENTS.md"));
-        write(&tmp.path().parent().expect("親がある").join("AGENTS.md"));
 
-        let chain = chain_for_target(tmp.path(), tmp.path()).expect("chain を発見できる");
+        let chain = chain_for_target(&root, &root).expect("chain を発見できる");
 
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].rel_path, "AGENTS.md");

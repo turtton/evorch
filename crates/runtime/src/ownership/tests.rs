@@ -1051,12 +1051,14 @@ fn ipc_release_deletes_the_scratch_before_responding() {
     let permit = host.start("thread").expect("start");
     let file = scratch_file(&host, "thread", "owned");
     let socket = host::socket_path(directory.path(), &permit.lease.owner_id).expect("socket");
-    let response = ipc::request(
+    // This checks cleanup ordering, not the production 500 ms latency budget.
+    let response = ipc::request_with_timeout(
         &socket,
         &ipc::Request::Quiesce {
             thread_id: "thread".into(),
             token: permit.lease.clone(),
         },
+        std::time::Duration::from_secs(30),
     )
     .expect("quiesce");
     assert!(

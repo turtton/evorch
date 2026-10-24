@@ -17,6 +17,7 @@ mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;
 use chat_restore::RunContinuation;
+pub(crate) use chat_restore::SnapshotReservation;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -765,6 +766,7 @@ impl AgentRuntime {
         self,
         config: &config::Config,
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
+        catalog_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let _ = self
             .shared
@@ -787,6 +789,7 @@ impl AgentRuntime {
             .set(crate::model_resolve::ModelResolution::new(
                 config,
                 credential_store,
+                catalog_dir,
             ));
         let _ = self
             .shared
@@ -1462,7 +1465,7 @@ impl AgentRuntime {
             handoff,
             restored: None,
         };
-        let task = match restored {
+        let mut task = match restored {
             Some(restored) => restored.attach_to(task),
             None => task,
         };
@@ -1508,6 +1511,14 @@ impl AgentRuntime {
             );
             self.release_held_messages(run_id, &mailbox);
             drop(runs);
+        }
+        // Registration is the consumption boundary, not provider completion.
+        if let Some(reservation) = task
+            .restored
+            .as_mut()
+            .and_then(|state| state.admission_reservation.as_mut())
+        {
+            reservation.commit();
         }
         if task.restored.is_some() {
             self.shared

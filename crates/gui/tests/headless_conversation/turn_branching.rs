@@ -280,6 +280,27 @@ fn same_row(harness: &HeadlessWorkbench<DemoSource>, a: &str, b: &str) -> bool {
 }
 
 #[test]
+fn edit_rows_stay_one_row_tall_under_their_messages() {
+    // Given: two completed turns, each started by an editable message.
+    let temp = tempfile::tempdir().unwrap();
+    let (gui, _conversation) = two_turns(temp.path());
+    let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
+    harness.run();
+    // Then: each edit action sits right below its message, so the first one
+    // does not stretch to the viewport and push the rest of the turn down.
+    let first = harness.label_rects("You: first")[0];
+    let second = harness.label_rects("You: second")[0];
+    let edits = harness.label_rects("ここから編集");
+    assert_eq!(edits.len(), 2);
+    for (message, edit) in [(first, edits[0]), (second, edits[1])] {
+        let gap = edit.top() - message.bottom();
+        assert!((0.0..40.0).contains(&gap), "edit row {gap}px below");
+    }
+    let turn = second.top() - first.bottom();
+    assert!(turn < 200.0, "second message {turn}px below the first");
+}
+
+#[test]
 fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
     // Given: two completed turns, each next turn started by an editable message.
     let temp = tempfile::tempdir().unwrap();

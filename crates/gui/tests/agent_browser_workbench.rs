@@ -48,7 +48,12 @@ impl AgentView for ScriptedView {
     }
 }
 
-fn workbench(pages: &Pages) -> gui::headless::HeadlessWorkbench<DemoSource> {
+fn workbench(
+    pages: &Pages,
+) -> (
+    tempfile::TempDir,
+    gui::headless::HeadlessWorkbench<DemoSource>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
@@ -75,8 +80,7 @@ fn workbench(pages: &Pages) -> gui::headless::HeadlessWorkbench<DemoSource> {
     })]);
     let mut gui = gui::headless::HeadlessWorkbench::new(state, [1600.0, 1000.0]);
     gui.run();
-    std::mem::forget(dir);
-    gui
+    (dir, gui)
 }
 
 fn navigate(run: &str) -> [Event; 2] {
@@ -102,7 +106,7 @@ fn navigate(run: &str) -> [Event; 2] {
 fn a_page_opens_the_browser_tab_and_view_reopens_it_after_closing() {
     // Given: the conversation's run navigates, which opens its page.
     let pages = Pages::default();
-    let mut gui = workbench(&pages);
+    let (_project, mut gui) = workbench(&pages);
     assert!(!gui.has_label("Showing the active tab t1"));
     gui.state_mut().apply_events(navigate("run-1"));
     pages.open.lock().unwrap().push("run-1".into());

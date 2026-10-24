@@ -19,6 +19,74 @@ fn record() -> RunContextRecord {
 }
 
 #[test]
+fn restore_state_cas_preserves_payloads_and_rejects_replaced_reservations() {
+    let temp = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: temp.path().join("contexts.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let db = Database::open(&config).unwrap();
+    let mut reserved = record();
+    reserved.restorable = false;
+    reserved.config_json = r#"{"reservation":"first","restorable":false}"#.into();
+    handle.upsert_run_context(&reserved).unwrap();
+    let retry = r#"{"restorable":true}"#;
+    assert!(
+        !handle
+            .compare_and_swap_run_context_restore_state(
+                "missing",
+                &reserved.config_json,
+                retry,
+                true
+            )
+            .unwrap()
+    );
+    assert!(
+        handle
+            .compare_and_swap_run_context_restore_state("run", &reserved.config_json, retry, true)
+            .unwrap()
+    );
+    assert_eq!(
+        db.run_context("run").unwrap(),
+        Some(RunContextRecord {
+            config_json: retry.into(),
+            restorable: true,
+            ..reserved.clone()
+        })
+    );
+    // Matching JSON alone must not re-arm an already restorable record.
+    let mut already_released = reserved.clone();
+    already_released.restorable = true;
+    handle.upsert_run_context(&already_released).unwrap();
+    assert!(
+        !handle
+            .compare_and_swap_run_context_restore_state("run", &reserved.config_json, retry, true)
+            .unwrap()
+    );
+    assert_eq!(db.run_context("run").unwrap(), Some(already_released));
+    // A repeated release must not match a new incarnation of the reservation.
+    let mut newer = reserved.clone();
+    newer.config_json = r#"{"reservation":"second","restorable":false}"#.into();
+    handle.upsert_run_context(&newer).unwrap();
+    assert!(
+        !handle
+            .compare_and_swap_run_context_restore_state("run", &reserved.config_json, retry, true)
+            .unwrap()
+    );
+    assert_eq!(db.run_context("run").unwrap(), Some(newer.clone()));
+    handle.invalidate_run_context("run").unwrap();
+    let invalidated = db.run_context("run").unwrap();
+    assert!(
+        !handle
+            .compare_and_swap_run_context_restore_state("run", &newer.config_json, retry, true)
+            .unwrap()
+    );
+    assert_eq!(db.run_context("run").unwrap(), invalidated);
+}
+
+#[test]
 fn upsert_latest_wins_and_round_trips() {
     // Given: a stored snapshot and another run that must remain independent.
     let temp = TempDir::new().unwrap();

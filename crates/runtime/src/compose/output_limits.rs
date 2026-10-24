@@ -7,7 +7,11 @@ impl RoutedModel {
                 if self.provider_configs.is_empty() {
                     None
                 } else {
-                    crate::model_resolve::load_catalog(&catalog::default_cache_dir()).await
+                    let directory = self
+                        .metadata_catalog_dir
+                        .clone()
+                        .unwrap_or_else(catalog::default_cache_dir);
+                    crate::model_resolve::load_catalog(&directory).await
                 }
             })
             .await

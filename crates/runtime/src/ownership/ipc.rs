@@ -149,8 +149,20 @@ fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result
 }
 
 pub fn request(path: &Path, request: &Request) -> Result<Response, IpcError> {
+    request_with_timeout(path, request, Duration::from_millis(500))
+}
+
+/// Test seam for ownership assertions that do not measure IPC latency.
+/// Uses one connection with no retry: a timed-out request may have committed.
+#[doc(hidden)]
+pub fn request_with_timeout(
+    path: &Path,
+    request: &Request,
+    timeout: Duration,
+) -> Result<Response, IpcError> {
     let mut stream = UnixStream::connect(path)?;
-    timeouts(&stream)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     write_frame(&mut stream, request)?;
     read_frame(&mut stream)
 }

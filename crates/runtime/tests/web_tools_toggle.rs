@@ -14,6 +14,7 @@ fn composed_runtime_uses_web_tool_config_and_live_updates() {
         ..Default::default()
     };
     let runtime = runtime::compose_runtime(runtime::RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         bus: bus.clone(),

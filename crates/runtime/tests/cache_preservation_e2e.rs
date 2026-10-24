@@ -251,6 +251,7 @@ summarizer = "structural"
         executor = executor.with_post_edit_hook(checker);
     }
     let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,
@@ -1039,6 +1040,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
         let mut executor = ToolExecutor::new(bus.clone());
         executor.register(Arc::new(BulkRead)).unwrap();
         harness.runtime = compose_runtime(RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
             user_config_dir: Some(root.join("empty-user-config")),
             config: &current,
             bus,
@@ -1215,6 +1217,7 @@ async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_pr
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let mut executor = ToolExecutor::new(bus.clone());
@@ -2976,6 +2979,7 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let repo = root.join("repo");
@@ -3628,6 +3632,7 @@ async fn thread_read_dirs_restore_preserves_wire_prefix(changed: bool) {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let repo = allowed_dir(&root, "repo");

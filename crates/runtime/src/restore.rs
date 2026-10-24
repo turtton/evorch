@@ -19,6 +19,8 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    /// Admission owns this reservation until registration commits consumption.
+    pub(crate) admission_reservation: Option<crate::runtime::SnapshotReservation>,
     pub(crate) turn: Option<providers::RequestTurnContext>,
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) continuity: crate::continuity::Continuity,
@@ -79,6 +81,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            admission_reservation: None,
             turn: descriptor.turn,
             continuity: descriptor.continuity,
             pending_reference_id: descriptor.pending_reference_id,
@@ -129,6 +132,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Identifies one unregistered chat attempt for conditional consumption release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_reservation_id: Option<String>,
     /// Conversation identity only; legacy snapshots did not record it.
     #[serde(default)]
     pub thread_id: Option<String>,
@@ -155,6 +161,10 @@ pub struct RunRestoreDescriptor {
     pub renewable_team: Option<TeamRestoreIdentity>,
     #[serde(default)]
     pub interrupted_tool_calls: Vec<InterruptedToolCall>,
+    /// These calls' recovery notices are already in this snapshot's history.
+    /// Fresh execution snapshots reset this: synthetic shell IDs can recur.
+    #[serde(default)]
+    pub(crate) outcome_notices_persisted: bool,
     #[serde(default)]
     pub durable_task_id: Option<String>,
     /// Model identity at the last snapshot, for inspection only; restore never routes by it.
@@ -463,6 +473,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        admission_reservation_id: None,
         thread_id: state.thread_id.clone(),
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
@@ -483,6 +494,7 @@ fn write_snapshot_with_context(
         non_restorable_reason,
         renewable_team,
         interrupted_tool_calls,
+        outcome_notices_persisted: false,
         durable_task_id: config.task_id.clone(),
         selected_model: Some(crate::compaction::selected_model(state)),
         tool_names: state

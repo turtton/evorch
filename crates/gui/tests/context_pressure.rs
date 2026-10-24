@@ -65,6 +65,25 @@ fn pressure_uses_latest_request_tokens_when_requests_accumulate() {
 }
 
 #[test]
+fn pressure_follows_a_context_window_edit() {
+    // Given: pressure resolved against a 1000-token window.
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&completed(100));
+    overlay.refresh_costs(&settings(Some(1000)));
+    // When: the window is edited without any new request.
+    overlay.refresh_costs(&settings(Some(2600)));
+    // Then: the cached window is resolved again from the new settings.
+    assert_eq!(
+        overlay
+            .row("run-1")
+            .unwrap()
+            .context_pressure_label()
+            .as_deref(),
+        Some("50%")
+    );
+}
+
+#[test]
 fn pressure_is_omitted_when_window_is_unknown_or_zero() {
     for window in [None, Some(0)] {
         // Given: completed usage with an unusable context window.

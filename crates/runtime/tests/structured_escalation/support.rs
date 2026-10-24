@@ -138,6 +138,7 @@ fn harness_with_model(
                 ..Default::default()
             },
         },
+        Some(test_support::model_catalog_dir()),
     )
     .expect("routed model");
     Harness {
@@ -232,6 +233,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                 ..FactoryOptions::default()
             },
         },
+        Some(test_support::model_catalog_dir()),
     )
     .expect("routed fallback model");
     Harness {

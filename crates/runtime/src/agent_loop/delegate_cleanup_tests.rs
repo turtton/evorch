@@ -2,19 +2,21 @@ use super::*;
 use crate::AgentRuntime;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::oneshot;
 
 #[derive(Default)]
 struct BlockedModel {
     // Spawn admission is the synchronous seam between two delegate spawns of a wave.
     interrupt_after_first_child: Mutex<Option<(watch::Sender<RunInterrupt>, RunInterrupt)>>,
     spawns: AtomicUsize,
+    completion_started: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl BlockedModel {
     fn interrupting(sender: watch::Sender<RunInterrupt>, interrupt: RunInterrupt) -> Self {
         Self {
             interrupt_after_first_child: Mutex::new(Some((sender, interrupt))),
-            spawns: AtomicUsize::new(0),
+            ..Self::default()
         }
     }
 }
@@ -28,6 +30,14 @@ impl AgentModel for BlockedModel {
         _: &[providers::Message],
         _: &[ToolSpec],
     ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+        if let Some(started) = self
+            .completion_started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = started.send(());
+        }
         std::future::pending().await
     }
 
@@ -48,6 +58,25 @@ impl AgentModel for BlockedModel {
         }
         false
     }
+}
+
+pub(super) async fn started_fixture(
+    cancel_rx: watch::Receiver<RunInterrupt>,
+) -> (AgentRuntime, LoopState) {
+    let (started, startup) = oneshot::channel();
+    let fixture = fixture_with_model(
+        cancel_rx,
+        BlockedModel {
+            completion_started: Mutex::new(Some(started)),
+            ..Default::default()
+        },
+    );
+    // The live parent shares the test state's run ID. Its initial checkpoint
+    // must finish before a caller attaches a store for the test state.
+    startup
+        .await
+        .expect("fixture parent entered model completion");
+    fixture
 }
 
 pub(super) fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState) {
@@ -122,6 +151,7 @@ fn fixture_with_model(
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,

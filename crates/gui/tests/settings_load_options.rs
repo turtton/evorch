@@ -71,6 +71,7 @@ preset = "user-layer"
             .with_provider_settings_path(save_path.clone());
     if production {
         let context = gui::model::production::ProductionModel {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
             load_options: options.clone(),
             credential_store: Arc::new(
                 sandbox::FileCredentialStore::open(root.join("credentials")).expect("store"),

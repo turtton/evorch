@@ -60,6 +60,11 @@ fn run_probes_with_terminal() {
         std::fs::File::open("/dev/tty").is_ok(),
         "the child test itself must own a controlling terminal"
     );
+    // The job probe allocates a durable shell handle; keep that state out of
+    // the user's configuration directory.
+    let state = tempfile::tempdir().expect("shell handle state directory");
+    tools::set_shell_job_handle_dir(state.path().join("shell-job-handles"))
+        .expect("isolate shell job handle state");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

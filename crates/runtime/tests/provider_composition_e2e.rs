@@ -42,6 +42,7 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .expect("composition");
     // When: sending through the streaming provider surface with tools requested.
@@ -132,6 +133,7 @@ fn composition<'a>(
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(root.join("empty-user-config")),
         config,
         bus,

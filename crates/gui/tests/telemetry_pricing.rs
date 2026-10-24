@@ -97,6 +97,102 @@ fn completed_costs_accumulate_by_profile_and_model() {
     assert!(overlay.cost_is_partial("run-1"));
 }
 
+fn completed_for(run_id: &str, model: &str) -> Event {
+    let mut event = completed(model);
+    if let event_bus::EventKind::Provider(ProviderEvent::RequestCompleted { run_id: run, .. }) =
+        &mut event.kind
+    {
+        *run = Some(run_id.into());
+    }
+    event
+}
+
+fn priced_settings(input_price: f64) -> ProviderSettingsModel {
+    let mut config = Config::default();
+    let mut entry = ModelEntryConfig::enabled("model");
+    entry.input_price = Some(input_price);
+    entry.output_price = Some(2.0);
+    config.providers.insert(
+        "local".into(),
+        ProviderProfileConfig {
+            models: vec![entry],
+            ..ProviderProfileConfig::default()
+        },
+    );
+    ProviderSettingsModel::seed_from_config(&config)
+}
+
+#[test]
+fn cached_costs_follow_a_price_edit() {
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&completed("model"));
+    let before = priced_settings(0.5);
+    overlay.refresh_costs(&before);
+    overlay.refresh_costs(&before);
+    assert_eq!(
+        overlay.cost("run-1"),
+        overlay.estimated_cost("run-1", &before)
+    );
+    let after = priced_settings(1.0);
+    overlay.refresh_costs(&after);
+    assert_ne!(
+        overlay.cost("run-1"),
+        overlay.estimated_cost("run-1", &before)
+    );
+    assert_eq!(
+        overlay.cost("run-1"),
+        overlay.estimated_cost("run-1", &after)
+    );
+}
+
+#[test]
+fn cached_costs_add_new_requests_without_touching_other_runs() {
+    let settings = priced_settings(0.5);
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&completed_for("run-1", "model"));
+    overlay.refresh_costs(&settings);
+    let first = overlay.cost("run-1").expect("first run cost");
+    overlay.apply_event(&completed_for("run-2", "model"));
+    overlay.apply_event(&completed_for("run-2", "unknown"));
+    overlay.refresh_costs(&settings);
+    assert_eq!(overlay.cost("run-1"), Some(first));
+    assert!(!overlay.cost_is_partial("run-1"));
+    assert_eq!(overlay.cost("run-2"), Some(first));
+    assert!(overlay.cost_is_partial("run-2"));
+    overlay.apply_event(&completed_for("run-1", "model"));
+    overlay.refresh_costs(&settings);
+    assert!((overlay.cost("run-1").expect("updated cost") - 2.0 * first).abs() < 1e-12);
+}
+
+#[tokio::test]
+async fn cached_costs_follow_a_replaced_catalog() {
+    async fn catalog(input: f64) -> (tempfile::TempDir, Arc<catalog::ModelCatalog>) {
+        let dir = tempfile::tempdir().expect("cache directory");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        std::fs::write(dir.path().join("models-dev.json"), format!(r#"{{"fetched_at":{now},"api":{{"vendor":{{"models":{{"model":{{"id":"model","cost":{{"input":{input},"output":2.0}}}}}}}}}}}}"#)).expect("cache fixture");
+        let loaded = catalog::ModelCatalog::load_or_refresh(dir.path())
+            .await
+            .expect("catalog");
+        (dir, Arc::new(loaded))
+    }
+    let mut settings = ProviderSettingsModel::seed_from_config(&Config::default());
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&completed("model"));
+    let (_first_dir, first) = catalog(1.0).await;
+    settings.catalog.catalog = Some(first);
+    overlay.refresh_costs(&settings);
+    let before = overlay.cost("run-1").expect("first catalog cost");
+    let (_second_dir, second) = catalog(3.0).await;
+    settings.catalog.catalog = Some(second);
+    overlay.refresh_costs(&settings);
+    let after = overlay.cost("run-1").expect("second catalog cost");
+    assert!(after > before);
+    assert_eq!(Some(after), overlay.estimated_cost("run-1", &settings));
+}
+
 /// A sandbox escalation review billed to the run with a model that has no price.
 fn unpriced_review() -> Event {
     let mut event = completed("unknown");

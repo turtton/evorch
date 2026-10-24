@@ -97,6 +97,7 @@ async fn owned_fallback(as_child: bool) {
             catalog: model::ModelCatalog::new(),
             factory: Default::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let mut executor = ToolExecutor::new(bus.clone());

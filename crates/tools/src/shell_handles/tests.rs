@@ -240,3 +240,99 @@ fn failed_atomic_save_does_not_issue_or_reset_a_number() {
     assert_eq!(std::fs::read(root.join("counter")).unwrap(), before);
     assert_eq!(allocator(&root).allocate().unwrap(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn default_test_state_is_shared_and_removed_on_normal_exit() {
+    const CHILD: &str = "EVORCH_TEST_STATE_EXIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let first = HandleAllocator::default();
+        let second = HandleAllocator::default();
+        assert_eq!(first.root().unwrap(), second.root().unwrap());
+        let number = first.allocate().unwrap();
+        assert_eq!(second.allocate().unwrap(), number + 1);
+        assert!(set_shell_job_handle_dir(first.root().unwrap()).is_err());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "shell_handles::tests::default_test_state_is_shared_and_removed_on_normal_exit",
+        ])
+        .env(CHILD, "1")
+        .env("TMPDIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn explicit_location_is_first_wins_absolute_and_never_replaces_a_used_default() {
+    let slot = OnceLock::new();
+    for invalid in ["", "relative/state", "/tmp/../state"] {
+        assert!(matches!(
+            set_location(&slot, PathBuf::from(invalid)),
+            Err(ToolError::InvalidArgs { .. })
+        ));
+    }
+    let first = PathBuf::from("/state/first");
+    set_location(&slot, first.clone()).unwrap();
+    set_location(&slot, first.clone()).unwrap();
+    assert!(matches!(
+        set_location(&slot, PathBuf::from("/state/second")),
+        Err(ToolError::Io { .. })
+    ));
+    assert_eq!(resolve_location(&slot), Some(first));
+
+    // Once an allocation used the default, numbers were issued there and a
+    // later explicit directory would fork the counter, so it is refused.
+    let slot = OnceLock::new();
+    assert_eq!(resolve_location(&slot), None);
+    assert!(matches!(
+        set_location(&slot, PathBuf::from("/state/late")),
+        Err(ToolError::Io { .. })
+    ));
+    assert_eq!(resolve_location(&slot), None);
+}
+
+#[test]
+fn racing_explicit_locations_keep_exactly_one_winner() {
+    let slot = OnceLock::new();
+    let barrier = Barrier::new(8);
+    let outcomes: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let (slot, barrier) = (&slot, &barrier);
+                scope.spawn(move || {
+                    let dir = PathBuf::from(format!("/state/racer-{index}"));
+                    barrier.wait();
+                    (dir.clone(), set_location(slot, dir))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    let winners: Vec<_> = outcomes
+        .iter()
+        .filter(|(_, outcome)| outcome.is_ok())
+        .map(|(dir, _)| dir.clone())
+        .collect();
+    assert_eq!(winners.len(), 1, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .filter(|(_, outcome)| outcome.is_err())
+            .all(|(_, outcome)| matches!(outcome, Err(ToolError::Io { .. })))
+    );
+    assert_eq!(resolve_location(&slot), Some(winners[0].clone()));
+}

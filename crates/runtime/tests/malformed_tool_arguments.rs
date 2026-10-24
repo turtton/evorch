@@ -26,6 +26,7 @@ async fn null_arguments_are_rejected_without_running_the_tool() {
         .map(Ok),
     ));
     let composed = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(tools::ToolExecutor::with_standard_tools(

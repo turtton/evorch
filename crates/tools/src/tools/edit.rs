@@ -3,8 +3,8 @@
 //! 空でない `old_string` の一致箇所を `new_string` へ置換する。`replace_all` が
 //! なければ一致は 1 箇所に限る。`edits` の複数置換はすべて元の内容に対して照合し、
 //! 見つからない・一意でない・重なる置換が 1 つでもあれば何も書き込まない。
-//! `edits` と一緒に渡された単一置換の欄は、空文字への置換（埋め草）なら無視して
-//! 結果で知らせ、中身があれば拒否する。
+//! `edits` と一緒に渡された単一置換の欄は、何も書き換えない（埋め草・同じ文字列への
+//! 置換・`edits` の項目の写し）なら無視して結果で知らせ、それ以外は拒否する。
 //! 書き込みは必ず同一親ディレクトリ上の一時ファイル経由で行い、`persist` に
 //! よる原子的リネームで反映する。ディスクへの書き込みはバイト一致とし、制御
 //! マーカーのエスケープは行わない（ADR 0008。エスケープは wave 3 の
@@ -269,23 +269,29 @@ struct Span {
     owner: usize,
 }
 
-/// `edits` と一緒に渡された空の単一置換を無視したときの、結果への注記。
+/// `edits` と一緒に渡された、何も書き換えない単一置換を無視したときの、結果への注記。
 const IGNORED_SINGLE_NOTE: &str = "\nNote: ignored old_string/new_string/replace_all because edits was given; only edits were applied. Omit them, or put every replacement in edits.";
+
+/// `edits` と、それにない変更を求める単一置換の欄が併用されたときのエラー。
+///
+/// 欄を省略できないモデルにも従える形を、[`single_changes_nothing`] が無視する
+/// JSON の例で示す。例は末尾に置き、そのまま実行できることをテストで確かめる。
+const MIXED_SHAPES: &str = "old_string/new_string/replace_all ask for a change that edits does not contain, so it is unclear which to apply; nothing was changed. Put every replacement in edits, and omit old_string/new_string/replace_all or make them inert (new_string \"\", replace_all false), e.g. {\"path\":\"src/lib.rs\",\"edits\":[{\"old_string\":\"old text\",\"new_string\":\"new text\"}],\"old_string\":\"unused\",\"new_string\":\"\",\"replace_all\":false}";
 
 /// 引数から取り出した置換。
 struct Replacements<'a> {
     replacements: Vec<Replacement<'a>>,
-    /// `edits` と一緒に渡された、`new_string` が空の単一置換を無視したか。
+    /// `edits` と一緒に渡された、何も書き換えない単一置換を無視したか。
     ignored_single: bool,
 }
 
 /// 単一置換または `edits` のどちらか一方を取り出す。
 ///
 /// スキーマの全プロパティを毎回埋めるモデルは、`edits` に本来の置換を書き、
-/// 単一置換の欄には `old_string: "x"`, `new_string: ""` のような埋め草を入れる。
-/// `edits` があり、単一置換が「空文字への置換・`replace_all` なし」のときは
-/// 埋め草として無視し、結果で知らせる。中身のある単一置換との併用は
-/// どちらの意図か決められないため、従来どおり拒否する。
+/// 単一置換の欄には `old_string: "x"`, `new_string: ""` のような埋め草や、
+/// `edits` の項目の写し、同じ文字列への置換を入れる。`edits` があり、単一置換が
+/// [`single_changes_nothing`] に当たるときは無視し、結果で知らせる。`edits` に
+/// ない変更を求める単一置換との併用はどちらの意図か決められないため拒否する。
 fn replacements(args: &Value) -> Result<Replacements<'_>, ToolError> {
     let Some(edits) = args.get("edits") else {
         if args.get("old_string").is_none() && args.get("new_string").is_none() {
@@ -312,10 +318,8 @@ fn replacements(args: &Value) -> Result<Replacements<'_>, ToolError> {
     let ignored_single = ["old_string", "new_string", "replace_all"]
         .iter()
         .any(|key| args.get(key).is_some());
-    if ignored_single && !is_placeholder_single(args) {
-        return Err(invalid(
-            "use either old_string/new_string/replace_all or edits, not both; put every replacement in edits",
-        ));
+    if ignored_single && !single_changes_nothing(args, edits) {
+        return Err(invalid(MIXED_SHAPES));
     }
     let edits = edits
         .as_array()
@@ -364,6 +368,39 @@ fn is_placeholder_single(args: &Value) -> bool {
         .get("replace_all")
         .is_none_or(|value| value.as_bool() == Some(false));
     old && new && all
+}
+
+/// `edits` の横の単一置換の欄が、`edits` のほかに何も書き換えないか。
+///
+/// 埋め草（[`is_placeholder_single`]）、同じ文字列への置換、`edits` のいずれかの
+/// 項目と同じ置換に限る。`edits` を埋め草にして単一置換の欄に本来の置換を書く
+/// 呼び出しは、どちらが本来の置換か決められないため含めない。
+fn single_changes_nothing(args: &Value, edits: &Value) -> bool {
+    if is_placeholder_single(args) {
+        return true;
+    }
+    let Some(single @ (old, new, _)) = replacement_fields(args) else {
+        return false;
+    };
+    old == new
+        || edits.as_array().is_some_and(|edits| {
+            edits
+                .iter()
+                .any(|edit| replacement_fields(edit) == Some(single))
+        })
+}
+
+/// `old_string`・`new_string`・`replace_all`（省略時は false）。型が違えば `None`。
+fn replacement_fields(value: &Value) -> Option<(&str, &str, bool)> {
+    let all = match value.get("replace_all") {
+        None => false,
+        Some(flag) => flag.as_bool()?,
+    };
+    Some((
+        value.get("old_string")?.as_str()?,
+        value.get("new_string")?.as_str()?,
+        all,
+    ))
 }
 
 fn replace_all(value: &Value, label: &str) -> Result<bool, ToolError> {
