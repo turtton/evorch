@@ -3,6 +3,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::LoopState;
+use super::stop_context::{ToolOutcome, stop_reason};
+use crate::escalation::detector::ToolErrorClass;
 
 /// Consecutive repeats of one `(name, input)`.
 #[derive(Default)]
@@ -103,17 +105,25 @@ impl LoopState {
         ) else {
             return true;
         };
-        self.stop_identical_calls(call_id, name, input, false);
+        // Any other call ends the streak, so a last result of this tool is the repeated call's.
+        let error = self
+            .last_tool
+            .as_ref()
+            .filter(|last| last.tool == *name)
+            .and_then(|last| last.error);
+        self.stop_identical_calls(call_id, name, input, error, false);
         false
     }
 
     /// Stops the run after `limit` identical calls in a row; `stalled` marks
-    /// calls counted because their results showed no progress.
+    /// calls counted because their results showed no progress. `error` is the
+    /// class of the repeated call's last result when it failed.
     pub(super) fn stop_identical_calls(
         &mut self,
         call_id: &str,
         name: &str,
         input: &Value,
+        error: Option<ToolErrorClass>,
         stalled: bool,
     ) {
         let limit = self.task.config.budget.max_identical_tool_call_repeats;
@@ -132,6 +142,13 @@ impl LoopState {
             thread_id: None,
             call_id: Some(call_id.to_owned()),
         }));
-        self.finish_error(format!("{code}: {detail}"));
+        self.finish_error(stop_reason(
+            code,
+            Some(&ToolOutcome {
+                tool: name.to_owned(),
+                error,
+            }),
+            &detail,
+        ));
     }
 }

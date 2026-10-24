@@ -1,4 +1,7 @@
+use event_bus::event::diagnostic_codes;
+
 use super::LoopState;
+use super::stop_context::stop_reason;
 use crate::budget_tracker::{BudgetContext, BudgetDecision};
 
 impl LoopState {
@@ -29,7 +32,12 @@ impl LoopState {
         match &decision {
             BudgetDecision::Continue => {}
             BudgetDecision::Exhausted(breach) => {
-                self.finish_error(format!("{}: {}", breach.code, breach.detail));
+                // A no-progress loop is judged by what it kept calling; other limits are not.
+                let last_tool = (breach.code == diagnostic_codes::NO_PROGRESS)
+                    .then_some(self.last_tool.as_ref())
+                    .flatten();
+                let reason = stop_reason(breach.code, last_tool, &breach.detail);
+                self.finish_error(reason);
                 return decision;
             }
         }

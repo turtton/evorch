@@ -153,7 +153,7 @@ async fn identical_successful_calls_name_the_tool_without_an_error_class() {
 
 #[tokio::test]
 async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats() {
-    // Given: an Orchestrator that awaits a Worker repeating one invalid edit.
+    // Given: an Orchestrator that waits for a Worker repeating one invalid edit.
     let model = Arc::new(ScriptedModel::new([]));
     model
         .add_keyed(
@@ -162,7 +162,12 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
                 Ok(tool_response(
                     "delegate",
                     "delegate",
-                    json!({"target": {"role": "worker"}, "prompt": "CHILD"}),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD"}),
+                )),
+                Ok(tool_response(
+                    "wait",
+                    "wait",
+                    json!({"run_ids": ["run-2"], "mode": "all"}),
                 )),
                 Ok(tool_response("finish", "finish", json!({"result": "done"}))),
             ],
@@ -177,7 +182,7 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
         Arc::new(sandbox::DirectSandbox::new_unchecked()),
     ));
     let runtime = AgentRuntime::new(bus, executor, model.clone()).with_sequential_run_ids();
-    // When: the child stops and the parent receives its delegate result.
+    // When: the child stops and the parent's wait returns its terminal snapshot.
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
     let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(parent))
@@ -185,7 +190,7 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
         .unwrap()
         .unwrap();
     assert_eq!(phase, AgentRunPhase::Done);
-    let delegate_result = model
+    let wait_result = model
         .observed()
         .await
         .iter()
@@ -196,19 +201,19 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
                 tool_call_id,
                 content,
                 ..
-            } if tool_call_id == "delegate" => match content.first() {
+            } if tool_call_id == "wait" => match content.first() {
                 Some(ToolResultContent::Text { text }) => Some(text.clone()),
                 _ => None,
             },
             _ => None,
         })
-        .expect("the delegate result reaches the parent model");
-    // Then: the parent's view names the repeated tool and its failure class.
-    assert!(
-        delegate_result.contains("IdenticalToolCalls: tool=edit last_error=invalid_args"),
-        "{delegate_result}"
-    );
-    assert!(!delegate_result.contains(INPUT_MARKER), "{delegate_result}");
+        .expect("the wait result reaches the parent model");
+    // Then: the reason the parent reads names the repeated tool and its failure class.
+    let snapshot: serde_json::Value = serde_json::from_str(&wait_result).unwrap();
+    let child = &snapshot["runs"][0];
+    assert_eq!(child["status"], "failed", "{snapshot}");
+    assert_eq!(child["reason_truncated"], false, "{snapshot}");
+    assert_names_the_failing_edit(child["reason"].as_str().unwrap(), "IdenticalToolCalls");
 }
 
 fn calls(inputs: &[u32]) -> Vec<ChatResponse> {
