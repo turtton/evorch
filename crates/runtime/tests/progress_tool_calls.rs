@@ -5,7 +5,7 @@ mod support;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use event_bus::{AgentRunPhase, EventBus, EventKind};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{ChatResponse, FinishReason};
 use runtime::{AgentRuntime, Role, RunConfig};
 use serde_json::{Value, json};
@@ -55,6 +55,8 @@ struct Outcome {
     requests: usize,
     probe_calls: u32,
     diagnostics: Vec<event_bus::DiagnosticEvent>,
+    /// The reason of the terminal `Error` transition.
+    error_reason: Option<String>,
 }
 
 async fn run(results: Vec<Result<Progress, Progress>>, script: Vec<ChatResponse>) -> Outcome {
@@ -70,8 +72,16 @@ async fn run(results: Vec<Result<Progress, Progress>>, script: Vec<ChatResponse>
     let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone());
     let run = runtime.delegate_background(Role::Worker, "repeat".into(), RunConfig::default());
     let phase = runtime.wait(run).await.unwrap();
-    let diagnostics = drain_events(&mut events)
-        .await
+    let events = drain_events(&mut events).await;
+    let error_reason = events.iter().find_map(|event| match &event.kind {
+        EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Error,
+            reason,
+            ..
+        }) => reason.clone(),
+        _ => None,
+    });
+    let diagnostics = events
         .into_iter()
         .filter_map(|event| match event.kind {
             EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls" => Some(d),
@@ -84,6 +94,7 @@ async fn run(results: Vec<Result<Progress, Progress>>, script: Vec<ChatResponse>
         requests: model.observed().await.len(),
         probe_calls,
         diagnostics,
+        error_reason,
     }
 }
 
@@ -124,6 +135,26 @@ async fn stalled_identical_calls_stop_after_the_limit_call_runs() {
     assert_eq!(outcome.diagnostics.len(), 1);
     assert_eq!(outcome.diagnostics[0].call_id.as_deref(), Some("12"));
     assert!(outcome.diagnostics[0].detail.contains("without progress"));
+    // The last stalled result succeeded, so the reason names only the tool.
+    let reason = outcome.error_reason.unwrap();
+    assert!(
+        reason.starts_with("IdenticalToolCalls: tool=read; "),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_failing_calls_name_the_tool_and_error_class_in_the_reason() {
+    // Given: identical calls that keep failing without progress.
+    let outcome = run(vec![Err(Progress::Stalled); 10], turns(&["read"; 12])).await;
+    // Then: the stop reason names the tool and the class of its last failure.
+    assert_eq!(outcome.phase, AgentRunPhase::Error);
+    assert_eq!(outcome.probe_calls, 10);
+    let reason = outcome.error_reason.unwrap();
+    assert!(
+        reason.starts_with("IdenticalToolCalls: tool=read last_error=other; "),
+        "{reason}"
+    );
 }
 
 #[tokio::test]

@@ -1,8 +1,9 @@
 mod support;
 
-use event_bus::{AgentRunPhase, EventKind};
-use providers::{ChatResponse, FinishReason};
-use runtime::{ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
+use event_bus::{AgentRunPhase, EventKind, LifecycleEvent};
+use providers::{ChatResponse, ContentBlock, FinishReason, ToolResultContent};
+use runtime::{AgentRuntime, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
+use serde_json::json;
 use std::sync::Arc;
 use support::{ScriptedModel, drain_events, text_response, tool_response};
 
@@ -48,6 +49,172 @@ async fn run_script(
         drain_events(&mut receiver).await,
         model.observed().await.len(),
     )
+}
+
+/// The reason of the run's terminal `Error` transition.
+fn error_reason(events: &[event_bus::Event]) -> String {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Error,
+                reason,
+                ..
+            }) => reason.clone(),
+            _ => None,
+        })
+        .expect("the run ends in Error with a reason")
+}
+
+/// Marker inside the rejected arguments; it must never reach a stop reason.
+const INPUT_MARKER: &str = "SECRET-EDIT-INPUT-MARKER";
+
+/// An edit that schema validation rejects as InvalidArgs before it runs.
+fn invalid_edit(id: usize) -> ChatResponse {
+    tool_response(
+        &id.to_string(),
+        "edit",
+        json!({
+            "path": format!("/{INPUT_MARKER}/note.md"),
+            "old_string": INPUT_MARKER,
+            "new_string": INPUT_MARKER,
+            "replace_all": "yes",
+        }),
+    )
+}
+
+fn assert_names_the_failing_edit(reason: &str, code: &str) {
+    // The code stays first, the tool and failure class follow right after it, and no
+    // input value is copied into the reason.
+    assert!(
+        reason.starts_with(&format!("{code}: tool=edit last_error=invalid_args")),
+        "{reason}"
+    );
+    assert!(!reason.contains(INPUT_MARKER), "{reason}");
+    assert!(!reason.contains("replace_all"), "{reason}");
+}
+
+#[tokio::test]
+async fn identical_invalid_edits_name_the_tool_and_error_class_in_the_reason() {
+    // Given: a model that repeats one edit that fails with InvalidArgs.
+    let script = (0..11)
+        .map(invalid_edit)
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect();
+    // When: the identical-call guard stops the run.
+    let (phase, events, _) = run_script(script, config::Config::default()).await;
+    // Then: the reason says which tool repeated and how it failed.
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_names_the_failing_edit(&error_reason(&events), "IdenticalToolCalls");
+}
+
+#[tokio::test]
+async fn no_progress_names_the_last_tool_and_error_class_in_the_reason() {
+    // Given: a no-progress limit reached long before the identical-call limit.
+    let config = config::Config {
+        budget: config::BudgetConfig {
+            max_no_progress_rounds: 2,
+            max_identical_tool_call_repeats: 100,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let script = (0..6)
+        .map(invalid_edit)
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect();
+    // When: failing edits never make progress.
+    let (phase, events, _) = run_script(script, config).await;
+    // Then: the NoProgress reason names the last tool and its failure class.
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_names_the_failing_edit(&error_reason(&events), "NoProgress");
+}
+
+#[tokio::test]
+async fn identical_successful_calls_name_the_tool_without_an_error_class() {
+    // Given: a model that keeps re-reading one existing file successfully.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("present.txt");
+    std::fs::write(&path, "present\n").unwrap();
+    let script = (0..11)
+        .map(|id| tool_response(&id.to_string(), "read", json!({"path": path})))
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect();
+    // When: the identical-call guard stops the run.
+    let (phase, events, _) = run_script(script, config::Config::default()).await;
+    // Then: the tool is named, but a successful last result adds no error class.
+    assert_eq!(phase, AgentRunPhase::Error);
+    let reason = error_reason(&events);
+    assert!(
+        reason.starts_with("IdenticalToolCalls: tool=read; "),
+        "{reason}"
+    );
+    assert!(!reason.contains("last_error"), "{reason}");
+}
+
+#[tokio::test]
+async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats() {
+    // Given: an Orchestrator that waits for a Worker repeating one invalid edit.
+    let model = Arc::new(ScriptedModel::new([]));
+    model
+        .add_keyed(
+            "PARENT",
+            [
+                Ok(tool_response(
+                    "delegate",
+                    "delegate",
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD"}),
+                )),
+                Ok(tool_response(
+                    "wait",
+                    "wait",
+                    json!({"run_ids": ["run-2"], "mode": "all"}),
+                )),
+                Ok(tool_response("finish", "finish", json!({"result": "done"}))),
+            ],
+        )
+        .await;
+    model
+        .add_keyed("CHILD", (0..11).map(invalid_edit).map(Ok))
+        .await;
+    let bus = Arc::new(event_bus::EventBus::new(1024));
+    let executor = Arc::new(tools::ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(bus, executor, model.clone()).with_sequential_run_ids();
+    // When: the child stops and the parent's wait returns its terminal snapshot.
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(parent))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(phase, AgentRunPhase::Done);
+    let wait_result = model
+        .observed()
+        .await
+        .iter()
+        .flat_map(|messages| messages.iter())
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } if tool_call_id == "wait" => match content.first() {
+                Some(ToolResultContent::Text { text }) => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the wait result reaches the parent model");
+    // Then: the reason the parent reads names the repeated tool and its failure class.
+    let snapshot: serde_json::Value = serde_json::from_str(&wait_result).unwrap();
+    let child = &snapshot["runs"][0];
+    assert_eq!(child["status"], "failed", "{snapshot}");
+    assert_eq!(child["reason_truncated"], false, "{snapshot}");
+    assert_names_the_failing_edit(child["reason"].as_str().unwrap(), "IdenticalToolCalls");
 }
 
 fn calls(inputs: &[u32]) -> Vec<ChatResponse> {

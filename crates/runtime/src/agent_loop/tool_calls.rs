@@ -610,6 +610,7 @@ impl LoopState {
                         .into_iter()
                         .zip(meta::wait_delegates(self, &runtime, children).await)
                     {
+                        self.record_tool_outcome("delegate", &dispatch.result, None);
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
                     }
@@ -827,6 +828,7 @@ impl LoopState {
                         } else if is_meta_op(&name) {
                             let dispatch = meta::dispatch(self, &name, input).await;
                             self.ledger_tool_completed(&name, &id, &dispatch.result);
+                            self.record_tool_outcome(&name, &dispatch.result, None);
                             self.context.push_tool_result(id, dispatch.result);
                             self.publish_message_count();
                             match dispatch.terminal {
@@ -845,6 +847,7 @@ impl LoopState {
                             ToolResult::error("invalid prepared local call")
                         };
                     self.ledger_tool_completed(&name, &id, &result);
+                    let error_class = self.record_tool_outcome(&name, &result, typed_error_class);
                     if reports_progress {
                         let limit = self.task.config.budget.max_identical_tool_call_repeats;
                         // Failed, denied or cancelled calls never count as progress.
@@ -855,7 +858,7 @@ impl LoopState {
                             .observe_result(&name, &input, advanced, limit)
                             && stalled.is_none()
                         {
-                            stalled = Some((id.clone(), name.clone(), input.clone()));
+                            stalled = Some((id.clone(), name.clone(), input.clone(), error_class));
                         }
                     }
                     let rule_target = matches!(name.as_str(), "read" | "write" | "edit" | "grep")
@@ -888,11 +891,7 @@ impl LoopState {
                                     &trigger,
                                     &name,
                                     &input,
-                                    result.is_error.then(|| {
-                                        typed_error_class.unwrap_or_else(|| {
-                                            ToolErrorClass::from_content(&result.content)
-                                        })
-                                    }),
+                                    error_class,
                                 ),
                                 run_id: Some(run_id.clone()),
                                 thread_id: None,
@@ -932,8 +931,8 @@ impl LoopState {
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
                 }
-                if let Some((id, name, input)) = stalled {
-                    self.stop_identical_calls(&id, &name, &input, true);
+                if let Some((id, name, input, error)) = stalled {
+                    self.stop_identical_calls(&id, &name, &input, error, true);
                     return false;
                 }
                 // A completed parallel wave belongs to one assistant tool batch.

@@ -1,12 +1,12 @@
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use workspace_ui::{
     AllowedDirectory, ProjectError, ProjectId, ProjectRecord, SidebarError, SidebarState, ThreadId,
     ThreadRecord, TrustState, load_sidebar, save_sidebar, sidebar_from_json, sidebar_to_json,
 };
 
-fn valid_sidebar() -> SidebarState {
+fn valid_sidebar() -> (TempDir, SidebarState) {
     let directory = tempdir().expect("temporary directory must be created");
-    let root = directory.keep().join("project");
+    let root = directory.path().join("project");
     std::fs::create_dir(&root).expect("project directory must be created");
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("p1");
@@ -16,13 +16,13 @@ fn valid_sidebar() -> SidebarState {
     sidebar
         .create_thread(ThreadId::new("t1"), project_id, "Thread")
         .expect("thread must be added");
-    sidebar
+    (directory, sidebar)
 }
 
 #[test]
 fn sidebar_json_roundtrip() {
     // Given: a valid sidebar and an isolated persistence path.
-    let sidebar = valid_sidebar();
+    let (_project, sidebar) = valid_sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let path = directory.path().join("sidebar.json");
 
@@ -40,7 +40,7 @@ fn sidebar_json_roundtrip() {
 #[test]
 fn load_rejects_unknown_project_ref_duplicate_thread_and_relative_trust_path() {
     // Given: independently malformed sidebar states.
-    let valid = valid_sidebar();
+    let (_project, valid) = valid_sidebar();
     let mut unknown = valid.clone();
     unknown.threads[0].project_id = ProjectId::new("missing");
     let mut duplicate = valid.clone();
@@ -71,7 +71,7 @@ fn load_rejects_unknown_project_ref_duplicate_thread_and_relative_trust_path() {
 #[test]
 fn load_keeps_allowed_directories_that_no_longer_exist() {
     // Given: a saved approved directory that was deleted, and one stored inside the project.
-    let mut sidebar = valid_sidebar();
+    let (_project, mut sidebar) = valid_sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let gone = directory
         .path()
@@ -110,7 +110,7 @@ fn load_keeps_allowed_directories_that_no_longer_exist() {
 #[test]
 fn load_rejects_noncanonical_allowed_directory() {
     // Given: persisted state whose allowed path resolves through a parent component.
-    let mut sidebar = valid_sidebar();
+    let (_project, mut sidebar) = valid_sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let allowed = directory.path().join("allowed");
     std::fs::create_dir(&allowed).expect("allowed directory must be created");
@@ -135,7 +135,7 @@ fn load_rejects_noncanonical_allowed_directory() {
 #[test]
 fn load_rejects_allowed_directory_inside_project_root() {
     // Given: persisted state that stores a project-root descendant as an explicit allowed directory.
-    let mut sidebar = valid_sidebar();
+    let (_project, mut sidebar) = valid_sidebar();
     let nested = sidebar.projects[0].repo_root.join("nested");
     std::fs::create_dir_all(&nested).expect("nested directory must be created");
     sidebar.projects[0]
@@ -159,7 +159,7 @@ fn load_rejects_allowed_directory_inside_project_root() {
 #[test]
 fn load_rejects_nested_allowed_directories() {
     // Given: persisted state with one allowed directory contained by another.
-    let mut sidebar = valid_sidebar();
+    let (_project, mut sidebar) = valid_sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let parent = directory.path().join("allowed");
     let child = parent.join("nested");
@@ -189,7 +189,7 @@ fn load_rejects_nested_allowed_directories() {
 #[test]
 fn load_accepts_canonical_external_allowed_directory() {
     // Given: persisted state with one canonical directory outside the project root.
-    let mut sidebar = valid_sidebar();
+    let (_project, mut sidebar) = valid_sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let allowed = directory.path().join("allowed");
     std::fs::create_dir(&allowed).expect("allowed directory must be created");

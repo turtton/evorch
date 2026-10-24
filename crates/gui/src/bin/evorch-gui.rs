@@ -32,6 +32,13 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 const EVENT_CAPACITY: usize = 256;
 
+/// Keeps the Rust heap out of glibc malloc. CEF runs its browser process inside this
+/// one, and its memory dumps read glibc's `mallinfo()`, whose `int` fields overflow
+/// once the glibc heap passes 2 GiB; Chromium then fails a CHECK and kills the GUI.
+/// Allocations from C libraries such as CEF and the GPU drivers stay on glibc.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, thiserror::Error)]
 enum GuiError {
     #[error("argument error: {0}")]
@@ -1649,6 +1656,52 @@ mod effective_project_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod heap_tests {
+    /// glibc's `struct mallinfo2` (glibc 2.33+), the 64-bit form of what CEF reads.
+    #[repr(C)]
+    struct MallInfo2 {
+        arena: usize,
+        ordblks: usize,
+        smblks: usize,
+        hblks: usize,
+        hblkhd: usize,
+        usmblks: usize,
+        fsmblks: usize,
+        uordblks: usize,
+        fordblks: usize,
+        keepcost: usize,
+    }
+
+    unsafe extern "C" {
+        fn mallinfo2() -> MallInfo2;
+    }
+
+    fn glibc_heap_bytes() -> usize {
+        // SAFETY: mallinfo2 only reads allocator statistics and returns them by value.
+        let info = unsafe { mallinfo2() };
+        info.arena + info.hblkhd
+    }
+
+    #[test]
+    fn rust_allocations_stay_out_of_the_glibc_heap_cef_measures() {
+        const TOTAL: usize = 128 << 20;
+        // Small blocks would land in glibc's arena, which never shrinks below its top.
+        const BLOCK: usize = 16 << 10;
+        let before = glibc_heap_bytes();
+        let blocks: Vec<Box<[u8]>> = (0..TOTAL / BLOCK)
+            .map(|index| vec![index as u8; BLOCK].into_boxed_slice())
+            .collect();
+        let grown = glibc_heap_bytes().saturating_sub(before);
+        assert_eq!(blocks.len(), TOTAL / BLOCK);
+        // Parallel tests may grow glibc a little through SQLite and other C code.
+        assert!(
+            grown < TOTAL / 4,
+            "glibc heap grew by {grown} bytes for {TOTAL} bytes of Rust allocations"
+        );
     }
 }
 
