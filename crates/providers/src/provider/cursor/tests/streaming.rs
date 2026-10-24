@@ -1,6 +1,40 @@
 use super::*;
 
 #[tokio::test]
+async fn unknown_server_fields_do_not_abort_a_valid_turn() {
+    // Given: a newer server sends an unknown protobuf field before and after text.
+    let server = MockServer::start().await;
+    let unknown = Proto::new().message(99, Proto::new().string(1, "opaque extension"));
+    let text = Proto::new().message(1, Proto::new().message(1, Proto::new().string(1, "Hello")));
+    Mock::given(path("/agent.v1.AgentService/RunSSE"))
+        .respond_with(response(vec![unknown.clone(), text, unknown, end()]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // When: the stream is collected through the normal provider API.
+    let result = client(&server)
+        .send(&ProviderAuth::new("unused"), &request())
+        .await
+        .unwrap();
+
+    // Then: unknown data is not emitted as content and the turn ends normally.
+    assert_eq!(result.finish_reason, FinishReason::Stop);
+    assert_eq!(
+        result.message.content,
+        [ContentBlock::Text {
+            text: "Hello".into()
+        }]
+    );
+    assert_eq!(result.usage.input_tokens, 100);
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn native_connect_handoff_preserves_tool_results_rules_and_conversation_checkpoint() {
     let server = MockServer::start().await;
     let args = Proto::new()

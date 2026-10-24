@@ -117,7 +117,10 @@ The protocol implementation was informed by
 [oh-my-pi](https://github.com/can1357/oh-my-pi/tree/602b6c812fa9ef774f359f1e399a09d30ee2eaca),
 including its OAuth, native Cursor transport, and quota parsers. Offline mock
 tests verify authentication, token rotation, tool continuations, and prompt
-prefix preservation. Live account acceptance requires an actual account.
+prefix preservation. Unknown top-level protobuf server fields are skipped for
+forward compatibility, matching the reference client; a valid `turnEnded` is
+still required, and unknown fields never authorize local tool execution.
+Live account acceptance requires an actual account.
 
 ## Failures and cooldowns
 
