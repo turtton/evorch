@@ -56,4 +56,42 @@ impl AgentRuntime {
         }
         RestoredState::for_conversation(record)
     }
+
+    /// Whether `parent` could continue its finished `child` with a message now,
+    /// or why not. This reads saved state only and changes nothing.
+    pub(crate) fn continuation_availability(
+        &self,
+        parent: RunId,
+        child: RunId,
+    ) -> Result<(), String> {
+        let ownership = {
+            let runs = lock_runs(&self.shared.runs);
+            if let Some(reason) = self.continuation_refusal(child, runs.get(&child)) {
+                return Err(reason.to_string());
+            }
+            runs.get(&parent)
+                .and_then(|entry| entry.config.ownership.clone())
+        };
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| RunRestoreFailure::StorageNotConfigured.to_string())?;
+        let record = store
+            .restore_record(child)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| RunRestoreFailure::MissingContext.to_string())?;
+        let descriptor: RunRestoreDescriptor =
+            serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
+        let history = descriptor.conversation_descriptor();
+        if (record.restorable && history.restorable)
+            || (history.renewable_ownership_only() && ownership.is_some())
+        {
+            Ok(())
+        } else {
+            Err(history
+                .non_restorable_reason
+                .unwrap_or_else(|| "実行設定".into()))
+        }
+    }
 }

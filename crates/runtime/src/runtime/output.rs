@@ -10,6 +10,13 @@ pub(crate) struct RunOutput {
     status: OutputStatus,
     output: Option<String>,
     reason: Option<String>,
+    /// For a finished direct child: whether a message continues it with its
+    /// saved context, which is preferable to delegating the same work again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuable: Option<bool>,
+    /// Why a finished direct child cannot be continued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation_blocked: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +64,8 @@ impl AgentRuntime {
                     status,
                     output: None,
                     reason,
+                    continuable: None,
+                    continuation_blocked: None,
                 });
             }
             return Err(unknown_run(target));
@@ -90,12 +99,22 @@ impl AgentRuntime {
                 (OutputStatus::StillRunning, None, None)
             }
         };
+        let finished_child = entry.parent == Some(caller)
+            && matches!(
+                phase,
+                AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+            );
+        // Saved state is read without holding the runs lock.
+        drop(runs);
+        let availability = finished_child.then(|| self.continuation_availability(caller, target));
         Ok(RunOutput {
             run_id: target.to_string(),
             phase,
             status,
             output,
             reason,
+            continuable: availability.as_ref().map(Result::is_ok),
+            continuation_blocked: availability.and_then(Result::err),
         })
     }
 }

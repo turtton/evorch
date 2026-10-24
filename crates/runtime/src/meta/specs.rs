@@ -13,7 +13,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output.".into(),
+        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
+        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,7 +56,7 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
@@ -76,7 +76,7 @@ pub(super) fn wait(name: &str) -> ToolSpec {
 pub(super) fn send_message(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Send a fire-and-forget message to a direct child or parent and return message_id. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
+        "Send a fire-and-forget message to a direct child or parent and return message_id. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
         json!({"run_id":run_id(), "message":{"type":"string", "description":"Self-contained update or instruction."}}),
         &["run_id", "message"],
         false,
@@ -86,7 +86,7 @@ pub(super) fn send_message(name: &str) -> ToolSpec {
 pub(super) fn send(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Deliver a message to a direct child or parent and return message_id without waiting for a reply. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
+        "Deliver a message to a direct child or parent and return message_id without waiting for a reply. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
         json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send", "description":"send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary."}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply."}}),
         &["run_id", "message"],
         false,
