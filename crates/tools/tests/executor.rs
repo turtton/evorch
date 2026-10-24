@@ -1041,3 +1041,53 @@ async fn executor_reads_null_in_optional_typed_fields_as_omitted() {
     }
     assert_eq!(received.lock().expect("spy lock").take(), None);
 }
+
+// Given: an MCP tool whose server schema declares an optional string / When: a call sends
+// null for it / Then: the null is left for validation to reject, because the server owns
+// what null means there (such as clearing a value), and dropping it would change the call.
+#[tokio::test]
+async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
+    let registry = Arc::new(tools::mcp::McpToolRegistry::new(
+        Arc::new(tools::NetworkGuard::new().expect("guard")),
+        tools::mcp::McpClientConfig {
+            server_label: "fixture".into(),
+            endpoint: "https://mcp.invalid/mcp".into(),
+            extra_headers: Default::default(),
+            timeout: std::time::Duration::from_secs(1),
+        },
+        tools::mcp::McpClientInfo {
+            name: "test".into(),
+            version: "1".into(),
+        },
+    ));
+    let definition = serde_json::from_value(serde_json::json!({
+        "name": "update_issue",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "assignee": {"type": "string"}},
+            "required": ["title"]
+        }
+    }))
+    .expect("definition");
+    let mut executor = ToolExecutor::new(Arc::new(EventBus::new(16)));
+    executor
+        .register(Arc::new(registry.tool(definition)))
+        .expect("register");
+    let executor = Arc::new(executor);
+    let validate = |args: serde_json::Value| {
+        executor
+            .validate_call(
+                test_ctx("run-1"),
+                "update_issue".into(),
+                "call-1".into(),
+                args,
+            )
+            .err()
+    };
+
+    // Validation alone never contacts the server.
+    assert!(validate(serde_json::json!({"title": "t"})).is_none());
+    let error = validate(serde_json::json!({"title": "t", "assignee": null}))
+        .expect("null in an MCP tool field is not read as omitted");
+    assert!(matches!(error, ToolError::InvalidArgs { .. }), "{error:?}");
+}
