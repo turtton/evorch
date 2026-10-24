@@ -134,6 +134,7 @@ pub struct WorkbenchState<S> {
     /// Runs whose latest lifecycle event completed a turn: safe rewind points.
     pub(super) idle_turns: std::collections::BTreeSet<String>,
     pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
+    pub(super) thread_mirror: Option<super::thread_mirror::ThreadMirrorLink>,
     pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
 }
 
@@ -244,6 +245,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             unread_threads: std::collections::BTreeSet::new(),
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
+            thread_mirror: None,
             agent_browser: super::agent_browser::AgentBrowserTabs::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
