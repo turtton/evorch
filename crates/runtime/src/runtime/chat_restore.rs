@@ -167,7 +167,11 @@ impl AgentRuntime {
             .restore_route_pins(&run_id.to_string(), &descriptor.route_pins);
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
-            match (pending.trusted_request.as_deref(), prompt) {
+            let original = pending
+                .trusted_request
+                .as_deref()
+                .filter(|_| pending.trusted_request_complete);
+            match (original, prompt) {
                 (Some(original), Some(prompt)) => Some(
                     crate::thread_goals::continued_thread_request(original, prompt),
                 ),
@@ -217,6 +221,7 @@ impl AgentRuntime {
             descriptor.outcome_notices_persisted = true;
             if let Some(pending) = &mut descriptor.pending_escalation {
                 pending.trusted_request = pending_request.clone();
+                pending.trusted_request_complete = true;
             }
             descriptor.turn = Some(crate::request_turn::initial(
                 Default::default(),

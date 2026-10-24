@@ -408,6 +408,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_restore_does_not_promote_legacy_truncated_pending_requests() {
+        for legacy in [true, false] {
+            for followup in [None, Some("read thread-20")] {
+                let f = Fixture::new();
+                let original = format!("{} thread-10", "a".repeat(8183));
+                let source = f.caller(&original, true).await.run_id;
+                for id in ["thread-1", "thread-10", "thread-20"] {
+                    f.row(id, Some(f.other.path()));
+                }
+                let target = f.runtime.reserve_run_id();
+                crate::restore::persist_escalation_seed(
+                    &f.runtime,
+                    target,
+                    source,
+                    "worker memo",
+                    &RunConfig::default(),
+                    false,
+                    &Default::default(),
+                    None,
+                )
+                .unwrap();
+                let mut saved = f.store().restore_record(target).unwrap().unwrap();
+                if legacy {
+                    let mut config: serde_json::Value =
+                        serde_json::from_str(&saved.config_json).unwrap();
+                    let pending = config["pending_escalation"].as_object_mut().unwrap();
+                    pending.remove("trusted_request_complete");
+                    pending.insert(
+                        "trusted_request".into(),
+                        serde_json::json!(original.chars().take(8192).collect::<String>()),
+                    );
+                    saved.config_json = config.to_string();
+                    f.store().handle.upsert_run_context(&saved).unwrap();
+                }
+                let config = storage::StorageConfig {
+                    db_path: f.dir.path().join("threads.db"),
+                    ..Default::default()
+                };
+                let bus = Arc::new(event_bus::EventBus::new(128));
+                let fresh = AgentRuntime::new(
+                    bus.clone(),
+                    Arc::new(tools::ToolExecutor::new(bus)),
+                    Arc::new(Model),
+                )
+                .with_run_store(RunStore::open(&config, f._storage.handle()).unwrap());
+                if let Some(prompt) = followup {
+                    fresh
+                        .continue_goal(target, prompt.into(), RunConfig::default())
+                        .unwrap();
+                } else {
+                    fresh.resume_chat(target, RunConfig::default()).unwrap();
+                }
+                let saved = fresh
+                    .shared
+                    .run_store
+                    .get()
+                    .unwrap()
+                    .restore_record(target)
+                    .unwrap()
+                    .unwrap();
+                let descriptor: crate::restore::RunRestoreDescriptor =
+                    serde_json::from_str(&saved.config_json).unwrap();
+                let pending = descriptor.pending_escalation.unwrap();
+                assert_eq!(
+                    pending.trusted_request_complete,
+                    !legacy || followup.is_some()
+                );
+                fresh.wait_admission(target).await.unwrap();
+                let expected = match (legacy, followup) {
+                    (true, None) => None,
+                    (true, Some(prompt)) => Some(prompt.to_owned()),
+                    (false, None) => Some(original.clone()),
+                    (false, Some(prompt)) => Some(crate::thread_goals::continued_thread_request(
+                        &original, prompt,
+                    )),
+                };
+                assert_eq!(fresh.trusted_thread_request(target), expected);
+                let caller = Caller::new(
+                    target,
+                    Some(event_bus::escalation_thread_id(&target.to_string())),
+                    None,
+                );
+                let store = fresh.shared.run_store.get().unwrap();
+                assert_eq!(
+                    resolve(store, &fresh, &caller, Target::Thread("thread-1")).unwrap_err(),
+                    denied("thread-1")
+                );
+                assert_eq!(
+                    resolve(store, &fresh, &caller, Target::Thread("thread-20")).is_ok(),
+                    followup.is_some()
+                );
+                fresh.stop(target, crate::StopScope::SelfOnly).unwrap();
+                fresh.wait(target).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn escalation_both_directions_and_fork_parent_are_visible() {
         let f = Fixture::new();
         let caller = f.caller("hello", true).await;

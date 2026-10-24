@@ -13,6 +13,10 @@ pub struct PendingEscalation {
     pub requires_ownership: bool,
     /// Host-authored text, kept separate from the worker's escalation memo.
     pub trusted_request: Option<String>,
+    /// Only writers retaining complete human input set this. Legacy snapshots
+    /// may contain a truncated ID prefix and must never grant thread access.
+    #[serde(default)]
+    pub trusted_request_complete: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,6 +65,7 @@ pub(crate) fn persist_escalation_seed(
             source_run_id,
             requires_ownership,
             trusted_request: runtime.trusted_thread_request(source_run_id),
+            trusted_request_complete: true,
         }),
         completed_turn_end: None,
         route_pins: vec![],
