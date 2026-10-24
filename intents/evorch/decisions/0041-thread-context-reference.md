@@ -324,7 +324,12 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 
 各項目の完了時に `[x]` にして、commit SHA を記入する。
 
-- **origin/main への rebase は不要と判断した（origin/main 側の差分は crates/gui の #335 のみで、v24 と衝突しない）。PR 作成前に `git merge-tree` で衝突がないことを再確認する。**
+- **2026-10-25 に origin/main を merge で取り込んだ（force push を避けるため）。** ユーザーの許可を得て一度 origin/main（ceaa9501）へ rebase したが、rebase 後の force push は権限レビューで認められなかった（1 回目は承認待ちのタイムアウト、2 回目と 3 回目は「force push は実行前にユーザーの明示的なレビューが必要」として拒否）。そこで Orchestrator の指示により、push 済みの履歴は書き換えずに merge コミット 091442b1 で origin/main（d3900116。#341 まで）を取り込み、fast-forward で push した。ブランチの起点は 86d5b332 のままで、下の各項目の SHA も元の値である。
+  - 衝突は 3 ファイルで、どれも双方の追加を残して解消した。`crates/storage/src/repo/run_context.rs` は A-1 の `from_row` と #337 の `compare_and_swap_restore_state` を両方残した。`crates/runtime/src/restore.rs` と `crates/runtime/src/restore/escalation.rs` は、`RunRestoreDescriptor` の #337 の `admission_reservation_id` と A-2 の `thread_id` を両方残した。
+  - #337 の予約解除（`SnapshotReservation`）は descriptor を複製して `config_json` に書き戻すので、`thread_id` は変わらず、`thread_runs` と食い違わない。
+  - origin/main は v24 を使っていない（最新は v23）ため、マイグレーション番号は v24 のままとした。
+  - rebase した結果は、ローカルのブランチ `feat/thread-context-ref-rebased-local`（ea269e8e、push していない）に残してある。コードは merge 後と同じで、差は「その後に origin/main に入った #341 の `crates/gui/tests/terminal_headless.rs`」と「ADR の記載」だけである。
+  - PR 作成前に `git merge-tree` で origin/main との衝突がないことを再確認する。
 - [x] ADR 作成 — commit: （この ADR を追加したコミット。`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [x] Phase 0 計測 — commit: 計測結果を記入したコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [x] A-1 storage — commit: 35021ada
@@ -344,7 +349,7 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 
 ## 再開手順
 
-1. worktree `/home/turtton/.ghr/github.com/turtton/evorch/.worktrees/thread-context-ref`（ブランチ `feat/thread-context-ref`、起点は origin/main の 86d5b332）に移動する。メインのチェックアウトは触らない。
+1. worktree `/home/turtton/.ghr/github.com/turtton/evorch/.worktrees/thread-context-ref`（ブランチ `feat/thread-context-ref`、起点は origin/main の 86d5b332。2026-10-25 に merge コミット 091442b1 で origin/main の d3900116 を取り込んだ）に移動する。メインのチェックアウトは触らない。
 2. この ADR を最初から読み、「実装状況」で最初の未チェック項目から再開する。
 3. `git log --oneline -- intents/evorch/decisions/0041-thread-context-reference.md crates/storage crates/runtime/src/meta crates/gui/src/app` などで、チェック済みでもコミットが残っているか確かめる。
 4. マイグレーション番号、`HistoryRead` の位置、`capabilities()` の形などは、実装前に現行のコードで確認する（この ADR の番号は 2026-10-24 時点）。
