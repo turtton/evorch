@@ -95,11 +95,7 @@ impl HandleAllocator {
         }
         #[cfg(test)]
         {
-            static STATE: OnceLock<tempfile::TempDir> = OnceLock::new();
-            Ok(STATE
-                .get_or_init(|| tempfile::tempdir().expect("test shell handle directory"))
-                .path()
-                .join("shell-job-handles"))
+            Ok(test_state::root())
         }
         #[cfg(not(test))]
         config::user_config_dir()
@@ -234,6 +230,40 @@ fn publish(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::Error::other(
         "atomic shell handle state initialization is unsupported on this platform",
     ))
+}
+
+#[cfg(test)]
+mod test_state {
+    use super::*;
+
+    // Allocators rebuilt in this process must keep sharing their counter.
+    // Statics do not run Drop; like test-support's isolated state, remove it
+    // at normal process exit instead. test-support itself depends on tools.
+    static STATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+    pub(super) fn root() -> PathBuf {
+        STATE
+            .get_or_init(|| {
+                let state = tempfile::Builder::new()
+                    .prefix("evorch-tools-test-state-")
+                    .tempdir()
+                    .expect("test shell handle directory");
+                // SAFETY: remove_state never unwinds and only reads STATE,
+                // whose storage remains valid throughout process teardown.
+                #[cfg(unix)]
+                assert_eq!(unsafe { libc::atexit(remove_state) }, 0);
+                state
+            })
+            .path()
+            .join("shell-job-handles")
+    }
+
+    #[cfg(unix)]
+    extern "C" fn remove_state() {
+        if let Some(state) = STATE.get() {
+            let _ = std::fs::remove_dir_all(state.path());
+        }
+    }
 }
 
 #[cfg(test)]
