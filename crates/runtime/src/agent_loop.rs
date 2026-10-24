@@ -113,6 +113,7 @@ const MAX_MODEL_SWITCHES: u32 = 16;
 const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(crate) struct LoopState {
+    pub(crate) thread_id: Option<String>,
     pub(crate) turn: providers::RequestTurnContext,
     pub(crate) boundary_pending: bool,
     pub(crate) continuity: crate::continuity::Continuity,
@@ -191,6 +192,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     if runtime.goal_thread(task.run_id).is_none() {
         policy.capabilities.allowed_tools.remove("todo_write");
     }
+    let thread_id = runtime.thread_of_live_run(task.run_id);
     drop(runtime);
     // A sandboxed runtime mounts the run's own project instead of the active one.
     let sandbox_root = shared.upgrade().and_then(|runtime| {
@@ -290,6 +292,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState {
+        thread_id,
         turn: task.turn.clone(),
         boundary_pending,
         continuity,

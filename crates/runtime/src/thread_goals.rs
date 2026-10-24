@@ -420,6 +420,30 @@ impl AgentRuntime {
             .map(|entry| entry.snapshot.clone())
     }
 
+    /// Resolve the fixed conversation identity of a live delegation tree (at most 64 links).
+    pub(crate) fn thread_of_live_run(&self, run: RunId) -> Option<String> {
+        let root = {
+            let runs = crate::runtime::lock_runs(&self.shared.runs);
+            let mut current = run;
+            let mut seen = std::collections::HashSet::new();
+            let mut root = None;
+            for _ in 0..=64 {
+                if !seen.insert(current) {
+                    return None;
+                }
+                match runs.get(&current)?.parent {
+                    Some(parent) => current = parent,
+                    None => {
+                        root = Some(current);
+                        break;
+                    }
+                }
+            }
+            root?
+        };
+        self.goal_thread(root)
+    }
+
     pub(crate) fn goal_thread(&self, root: RunId) -> Option<String> {
         self.goal_lock().roots.get(&root).cloned()
     }

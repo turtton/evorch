@@ -30,6 +30,7 @@ pub(crate) fn persist_escalation_seed(
         return Ok(());
     };
     let descriptor = RunRestoreDescriptor {
+        thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),
         turn: None,
         boundary_pending: true,
         continuity: continuity.clone(),

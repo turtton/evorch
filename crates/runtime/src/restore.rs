@@ -129,6 +129,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Conversation identity only; legacy snapshots did not record it.
+    #[serde(default)]
+    pub thread_id: Option<String>,
     /// Explicit input provenance, never reconstructed by counting canonical history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<providers::RequestTurnContext>,
@@ -460,6 +463,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        thread_id: state.thread_id.clone(),
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),
@@ -566,6 +570,9 @@ fn tool_may_have_side_effects(executor: &tools::ToolExecutor, name: &str) -> boo
             | "inbox"
             | "working_note_read"
             | "history_read"
+            | "thread_search"
+            | "thread_grep"
+            | "thread_read"
             | "compact"
     )
 }
@@ -655,6 +662,16 @@ mod tests {
             "model_preference": null, "restorable": true, "non_restorable_reason": null,
         });
         let mut descriptor: super::RunRestoreDescriptor = serde_json::from_value(legacy).unwrap();
+        assert_eq!(descriptor.thread_id, None);
+        descriptor.thread_id = Some("thread-test".into());
+        assert_eq!(
+            serde_json::from_str::<super::RunRestoreDescriptor>(
+                &serde_json::to_string(&descriptor).unwrap()
+            )
+            .unwrap()
+            .thread_id,
+            descriptor.thread_id
+        );
         // Then: it reads as told nothing and writes back without the field
         assert!(descriptor.allowed_directories.is_unused());
         assert!(

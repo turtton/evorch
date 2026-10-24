@@ -433,9 +433,9 @@ impl AgentRuntime {
                     }
                 }
                 match record {
-                    None => match seed {
+                    None => match seed.as_ref() {
                         None => None,
-                        Some(seed) => Some(self.fork_seed_history(store, &seed, role, &config)?),
+                        Some(seed) => Some(self.fork_seed_history(store, seed, role, &config)?),
                     },
                     Some(record) => {
                         let descriptor: RunRestoreDescriptor =
@@ -558,6 +558,14 @@ impl AgentRuntime {
                 reason: RunRestoreFailure::CorruptContext(reason),
             }
         })?;
+        crate::thread_lineage::record_chat_root(
+            self,
+            thread_id,
+            run_id,
+            role,
+            &config,
+            seed.as_ref().filter(|_| restored_source.is_none()),
+        );
         if let Some((objective, criteria)) = config.initial_thread_goal.take() {
             self.create_thread_goal(thread_id, run_id, objective, criteria)
                 .map_err(|reason| RuntimeError::RunRestoreFailed {
