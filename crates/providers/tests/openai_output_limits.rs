@@ -16,14 +16,20 @@ use wiremock::{Mock, MockServer};
 async fn clients_choose_the_output_limit_field_for_send_and_stream() {
     for streaming in [false, true] {
         let server = MockServer::start().await;
-        let response = if streaming {
+        // The official provider always answers over Responses SSE.
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(sse_response(&fixture("openai", "responses_text.sse")))
+            .mount(&server)
+            .await;
+        let compatible_response = if streaming {
             sse_response(&fixture("openai", "stream_text.sse"))
         } else {
             json_response(200, &fixture("openai", "send_text.json"))
         };
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(response)
+            .respond_with(compatible_response)
             .mount(&server)
             .await;
         let mut expected = Vec::new();
@@ -73,13 +79,18 @@ async fn clients_choose_the_output_limit_field_for_send_and_stream() {
         for (request, (provider, model, limit)) in received.iter().zip(expected) {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(body["model"], model);
-            assert_eq!(body["stream"], streaming);
-            let (field, absent) = if provider == "openai" {
-                ("max_completion_tokens", "max_tokens")
+            let (endpoint, field, transport_streams) = if provider == "openai" {
+                ("/responses", "max_output_tokens", true)
             } else {
-                ("max_tokens", "max_completion_tokens")
+                ("/chat/completions", "max_tokens", streaming)
             };
-            assert!(body.get(absent).is_none(), "{provider}: {body}");
+            assert_eq!(request.url.path(), endpoint, "{provider}");
+            assert_eq!(body["stream"], transport_streams, "{provider}: {body}");
+            for absent in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+                if absent != field {
+                    assert!(body.get(absent).is_none(), "{provider}: {body}");
+                }
+            }
             assert_eq!(
                 body.get(field).and_then(Value::as_u64),
                 limit,

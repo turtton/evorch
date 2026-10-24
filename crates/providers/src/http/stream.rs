@@ -43,6 +43,11 @@ pub(crate) struct FrameInterpretation {
 /// 解釈結果 ([`FrameInterpretation::completion`]) の一部として返す。
 /// これにより「どのフレームが完了を引き起こしたか」という対応が 1 つの
 /// 戻り値に閉じ、実装側は完了判定の状態照会タイミングを気にせず済む。
+///
+/// 既に本トレイトを実装した型を包む転送用ラッパーは作らず、その型を直接
+/// [`adapt_sse_stream`] へ渡す。ラッパーは既定実装を持つメソッド
+/// ([`Self::take_message`] / [`Self::finalize_message`]) の委譲漏れを
+/// コンパイルエラーにできず、終端ポリシーを黙って失う。
 pub(crate) trait WireStreamInterpreter: Send {
     /// 1 フレームを解釈する。
     ///
@@ -63,6 +68,10 @@ pub(crate) trait WireStreamInterpreter: Send {
     fn take_message(&mut self) -> Option<Message> {
         None
     }
+
+    /// Apply wire-specific terminal policy after canonical/native message assembly.
+    /// This must not infer a shared tool-execution policy from the finish reason.
+    fn finalize_message(&mut self, _message: &mut Message) {}
 }
 
 /// SSE バイト列を canonical イベント列へ変換するポンプ。
@@ -224,6 +233,7 @@ impl<I: WireStreamInterpreter> SsePump<I> {
             if let Some(message) = self.interpreter.take_message() {
                 response.message = message;
             }
+            self.interpreter.finalize_message(&mut response.message);
             self.usage.emit_usage(&self.model, &response.usage);
             self.observer
                 .emit_completed(&response.usage, response.finish_reason.clone());

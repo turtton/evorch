@@ -238,11 +238,11 @@ fn compose_rejects_zero_providers() {
     assert_eq!(error, RoutingError::NoProviders);
 }
 
-// Given: map内に未対応openai provider / When: compose / Then: 一件でも未対応なら全体を失敗させる
+// Given: map内に未対応github-copilot provider / When: compose / Then: 一件でも未対応なら全体を失敗させる
 #[test]
 fn compose_fails_closed_for_unsupported_provider_type() {
     let error = compose_providers(
-        &config_with(ProviderTypeConfig::OpenAi),
+        &config_with(ProviderTypeConfig::GithubCopilot),
         deps(populated_env()),
     )
     .expect_err("未対応providerを拒否する");
@@ -250,7 +250,7 @@ fn compose_fails_closed_for_unsupported_provider_type() {
     assert_eq!(
         error,
         RoutingError::UnsupportedProviderType {
-            provider_type: "openai".to_string()
+            provider_type: "github-copilot".to_string()
         }
     );
 }
@@ -303,4 +303,34 @@ default_model = "{MODEL}"
     let composed = compose_providers(&loaded, deps(populated_env())).expect("composeに成功する");
 
     assert!(composed.provider(PROFILE).is_some());
+}
+
+// Given: type = "openai" と OPENAI_API_KEY だけのsugar設定 / When: 設定を解析してcompose
+// Then: openai-responses・公式base URL・OPENAI_API_KEY参照の既定でproviderを構築する
+#[test]
+fn openai_sugar_config_composes_with_responses_defaults() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "providers": {PROFILE: {"type": "openai", "api_key_env": "OPENAI_API_KEY"}}
+    }))
+    .expect("openai sugar設定を解析できる");
+
+    let composed = compose_providers(
+        &config,
+        deps(MapEnv::from_iter([("OPENAI_API_KEY", API_KEY)])),
+    )
+    .expect("openai providerをcomposeできる");
+
+    let provider = composed.provider(PROFILE).expect("providerが存在する");
+    assert_eq!(provider.profile.provider_type, model::ProviderType::OpenAi);
+    assert_eq!(
+        provider.profile.api_protocol,
+        model::ApiProtocol::OpenAiResponses
+    );
+    assert_eq!(provider.profile.base_url, "https://api.openai.com/v1");
+    assert_eq!(
+        provider.profile.credential,
+        routing::CredentialRef::Env {
+            var: "OPENAI_API_KEY".to_string()
+        }
+    );
 }

@@ -10,8 +10,12 @@ use serde_json::{Map, Value};
 /// Wire format of the captured request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheProtocol {
+    /// Chat Completions (`messages`), used by OpenAI-compatible endpoints.
     OpenAi,
+    /// Responses API (`instructions` + `input`), shared by the Codex backend and
+    /// the official OpenAI provider.
     Codex,
+    /// Anthropic Messages.
     Anthropic,
 }
 

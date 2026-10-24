@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent};
-use providers::provider::openai::{OpenAiClient, OpenAiConfig};
+use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use providers::{ChatRequest, ProviderAuth, ProviderClient};
 use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
 
-struct HttpModel(OpenAiClient);
+struct HttpModel(OpenAiCompatibleClient);
 
 #[async_trait::async_trait]
 impl AgentModel for HttpModel {
@@ -101,11 +101,12 @@ fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<serde_j
 }
 
 fn runtime(base_url: String, bus: &Arc<EventBus>) -> AgentRuntime {
-    let client = OpenAiClient::new(OpenAiConfig {
+    let client = OpenAiCompatibleClient::new(
         base_url,
-        event_bus: Some(bus.clone()),
-        ..OpenAiConfig::default()
-    })
+        "openai-compatible",
+        Duration::from_secs(60),
+        Some(bus.clone()),
+    )
     .expect("client");
     AgentRuntime::new(
         bus.clone(),

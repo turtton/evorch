@@ -44,7 +44,6 @@ fn other_providers_keep_existing_defaults_when_models_are_omitted() {
     for provider in [
         "anthropic",
         "anthropic-subscription",
-        "openai",
         "github-copilot",
         "openrouter",
         "openai-compatible",
@@ -58,6 +57,36 @@ fn other_providers_keep_existing_defaults_when_models_are_omitted() {
             [ModelEntryConfig::enabled("claude-sonnet-4-5")]
         );
         assert_eq!(profile.default_model, "claude-sonnet-4-5");
+    }
+}
+
+#[test]
+fn openai_defaults_when_models_are_omitted_or_empty() {
+    // Given
+    for fields in ["", "models = []\ndefault_model = ''"] {
+        let input = format!("type = 'openai'\n{fields}");
+        // When
+        let profile: ProviderProfileConfig = toml::from_str(&input).unwrap();
+        // Then
+        assert_eq!(
+            profile.api_protocol,
+            config::ApiProtocolConfig::OpenAiResponses
+        );
+        assert_eq!(
+            profile.base_url,
+            config::types::provider::OPENAI_DEFAULT_BASE_URL
+        );
+        assert_eq!(
+            profile.models,
+            config::types::provider::OPENAI_DEFAULT_MODELS
+                .iter()
+                .map(|id| ModelEntryConfig::enabled(*id))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            profile.default_model,
+            config::types::provider::OPENAI_DEFAULT_MODEL
+        );
     }
 }
 

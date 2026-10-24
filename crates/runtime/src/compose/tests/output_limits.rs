@@ -104,11 +104,7 @@ async fn fast_variant_uses_base_catalog_and_exact_preset_before_base_preset() {
 
 #[tokio::test]
 async fn automatic_limit_is_only_added_for_protocols_that_send_it() {
-    for protocol in [
-        ApiProtocol::OpenAiCodexResponses,
-        ApiProtocol::CursorAgent,
-        ApiProtocol::OpenAiResponses,
-    ] {
+    for protocol in [ApiProtocol::OpenAiCodexResponses, ApiProtocol::CursorAgent] {
         let (mut model, requests) = fixture("catalog-model").await;
         model
             .providers
@@ -118,6 +114,43 @@ async fn automatic_limit_is_only_added_for_protocols_that_send_it() {
             .api_protocol = protocol;
         complete(&model, "unsupported-wire").await.unwrap();
         assert_eq!(requests.lock().unwrap()[0].max_tokens, None);
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_receives_automatic_limit_but_codex_does_not() {
+    for (provider_type, config_type, protocol, expected) in [
+        (
+            ProviderType::OpenAi,
+            config::ProviderTypeConfig::OpenAi,
+            ApiProtocol::OpenAiResponses,
+            Some(128_000),
+        ),
+        (
+            ProviderType::OpenAiCodex,
+            config::ProviderTypeConfig::OpenAiCodex,
+            ApiProtocol::OpenAiCodexResponses,
+            None,
+        ),
+    ] {
+        // Given: a catalog-limited model served by the OpenAI API or by Codex.
+        let (mut model, requests) = fixture("catalog-model").await;
+        let profile = &mut model.providers.get_mut("local").unwrap().profile;
+        profile.provider_type = provider_type;
+        profile.api_protocol = protocol;
+        model
+            .provider_configs
+            .get_mut("local")
+            .unwrap()
+            .provider_type = config_type;
+        // When: the request is built without an explicit limit.
+        complete(&model, "responses-wire").await.unwrap();
+        // Then: only the OpenAI Responses request carries the catalog limit.
+        assert_eq!(
+            requests.lock().unwrap()[0].max_tokens,
+            expected,
+            "{provider_type:?} / {protocol:?}"
+        );
     }
 }
 
