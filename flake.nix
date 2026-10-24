@@ -36,17 +36,37 @@
           exec ${pkgs.lefthook}/bin/lefthook "$@"
         '';
         craneLib = (crane.mkLib pkgs).overrideToolchain (_p: rustToolchain);
+        # Loaded by winit and wgpu at runtime; the GUI wrappers and the dev
+        # shell put them on LD_LIBRARY_PATH.
         guiLibraries = [
           pkgs.wayland
           pkgs.libxkbcommon
           pkgs.vulkan-loader
-          pkgs.mesa
         ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.libx11
           pkgs.libxcursor
           pkgs.libxi
           pkgs.libxrandr
         ];
+        # mesa supplies lavapipe, the software Vulkan driver the dev shell's
+        # headless captures render with: mkShell puts mesa/share on
+        # XDG_DATA_DIRS, where the Vulkan loader finds its ICD.
+        #
+        # The packages leave mesa out, which keeps mesa, LLVM and Python
+        # (~0.9 GiB) out of their closures. Their wrappers set no
+        # XDG_DATA_DIRS, so the Vulkan loader never found mesa's drivers, and
+        # NixOS and nixGL name libEGL_mesa in their EGL vendor files by
+        # absolute path. The one setup found to load mesa from LD_LIBRARY_PATH
+        # no longer starts: a non-NixOS host without a usable Vulkan driver,
+        # where the user's LD_LIBRARY_PATH carries libglvnd's libEGL and the
+        # host's vendor file names libEGL_mesa.so.0 without a path, as
+        # Debian/Ubuntu's /usr/share/glvnd/egl_vendor.d/50_mesa.json does.
+        # Use nixGL there, or a mesa from the nixpkgs of the installed evorch
+        # revision (lvp is lavapipe; radeon_icd, intel_icd, ... use the GPU):
+        #   mesa=$(nix build --inputs-from github:turtton/evorch/<rev> nixpkgs#mesa --no-link --print-out-paths)
+        #   VK_DRIVER_FILES=$mesa/share/vulkan/icd.d/lvp_icd.x86_64.json evorch-gui
+        #   __EGL_VENDOR_LIBRARY_FILENAMES=$mesa/share/glvnd/egl_vendor.d/50_mesa.json evorch-gui
+        devShellGuiLibraries = guiLibraries ++ [ pkgs.mesa ];
         runtimeLibraries = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.stdenv.cc.cc.lib
         ];
@@ -355,12 +375,12 @@
             pkgs.perl
             pkgs.git
             pkgs.wayland-protocols
-          ] ++ guiLibraries ++ runtimeLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          ] ++ devShellGuiLibraries ++ runtimeLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)
             pkgs.mold
           ];
           shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (guiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (devShellGuiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
