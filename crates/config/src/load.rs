@@ -51,7 +51,9 @@ pub struct LoadOptions {
 
     /// パスが完全一致する設定ファイルの内容を、ディスクの代わりに使用する。
     ///
-    /// 保存前の実効設定シミュレーション用。値は現行バージョンの形式で渡すこと。
+    /// Current-format overrides for consumers that already own normalized values.
+    /// For raw file replacement (including migration), use
+    /// [`Config::load_unresolved_with_file_text`]. Values must be current format.
     /// 上書き値にはマイグレーションを適用しない。メインファイルは未作成でも使用できる。
     pub file_overrides: BTreeMap<PathBuf, toml::Value>,
 
@@ -143,15 +145,83 @@ impl Config {
         Self::load_with_unknown_field_policy(opts, false)
     }
 
+    /// Compose the exact raw text at the file's normal layer position.
+    ///
+    /// Unlike `file_overrides`, this parses and migrates the text exactly like a
+    /// disk file. Missing main files are supported; undiscovered paths (including
+    /// new drop-ins) and conflicting current-format overrides are errors.
+    /// The selected role profile is not applied.
+    ///
+    /// # Errors
+    /// Returns normal loader errors, or an error if the replacement was not read.
+    pub fn load_unresolved_with_file_text(
+        opts: &LoadOptions,
+        path: &Path,
+        text: &str,
+    ) -> Result<Config, ConfigError> {
+        if opts.file_overrides.contains_key(path) {
+            return Err(crate::save::invalid_field(
+                &path.display().to_string(),
+                "save target is masked by a current-format file override",
+            ));
+        }
+        let mut source = FileSource {
+            replacement: Some((path, text)),
+            consumed: false,
+        };
+        let config = Self::load_from_source(opts, false, &mut source, false)?;
+        if !source.consumed {
+            return Err(crate::save::invalid_field(
+                &path.display().to_string(),
+                "save target was not loaded; new drop-in files are not supported",
+            ));
+        }
+        Ok(config)
+    }
+
+    /// Treat this text as the only user layer; never discover home or neighbors.
+    pub(crate) fn load_standalone_text(text: &str) -> Result<Config, ConfigError> {
+        let mut source = FileSource {
+            replacement: Some((Path::new("config.toml"), text)),
+            consumed: false,
+        };
+        Self::load_from_source(&LoadOptions::default(), false, &mut source, true)
+    }
+
     fn load_with_unknown_field_policy(
         opts: &LoadOptions,
         reject_unknown_fields: bool,
     ) -> Result<Config, ConfigError> {
+        Self::load_from_source(
+            opts,
+            reject_unknown_fields,
+            &mut FileSource::default(),
+            false,
+        )
+    }
+
+    fn load_from_source(
+        opts: &LoadOptions,
+        reject_unknown_fields: bool,
+        source: &mut FileSource<'_>,
+        standalone: bool,
+    ) -> Result<Config, ConfigError> {
         let mut merged = migrate::Layer::current(builtin_layer()?);
 
-        let user_dir = opts.user_config_dir.clone().or_else(user_config_dir);
-        if let Some(dir) = user_dir {
-            merge_dir_layer(&mut merged, &dir, USER_MAIN_FILE, &opts.file_overrides)?;
+        if standalone {
+            if let Some(layer) =
+                read_file_migrated(Path::new("config.toml"), &BTreeMap::new(), source)?
+            {
+                merged.merge(layer);
+            }
+        } else if let Some(dir) = opts.user_config_dir.clone().or_else(user_config_dir) {
+            merge_dir_layer(
+                &mut merged,
+                &dir,
+                USER_MAIN_FILE,
+                &opts.file_overrides,
+                source,
+            )?;
         }
 
         // Executable configuration is trusted only through defaults and user/global files.
@@ -176,11 +246,11 @@ impl Config {
             ConfigError::Migration(format!("invalid trusted tools config: {err}"))
         })?;
 
-        if let Some(dir) = &opts.project_dir {
-            merge_project_layer(&mut merged.value, dir, &opts.file_overrides)?;
+        if !standalone && let Some(dir) = &opts.project_dir {
+            merge_project_layer(&mut merged.value, dir, &opts.file_overrides, source)?;
         }
 
-        if opts.read_env {
+        if !standalone && opts.read_env {
             let vars: BTreeMap<String, String> = match &opts.env {
                 Some(vars) => vars.clone(),
                 None => std::env::vars().collect(),
@@ -188,7 +258,7 @@ impl Config {
             merged.merge(migrate::Layer::current(env::build_layer(&vars)?));
         }
 
-        if let Some(overrides) = &opts.cli_overrides {
+        if !standalone && let Some(overrides) = &opts.cli_overrides {
             merged.merge(migrate::Layer::current(overrides.clone()));
         }
 
@@ -282,9 +352,10 @@ fn merge_dir_layer(
     dir: &Path,
     main_file: &str,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
+    source: &mut FileSource<'_>,
 ) -> Result<(), ConfigError> {
     for path in layer_paths(dir, main_file)? {
-        if let Some(value) = read_file_migrated(&path, file_overrides)? {
+        if let Some(value) = read_file_migrated(&path, file_overrides, source)? {
             merged.merge(value);
         }
     }
@@ -302,9 +373,10 @@ fn merge_project_layer(
     merged: &mut toml::Value,
     project_dir: &Path,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
+    source: &mut FileSource<'_>,
 ) -> Result<(), ConfigError> {
     for path in layer_paths(&project_dir.join(PROJECT_CONFIG_DIR), USER_MAIN_FILE)? {
-        let Some(layer) = read_file_migrated(&path, file_overrides)? else {
+        let Some(layer) = read_file_migrated(&path, file_overrides, source)? else {
             continue;
         };
         // Projects only select a profile; their migration side-table is discarded.
@@ -335,7 +407,12 @@ fn merge_project_layer(
 /// プロジェクト設定ファイルの読み取り・パース・マイグレーションに失敗した場合。
 pub fn project_role_profile(project_dir: &Path) -> Result<Option<String>, ConfigError> {
     let mut merged = toml::Value::Table(toml::map::Map::new());
-    merge_project_layer(&mut merged, project_dir, &BTreeMap::new())?;
+    merge_project_layer(
+        &mut merged,
+        project_dir,
+        &BTreeMap::new(),
+        &mut FileSource::default(),
+    )?;
     Ok(merged
         .get("role_profile")
         .and_then(toml::Value::as_str)
@@ -365,22 +442,32 @@ fn collect_dropins(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
     Ok(paths)
 }
 
-/// 1 つの設定ファイルを読み、TOML パースとマイグレーションまで行う。
-///
-/// 上書き値がある場合は I/O とマイグレーションを省略する。
-/// 上書きもファイルも存在しない場合は `Ok(None)`。ディスク上のルートがテーブルでない
-/// ドキュメントも [`ConfigError::Parse`] として扱う。
+/// Only the source of raw bytes changes; parse, migration and merge stay shared.
+#[derive(Default)]
+struct FileSource<'a> {
+    replacement: Option<(&'a Path, &'a str)>,
+    consumed: bool,
+}
+
+/// Read a layer, preserving the migration-free contract of `file_overrides`.
 fn read_file_migrated(
     path: &Path,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
+    source: &mut FileSource<'_>,
 ) -> Result<Option<migrate::Layer>, ConfigError> {
     if let Some(value) = file_overrides.get(path) {
         return Ok(Some(migrate::Layer::current(value.clone())));
     }
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
+    let content = if let Some((_, text)) = source.replacement.filter(|(target, _)| *target == path)
+    {
+        source.consumed = true;
+        text.to_owned()
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        }
     };
 
     let table: toml::value::Table =
@@ -449,7 +536,8 @@ mod tests {
             toml::from_str("[metrics]\nenabled = false\n").expect("current-format candidate");
         let overrides = [(path.clone(), candidate.clone())].into();
         // When: resolving that exact path.
-        let loaded = read_file_migrated(&path, &overrides).expect("override");
+        let loaded = read_file_migrated(&path, &overrides, &mut super::FileSource::default())
+            .expect("override");
         // Then: unlike migration, the override path does not insert a version field.
         assert_eq!(loaded.map(|layer| layer.value), Some(candidate));
         assert!(!path.exists());
@@ -464,7 +552,8 @@ mod tests {
         let candidate = toml::from_str("[metrics]\nenabled = false\n").expect("candidate");
         let overrides = [(other, candidate)].into();
         // When: resolving a missing file not in the map.
-        let loaded = read_file_migrated(&path, &overrides).expect("missing file");
+        let loaded = read_file_migrated(&path, &overrides, &mut super::FileSource::default())
+            .expect("missing file");
         // Then: a matching filename alone cannot replace a different path.
         assert!(loaded.is_none());
     }

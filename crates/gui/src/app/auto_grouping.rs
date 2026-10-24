@@ -117,14 +117,9 @@ pub(crate) fn write_additions(
         {
             return Err(problem.to_string());
         }
-        config::save_role_profile_bindings_with_options(
-            path,
-            Some(scope),
-            Some(&file_routing),
-            None,
-            options,
-        )
-        .map_err(|error| error.to_string())?;
+        config::LayeredSaveContext::new(options)
+            .save_role_profile_bindings(path, Some(scope), Some(&file_routing), None)
+            .map_err(|error| error.to_string())?;
     }
     Ok((added, blocked))
 }

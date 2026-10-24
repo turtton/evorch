@@ -192,7 +192,8 @@ fn prepare(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    let after = config::preview_role_profiles_bindings(&path, &bindings(&wanted, &targets))
+    let after = config::StandaloneSaveContext
+        .preview_role_profiles_bindings(&path, &bindings(&wanted, &targets))
         .map_err(|error| error.to_string())?;
     if after == before {
         return Ok(None);
@@ -295,7 +296,7 @@ impl Tool for ApplyConfig {
                     change.path.display()
                 ));
             }
-            config::save_role_profiles_bindings(&change.path, &bindings(&wanted, &targets))
+            config::StandaloneSaveContext.save_role_profiles_bindings(&change.path, &bindings(&wanted, &targets))
                 .map_err(|error| error.to_string())?;
             Ok(change)
         })

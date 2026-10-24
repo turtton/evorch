@@ -434,12 +434,36 @@ visible and is flagged, and saving role or routing settings is refused while a
 chain or route mixes kinds. In routing settings, a candidate's model override
 offers only models of the kind the route's other candidates share.
 
-GUI provider, role-chain and routing saves validate the final candidate file in
-its effective layered configuration (including `config.d`, environment and CLI
-overrides, and inactive role profiles) before writing. Model registrations and
-chains may live in different files. Route deletion, renaming and reference
-updates are all applied before this check; an incompatible chain or provider
-leaves the original file untouched. A Codex GUI edit must retain an explicit
-chat default, so changing or deleting its last chat model is rejected before
-saving. The standalone config API can still omit both `models` and
-`default_model` to opt into the built-in Codex defaults.
+Every GUI config save (providers including deletion, role profile creation,
+replacement and deletion, routing and renames, automatic grouping, project
+profile selection, sandbox, and self-improvement) uses an explicit layered save
+context. The final TOML text is prepared once, checked for file-local structure
+and credential safety, then composed by the normal loader at the target's
+original layer position. The raw text follows the same per-file migration,
+merge order and finalization as a disk reload; legacy `logical_model` and
+Oracle/Advisor bindings therefore have the same meaning before and after a
+save. All top-level and named profiles, even unselected ones, are checked for
+model-kind and image-provider constraints. The checked bytes are the bytes
+written atomically (or returned by preview), not a new serialization.
+
+Registrations and chains may live in different files. Deletion, renaming and
+reference updates happen before validation. If the final result is invalid,
+the original file is unchanged and validation creates no temporary file.
+This also means an unrelated save is refused when another, inactive profile
+already has a kind/provider mismatch; repair that profile before saving.
+Undefined routes retain their existing warning policy rather than making all
+saves equivalent to strict loading.
+
+A save target must be a path actually read by the supplied load options. A
+missing main file can be created; a new, undiscovered drop-in or a target masked
+by a current-format `file_overrides` value is rejected explicitly. No neighboring
+configuration directories are inferred from the save path. Non-GUI consumers
+can explicitly choose `StandaloneSaveContext`, which treats the file as the only
+user layer plus built-in defaults and reads no home, drop-in, env or CLI layers.
+The evaluator's preview/apply uses this standalone contract.
+
+Codex model intent is separate from layer context: `ExplicitModels` requires an
+enabled chat default, so a GUI edit changing or removing its last chat model
+(including deleting all models) fails before saving. `BuiltinDefaults` explicitly
+requests the built-in Codex models/default and requires both input fields empty;
+this intent is available in both standalone and layered contexts.

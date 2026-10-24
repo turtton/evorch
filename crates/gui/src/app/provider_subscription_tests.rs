@@ -53,6 +53,11 @@ mod subscription_delete_tests {
             &workspace_ui::UiSettings::default(),
         )
         .unwrap()
+        .with_settings_load_options(config::LoadOptions {
+            user_config_dir: Some(directory.path().to_owned()),
+            read_env: false,
+            ..Default::default()
+        })
         .with_provider_settings(ProviderSettingsModel::seed_from_config(&config))
         .with_provider_settings_path(&path)
         .with_credential_store(store.clone());
@@ -168,11 +173,18 @@ mod native_delete_race_tests {
                 &workspace_ui::UiSettings::default(),
             )
             .unwrap()
+            .with_settings_load_options(config::LoadOptions {
+                user_config_dir: Some(directory.path().to_owned()),
+                read_env: false,
+                ..Default::default()
+            })
             .with_provider_settings(ProviderSettingsModel::seed_from_config(&config))
             .with_provider_settings_path(&path)
             .with_credential_store(store.clone());
             state.delete_provider_settings("native".into());
-            let held_lock = started.recv().unwrap();
+            let held_lock = started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("credential deletion reached after config save");
             let refresh_store = store.clone();
             let refresher = std::thread::spawn(move || {
                 let lock = routing::factory::subscription_refresh_lock(provider, "native-account");

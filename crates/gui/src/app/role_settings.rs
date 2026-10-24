@@ -68,8 +68,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Created(name),
-                    Box::new(move |path, current| {
-                        super::role_profiles::create_profile(path, current, &source, &target)
+                    Box::new(move |path, current, context| {
+                        super::role_profiles::create_profile(
+                            path, current, context, &source, &target,
+                        )
                     }),
                 )
             }
@@ -77,7 +79,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Deleted(name),
-                    Box::new(move |path, _| super::role_profiles::delete_profile(path, &target)),
+                    Box::new(move |path, _, context| {
+                        super::role_profiles::delete_profile(path, context, &target)
+                    }),
                 )
             }
         };
@@ -154,18 +158,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let agents = self.role_settings.agents.clone();
         let profile = self.role_settings.profiles.selected.clone();
-        let options = self.user_settings_options();
         self.start_role_job(
             RoleProfileJob::Save,
-            Box::new(move |path, _| {
-                config::save_role_profile_bindings_with_options(
-                    path,
-                    Some(&profile),
-                    None,
-                    Some(&agents),
-                    &options,
-                )
-                .map_err(|error| error.to_string())
+            Box::new(move |path, _, context| {
+                context
+                    .save_role_profile_bindings(path, Some(&profile), None, Some(&agents))
+                    .map_err(|error| error.to_string())
             }),
         );
     }

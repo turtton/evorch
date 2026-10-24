@@ -41,7 +41,7 @@ impl SelfImprovementSettingsModel {
         self.save_rx.is_some()
     }
 
-    pub fn start_save(&mut self, path: Option<PathBuf>) {
+    pub fn start_save(&mut self, path: Option<PathBuf>, options: config::LoadOptions) {
         if self.is_saving() {
             return;
         }
@@ -64,7 +64,9 @@ impl SelfImprovementSettingsModel {
                 .map_or(Ok(()), std::fs::create_dir_all)
                 .map_err(|error| error.to_string())
                 .and_then(|()| {
-                    config::save_self_improvement(&path, &draft).map_err(|error| error.to_string())
+                    config::LayeredSaveContext::new(&options)
+                        .save_self_improvement(&path, &draft)
+                        .map_err(|error| error.to_string())
                 });
             let _ = tx.send(result);
         });
@@ -150,7 +152,14 @@ mod tests {
             collect_lessons: false,
         };
         let mut model = SelfImprovementSettingsModel::seed_from_config(&cfg);
-        model.start_save(Some(path));
+        model.start_save(
+            Some(path),
+            config::LoadOptions {
+                user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
+                read_env: false,
+                ..Default::default()
+            },
+        );
         assert!(wait_for_save(&mut model));
         let loaded = config::Config::load(&config::LoadOptions {
             project_dir: Some(dir.path().into()),
@@ -168,9 +177,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut model = SelfImprovementSettingsModel::default();
         assert!(!model.draft.enabled);
-        model.start_save(None);
+        model.start_save(None, config::LoadOptions::default());
         assert!(model.error.is_some());
-        model.start_save(Some(dir.path().to_owned()));
+        model.start_save(Some(dir.path().to_owned()), config::LoadOptions::default());
         assert!(!wait_for_save(&mut model));
         assert!(model.error.is_some());
     }

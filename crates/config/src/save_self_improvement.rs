@@ -14,6 +14,18 @@ pub fn save_self_improvement(
     path: &Path,
     self_improvement: &SelfImprovementConfig,
 ) -> Result<(), ConfigError> {
+    save_self_improvement_in_scope(
+        path,
+        self_improvement,
+        crate::save_context::SaveScope::Standalone,
+    )
+}
+
+pub(crate) fn save_self_improvement_in_scope(
+    path: &Path,
+    self_improvement: &SelfImprovementConfig,
+    scope: crate::save_context::SaveScope<'_>,
+) -> Result<(), ConfigError> {
     self_improvement.validate()?;
     let mut doc = crate::save::read_document(path)?;
     let mut section = toml_edit::Table::new();
@@ -47,5 +59,5 @@ pub fn save_self_improvement(
         toml_edit::value(self_improvement.collect_lessons),
     );
     doc.insert("self_improvement", toml_edit::Item::Table(section));
-    crate::save::write_document(path, &doc)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }

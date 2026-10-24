@@ -16,6 +16,7 @@ pub mod prompt_sources;
 pub mod save;
 mod save_agents;
 mod save_codex;
+mod save_context;
 mod save_role_profiles;
 mod save_routing;
 mod save_sandbox;
@@ -38,9 +39,10 @@ pub use save::{
 };
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
-    CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
-    save_codex_provider_edit_with_options,
+    CodexModelIntent, CodexProviderInput, delete_provider, save_codex_provider,
+    save_codex_provider_edit, save_codex_provider_edit_with_options,
 };
+pub use save_context::{LayeredSaveContext, StandaloneSaveContext};
 pub use save_role_profiles::{
     RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings,
     save_project_role_profile, save_role_profile, save_role_profile_bindings,

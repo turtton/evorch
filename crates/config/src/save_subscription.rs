@@ -24,7 +24,12 @@ pub fn save_subscription_provider_edit(
     input: &SubscriptionProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
-    save_subscription_provider_edit_inner(path, input, original_name, None)
+    save_subscription_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        crate::save_context::SaveScope::Standalone,
+    )
 }
 
 /// Save a subscription edit after validating the effective layered configuration.
@@ -37,14 +42,19 @@ pub fn save_subscription_provider_edit_with_options(
     original_name: Option<&str>,
     options: &crate::LoadOptions,
 ) -> Result<(), ConfigError> {
-    save_subscription_provider_edit_inner(path, input, original_name, Some(options))
+    save_subscription_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        crate::save_context::SaveScope::Layered(options),
+    )
 }
 
-fn save_subscription_provider_edit_inner(
+pub(crate) fn save_subscription_provider_edit_inner(
     path: &Path,
     input: &SubscriptionProviderInput,
     original_name: Option<&str>,
-    options: Option<&crate::LoadOptions>,
+    scope: crate::save_context::SaveScope<'_>,
 ) -> Result<(), ConfigError> {
     if !matches!(
         input.provider_type,
@@ -67,14 +77,5 @@ fn save_subscription_provider_edit_inner(
         excluded_models: input.excluded_models.clone(),
         default_model: input.default_model.clone(),
     };
-    if let Some(options) = options {
-        crate::save::save_openai_compatible_provider_edit_with_options(
-            path,
-            &validated,
-            original_name,
-            options,
-        )
-    } else {
-        crate::save::save_openai_compatible_provider_edit(path, &validated, original_name)
-    }
+    crate::save::save_openai_compatible_provider_edit_inner(path, &validated, original_name, scope)
 }

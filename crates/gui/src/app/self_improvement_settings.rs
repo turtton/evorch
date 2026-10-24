@@ -77,8 +77,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.self_improvement_settings.open = false;
         }
         if save {
+            let options = self.user_settings_options();
             self.self_improvement_settings
-                .start_save(self.provider_settings_path.clone());
+                .start_save(self.provider_settings_path.clone(), options);
         }
     }
 }

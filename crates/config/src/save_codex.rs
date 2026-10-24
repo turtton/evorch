@@ -3,8 +3,9 @@
 use crate::ConfigError;
 use crate::save::{
     insert_profile, invalid_field, model_values, normalized_models, read_document,
-    remove_original_profile, write_document,
+    remove_original_profile,
 };
+use crate::save_context::SaveScope;
 use crate::types::provider::ModelEntryConfig;
 use std::path::Path;
 use toml_edit::{InlineTable, Table, value};
@@ -34,7 +35,17 @@ pub fn save_codex_provider_edit(
     input: &CodexProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
-    save_codex_provider_edit_inner(path, input, original_name, None)
+    save_codex_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        SaveScope::Standalone,
+        if input.models.is_empty() && input.default_model.is_empty() {
+            CodexModelIntent::BuiltinDefaults
+        } else {
+            CodexModelIntent::ExplicitModels
+        },
+    )
 }
 
 /// Save a Codex GUI edit after validating all effective role profiles.
@@ -48,14 +59,28 @@ pub fn save_codex_provider_edit_with_options(
     original_name: Option<&str>,
     options: &crate::LoadOptions,
 ) -> Result<(), ConfigError> {
-    save_codex_provider_edit_inner(path, input, original_name, Some(options))
+    save_codex_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        SaveScope::Layered(options),
+        CodexModelIntent::ExplicitModels,
+    )
 }
 
-fn save_codex_provider_edit_inner(
+/// Whether an empty model list intentionally requests Codex built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexModelIntent {
+    BuiltinDefaults,
+    ExplicitModels,
+}
+
+pub(crate) fn save_codex_provider_edit_inner(
     path: &Path,
     input: &CodexProviderInput,
     original_name: Option<&str>,
-    options: Option<&crate::LoadOptions>,
+    scope: SaveScope<'_>,
+    intent: CodexModelIntent,
 ) -> Result<(), ConfigError> {
     if input.name.is_empty()
         || !input
@@ -99,10 +124,15 @@ fn save_codex_provider_edit_inner(
             crate::save::DEFAULT_MODEL_KIND_MESSAGE,
         ));
     }
-    // Explicit model edits must retain an enabled chat default. The standalone
-    // API alone may omit both fields to opt into Codex's built-in defaults; a GUI
-    // edit that deletes every model must not silently opt into those defaults.
-    if (options.is_some() || !models.is_empty() || !input.default_model.is_empty())
+    if intent == CodexModelIntent::BuiltinDefaults
+        && (!models.is_empty() || !input.default_model.is_empty())
+    {
+        return Err(invalid_field(
+            "providers.models",
+            "built-in defaults require empty models and default_model",
+        ));
+    }
+    if intent == CodexModelIntent::ExplicitModels
         && !models.iter().any(|model| {
             model.id == input.default_model
                 && model.enabled
@@ -132,7 +162,7 @@ fn save_codex_provider_edit_inner(
     }
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
-    crate::save::write_document_with_options(path, &doc, options)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }
 
 /// Remove only the named profile. The caller owns credential-store cleanup.
@@ -140,6 +170,14 @@ fn save_codex_provider_edit_inner(
 /// # Errors
 /// Returns invalid config, unsupported versions, or I/O errors.
 pub fn delete_provider(path: &Path, name: &str) -> Result<(), ConfigError> {
+    delete_provider_in_scope(path, name, SaveScope::Standalone)
+}
+
+pub(crate) fn delete_provider_in_scope(
+    path: &Path,
+    name: &str,
+    scope: SaveScope<'_>,
+) -> Result<(), ConfigError> {
     let mut doc = read_document(path)?;
     if let Some(providers) = doc.get_mut("providers") {
         let table = providers
@@ -147,5 +185,5 @@ pub fn delete_provider(path: &Path, name: &str) -> Result<(), ConfigError> {
             .ok_or_else(|| invalid_field("providers", "providers must be a table"))?;
         table.remove(name);
     }
-    write_document(path, &doc)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }
