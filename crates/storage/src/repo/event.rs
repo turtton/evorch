@@ -189,6 +189,17 @@ pub fn list_all_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageEr
     )
 }
 
+/// Orchestrator events in ID order. Only these rows' payloads are decoded,
+/// a small share of a long history.
+pub fn list_orchestrator_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageError> {
+    list_events(
+        conn,
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
+         FROM events WHERE kind = 'Orchestrator' ORDER BY id ASC",
+        [],
+    )
+}
+
 /// Events at or after `from_ns` that name one of `run_ids` in a `run_id` field or
 /// carry an approval call ID (`<run>:<call>`) of one, oldest first. At most
 /// `limit` are returned, with whether more matched.

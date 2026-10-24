@@ -428,7 +428,8 @@ impl eval::evaluator::EvaluatorHost for EvaluatorHost {
 }
 
 fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
-    let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
+    let result =
+        Database::open(storage_config).and_then(|database| database.orchestrator_events_ordered());
     match result {
         Ok(events) => {
             let latest = latest_thread_goals(events.into_iter().map(|stored| stored.event));
@@ -448,7 +449,8 @@ fn restore_thread_todos(
     runtime: &runtime::AgentRuntime,
     sidebar: &workspace_ui::SidebarState,
 ) {
-    let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
+    let result =
+        Database::open(storage_config).and_then(|database| database.orchestrator_events_ordered());
     match result {
         Ok(events) => {
             let mut latest = std::collections::BTreeMap::new();
