@@ -1,5 +1,5 @@
 //! Headers for runtime-owned coordination tools: delegation, agent messages,
-//! waits, questions, todos and team tasks.
+//! waits, questions, todos, team tasks and reads of other threads.
 
 use serde_json::Value;
 
@@ -157,6 +157,37 @@ pub(super) fn header(
             header.meta = str_arg("task_id").map(one_line);
             header
         }
+        "thread_search" => {
+            // `query` is one string or alternatives; without it the newest threads are listed.
+            let queries: Vec<&str> = match input.and_then(|input| input.get("query")) {
+                Some(Value::String(query)) => vec![query],
+                Some(Value::Array(queries)) => queries.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let mut header = new(icons::LIST_MAGNIFYING_GLASS, "Search threads");
+            header.subject = one_line(
+                &queries
+                    .iter()
+                    .map(|query| format!("\"{query}\""))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
+            header
+        }
+        "thread_grep" => {
+            let mut header = new(icons::FILE_MAGNIFYING_GLASS, "Grep thread");
+            header.subject = str_arg("pattern")
+                .map(|pattern| one_line(&format!("\"{pattern}\"")))
+                .unwrap_or_default();
+            header.location = agent("thread").map(|thread| format!("in {thread}"));
+            header
+        }
+        "thread_read" => {
+            let mut header = new(icons::BOOK_OPEN_TEXT, "Read thread");
+            header.subject = agent("thread").unwrap_or_default();
+            header.meta = str_arg("view").map(one_line);
+            header
+        }
         _ => return None,
     };
     header.subject = header.subject.trim().to_owned();
@@ -242,6 +273,31 @@ mod tests {
                 "task_claim",
                 json!({"task_id": "task-1"}),
                 "Claim task task-1",
+            ),
+        ] {
+            assert_eq!(text(tool, input, &agents).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn thread_reads_name_the_query_and_thread() {
+        let agents = [row(3, "reviewer-r1", "reviewer")];
+        for (tool, input, expected) in [
+            (
+                "thread_search",
+                json!({"query": ["login", "auth flow"]}),
+                "Search threads \"login\" | \"auth flow\"",
+            ),
+            ("thread_search", json!({"limit": 5}), "Search threads"),
+            (
+                "thread_grep",
+                json!({"thread": "thread-2", "pattern": "panic"}),
+                "Grep thread \"panic\" in thread-2",
+            ),
+            (
+                "thread_read",
+                json!({"thread": "run-3", "view": "messages"}),
+                "Read thread reviewer-r1 · messages",
             ),
         ] {
             assert_eq!(text(tool, input, &agents).as_deref(), Some(expected));
