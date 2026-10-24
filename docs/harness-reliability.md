@@ -23,7 +23,9 @@
   or a copy of an item in `edits`). Any other combination is rejected without
   writing, with a JSON example of a call that works. The executor reads an
   optional field set to `null` that its schema can never accept as omitted, for
-  every tool; required fields stay for validation to reject. In a file whose
+  every built-in and host tool; required fields stay for validation to reject.
+  MCP tools keep such a `null` for validation to reject, since their server
+  decides what it means. In a file whose
   line breaks are all CRLF, LF line breaks in `old_string` and `new_string` are
   treated as CRLF. In a file that mixes CRLF and LF, a multi-line `old_string` written with
   LF is matched as CRLF only when nothing matches as written, and its

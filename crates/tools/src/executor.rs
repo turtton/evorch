@@ -282,12 +282,15 @@ impl ToolExecutor {
     }
 
     /// Resolve relative file arguments against this run's workspace, never global cwd.
-    /// Optional fields set to a null the schema rejects are read as omitted first.
+    /// Optional fields set to a null the schema rejects are read as omitted first,
+    /// unless the tool opts out through [`Tool::reads_null_as_omitted`].
     fn scoped_args(&self, name: &str, mut args: serde_json::Value) -> serde_json::Value {
         if name == "edit" {
             canonicalize_edit_names(&mut args);
         }
-        if let Some(registered) = self.tools.get(name) {
+        if let Some(registered) = self.tools.get(name)
+            && registered.tool.reads_null_as_omitted()
+        {
             schema::strip_null_optionals(&registered.schema, &mut args);
         }
         let root = self
