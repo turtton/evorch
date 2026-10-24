@@ -270,8 +270,16 @@ async fn web_fetch_critical_approval_is_handed_to_the_user() {
                 RunConfig::default(),
             )
             .unwrap();
-        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-        responder.await.expect("responder");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(run_id))
+                .await
+                .expect("critical approval run timed out"),
+            Ok(AgentRunPhase::Done)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), responder)
+            .await
+            .expect("critical approval responder timed out")
+            .expect("responder");
         let events = drain_events(&mut events).await;
         assert!(events.iter().any(|event| matches!(
             &event.kind,

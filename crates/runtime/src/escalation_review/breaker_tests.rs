@@ -213,6 +213,289 @@ async fn approval_resets_the_streak() {
 }
 
 #[tokio::test]
+async fn user_mode_approval_resets_auto_streak() {
+    let fixture = Fixture::new(false);
+    fixture.deny("one").await;
+    fixture.deny("two").await;
+    *fixture.gate.settings.lock().unwrap() = (EscalationApproval::User, false);
+    let mut events = fixture.gate.bus.subscribe();
+    let approval = fixture.gate.decide(&fixture.ctx, "inspection", "inspect");
+    let answer = async {
+        loop {
+            if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { call_id, .. }) =
+                events.recv().await.unwrap().kind
+            {
+                fixture.gate.bus.emit(event_bus::Event::new(
+                    event_bus::ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved: true,
+                    },
+                ));
+                break;
+            }
+        }
+    };
+    let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(approval, answer)
+    })
+    .await
+    .expect("user-mode approval deadline");
+    assert!(matches!(decision, EscalationDecision::Approve));
+    assert_eq!(fixture.denials(&fixture.ctx), 0);
+    *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Auto, false);
+    assert!(!refused_without_review(&fixture.deny("new one").await));
+    assert_eq!(fixture.denials(&fixture.ctx), 1);
+    assert!(!refused_without_review(&fixture.deny("new two").await));
+    assert_eq!(fixture.reviewed(), 4);
+}
+
+#[tokio::test]
+async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
+    let mut fixture = Fixture::new(true);
+    fixture
+        .run
+        .add_user_request(&fixture.ctx.run_id, "inspect the project");
+    fixture.deny("existing").await;
+    let model = Arc::new(ScriptedModel::new([Ok(
+        super::super::support::text_response(
+            r#"{"approve":false,"reason":"pending","risk_level":"low","authorization_level":"high"}"#,
+            providers::FinishReason::Stop,
+        ),
+    )]));
+    fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(model)));
+    let mut events = fixture.gate.bus.subscribe();
+    let decision = fixture.gate.decide(&fixture.ctx, "inspection", "inspect");
+    let change = async {
+        loop {
+            if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { call_id, .. }) =
+                events.recv().await.unwrap().kind
+            {
+                *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Auto, false);
+                fixture.gate.bus.emit(event_bus::Event::new(
+                    event_bus::ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved: true,
+                    },
+                ));
+                break;
+            }
+        }
+    };
+    let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(decision, change)
+    })
+    .await
+    .expect("ordered settings change");
+    assert!(matches!(decision, EscalationDecision::Deny { reason }
+        if reason.starts_with("shell escalation settings changed during review\n")));
+    assert_eq!(fixture.denials(&fixture.ctx), 1);
+}
+
+#[tokio::test]
+async fn parallel_old_generation_completions_cannot_change_current_streak() {
+    // Cover a reset watermark, a live streak, and an already suspended generation.
+    for current_denials in [0, 1, CONSECUTIVE_DENIAL_LIMIT] {
+        for approve in [false, true] {
+            let mut fixture = Fixture::new(false);
+            fixture
+                .run
+                .add_user_request(&fixture.ctx.run_id, "old request");
+            let release = Arc::new(tokio::sync::Notify::new());
+            let response = if approve {
+                r#"{"approve":true,"reason":"old critical","risk_level":"critical","authorization_level":"high"}"#
+            } else {
+                r#"{"approve":false,"reason":"old denial","risk_level":"low","authorization_level":"high"}"#
+            };
+            let model = Arc::new(ScriptedModel::gated(
+                [Ok(super::super::support::text_response(
+                    response,
+                    providers::FinishReason::Stop,
+                ))],
+                release.clone(),
+            ));
+            fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(model.clone())));
+            let request = FileAccessRequest {
+                tool: "read".into(),
+                paths: vec!["/outside/documentation".into()],
+                write: false,
+                justification: "requested inspection".into(),
+                change: None,
+            };
+            let mut events = fixture.gate.bus.subscribe();
+            let old = fixture.gate.decide_file_access(&fixture.ctx, &request);
+            let newer = async {
+                model.wait_for_request(0).await;
+                fixture
+                    .run
+                    .add_user_request(&fixture.ctx.run_id, "new request");
+                if current_denials == 0 {
+                    fixture.decide(Ok(ReviewVerdict::Approve), false).await;
+                } else {
+                    for _ in 0..current_denials {
+                        fixture.deny("current denial").await;
+                    }
+                }
+                release.notify_one();
+                if approve {
+                    loop {
+                        if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
+                            call_id,
+                            ..
+                        }) = events.recv().await.unwrap().kind
+                        {
+                            fixture.gate.bus.emit(event_bus::Event::new(
+                                event_bus::ToolEvent::ApprovalResolved {
+                                    call_id,
+                                    approved: true,
+                                },
+                            ));
+                            break;
+                        }
+                    }
+                }
+            };
+            let (decision, ()) =
+                tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(old, newer) })
+                    .await
+                    .expect("ordered old-generation completion");
+            assert_eq!(matches!(decision, EscalationDecision::Approve), approve);
+            assert_eq!(
+                fixture.denials(&fixture.ctx),
+                current_denials,
+                "approve={approve}"
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .shared
+                    .escalation_denials
+                    .suspension(Fixture::run_id(&fixture.ctx), 2),
+                (current_denials == CONSECUTIVE_DENIAL_LIMIT).then(|| "current denial".into())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn input_arriving_during_denial_discards_old_result_before_next_call() {
+    let fixture = Fixture::new(false);
+    let entered = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
+    let pending = fixture.gate.arbitrate(
+        &fixture.ctx,
+        "file access escalation",
+        |_| async {
+            entered.notify_one();
+            release.notified().await;
+            Ok((
+                ReviewVerdict::Deny {
+                    reason: "old".into(),
+                },
+                None,
+            ))
+        },
+        || async { panic!("no fallback") },
+    );
+    let input = async {
+        entered.notified().await;
+        fixture
+            .run
+            .add_user_request(&fixture.ctx.run_id, "new request");
+        release.notify_one();
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(pending, input)
+    })
+    .await
+    .expect("ordered new input");
+    assert_eq!(fixture.denials(&fixture.ctx), 0);
+}
+
+#[tokio::test]
+async fn authorization_and_missing_user_request_policy_denials_count() {
+    use crate::escalation_review::support::text_response;
+    use providers::FinishReason;
+    for missing_request in [false, true] {
+        let mut fixture = Fixture::new(false);
+        let model = Arc::new(ScriptedModel::new((0..3).map(|_| Ok(text_response(
+            r#"{"approve":true,"reason":"insufficient authority","risk_level":"high","authorization_level":"low"}"#,
+            FinishReason::Stop,
+        )))));
+        fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(model.clone())));
+        if !missing_request {
+            fixture
+                .run
+                .add_user_request(&fixture.ctx.run_id, "inspect the project");
+        }
+        for count in 1..=CONSECUTIVE_DENIAL_LIMIT {
+            assert!(matches!(
+                fixture
+                    .gate
+                    .decide(&fixture.ctx, "inspection", "inspect")
+                    .await,
+                EscalationDecision::Deny { .. }
+            ));
+            assert_eq!(fixture.denials(&fixture.ctx), count);
+        }
+        assert!(refused_without_review(
+            &fixture
+                .gate
+                .decide(&fixture.ctx, "inspection", "inspect")
+                .await
+        ));
+        assert_eq!(
+            model.observed().await.len(),
+            if missing_request { 0 } else { 3 }
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn critical_human_timeout_or_cancel_does_not_change_streak() {
+    for cancel in [false, true] {
+        let fixture = Fixture::new(false);
+        fixture.deny("existing").await;
+        let mut events = fixture.gate.bus.subscribe();
+        let mut decision = Box::pin(fixture.gate.arbitrate(
+            &fixture.ctx,
+            "shell escalation",
+            |_| async {
+                Ok((
+                    ReviewVerdict::RequiresUser {
+                        reason: "critical".into(),
+                    },
+                    None,
+                ))
+            },
+            || {
+                fixture.gate.human(
+                    &fixture.ctx,
+                    "critical operation",
+                    "requested",
+                    ShellAccess::Host,
+                )
+            },
+        ));
+        loop {
+            tokio::select! {
+                result = &mut decision => panic!("approval must be pending: {}", describe(&result)),
+                event = events.recv() => if matches!(event.unwrap().kind,
+                    EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { .. })) { break; }
+            }
+        }
+        if cancel {
+            // The caller cancels by dropping the in-flight gate future.
+            drop(decision);
+        } else {
+            tokio::time::advance(HUMAN_APPROVAL_TIMEOUT).await;
+            assert!(matches!(decision.await, EscalationDecision::Deny { reason }
+                if reason.contains("approval timed out") && reason.contains(DENIAL_GUIDANCE)));
+        }
+        assert_eq!(fixture.denials(&fixture.ctx), 1);
+    }
+}
+
+#[tokio::test]
 async fn environment_failures_and_requires_user_do_not_count() {
     let fixture = Fixture::new(false);
     fixture.deny("counted").await;

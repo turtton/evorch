@@ -24,6 +24,8 @@ mod mcp_scope;
 
 #[cfg(test)]
 mod finish_tests;
+#[cfg(test)]
+mod network_review_tests;
 
 #[cfg(test)]
 mod rework_tests {
@@ -1011,11 +1013,10 @@ impl LoopState {
                 NetworkGate::Proceed
             }
             NetworkAccessDecision::Deny { reason } => {
-                self.audit_network_call(name, call_id, input, "deny", "tool_policy", &reason);
                 if self.shared.executor.requires_scope_gate(name) {
                     self.emit_mcp_scope_denial(name, call_id, &reason);
                 }
-                NetworkGate::Reject(ToolResult::error(reason))
+                self.reject_network_call(name, call_id, input, "tool_policy", &reason)
             }
             NetworkAccessDecision::Ask { mut reason } => {
                 if crate::network::reviews_each_call(name) && per_tool == PolicyDecision::AutoAllow
@@ -1070,7 +1071,7 @@ impl LoopState {
                                 self.finish_interrupted(kind);
                                 return NetworkGate::Cancelled;
                             }
-                            return NetworkGate::Reject(ToolResult::error("review was interrupted"));
+                            return self.reject_network_call(name, call_id, input, "auto_review", "review was interrupted");
                         }
                         verdict = review => verdict,
                     };
@@ -1084,9 +1085,13 @@ impl LoopState {
                             if !matches!((stamp, current), (Some(expected), Some(current))
                                 if current.synced && current == expected)
                             {
-                                return NetworkGate::Reject(ToolResult::error(
+                                return self.reject_network_call(
+                                    name,
+                                    call_id,
+                                    input,
+                                    "auto_review",
                                     "review context changed during review",
-                                ));
+                                );
                             }
                             self.audit_network_call(
                                 name,
@@ -1104,33 +1109,23 @@ impl LoopState {
                             reason: critical,
                         }) => reason = critical,
                         Ok(crate::escalation_review::ReviewVerdict::Deny { reason: error }) => {
-                            self.audit_network_call(
+                            return self.reject_network_call(
                                 name,
                                 call_id,
                                 input,
-                                "deny",
                                 "auto_review",
                                 &error,
                             );
-                            return NetworkGate::Reject(ToolResult::error(format!(
-                                "{error}\n{}",
-                                crate::escalation_review::DENIAL_GUIDANCE
-                            )));
                         }
                         Err(error) => {
                             let error = error.to_string();
-                            self.audit_network_call(
+                            return self.reject_network_call(
                                 name,
                                 call_id,
                                 input,
-                                "deny",
                                 "auto_review",
                                 &error,
                             );
-                            return NetworkGate::Reject(ToolResult::error(format!(
-                                "{error}\n{}",
-                                crate::escalation_review::DENIAL_GUIDANCE
-                            )));
                         }
                     }
                 }
@@ -1144,7 +1139,7 @@ impl LoopState {
                             self.finish_interrupted(kind);
                             return NetworkGate::Cancelled;
                         }
-                        return NetworkGate::Reject(ToolResult::error("approval wait was interrupted"));
+                        return self.reject_network_call(name, call_id, input, "user_review", "approval wait was interrupted");
                     }
                     outcome = gate.request_with_input(name, &correlation_id, Some(input.clone())) => outcome,
                 };
@@ -1166,25 +1161,31 @@ impl LoopState {
                         } else {
                             format!("approval denied: {reason}")
                         };
-                        self.audit_network_call(
-                            name,
-                            call_id,
-                            input,
-                            "deny",
-                            "user_review",
-                            &error,
-                        );
                         if self.shared.executor.requires_scope_gate(name) {
                             self.emit_mcp_scope_denial(name, call_id, &reason);
                         }
-                        NetworkGate::Reject(ToolResult::error(format!(
-                            "{error}\n{}",
-                            crate::escalation_review::DENIAL_GUIDANCE
-                        )))
+                        self.reject_network_call(name, call_id, input, "user_review", &error)
                     }
                 }
             }
         }
+    }
+
+    /// Keep audit/diagnostic reasons bare and add agent guidance only at the
+    /// rejection boundary, including policy and stale-context denials.
+    fn reject_network_call(
+        &self,
+        name: &str,
+        call_id: &str,
+        input: &Value,
+        reviewer: &str,
+        reason: &str,
+    ) -> NetworkGate {
+        self.audit_network_call(name, call_id, input, "deny", reviewer, reason);
+        NetworkGate::Reject(ToolResult::error(format!(
+            "{reason}\n{}",
+            crate::escalation_review::DENIAL_GUIDANCE
+        )))
     }
 
     fn audit_network_call(

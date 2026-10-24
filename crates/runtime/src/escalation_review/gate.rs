@@ -202,7 +202,9 @@ impl SandboxEscalationGate {
     {
         let settings = self.settings.lock().ok().map(|settings| *settings);
         let mut reviewed_stamp = None;
-        let mut streak = None;
+        // Capture the input generation in every mode: a valid human approval
+        // in User mode resets the same run-local streak as an Auto approval.
+        let streak = self.denial_streak(ctx);
         // The reviewer's own denial reason, when the outcome hinges on it.
         let mut counted = None;
         let decision = match settings {
@@ -214,7 +216,6 @@ impl SandboxEscalationGate {
             },
             Some((EscalationApproval::User, _)) => human().await,
             Some((EscalationApproval::Auto, fallback)) => {
-                streak = self.denial_streak(ctx);
                 let suspended = streak.as_ref().and_then(|(shared, run_id, user_inputs)| {
                     shared.escalation_denials.suspension(*run_id, *user_inputs)
                 });
@@ -244,12 +245,16 @@ impl SandboxEscalationGate {
                 if reviewed_stamp
                     .is_some_and(|stamp| !stamp.synced || self.current_stamp(ctx) != Some(stamp))
                 {
+                    counted = None;
                     EscalationDecision::Deny {
                         reason: "review context changed during review".into(),
                     }
                 } else if current.is_some() && current == settings {
                     EscalationDecision::Approve
                 } else {
+                    // Even a model Deny followed by human approval must not
+                    // count when the final approval is environmentally invalid.
+                    counted = None;
                     EscalationDecision::Deny {
                         reason: format!("{label} settings changed during review"),
                     }
@@ -258,9 +263,18 @@ impl SandboxEscalationGate {
             EscalationDecision::Deny { reason } => EscalationDecision::Deny { reason },
         };
         if let Some((shared, run_id, user_inputs)) = &streak {
+            // Observe input that arrived while this decision was pending. Old
+            // completions cannot revive a generation, even before its next call.
+            if let Some((_, _, current_inputs)) = self.denial_streak(ctx) {
+                shared
+                    .escalation_denials
+                    .suspension(*run_id, current_inputs);
+            }
             match (&decision, &counted) {
-                // Any approval, automatic or by the user, ends the streak.
-                (EscalationDecision::Approve, _) => shared.escalation_denials.clear(*run_id),
+                // Only a valid final approval resets, in its starting generation.
+                (EscalationDecision::Approve, _) => shared
+                    .escalation_denials
+                    .record_approval(*run_id, *user_inputs),
                 (EscalationDecision::Deny { .. }, Some(reason)) => {
                     shared
                         .escalation_denials
