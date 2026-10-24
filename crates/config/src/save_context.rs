@@ -15,6 +15,18 @@ impl<'a> LayeredSaveContext<'a> {
         Self { options }
     }
 
+    /// Refresh the shared save checks after an approval wait without rebuilding
+    /// the approved text. Recompose it at its original position in today's layers.
+    ///
+    /// # Errors
+    /// Returns structure, layer-loading, or model-kind errors before any write.
+    pub fn revalidate(
+        &self,
+        prepared: crate::save::ValidatedSave,
+    ) -> Result<crate::save::ValidatedSave, ConfigError> {
+        prepared.revalidate(self.scope())
+    }
+
     const fn scope(&self) -> SaveScope<'_> {
         SaveScope::Layered(self.options)
     }

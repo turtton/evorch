@@ -470,6 +470,15 @@ impl ValidatedSave {
         self.text
     }
 
+    /// Exact checked bytes, suitable for a preview without reserializing the config.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn revalidate(self, scope: SaveScope<'_>) -> Result<Self, ConfigError> {
+        checked_text_for_save_text(&self.path, self.text, scope)
+    }
+
     /// Effective unresolved configuration composed from these exact bytes.
     pub const fn config(&self) -> &Config {
         &self.config
@@ -506,7 +515,15 @@ pub(crate) fn checked_text_for_save(
     doc: &DocumentMut,
     scope: SaveScope<'_>,
 ) -> Result<ValidatedSave, ConfigError> {
-    let text = checked_text(doc)?;
+    checked_text_for_save_text(path, doc.to_string(), scope)
+}
+
+fn checked_text_for_save_text(
+    path: &Path,
+    text: String,
+    scope: SaveScope<'_>,
+) -> Result<ValidatedSave, ConfigError> {
+    check_file_structure(&text)?;
     let config = scope.compose(path, &text)?;
     config
         .model_kind_problems()
@@ -522,9 +539,8 @@ pub(crate) fn checked_text_for_save(
 
 /// Validate file-local structure only. Cross-layer model registrations and chains
 /// must be checked against the effective configuration at the save boundary.
-pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
-    let text = doc.to_string();
-    let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
+fn check_file_structure(text: &str) -> Result<(), ConfigError> {
+    let table = toml::from_str::<toml::value::Table>(text).map_err(|error| {
         ConfigError::Migration(format!("failed to parse config before saving: {error}"))
     })?;
     let checked = crate::migrate::run(toml::Value::Table(table))?;
@@ -534,8 +550,7 @@ pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
             "failed to deserialize config before saving: {error}"
         ))
     })?;
-    config.self_improvement.validate()?;
-    Ok(text)
+    config.self_improvement.validate()
 }
 
 pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {

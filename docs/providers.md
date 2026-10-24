@@ -460,7 +460,11 @@ by a current-format `file_overrides` value is rejected explicitly. No neighborin
 configuration directories are inferred from the save path. Non-GUI consumers
 can explicitly choose `StandaloneSaveContext`, which treats the file as the only
 user layer plus built-in defaults and reads no home, drop-in, env or CLI layers.
-The evaluator's preview/apply uses this standalone contract.
+The evaluator's preview/apply uses its actual user configuration layers,
+including drop-ins. Preview text, effective override diagnostics and commit all
+come from the same `ValidatedSave`. After user approval it revalidates the exact
+approved bytes against the current layers, so a kind change in a drop-in while
+waiting cannot bypass the save checks.
 
 Codex model intent is separate from layer context: `ExplicitModels` requires an
 enabled chat default, so a GUI edit changing or removing its last chat model
