@@ -340,6 +340,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_stopped_restore_keeps_snapshot_while_its_root_awaits_admission() {
+        // Given: an earlier start of the stopped root still awaits provider
+        // admission under the same run ID.
+        let fixture = Fixture::new("Stopped").await;
+        fixture
+            .runtime
+            .entry(fixture.root)
+            .unwrap()
+            .phase_tx
+            .send_replace(AgentRunPhase::Stopped);
+        fixture
+            .model
+            .admission_pending
+            .store(true, Ordering::Relaxed);
+        fixture.runtime.spawn_reserved(
+            fixture.root,
+            None,
+            Role::Orchestrator,
+            "root",
+            RunConfig::default(),
+        );
+        assert!(
+            fixture
+                .runtime
+                .admission_snapshot(fixture.root)
+                .unwrap()
+                .result
+                .is_none()
+        );
+        // When: the operator continues the same conversation again.
+        let error = fixture
+            .runtime
+            .continue_goal(fixture.root, "continue".into(), RunConfig::default())
+            .unwrap_err();
+        // Then: the second start is refused without consuming the snapshot.
+        assert!(
+            matches!(&error, RuntimeError::RunRestoreFailed {
+                reason: RunRestoreFailure::UnsupportedConfig(reason), ..
+            } if reason.starts_with("root_reconciliation_required")),
+            "{error}"
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .restore_record(fixture.root)
+                .unwrap(),
+            Some(fixture.record)
+        );
+    }
+
+    #[tokio::test]
     async fn non_stopped_record_still_rejects_live_child() {
         for phase in ["Done", "Error", "Checkpoint"] {
             let fixture = Fixture::new(phase).await;
