@@ -140,9 +140,8 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - name: Setup attic client
         run: |
-          nix profile install nixpkgs#attic-client
-          attic login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
-          attic use home
+          nix run --inputs-from . nixpkgs#attic-client -- login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
+          nix run --inputs-from . nixpkgs#attic-client -- use home
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       # The package also checks CLI startup and ELF linkage after runtime fixup.
@@ -155,6 +154,10 @@ jobs:
           # The default package adds the CEF GUI build on x86_64-linux (ADR 0034).
           nix build -L .#default --out-link ./result-default
           nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
+          # The patched attic client the push step uploads with (flake.nix
+          # atticClient). Built on every run so a pull request catches a patch
+          # that no longer applies; main pushes it, so later runs substitute it.
+          nix build -L .#attic-client --out-link ./result-attic
       # PR 同士の並行 push が tailscaled ingress を詰まらせるため (issue #72)、
       # attic への push は main の push に限る。PR は main の closure を substitute する。
       - name: Push to attic
@@ -166,22 +169,30 @@ jobs:
           # vendored crate sources) が attic に入らず毎回再 build になるため、
           # 出力の runtime closure ごと push して次回 run で substitute させる。
           # tailscaled ingress stalls under concurrent large uploads (issue #72).
-          # Since the CEF build joined the default package, each main push
-          # carried four 0.15-0.9 GB NARs (about 2 GB) at once over the default
-          # five upload jobs, and every upload-path request ended in
-          # "Connection timed out (os error 110)" through all retries (runs
-          # 39813604265 .. 40051380823). attic streams the whole NAR on every
-          # attempt and deduplicates only on the server, so a retry resends it.
-          # Upload one NAR at a time, the shipped packages before the deps
-          # archives, and retry each set on its own so a stalled deps archive
-          # no longer discards the others.
+          # Every main push since #309 failed with upload-path requests ending
+          # in "Connection timed out (os error 110)" (runs 39813604265 ..
+          # 40058104188): nixpkgs' attic client inherits reqwest 0.13's Linux
+          # TCP_USER_TIMEOUT of 30 s, so the kernel aborted every upload that
+          # atticd left unread for 30 s while it stored new chunks. The flake's
+          # attic-client raises that limit to 5 minutes; the login above still
+          # uses nixpkgs' client, which shares its config.
+          # attic streams the whole NAR on every attempt and deduplicates only
+          # on the server, so a retry resends it. Upload one NAR at a time: a
+          # result rarely adds more than one or two new large NARs, so parallel
+          # jobs save little, while concurrent uploads compete for atticd's
+          # database and storage, which is what leaves bodies unread. Push the
+          # shipped packages before the deps archives and retry each set on its
+          # own so a stalled deps archive no longer discards the others.
+          # `timeout` still ends an attempt whose server stays connected but
+          # never answers, which no TCP timeout detects.
           # How the runner reaches attic (direct or DERP relay) bounds throughput.
           timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
+          attic="$PWD/result-attic/bin/attic"
           status=0
-          for result in ./result-evorch ./result-default ./result-deps ./result-cef-deps; do
+          for result in ./result-attic ./result-evorch ./result-default ./result-deps ./result-cef-deps; do
             for attempt in 1 2 3 4; do
               if nix path-info --recursive "$result" |
-                timeout 20m attic push --stdin --jobs 1 home; then
+                timeout 20m "$attic" push --stdin --jobs 1 home; then
                 break
               fi
               if [ "$attempt" -eq 4 ]; then

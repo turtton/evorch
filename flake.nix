@@ -326,6 +326,21 @@
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
         '';
         defaultPackage = if isCefSystem then evorch-with-cef else evorch;
+        # The client CI pushes to attic with. attic builds its HTTP client with
+        # reqwest 0.13, whose Linux default TCP_USER_TIMEOUT is 30 s, so the
+        # kernel drops an upload as soon as atticd leaves the body unread for
+        # 30 s while it stores earlier chunks: every failed main push ended in
+        # "Connection timed out (os error 110)" that way. Five minutes rides out
+        # those stalls and still ends an upload whose peer is gone. attic offers
+        # no setting for it, and --replace-fail stops the build once upstream
+        # changes this builder. reqwest has the option on Linux only.
+        atticClient = pkgs.attic-client.overrideAttrs (old: {
+          postPatch = (old.postPatch or "") + ''
+            substituteInPlace client/src/api/mod.rs --replace-fail \
+              '.default_headers(headers)' \
+              '.default_headers(headers).tcp_user_timeout(std::time::Duration::from_secs(300))'
+          '';
+        });
         devShell = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
@@ -365,6 +380,9 @@
           # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
           # バイナリとセットで push することで次回 run の deps build を skip させる。
           evorch-deps = cargoArtifacts;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # CI only: the attic client for the push step (see atticClient).
+          attic-client = atticClient;
         } // pkgs.lib.optionalAttrs isCefSystem {
           inherit evorch-gui-cef evorch-with-cef cefDist;
           # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.
