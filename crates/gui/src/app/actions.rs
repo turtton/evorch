@@ -482,6 +482,45 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .contains(&crate::model::transcript_registry::TranscriptKey::Thread)
     }
 
+    fn thread_of_run(&self, run_id: &str) -> Option<ThreadId> {
+        self.sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.run_ids.iter().any(|id| id == run_id))
+            .map(|thread| thread.id.clone())
+    }
+
+    /// The runtime holds subagent reports for this finished root: resume it
+    /// under the thread's current authority so it receives them. The user did
+    /// not ask for this, so routine notices about its state stay quiet.
+    pub(super) fn wake_conversation_root(&mut self, run_id: &str) {
+        let Some(thread_id) = self.thread_of_run(run_id) else {
+            return;
+        };
+        if self.readonly_threads.contains(&thread_id.to_string()) {
+            return;
+        }
+        let command = WorkbenchCommand::ContinueChat(self.chat_continuation(&thread_id, true));
+        self.issued.push(command.clone());
+        for event in self.sink.submit(command) {
+            if !matches!(event, LoopEvent::ChatNotice { .. }) {
+                self.apply_loop_event(event);
+            }
+        }
+    }
+
+    pub(super) fn announce_auto_continuation_pause(&mut self, run_id: &str, limit: u32) {
+        let Some(thread_id) = self.thread_of_run(run_id) else {
+            return;
+        };
+        self.apply_loop_event(LoopEvent::ChatNotice {
+            thread_id: thread_id.to_string(),
+            text: format!(
+                "Paused automatic continuation after {limit} subagent reports without your input. Send a message to deliver the remaining reports and continue."
+            ),
+        });
+    }
+
     pub fn request_diff(&mut self, mode: DiffMode) {
         let Some(repo_root) = self.active_repo_root() else {
             return;

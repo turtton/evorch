@@ -8,6 +8,7 @@ mod cancellation;
 mod chat_restore;
 mod child_renewal;
 mod completion_relay;
+mod held_messages;
 mod output;
 mod project;
 mod questions;
@@ -89,6 +90,10 @@ pub(crate) struct Shared {
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
+    /// Messages for finished or stopped runs, released when the run is registered again.
+    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<AgentMessage>>>,
+    /// Automatic wakes per conversation root since the last user input.
+    pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -654,6 +659,8 @@ impl AgentRuntime {
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                held_messages: Mutex::new(HashMap::new()),
+                auto_wakes: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
@@ -962,6 +969,8 @@ impl AgentRuntime {
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                held_messages: Mutex::new(HashMap::new()),
+                auto_wakes: Mutex::new(HashMap::new()),
                 bus,
                 executor: Mutex::new(executor),
                 model,
@@ -1469,32 +1478,37 @@ impl AgentRuntime {
             compaction_busy: compaction_busy.clone(),
             result_tx,
         };
-        lock_runs(&self.shared.runs).insert(
-            run_id,
-            RunEntry {
-                terminal_reason: None,
-                role,
-                name: name.clone(),
-                model,
-                config: config.clone(),
-                parent,
-                escalated_from,
-                completion_relayed,
-                phase_tx: phase_tx_entry,
-                phase_rx,
-                message_count_rx,
-                inbox_tx,
-                user_inbox,
-                pending_reference: Arc::new(Mutex::new(pending_reference)),
-                cancel_tx,
-                compact_tx,
-                model_preference_tx,
-                result_rx,
-                compaction_busy: Arc::clone(&compaction_busy),
-                mailbox: Arc::clone(&mailbox),
-                _join: None,
-            },
-        );
+        {
+            let mut runs = lock_runs(&self.shared.runs);
+            runs.insert(
+                run_id,
+                RunEntry {
+                    terminal_reason: None,
+                    role,
+                    name: name.clone(),
+                    model,
+                    config: config.clone(),
+                    parent,
+                    escalated_from,
+                    completion_relayed,
+                    phase_tx: phase_tx_entry,
+                    phase_rx,
+                    message_count_rx,
+                    inbox_tx,
+                    user_inbox,
+                    pending_reference: Arc::new(Mutex::new(pending_reference)),
+                    cancel_tx,
+                    compact_tx,
+                    model_preference_tx,
+                    result_rx,
+                    compaction_busy: Arc::clone(&compaction_busy),
+                    mailbox: Arc::clone(&mailbox),
+                    _join: None,
+                },
+            );
+            self.release_held_messages(run_id, &mailbox);
+            drop(runs);
+        }
         if task.restored.is_some() {
             self.shared
                 .bus

@@ -179,7 +179,7 @@ async fn team_history_rejects_persisted_claims_and_live_unclaimed_descendants() 
 }
 
 #[tokio::test]
-async fn disk_authoritative_delivery_still_rejects_a_renewable_team_root() {
+async fn subagent_message_holds_instead_of_restoring_a_renewable_team_root_from_disk() {
     let fixture = Fixture::new();
     let runtime = fixture.runtime();
     let root = fixture.root(&runtime).await;
@@ -187,12 +187,21 @@ async fn disk_authoritative_delivery_still_rejects_a_renewable_team_root() {
         .delegate_background_as_child(root, Role::Explorer, "child", RunConfig::default())
         .unwrap();
     runtime.wait(child).await.unwrap();
-    let result = runtime.send_agent_message(child, root, AgentMessageKind::Send, "resume", None);
+    // The team's authority cannot come from disk: the message waits for the
+    // host to resume the root under current authority.
+    runtime
+        .send_agent_message(child, root, AgentMessageKind::Send, "resume", None)
+        .unwrap();
+    assert_eq!(
+        runtime.inspect_agent(root).unwrap().phase,
+        event_bus::AgentRunPhase::Done
+    );
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("current_team_authority_required")
+        runtime
+            .restore_diagnostics(root)
+            .unwrap()
+            .unwrap()
+            .history_available_with_current_authority
     );
 }
 

@@ -133,6 +133,9 @@ impl AgentRuntime {
                 _join: None,
             },
         );
+        if let Some(entry) = runs.get(&run_id) {
+            self.release_held_messages(run_id, &entry.mailbox);
+        }
         self.shared.bus.emit(Event::new(restored_event));
         self.shared
             .bus

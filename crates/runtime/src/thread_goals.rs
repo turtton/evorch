@@ -604,6 +604,7 @@ impl AgentRuntime {
     }
 
     pub(crate) fn goal_user_input(&self, root: RunId, text: &str) {
+        self.reset_auto_wakes(root);
         let reviewer = {
             let mut goals = self.goal_lock();
             let Some(thread) = goals.roots.get(&root).cloned() else {

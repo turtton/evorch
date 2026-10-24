@@ -50,6 +50,8 @@ pub struct RuntimeCommandSink {
     stop_marked: BTreeSet<String>,
     // Retain resume eligibility even after stage two clears stop_marked.
     stopped_by_us: BTreeSet<String>,
+    /// Set while serving a runtime-requested resume, which is not user input.
+    automatic_resume: bool,
     goal_projects: BTreeMap<String, String>,
     chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     /// Project each thread last submitted from, for host follow-ups that carry none.
@@ -92,6 +94,7 @@ impl RuntimeCommandSink {
             running_children: BTreeMap::new(),
             stop_marked: BTreeSet::new(),
             stopped_by_us: BTreeSet::new(),
+            automatic_resume: false,
             goal_projects: BTreeMap::new(),
             chat_permits: BTreeMap::new(),
             thread_roots: BTreeMap::new(),
@@ -707,20 +710,39 @@ impl RuntimeCommandSink {
                 runtime.set_goal_checks_paused(&thread_id, &goal_id, paused)
             }),
             WorkbenchCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
-            WorkbenchCommand::ContinueChat(continuation) => self.submit_chat(
-                crate::model::commands::ChatSubmission {
-                    fork_seed: None,
-                    project_root: continuation.project_root,
-                    thread_id: continuation.thread_id,
-                    composer_role: continuation.composer_role,
-                    model_preference: continuation.model_preference,
-                    images: Vec::new(),
-                    // The resume_only path never submits this placeholder as input.
-                    text: String::new(),
-                },
-                permit,
-                true,
-            ),
+            WorkbenchCommand::ContinueChat(continuation) => {
+                self.automatic_resume = continuation.automatic;
+                let events = self.submit_chat(
+                    crate::model::commands::ChatSubmission {
+                        fork_seed: None,
+                        project_root: continuation.project_root,
+                        thread_id: continuation.thread_id,
+                        composer_role: continuation.composer_role,
+                        model_preference: continuation.model_preference,
+                        images: Vec::new(),
+                        // The resume_only path never submits this placeholder as input.
+                        text: String::new(),
+                    },
+                    permit,
+                    true,
+                );
+                self.automatic_resume = false;
+                events
+            }
+        }
+    }
+
+    /// A user `/continue` renews the automatic-wake budget; a runtime-requested
+    /// resume only delivers the reports held for the root.
+    fn resume_chat(
+        &self,
+        run_id: RunId,
+        authority: RunConfig,
+    ) -> Result<RunId, runtime::RuntimeError> {
+        if self.automatic_resume {
+            self.runtime.wake_chat(run_id, authority)
+        } else {
+            self.runtime.resume_chat(run_id, authority)
         }
     }
 
@@ -912,7 +934,7 @@ impl RuntimeCommandSink {
             }
             let _guard = self.handle.enter();
             let continuation = if resume_only {
-                self.runtime.resume_chat(run_id, authority)
+                self.resume_chat(run_id, authority)
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)
@@ -982,7 +1004,7 @@ impl RuntimeCommandSink {
             }
             let _guard = self.handle.enter();
             let continuation = if resume_only {
-                self.runtime.resume_chat(run_id, authority)
+                self.resume_chat(run_id, authority)
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)
@@ -1567,6 +1589,7 @@ mod tests {
             thread_id: thread.into(),
             composer_role: crate::model::composer::ComposerRole::Worker,
             model_preference: None,
+            automatic: false,
         })
     }
 

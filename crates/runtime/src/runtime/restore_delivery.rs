@@ -50,21 +50,33 @@ impl AgentRuntime {
                         }
                     }
                     self.authorize_restore(&runs, sender, (recipient, entry.parent), &message)?;
-                    if let Some(reason) = self.continuation_refusal(recipient, Some(entry)) {
-                        return Err(fail(reason));
+                    // A subagent's report to its finished parent is never lost:
+                    // it is held until the parent continues, and while the
+                    // operator's stop holds the parent is not woken for it.
+                    let from_child =
+                        runs.get(&sender).and_then(|sender| sender.parent) == Some(recipient);
+                    match self.continuation_refusal(recipient, Some(entry)) {
+                        Some(RunRestoreFailure::StoppedByOperator) if from_child => {
+                            drop(runs);
+                            return self.hold_for_parent(sender, recipient, message);
+                        }
+                        Some(reason) => return Err(fail(reason)),
+                        None => {}
                     }
-                    Some(Arc::clone(&entry.mailbox))
+                    (Some(Arc::clone(&entry.mailbox)), from_child)
                 } else {
-                    None
+                    (None, false)
                 }
             };
-            let store = self.shared.run_store.get().ok_or_else(|| {
-                if previous.is_some() {
-                    fail(RunRestoreFailure::StorageNotConfigured)
-                } else {
-                    unknown_run(recipient)
+            let (previous, from_child) = previous;
+            let store = match self.shared.run_store.get() {
+                Some(store) => store,
+                None if from_child => return self.hold_for_parent(sender, recipient, message),
+                None if previous.is_some() => {
+                    return Err(fail(RunRestoreFailure::StorageNotConfigured));
                 }
-            })?;
+                None => return Err(unknown_run(recipient)),
+            };
             let identity = store
                 .restore_parent(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
@@ -140,14 +152,25 @@ impl AgentRuntime {
                     (restored, permit.filter(|_| renewed))
                 }
                 None => {
-                    if !record.restorable || !descriptor.restorable {
-                        return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                    let disk = if !record.restorable || !descriptor.restorable {
+                        Err(fail(RunRestoreFailure::UnsupportedConfig(
                             descriptor
                                 .non_restorable_reason
+                                .clone()
                                 .unwrap_or_else(|| "実行設定".into()),
-                        )));
+                        )))
+                    } else {
+                        RestoredState::from_record(&record)
+                    };
+                    match disk {
+                        Ok(restored) => (restored, None),
+                        // Disk alone cannot continue the parent: keep the report
+                        // and let the parent be woken under current authority.
+                        Err(_) if from_child => {
+                            return self.hold_for_parent(sender, recipient, message);
+                        }
+                        Err(error) => return Err(error),
                     }
-                    (RestoredState::from_record(&record)?, None)
                 }
             };
             let _authority = ownership
@@ -230,6 +253,38 @@ impl AgentRuntime {
                 DeliveryDisposition::Restored,
             ));
         }
+    }
+    /// Keep a subagent's message for its finished parent and wake the parent.
+    /// A parent that came back meanwhile receives it directly.
+    fn hold_for_parent(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        mut message: AgentMessage,
+    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        let runs = lock_runs(&self.shared.runs);
+        if runs.get(&recipient).is_some_and(is_live) {
+            drop(runs);
+            return self.try_live_delivery(
+                sender,
+                recipient,
+                message.kind.clone(),
+                message.content.clone(),
+                message.reply_to.clone(),
+            );
+        }
+        message.message_id = format!(
+            "msg-{}",
+            self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
+        );
+        self.hold_message(recipient, message.clone());
+        drop(runs);
+        self.schedule_wake(recipient);
+        Ok((
+            message.message_id.clone(),
+            message,
+            DeliveryDisposition::Held,
+        ))
     }
 }
 

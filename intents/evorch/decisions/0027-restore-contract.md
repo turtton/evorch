@@ -172,3 +172,24 @@ blocking にある `workspace_branch` は、拒否する対象そのものが存
 - blocking/securityの拒否理由、消費済みsnapshot、識別子の検証は変えない。
 
 検証: `crates/runtime/tests/subagent_continuation.rs`、`subagent_question_resume.rs`。
+
+## Addendum（2026-10-22、終了した親への子の報告）
+
+子の完了通知は、親が終了・停止していると破棄されていた。親より長く動いた子の結果は
+親に届かなかった。利用者の承認（2026-10-22）により、無限ループの防止を条件に親を起こす。
+
+- 終了・停止した親への子の完了通知と子からのメッセージは破棄せず保留する
+  （`DeliveryDisposition::Held`）。取り消された親への通知だけは破棄する。
+- 保留した親は起こす。root は `LifecycleEvent::RootWakeRequested` でホストに依頼し、
+  ホストが現在の権限で `wake_chat` により再開する。非rootの親は、生存している自分の親の
+  現在のpermitで継続する。生存していなければ、親が再開されるまで保留する。
+  保留分は run の再登録時に受信箱へ移す。
+- disk だけで復元できる親への子のメッセージは、従来どおり disk から復元して配送する。
+- 利用者が停止した親は起こさない。利用者が root を再開した時点で保留分を配送する。
+- 利用者の入力なしに起こせる回数は会話ごとに `AUTO_WAKE_LIMIT`（20）回までとする。
+  超えたら `LifecycleEvent::AutoContinuationPaused` を一度だけ出し、以後の保留分は
+  利用者の次の入力まで残す。利用者のメッセージと `/continue` が上限を戻す。
+  ホストが自動で行う再開（`wake_chat`）は利用者の入力として扱わない。
+
+検証: `crates/runtime/tests/held_reports.rs`、`messaging_completion.rs`、
+`crates/gui/tests/headless_conversation/thread_resume_status.rs`。
