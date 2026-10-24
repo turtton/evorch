@@ -249,10 +249,13 @@ async fn connect_error_and_truncated_stream_never_report_success() {
         .await;
     let client = client(&server);
     Mock::given(path("/agent.v1.AgentService/RunSSE"))
-        .respond_with(response(vec![Proto::new().message(
-            1,
-            Proto::new().message(1, Proto::new().string(1, "partial")),
-        )]))
+        .respond_with(response(vec![
+            Proto::new().message(99, Proto::new().string(1, "opaque extension")),
+            Proto::new().message(
+                1,
+                Proto::new().message(1, Proto::new().string(1, "partial")),
+            ),
+        ]))
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&server)

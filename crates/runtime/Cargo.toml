@@ -46,6 +46,7 @@ rustix = { version = "1", features = ["fs"] }
 socket2 = "0.6"
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 url = { workspace = true }
 jsonschema = { workspace = true }
 wiremock = { workspace = true }

@@ -85,6 +85,39 @@ struct Harness {
     runtime: AgentRuntime,
     receiver: EventReceiver,
     mock: StreamingMockOpenAi,
+    wire: Wire,
+}
+
+/// Provider wire exercised through the real routing factory and HTTP client.
+#[derive(Clone, Copy)]
+enum Wire {
+    /// `type = "openai-compatible"`: Chat Completions.
+    ChatCompletions,
+    /// `type = "openai"`: the official Responses API.
+    Responses,
+}
+
+impl Wire {
+    const fn provider_type(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "openai-compatible",
+            Self::Responses => "openai",
+        }
+    }
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/v1/chat/completions",
+            Self::Responses => "/v1/responses",
+        }
+    }
+
+    const fn protocol(self) -> CacheProtocol {
+        match self {
+            Self::ChatCompletions => CacheProtocol::OpenAi,
+            Self::Responses => CacheProtocol::Codex,
+        }
+    }
 }
 
 fn harness(script: Vec<ScriptedResponse>, window: u64) -> Harness {
@@ -142,6 +175,29 @@ fn harness_with_config(
     threshold: f64,
     configure: impl FnOnce(&mut Config),
 ) -> Harness {
+    harness_with_wire(
+        Wire::ChatCompletions,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harness_with_wire(
+    wire: Wire,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
     std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
@@ -151,7 +207,7 @@ fn harness_with_config(
         format!(
             r#"
 [providers.local]
-type = "openai-compatible"
+type = "{provider_type}"
 base_url = "{}"
 api_key_env = "{KEY_ENV}"
 models = ["{MODEL}"]
@@ -171,7 +227,8 @@ keep_recent_tokens = 1
 max_summary_bytes = 256
 summarizer = "structural"
 "#,
-            mock.base_url()
+            mock.base_url(),
+            provider_type = wire.provider_type(),
         ),
     )
     .unwrap();
@@ -194,6 +251,7 @@ summarizer = "structural"
         executor = executor.with_post_edit_hook(checker);
     }
     let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,
@@ -215,6 +273,7 @@ summarizer = "structural"
         runtime,
         receiver,
         mock,
+        wire,
     }
 }
 
@@ -293,9 +352,10 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         .mock
         .recorded_requests()
         .into_iter()
-        .filter(|request| request.path == "/v1/chat/completions")
+        .filter(|request| request.path == harness.wire.path())
         .map(|request| request.body)
         .collect::<Vec<_>>();
+    let protocol = harness.wire.protocol();
     let mut starts = Vec::new();
     let mut completed = std::collections::HashMap::new();
     let mut pending_checkpoint = None;
@@ -364,7 +424,7 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
             // Only the successful event for this run, consumed at this exact next
             // request, permits replacing history. Static instructions/tools stay fixed.
             assert_compaction_transition(
-                CacheProtocol::OpenAi,
+                protocol,
                 &requests[index - 1],
                 &requests[index],
                 checkpoint,
@@ -375,12 +435,8 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
                 "compaction fixture must actually invalidate part of the old prefix"
             );
         } else {
-            assert_append_only(
-                CacheProtocol::OpenAi,
-                &requests[index - 1],
-                &requests[index],
-            )
-            .unwrap_or_else(|error| panic!("request {index} destroyed cached input: {error}"));
+            assert_append_only(protocol, &requests[index - 1], &requests[index])
+                .unwrap_or_else(|error| panic!("request {index} destroyed cached input: {error}"));
             assert!(
                 cached >= previous_input,
                 "request {index}: cached={cached}, previously processed input={previous_input}"
@@ -984,6 +1040,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
         let mut executor = ToolExecutor::new(bus.clone());
         executor.register(Arc::new(BulkRead)).unwrap();
         harness.runtime = compose_runtime(RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
             user_config_dir: Some(root.join("empty-user-config")),
             config: &current,
             bus,
@@ -1160,6 +1217,7 @@ async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_pr
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let mut executor = ToolExecutor::new(bus.clone());
@@ -1430,11 +1488,16 @@ async fn shell_scope_recovery_keeps_policy_and_failed_observations_in_the_wire_p
 }
 
 async fn compaction_restarts_cache(reason: CompactionReason) {
+    compaction_restarts_cache_on(Wire::ChatCompletions, reason).await;
+}
+
+async fn compaction_restarts_cache_on(wire: Wire, reason: CompactionReason) {
     let review_storage = support::ReviewStorage::new();
     let automatic = reason == CompactionReason::Automatic;
     let old_reply =
         "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
-    let mut harness = harness(
+    let mut harness = harness_with_wire(
+        wire,
         vec![
             read_response(0),
             text_response(&old_reply),
@@ -1443,6 +1506,11 @@ async fn compaction_restarts_cache(reason: CompactionReason) {
             text_response("done"),
         ],
         if automatic { 64_000 } else { 1_000_000 },
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
     );
     let run = harness.runtime.delegate_background(
         Role::Worker,
@@ -1479,6 +1547,64 @@ async fn manual_compaction_can_replace_history_then_warms_a_new_prefix() {
 #[tokio::test]
 async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;
+}
+
+// Given: a real `type = "openai"` profile pointed at the input-derived Responses cache mock
+// When: a worker runs twelve tool round trips and then answers
+// Then: every Responses request keeps the previous instructions, tools, and input as a prefix,
+// and the mock reports that whole previous input as cached
+#[tokio::test]
+async fn openai_responses_tool_turns_reuse_all_previous_wire_input() {
+    let script = (0..12)
+        .map(read_response)
+        .chain([text_response("done")])
+        .collect();
+    let mut harness = harness_with_wire(
+        Wire::Responses,
+        script,
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
+    );
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Read twelve results".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    assert!(
+        harness
+            .mock
+            .recorded_requests()
+            .iter()
+            .filter(|request| request.method == "POST")
+            .all(|request| request.path == "/v1/responses")
+    );
+}
+
+// Given: a real `type = "openai"` profile, which has no provider Compactor
+// When: tool and text turns are followed by manual compaction and a follow-up
+// Then: the runtime re-summary replaces history once at the verified boundary, keeps the
+// instructions and tools, and the following turns reuse the new Responses prefix
+#[tokio::test]
+async fn openai_responses_manual_compaction_replaces_history_then_warms_a_new_prefix() {
+    compaction_restarts_cache_on(Wire::Responses, CompactionReason::Manual).await;
+}
+
+// Given: a real `type = "openai"` profile and a reply that exceeds the compaction threshold
+// When: the follow-up triggers automatic compaction
+// Then: the runtime re-summary boundary is verified once and later turns reuse the new prefix
+#[tokio::test]
+async fn openai_responses_automatic_compaction_replaces_history_then_warms_a_new_prefix() {
+    compaction_restarts_cache_on(Wire::Responses, CompactionReason::Automatic).await;
 }
 
 fn note_response(id: &str, body: &str) -> ScriptedResponse {
@@ -2853,6 +2979,7 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let repo = root.join("repo");
@@ -3505,6 +3632,7 @@ async fn thread_read_dirs_restore_preserves_wire_prefix(changed: bool) {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let repo = allowed_dir(&root, "repo");

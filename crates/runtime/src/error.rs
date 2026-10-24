@@ -137,4 +137,12 @@ pub enum RunRestoreFailure {
     CorruptContext(String),
     #[error("復元できない実行設定です: {0}")]
     UnsupportedConfig(String),
+    /// The operator stopped the run; only resuming its thread root lifts the stop.
+    #[error(
+        "ユーザーが停止した実行のため継続しません。作業がまだ必要なら新しい run に委譲するか、ユーザーに確認してください"
+    )]
+    StoppedByOperator,
+    /// Cancellation discards the run, so nothing may continue it.
+    #[error("取り消された実行のため継続しません。作業がまだ必要なら新しい run に委譲してください")]
+    Cancelled,
 }

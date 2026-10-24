@@ -62,6 +62,17 @@ Other HTTP 400 errors and authentication failures still fail immediately. Rate
 limits retain their existing quota handling. Low-level `send` and `stream` calls
 do not gain retries; recovery remains in the shared `send_streaming` path.
 
+Responses API streams (Codex and `openai`) begin with HTTP 200, so failures that
+arrive as `response.failed` or top-level `error` SSE events are classified by
+their code: `server_error` is handled as an HTTP 500 server failure and retried,
+and `rate_limit_exceeded` is handled as a rate limit. Other codes remain HTTP 400
+errors. A `response.incomplete` with an unknown or missing reason finishes as
+`Other`: executable tool calls are removed from the final response and logged
+for diagnosis, so the runtime ends in Error without executing them or requesting
+a continuation. Partial text, reasoning, and usage are retained. Known reasons
+`max_output_tokens` (Length) and `content_filter` (ContentFilter) retain their
+existing behavior, including tool execution when tool calls are present.
+
 ## Configuration
 
 Only credential references are written to TOML; OAuth token families and Cursor
@@ -117,7 +128,34 @@ The protocol implementation was informed by
 [oh-my-pi](https://github.com/can1357/oh-my-pi/tree/602b6c812fa9ef774f359f1e399a09d30ee2eaca),
 including its OAuth, native Cursor transport, and quota parsers. Offline mock
 tests verify authentication, token rotation, tool continuations, and prompt
-prefix preservation. Live account acceptance requires an actual account.
+prefix preservation. Unknown top-level protobuf server fields are skipped for
+forward compatibility, matching the reference client; a valid `turnEnded` is
+still required, and unknown fields never authorize local tool execution.
+Live account acceptance requires an actual account.
+
+### OpenAI API
+
+An `openai` profile calls the OpenAI Responses API (`POST /v1/responses`) with
+the API key as a Bearer token. The shortest form names only the key's
+environment variable:
+
+```toml
+version = 3
+
+[providers.openai]
+type = "openai"
+api_key_env = "OPENAI_API_KEY"
+```
+
+Omitted fields default to `api_protocol = "openai-responses"`,
+`base_url = "https://api.openai.com/v1"`, the `OPENAI_API_KEY` environment
+variable, and evorch's built-in OpenAI model list and default model; any field
+you set takes precedence. The key can instead be saved in the credential store
+with `credential = { type = "keyring", service = "evorch", account = "..." }`.
+A `base_url` without `/v1` has it appended, so `https://host` and
+`https://host/v1` both send to `https://host/v1/responses`. Other
+`api_protocol` values are rejected; use `openai-compatible` for Chat
+Completions endpoints.
 
 ## Failures and cooldowns
 
@@ -248,18 +286,20 @@ not use yet.
 
 ### Output limits
 
-For Anthropic Messages and OpenAI Chat Completions, each request resolves its
-output limit from explicit role/category `generation.max_tokens`, the selected
+For Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses, each
+request resolves its output limit from explicit role/category
+`generation.max_tokens`, the selected
 model's preset `max_output_tokens`, then models.dev. Positive metadata values
 are used; unknown limits retain the provider's default. The selected profile
 and model are resolved again on fallback. A `+fast` variant uses its exact
 configured preset when present and its base model for catalog lookup.
 Codex and Cursor do not automatically receive this limit because their wire
 formats do not support that generation field.
-Requests to the official OpenAI HTTPS endpoint (`https://api.openai.com`, port
-443), including configured `openai-compatible` profiles, send this limit as
-`max_completion_tokens`, including reasoning tokens. Other compatible endpoints
-and Kimi retain `max_tokens`.
+`openai` profiles (OpenAI Responses) send this limit as `max_output_tokens`.
+`openai-compatible` profiles (OpenAI Chat Completions) whose `base_url` is the
+official OpenAI HTTPS endpoint (`https://api.openai.com`, port 443) send this
+limit as `max_completion_tokens`, including reasoning tokens. Other compatible
+endpoints and Kimi retain `max_tokens`.
 
 ### Automatic pools
 

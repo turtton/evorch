@@ -309,6 +309,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             {
                 self.reconcile_claimed_thread(thread_id);
             }
+            EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
+                self.wake_conversation_root(run_id);
+            }
+            EventKind::Lifecycle(LifecycleEvent::AutoContinuationPaused { run_id, limit }) => {
+                self.announce_auto_continuation_pause(run_id, *limit);
+            }
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)
             | EventKind::Message(_)

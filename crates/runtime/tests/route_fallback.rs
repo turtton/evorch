@@ -75,6 +75,7 @@ async fn http_failure_switches_provider_and_keeps_session_on_fallback() {
             catalog: model::ModelCatalog::new(),
             factory: Default::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     let invocation = AgentInvocationContext {

@@ -535,6 +535,7 @@ async fn drive_in(
         let runtime = compose_runtime(RuntimeComposition {
             config: &config,
             user_config_dir: context.user_config_dir.clone(),
+            model_catalog_dir: None,
             bus: Arc::clone(&bus),
             executor,
             credential_store: Arc::clone(&context.credentials),
@@ -630,6 +631,7 @@ pub(crate) fn configured_model(
                 ..Default::default()
             },
         },
+        None,
     )
     .map(|model| model as Arc<dyn AgentModel>)
     .map_err(|error| error.to_string())

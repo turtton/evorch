@@ -55,11 +55,8 @@ pub(super) fn freeze(
                 "Anthropic wire format does not preserve explicit reasoning_effort or service_tier",
             ));
         }
-        model::ApiProtocol::OpenAiResponses => {
-            return Err(unsupported(
-                "OpenAI Responses generation parity is not implemented",
-            ));
-        }
+        // OpenAI Responses keeps temperature, max_output_tokens, reasoning effort and
+        // service_tier; top_p is rejected above for every protocol.
         _ => {}
     }
     let (model_id, _) = config::types::provider::parse_model_speed(&route.model_id);

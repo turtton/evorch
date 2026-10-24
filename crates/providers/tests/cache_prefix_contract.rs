@@ -181,11 +181,11 @@ async fn openai_normal_turns_preserve_the_sent_prefix() {
     assert_http_prefix_contract(
         &server,
         &client,
-        CacheProtocol::OpenAi,
+        CacheProtocol::Codex,
         "gpt-6-astra",
-        "/chat/completions",
+        "/responses",
         "openai",
-        "stream_text.sse",
+        "responses_text.sse",
     )
     .await;
 }

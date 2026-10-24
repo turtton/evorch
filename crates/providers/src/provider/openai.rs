@@ -1,29 +1,32 @@
 //! OpenAI provider 実装を提供します。
+//!
+//! 公式 OpenAI API へは Responses API (`POST {base_url}/responses`) で接続します。
+//! wire 変換と SSE 解釈は Codex と共有する [`crate::wire::responses`] が担います。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use event_bus::EventBus;
+use futures_util::StreamExt;
 
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
-use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
+use crate::http::stream::adapt_sse_stream;
 use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
-use crate::message::{ChatRequest, ChatResponse, FinishReason, ProviderCapabilities};
+use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
-use crate::sse::SseFrame;
-use crate::stream::DeltaStream;
-use crate::wire::openai::{OpenAiStreamInterpreter, WireChatResponse, from_wire_response};
-
-mod request;
+use crate::stream::{DeltaStream, StreamEvent};
+use crate::wire::responses::{
+    ResponsesDialect, ResponsesRequestOptions, ResponsesStreamInterpreter, to_wire_request,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_PROVIDER_LABEL: &str = "openai";
-const OPENAI_PROTOCOL: &str = "openai-chat-completions";
+const OPENAI_PROTOCOL: &str = "openai-responses";
 
-/// OpenAI Chat Completions クライアントの設定。
+/// OpenAI Responses クライアントの設定。
 #[derive(Clone)]
 pub struct OpenAiConfig {
     /// API のベース URL。
@@ -44,9 +47,13 @@ impl Default for OpenAiConfig {
     }
 }
 
-/// OpenAI Chat Completions API を呼び出す provider クライアント。
+/// OpenAI Responses API を呼び出す provider クライアント。
 pub struct OpenAiClient {
-    inner: ChatCompletionsClient,
+    http: reqwest::Client,
+    endpoint: String,
+    timeout: Duration,
+    event_bus: Option<Arc<EventBus>>,
+    profile: Option<String>,
 }
 
 impl OpenAiClient {
@@ -56,22 +63,84 @@ impl OpenAiClient {
     /// HTTP クライアントを構築できない場合 [`ProviderError`] を返す。
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
         Ok(Self {
-            inner: ChatCompletionsClient::new(ChatCompletionsConfig {
-                base_url: config.base_url,
-                provider_label: OPENAI_PROVIDER_LABEL.to_string(),
-                timeout: config.timeout,
-                event_bus: config.event_bus,
-                profile: None,
-                prompt_cache_key: true,
-                output_limit_field: OutputLimitField::MaxCompletionTokens,
-            })?,
+            http: build_http_client(None)?,
+            endpoint: format!("{}/responses", config.base_url.trim_end_matches('/')),
+            timeout: config.timeout,
+            event_bus: config.event_bus,
+            profile: None,
         })
     }
 
     /// 観測イベントへ記録する provider profile を設定する。
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
-        self.inner.profile = Some(profile.into());
+        self.profile = Some(profile.into());
         self
+    }
+
+    /// Responses SSE を canonical 差分ストリームへ変換する。
+    ///
+    /// Responses API は送信方式に関わらず SSE で応答させるため、非ストリーミングも
+    /// 同じ経路を使います。usage 発行は SSE 完了ポンプ ([`adapt_sse_stream`]) が担い、
+    /// Err を返した attempt の usage 発行件数は 0 です。全体タイムアウトは長い正当な
+    /// SSE を切らないよう非ストリーミング時だけ付けます。
+    async fn execute(
+        &self,
+        auth: &ProviderAuth,
+        request: &ChatRequest,
+        streaming: bool,
+    ) -> Result<DeltaStream, ProviderError> {
+        let wire_request = to_wire_request(
+            request,
+            &ResponsesRequestOptions {
+                dialect: ResponsesDialect::OpenAi,
+                prompt_cache_key: request
+                    .observation
+                    .as_ref()
+                    .map(|context| context.run_id.clone()),
+            },
+        );
+        let mut observer = AttemptObserver::new(
+            self.event_bus.clone(),
+            OPENAI_PROVIDER_LABEL,
+            self.profile.clone(),
+            OPENAI_PROTOCOL,
+            request.model.clone(),
+            streaming,
+            request.observation.clone(),
+        )
+        .with_service_tier(request.service_tier)
+        .with_reasoning_effort(wire_request.reasoning_effort())
+        .with_cache_observation(&wire_request)
+        .with_known_secret(&auth.api_key);
+        let mut builder = self
+            .http
+            .post(&self.endpoint)
+            .bearer_auth(&auth.api_key)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(&wire_request);
+        if !streaming {
+            builder = builder.timeout(self.timeout);
+        }
+        let http_request = builder.build().map_err(map_request_error)?;
+        observer.emit_started();
+        let response = self
+            .http
+            .execute(http_request)
+            .await
+            .map_err(map_request_error)
+            .inspect_err(|error| observer.emit_failed(error))?;
+        if !response.status().is_success() {
+            let error = map_response_error(response).await;
+            observer.emit_failed(&error);
+            return Err(error);
+        }
+        Ok(adapt_sse_stream(
+            response.bytes_stream(),
+            ResponsesStreamInterpreter::new(),
+            UsageEmitter::new(self.event_bus.clone(), OPENAI_PROVIDER_LABEL),
+            request.model.clone(),
+            observer,
+        ))
     }
 }
 
@@ -85,7 +154,7 @@ impl ProviderClient for OpenAiClient {
         ProviderCapabilities {
             streaming: true,
             tool_use: true,
-            reasoning: false,
+            reasoning: true,
         }
     }
 
@@ -94,7 +163,15 @@ impl ProviderClient for OpenAiClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
-        self.inner.send(auth, request).await
+        let mut stream = self.execute(auth, request, false).await?;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::Completed { response } = event? {
+                return Ok(response);
+            }
+        }
+        Err(ProviderError::Request(
+            "openai response ended without completion".to_string(),
+        ))
     }
 
     async fn stream(
@@ -102,237 +179,6 @@ impl ProviderClient for OpenAiClient {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
-        self.inner
-            .stream(
-                auth,
-                request,
-                OpenAiInterpreterAdapter(OpenAiStreamInterpreter::new()),
-            )
-            .await
-    }
-}
-
-/// Output limit parameter supported by the selected provider client.
-pub(crate) enum OutputLimitField {
-    MaxTokens,
-    MaxCompletionTokens,
-}
-
-impl OutputLimitField {
-    pub(crate) fn for_compatible_endpoint(base_url: &str) -> Self {
-        if reqwest::Url::parse(base_url).is_ok_and(|url| {
-            url.scheme() == "https"
-                && url.host_str() == Some("api.openai.com")
-                && url.port_or_known_default() == Some(443)
-        }) {
-            Self::MaxCompletionTokens
-        } else {
-            Self::MaxTokens
-        }
-    }
-}
-
-/// OpenAI形式の送受信処理を共有する内部設定。
-pub(crate) struct ChatCompletionsConfig {
-    pub(crate) prompt_cache_key: bool,
-    pub(crate) output_limit_field: OutputLimitField,
-    /// API のベース URL。
-    pub(crate) base_url: String,
-    /// usage イベントに記録するプロバイダ識別子。
-    pub(crate) provider_label: String,
-    /// 非ストリーミングリクエスト全体のタイムアウト。
-    pub(crate) timeout: Duration,
-    /// usage イベントの発行先。
-    pub(crate) event_bus: Option<Arc<EventBus>>,
-    /// 観測イベントへ記録する provider profile。
-    pub(crate) profile: Option<String>,
-}
-
-/// OpenAI wire 形式を共有する Chat Completions HTTP クライアント。
-pub(crate) struct ChatCompletionsClient {
-    prompt_cache_key: bool,
-    output_limit_field: OutputLimitField,
-    http: reqwest::Client,
-    endpoint: String,
-    provider_label: String,
-    timeout: Duration,
-    event_bus: Option<Arc<EventBus>>,
-    pub(crate) profile: Option<String>,
-}
-
-impl ChatCompletionsClient {
-    /// 共通設定から HTTP クライアントを構築する。
-    ///
-    /// # Errors
-    /// reqwest クライアントの構築に失敗した場合 [`ProviderError`] を返す。
-    pub(crate) fn new(config: ChatCompletionsConfig) -> Result<Self, ProviderError> {
-        Ok(Self {
-            http: build_http_client(None)?,
-            prompt_cache_key: config.prompt_cache_key,
-            output_limit_field: config.output_limit_field,
-            endpoint: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
-            provider_label: config.provider_label,
-            timeout: config.timeout,
-            event_bus: config.event_bus,
-            profile: config.profile,
-        })
-    }
-
-    /// 非ストリーミング Chat Completions を送信する。
-    ///
-    /// usage は HTTP ステータス成功・ボディ読み取り・JSON パース・canonical
-    /// 変換のすべてが成功した後にちょうど 1 回だけ発行する。どのエラー経路も
-    /// 発行前に return するため、失敗した attempt の usage 発行件数は 0 に
-    /// なる。このメソッドが非ストリーミング経路で唯一の usage 発行地点である。
-    ///
-    /// # Errors
-    /// 送信、HTTP応答、JSON解析、canonical変換に失敗した場合 [`ProviderError`] を返す。
-    pub(crate) async fn send(
-        &self,
-        auth: &ProviderAuth,
-        request: &ChatRequest,
-    ) -> Result<ChatResponse, ProviderError> {
-        let model = request.model.clone();
-        let wire_request = self.wire_request(request, false);
-        let mut observer = AttemptObserver::new(
-            self.event_bus.clone(),
-            self.provider_label.clone(),
-            self.profile.clone(),
-            OPENAI_PROTOCOL,
-            model.clone(),
-            false,
-            request.observation.clone(),
-        )
-        .with_service_tier(request.service_tier)
-        .with_reasoning_effort(wire_request.reasoning_effort.as_deref())
-        .with_cache_observation(&wire_request)
-        .with_known_secret(&auth.api_key);
-        let request = self
-            .http
-            .post(&self.endpoint)
-            .bearer_auth(&auth.api_key)
-            .json(&wire_request)
-            .timeout(self.timeout)
-            .build()
-            .map_err(map_request_error)?;
-        observer.emit_started();
-        let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(map_request_error)
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        if !response.status().is_success() {
-            let error = map_response_error(response).await;
-            observer.emit_failed(&error);
-            return Err(error);
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(map_request_error)
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        let wire_response: WireChatResponse = serde_json::from_slice(&bytes)
-            .map_err(|error| ProviderError::InvalidJson {
-                detail: format!("OpenAI response の解析に失敗しました: {error}"),
-            })
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        let response = from_wire_response(&wire_response).inspect_err(|error| {
-            observer.emit_failed(error);
-        })?;
-        UsageEmitter::new(self.event_bus.clone(), self.provider_label.clone())
-            .emit_usage(&model, &response.usage);
-        observer.emit_completed(&response.usage, response.finish_reason.clone());
-        Ok(response)
-    }
-
-    /// Chat Completions SSE を canonical 差分ストリームへ変換する。
-    ///
-    /// ストリーミングの usage 発行は SSE 完了ポンプ ([`adapt_sse_stream`]) が
-    /// 担う。このメソッド自体は usage を発行せず、Err を返した場合はその
-    /// attempt の usage 発行件数は 0 になる。
-    ///
-    /// # Errors
-    /// リクエスト送信またはHTTP応答に失敗した場合 [`ProviderError`] を返す。
-    pub(crate) async fn stream<I>(
-        &self,
-        auth: &ProviderAuth,
-        request: &ChatRequest,
-        interpreter: I,
-    ) -> Result<DeltaStream, ProviderError>
-    where
-        I: WireStreamInterpreter + 'static,
-    {
-        let model = request.model.clone();
-        let wire_request = self.wire_request(request, true);
-        let mut observer = AttemptObserver::new(
-            self.event_bus.clone(),
-            self.provider_label.clone(),
-            self.profile.clone(),
-            OPENAI_PROTOCOL,
-            model.clone(),
-            true,
-            request.observation.clone(),
-        )
-        .with_service_tier(request.service_tier)
-        .with_reasoning_effort(wire_request.reasoning_effort.as_deref())
-        .with_cache_observation(&wire_request)
-        .with_known_secret(&auth.api_key);
-        let request = self
-            .http
-            .post(&self.endpoint)
-            .bearer_auth(&auth.api_key)
-            .json(&wire_request)
-            .build()
-            .map_err(map_request_error)?;
-        observer.emit_started();
-        let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(map_request_error)
-            .inspect_err(|error| {
-                observer.emit_failed(error);
-            })?;
-        if !response.status().is_success() {
-            let error = map_response_error(response).await;
-            observer.emit_failed(&error);
-            return Err(error);
-        }
-        Ok(adapt_sse_stream(
-            response.bytes_stream(),
-            interpreter,
-            UsageEmitter::new(self.event_bus.clone(), self.provider_label.clone()),
-            model,
-            observer,
-        ))
-    }
-}
-
-struct OpenAiInterpreterAdapter(OpenAiStreamInterpreter);
-
-impl WireStreamInterpreter for OpenAiInterpreterAdapter {
-    fn interpret(&mut self, frame: SseFrame) -> Result<FrameInterpretation, ProviderError> {
-        let events = self.0.interpret(&frame)?;
-        let completion = if self.0.is_done() {
-            let (usage, reason) = self.0.take_result();
-            Some((
-                usage.unwrap_or_default(),
-                reason.unwrap_or(FinishReason::Stop),
-            ))
-        } else {
-            None
-        };
-        Ok(FrameInterpretation { events, completion })
-    }
-
-    fn finish(&mut self) -> Result<FrameInterpretation, ProviderError> {
-        Ok(FrameInterpretation::default())
+        self.execute(auth, request, true).await
     }
 }

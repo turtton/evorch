@@ -22,6 +22,7 @@ fn production_reload_reuses_the_user_config_installation_seed() {
         },
     );
     let context = ProductionModel {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         load_options: config::LoadOptions {
             user_config_dir: Some(user_dir.clone()),
             file_overrides: [(

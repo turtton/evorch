@@ -99,7 +99,10 @@ impl StreamingMockOpenAi {
 
     /// Starts a fixture with deterministic prefix-cache usage in JSON and SSE.
     ///
-    /// One UTF-8 byte of canonical request settings and messages is one synthetic
+    /// Both `/v1/chat/completions` and `/v1/responses` participate; the latter is
+    /// answered as Responses SSE with the usage in `response.completed`.
+    /// One UTF-8 byte of canonical request settings and messages (Responses:
+    /// `instructions`/`tools` settings and `input` items) is one synthetic
     /// token. The longest input prefix among the last 64 requests with the same
     /// model and `prompt_cache_key` is reported as cached. `stream` and
     /// `stream_options` do not affect this prefix. Scripted completion usage is
@@ -199,12 +202,15 @@ impl StreamingMockOpenAi {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
                     let request = read_request(&mut stream)?;
-                    let streaming = request.stream;
+                    let responses_api =
+                        request.method == "POST" && request.path == "/v1/responses";
+                    // The Responses API answers with SSE regardless of the request flag.
+                    let streaming = request.stream || responses_api;
                     let listing_models = request.method == "GET"
                         && request.path.split('?').next() == Some("/v1/models");
                     let prompt = (prompt_cache.is_some()
                         && request.method == "POST"
-                        && request.path == "/v1/chat/completions")
+                        && (request.path == "/v1/chat/completions" || responses_api))
                         .then(|| request.body.clone());
                     // Poison recovery retains fixture evidence instead of panicking again.
                     recorded
@@ -231,7 +237,12 @@ impl StreamingMockOpenAi {
                         thread::sleep(response.delay);
                     }
                     match response {
-                        Some(response) if streaming => write_sse(&mut stream, &response, mode),
+                        Some(response) if responses_api => {
+                            write_sse(&mut stream, &response.responses_frames(), mode)
+                        }
+                        Some(response) if streaming => {
+                            write_sse(&mut stream, &response.frames(), mode)
+                        }
                         Some(response) => {
                             write_json(&mut stream, "200 OK", &response.to_non_streaming_json())
                         }
@@ -348,22 +359,18 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
     })
 }
 
-fn write_sse(
-    stream: &mut TcpStream,
-    response: &ScriptedResponse,
-    mode: WriteMode,
-) -> io::Result<()> {
+fn write_sse(stream: &mut TcpStream, frames: &[String], mode: WriteMode) -> io::Result<()> {
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")?;
     match mode {
-        WriteMode::WholeBody => stream.write_all(response.body().as_bytes())?,
+        WriteMode::WholeBody => stream.write_all(frames.concat().as_bytes())?,
         WriteMode::FramePerWrite => {
-            for frame in response.frames() {
+            for frame in frames {
                 stream.write_all(frame.as_bytes())?;
                 stream.flush()?;
             }
         }
         WriteMode::GatedAfterFirst(release) => {
-            for (index, frame) in response.frames().iter().enumerate() {
+            for (index, frame) in frames.iter().enumerate() {
                 stream.write_all(frame.as_bytes())?;
                 stream.flush()?;
                 if index == 0 {

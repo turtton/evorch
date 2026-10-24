@@ -547,6 +547,20 @@ pub enum LifecycleEvent {
         /// 復元の契機となったメッセージ ID。
         message_id: String,
     },
+    /// A finished or stopped root holds messages from its subagents. The host
+    /// delivers them by resuming the conversation under its current authority.
+    RootWakeRequested {
+        /// Root run ID to resume.
+        run_id: String,
+    },
+    /// Automatic continuations without user input reached their limit. Held
+    /// messages wait until the user next continues the conversation.
+    AutoContinuationPaused {
+        /// Root run ID of the conversation.
+        run_id: String,
+        /// Automatic continuations allowed between user inputs.
+        limit: u32,
+    },
 }
 
 /// メッセージストリームに関するイベント。
@@ -1248,6 +1262,8 @@ pub enum DeliveryDisposition {
     Wake,
     /// 保存された受信者の実行を復元して配送します。
     Restored,
+    /// Held for a finished or stopped recipient until it is resumed.
+    Held,
 }
 
 /// エージェント間メッセージの配送に関するイベントです。

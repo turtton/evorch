@@ -118,6 +118,7 @@ fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
     assert!(
         matches!(harness.state().issued(), [WorkbenchCommand::ContinueChat(request)]
         if request.thread_id == "thread-1"
+            && !request.automatic
             && request.composer_role == gui::model::composer::ComposerRole::Orchestrator
             && request.model_preference.as_ref().unwrap().model.as_deref() == Some("chosen"))
     );

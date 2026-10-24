@@ -43,6 +43,7 @@ async fn a_panicking_run_ends_in_error_with_its_panic_site() {
     let dir = tempfile::tempdir().unwrap();
     let config = config::Config::default();
     let composed = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(tools::ToolExecutor::with_standard_tools(

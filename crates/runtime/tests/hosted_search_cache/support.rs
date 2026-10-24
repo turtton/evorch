@@ -85,6 +85,7 @@ pub(super) async fn model(
                 ..Default::default()
             },
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     (

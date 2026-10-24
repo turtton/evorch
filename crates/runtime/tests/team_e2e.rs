@@ -57,6 +57,7 @@ enabled = true
     .unwrap();
     let bus = Arc::new(EventBus::new(256));
     let composed = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(root.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(ToolExecutor::with_standard_tools(

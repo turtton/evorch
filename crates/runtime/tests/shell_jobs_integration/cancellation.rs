@@ -3,6 +3,7 @@ use event_bus::{EventKind, LifecycleEvent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_notification_waits_for_drain_and_precedes_terminal_error() {
+    test_support::isolated_state_dir();
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
     let (started, mut draining) = mpsc::unbounded_channel();

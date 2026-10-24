@@ -24,13 +24,33 @@ fn request(run: &str) -> ChatRequest {
 
 async fn mount_usage(server: &MockServer, cached: u64) {
     server.reset().await;
+    let completed = json!({
+        "type": "response.completed",
+        "response": {"status": "completed", "usage": {"input_tokens": 110, "output_tokens": 1,
+            "input_tokens_details": {"cached_tokens": cached}}}
+    });
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "event: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {completed}\n\n",
+                    json!({"type": "response.output_text.delta", "delta": "ok"})
+                )),
+        )
+        .mount(server)
+        .await;
+}
+
+async fn mount_compatible_usage(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "cache-response", "model": "cache-model",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 110, "completion_tokens": 1,
-                "prompt_tokens_details": {"cached_tokens": cached}}
+                "prompt_tokens_details": {"cached_tokens": 0}}
         })))
         .mount(server)
         .await;
@@ -125,7 +145,7 @@ async fn compatible_cache_key_is_absent_when_observation_is_set() {
     let server = MockServer::start().await;
     let client =
         OpenAiCompatibleClient::new(server.uri(), "openai", Duration::from_secs(2), None).unwrap();
-    mount_usage(&server, 0).await;
+    mount_compatible_usage(&server).await;
     // When: sending an observed request over HTTP.
     client
         .send(&ProviderAuth::new("test-key"), &request("run-key"))

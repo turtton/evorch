@@ -291,7 +291,10 @@ impl Run {
                 4 => self.kv(field.data).await?,
                 5 => {} // No local executions run, so there is nothing to abort.
                 7 => self.query(field.data).await?,
-                _ => return Err(protocol_error("Unsupported Cursor server message")),
+                // Protobuf extensions must be skipped, as in the reference client.
+                // Known RPCs still require their explicit handlers above; unknown data
+                // never executes locally and cannot substitute for turnEnded.
+                _ => {}
             }
         }
         Ok(())

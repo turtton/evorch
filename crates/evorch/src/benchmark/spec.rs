@@ -11,6 +11,9 @@ pub const USAGE: &str = "usage: evorch benchmark record --spec <json> --output <
 pub struct BenchmarkArgs {
     pub command: BenchmarkCommand,
     pub user_config_dir: Option<PathBuf>,
+    /// models.dev cache directory; not a CLI option. `None` uses
+    /// [`catalog::default_cache_dir`].
+    pub model_catalog_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -203,5 +206,6 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> BenchmarkResult<Benchma
     Ok(BenchmarkArgs {
         command: parsed,
         user_config_dir,
+        model_catalog_dir: None,
     })
 }

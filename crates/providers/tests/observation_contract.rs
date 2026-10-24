@@ -275,9 +275,8 @@ async fn openai_send_success_emits_ordered_observation() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        json_response(200, &fixture("openai", "send_text.json"))
-            .set_delay(Duration::from_millis(2)),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")).set_delay(Duration::from_millis(2)),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -302,7 +301,7 @@ async fn openai_send_success_emits_ordered_observation() {
     };
     assert_eq!(provider, "openai");
     assert_eq!(profile.as_deref(), Some("openai-profile"));
-    assert_eq!(protocol, "openai-chat-completions");
+    assert_eq!(protocol, "openai-responses");
     assert_eq!(model, OPENAI_MODEL);
     assert!(!streaming);
     let usage = next_usage_event(&mut rx).await;
@@ -354,8 +353,8 @@ async fn openai_stream_success_emits_first_token_once() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        sse_response(&fixture("openai", "stream_text.sse")),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -373,7 +372,7 @@ async fn openai_stream_success_emits_first_token_once() {
         &events,
         "openai",
         "openai-profile",
-        "openai-chat-completions",
+        "openai-responses",
         OPENAI_MODEL,
         true,
         true,
@@ -383,7 +382,7 @@ async fn openai_stream_success_emits_first_token_once() {
 
 async fn assert_openai_send_failure(response: ResponseTemplate, expected: ProviderFailureKind) {
     let server = MockServer::start().await;
-    mount(&server, "/chat/completions", response).await;
+    mount(&server, "/responses", response).await;
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
 
@@ -410,11 +409,11 @@ async fn openai_send_http_500_emits_http_failure() {
     .await;
 }
 
-// Given: OpenAI 200 と不正 JSON / When: send / Then: Started→InvalidResponse を観測する
+// Given: OpenAI 200 と不正 JSON の SSE frame / When: send / Then: Started→InvalidResponse を観測する
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_send_invalid_json_emits_invalid_response() {
     assert_openai_send_failure(
-        json_response(200, "{broken"),
+        sse_response("event: response.completed\ndata: {broken\n\n"),
         ProviderFailureKind::InvalidResponse,
     )
     .await;
@@ -426,7 +425,7 @@ async fn openai_stream_invalid_json_emits_invalid_response() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
+        "/responses",
         sse_response("data: {invalid json}\n\n"),
     )
     .await;
@@ -454,8 +453,8 @@ async fn openai_send_timeout_emits_timeout_failure() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        json_response(200, &fixture("openai", "send_text.json")).set_delay(Duration::from_secs(2)),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")).set_delay(Duration::from_secs(2)),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -673,14 +672,16 @@ async fn compatible_send_http_500_emits_failure() {
     );
 }
 
-// Given: OpenAI stream の最初の delta / When: consumer が stream を破棄 / Then: Started と同じ request ID の Other failure を観測する
+// Given: 完了前の OpenAI stream の最初の delta / When: consumer が stream を破棄 / Then: Started と同じ request ID の Other failure を観測する
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_consumer_drop_emits_other_failure() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        sse_response(&fixture("openai", "stream_text.sse")),
+        "/responses",
+        sse_response(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -749,8 +750,8 @@ async fn openai_send_stamps_context_run_id_on_observation_events() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        json_response(200, &fixture("openai", "send_text.json")),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -779,19 +780,21 @@ async fn openai_send_stamps_context_run_id_on_observation_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_send_completion_carries_purpose_and_reasoning_tokens() {
     let server = MockServer::start().await;
-    let body = serde_json::json!({
-        "choices": [{
-            "message": { "role": "assistant", "content": "title" },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": 30,
-            "completion_tokens": 12,
-            "completion_tokens_details": { "reasoning_tokens": 8 }
-        }
-    })
-    .to_string();
-    mount(&server, "/chat/completions", json_response(200, &body)).await;
+    let body = format!(
+        "event: response.completed\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 30,
+                    "output_tokens": 12,
+                    "output_tokens_details": { "reasoning_tokens": 8 }
+                }
+            }
+        })
+    );
+    mount(&server, "/responses", sse_response(&body)).await;
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
     let mut request = request_with_context(OPENAI_MODEL, "auto-title:thread-1");
@@ -828,8 +831,8 @@ async fn openai_stream_stamps_context_run_id_on_observation_events() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        sse_response(&fixture("openai", "stream_text.sse")),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -864,7 +867,7 @@ async fn openai_stream_stamps_context_run_id_on_observation_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_send_failure_stamps_context_run_id_on_failure_event() {
     let server = MockServer::start().await;
-    mount(&server, "/chat/completions", json_response(500, "boom")).await;
+    mount(&server, "/responses", json_response(500, "boom")).await;
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
 
@@ -891,8 +894,8 @@ async fn openai_send_without_context_emits_none_run_id() {
     let server = MockServer::start().await;
     mount(
         &server,
-        "/chat/completions",
-        json_response(200, &fixture("openai", "send_text.json")),
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));

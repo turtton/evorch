@@ -147,6 +147,7 @@ summarizer = "structural"
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(Read)).unwrap();
     let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,

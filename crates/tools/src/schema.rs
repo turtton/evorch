@@ -56,6 +56,56 @@ pub(crate) fn validate_args(
     Err(ToolError::InvalidArgs { detail })
 }
 
+/// スキーマが決して受け付けない、任意の欄の `null` を取り除く。
+///
+/// 使わない任意の欄を省略せず `null` で埋めるモデルがある。型が `null` を含まない
+/// 欄の `null` は検証で必ず失敗するため、省略と同じに扱う。必須の欄、型の指定が
+/// ない欄、`null` を許す欄、スキーマにない欄はそのまま残し、検証に判断を任せる。
+/// `properties` を持つ入れ子の object と、その形の `items` を持つ配列の要素にも
+/// 同じ規則を当てる。
+pub(crate) fn strip_null_optionals(schema: &serde_json::Value, args: &mut serde_json::Value) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    let required = schema.get("required").and_then(serde_json::Value::as_array);
+    object.retain(|key, value| {
+        !value.is_null()
+            || required.is_some_and(|required| required.iter().any(|name| name == key.as_str()))
+            || !properties.get(key).is_some_and(rejects_null)
+    });
+    for (key, value) in object.iter_mut() {
+        let Some(property) = properties.get(key) else {
+            continue;
+        };
+        match value {
+            serde_json::Value::Object(_) => strip_null_optionals(property, value),
+            serde_json::Value::Array(items) => {
+                if let Some(item) = property.get("items") {
+                    for value in items {
+                        strip_null_optionals(item, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `type` が `null` を含まず、`null` を必ず拒否するスキーマか。
+fn rejects_null(schema: &serde_json::Value) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => kind != "null",
+        Some(serde_json::Value::Array(kinds)) => !kinds.iter().any(|kind| kind == "null"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{compile, validate_args};

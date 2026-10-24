@@ -92,6 +92,7 @@ fn composition<'a>(
     workspace: Option<WorkspaceSeam>,
 ) -> RuntimeComposition<'a> {
     RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(
             tempfile::tempdir()
                 .expect("user config directory")

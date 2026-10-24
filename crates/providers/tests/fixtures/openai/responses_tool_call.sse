@@ -1,0 +1,23 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_tool","object":"response","status":"in_progress","model":"gpt-contract","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"get_weather","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_1","output_index":0,"delta":"{\"location\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_1","output_index":0,"delta":"\"Tok"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_1","output_index":0,"delta":"yo\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"fc_1","output_index":0,"arguments":"{\"location\":\"Tokyo\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_tool","object":"response","status":"completed","model":"gpt-contract","usage":{"input_tokens":13,"input_tokens_details":{"cached_tokens":4},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":22}}}

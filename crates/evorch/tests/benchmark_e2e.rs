@@ -171,6 +171,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         user.clone(),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -227,6 +228,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         user.clone(),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -245,6 +247,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         user.clone(),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -258,6 +261,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         user.clone(),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -279,6 +283,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         user,
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -294,6 +299,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         None,
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -309,7 +315,8 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
             candidate,
             None,
             env(),
-            SandboxChoice::DirectUnchecked
+            SandboxChoice::DirectUnchecked,
+            Some(test_support::model_catalog_dir()),
         )
         .await
         .is_err(),
@@ -331,7 +338,8 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
             },
             None,
             env(),
-            SandboxChoice::DirectUnchecked
+            SandboxChoice::DirectUnchecked,
+            Some(test_support::model_catalog_dir()),
         )
         .await
         .unwrap_err()
@@ -460,6 +468,7 @@ async fn final_usage_over_budget_poison_is_durable_and_skips_verification() {
         Some(root.path().join("user")),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -495,6 +504,7 @@ async fn final_usage_over_budget_poison_is_durable_and_skips_verification() {
         None,
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap_err();
@@ -535,6 +545,7 @@ async fn incomplete_candidate_poison_blocks_later_trials_without_snapshot_or_ver
         Some(root.path().join("user")),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -550,6 +561,7 @@ async fn incomplete_candidate_poison_blocks_later_trials_without_snapshot_or_ver
         None,
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -567,7 +579,8 @@ async fn incomplete_candidate_poison_blocks_later_trials_without_snapshot_or_ver
             candidate,
             None,
             env(),
-            SandboxChoice::DirectUnchecked
+            SandboxChoice::DirectUnchecked,
+            Some(test_support::model_catalog_dir()),
         )
         .await
         .unwrap_err()
@@ -634,6 +647,7 @@ async fn executable_trusted_verifier_keeps_large_output_artifacts_after_temp_wor
         Some(root.path().join("user")),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -709,6 +723,7 @@ async fn failed_nonselected_delegate_poison_survives_parent_recovery_and_selecte
         Some(root.path().join("user")),
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap();
@@ -740,7 +755,8 @@ async fn failed_nonselected_delegate_poison_survives_parent_recovery_and_selecte
             },
             None,
             env(),
-            SandboxChoice::DirectUnchecked
+            SandboxChoice::DirectUnchecked,
+            Some(test_support::model_catalog_dir()),
         )
         .await
         .unwrap_err()
@@ -791,6 +807,7 @@ async fn report_and_replay_accept_legacy_oracle_baseline_selector() {
         None,
         env(),
         SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
     )
     .await
     .unwrap_err();

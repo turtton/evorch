@@ -133,6 +133,9 @@ impl AgentRuntime {
                 _join: None,
             },
         );
+        if let Some(entry) = runs.get(&run_id) {
+            self.release_held_messages(run_id, &entry.mailbox);
+        }
         self.shared.bus.emit(Event::new(restored_event));
         self.shared
             .bus
@@ -193,6 +196,7 @@ mod review_tests {
                 &mut lock_runs(&runtime.shared.runs),
                 (run, None, Role::Worker, RunConfig::default(), run),
                 RestoredState {
+                    admission_reservation: None,
                     turn: None,
                     boundary_pending: false,
                     continuity: Default::default(),

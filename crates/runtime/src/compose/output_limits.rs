@@ -7,7 +7,11 @@ impl RoutedModel {
                 if self.provider_configs.is_empty() {
                     None
                 } else {
-                    crate::model_resolve::load_catalog(&catalog::default_cache_dir()).await
+                    let directory = self
+                        .metadata_catalog_dir
+                        .clone()
+                        .unwrap_or_else(catalog::default_cache_dir);
+                    crate::model_resolve::load_catalog(&directory).await
                 }
             })
             .await
@@ -23,9 +27,13 @@ impl RoutedModel {
             return Some(u64::from(value));
         }
         let protocol = self.providers.get(&route.profile)?.profile.api_protocol;
+        // Codex backend omits max_output_tokens. The factory accepts `openai-responses` only
+        // for `openai` and pins `openai-codex` to `openai-codex-responses`, so protocol suffices.
         if !matches!(
             protocol,
-            model::ApiProtocol::AnthropicMessages | model::ApiProtocol::OpenAiCompletions
+            model::ApiProtocol::AnthropicMessages
+                | model::ApiProtocol::OpenAiCompletions
+                | model::ApiProtocol::OpenAiResponses
         ) {
             return None;
         }

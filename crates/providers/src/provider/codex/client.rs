@@ -18,14 +18,13 @@ use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::codex_catalog_version::{CodexCatalogVersion, CodexClientVersion};
 use crate::error::ProviderError;
-use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
+use crate::http::stream::adapt_sse_stream;
 use crate::http::{
     UsageEmitter, build_http_client, build_http_client_with_read_timeout, map_request_error,
     map_response_error,
 };
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
-use crate::sse::SseFrame;
 use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter, to_wire_request};
 
@@ -199,7 +198,7 @@ impl CodexClient {
         let wire_request = to_wire_request(request);
         let mut observer = self
             .observer(request, streaming)
-            .with_reasoning_effort(Some(wire_request.reasoning_effort()))
+            .with_reasoning_effort(wire_request.reasoning_effort())
             .with_cache_observation(&wire_request);
         let response = self
             .send_response(
@@ -212,9 +211,11 @@ impl CodexClient {
                 &mut observer,
             )
             .await?;
+        // Pass the shared interpreter itself: a forwarding wrapper silently drops
+        // defaulted hooks such as take_message/finalize_message.
         Ok(adapt_sse_stream(
             response.bytes_stream(),
-            CodexInterpreterAdapter(CodexStreamInterpreter::new()),
+            CodexStreamInterpreter::new(),
             UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL),
             request.model.clone(),
             observer,
@@ -355,18 +356,6 @@ impl ProviderClient for CodexClient {
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError> {
         self.execute(request, true).await
-    }
-}
-
-struct CodexInterpreterAdapter(CodexStreamInterpreter);
-
-impl WireStreamInterpreter for CodexInterpreterAdapter {
-    fn interpret(&mut self, frame: SseFrame) -> Result<FrameInterpretation, ProviderError> {
-        self.0.interpret(frame)
-    }
-
-    fn finish(&mut self) -> Result<FrameInterpretation, ProviderError> {
-        self.0.finish()
     }
 }
 

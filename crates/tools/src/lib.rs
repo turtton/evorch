@@ -40,7 +40,7 @@ pub use search::{
     ResponsesTransport, SearchError, SearchOptions, SearchProvider, SearchResults,
     TavilyKeylessProvider, count_search_results,
 };
-pub use shell_handles::MAX_RESTORED_HANDLE_FLOOR;
+pub use shell_handles::{MAX_RESTORED_HANDLE_FLOOR, set_shell_job_handle_dir};
 pub use tool::{Permissions, Tool, ToolExecutionMode};
 pub use tools::{
     BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, Edit, GitDiff, Grep, GuardPolicy, Read,

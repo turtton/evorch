@@ -6,7 +6,9 @@ mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
 mod chat_restore;
+mod child_renewal;
 mod completion_relay;
+mod held_messages;
 mod output;
 mod project;
 mod questions;
@@ -15,6 +17,7 @@ mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;
 use chat_restore::RunContinuation;
+pub(crate) use chat_restore::SnapshotReservation;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -85,6 +88,13 @@ pub(crate) struct Shared {
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
+    /// Runs the operator stopped. Neither agent messages nor answers continue them
+    /// until the operator resumes their thread root, which lifts the whole tree.
+    pub(crate) operator_stops: Mutex<HashSet<RunId>>,
+    /// Messages for finished or stopped runs, released when the run is registered again.
+    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<AgentMessage>>>,
+    /// Automatic wakes per conversation root since the last user input.
+    pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -649,6 +659,9 @@ impl AgentRuntime {
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
+                operator_stops: Mutex::new(HashSet::new()),
+                held_messages: Mutex::new(HashMap::new()),
+                auto_wakes: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
@@ -753,6 +766,7 @@ impl AgentRuntime {
         self,
         config: &config::Config,
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
+        catalog_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let _ = self
             .shared
@@ -775,6 +789,7 @@ impl AgentRuntime {
             .set(crate::model_resolve::ModelResolution::new(
                 config,
                 credential_store,
+                catalog_dir,
             ));
         let _ = self
             .shared
@@ -956,6 +971,9 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
+                operator_stops: Mutex::new(HashSet::new()),
+                held_messages: Mutex::new(HashMap::new()),
+                auto_wakes: Mutex::new(HashMap::new()),
                 bus,
                 executor: Mutex::new(executor),
                 model,
@@ -1447,7 +1465,7 @@ impl AgentRuntime {
             handoff,
             restored: None,
         };
-        let task = match restored {
+        let mut task = match restored {
             Some(restored) => restored.attach_to(task),
             None => task,
         };
@@ -1463,32 +1481,45 @@ impl AgentRuntime {
             compaction_busy: compaction_busy.clone(),
             result_tx,
         };
-        lock_runs(&self.shared.runs).insert(
-            run_id,
-            RunEntry {
-                terminal_reason: None,
-                role,
-                name: name.clone(),
-                model,
-                config: config.clone(),
-                parent,
-                escalated_from,
-                completion_relayed,
-                phase_tx: phase_tx_entry,
-                phase_rx,
-                message_count_rx,
-                inbox_tx,
-                user_inbox,
-                pending_reference: Arc::new(Mutex::new(pending_reference)),
-                cancel_tx,
-                compact_tx,
-                model_preference_tx,
-                result_rx,
-                compaction_busy: Arc::clone(&compaction_busy),
-                mailbox: Arc::clone(&mailbox),
-                _join: None,
-            },
-        );
+        {
+            let mut runs = lock_runs(&self.shared.runs);
+            runs.insert(
+                run_id,
+                RunEntry {
+                    terminal_reason: None,
+                    role,
+                    name: name.clone(),
+                    model,
+                    config: config.clone(),
+                    parent,
+                    escalated_from,
+                    completion_relayed,
+                    phase_tx: phase_tx_entry,
+                    phase_rx,
+                    message_count_rx,
+                    inbox_tx,
+                    user_inbox,
+                    pending_reference: Arc::new(Mutex::new(pending_reference)),
+                    cancel_tx,
+                    compact_tx,
+                    model_preference_tx,
+                    result_rx,
+                    compaction_busy: Arc::clone(&compaction_busy),
+                    mailbox: Arc::clone(&mailbox),
+                    _join: None,
+                },
+            );
+            self.release_held_messages(run_id, &mailbox);
+            drop(runs);
+        }
+        // Registration is the consumption boundary, not provider completion.
+        if let Some(reservation) = task
+            .restored
+            .as_mut()
+            .and_then(|state| state.admission_reservation.as_mut())
+        {
+            reservation.commit();
+        }
         if task.restored.is_some() {
             self.shared
                 .bus
@@ -1919,9 +1950,33 @@ impl AgentRuntime {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
                 entry.cancel_tx.send_replace(RunInterrupt::Stop);
+                self.shared
+                    .operator_stops
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(target);
             }
         }
         Ok(())
+    }
+
+    /// Whether the operator stopped this run and has not resumed its thread root since.
+    pub(crate) fn operator_stopped(&self, run_id: RunId) -> bool {
+        self.shared
+            .operator_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&run_id)
+    }
+
+    /// The operator resumed this root: its whole tree may be continued again.
+    pub(crate) fn lift_operator_stops(&self, root: RunId) {
+        let tree = self.run_subtree_ids(root);
+        self.shared
+            .operator_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|run| !tree.contains(run));
     }
 
     /// Hard-cancel a root and all descendants, fencing even in-flight child spawns.

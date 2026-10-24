@@ -91,6 +91,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// true なら、型が `null` を許さない任意の欄の `null` を、検証の前に省略として
+    /// 取り除く（使わない欄を `null` で埋めるモデル向け）。スキーマと `null` の意味を
+    /// 外部のサーバーが決めるツール（MCP）は、値を消すなどの意図を黙って落とさない
+    /// よう false にし、検証で拒否させる。
+    fn reads_null_as_omitted(&self) -> bool {
+        true
+    }
+
     /// true なら、この呼び出しは結果に [`ToolResult::progress`] を添える。runtime は
     /// 同一入力の反復を実行前ではなく結果の進捗で判定する。待機を伴う状態確認向け。
     fn reports_progress(&self, _args: &serde_json::Value) -> bool {

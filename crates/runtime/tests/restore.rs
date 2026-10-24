@@ -68,7 +68,7 @@ async fn send_to_done_run_preserves_uncompacted_history() {
         )
         .unwrap();
     // Then: model receives the original history followed by exactly one trigger.
-    assert_eq!(id, "msg-1");
+    assert!(id.starts_with("msg-"), "{id}");
     assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
     let observed = model.observed().await;
     let restored = observed.last().unwrap();
@@ -93,6 +93,8 @@ async fn send_to_done_run_restores_full_context_and_processes_new_turn() {
         Ok(final_reply.clone()),
         Ok(text_response("sender", FinishReason::Stop)),
         Ok(text_response("restored", FinishReason::Stop)),
+        // The sender's completion report, held while the run was finished.
+        Ok(text_response("report handled", FinishReason::Stop)),
     ]));
     let (runtime, bus) = runtime_with(Arc::clone(&model));
     let runtime = runtime
@@ -207,7 +209,7 @@ async fn send_to_done_run_restores_full_context_and_processes_new_turn() {
         .unwrap();
     assert_eq!(terminal(&runtime, run_id).await, AgentRunPhase::Done);
     let observed = model.observed().await;
-    let restored = observed.last().unwrap();
+    let restored = &observed[3];
     let checkpoint = &checkpoints[0];
     let mut expected = messages[..checkpoint.range.0].to_vec();
     expected.push(checkpoint.summary.clone());

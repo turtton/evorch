@@ -117,6 +117,8 @@ impl AgentRuntime {
                 continuation,
                 review_seed,
             );
+        } else {
+            drop(continuation);
         }
         if let Some(admission) = admissions.get_mut(&run_id)
             && let Some(completion) = admission.completion.take()
@@ -200,6 +202,9 @@ impl AgentRuntime {
                     continuation,
                     review_seed,
                 );
+            } else {
+                // Release before notifying waiters; retries must observe the durable seed.
+                drop(continuation);
             }
             let failure = handoff.then(|| admitted.as_ref().err()).flatten();
             drop(admissions);

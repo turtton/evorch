@@ -145,6 +145,70 @@ impl ScriptedResponse {
         self.frames().concat()
     }
 
+    /// Renders the same script as Responses API SSE, ending with `response.completed`.
+    ///
+    /// Text fragments become `response.output_text.delta`. A tool call becomes one
+    /// `function_call` output item whose arguments arrive as
+    /// `response.function_call_arguments.delta` fragments before `output_item.done`.
+    pub fn responses_frames(&self) -> Vec<String> {
+        let frame = |value: Value| {
+            format!(
+                "event: {}\ndata: {value}\n\n",
+                value["type"].as_str().unwrap_or_default()
+            )
+        };
+        let mut frames = vec![frame(json!({
+            "type": "response.created",
+            "response": {"id": self.id, "object": "response", "status": "in_progress",
+                "model": self.model, "output": []},
+        }))];
+        match &self.kind {
+            ResponseKind::Text => {
+                for fragment in &self.fragments {
+                    frames.push(frame(json!({
+                        "type": "response.output_text.delta", "item_id": "msg_0",
+                        "output_index": 0, "content_index": 0, "delta": fragment,
+                    })));
+                }
+            }
+            ResponseKind::ToolCall { index, id, name } => {
+                let item_id = format!("fc_{id}");
+                let item = |arguments: String| {
+                    json!({"type": "function_call", "id": item_id, "call_id": id,
+                        "name": name, "arguments": arguments})
+                };
+                frames.push(frame(json!({
+                    "type": "response.output_item.added", "output_index": index,
+                    "item": item(String::new()),
+                })));
+                for fragment in &self.fragments {
+                    frames.push(frame(json!({
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": item_id, "output_index": index, "delta": fragment,
+                    })));
+                }
+                frames.push(frame(json!({
+                    "type": "response.output_item.done", "output_index": index,
+                    "item": item(self.fragments.concat()),
+                })));
+            }
+        }
+        let mut usage = json!({
+            "input_tokens": self.prompt_tokens,
+            "output_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + u64::from(self.completion_tokens),
+        });
+        if let Some(cached_tokens) = self.cached_tokens {
+            usage["input_tokens_details"] = json!({"cached_tokens": cached_tokens});
+        }
+        frames.push(frame(json!({
+            "type": "response.completed",
+            "response": {"id": self.id, "object": "response", "status": "completed",
+                "model": self.model, "usage": usage},
+        })));
+        frames
+    }
+
     /// Renders a non-streaming completion with all fragments reassembled.
     pub fn to_non_streaming_json(&self) -> Value {
         let content = self.fragments.concat();

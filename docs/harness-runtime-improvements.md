@@ -35,6 +35,12 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   count, while an immediate unchanged or failed result counts toward it. The
   call that reaches the limit has already run; its wave is recorded before the
   run stops. Each kind of call ends the other kind's streak.
+  The stop reason, like the `NoProgress` one, keeps its code first and then
+  names the tool and the fixed class of its last failure, e.g.
+  `IdenticalToolCalls: tool=edit last_error=invalid_args; consecutive identical
+  tool calls reached max_identical_tool_call_repeats=10`; `last_error` is left
+  out when the last result succeeded. Inputs and error texts never enter it, so
+  a parent reading a truncated reason still sees which tool looped and how.
   A job belongs to its launching run and retains its sandbox and cwd. It is not
   a durable task and cannot survive process restart.
 - Shell control uses short `job-N` handles. Internal UUIDs remain in GUI events

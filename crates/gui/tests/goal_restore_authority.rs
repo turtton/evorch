@@ -299,6 +299,7 @@ fn continue_chat(world: &mut World) -> Vec<LoopEvent> {
             thread_id: "thread".into(),
             composer_role: gui::model::composer::ComposerRole::Worker,
             model_preference: None,
+            automatic: false,
         },
     ))
 }
