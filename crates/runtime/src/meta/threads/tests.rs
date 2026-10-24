@@ -622,6 +622,59 @@ fn metadata_is_redacted_without_changing_authorization_or_search_cursors() {
 }
 
 #[test]
+fn long_tool_identifiers_do_not_stall_read_or_grep_pagination() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("long-tools", Some(f.project.path()), "run-810", |_| {});
+    let id = "識".repeat(6000);
+    let name = "名".repeat(6000);
+    f.run(
+        "run-810",
+        Some("long-tools"),
+        None,
+        vec![
+            assistant(vec![ContentBlock::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: json!({"needle": "x"}),
+            }]),
+            user(vec![ContentBlock::ToolResult {
+                tool_call_id: id.clone(),
+                content: vec![ToolResultContent::Text {
+                    text: "needle result".into(),
+                }],
+                is_error: false,
+            }]),
+            assistant(vec![text("needle later")]),
+        ],
+    );
+    for tool in ["thread_read", "thread_grep"] {
+        let mut args = if tool == "thread_read" {
+            json!({"thread": "long-tools", "view": "messages", "max_bytes": 1024})
+        } else {
+            json!({"thread": "long-tools", "pattern": "needle", "max_hits": 1})
+        };
+        let mut saw_later = false;
+        let mut finished = false;
+        for _ in 0..20 {
+            let page = f.call(own, tool, args.clone()).unwrap();
+            assert!(!page.to_string().contains(&id));
+            assert!(!page.to_string().contains(&name));
+            saw_later |= page.to_string().contains("needle later");
+            let next = &page["next_cursor"];
+            if next.is_null() {
+                finished = true;
+                break;
+            }
+            assert_ne!(next, &args["cursor"], "cursor must progress");
+            args["cursor"] = next.clone();
+        }
+        assert!(finished && saw_later, "{tool} must reach the later message");
+    }
+    assert!(super::fit(10, 1, |_| json!({"too_large": "x".repeat(100)})).is_err());
+}
+
+#[test]
 fn around_refs_stay_stable_and_max_bytes_pages_with_a_cursor() {
     let f = Fixture::new();
     let own = f.own();

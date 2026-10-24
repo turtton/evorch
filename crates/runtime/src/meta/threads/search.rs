@@ -230,7 +230,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
     }
     let next = (!exhausted).then(|| last_examined.clone()).flatten();
     let total = results.len();
-    Ok(scope.output(fit(MAX_OUTPUT_BYTES, total, |count| {
+    fit(MAX_OUTPUT_BYTES, total, |count| {
         // A trimmed page resumes after the last thread it still shows.
         let next_cursor = if count < total {
             count
@@ -247,7 +247,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             "threads": &results[..count],
             "next_cursor": next_cursor,
         }))
-    })))
+    })
 }
 
 fn position(scope: &Scope<'_>, row: &ThreadRow) -> Result<String, String> {

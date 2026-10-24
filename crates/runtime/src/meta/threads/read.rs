@@ -345,7 +345,7 @@ fn last_tool_error(run: &NormalizedRun) -> Option<Value> {
         .rfind(|block| block.kind == BlockKind::ToolResult && block.is_error == Some(true))
         .map(|block| {
             json!({
-                "tool_name": block.tool_name,
+                "tool_name": block.tool_name.as_deref().map(super::identifier),
                 "class": error_class(&block.text),
             })
         })
@@ -426,7 +426,7 @@ fn last_exchanges(run: &NormalizedRun, count: usize) -> Vec<Exchange> {
 
 /// Where the next response continues: a message ordinal, an original block
 /// index and a UTF-8 byte offset into that block's text.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Position {
     ordinal: usize,
     block: usize,
@@ -595,6 +595,11 @@ fn messages(
             break 'messages;
         }
     }
+    if next == Some(start) || !fits(&out) {
+        return Err(
+            "thread_output_too_large: metadata cannot fit max_bytes; raise max_bytes".into(),
+        );
+    }
     let next = next.map(|position| cursor_text(run.run_id, position));
     Ok(render(&out, next.as_deref()))
 }
@@ -622,10 +627,10 @@ fn block_json(block: &Block, reference: Ref, chunk: Option<(usize, &str)>) -> Va
         }
     }
     if let Some(name) = &block.tool_name {
-        value["tool_name"] = json!(name);
+        value["tool_name"] = json!(super::identifier(name));
     }
     if let Some(id) = &block.call_id {
-        value["call_id"] = json!(id);
+        value["call_id"] = json!(super::identifier(id));
     }
     if let Some(is_error) = block.is_error {
         value["is_error"] = json!(is_error);

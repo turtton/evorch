@@ -143,7 +143,7 @@ pub(super) fn run(scope: &Scope<'_>, args: GrepArgs) -> Result<Value, String> {
                     "snippet": snippet(&block.text, first.start(), first.end(), context, MATCH_CHARS),
                 });
                 if let Some(name) = &block.tool_name {
-                    hit["tool_name"] = json!(name);
+                    hit["tool_name"] = json!(super::identifier(name));
                 }
                 if let Some(is_error) = block.is_error {
                     hit["is_error"] = json!(is_error);
@@ -167,7 +167,7 @@ pub(super) fn run(scope: &Scope<'_>, args: GrepArgs) -> Result<Value, String> {
     }
     let page: Vec<Value> = hits.into_iter().skip(start).take(max_hits).collect();
     let shown = page.len();
-    Ok(fit(MAX_OUTPUT_BYTES, shown, |count| {
+    fit(MAX_OUTPUT_BYTES, shown, |count| {
         let next = start + count;
         scope.output(json!({
             "note": UNTRUSTED_NOTE,
@@ -178,5 +178,5 @@ pub(super) fn run(scope: &Scope<'_>, args: GrepArgs) -> Result<Value, String> {
             "next_cursor": (next < total).then(|| next.to_string()),
             "notes": notes,
         }))
-    }))
+    })
 }

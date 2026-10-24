@@ -314,6 +314,12 @@ fn clip_chars(text: &str, max: usize) -> String {
     clipped
 }
 
+/// Long identifiers are abbreviated only for display, never for pairing or
+/// repeat collapsing (different tools can share the same displayed prefix).
+fn identifier(text: &str) -> String {
+    clip_chars(text, 80)
+}
+
 /// At most `max` UTF-8 bytes, marking a cut with an ellipsis.
 fn clip_bytes(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -345,13 +351,16 @@ fn snippet(text: &str, start: usize, end: usize, context: usize, match_chars: us
     result
 }
 
-/// The largest `n <= total` whose rendering fits `budget` bytes (at least zero).
-fn fit(budget: usize, total: usize, render: impl Fn(usize) -> Value) -> Value {
+/// The largest nonempty page that fits, or an error rather than a stuck cursor.
+fn fit(budget: usize, total: usize, render: impl Fn(usize) -> Value) -> Result<Value, String> {
     let mut count = total;
     loop {
         let value = render(count);
-        if count == 0 || value.to_string().len() <= budget {
-            return value;
+        if value.to_string().len() <= budget && (total == 0 || count > 0) {
+            return Ok(value);
+        }
+        if count == 0 {
+            return Err("thread_output_too_large: metadata cannot fit the output budget".into());
         }
         count -= 1;
     }
