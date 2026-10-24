@@ -40,6 +40,9 @@ pub struct HistorySource {
     pub message_count: usize,
 }
 
+/// Upper bound on frozen handoff sources a run can carry.
+pub(crate) const MAX_SOURCES: usize = 8;
+
 impl Continuity {
     pub(crate) fn latest_note(
         &self,
@@ -64,7 +67,6 @@ impl Continuity {
         source: crate::RunId,
         messages: &[Message],
     ) -> Result<Self, String> {
-        const MAX_SOURCES: usize = 8;
         const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
         let mut sources = self.sources.clone();
         if sources.len() >= MAX_SOURCES {
