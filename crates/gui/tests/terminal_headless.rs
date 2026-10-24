@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use egui::{Event, Key, Modifiers};
 use gui::app::WorkbenchState;
@@ -106,18 +107,74 @@ fn screen(harness: &HeadlessWorkbench<Source>) -> Vec<String> {
         .screen_lines()
 }
 
-/// Steps frames on every PTY wakeup until `done` holds; the PTY signals each output and exit.
+/// Steps frames on every PTY wakeup until `done` holds, with a total deadline.
+#[track_caller]
 fn run_until(
     harness: &mut HeadlessWorkbench<Source>,
     wake: &mpsc::Receiver<()>,
     done: impl Fn(&HeadlessWorkbench<Source>) -> bool,
 ) {
+    // Leave room for shared CI load, but report the screen before nextest's 180s cutoff.
+    run_until_before(
+        harness,
+        wake,
+        Instant::now() + Duration::from_secs(60),
+        done,
+    );
+}
+
+#[track_caller]
+fn run_until_before(
+    harness: &mut HeadlessWorkbench<Source>,
+    wake: &mpsc::Receiver<()>,
+    deadline: Instant,
+    done: impl Fn(&HeadlessWorkbench<Source>) -> bool,
+) {
     harness.step();
     while !done(harness) {
-        wake.recv()
-            .expect("PTY must keep signalling until the condition holds");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let result = if remaining.is_zero() {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            wake.recv_timeout(remaining)
+        };
+        if let Err(error) = result {
+            let terminal = harness.state().active_terminal().expect("active terminal");
+            panic!(
+                "PTY condition not met: {error}; status={:?}, size={:?}, screen={:#?}",
+                terminal.status(),
+                terminal.emulator().size(),
+                screen(harness)
+            );
+        }
         harness.step();
     }
+}
+
+#[test]
+#[should_panic(expected = "PTY condition not met: timed out waiting on channel; status=")]
+fn missing_pty_wakeup_has_a_bounded_wait() {
+    let mut harness = terminal_harness();
+    let (_tx, wake) = mpsc::channel();
+    run_until_before(
+        &mut harness,
+        &wake,
+        Instant::now() + Duration::from_millis(100),
+        |_| false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "PTY condition not met: timed out waiting on channel; status=")]
+fn queued_pty_wakeups_do_not_extend_the_deadline() {
+    let mut harness = terminal_harness();
+    let (tx, wake) = mpsc::channel();
+    tx.send(()).expect("queued wakeup");
+    let checks = std::cell::Cell::new(0);
+    run_until_before(&mut harness, &wake, Instant::now(), |_| {
+        assert_eq!(checks.replace(checks.get() + 1), 0, "deadline was extended");
+        false
+    });
 }
 
 fn type_text(harness: &mut HeadlessWorkbench<Source>, text: &str) {
@@ -269,34 +326,49 @@ fn focused_terminal_sends_keys_to_the_shell_and_restarts_after_exit() {
 // Given: two projects / When: the selection switches / Then: each gets its own shell in its repo root.
 #[test]
 fn each_project_gets_its_own_shell_in_its_root() {
-    let first = tempfile::tempdir().expect("first project dir");
-    let second = tempfile::tempdir().expect("second project dir");
-    let (spawner, wake) = ScriptSpawner::new("pwd; exec cat");
+    let projects = tempfile::tempdir().expect("project directories");
+    // Force pwd to wrap at the pane's width even when TMPDIR is short (as in CI).
+    let parent = projects.path().join("long-project-root-".repeat(6));
+    let first = parent.join("first");
+    let second = parent.join("second");
+    std::fs::create_dir_all(&first).expect("first project dir");
+    std::fs::create_dir_all(&second).expect("second project dir");
+    // Check the full cwd outside the screen: wrapping/scrollback can hide parts of it.
+    let (spawner, wake) = ScriptSpawner::new(
+        "pwd > shell-cwd; cat shell-cwd; printf 'ready:%s\\n' \"${PWD##*/}\"; exec cat",
+    );
     let mut state = default_state().with_terminal_spawner(spawner.clone());
-    let first_id = state.add_project(first.path()).expect("first project");
-    let second_id = state.add_project(second.path()).expect("second project");
+    let first_id = state.add_project(&first).expect("first project");
+    let second_id = state.add_project(&second).expect("second project");
     state
         .select_project(first_id.clone())
         .expect("select first");
     let mut harness = terminal_harness_with(state, [800.0, 600.0]);
-    let first_root = first.path().display().to_string();
-    run_until(&mut harness, &wake, |h| screen_contains(h, &first_root));
+    run_until(&mut harness, &wake, |h| screen_contains(h, "ready:first"));
 
     harness
         .state_mut()
         .select_project(second_id)
         .expect("select second");
-    let second_root = second.path().display().to_string();
-    run_until(&mut harness, &wake, |h| screen_contains(h, &second_root));
+    run_until(&mut harness, &wake, |h| screen_contains(h, "ready:second"));
 
-    assert_eq!(spawner.cwds(), [first.path(), second.path()]);
+    for project in [&first, &second] {
+        assert_eq!(
+            std::fs::read_to_string(project.join("shell-cwd")).expect("shell records its cwd"),
+            format!(
+                "{}\n",
+                project.canonicalize().expect("project root").display()
+            )
+        );
+    }
+    assert_eq!(spawner.cwds(), [first, second]);
     assert_eq!(harness.state().terminals().len(), 2);
     harness
         .state_mut()
         .select_project(first_id)
         .expect("select first again");
     harness.run();
-    assert!(screen_contains(&harness, &first_root));
+    assert!(screen_contains(&harness, "ready:first"));
     assert_eq!(
         spawner.cwds().len(),
         2,
