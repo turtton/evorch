@@ -158,6 +158,10 @@ pub struct RunRestoreDescriptor {
     pub renewable_team: Option<TeamRestoreIdentity>,
     #[serde(default)]
     pub interrupted_tool_calls: Vec<InterruptedToolCall>,
+    /// These calls' recovery notices are already in this snapshot's history.
+    /// Fresh execution snapshots reset this: synthetic shell IDs can recur.
+    #[serde(default)]
+    pub(crate) outcome_notices_persisted: bool,
     #[serde(default)]
     pub durable_task_id: Option<String>,
     /// Model identity at the last snapshot, for inspection only; restore never routes by it.
@@ -486,6 +490,7 @@ fn write_snapshot_with_context(
         non_restorable_reason,
         renewable_team,
         interrupted_tool_calls,
+        outcome_notices_persisted: false,
         durable_task_id: config.task_id.clone(),
         selected_model: Some(crate::compaction::selected_model(state)),
         tool_names: state

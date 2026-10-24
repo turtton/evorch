@@ -212,6 +212,9 @@ impl AgentRuntime {
             });
             record.messages_json = serde_json::to_string(&history)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+            // Persist atomically with the notices, retaining call diagnostics and
+            // disk-delivery restrictions even when admission returns the snapshot.
+            descriptor.outcome_notices_persisted = true;
             if let Some(pending) = &mut descriptor.pending_escalation {
                 pending.trusted_request = pending_request.clone();
             }
