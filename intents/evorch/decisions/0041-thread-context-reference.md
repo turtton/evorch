@@ -337,11 +337,22 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - ADR に記載のない実装判断: 3 ツールを `agent_loop/tool_calls/ledger_events.rs` の `VISIBLE_META_OPS` に加え、GUI の会話にツール呼び出しとして表示する（他スレッドを読んだことを利用者が見られるようにするため。Orchestrator 承認済み）。`thread_grep` / `thread_read` の `thread` 引数は 256 バイト以下とし、超えると存在に依存しない `thread_args_invalid` で拒否する（拒否文が ID をそのまま返すので、出力上限内に収めるため）。
   - キャッシュ契約テストは `crates/runtime/tests/thread_tools_cache.rs`（`scripts/contract-test-filters.sh` の `binary(=thread_tools_cache)`）。
   - 保存済み run の終了理由は A-1 の読み取り API（`RunTerminalSummary`）に含まれないため、`thread_read` の終了理由は runtime に登録中の run についてのみ返す（それ以外は phase だけ）。
-- [ ] A-3 GUI — commit: ____
-- [ ] A-4 inspect（任意）— commit: ____
-- [ ] 検証（`cargo nextest run`、`cargo clippy --workspace -- -D warnings`、`cargo fmt --check`、`scripts/check-cache-contracts.sh`）— commit: ____
+- [x] A-3 GUI — commit: 00208ac4（会話のツール見出し）, e544db44（`sidebar.json` → `threads` のミラー）, 58997357（解決できない `project_root` を送らない）, cd246a11（rewind・版の切り替え・escalation の追従テスト）
+  - `crates/gui/src/app/thread_mirror.rs` の `sync_thread_mirror` が、`SYNC_INTERVAL`（1 秒）ごとに前回から変わった定義だけを `try_upsert_threads` で書く。`frame.rs` の `logic` と `update` の両方から呼ぶので、ウィンドウが隠れている間も追従する。
+  - 受け入れテストは `crates/gui/tests/thread_mirror_headless.rs`（4 件）。スレッドの追加・改名・fork・アーカイブと復元、symlink 経由の `project_root` の canonical 化と runtime が書いた値の保持、rewind と版の切り替え、escalation の追従を確かめる。既存の `usage_tab_headless` も通る。
+  - ADR に記載のない実装判断: sidebar が知らない値は `None` で送り、保存済みの値を消さない。`project_root` を canonical にできない（ディレクトリがない）間は送らず、canonical でないパスを可視性の鍵にしない。`escalation_source_run_id` があるスレッドの `lineage_kind` は fork / rewind より escalation を優先する。3 ツールの呼び出しは会話に見出し（Search threads / Grep thread / Read thread）つきで表示する。
+  - 同じ 4 コミットは `feat/thread-context-mirror`（4cd7ce9d, 3fec56b2, 5719f60b, f97b50fc）にもある。`git range-diff` でパッチが同一であることを確認した。
+- [ ] A-4 inspect（任意）— 任意のため今回は見送り
+- [x] 検証 — 対象: 091442b1（merge 後の HEAD）。記録: この結果を書いたコミット。テストは `TMPDIR=/tmp/evt` で実行した（理由は下記の環境起因の失敗）。
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`: 成功（警告なし）。
+  - `cargo fmt --all --check`: 成功（差分なし）。
+  - `scripts/check-cache-contracts.sh -j 4`: 263 件すべて成功（`thread_tools_cache` の 2 件を含む）。
+  - `cargo nextest run -p storage -p agents -p gui -p runtime --locked -j 4`: 3,523 件すべて成功（42 件 skip）。`thread_mirror_headless` 4 件、`thread_mirror` の単体テスト 4 件、`usage_tab_headless` 4 件（ignore の 1 件を除く）、`terminal_headless` 8 件を含む。
+  - 依存 crate: `cargo nextest run -p evorch -p eval -p recorder --locked -j 4` で 124 件すべて成功。
+  - 環境起因の失敗: rebase した結果での最初の実行（sandbox の長い `TMPDIR`）では、上の 4 crate のうち 4 件が失敗し 1 件がタイムアウトした。3 件は `path must be shorter than SUN_LEN`（Unix ソケットのパスが長すぎる）で失敗した。残りの 2 件（ownership IPC を使う `headless_layout` の 1 件と、端末の `terminal_headless` の 1 件）も `TMPDIR=/tmp/evt` では成功したため、同じソケットパス長の問題と判断した。
+  - コード起因の失敗はなかった。
 - [ ] 受け入れレビュー — commit: ____
-- [ ] PR 作成（マージはしない）— PR: ____
+- [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: ____
 
 ### 触らない範囲
 
@@ -353,4 +364,4 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 2. この ADR を最初から読み、「実装状況」で最初の未チェック項目から再開する。
 3. `git log --oneline -- intents/evorch/decisions/0041-thread-context-reference.md crates/storage crates/runtime/src/meta crates/gui/src/app` などで、チェック済みでもコミットが残っているか確かめる。
 4. マイグレーション番号、`HistoryRead` の位置、`capabilities()` の形などは、実装前に現行のコードで確認する（この ADR の番号は 2026-10-24 時点）。
-5. コミットは署名つきで、`type(scope): subject` 形式にする。マージはしない。
+5. コミットは署名つきで、`type(scope): subject` 形式にする。マージは「実装状況」の PR の行の条件（CI 成功と独立レビュー合格）を満たしてから squash で行う。
