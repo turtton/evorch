@@ -376,6 +376,16 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 修正 7 コミットおよび ADR 対応記録 `91633635` の 8 件は GitHub API の `commit.verification` で `verified=true, reason=valid` を確認済み。全 push は gh auth token を使った HTTPS、通常の fast-forward（force / ssh / フック迂回なし）。
 - 区切りごとの検証: M1 関連 35 件、M2 thread 関連 23 件、M3 24 件、M4 25 件、S1 26 件、description 契約 5 件、M1 補完 goal 関連 25 件がすべて成功。各コミットの fmt / pre-push clippy フックも成功。署名付きコミットは各回通常の fast-forward push を実施。
 
+### 受け入れレビュー 2 回目の指摘への対応
+
+再レビューも不合格（対象 `9cfa08c0`、must 2 件）。R1 / R2 を以下のとおり修正。修正後の独立レビュー合格判定は未取得のため、受け入れレビューは未完了のままとする。
+
+- **R1** — `f0d0c207` (`fix(runtime): reject incomplete legacy handoff authorization`): `PendingEscalation` に `trusted_request_complete` を追加。完全な人間入力を保持する新 writer のみ true とし、serde default は false。旧形式・マーカーなしの保存値は `trusted_thread_request` の認可証拠へ戻さない。follow-up がある場合は、旧保存値を混ぜず完全な新入力だけを認可証拠として保存する。新入力なしでは単なる再保存で完全性を昇格させない。
+  - 回帰テスト: 旧形式の 8,192 文字切り詰め済み pending escalation と新形式の全文を保存し、fresh runtime で新入力なし／follow-up ありの 4 通りを復元。別プロジェクトの `thread-1` が許可されないこと、follow-up の `thread-20` は許可されること、新形式の完全入力が維持されることを確認。関連 12 件すべて成功。
+- **R2** — `ee858c0a` (`fix(runtime): authorize search cursor positions before use`): DB rowid の cursor 参照位置を caller の共通 visibility ゲートで再認可してから使用し、不存在・不可視・解決不能はすべて同じ `thread_cursor_invalid` にする。候補の系譜に含まれる不可視 fork 行は cursor 発行前に除外し、発行済み cursor が自身の認可チェックで拒否されるのを防ぐ。cursor は認可証拠にはしない。
+  - 回帰テスト: 可視集合が空の caller と自プロジェクトを持つ caller から、他プロジェクトの実在 rowid と不存在 rowid が同一エラーとなること、可視時に使えた cursor も認可を失うと拒否されること、110 件の不可視 fork 候補を cursor として発行しないことを確認。`thread_read` の cursor は認可済み run 内の位置だけを検証し、`thread_grep` は数値 offset のみで DB/run の参照解決をしないことを確認し、実在する不可視／不存在の run ref と target の拒否を回帰テストに追加。thread 関連 29 件すべて成功（既存の 2,106 スレッドの検索継続も含む）。
+- 両修正は署名付きコミット・通常の fast-forward push 済み。fmt / pre-push clippy フック成功。`crates/tools` と ADR の触らない範囲は変更していない。
+
 ### 触らない範囲
 
 別の担当が変更中のため、次には触れない。`crates/tools` の edit / executor、runtime の `identical_calls.rs`、`budget_tracker.rs`、`completion_relay.rs`。
