@@ -45,6 +45,7 @@ const KEYRING_KEYS: &[&str] = &["type", "service", "account"];
 const MODEL_ENTRY_KEYS: &[&str] = &[
     "id",
     "enabled",
+    "kind",
     "metadata_source",
     "metadata_ref",
     "preset",
@@ -100,6 +101,7 @@ const ADDITIONAL_ROLE_KEYS: &[&str] = &[
     "multimodal_looker",
     "evaluator",
     "compactor",
+    "image_generator",
 ];
 const RULES_KEYS: &[&str] = &[
     "context_window_tokens",
@@ -636,6 +638,21 @@ fn validate_models(profile: &toml::value::Table, profile_path: &str) -> Result<(
                     return Err(ConfigError::InvalidField {
                         path: format!("{path}.enabled"),
                         message: "enabled must be a boolean".into(),
+                    });
+                }
+                if let Some(kind) = table.get("kind")
+                    && !crate::ModelKind::ALL
+                        .iter()
+                        .any(|known| kind.as_str() == Some(known.as_str()))
+                {
+                    return Err(ConfigError::InvalidField {
+                        path: format!("{path}.kind"),
+                        message: format!(
+                            "kind must be one of: {}",
+                            crate::ModelKind::ALL
+                                .map(crate::ModelKind::as_str)
+                                .join(", ")
+                        ),
                     });
                 }
             }

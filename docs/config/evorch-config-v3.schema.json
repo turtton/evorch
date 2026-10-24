@@ -28,6 +28,9 @@
           "evaluator": {
             "generation": {}
           },
+          "image_generator": {
+            "generation": {}
+          },
           "multimodal_looker": {
             "generation": {}
           },
@@ -260,6 +263,13 @@
             "generation": {}
           }
         },
+        "image_generator": {
+          "description": "画像生成にだけ使うチェーン。agent としては起動しない (ADR 0038)。\n候補はすべて `image_generation` のモデル。`models` が空なら画像生成は無効で、\nロール名の route への暗黙のフォールバックはしない。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
@@ -317,6 +327,9 @@
               "generation": {}
             },
             "evaluator": {
+              "generation": {}
+            },
+            "image_generator": {
               "generation": {}
             },
             "multimodal_looker": {
@@ -1001,6 +1014,17 @@
               ],
               "format": "double"
             },
+            "kind": {
+              "description": "モデルの種別 (ADR 0038)。省略時は ID から推定する: `gpt-image-` / `chatgpt-image-` /\n`dall-e-` で始まれば `image_generation`、それ以外は `chat`。",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "metadata_ref": {
               "type": [
                 "string",
@@ -1045,6 +1069,21 @@
           "required": [
             "id"
           ]
+        }
+      ]
+    },
+    "ModelKind": {
+      "description": "モデルの種別 (ADR 0038)。会話に使うモデルか、画像生成に使うモデルか。\n\nTOML では `chat` / `image_generation` と書く。",
+      "oneOf": [
+        {
+          "description": "会話用のモデル。通常のロール・カテゴリ・compactor のチェーンに置ける。",
+          "type": "string",
+          "const": "chat"
+        },
+        {
+          "description": "画像生成用のモデル。`agents.roles.image_generator` のチェーンにだけ置ける。",
+          "type": "string",
+          "const": "image_generation"
         }
       ]
     },
@@ -1403,6 +1442,9 @@
                 "generation": {}
               },
               "evaluator": {
+                "generation": {}
+              },
+              "image_generator": {
                 "generation": {}
               },
               "multimodal_looker": {

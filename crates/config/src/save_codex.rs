@@ -67,6 +67,15 @@ pub fn save_codex_provider_edit(
             "default_model must be a member of models",
         ));
     }
+    if models.iter().any(|model| {
+        model.id == input.default_model
+            && model.effective_kind() == crate::ModelKind::ImageGeneration
+    }) {
+        return Err(invalid_field(
+            "providers.default_model",
+            crate::save::DEFAULT_MODEL_KIND_MESSAGE,
+        ));
+    }
     let mut doc = read_document(path)?;
     let mut profile = Table::new();
     profile.insert("type", value("openai-codex"));

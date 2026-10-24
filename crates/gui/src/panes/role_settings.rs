@@ -54,6 +54,10 @@ pub fn role_settings_modal(
                                 );
                             });
                         }
+                        let conversation =
+                            model.chain_routes(config::ChainPurpose::Conversation);
+                        let image = model.chain_routes(config::ChainPurpose::ImageGeneration);
+                        let no_efforts = BTreeMap::new();
                         let agents = &mut model.agents;
                         for (name, role_key, binding, categories) in [
                             ("Orchestrator", "orchestrator", &mut agents.orchestrator, None),
@@ -77,8 +81,10 @@ pub fn role_settings_modal(
                                         ui,
                                         &mut binding.models,
                                         ChainChoices {
-                                            routes: &model.logical_models,
-                                            existing: &model.route_names,
+                                            routes: &conversation.heads,
+                                            existing: &conversation.existing,
+                                            misfits: &conversation.misfits,
+                                            requirement: CHAT_ROUTES,
                                             efforts: &model.route_efforts,
                                             name: "Role route",
                                             inherit_label: "Inherit default",
@@ -107,8 +113,10 @@ pub fn role_settings_modal(
                                                     ui,
                                                     &mut draft.models,
                                                     ChainChoices {
-                                                        routes: &model.logical_models,
-                                                        existing: &model.route_names,
+                                                        routes: &conversation.heads,
+                                                        existing: &conversation.existing,
+                                                        misfits: &conversation.misfits,
+                                                        requirement: CHAT_ROUTES,
                                                         efforts: &model.route_efforts,
                                                         name: &format!("{category} route"),
                                                         inherit_label: "Inherit default",
@@ -152,8 +160,10 @@ pub fn role_settings_modal(
                                     ui,
                                     &mut binding.models,
                                     ChainChoices {
-                                        routes: &model.logical_models,
-                                        existing: &model.route_names,
+                                        routes: &conversation.heads,
+                                        existing: &conversation.existing,
+                                        misfits: &conversation.misfits,
+                                        requirement: CHAT_ROUTES,
                                         efforts: &model.route_efforts,
                                         name: "Compactor route",
                                         inherit_label: "Use running role's chain",
@@ -171,6 +181,32 @@ pub fn role_settings_modal(
                                         generation(ui, &mut binding.generation)
                                     });
                                 });
+                            });
+                        });
+                        ui.push_id("image_generator", |ui| {
+                            ui.collapsing(badge("Image generator"), |ui| {
+                                let binding = &mut agents.roles.image_generator;
+                                chain_editor(
+                                    ui,
+                                    &mut binding.models,
+                                    ChainChoices {
+                                        routes: &image.heads,
+                                        existing: &image.existing,
+                                        misfits: &image.misfits,
+                                        requirement: IMAGE_ROUTES,
+                                        efforts: &no_efforts,
+                                        name: "Image generator route",
+                                        inherit_label: IMAGE_GENERATION_DISABLED,
+                                    },
+                                );
+                                if let Some(logical) = binding_status(
+                                    ui,
+                                    binding.head_route(),
+                                    &model.route_names,
+                                ) {
+                                    action = Some(RoleSettingsAction::CreateRoute(logical));
+                                }
+                                ui.label(muted(IMAGE_ROUTES));
                             });
                         });
                     });
@@ -195,6 +231,15 @@ pub fn role_settings_modal(
     action
 }
 
+/// Shown when the image generator has no chain: image generation is off (ADR 0038).
+pub const IMAGE_GENERATION_DISABLED: &str = "Disabled (generate_image unavailable)";
+/// What conversation and compactor chains accept.
+const CHAT_ROUTES: &str =
+    "Only routes of chat models are offered for agent roles and the compactor.";
+/// What the image generator chain accepts.
+const IMAGE_ROUTES: &str =
+    "Only routes of image generation models on Codex or OpenAI profiles are offered.";
+
 /// `AgentsConfig::binding_for` と同じ優先順で、編集中のチェーンの先頭 route を解決する。
 fn effective_route<'a>(
     explicit: Option<&'a str>,
@@ -216,6 +261,8 @@ fn chain_editor(
     let ChainChoices {
         routes,
         existing,
+        misfits,
+        requirement,
         efforts,
         name,
         inherit_label,
@@ -286,6 +333,15 @@ fn chain_editor(
     } else if let Some(index) = removal {
         models.remove(index);
     }
+    for entry in models.iter().filter(|entry| misfits.contains(&entry.route)) {
+        ui.colored_label(
+            palette().ERROR_FG,
+            format!(
+                "Route `{}` has models of another kind. {requirement}",
+                entry.route
+            ),
+        );
+    }
     let next = existing
         .iter()
         .find(|route| !models.iter().any(|entry| &entry.route == *route));
@@ -309,6 +365,11 @@ struct ChainChoices<'a> {
     routes: &'a [String],
     /// Routes that exist, the only ones a fallback can pick.
     existing: &'a std::collections::BTreeSet<String>,
+    /// Routes whose model kinds do not fit this chain (ADR 0038); entries naming one
+    /// stay visible and are flagged instead of being hidden.
+    misfits: &'a std::collections::BTreeSet<String>,
+    /// What the chain accepts, shown next to a flagged entry.
+    requirement: &'a str,
     efforts: &'a BTreeMap<String, Vec<String>>,
     name: &'a str,
     inherit_label: &'a str,

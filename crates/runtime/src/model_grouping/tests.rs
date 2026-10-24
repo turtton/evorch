@@ -337,12 +337,141 @@ async fn a_changed_canonical_id_is_reported_without_rewriting() {
             model: "kimi-k3".into(),
             expected: GroupKey {
                 canonical: KIMI_K3.into(),
-                tier: Tier::Standard
+                tier: Tier::Standard,
+                kind: ModelKind::Chat,
             },
             actual: GroupKey {
                 canonical: "moonshotai/kimi-k3.1".into(),
-                tier: Tier::Standard
+                tier: Tier::Standard,
+                kind: ModelKind::Chat,
             },
         }]
     );
+}
+
+const GPT_IMAGE: &str = "openai/gpt-image-2";
+
+async fn image_catalog() -> ModelCatalog {
+    catalog(serde_json::json!({
+        "openai": models([
+            canonical("gpt-image-2", GPT_IMAGE),
+            canonical("gpt-image-2-chat", GPT_IMAGE),
+        ]),
+    }))
+    .await
+}
+
+fn with_kind(
+    mut profile: ProviderProfileConfig,
+    id: &str,
+    kind: ModelKind,
+) -> ProviderProfileConfig {
+    let entry = profile
+        .models
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .expect("registered model");
+    entry.kind = Some(kind);
+    profile
+}
+
+#[tokio::test]
+async fn the_group_key_carries_the_model_kind() {
+    // Given: the same catalog identity registered as an image model and as a chat model.
+    let catalog = image_catalog().await;
+    let image = provider(
+        ProviderTypeConfig::OpenAiCodex,
+        &["gpt-6-astra", "gpt-image-2"],
+    );
+    let chat = with_kind(
+        provider(ProviderTypeConfig::OpenAi, &["gpt-image-2"]),
+        "gpt-image-2",
+        ModelKind::Chat,
+    );
+    // When / Then: only the kind tells the two apart.
+    let image_key = group_key("codex", &image, "gpt-image-2", &catalog).expect("image key");
+    let chat_key = group_key("openai", &chat, "gpt-image-2", &catalog).expect("chat key");
+    assert_eq!(image_key.kind, ModelKind::ImageGeneration);
+    assert_eq!(chat_key.kind, ModelKind::Chat);
+    assert_eq!(image_key.canonical, chat_key.canonical);
+    assert_ne!(image_key, chat_key);
+}
+
+#[tokio::test]
+async fn models_of_another_kind_never_join_a_pool() {
+    // Given: an image pool used by the image generator, and a chat pool used by the
+    // planner, both on the same catalog identity.
+    let catalog = image_catalog().await;
+    let mut agents = planner_uses("chat-pool");
+    agents.roles.image_generator.models = vec![ChainEntryConfig::route("image-pool")];
+    let routing = routing([
+        ("image-pool", vec![candidate("codex", "gpt-image-2", false)]),
+        (
+            "chat-pool",
+            vec![candidate("compatible", "gpt-image-2-chat", false)],
+        ),
+    ]);
+    let compatible = with_kind(
+        provider(ProviderTypeConfig::OpenAiCompatible, &["gpt-image-2-chat"]),
+        "gpt-image-2-chat",
+        ModelKind::Chat,
+    );
+
+    // When: an OpenAI profile whose gpt-image-2 is an image model is saved.
+    let image_providers = providers([
+        (
+            "codex",
+            provider(
+                ProviderTypeConfig::OpenAiCodex,
+                &["gpt-6-astra", "gpt-image-2"],
+            ),
+        ),
+        ("compatible", compatible.clone()),
+        (
+            "openai",
+            provider(ProviderTypeConfig::OpenAi, &["gpt-5", "gpt-image-2"]),
+        ),
+    ]);
+    let plan = plan_for_profile("openai", &image_providers, &routing, &agents, &catalog);
+    // Then: it joins the image pool only; the chat pool of the same identity is left alone.
+    assert_eq!(
+        plan,
+        AutoGroupPlan {
+            additions: vec![AutoAddition {
+                route: "image-pool".into(),
+                candidate: candidate("openai", "gpt-image-2", true),
+            }],
+            conflicts: vec![],
+        }
+    );
+
+    // When: the same model is marked as a chat model instead.
+    let chat_providers = providers([
+        (
+            "codex",
+            provider(
+                ProviderTypeConfig::OpenAiCodex,
+                &["gpt-6-astra", "gpt-image-2"],
+            ),
+        ),
+        ("compatible", compatible),
+        (
+            "openai",
+            with_kind(
+                provider(ProviderTypeConfig::OpenAi, &["gpt-5", "gpt-image-2"]),
+                "gpt-image-2",
+                ModelKind::Chat,
+            ),
+        ),
+    ]);
+    let plan = plan_for_profile("openai", &chat_providers, &routing, &agents, &catalog);
+    // Then: it joins the chat pool only and is never offered to the image pool.
+    assert_eq!(
+        plan.additions,
+        [AutoAddition {
+            route: "chat-pool".into(),
+            candidate: candidate("openai", "gpt-image-2", true),
+        }]
+    );
+    assert!(plan.conflicts.is_empty());
 }

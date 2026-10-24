@@ -77,10 +77,14 @@ pub fn provider_models(
                         }
                     } else {
                         ui.add_sized(
-                            [(ui.available_width() - 130.0).max(40.0), 20.0],
+                            [(ui.available_width() - 260.0).max(40.0), 20.0],
                             egui::Label::new(&id).truncate(),
                         )
                         .on_hover_text(&id);
+                        let kind = editor.models[index].effective_kind();
+                        if let Some(kind) = kind_picker(ui, &id, kind) {
+                            inputs.error = editor.set_model_kind(index, kind).err();
+                        }
                         let edit = ui.button("Edit");
                         edit.widget_info(|| {
                             egui::WidgetInfo::labeled(
@@ -226,4 +230,44 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
         });
     }
     refresh
+}
+
+/// How a model kind reads in the settings (ADR 0038).
+pub fn kind_label(kind: config::ModelKind) -> &'static str {
+    match kind {
+        config::ModelKind::Chat => "Chat",
+        config::ModelKind::ImageGeneration => "Image generation",
+    }
+}
+
+/// A configured model's kind picker, showing its effective kind (explicit or inferred).
+/// Returns the kind the user picked when it differs.
+pub fn kind_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: config::ModelKind,
+) -> Option<config::ModelKind> {
+    let mut selected = current;
+    let response = egui::ComboBox::from_id_salt(("model-kind", id))
+        .width(120.0)
+        .selected_text(kind_label(current))
+        .show_ui(ui, |ui| {
+            for kind in config::ModelKind::ALL {
+                ui.selectable_value(&mut selected, kind, kind_label(kind));
+            }
+        })
+        .response;
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(
+            egui::WidgetType::ComboBox,
+            ui.is_enabled(),
+            format!("Kind {id}"),
+        );
+        info.current_text_value = Some(kind_label(current).to_owned());
+        info
+    });
+    response.on_hover_text(
+        "Chat models serve agent roles; image generation models serve only the Image generator",
+    );
+    (selected != current).then_some(selected)
 }

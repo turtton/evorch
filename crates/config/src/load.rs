@@ -116,8 +116,9 @@ impl Config {
     /// - マージ済み設定に平文 credential フィールドがある場合
     ///   ([`ConfigError::InvalidField`])。未知フィールドは警告して無視する。
     /// - 自己改善ドラフト設定の値が許容範囲外の場合 ([`ConfigError::InvalidField`])。
-    /// - 厳格な読み込みで、ロールのチェーンが存在しない route を参照する場合
-    ///   ([`ConfigError::InvalidField`])。通常の読み込みでは警告にとどめる。
+    /// - 厳格な読み込みで、ロールのチェーンが存在しない route を参照する場合や、モデルの
+    ///   種別がチェーン・route・`default_model` と合わない場合 ([`Config::chain_problems`]、
+    ///   [`ConfigError::InvalidField`])。通常の読み込みでは警告にとどめる。
     /// - マージ済みの値を [`Config`] にデシリアライズできない場合 (該当する
     ///   エラーバリアントが存在しないため、経緯を文字列に載せた
     ///   [`ConfigError::Migration`] として報告する)。
@@ -207,12 +208,15 @@ impl Config {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;
         config.self_improvement.validate()?;
-        // 未定義 route の参照は、厳格な読み込みではエラー、通常の読み込みでは
-        // そのロールを使う時点のエラーに委ねて警告だけにする (他のロールは動かせる)。
-        match config.validate_chain_routes() {
-            Ok(()) => {}
-            Err(error) if reject_unknown_fields => return Err(error),
-            Err(error) => tracing::warn!(%error, "role chain references an unknown route"),
+        // 未定義 route の参照とモデルの種別の不一致 (ADR 0038) は、厳格な読み込みではエラー、
+        // 通常の読み込みではそのチェーンを使う時点のエラーに委ねて警告だけにする
+        // (他のロールは動かせる)。
+        let mut problems = config.chain_problems().into_iter();
+        if reject_unknown_fields && let Some(error) = problems.next() {
+            return Err(error);
+        }
+        for error in problems {
+            tracing::warn!(%error, "role chain is misconfigured; it fails when used");
         }
         Ok(config)
     }

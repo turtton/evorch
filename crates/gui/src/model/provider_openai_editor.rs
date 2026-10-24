@@ -236,15 +236,17 @@ impl ProviderSettingsModel {
         models
     }
 
-    /// 設定済みの有効なモデルだけを初出順に返す。
+    /// 設定済みの有効な会話用モデルだけを初出順に返す (`default_model` の選択肢)。
+    /// 画像生成のモデルは既定モデルにできない (ADR 0038)。
     pub fn candidate_models(&self) -> Vec<String> {
         let mut choices = Vec::new();
         for model in &self.models {
             if !choices.contains(&model.id)
-                && self
-                    .models
-                    .iter()
-                    .any(|entry| entry.id == model.id && entry.enabled)
+                && self.models.iter().any(|entry| {
+                    entry.id == model.id
+                        && entry.enabled
+                        && entry.effective_kind() == config::ModelKind::Chat
+                })
             {
                 choices.push(model.id.clone());
             }

@@ -243,14 +243,22 @@ pub struct RoutedModel {
 }
 
 impl RoutedModel {
-    /// Returns credential-free profiles in name order.
+    /// Returns credential-free profiles in name order. Image models are left out: a
+    /// picker selects a conversation model, and image models only serve the
+    /// image generator (ADR 0038).
     pub fn available_profiles(&self) -> Vec<ProfileSummary> {
         self.providers
             .iter()
             .map(|(name, provider)| ProfileSummary {
                 name: name.clone(),
                 provider_type: provider.profile.provider_type,
-                models: provider.profile.models.clone(),
+                models: provider
+                    .profile
+                    .models
+                    .iter()
+                    .filter(|model| self.model_kind(name, model) == config::ModelKind::Chat)
+                    .cloned()
+                    .collect(),
                 default_model: Some(provider.profile.default_model.clone()),
                 effort_levels: self.effort_levels.get(name).cloned().unwrap_or_default(),
             })
@@ -366,14 +374,42 @@ impl RoutedModel {
             .binding_for(role_key(role), category)
             .map_err(model_error)?;
         let router = self.router_for(requires_tools);
-        let resolved = router
+        let resolution_error =
+            |error| route_resolution_error(error, role, category, &binding.models);
+        let chain = router
             .chain(chain_key(role, category), &binding.models)
-            .and_then(|chain| {
-                let position = router.resolve_chain(affinity, session_id, &chain)?;
-                Ok(ChainChoice { chain, position })
-            })
-            .map_err(|error| route_resolution_error(error, role, category, &binding.models))?;
-        Ok((binding, resolved))
+            .map_err(resolution_error)?;
+        self.ensure_chat_chain(&chain)?;
+        let position = router
+            .resolve_chain(affinity, session_id, &chain)
+            .map_err(resolution_error)?;
+        Ok((binding, ChainChoice { chain, position }))
+    }
+
+    /// The kind of `model` on `profile`: its registration, else the ID (ADR 0038).
+    fn model_kind(&self, profile: &str, model: &str) -> config::ModelKind {
+        self.provider_configs.get(profile).map_or_else(
+            || config::ModelKind::infer(model),
+            |config| config.model_kind(model),
+        )
+    }
+
+    /// Refuses a conversation or summary chain with a member that is not a chat model,
+    /// before anything is sent (ADR 0038). Like a missing route, the whole chain fails
+    /// when it is used, whichever member would answer.
+    fn ensure_chat_chain(&self, chain: &routing::Chain) -> Result<(), RuntimeError> {
+        for member in chain.members() {
+            let kind = self.model_kind(&member.target.profile, &member.target.model_id);
+            if kind != config::ModelKind::Chat {
+                return Err(RuntimeError::ModelKindMismatch {
+                    origin: format!("chain `{}` route `{}`", chain.key(), member.route),
+                    profile: member.target.profile.clone(),
+                    model: member.target.model_id.clone(),
+                    kind,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// 要約に使うメンバーを選ぶ (ADR 0030)。
@@ -415,19 +451,17 @@ impl RoutedModel {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let choice = router
-            .chain(key, &models)
-            .map(|chain| {
-                chain.filtered(|member| {
-                    self.context_window(&member.target)
-                        .is_none_or(|window| window > needed)
-                })
-            })
-            .and_then(|chain| {
-                let position = router.resolve_chain(&mut scratch, &invocation.run_id, &chain)?;
-                Ok(ChainChoice { chain, position })
-            })
-            .map_err(|error| route_resolution_error(error, role, category, &models))?;
+        let resolution_error = |error| route_resolution_error(error, role, category, &models);
+        let chain = router.chain(key, &models).map_err(resolution_error)?;
+        self.ensure_chat_chain(&chain)?;
+        let chain = chain.filtered(|member| {
+            self.context_window(&member.target)
+                .is_none_or(|window| window > needed)
+        });
+        let position = router
+            .resolve_chain(&mut scratch, &invocation.run_id, &chain)
+            .map_err(resolution_error)?;
+        let choice = ChainChoice { chain, position };
         let member = choice.chain.member(choice.position);
         Ok(ResolvedInvocation {
             route: member.target.clone(),
@@ -488,6 +522,15 @@ impl RoutedModel {
                             "model `{model_id}` is not listed for profile `{}`",
                             preference.profile
                         ),
+                    });
+                }
+                let kind = self.model_kind(&preference.profile, model_id);
+                if kind != config::ModelKind::Chat {
+                    return Err(RuntimeError::ModelKindMismatch {
+                        origin: "the selected model".to_owned(),
+                        profile: preference.profile.clone(),
+                        model: model_id.clone(),
+                        kind,
                     });
                 }
                 ResolvedInvocation {
@@ -1307,11 +1350,14 @@ pub fn compose_routed_model(
     })?;
     let mut model = RoutedModel::new(composed, config.agents.clone())
         .with_cooldown(config.routing.cooldown.clone());
+    // Image routes serve the image generator, not conversations, so admission never
+    // reports them as unverified conversation fallbacks (ADR 0038).
     model.admission_routes = config
         .routing
         .routes
         .values()
         .flatten()
+        .filter(|candidate| candidate.kind(&config.providers) == Some(config::ModelKind::Chat))
         .filter_map(|candidate| {
             let provider = model.providers.get(&candidate.profile)?;
             Some(routing::ResolvedRoute {

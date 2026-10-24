@@ -59,6 +59,7 @@ pub(crate) fn agents_document_table(agents: &AgentsConfig) -> Table {
         ("multimodal_looker", &agents.roles.multimodal_looker),
         ("evaluator", &agents.roles.evaluator),
         ("compactor", &agents.roles.compactor),
+        ("image_generator", &agents.roles.image_generator),
     ] {
         insert_binding(&mut roles, name, binding);
     }

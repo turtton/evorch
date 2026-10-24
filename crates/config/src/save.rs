@@ -103,8 +103,18 @@ pub fn validate_openai_compatible_provider_input(
             "default_model must be a member of enabled models",
         ));
     }
+    if models.iter().any(|model| {
+        model.id == input.default_model
+            && model.effective_kind() == crate::ModelKind::ImageGeneration
+    }) {
+        return Err(invalid("default_model", DEFAULT_MODEL_KIND_MESSAGE));
+    }
     Ok(())
 }
+
+/// 保存時に `default_model` が画像生成のモデルだったときの説明 (ADR 0038)。
+pub(crate) const DEFAULT_MODEL_KIND_MESSAGE: &str =
+    "default_model must be a chat model; route candidates without a model send conversations to it";
 
 /// 対象プロファイルだけを sugar 形式で全置換し、検証後に原子的に保存する。
 ///
@@ -168,6 +178,7 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
         .map(|model| {
             Ok(
                 if model.enabled
+                    && model.kind.is_none()
                     && model.metadata_source.is_none()
                     && model.metadata_ref.is_none()
                     && model.preset.is_none()
@@ -182,6 +193,9 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                     let mut table = InlineTable::new();
                     table.insert("id", model.id.into());
                     table.insert("enabled", model.enabled.into());
+                    if let Some(kind) = model.kind {
+                        table.insert("kind", kind.as_str().into());
+                    }
                     if let Some(source) = model.metadata_source {
                         let source = match source {
                             crate::MetadataSource::Manual => "manual",

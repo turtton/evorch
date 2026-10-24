@@ -230,14 +230,27 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .warned
                 .insert((scope.clone(), candidate.clone()))
             {
+                let detail = if candidate.actual.kind == candidate.expected.kind {
+                    format!(
+                        "models.dev now lists the automatic path {}/{} as {} instead of {}",
+                        candidate.profile,
+                        candidate.model,
+                        candidate.actual.canonical,
+                        candidate.expected.canonical,
+                    )
+                } else {
+                    format!(
+                        "the automatic path {}/{} is now a {} model, but the route serves {} models",
+                        candidate.profile,
+                        candidate.model,
+                        candidate.actual.kind,
+                        candidate.expected.kind,
+                    )
+                };
                 self.push_notice(format!(
-                    "Route {}{}: models.dev now lists the automatic path {}/{} as {} instead of {}. The configuration was not changed; review the route in Routing settings.",
+                    "Route {}{}: {detail}. The configuration was not changed; review the route in Routing settings.",
                     candidate.route,
                     scope_suffix(&scope),
-                    candidate.profile,
-                    candidate.model,
-                    candidate.actual.canonical,
-                    candidate.expected.canonical,
                 ));
             }
         }

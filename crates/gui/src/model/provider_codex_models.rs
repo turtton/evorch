@@ -158,15 +158,86 @@ impl CodexEditorModel {
             for id in models {
                 if self.fetch.fetch_selected.contains(id) && !self.models.contains(id) {
                     self.models.push(id.clone());
-                    self.model_entries
-                        .insert(id.clone(), config::ModelEntryConfig::enabled(id));
-                    if self.default_model.is_empty() {
-                        self.default_model.clone_from(id);
-                    }
+                    self.model_entries.insert(
+                        id.clone(),
+                        config::ModelEntryConfig::enabled_with_inferred_kind(id),
+                    );
                 }
             }
         }
         self.fetch.fetch_selected.clear();
+        self.reconcile_default();
+    }
+
+    /// Adds a model entered by hand or one of [`Self::image_model_candidates`], writing
+    /// the kind inferred from its ID (ADR 0038).
+    pub fn add_model(&mut self, id: &str) -> Result<(), String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("Model ID must not be empty".into());
+        }
+        if self.models.iter().any(|model| model == id) {
+            return Err("Model already added".into());
+        }
+        self.models.push(id.to_owned());
+        self.model_entries.insert(
+            id.to_owned(),
+            config::ModelEntryConfig::enabled_with_inferred_kind(id),
+        );
+        self.reconcile_default();
+        Ok(())
+    }
+
+    pub fn remove_model(&mut self, index: usize) {
+        if index < self.models.len() {
+            let removed = self.models.remove(index);
+            self.model_entries.remove(&removed);
+            self.reconcile_default();
+        }
+    }
+
+    /// The kind of a configured model: its entry, else its ID.
+    pub fn model_kind(&self, id: &str) -> config::ModelKind {
+        self.model_entries.get(id).map_or_else(
+            || config::ModelKind::infer(id),
+            config::ModelEntryConfig::effective_kind,
+        )
+    }
+
+    /// Sets a configured model's kind explicitly; an image model stops being the default.
+    pub fn set_model_kind(&mut self, id: &str, kind: config::ModelKind) {
+        self.model_entries
+            .entry(id.to_owned())
+            .or_insert_with(|| config::ModelEntryConfig::enabled(id))
+            .kind = Some(kind);
+        self.reconcile_default();
+    }
+
+    /// The configured models the default can be: chat models only (ADR 0038).
+    pub fn default_model_choices(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|id| self.model_kind(id) == config::ModelKind::Chat)
+            .cloned()
+            .collect()
+    }
+
+    /// The fixed Codex image models not configured yet. The Codex catalog never lists
+    /// them, so the editor offers them separately (ADR 0038).
+    pub fn image_model_candidates(&self) -> Vec<&'static str> {
+        config::types::provider::CODEX_IMAGE_MODELS
+            .iter()
+            .copied()
+            .filter(|id| !self.models.iter().any(|model| model == id))
+            .collect()
+    }
+
+    /// Moves an empty or no longer eligible default to the first chat model.
+    fn reconcile_default(&mut self) {
+        let choices = self.default_model_choices();
+        if !choices.contains(&self.default_model) {
+            self.default_model = choices.into_iter().next().unwrap_or_default();
+        }
     }
 }
 

@@ -244,7 +244,9 @@ Agent role settings edit the whole chain of a role or category. The first
 picker sets the head route; each fallback entry below it picks one of the
 defined routes and its own reasoning effort, and can be moved up, moved down
 or removed. "Add … fallback" appends the first defined route the chain does
-not use yet.
+not use yet. Agent roles, categories and the compactor are offered only routes
+of chat models, and the Image generator only routes of image generation models
+(see [Model kinds and the image generator](#model-kinds-and-the-image-generator)).
 
 ### Output limits
 
@@ -266,7 +268,8 @@ and Kimi retain `max_tokens`.
 Saving a provider in the GUI adds its models to the pools that serve the same
 model. A model's identity is its models.dev `canonical_model_id` together with
 its tier: `+fast`, or a `fast`, `highspeed`, `flex`, `eco` or `free` segment of
-the provider's model ID. Pools never mix tiers. The catalog entry is found
+the provider's model ID, and its kind (`chat` or `image_generation`). Pools
+never mix tiers or kinds. The catalog entry is found
 through the model's `metadata_ref`, then the provider type's models.dev
 providers, then the profile name, then a unique match across the catalog.
 Models whose metadata is `manual` or `provider-default` are never grouped.
@@ -295,3 +298,98 @@ they can be moved or removed like any other.
 The addition is written once and is not recomputed on load. When models.dev
 later lists an `auto` candidate under another identity than its pool, the GUI
 warns once per session and leaves the configuration unchanged.
+
+## Model kinds and the image generator
+
+Each model of a profile has a kind: `chat` for conversations, or
+`image_generation` for image generation ([ADR 0038](../intents/evorch/decisions/0038-image-generation.md)).
+A model entry may set it explicitly; otherwise it is inferred from the model
+ID. IDs starting with `gpt-image-`, `chatgpt-image-` or `dall-e-` (ignoring
+case) are `image_generation`, and every other ID is `chat`. An explicit `kind`
+always wins, so a model the inference gets wrong can be corrected:
+
+```toml
+[providers.openai]
+type = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = [
+  "gpt-5",                                                   # inferred: chat
+  "gpt-image-1",                                             # inferred: image_generation
+  { id = "house-painter", enabled = true, kind = "image_generation" },
+  { id = "gpt-image-notes", enabled = true, kind = "chat" },
+]
+default_model = "gpt-5"
+```
+
+Existing files need no migration: entries without `kind`, including plain
+strings, keep loading and are inferred. A route candidate's kind is that of the
+model it sends to: an explicit `model` uses that model's entry on the profile
+(or the inference when the profile does not list it), and a candidate without
+`model` uses the profile's `default_model`. A profile's `default_model` must
+therefore be a chat model.
+
+The kinds are checked in both directions:
+
+- Every candidate in the chains of agent roles, categories and
+  `agents.roles.compactor` must be `chat`. This includes a role without
+  `models` that uses the route named after it.
+- Every candidate in the `agents.roles.image_generator` chain must be
+  `image_generation` and belong to an `openai-codex` or `openai` profile.
+- One route never mixes chat and image generation candidates.
+
+Strict loading rejects a violation with the chain or route path, the route and
+the model. A normal load only warns, and the affected chain then fails when it
+is used: before a conversation or summary request is sent, the runtime refuses
+a chain that contains a non-chat member with a typed error, so no prompt
+reaches an image model. The chat model picker never lists image models.
+
+`agents.roles.image_generator` is a chain like `agents.roles.compactor`: it is
+never started as an agent and accepts no category. With no `models`, image
+generation is disabled; there is no fallback to a route named after the role.
+For example, generate with the Codex subscription and move to an OpenAI API key
+profile once its usage limit is reached:
+
+```toml
+[providers.codex]
+type = "openai-codex"
+api_protocol = "openai-codex-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = { type = "keyring", service = "evorch", account = "codex" }
+models = ["gpt-6-astra", { id = "gpt-image-2", enabled = true, kind = "image_generation" }]
+default_model = "gpt-6-astra"
+
+[providers.openai]
+type = "openai"
+api_protocol = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-5", "gpt-image-2"]
+default_model = "gpt-5"
+
+[routing.routes]
+codex-image = [{ profile = "codex", model = "gpt-image-2" }]
+openai-image = [{ profile = "openai", model = "gpt-image-2" }]
+
+[agents.roles.image_generator]
+models = [{ route = "codex-image" }, { route = "openai-image" }]
+```
+
+The image generator only selects models in this release; the `generate_image`
+tool that uses the chain is described in ADR 0038. Note that the runtime does
+not compose `openai` profiles yet (composition fails with "unsupported provider
+type: openai"), so the `openai` part of this example only passes the
+configuration check for now; a Codex-only chain works as is.
+
+In the GUI, models added to a profile, whether typed in or picked from the
+fetched list, are saved with their inferred kind written out, and each model row
+has a kind picker. Models already in the file keep the form they were written
+in. Image models are never offered as the default model. The Codex catalog does
+not list image models, so the Codex editor offers `gpt-image-2` as a separate
+addition. Agent role settings have an Image generator section next to the
+compactor, showing "Disabled (generate_image unavailable)" while its chain is
+empty. Each chain picker offers only routes of the matching kind (routes
+without candidates fit either), a configured route of the other kind stays
+visible and is flagged, and saving role or routing settings is refused while a
+chain or route mixes kinds. In routing settings, a candidate's model override
+offers only models of the kind the route's other candidates share.

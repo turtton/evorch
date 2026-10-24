@@ -75,6 +75,20 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
         });
     }
     let mut remove = None;
+    // Kind-aware choices are computed up front: the loop below borrows the routes.
+    let mut model_choices = std::collections::BTreeMap::new();
+    let mut new_candidates = std::collections::BTreeMap::new();
+    let mut mixed = std::collections::BTreeSet::new();
+    for (name, candidates) in &model.routes {
+        for index in 0..candidates.len() {
+            model_choices.insert((name.clone(), index), model.model_choices(name, index));
+        }
+        new_candidates.insert(name.clone(), model.new_candidate(name));
+        if config::types::routing::route_model_kinds(candidates, &model.providers).len() > 1 {
+            mixed.insert(name.clone());
+        }
+    }
+    let mut refit = None;
     for (name, candidates) in &mut model.routes {
         ui.push_id(name, |ui| {
             ui.separator();
@@ -112,15 +126,21 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                                     );
                                 }
                             });
-                            candidate_picker(
+                            let choices = model_choices
+                                .get(&(name.clone(), index))
+                                .cloned()
+                                .unwrap_or_default();
+                            if candidate_picker(
                                 ui,
                                 candidate,
                                 (
                                     &model.profile_names,
-                                    &model.profile_models,
+                                    &choices,
                                     &format!("{name} candidate {}", index + 1),
                                 ),
-                            );
+                            ) {
+                                refit = Some((name.clone(), index));
+                            }
                             ui.horizontal_wrapped(|ui| {
                                 if ui
                                     .add_enabled(
@@ -161,12 +181,20 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     if let Some(index) = removal {
                         candidates.remove(index);
                     }
+                    if mixed.contains(name) {
+                        ui.colored_label(
+                            palette().ERROR_FG,
+                            "This route mixes chat and image generation models; keep one model kind per route.",
+                        );
+                    }
                     if ui.button("Add candidate").clicked() {
-                        candidates.push(config::RouteCandidateConfig {
-                            profile: model.profile_names.first().cloned().unwrap_or_default(),
-                            model: None,
-                            auto: false,
-                        });
+                        candidates.push(new_candidates.get(name).cloned().unwrap_or_else(|| {
+                            config::RouteCandidateConfig {
+                                profile: model.profile_names.first().cloned().unwrap_or_default(),
+                                model: None,
+                                auto: false,
+                            }
+                        }));
                     }
                 });
             if header.header_response.clicked() {
@@ -202,6 +230,9 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                 |users| format!("Used by: {}", users.join(", ")),
             )));
         });
+    }
+    if let Some((route, index)) = refit {
+        model.refit_candidate(&route, index);
     }
     if let Some(name) = remove {
         model.routes.remove(&name);
