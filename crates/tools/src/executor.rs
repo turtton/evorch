@@ -87,6 +87,8 @@ struct RegisteredTool {
     tool: Arc<dyn Tool>,
     /// [`Tool::schema`] をコンパイルした検証器。
     validator: jsonschema::Validator,
+    /// 検証器の元のスキーマ。検証前に任意の欄の `null` を取り除くために使う。
+    schema: serde_json::Value,
 }
 
 /// ツール実行の窓口。
@@ -151,10 +153,17 @@ impl ToolExecutor {
     ///
     /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`] を返す。
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
-        let validator = schema::compile(tool.name(), &tool.schema())?;
+        let schema = tool.schema();
+        let validator = schema::compile(tool.name(), &schema)?;
         tool.set_event_bus(Arc::clone(&self.event_bus));
-        self.tools
-            .insert(tool.name().to_owned(), RegisteredTool { tool, validator });
+        self.tools.insert(
+            tool.name().to_owned(),
+            RegisteredTool {
+                tool,
+                validator,
+                schema,
+            },
+        );
         Ok(())
     }
 
@@ -273,9 +282,16 @@ impl ToolExecutor {
     }
 
     /// Resolve relative file arguments against this run's workspace, never global cwd.
+    /// Optional fields set to a null the schema rejects are read as omitted first,
+    /// unless the tool opts out through [`Tool::reads_null_as_omitted`].
     fn scoped_args(&self, name: &str, mut args: serde_json::Value) -> serde_json::Value {
         if name == "edit" {
             canonicalize_edit_names(&mut args);
+        }
+        if let Some(registered) = self.tools.get(name)
+            && registered.tool.reads_null_as_omitted()
+        {
+            schema::strip_null_optionals(&registered.schema, &mut args);
         }
         let root = self
             .default_cwd

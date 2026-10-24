@@ -18,6 +18,7 @@ mod questions;
 mod retracted_delegates;
 #[cfg(test)]
 mod review_evidence_tests;
+mod stop_context;
 mod team;
 mod tool_calls;
 
@@ -147,6 +148,8 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
+    /// The last tool result, named in the reason when a loop guard stops the run.
+    last_tool: Option<stop_context::ToolOutcome>,
     retracted_delegates: retracted_delegates::RetractedDelegates,
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
@@ -320,6 +323,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,

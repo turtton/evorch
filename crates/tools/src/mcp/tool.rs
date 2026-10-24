@@ -102,6 +102,10 @@ impl Tool for McpTool {
     fn requires_scope_gate(&self) -> bool {
         true
     }
+    /// The server owns the schema and what `null` means in it.
+    fn reads_null_as_omitted(&self) -> bool {
+        false
+    }
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         self.invoke(args, None).await
     }
