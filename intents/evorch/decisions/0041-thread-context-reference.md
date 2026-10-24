@@ -2,12 +2,12 @@
 
 ## Status
 
-Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a〜i と権限モデル、Phase A の設計）をすべて推奨案どおりに承認した。実装は未着手である。進捗は末尾の「実装状況」に記録する。
+Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a〜i と権限モデル、Phase A の設計）をすべて推奨案どおりに承認した。Phase A の実装は一部着手済みで、進捗は末尾の「実装状況」に記録する。
 
 この ADR は、evorch の再起動で作業が失われても、次の担当がこの ADR だけを読んで再開できるように、承認済みの仕様をすべて書く。
 
 - 着手順は Phase 0（ADR と計測）→ Phase A（storage / runtime / GUI）である。Phase B（本文の全文索引）は Phase 0 の計測を見て別途決める。Phase C（ポインタ注入・GUI 添付）は今回の範囲外である。
-- Phase 0 の計測結果は、別の担当が「Phase 0 計測」節に追記する。今は項目だけを置き、結果は TBD とする。
+- Phase 0 の計測結果は、以下の「Phase 0 計測」節に記録する。計測は完了している。Phase B の採否は別途判断する。
 
 ## Context
 
@@ -103,8 +103,9 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 既存のデータ（`run_contexts` の名前規約と親子関係、`EscalationRequested`、`usage_run_threads`、`thread_start_states` など）から `threads` / `thread_runs` を補完する。補完した行は `source='backfill'` とする。
 
-- 同期で行うか非同期で行うかは、Phase 0 の計測（1 run の正規化時間、旧 run の件数）と実装の結果を見て判断し、この ADR に記録する。判断前は決めない。
-- `project_root` が null の旧 run（約 652 件、2026-10 時点の概数）の扱いは、補完できるものと補完できないものに分ける。補完は root / 親、`usage_run_threads`、`thread_start_states`、config の cwd から推定できる場合に限る。推定できない run は `project_root` を null のままにし、同じスレッドの範囲か、ユーザーが ID を与えた場合（決定 a）にだけ読めるものとする。プロジェクト範囲の可視性（2）では見えない。補完できた件数は Phase 0 の計測で出す。
+- 同期で行うか非同期で行うかの判断は、Phase 0 の計測結果と実装結果を踏まえ、以下のとおり同期実行に決定した。
+- **backfill は v24 マイグレーション内で同期実行する。** 根拠: 実 store コピー（2.1 GB、1,638 run）への v24 適用は 2.4〜7.3 秒（一度だけ。時間の大半は escalation 補完の events 全走査）で、Python 参考値による 1 run 正規化 p95 は 8.5 ms。初回起動の一度限りのコストとして許容する。
+- `project_root` が null の旧 run（実測 687 件）の扱いは、補完できるものと補完できないものに分ける。補完は root / 親、`usage_run_threads`、`thread_start_states`、config の cwd から推定できる場合に限る。推定できない run は `project_root` を null のままにし、同じスレッドの範囲か、ユーザーが ID を与えた場合（決定 a）にだけ読めるものとする。プロジェクト範囲の可視性（2）では見えない。計測では確定的な補完根拠を持つものは 0 件だった。`usage_run_threads` に該当 run は 652 件あるが、持つのは `project_id` のみで canonical `project_root` の根拠にならない。
 
 ### 段階計画（決定 i）
 
@@ -117,15 +118,21 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 ## Phase 0 計測
 
-実 store `/home/turtton/.config/evorch/evorch-events.db` を `mode=ro` で開いて計測する。本番 DB は書き換えず、サンプルや索引の作成は `$TMPDIR` 配下の一時 DB で行う。結果は別の担当が追記する。それまで結果はすべて TBD である。値が入るまで、Phase B の採否や性能について推定を書いてはならない。
+実 store `/home/turtton/.config/evorch/evorch-events.db` を `mode=ro` で開いて計測した。本番 DB は書き換えていない。計測結果は次のとおり。
 
-| 計測項目 | 結果 |
-|---|---|
-| 除外後（thinking / reasoning、画像、Anthropic 固有ブロックなどを除いた）本文量 | TBD |
-| 本文の kind 分布（user / assistant / tool_use / tool_result など、件数と bytes） | TBD |
-| 10% サンプルでの FTS5 trigram 索引サイズ（本文量に対する比と、全量への外挿） | TBD |
-| 1 run の正規化時間（median / p95 / max と、大きい run の例） | TBD |
-| `project_root` が null の旧 run のうち補完可能な件数（補完根拠ごと） | TBD |
+| 対象 store | `/home/turtton/.config/evorch/evorch-events.db`（SQLite `mode=ro`） |
+| 計測日時 | 2026-10-24 07:14:00 UTC |
+| DB サイズ | 2,138,054,656 bytes（約 1.99 GiB、計測時の DB ファイル） |
+| run 総数 | 1,638（`run_contexts`） |
+| 除外後の本文量 | 294,648,246 bytes（UTF-8）、1,638 runs、135,511 messages |
+| 本文 kind 分布 | user: 6,311 件 / 10,062,617 bytes; assistant text: 6,695 / 8,556,912; tool_use: 72,076 / 39,031,050; tool_result: 72,076 / 229,295,607; system: 3,705 / 7,702,060; その他（assistant の空/除外ブロック等）: 0 bytes |
+| 10% サンプルでの FTS5 trigram 索引サイズ | 1,638 run 中 164 run（無作為、seed=410）。抽出本文 25,604,480 bytes、SQLite DB ファイル 87,478,272 bytes（本文量の 3.4165×）。単純 10 倍外挿: 874,782,720 bytes（約 834 MiB、本文量の 3.4165×） |
+| 1 run の正規化時間 | median 0.000722 s; p95 0.008461 s; max 0.058946 s。大きい run: `run-01m5hq577mqemk417aetfsh9f1` 1,494,253 bytes / 666 messages; `run-01m4r36vbk0rt33t9a8yzdw1hh` 1,294,982 / 554; `run-302` 1,293,618 / 352 |
+| `project_root` が null の旧 run と補完 | null: 687 run。親/祖先、`thread_start_states.project_root`、`usage_run_threads` 経由の root、config の cwd による確定的な補完はいずれも 0。補完可能合計 0、未解決 687。`usage_run_threads` がある null run は 652（`project_id` のみで canonical root の根拠にはならない）。 |
+
+### 手法・注記
+
+実 store は Python `sqlite3`（SQLite 3.53.3）の読み取り専用接続で調査した。本文は `messages_json` から thinking / reasoning / 画像 / 非表示・opaque block を除いて正規化した。FTS5 trigram は seed=410 で無作為抽出した 164 run の一時 SQLite DB ファイルのサイズ（DB 管理 overhead を含む）を測定し、全量値はその単純 10 倍である。正規化時間は Python の JSON parse・除外・テキスト化を `perf_counter` で測った参考値。補完は確定的な根拠のみを採用した。
 
 ## Phase A の設計
 
@@ -311,14 +318,15 @@ Phase A の検索対象はメタデータ（title、人間の発話、working no
 
 ## 計測と検証の限界
 
-Phase 0 の計測は未実施で、索引サイズ・正規化時間・旧データの補完件数は未確認である。Phase B の判断はこの計測が揃ってから行う。
+Phase 0 の計測は完了した。正規化時間は Python の JSON parse・テキスト化による参考値であり、Rust 実装性能を示すものではない。FTS の全量サイズは 10% サンプルの SQLite DB ファイル実測値を単純に 10 倍した外挿であり、SQLite の管理 overhead を含むサンプル値から全量索引の実サイズを保証するものではない。
 
 ## 実装状況
 
 各項目の完了時に `[x]` にして、commit SHA を記入する。
 
+- **origin/main への rebase は不要と判断した（origin/main 側の差分は crates/gui の #335 のみで、v24 と衝突しない）。PR 作成前に `git merge-tree` で衝突がないことを再確認する。**
 - [x] ADR 作成 — commit: （この ADR を追加したコミット。`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
-- [ ] Phase 0 計測 — commit: ____（結果を「Phase 0 計測」節に記入）
+- [x] Phase 0 計測 — commit: 計測結果を記入したコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [x] A-1 storage — commit: 35021ada
 - [ ] A-2 runtime — commit: ____
 - [ ] A-3 GUI — commit: ____
