@@ -24,6 +24,28 @@ pub fn save_subscription_provider_edit(
     input: &SubscriptionProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
+    save_subscription_provider_edit_inner(path, input, original_name, None)
+}
+
+/// Save a subscription edit after validating the effective layered configuration.
+///
+/// # Errors
+/// Rejects unsupported types, invalid fields, model kinds and I/O failures.
+pub fn save_subscription_provider_edit_with_options(
+    path: &Path,
+    input: &SubscriptionProviderInput,
+    original_name: Option<&str>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    save_subscription_provider_edit_inner(path, input, original_name, Some(options))
+}
+
+fn save_subscription_provider_edit_inner(
+    path: &Path,
+    input: &SubscriptionProviderInput,
+    original_name: Option<&str>,
+    options: Option<&crate::LoadOptions>,
+) -> Result<(), ConfigError> {
     if !matches!(
         input.provider_type,
         ProviderTypeConfig::AnthropicSubscription | ProviderTypeConfig::Cursor
@@ -45,5 +67,14 @@ pub fn save_subscription_provider_edit(
         excluded_models: input.excluded_models.clone(),
         default_model: input.default_model.clone(),
     };
-    crate::save::save_openai_compatible_provider_edit(path, &validated, original_name)
+    if let Some(options) = options {
+        crate::save::save_openai_compatible_provider_edit_with_options(
+            path,
+            &validated,
+            original_name,
+            options,
+        )
+    } else {
+        crate::save::save_openai_compatible_provider_edit(path, &validated, original_name)
+    }
 }

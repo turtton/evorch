@@ -39,6 +39,7 @@ pub use save::{
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
     CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
+    save_codex_provider_edit_with_options,
 };
 pub use save_role_profiles::{
     RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings,
@@ -48,7 +49,10 @@ pub use save_role_profiles::{
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;
 pub use save_self_improvement::save_self_improvement;
-pub use save_subscription::{SubscriptionProviderInput, save_subscription_provider_edit};
+pub use save_subscription::{
+    SubscriptionProviderInput, save_subscription_provider_edit,
+    save_subscription_provider_edit_with_options,
+};
 pub use schema::json_schema;
 pub use types::BudgetConfig;
 pub use types::OrchestrationConfig;

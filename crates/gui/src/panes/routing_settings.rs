@@ -130,7 +130,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                                 .get(&(name.clone(), index))
                                 .cloned()
                                 .unwrap_or_default();
-                            if candidate_picker(
+                            if let Some(profile) = candidate_picker(
                                 ui,
                                 candidate,
                                 (
@@ -139,7 +139,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                                     &format!("{name} candidate {}", index + 1),
                                 ),
                             ) {
-                                refit = Some((name.clone(), index));
+                                refit = Some((name.clone(), index, profile));
                             }
                             ui.horizontal_wrapped(|ui| {
                                 if ui
@@ -231,8 +231,14 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
             )));
         });
     }
-    if let Some((route, index)) = refit {
-        model.refit_candidate(&route, index);
+    if let Some((route, index, profile)) = refit {
+        if model.change_candidate_profile(&route, index, &profile) {
+            model.validation_error = None;
+        } else {
+            model.validation_error = Some(format!(
+                "Profile `{profile}` has no model matching route `{route}`; profile change cancelled"
+            ));
+        }
     }
     if let Some(name) = remove {
         model.routes.remove(&name);

@@ -196,14 +196,34 @@ fn route_candidates_offer_only_models_of_the_route_kind() {
     );
     assert_eq!(model.new_candidate("chat").model, None);
     // Moving a candidate to a profile keeps the route's kind.
-    let candidate = &mut model.routes.get_mut("image").expect("route")[1];
-    candidate.profile = "local".into();
-    candidate.model = None;
-    model.refit_candidate("image", 1);
+    model.routes.get_mut("image").expect("route")[1].model = None;
+    assert!(model.change_candidate_profile("image", 1, "local"));
     assert_eq!(
         model.routes["image"][1].model.as_deref(),
         Some("gpt-image-1")
     );
+}
+
+#[test]
+fn changing_to_a_chat_only_profile_never_inserts_an_incompatible_default() {
+    let mut config = config();
+    config
+        .providers
+        .get_mut("local")
+        .unwrap()
+        .models
+        .retain(|model| model.effective_kind() == ModelKind::Chat);
+    for count in [1, 2] {
+        let mut model = RoutingSettingsModel::seed_from_config(&config);
+        let original = model.routes["image"][0].clone();
+        model
+            .routes
+            .insert("image".into(), vec![original.clone(); count]);
+        assert!(!model.change_candidate_profile("image", count - 1, "local"));
+        assert_eq!(model.routes["image"][count - 1], original);
+        assert!(!model.change_candidate_profile("image", count - 1, "unknown"));
+        assert_eq!(model.routes["image"][count - 1], original);
+    }
 }
 
 #[test]

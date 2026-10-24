@@ -94,10 +94,10 @@ pub(crate) fn write_additions(
     scope: &str,
     additions: &[AutoAddition],
 ) -> Result<(Vec<AutoAddition>, Vec<AutoAddition>), String> {
-    let merged_routing = scopes(merged)
+    let (merged_routing, merged_agents) = scopes(merged)
         .into_iter()
         .find(|(name, _, _)| name == scope)
-        .map(|(_, routing, _)| routing.clone())
+        .map(|(_, routing, agents)| (routing.clone(), agents.clone()))
         .ok_or_else(|| format!("Unknown role profile: {scope}"))?;
     let mut file_routing = file_routing(path, scope)?;
     let (writable, blocked): (Vec<_>, Vec<_>) = additions.iter().cloned().partition(|addition| {
@@ -107,6 +107,15 @@ pub(crate) fn write_additions(
     });
     let added = apply_additions(&mut file_routing, &merged.providers, &writable);
     if !added.is_empty() {
+        let mut effective_routing = merged_routing;
+        apply_additions(&mut effective_routing, &merged.providers, &added);
+        if let Some(problem) =
+            config::scope_kind_problems("", &merged_agents, &effective_routing, &merged.providers)
+                .into_iter()
+                .next()
+        {
+            return Err(problem.to_string());
+        }
         config::save_role_profile_bindings(path, Some(scope), Some(&file_routing), None)
             .map_err(|error| error.to_string())?;
     }
@@ -290,5 +299,73 @@ fn scope_suffix(scope: &str) -> String {
         String::new()
     } else {
         format!(" (role profile {scope})")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_addition_save_checks_merged_chain_provider_constraints() {
+        for scope in ["default", "night"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            let mut config = config::Config::default();
+            let supported = config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAi,
+                default_model: "chat".into(),
+                models: vec![
+                    config::ModelEntryConfig::enabled("chat"),
+                    config::ModelEntryConfig::enabled("gpt-image-1"),
+                ],
+                ..Default::default()
+            };
+            let mut unsupported = supported.clone();
+            unsupported.provider_type = config::ProviderTypeConfig::OpenAiCompatible;
+            config.providers.insert("openai".into(), supported);
+            config.providers.insert("local".into(), unsupported);
+            let mut routing = config::RoutingConfig::default();
+            routing.routes.insert(
+                "art".into(),
+                vec![config::RouteCandidateConfig {
+                    profile: "openai".into(),
+                    model: Some("gpt-image-1".into()),
+                    auto: false,
+                }],
+            );
+            if scope == "default" {
+                config.routing = routing;
+            } else {
+                config.role_profiles.insert(
+                    scope.into(),
+                    config::RoleProfileConfig {
+                        routing,
+                        ..Default::default()
+                    },
+                );
+            }
+            // Only the merged layer uses the route for image generation; validating the
+            // target file alone would miss the provider restriction.
+            let document = toml::to_string(&config).unwrap();
+            std::fs::write(&path, &document).unwrap();
+            let agents = if scope == "default" {
+                &mut config.agents
+            } else {
+                &mut config.role_profiles.get_mut(scope).unwrap().agents
+            };
+            agents.roles.image_generator.models = vec![config::ChainEntryConfig::route("art")];
+            let addition = AutoAddition {
+                route: "art".into(),
+                candidate: config::RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: Some("gpt-image-1".into()),
+                    auto: true,
+                },
+            };
+            let error = write_additions(&path, &config, scope, &[addition]).unwrap_err();
+            assert!(error.contains("cannot generate images"), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
+        }
     }
 }

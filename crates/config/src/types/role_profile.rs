@@ -98,6 +98,14 @@ impl Config {
                 }
             }
         }
+        problems.extend(self.model_kind_problems());
+        dedup(problems)
+    }
+
+    /// Provider defaults, route homogeneity and chain kind/provider constraints across
+    /// all role profiles, independently of unresolved route references during editing.
+    pub fn model_kind_problems(&self) -> Vec<crate::ConfigError> {
+        let mut problems = Vec::new();
         for (name, profile) in &self.providers {
             if profile.model_kind(&profile.default_model) == super::ModelKind::ImageGeneration {
                 problems.push(crate::ConfigError::InvalidField {
@@ -110,9 +118,19 @@ impl Config {
                 });
             }
         }
-        for (prefix, agents, routing) in &scopes {
+        for (prefix, agents, routing) in
+            std::iter::once((String::new(), &self.agents, &self.routing)).chain(
+                self.role_profiles.iter().map(|(name, profile)| {
+                    (
+                        format!("role_profiles.{name}."),
+                        &profile.agents,
+                        &profile.routing,
+                    )
+                }),
+            )
+        {
             problems.extend(scope_kind_problems(
-                prefix,
+                &prefix,
                 agents,
                 routing,
                 &self.providers,

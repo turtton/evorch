@@ -162,6 +162,28 @@ async fn a_selected_image_model_is_refused_before_sending() {
 }
 
 #[test]
+fn model_pickers_never_offer_image_defaults() {
+    for explicit in [false, true] {
+        let (mut model, _) = fixture_with(vec![None], &[], &[]);
+        let id = if explicit { "model-0" } else { "gpt-image-1" };
+        model
+            .providers
+            .get_mut("profile-0")
+            .unwrap()
+            .profile
+            .default_model = id.into();
+        if explicit {
+            register(&mut model, "profile-0", id, ModelKind::ImageGeneration);
+        }
+        let profiles = model.available_profiles();
+        assert_eq!(
+            profiles[0].default_model, None,
+            "image defaults must not re-enter the conversation picker"
+        );
+    }
+}
+
+#[test]
 fn model_pickers_never_offer_image_models() {
     // Given: a profile that also lists an image model, recognized by its name.
     let (mut model, _) = fixture_with(vec![None], &[], &[]);

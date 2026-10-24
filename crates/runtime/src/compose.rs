@@ -259,7 +259,9 @@ impl RoutedModel {
                     .filter(|model| self.model_kind(name, model) == config::ModelKind::Chat)
                     .cloned()
                     .collect(),
-                default_model: Some(provider.profile.default_model.clone()),
+                default_model: (self.model_kind(name, &provider.profile.default_model)
+                    == config::ModelKind::Chat)
+                    .then(|| provider.profile.default_model.clone()),
                 effort_levels: self.effort_levels.get(name).cloned().unwrap_or_default(),
             })
             .collect()

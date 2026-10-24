@@ -87,6 +87,67 @@ fn planner_uses(route: &str) -> AgentsConfig {
     agents
 }
 
+#[tokio::test]
+async fn image_pools_never_plan_unsupported_providers_even_as_conflicts() {
+    let catalog = catalog(serde_json::json!({
+        "openai": models([canonical("gpt-image-1", "image")]),
+        "local": models([
+            canonical("gpt-image-1", "image"),
+            canonical("gpt-image-2", "image"),
+        ]),
+    }))
+    .await;
+    let mut agents = AgentsConfig::default();
+    agents.roles.image_generator.models = vec![ChainEntryConfig::route("art")];
+    for ids in [&["gpt-image-1"][..], &["gpt-image-1", "gpt-image-2"][..]] {
+        for provider_type in [
+            ProviderTypeConfig::OpenAiCompatible,
+            ProviderTypeConfig::OpenAi,
+            ProviderTypeConfig::OpenAiCodex,
+        ] {
+            let providers = providers([
+                (
+                    "openai",
+                    provider(ProviderTypeConfig::OpenAi, &["gpt-image-1"]),
+                ),
+                ("local", provider(provider_type, ids)),
+            ]);
+            let routing = routing([("art", vec![candidate("openai", "gpt-image-1", false)])]);
+            let plan = plan_for_profile("local", &providers, &routing, &agents, &catalog);
+            if provider_type == ProviderTypeConfig::OpenAiCompatible {
+                assert_eq!(
+                    plan,
+                    AutoGroupPlan::default(),
+                    "unsupported candidates must not be added or offered"
+                );
+            } else if ids.len() == 1 {
+                assert_eq!(plan.additions.len(), 1);
+                assert!(plan.conflicts.is_empty());
+            } else {
+                assert!(plan.additions.is_empty());
+                assert_eq!(plan.conflicts.len(), 1);
+            }
+        }
+    }
+    // A route used by both conversation and image chains cannot accept either kind.
+    agents.worker.base.models = vec![ChainEntryConfig::route("art")];
+    let providers = providers([
+        (
+            "openai",
+            provider(ProviderTypeConfig::OpenAi, &["gpt-image-1"]),
+        ),
+        (
+            "local",
+            provider(ProviderTypeConfig::OpenAi, &["gpt-image-1"]),
+        ),
+    ]);
+    let routing = routing([("art", vec![candidate("openai", "gpt-image-1", false)])]);
+    assert_eq!(
+        plan_for_profile("local", &providers, &routing, &agents, &catalog),
+        AutoGroupPlan::default()
+    );
+}
+
 #[test]
 fn tier_comes_from_the_speed_marker_or_a_provider_suffix_segment() {
     for (id, tier) in [

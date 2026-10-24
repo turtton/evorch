@@ -357,6 +357,168 @@ fn image_generator_chain_survives_saving_agents() {
     );
 }
 
+#[test]
+fn provider_kind_edits_reject_incompatible_chains_and_mixed_routes_without_writing() {
+    for layered in [false, true] {
+        for codex in [false, true] {
+            let name = if codex { "codex" } else { "openai" };
+            for prefix in ["", "role_profiles.night."] {
+                for usage in ["worker", "image_generator", "mixed"] {
+                    let initial_kind = if usage == "image_generator" {
+                        ModelKind::ImageGeneration
+                    } else {
+                        ModelKind::Chat
+                    };
+                    let mut scope = config::RoleProfileConfig::default();
+                    let mut candidates = vec![config::RouteCandidateConfig {
+                        profile: name.into(),
+                        model: Some("target".into()),
+                        auto: false,
+                    }];
+                    if usage == "mixed" {
+                        candidates.push(config::RouteCandidateConfig {
+                            profile: name.into(),
+                            model: None,
+                            auto: false,
+                        });
+                    }
+                    scope.routing.routes.insert("pool".into(), candidates);
+                    let chain = vec![config::ChainEntryConfig::route("pool")];
+                    match usage {
+                        "worker" => scope.agents.worker.base.models = chain,
+                        "image_generator" => scope.agents.roles.image_generator.models = chain,
+                        _ => {}
+                    }
+                    let mut config = load_both(PROVIDERS).0.unwrap();
+                    if prefix.is_empty() {
+                        config.agents = scope.agents;
+                        config.routing = scope.routing;
+                    } else {
+                        config.role_profiles.insert("night".into(), scope);
+                    }
+                    config
+                        .providers
+                        .get_mut(name)
+                        .unwrap()
+                        .models
+                        .push(config::ModelEntryConfig {
+                            kind: Some(initial_kind),
+                            ..config::ModelEntryConfig::enabled("target")
+                        });
+                    let tmp = tempfile::tempdir().unwrap();
+                    let document = if layered {
+                        let mut main = toml::Value::try_from(&config).unwrap();
+                        let mut dropin = toml::Table::new();
+                        for section in ["agents", "routing", "role_profiles"] {
+                            if let Some(value) = main.as_table_mut().unwrap().remove(section) {
+                                dropin.insert(section.into(), value);
+                            }
+                        }
+                        std::fs::create_dir(tmp.path().join("config.d")).unwrap();
+                        std::fs::write(
+                            tmp.path().join("config.d/chains.toml"),
+                            toml::to_string(&dropin).unwrap(),
+                        )
+                        .unwrap();
+                        toml::to_string(&main).unwrap()
+                    } else {
+                        toml::to_string(&config).unwrap()
+                    };
+                    let path = tmp.path().join("config.toml");
+                    std::fs::write(&path, &document).unwrap();
+                    let config = Config::load_strict(&options(tmp.path())).unwrap();
+                    let mut models = config.providers[name].models.clone();
+                    models
+                        .iter_mut()
+                        .find(|model| model.id == "target")
+                        .unwrap()
+                        .kind = Some(if initial_kind == ModelKind::Chat {
+                        ModelKind::ImageGeneration
+                    } else {
+                        ModelKind::Chat
+                    });
+                    let result = if codex {
+                        let input = config::CodexProviderInput {
+                            name: name.into(),
+                            account: "codex".into(),
+                            base_url: "https://chatgpt.com/backend-api/codex".into(),
+                            models,
+                            default_model: config.providers[name].default_model.clone(),
+                        };
+                        if layered {
+                            config::save_codex_provider_edit_with_options(
+                                &path,
+                                &input,
+                                None,
+                                &options(tmp.path()),
+                            )
+                        } else {
+                            config::save_codex_provider(&path, &input)
+                        }
+                    } else {
+                        let input = config::OpenAiCompatibleProviderInput {
+                            name: name.into(),
+                            provider_type: config::ProviderTypeConfig::OpenAi,
+                            base_url: "https://api.openai.com/v1".into(),
+                            credential: config::ProviderCredentialInput::Env {
+                                var: "OPENAI_API_KEY".into(),
+                            },
+                            models,
+                            excluded_models: vec![],
+                            default_model: config.providers[name].default_model.clone(),
+                        };
+                        if layered {
+                            config::save::save_openai_compatible_provider_edit_with_options(
+                                &path,
+                                &input,
+                                None,
+                                &options(tmp.path()),
+                            )
+                        } else {
+                            config::save_openai_compatible_provider(&path, &input)
+                        }
+                    };
+                    assert!(
+                        result.is_err(),
+                        "{name}/{prefix}/{usage}: save must refuse incompatible kind"
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
+                    assert!(!path.with_extension("toml.tmp").exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn image_generator_save_rejects_unsupported_auto_candidates_without_writing() {
+    let document = with_providers(
+        "[routing.routes]\nart = [{ profile = 'openai', model = 'gpt-image-1' }]\n\
+         [agents.roles.image_generator]\nmodels = [{ route = 'art' }]\n\
+         [role_profiles.night.routing.routes]\nart = [{ profile = 'codex', model = 'gpt-image-2' }]\n\
+         [role_profiles.night.agents.roles.image_generator]\nmodels = [{ route = 'art' }]\n",
+    );
+    for scope in [None, Some("night")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, &document).unwrap();
+        let config = Config::load_strict(&options(tmp.path())).unwrap();
+        let mut routing = config.role_profile_config(scope).unwrap().routing;
+        routing
+            .routes
+            .get_mut("art")
+            .unwrap()
+            .push(config::RouteCandidateConfig {
+                profile: "local".into(),
+                model: Some("gpt-image-1".into()),
+                auto: true,
+            });
+        let result = config::save_role_profile_bindings(&path, scope, Some(&routing), None);
+        assert!(result.is_err(), "unsupported image provider must not save");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
+    }
+}
+
 // Given: 生成した JSON Schema
 // When: モデル要素と追加ロールの定義を調べる
 // Then: kind (chat / image_generation) と image_generator が載っている

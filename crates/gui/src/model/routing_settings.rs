@@ -215,14 +215,16 @@ impl RoutingSettingsModel {
         let Some(candidate) = self.routes.get(route).and_then(|list| list.get(index)) else {
             return ModelChoices::default();
         };
-        let kind = self.route_kind(route, Some(index));
-        let fits = |model: &str| {
-            kind.is_none_or(|kind| self.model_kind(&candidate.profile, model) == Some(kind))
-        };
+        self.choices_for_profile(&candidate.profile, self.route_kind(route, Some(index)))
+    }
+
+    fn choices_for_profile(&self, profile: &str, kind: Option<ModelKind>) -> ModelChoices {
+        let fits =
+            |model: &str| kind.is_none_or(|kind| self.model_kind(profile, model) == Some(kind));
         ModelChoices {
             models: self
                 .profile_models
-                .get(&candidate.profile)
+                .get(profile)
                 .into_iter()
                 .flatten()
                 .filter(|model| fits(model))
@@ -230,36 +232,40 @@ impl RoutingSettingsModel {
                 .collect(),
             profile_default: self
                 .providers
-                .get(&candidate.profile)
-                .is_none_or(|profile| fits(&profile.default_model)),
+                .get(profile)
+                .is_some_and(|profile| fits(&profile.default_model)),
         }
     }
 
-    /// After candidate `index` of `route` moved to another profile, keeps its model
-    /// override only when the new profile offers it with the route's kind. Otherwise the
-    /// profile default is used, or the first fitting model when the default does not fit.
-    pub fn refit_candidate(&mut self, route: &str, index: usize) {
-        let choices = self.model_choices(route, index);
-        let Some(candidate) = self
-            .routes
-            .get_mut(route)
-            .and_then(|list| list.get_mut(index))
-        else {
-            return;
+    /// Changes the profile only if it can serve the route's kind. A missing fitting
+    /// override is not `None`: that would silently select an incompatible default.
+    /// Returns whether the change was accepted, leaving the candidate intact on failure.
+    pub fn change_candidate_profile(&mut self, route: &str, index: usize, profile: &str) -> bool {
+        let Some(original) = self.routes.get(route).and_then(|list| list.get(index)) else {
+            return false;
         };
-        let fits = candidate
+        let kind = self
+            .route_kind(route, Some(index))
+            .or_else(|| original.kind(&self.providers));
+        let choices = self.choices_for_profile(profile, kind);
+        let model = if original
             .model
             .as_ref()
             .map_or(choices.profile_default, |model| {
                 choices.models.contains(model)
-            });
-        if !fits {
-            candidate.model = if choices.profile_default {
-                None
-            } else {
-                choices.models.first().cloned()
-            };
-        }
+            }) {
+            original.model.clone()
+        } else if choices.profile_default {
+            None
+        } else if let Some(model) = choices.models.first() {
+            Some(model.clone())
+        } else {
+            return false;
+        };
+        let candidate = &mut self.routes.get_mut(route).expect("route exists")[index];
+        candidate.profile = profile.into();
+        candidate.model = model;
+        true
     }
 
     /// The candidate "Add candidate" appends to `route`: the first profile's default, or

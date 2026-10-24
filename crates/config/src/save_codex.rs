@@ -34,6 +34,28 @@ pub fn save_codex_provider_edit(
     input: &CodexProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
+    save_codex_provider_edit_inner(path, input, original_name, None)
+}
+
+/// Save a Codex edit after validating all effective role profiles.
+///
+/// # Errors
+/// Rejects invalid input or effective model kinds before writing anything.
+pub fn save_codex_provider_edit_with_options(
+    path: &Path,
+    input: &CodexProviderInput,
+    original_name: Option<&str>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    save_codex_provider_edit_inner(path, input, original_name, Some(options))
+}
+
+fn save_codex_provider_edit_inner(
+    path: &Path,
+    input: &CodexProviderInput,
+    original_name: Option<&str>,
+    options: Option<&crate::LoadOptions>,
+) -> Result<(), ConfigError> {
     if input.name.is_empty()
         || !input
             .name
@@ -94,6 +116,7 @@ pub fn save_codex_provider_edit(
     }
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
+    crate::save::validate_effective_model_kinds(path, &doc, options)?;
     write_document(path, &doc)
 }
 

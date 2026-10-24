@@ -120,6 +120,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         let store = self.credential_store.clone();
+        let options = self.user_settings_options();
         match &self.provider_settings.editor {
             None => {}
             Some(ProfileEditor::OpenAiCompatible(editor)) => {
@@ -168,10 +169,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
-                    config::save::save_openai_compatible_provider_edit(
+                    config::save::save_openai_compatible_provider_edit_with_options(
                         &path,
                         &input,
                         original_name.as_deref(),
+                        &options,
                     )
                     .map_err(|e| e.to_string())?;
                     if let (Some(store), Some(account)) = (store, migrated_account) {
@@ -188,8 +190,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         std::fs::create_dir_all(parent)
                             .map_err(|_| "Could not create config directory".to_owned())?;
                     }
-                    config::save_subscription_provider_edit(&path, &input, original_name.as_deref())
-                        .map_err(|e| e.to_string())
+                    config::save_subscription_provider_edit_with_options(
+                        &path,
+                        &input,
+                        original_name.as_deref(),
+                        &options,
+                    )
+                    .map_err(|e| e.to_string())
                 });
             }
             Some(ProfileEditor::Codex(editor)) => {
@@ -215,8 +222,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
-                    config::save_codex_provider_edit(&path, &input, original_name.as_deref())
-                        .map_err(|e| e.to_string())
+                    config::save_codex_provider_edit_with_options(
+                        &path,
+                        &input,
+                        original_name.as_deref(),
+                        &options,
+                    )
+                    .map_err(|e| e.to_string())
                 });
             }
         }

@@ -140,6 +140,28 @@ pub fn save_openai_compatible_provider_edit(
     input: &OpenAiCompatibleProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
+    save_openai_compatible_provider_edit_inner(path, input, original_name, None)
+}
+
+/// Save after validating the candidate file in the caller's layered configuration.
+///
+/// # Errors
+/// Rejects invalid input or effective model kinds before writing anything.
+pub fn save_openai_compatible_provider_edit_with_options(
+    path: &Path,
+    input: &OpenAiCompatibleProviderInput,
+    original_name: Option<&str>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    save_openai_compatible_provider_edit_inner(path, input, original_name, Some(options))
+}
+
+fn save_openai_compatible_provider_edit_inner(
+    path: &Path,
+    input: &OpenAiCompatibleProviderInput,
+    original_name: Option<&str>,
+    options: Option<&crate::LoadOptions>,
+) -> Result<(), ConfigError> {
     validate_openai_compatible_provider_input(input)?;
     let mut doc = read_document(path)?;
 
@@ -169,6 +191,7 @@ pub fn save_openai_compatible_provider_edit(
     profile.insert("default_model", value(input.default_model.as_str()));
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
+    validate_effective_model_kinds(path, &doc, options)?;
     write_document(path, &doc)
 }
 
@@ -449,7 +472,33 @@ pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
         ))
     })?;
     config.self_improvement.validate()?;
+    if let Some(problem) = config.model_kind_problems().into_iter().next() {
+        return Err(problem);
+    }
     Ok(text)
+}
+
+/// Validate the exact candidate file through the same layers the GUI reloads. Do not
+/// apply the selected role profile: every profile, including inactive ones, must fit.
+pub(crate) fn validate_effective_model_kinds(
+    path: &Path,
+    doc: &DocumentMut,
+    options: Option<&crate::LoadOptions>,
+) -> Result<(), ConfigError> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    let mut options = options.clone();
+    let candidate = toml::from_str(&checked_text(doc)?).map_err(|error| {
+        ConfigError::Migration(format!("failed to parse config before saving: {error}"))
+    })?;
+    options.file_overrides.insert(path.to_path_buf(), candidate);
+    let effective = Config::load_unresolved(&options)?;
+    effective
+        .model_kind_problems()
+        .into_iter()
+        .next()
+        .map_or(Ok(()), Err)
 }
 
 pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {

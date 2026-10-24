@@ -232,9 +232,29 @@ pub fn plan_for_profile(
         let Some(key) = route_key(candidates, providers, catalog) else {
             continue;
         };
+        let purposes: Vec<_> = config::types::agents::explicit_refs(agents)
+            .into_iter()
+            .filter(|(_, used)| *used == route)
+            .map(|(address, _)| config::ChainPurpose::of_address(&address))
+            .chain(
+                config::types::agents::implicit_roles_using(&route, agents)
+                    .into_iter()
+                    .map(|address| config::ChainPurpose::of_address(&address)),
+            )
+            .collect();
         let matching: Vec<_> = models
             .iter()
             .filter(|(_, model_key)| *model_key == key)
+            .filter(|(id, _)| {
+                let candidate = RouteCandidateConfig {
+                    profile: profile_name.to_owned(),
+                    model: Some(id.clone()),
+                    auto: true,
+                };
+                purposes
+                    .iter()
+                    .all(|purpose| purpose.candidate_problem(&candidate, providers).is_none())
+            })
             .map(|(id, _)| id.clone())
             .collect();
         match matching.as_slice() {
