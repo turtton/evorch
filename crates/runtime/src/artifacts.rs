@@ -2,7 +2,9 @@
 //! `render_artifact`, and only the conversation owner shows them with `present`.
 //!
 //! Captures are immutable content-addressed copies, so later edits to the
-//! working file never change what the user was shown.
+//! working file never change what the user was shown. They read from the run's
+//! workspace and its thread's temporary directory, and HTML captures embed the
+//! images they reference by path (ADR 0038).
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +19,10 @@ use sha2::{Digest, Sha256};
 use crate::{AgentRuntime, Role, RunPurpose, agent_loop::LoopState, meta::DispatchResult};
 
 pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+/// The HTML file as written; its referenced images do not count.
 pub const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
+/// A stored HTML artifact, including the images inlined into it.
+pub const MAX_BUNDLED_HTML_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TITLE: usize = 200;
 const MAX_CAPTION: usize = 1000;
 const MAX_PRESENTED: usize = 8;
@@ -86,6 +91,18 @@ pub struct ArtifactRecord {
     pub root_run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// Image files inlined into captured HTML as data URIs, once per file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inlined_assets: Vec<InlinedAsset>,
+}
+
+/// One image file whose content an HTML artifact carries as a data URI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InlinedAsset {
+    pub source_path: String,
+    pub sha256: String,
+    pub byte_len: u64,
 }
 
 /// Captures live outside every workspace: `<root>/blobs/<sha256>.<ext>` and
@@ -118,14 +135,18 @@ impl ArtifactStore {
             .join(format!("{}.{}", record.sha256, record.extension))
     }
 
-    /// Validate `path` inside `workspace` and store its current content.
+    /// Validate `path` inside `workspace` or `scratch` and store its current
+    /// content. Relative paths resolve from `workspace`. HTML gets the images it
+    /// references by path inlined; nothing is stored if any of them fails.
     pub fn capture(
         &self,
         workspace: &Path,
+        scratch: Option<&Path>,
         path: &Path,
         request: CaptureRequest<'_>,
     ) -> Result<ArtifactRecord, String> {
-        let (source, kind, bytes) = read_workspace_file(workspace, path)?;
+        let roots = SourceRoots::new(workspace, scratch)?;
+        let (source, kind, bytes) = read_source_file(&roots, path)?;
         if kind == ArtifactKind::Html
             && let Some(rule) = secret_guard::SecretRedactor::from_env()
                 .detect(std::str::from_utf8(&bytes).unwrap_or_default())
@@ -134,6 +155,10 @@ impl ArtifactStore {
                 "the HTML contains a credential ({rule:?}); remove it before capturing"
             ));
         }
+        let (bytes, inlined_assets) = match kind {
+            ArtifactKind::Html => inline_images::inline(&roots, &source, path, bytes)?,
+            ArtifactKind::Image(_) => (bytes, Vec::new()),
+        };
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         let record = ArtifactRecord {
             artifact_id: random_id("artifact")?,
@@ -147,6 +172,7 @@ impl ArtifactStore {
             run_id: request.run_id,
             root_run_id: request.root_run_id,
             thread_id: request.thread_id,
+            inlined_assets,
         };
         let blob = self.blob_path(&record);
         if !blob.is_file() {
@@ -182,27 +208,56 @@ impl ArtifactStore {
     }
 }
 
-fn read_workspace_file(
-    workspace: &Path,
+/// The canonical directories a capture may read: the run's workspace and its
+/// thread's temporary directory. Allowed directories (ADR 0032) are not sources.
+struct SourceRoots {
+    workspace: PathBuf,
+    scratch: Option<PathBuf>,
+}
+
+impl SourceRoots {
+    fn new(workspace: &Path, scratch: Option<&Path>) -> Result<Self, String> {
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("workspace is unavailable: {error}"))?;
+        // A temporary directory that does not exist holds no file to capture.
+        let scratch = scratch.and_then(|dir| dir.canonicalize().ok());
+        Ok(Self { workspace, scratch })
+    }
+
+    /// Whether `path`, already resolved, lies inside one of the roots.
+    fn contains(&self, path: &Path) -> bool {
+        path.starts_with(&self.workspace)
+            || self
+                .scratch
+                .as_ref()
+                .is_some_and(|scratch| path.starts_with(scratch))
+    }
+
+    const fn outside(&self) -> &'static str {
+        if self.scratch.is_some() {
+            "is outside this run's workspace and its $TMPDIR"
+        } else {
+            "is outside this run's workspace"
+        }
+    }
+}
+
+fn read_source_file(
+    roots: &SourceRoots,
     path: &Path,
 ) -> Result<(PathBuf, ArtifactKind, Vec<u8>), String> {
-    let workspace = workspace
-        .canonicalize()
-        .map_err(|error| format!("workspace is unavailable: {error}"))?;
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        workspace.join(path)
+        roots.workspace.join(path)
     };
-    // Resolve links first: only the real file must be inside the workspace.
+    // Resolve links first: only the real file must be inside the roots.
     let source = joined
         .canonicalize()
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    if !source.starts_with(&workspace) {
-        return Err(format!(
-            "{} is outside this run's workspace",
-            path.display()
-        ));
+    if !roots.contains(&source) {
+        return Err(format!("{} {}", path.display(), roots.outside()));
     }
     let kind = ArtifactKind::from_extension(&source).ok_or_else(|| {
         format!(
@@ -210,34 +265,37 @@ fn read_workspace_file(
             path.display()
         )
     })?;
-    let file = std::fs::File::open(&source)
-        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    let bytes =
+        read_limited(&source, kind).map_err(|reason| format!("{} {reason}", path.display()))?;
+    Ok((source, kind, bytes))
+}
+
+/// Read the resolved `source` as `kind`. Errors complete a sentence about the file.
+fn read_limited(source: &Path, kind: ArtifactKind) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(source).map_err(|error| format!("cannot be opened: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot be opened: {error}"))?;
     if !metadata.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
+        return Err("is not a regular file".into());
     }
     let limit = kind.max_bytes();
     let mut bytes = Vec::new();
     // Bound the read itself: the file may grow after the metadata check.
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        .map_err(|error| format!("cannot be read: {error}"))?;
     if bytes.len() as u64 > limit {
         return Err(format!(
-            "{} exceeds the {} MiB limit for {}",
-            path.display(),
+            "exceeds the {} MiB limit for {}",
             limit / 1024 / 1024,
             kind.media_type()
         ));
     }
     if bytes.is_empty() || !kind.matches(&bytes) {
-        return Err(format!(
-            "{} does not contain valid {} data",
-            path.display(),
-            kind.media_type()
-        ));
+        return Err(format!("does not contain valid {} data", kind.media_type()));
     }
-    Ok((source, kind, bytes))
+    Ok(bytes)
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -283,8 +341,8 @@ pub(crate) fn may_render(role: Role, config: &crate::RunConfig, is_root: bool) -
 pub(crate) fn render_spec(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Capture an image or HTML mock from your workspace so the conversation owner can show it to the user. Supported: .png, .jpg, .gif, .webp (up to 8 MiB) and self-contained .html (up to 2 MiB; inline all CSS, scripts and images because external files are not captured). The current file content is stored as an immutable copy, so capture again after each revision. This does not show anything to the user: pass the returned artifact_id to present if you own the conversation, otherwise include it in your result for your parent.".into(),
-        input_schema: json!({"type":"object","properties":{"path":{"type":"string","description":"File inside your workspace; relative paths resolve from the workspace root."},"title":{"type":"string","minLength":1,"maxLength":MAX_TITLE},"caption":{"type":"string","maxLength":MAX_CAPTION}},"required":["path","title"],"additionalProperties":false}),
+        description: "Capture an image or HTML mock from your workspace or $TMPDIR so the conversation owner can show it to the user. Supported: .png, .jpg, .gif, .webp (up to 8 MiB) and .html (up to 2 MiB as written). Put the HTML's CSS and scripts in the file itself: <link>, <script src> and srcset are not captured. Images that <img src> or a CSS url() (in <style> or a style attribute) references by relative path are embedded as data URIs when you capture, resolved from the HTML file's directory; each must be a .png, .jpg, .gif or .webp of up to 8 MiB inside your workspace or $TMPDIR, and the HTML with them embedded must stay within 8 MiB. If any such reference cannot be embedded (missing, outside those directories, another format such as a font, or too large), nothing is captured and the error lists them. http:, https: and data: references are kept as written. Reference material and drafts can stay in $TMPDIR. The current content is stored as an immutable copy, so capture again after each revision. This does not show anything to the user: pass the returned artifact_id to present if you own the conversation, otherwise include it in your result for your parent.".into(),
+        input_schema: json!({"type":"object","properties":{"path":{"type":"string","description":"File inside your workspace or $TMPDIR; relative paths resolve from the workspace root."},"title":{"type":"string","minLength":1,"maxLength":MAX_TITLE},"caption":{"type":"string","maxLength":MAX_CAPTION}},"required":["path","title"],"additionalProperties":false}),
     }
 }
 
@@ -356,6 +414,7 @@ pub(crate) fn render(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
         let root = runtime.run_root(caller)?;
         let record = store.capture(
             &workspace,
+            state.scratch_dir(),
             Path::new(&args.path),
             CaptureRequest {
                 title: &args.title,
@@ -365,13 +424,17 @@ pub(crate) fn render(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
                 thread_id: runtime.goal_thread(root),
             },
         )?;
-        Ok(json!({
+        let mut result = json!({
             "artifact_id": record.artifact_id,
             "title": record.title,
             "media_type": record.media_type,
             "bytes": record.byte_len,
             "reference": reference(&record.artifact_id, &record.title),
-        }))
+        });
+        if !record.inlined_assets.is_empty() {
+            result["inlined_images"] = json!(record.inlined_assets.len());
+        }
+        Ok(result)
     })())
 }
 
@@ -463,6 +526,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
     })())
 }
 
+mod inline_images;
 mod inspect;
 pub use inspect::{ArtifactPage, ArtifactPages, INSPECT_ARTIFACT};
 pub(crate) use inspect::{inspect, spec as inspect_spec};

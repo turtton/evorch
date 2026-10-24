@@ -33,6 +33,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ipnet = "2"
 jsonschema = { version = "0.52", default-features = false }
 keyring = { version = "4", features = ["v1"] }
+# Locates image references in captured HTML artifacts without re-serializing them.
+lol_html = "3"
 # OTel metrics / span exporter (event-bus / otel-exporter feature)。
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["metrics", "trace", "http-proto", "reqwest-blocking-client"] }

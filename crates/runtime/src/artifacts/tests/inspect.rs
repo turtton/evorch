@@ -64,9 +64,9 @@ impl ArtifactPage for Page {
 }
 
 #[derive(Default)]
-struct Pages {
+pub(super) struct Pages {
     open: Mutex<HashMap<String, Arc<Page>>>,
-    opened: Mutex<Vec<(String, Vec<u8>)>>,
+    pub(super) opened: Mutex<Vec<(String, Vec<u8>)>>,
     closed: Mutex<Vec<String>>,
 }
 
@@ -114,7 +114,7 @@ fn inspect(input: Value) -> Step {
     calls(vec![("inspect_artifact", input)])
 }
 
-fn open_last_capture() -> Step {
+pub(super) fn open_last_capture() -> Step {
     Step::Calls(Box::new(|messages| {
         vec![(
             "inspect_artifact",
@@ -228,6 +228,7 @@ async fn inspect_refuses_images_foreign_artifacts_and_missing_pages() {
     let foreign = store
         .capture(
             harness.workspace.path(),
+            None,
             Path::new("mock.html"),
             CaptureRequest {
                 title: "Foreign",

@@ -125,13 +125,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 pub fn read_html(path: &Path) -> Result<Vec<u8>, String> {
+    // Stored HTML may exceed the source limit once its images are inlined (ADR 0038).
+    let limit = runtime::artifacts::MAX_BUNDLED_HTML_BYTES;
     let length = std::fs::metadata(path)
         .map_err(|error| error.to_string())?
         .len();
-    if length > runtime::artifacts::MAX_HTML_BYTES {
+    if length > limit {
         return Err(format!(
-            "{length} bytes exceeds the {} byte HTML artifact limit",
-            runtime::artifacts::MAX_HTML_BYTES
+            "{length} bytes exceeds the {limit} byte HTML artifact limit"
         ));
     }
     std::fs::read(path).map_err(|error| error.to_string())
@@ -239,6 +240,19 @@ mod tests {
             SnapshotState::Failed("CEF unavailable".into())
         );
         assert_eq!(snapshots.take_requests().len(), 1);
+    }
+
+    #[test]
+    fn stored_html_with_inlined_images_is_read_up_to_the_bundled_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("bundled.html");
+        let file = std::fs::File::create(&bundled).unwrap();
+        file.set_len(runtime::artifacts::MAX_HTML_BYTES + 1)
+            .unwrap();
+        assert!(read_html(&bundled).is_ok());
+        file.set_len(runtime::artifacts::MAX_BUNDLED_HTML_BYTES + 1)
+            .unwrap();
+        assert!(read_html(&bundled).unwrap_err().contains("exceeds"));
     }
 
     #[test]
