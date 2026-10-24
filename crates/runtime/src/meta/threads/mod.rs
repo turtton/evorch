@@ -9,6 +9,8 @@ mod grep;
 pub(super) mod normalize;
 mod read;
 mod search;
+#[cfg(test)]
+mod tests;
 pub(super) mod visibility;
 
 #[cfg(test)]
