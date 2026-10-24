@@ -448,6 +448,110 @@ async fn cancelled_admission_releases_only_its_reservation_and_success_commits_c
 }
 
 #[tokio::test]
+async fn rejected_wake_releases_its_reservation_without_acting_as_operator_resume() {
+    // Given: a stopped root with a report held for it and part of its wake budget used.
+    let model = Arc::new(RetryModel::default());
+    let fixture = Fixture::with_model(model.clone());
+    let run = fixture.terminal().await;
+    fixture.runtime.hold_message(
+        run,
+        AgentMessage {
+            message_id: "held-report".into(),
+            sender_run_id: RunId::new(99).to_string(),
+            recipient_run_id: run.to_string(),
+            kind: AgentMessageKind::Send,
+            content: "held child report".into(),
+            reply_to: None,
+        },
+    );
+    fixture
+        .runtime
+        .shared
+        .operator_stops
+        .lock()
+        .unwrap()
+        .insert(run);
+    fixture
+        .runtime
+        .shared
+        .auto_wakes
+        .lock()
+        .unwrap()
+        .insert(run, 3);
+    model.reject.store(true, Ordering::Relaxed);
+    // When: a runtime-requested wake fails provider admission.
+    fixture
+        .runtime
+        .wake_chat(run, RunConfig::default())
+        .unwrap();
+    assert!(fixture.runtime.wait_admission(run).await.is_err());
+    // Then: the snapshot is returned, and the wake still is not an operator resume.
+    let after = saved(&fixture, run);
+    assert!(after.restorable);
+    assert!(descriptor(&after).restorable);
+    assert!(descriptor(&after).non_restorable_reason.is_none());
+    assert!(descriptor(&after).admission_reservation_id.is_none());
+    assert!(fixture.runtime.operator_stopped(run));
+    assert_eq!(
+        fixture.runtime.shared.auto_wakes.lock().unwrap().get(&run),
+        Some(&3)
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .shared
+            .held_messages
+            .lock()
+            .unwrap()
+            .get(&run)
+            .map(Vec::len),
+        Some(1)
+    );
+
+    // When: the operator resumes once admission recovers.
+    model.reject.store(false, Ordering::Relaxed);
+    fixture
+        .runtime
+        .resume_chat(run, RunConfig::default())
+        .unwrap();
+    fixture.runtime.wait_admission(run).await.unwrap();
+    // Then: the explicit resume lifts the stop and renews the budget, and
+    // registration hands the held report to the restored run.
+    assert!(!fixture.runtime.operator_stopped(run));
+    assert!(
+        !fixture
+            .runtime
+            .shared
+            .auto_wakes
+            .lock()
+            .unwrap()
+            .contains_key(&run)
+    );
+    assert!(
+        !fixture
+            .runtime
+            .shared
+            .held_messages
+            .lock()
+            .unwrap()
+            .contains_key(&run)
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !model.requests.lock().unwrap().iter().any(|request| {
+            serde_json::to_string(request)
+                .unwrap()
+                .contains("held child report")
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the restored run receives the held report");
+    fixture.runtime.cancel(run).unwrap();
+    fixture.runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_attempt_does_not_replace_a_newer_snapshot_or_its_reservation() {
     for new_reservation in [false, true] {
         let model = Arc::new(RetryModel::default());
