@@ -45,6 +45,7 @@ pub fn rename_route_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, S
         &mut agents.roles.multimodal_looker.models,
         &mut agents.roles.evaluator.models,
         &mut agents.roles.compactor.models,
+        &mut agents.roles.image_generator.models,
     ]
     .into_iter()
     .chain(
@@ -123,6 +124,7 @@ pub fn chain_at_mut<'a>(
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker,
         "roles.evaluator" => &mut agents.roles.evaluator,
         "roles.compactor" => &mut agents.roles.compactor,
+        IMAGE_GENERATOR_ADDRESS => &mut agents.roles.image_generator,
         address => {
             let (categories, category) =
                 if let Some(category) = address.strip_prefix("worker.categories.") {
@@ -147,16 +149,21 @@ pub fn implicit_roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String>
         .into_iter()
         .filter(|(address, binding)| {
             // The compactor has no implicit route: without a chain it uses the run's own.
+            // The image generator has none either: without a chain image generation is off.
             binding.models.is_empty()
-                && *address != "roles.compactor"
+                && !matches!(*address, "roles.compactor" | IMAGE_GENERATOR_ADDRESS)
                 && address.strip_prefix("roles.").unwrap_or(address) == logical
         })
         .map(|(address, _)| address.to_string())
         .collect()
 }
 
-/// 設定上のアドレスと全9ロール、および compactor のバインディングを列挙する。
-fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 10] {
+/// `agents.roles.image_generator` の設定上のアドレス ([`explicit_refs`] と同じ表記)。
+pub const IMAGE_GENERATOR_ADDRESS: &str = "roles.image_generator";
+
+/// 設定上のアドレスと全 9 ロール、および agent として起動しない compactor と
+/// image_generator のバインディングを列挙する。
+fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 11] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
@@ -168,6 +175,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 10] {
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
         ("roles.evaluator", &agents.roles.evaluator),
         ("roles.compactor", &agents.roles.compactor),
+        (IMAGE_GENERATOR_ADDRESS, &agents.roles.image_generator),
     ]
 }
 
@@ -183,9 +191,21 @@ pub struct AdditionalRoleBindings {
     /// 要約 (compaction) にだけ使うチェーン。agent としては起動しない。
     /// `models` が空なら、実行中ロールのチェーンで要約する (ADR 0030)。
     pub compactor: RoleBindingConfig,
+    /// 画像生成にだけ使うチェーン。agent としては起動しない (ADR 0038)。
+    /// 候補はすべて `image_generation` のモデル。`models` が空なら画像生成は無効で、
+    /// ロール名の route への暗黙のフォールバックはしない。
+    pub image_generator: RoleBindingConfig,
 }
 
 impl AgentsConfig {
+    /// 画像生成のチェーン (ADR 0038)。空なら画像生成は無効。
+    ///
+    /// [`Self::binding_for`] は image_generator を agent のロールとして受け付けないため、
+    /// 画像生成のチェーンはこの取得口からだけ解決する。
+    pub fn image_generator_chain(&self) -> &[ChainEntryConfig] {
+        &self.roles.image_generator.models
+    }
+
     /// ロール名とカテゴリからバインディングを解決する。
     ///
     /// 各フィールドはカテゴリ指定値がロール指定値に優先し、カテゴリが未指定の
@@ -1131,5 +1151,61 @@ models = [{ route = "shared" }]
 
         // Then: binding_for のロール名フォールバックを数えず空を返す。
         assert!(result.is_empty());
+    }
+
+    // Given: image_generator のチェーンを持つ設定と、持たない設定
+    // When: 明示参照・暗黙参照・binding_for・リネームで扱う
+    // Then: 明示参照としてだけ現れ、暗黙のフォールバックも agent のロールとしての解決も持たない
+    #[test]
+    fn image_generator_is_an_explicit_chain_without_implicit_route_or_agent_role() {
+        let mut agents = toml::from_str::<Config>(
+            "[agents.roles.image_generator]\nmodels = [{ route = 'codex-image' }, { route = 'openai-image' }]\n",
+        )
+        .expect("image generator chain parses")
+        .agents;
+
+        assert_eq!(
+            agents
+                .image_generator_chain()
+                .iter()
+                .map(|entry| entry.route.as_str())
+                .collect::<Vec<_>>(),
+            ["codex-image", "openai-image"]
+        );
+        assert_eq!(
+            explicit_refs(&agents),
+            [
+                ("roles.image_generator".to_owned(), "codex-image".to_owned()),
+                (
+                    "roles.image_generator".to_owned(),
+                    "openai-image".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            roles_using("codex-image", &agents),
+            ["roles.image_generator"]
+        );
+        assert!(matches!(
+            agents.binding_for("image_generator", None),
+            Err(ConfigError::UnknownAgentRole { role }) if role == "image_generator"
+        ));
+        rename_route_refs(
+            &mut agents,
+            &[("codex-image".into(), "image".into())].into(),
+        );
+        assert_eq!(agents.image_generator_chain()[0].route, "image");
+        chain_at_mut(&mut agents, IMAGE_GENERATOR_ADDRESS)
+            .expect("image generator address")
+            .clear();
+        assert!(agents.image_generator_chain().is_empty());
+
+        // Without a chain, image generation is off: no role-name route is implied.
+        let defaults = AgentsConfig::default();
+        assert!(defaults.image_generator_chain().is_empty());
+        for logical in ["image_generator", "roles.image_generator"] {
+            assert!(implicit_roles_using(logical, &defaults).is_empty());
+        }
+        assert!(explicit_refs(&defaults).is_empty());
     }
 }

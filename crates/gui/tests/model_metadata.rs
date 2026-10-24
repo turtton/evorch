@@ -13,6 +13,7 @@ fn entry() -> ModelEntryConfig {
     ModelEntryConfig {
         id: "test-model".into(),
         enabled: true,
+        kind: None,
         metadata_source: Some(MetadataSource::ModelsDev),
         preset: None,
         metadata_ref: None,

@@ -3,7 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
-use config::{Config, ConfigError, RouteCandidateConfig, RoutingConfig};
+use config::{Config, ConfigError, ModelKind, RouteCandidateConfig, RoutingConfig};
+
+/// The model overrides one route candidate can pick (ADR 0038).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelChoices {
+    /// Enabled models of the candidate's profile with the route's kind.
+    pub models: Vec<String>,
+    /// Whether the profile's default model has the route's kind.
+    pub profile_default: bool,
+}
 
 #[derive(Debug, Default)]
 pub struct RoutingSettingsModel {
@@ -21,6 +30,10 @@ pub struct RoutingSettingsModel {
     pub expanded: BTreeSet<String>,
     pub profile_names: Vec<String>,
     pub profile_models: BTreeMap<String, Vec<String>>,
+    /// 候補の種別 (ADR 0038) を決めるプロバイダ設定。
+    pub providers: BTreeMap<String, config::ProviderProfileConfig>,
+    /// 保存前に、route を使うチェーンの種別を検査するための agents (編集前の route 名で参照する)。
+    pub agents: config::AgentsConfig,
     pub new_route_name: String,
     pub route_name_edits: BTreeMap<String, String>,
     pub validation_error: Option<String>,
@@ -114,6 +127,8 @@ impl RoutingSettingsModel {
                 .iter()
                 .map(|(name, profile)| (name.clone(), profile.enabled_model_ids()))
                 .collect(),
+            providers: config.providers.clone(),
+            agents: config.agents.clone(),
             ..Self::default()
         }
     }
@@ -127,6 +142,16 @@ impl RoutingSettingsModel {
         model.origin_role_settings = true;
         match model.add_route(logical) {
             Ok(()) => {
+                // A route created for the image generator starts on an image model.
+                if config
+                    .agents
+                    .image_generator_chain()
+                    .iter()
+                    .any(|entry| entry.route == logical)
+                    && let Some(candidate) = model.image_candidate()
+                {
+                    model.routes.insert(logical.into(), vec![candidate]);
+                }
                 model.pending_new_route = Some(logical.into());
                 model.route_users.insert(
                     logical.into(),
@@ -154,6 +179,131 @@ impl RoutingSettingsModel {
         );
         self.expanded.insert(name.into());
         Ok(())
+    }
+
+    /// The kind of `model` served by `profile`: its registration, else its ID (ADR 0038).
+    fn model_kind(&self, profile: &str, model: &str) -> Option<ModelKind> {
+        RouteCandidateConfig {
+            profile: profile.into(),
+            model: Some(model.into()),
+            auto: false,
+        }
+        .kind(&self.providers)
+    }
+
+    /// The kind every candidate of `route` except `skip` shares, when they agree.
+    pub fn route_kind(&self, route: &str, skip: Option<usize>) -> Option<ModelKind> {
+        let others: Vec<_> = self
+            .routes
+            .get(route)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != skip)
+            .map(|(_, candidate)| candidate.clone())
+            .collect();
+        let kinds = config::types::routing::route_model_kinds(&others, &self.providers);
+        match kinds.len() {
+            1 => kinds.first().copied(),
+            _ => None,
+        }
+    }
+
+    /// The model overrides candidate `index` of `route` can pick: enabled models of its
+    /// profile with the kind the other candidates share, so a route never mixes kinds.
+    pub fn model_choices(&self, route: &str, index: usize) -> ModelChoices {
+        let Some(candidate) = self.routes.get(route).and_then(|list| list.get(index)) else {
+            return ModelChoices::default();
+        };
+        self.choices_for_profile(&candidate.profile, self.route_kind(route, Some(index)))
+    }
+
+    fn choices_for_profile(&self, profile: &str, kind: Option<ModelKind>) -> ModelChoices {
+        let fits =
+            |model: &str| kind.is_none_or(|kind| self.model_kind(profile, model) == Some(kind));
+        ModelChoices {
+            models: self
+                .profile_models
+                .get(profile)
+                .into_iter()
+                .flatten()
+                .filter(|model| fits(model))
+                .cloned()
+                .collect(),
+            profile_default: self
+                .providers
+                .get(profile)
+                .is_some_and(|profile| fits(&profile.default_model)),
+        }
+    }
+
+    /// Changes the profile only if it can serve the route's kind. A missing fitting
+    /// override is not `None`: that would silently select an incompatible default.
+    /// Returns whether the change was accepted, leaving the candidate intact on failure.
+    pub fn change_candidate_profile(&mut self, route: &str, index: usize, profile: &str) -> bool {
+        let Some(original) = self.routes.get(route).and_then(|list| list.get(index)) else {
+            return false;
+        };
+        let kind = self
+            .route_kind(route, Some(index))
+            .or_else(|| original.kind(&self.providers));
+        let choices = self.choices_for_profile(profile, kind);
+        let model = if original
+            .model
+            .as_ref()
+            .map_or(choices.profile_default, |model| {
+                choices.models.contains(model)
+            }) {
+            original.model.clone()
+        } else if choices.profile_default {
+            None
+        } else if let Some(model) = choices.models.first() {
+            Some(model.clone())
+        } else {
+            return false;
+        };
+        let candidate = &mut self.routes.get_mut(route).expect("route exists")[index];
+        candidate.profile = profile.into();
+        candidate.model = model;
+        true
+    }
+
+    /// The candidate "Add candidate" appends to `route`: the first profile's default, or
+    /// an image model when the route already serves image models.
+    pub fn new_candidate(&self, route: &str) -> RouteCandidateConfig {
+        if self.route_kind(route, None) == Some(ModelKind::ImageGeneration)
+            && let Some(candidate) = self.image_candidate()
+        {
+            return candidate;
+        }
+        RouteCandidateConfig {
+            profile: self.profile_names.first().cloned().unwrap_or_default(),
+            model: None,
+            auto: false,
+        }
+    }
+
+    /// The first enabled image model, preferring profiles that can generate images.
+    fn image_candidate(&self) -> Option<RouteCandidateConfig> {
+        let supported = |profile: &String| {
+            self.providers
+                .get(profile)
+                .is_some_and(|config| config.provider_type.supports_image_generation())
+        };
+        let (preferred, others): (Vec<_>, Vec<_>) = self
+            .profile_names
+            .iter()
+            .partition(|profile| supported(profile));
+        preferred.into_iter().chain(others).find_map(|profile| {
+            let model = self.profile_models.get(profile)?.iter().find(|model| {
+                self.model_kind(profile, model) == Some(ModelKind::ImageGeneration)
+            })?;
+            Some(RouteCandidateConfig {
+                profile: profile.clone(),
+                model: Some(model.clone()),
+                auto: false,
+            })
+        })
     }
 
     pub fn rename_route(&mut self, old: &str, name: &str) -> Result<(), ConfigError> {
@@ -216,6 +366,23 @@ impl RoutingSettingsModel {
                     candidate.model = None;
                 }
             }
+        }
+        // Kinds are checked under the names the chains still use, before renaming.
+        let unrenamed = RoutingConfig {
+            routes: routes.clone(),
+            ..RoutingConfig::default()
+        };
+        if let Some(problem) = config::route_mixing_problems("", &unrenamed, &self.providers)
+            .into_iter()
+            .chain(config::chain_kind_problems(
+                "",
+                &self.agents,
+                &unrenamed,
+                &self.providers,
+            ))
+            .next()
+        {
+            return Err(problem);
         }
         let mut renamed = BTreeMap::new();
         for (name, candidates) in routes {

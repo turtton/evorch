@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,19 +114,7 @@ fn options(user: &Path) -> LoadOptions {
 }
 
 /// Sections whose saved value a later file in `config.d` still overrides.
-fn overridden(
-    user: &Path,
-    path: &Path,
-    after: &str,
-    wanted: &Config,
-    targets: &Targets,
-) -> Result<Vec<String>, String> {
-    let saved: toml::Value = toml::from_str(after).map_err(|error| error.to_string())?;
-    let effective = Config::load_unresolved(&LoadOptions {
-        file_overrides: BTreeMap::from([(path.to_path_buf(), saved)]),
-        ..options(user)
-    })
-    .map_err(|error| error.to_string())?;
+fn overridden(effective: &Config, wanted: &Config, targets: &Targets) -> Vec<String> {
     let section = |config: &Config, profile: &Option<String>, section: &str| {
         let (agents, routing) = match profile {
             None => (Some(&config.agents), Some(&config.routing)),
@@ -143,18 +130,18 @@ fn overridden(
             _ => serde_json::to_value(routing).unwrap_or_default(),
         }
     };
-    Ok(targets
+    targets
         .iter()
         .flat_map(|(profile, sections)| {
             sections
                 .iter()
-                .filter(|name| section(&effective, profile, name) != section(wanted, profile, name))
+                .filter(|name| section(effective, profile, name) != section(wanted, profile, name))
                 .map(move |name| match profile {
                     None => (*name).to_owned(),
                     Some(profile) => format!("role_profiles.{profile}.{name}"),
                 })
         })
-        .collect())
+        .collect()
 }
 
 struct Change {
@@ -174,11 +161,15 @@ fn diff(change: &Change) -> String {
         .to_string()
 }
 
+struct PreparedChange {
+    change: Change,
+    save: config::save::ValidatedSave,
+    wanted: Config,
+    targets: Targets,
+}
+
 /// What applying `overlay` changes, or `None` when the file already holds it.
-fn prepare(
-    user: &Path,
-    overlay: &toml::Value,
-) -> Result<Option<(Change, Config, Targets)>, String> {
+fn prepare(user: &Path, overlay: &toml::Value) -> Result<Option<PreparedChange>, String> {
     let current = Config::load_unresolved(&options(user)).map_err(|error| error.to_string())?;
     let targets = targets(overlay, &current)?;
     let wanted = Config::load_unresolved(&LoadOptions {
@@ -192,12 +183,14 @@ fn prepare(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    let after = config::preview_role_profiles_bindings(&path, &bindings(&wanted, &targets))
+    let prepared = config::LayeredSaveContext::new(&options(user))
+        .prepare_role_profiles_bindings(&path, &bindings(&wanted, &targets))
         .map_err(|error| error.to_string())?;
+    let after = prepared.text().to_owned();
     if after == before {
         return Ok(None);
     }
-    let overridden = overridden(user, &path, &after, &wanted, &targets)?;
+    let overridden = overridden(prepared.config(), &wanted, &targets);
     let change = Change {
         sections: section_names(&targets),
         path,
@@ -205,7 +198,12 @@ fn prepare(
         after,
         overridden,
     };
-    Ok(Some((change, wanted, targets)))
+    Ok(Some(PreparedChange {
+        change,
+        save: prepared,
+        wanted,
+        targets,
+    }))
 }
 
 fn summary(change: &Change, diff: &str) -> String {
@@ -269,7 +267,12 @@ impl Tool for ApplyConfig {
         .await
         .map_err(|error| error.to_string())
         .and_then(|prepared| prepared);
-        let (change, wanted, targets) = match prepared {
+        let PreparedChange {
+            mut change,
+            save: prepared,
+            wanted,
+            targets,
+        } = match prepared {
             Ok(Some(prepared)) => prepared,
             Ok(None) => {
                 return Ok(ToolResult::success(
@@ -287,6 +290,7 @@ impl Tool for ApplyConfig {
                 "{declined}; nothing was written"
             )));
         }
+        let user = self.0.context.user_config_dir.clone();
         let written = tokio::task::spawn_blocking(move || {
             let now = std::fs::read_to_string(&change.path).unwrap_or_default();
             if now != change.before {
@@ -295,8 +299,13 @@ impl Tool for ApplyConfig {
                     change.path.display()
                 ));
             }
-            config::save_role_profiles_bindings(&change.path, &bindings(&wanted, &targets))
+            // Approval can outlive a drop-in edit. Recheck the approved bytes in
+            // today's layers, rather than rebuild or trust the preview's snapshot.
+            let prepared = config::LayeredSaveContext::new(&options(&user))
+                .revalidate(prepared)
                 .map_err(|error| error.to_string())?;
+            change.overridden = overridden(prepared.config(), &wanted, &targets);
+            prepared.write().map_err(|error| error.to_string())?;
             Ok(change)
         })
         .await

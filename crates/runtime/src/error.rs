@@ -69,6 +69,24 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// 会話や要約に会話用でないモデルが選ばれたため、送信せずに失敗した (ADR 0038)。
+    ///
+    /// 通常の読み込みが警告にとどめた設定 (画像生成のモデルを含むチェーンなど) を、
+    /// プロンプトを送る前に止める。
+    #[error(
+        "{origin} の {profile}/{model} は {kind} のモデルのため送信しませんでした。会話と要約には chat のモデルだけを使えます"
+    )]
+    ModelKindMismatch {
+        /// モデルを選んだ経路 (チェーンと route、または利用者が選んだモデル)。
+        origin: String,
+        /// プロファイル名。
+        profile: String,
+        /// モデル ID。
+        model: String,
+        /// モデルの実効の種別。
+        kind: config::ModelKind,
+    },
+
     /// ツール実行の失敗。
     #[error(transparent)]
     Tool(#[from] tools::ToolError),

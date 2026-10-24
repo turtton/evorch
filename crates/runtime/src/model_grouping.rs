@@ -2,8 +2,8 @@
 //! (ADR 0030).
 //!
 //! A route is a pool of paths to one model. When a provider is saved, each of its
-//! enabled models whose (canonical id, tier) matches a pool that some role uses is
-//! appended to that pool with `auto = true`. The result is written to the
+//! enabled models whose (canonical id, tier, kind) matches a pool that some role uses
+//! is appended to that pool with `auto = true`. The result is written to the
 //! configuration once; loading never recomputes it, so a later change of the
 //! canonical id only produces a [`StaleAutoCandidate`] warning.
 
@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use catalog::{ModelCatalog, ModelMetadata};
 use config::types::provider::{ModelSpeed, parse_model_speed};
 use config::{
-    AgentsConfig, MetadataSource, ModelEntryConfig, ProviderProfileConfig, RouteCandidateConfig,
-    RoutingConfig,
+    AgentsConfig, MetadataSource, ModelEntryConfig, ModelKind, ProviderProfileConfig,
+    RouteCandidateConfig, RoutingConfig,
 };
 
 /// Speed or price tier. Members of one pool share it, so a pool never mixes tiers.
@@ -26,11 +26,13 @@ pub enum Tier {
     Free,
 }
 
-/// The identity a pool groups by.
+/// The identity a pool groups by. A pool never mixes model kinds (ADR 0038), so a chat
+/// model and an image model never join the same pool even when the catalog relates them.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GroupKey {
     pub canonical: String,
     pub tier: Tier,
+    pub kind: ModelKind,
 }
 
 /// A candidate to append at the lowest priority of `route`.
@@ -106,6 +108,7 @@ pub fn group_key(
     Some(GroupKey {
         canonical,
         tier: tier_of(model_id),
+        kind: profile.model_kind(model_id),
     })
 }
 
@@ -229,9 +232,29 @@ pub fn plan_for_profile(
         let Some(key) = route_key(candidates, providers, catalog) else {
             continue;
         };
+        let purposes: Vec<_> = config::types::agents::explicit_refs(agents)
+            .into_iter()
+            .filter(|(_, used)| *used == route)
+            .map(|(address, _)| config::ChainPurpose::of_address(&address))
+            .chain(
+                config::types::agents::implicit_roles_using(&route, agents)
+                    .into_iter()
+                    .map(|address| config::ChainPurpose::of_address(&address)),
+            )
+            .collect();
         let matching: Vec<_> = models
             .iter()
             .filter(|(_, model_key)| *model_key == key)
+            .filter(|(id, _)| {
+                let candidate = RouteCandidateConfig {
+                    profile: profile_name.to_owned(),
+                    model: Some(id.clone()),
+                    auto: true,
+                };
+                purposes
+                    .iter()
+                    .all(|purpose| purpose.candidate_problem(&candidate, providers).is_none())
+            })
             .map(|(id, _)| id.clone())
             .collect();
         match matching.as_slice() {

@@ -11,14 +11,14 @@ use crate::model::tasks::AgentRunSource;
 
 pub(super) type SettingsJobRx = Receiver<Result<config::Config, String>>;
 /// Edits the user config file given the config loaded just before the write.
-pub(super) type SettingsWrite = dyn FnOnce(&Path, &config::Config) -> Result<(), String> + Send;
+pub(super) type SettingsWrite = dyn FnOnce(&Path, &config::Config, &config::LayeredSaveContext<'_>) -> Result<(), String>
+    + Send;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    /// The runtime's load options without the project layer or save simulations.
+    /// The runtime's load options without the project profile selection.
     pub(super) fn user_settings_options(&self) -> config::LoadOptions {
         let mut options = self.routing_load_options();
         options.project_dir = None;
-        options.file_overrides.clear();
         options
     }
 
@@ -96,7 +96,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .and_then(|()| {
                     config::Config::load_unresolved(&options).map_err(|error| error.to_string())
                 })
-                .and_then(|current| write(&path, &current))
+                .and_then(|current| {
+                    write(&path, &current, &config::LayeredSaveContext::new(&options))
+                })
                 .and_then(|()| {
                     crate::model::production::reload_models(
                         production.as_ref(),
@@ -117,15 +119,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 pub(super) fn create_profile(
     path: &Path,
     current: &config::Config,
+    context: &config::LayeredSaveContext<'_>,
     source: &str,
     name: &str,
 ) -> Result<(), String> {
     let profile = current
         .role_profile_config(Some(source))
         .ok_or_else(|| format!("Role profile '{source}' no longer exists"))?;
-    config::save_role_profile(path, name, &profile).map_err(|error| error.to_string())
+    context
+        .save_role_profile(path, name, &profile)
+        .map_err(|error| error.to_string())
 }
 
-pub(super) fn delete_profile(path: &Path, name: &str) -> Result<(), String> {
-    config::delete_role_profile(path, name).map_err(|error| error.to_string())
+pub(super) fn delete_profile(
+    path: &Path,
+    context: &config::LayeredSaveContext<'_>,
+    name: &str,
+) -> Result<(), String> {
+    context
+        .delete_role_profile(path, name)
+        .map_err(|error| error.to_string())
 }

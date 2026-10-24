@@ -33,6 +33,33 @@ pub fn save_role_profile_bindings(
     )
 }
 
+/// Save final agents / routing edits after checking all layers and role profiles.
+/// No file is opened for writing until model-kind and provider constraints pass.
+///
+/// # Errors
+/// Fails like [`save_role_profile_bindings`], or on incompatible effective chains.
+pub fn save_role_profile_bindings_with_options(
+    path: &Path,
+    profile: Option<&str>,
+    routing: Option<&RoutingConfig>,
+    agents: Option<&AgentsConfig>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    let doc = bindings_document(
+        path,
+        &[RoleProfileBindings {
+            profile,
+            routing,
+            agents,
+        }],
+    )?;
+    crate::save::write_document_in_scope(
+        path,
+        &doc,
+        crate::save_context::SaveScope::Layered(options),
+    )
+}
+
 /// One profile's sections for [`save_role_profiles_bindings`].
 #[derive(Debug, Clone, Copy)]
 pub struct RoleProfileBindings<'a> {
@@ -63,10 +90,10 @@ pub fn preview_role_profiles_bindings(
     path: &Path,
     changes: &[RoleProfileBindings<'_>],
 ) -> Result<String, ConfigError> {
-    crate::save::checked_text(&bindings_document(path, changes)?)
+    crate::StandaloneSaveContext.preview_role_profiles_bindings(path, changes)
 }
 
-fn bindings_document(
+pub(crate) fn bindings_document(
     path: &Path,
     changes: &[RoleProfileBindings<'_>],
 ) -> Result<DocumentMut, ConfigError> {
@@ -93,6 +120,20 @@ pub fn save_role_profile(
     name: &str,
     profile: &RoleProfileConfig,
 ) -> Result<(), ConfigError> {
+    save_role_profile_in_scope(
+        path,
+        name,
+        profile,
+        crate::save_context::SaveScope::Standalone,
+    )
+}
+
+pub(crate) fn save_role_profile_in_scope(
+    path: &Path,
+    name: &str,
+    profile: &RoleProfileConfig,
+    scope: crate::save_context::SaveScope<'_>,
+) -> Result<(), ConfigError> {
     validate_named(name)?;
     let mut doc = crate::save::read_document(path)?;
     let target = target_table(&mut doc, Some(name), true)?;
@@ -104,7 +145,7 @@ pub fn save_role_profile(
         "agents",
         Item::Table(agents_document_table(&profile.agents)),
     );
-    crate::save::write_document(path, &doc)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }
 
 /// 名前付きプロファイルを削除する。存在しない場合は何もしない。
@@ -112,21 +153,26 @@ pub fn save_role_profile(
 /// # Errors
 /// 名前が `default` の場合、または保存に失敗した場合にエラーを返す。
 pub fn delete_role_profile(path: &Path, name: &str) -> Result<(), ConfigError> {
+    delete_role_profile_in_scope(path, name, crate::save_context::SaveScope::Standalone)
+}
+
+pub(crate) fn delete_role_profile_in_scope(
+    path: &Path,
+    name: &str,
+    scope: crate::save_context::SaveScope<'_>,
+) -> Result<(), ConfigError> {
     validate_named(name)?;
     let mut doc = crate::save::read_document(path)?;
-    let Some(profiles) = doc
+    if let Some(profiles) = doc
         .get_mut("role_profiles")
         .and_then(Item::as_table_like_mut)
-    else {
-        return Ok(());
-    };
-    if profiles.remove(name).is_none() {
-        return Ok(());
+    {
+        profiles.remove(name);
+        if profiles.is_empty() {
+            doc.remove("role_profiles");
+        }
     }
-    if profiles.is_empty() {
-        doc.remove("role_profiles");
-    }
-    crate::save::write_document(path, &doc)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }
 
 /// プロジェクト設定 (`<project>/.evorch/config.toml`) の `role_profile` を設定・削除する。
@@ -138,6 +184,18 @@ pub fn delete_role_profile(path: &Path, name: &str) -> Result<(), ConfigError> {
 pub fn save_project_role_profile(
     project_dir: &Path,
     profile: Option<&str>,
+) -> Result<(), ConfigError> {
+    save_project_role_profile_in_scope(
+        project_dir,
+        profile,
+        crate::save_context::SaveScope::Standalone,
+    )
+}
+
+pub(crate) fn save_project_role_profile_in_scope(
+    project_dir: &Path,
+    profile: Option<&str>,
+    scope: crate::save_context::SaveScope<'_>,
 ) -> Result<(), ConfigError> {
     let path = crate::project_main_config_path(project_dir);
     let profile = profile.filter(|name| *name != DEFAULT_ROLE_PROFILE);
@@ -156,7 +214,7 @@ pub fn save_project_role_profile(
             doc.remove("role_profile");
         }
     }
-    crate::save::write_document(&path, &doc)
+    crate::save::write_document_in_scope(&path, &doc, scope)
 }
 
 fn validate_named(name: &str) -> Result<(), ConfigError> {

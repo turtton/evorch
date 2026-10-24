@@ -68,8 +68,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Created(name),
-                    Box::new(move |path, current| {
-                        super::role_profiles::create_profile(path, current, &source, &target)
+                    Box::new(move |path, current, context| {
+                        super::role_profiles::create_profile(
+                            path, current, context, &source, &target,
+                        )
                     }),
                 )
             }
@@ -77,7 +79,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Deleted(name),
-                    Box::new(move |path, _| super::role_profiles::delete_profile(path, &target)),
+                    Box::new(move |path, _, context| {
+                        super::role_profiles::delete_profile(path, context, &target)
+                    }),
                 )
             }
         };
@@ -156,8 +160,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let profile = self.role_settings.profiles.selected.clone();
         self.start_role_job(
             RoleProfileJob::Save,
-            Box::new(move |path, _| {
-                config::save_role_profile_bindings(path, Some(&profile), None, Some(&agents))
+            Box::new(move |path, _, context| {
+                context
+                    .save_role_profile_bindings(path, Some(&profile), None, Some(&agents))
                     .map_err(|error| error.to_string())
             }),
         );

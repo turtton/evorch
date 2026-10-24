@@ -50,6 +50,7 @@ serde_yaml_ng = "0.10"
 sha2 = "0.10"
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh64"] }
 similar = "2"
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }

@@ -120,6 +120,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         let store = self.credential_store.clone();
+        let options = self.user_settings_options();
         match &self.provider_settings.editor {
             None => {}
             Some(ProfileEditor::OpenAiCompatible(editor)) => {
@@ -168,12 +169,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
-                    config::save::save_openai_compatible_provider_edit(
-                        &path,
-                        &input,
-                        original_name.as_deref(),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    config::LayeredSaveContext::new(&options)
+                        .save_openai_compatible_provider_edit(
+                            &path,
+                            &input,
+                            original_name.as_deref(),
+                        )
+                        .map_err(|e| e.to_string())?;
                     if let (Some(store), Some(account)) = (store, migrated_account) {
                         store.delete(account).map_err(|e| e.to_string())?;
                     }
@@ -188,7 +190,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         std::fs::create_dir_all(parent)
                             .map_err(|_| "Could not create config directory".to_owned())?;
                     }
-                    config::save_subscription_provider_edit(&path, &input, original_name.as_deref())
+                    config::LayeredSaveContext::new(&options)
+                        .save_subscription_provider_edit(&path, &input, original_name.as_deref())
                         .map_err(|e| e.to_string())
                 });
             }
@@ -215,7 +218,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
-                    config::save_codex_provider_edit(&path, &input, original_name.as_deref())
+                    config::LayeredSaveContext::new(&options)
+                        .save_codex_provider_edit(
+                            &path,
+                            &input,
+                            original_name.as_deref(),
+                            config::CodexModelIntent::ExplicitModels,
+                        )
                         .map_err(|e| e.to_string())
                 });
             }
@@ -239,11 +248,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => false,
         };
         let store = self.credential_store.clone();
+        let options = self.user_settings_options();
         self.provider_operation(None, move || {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-            config::delete_provider(&path, &name).map_err(|e| e.to_string())?;
+            config::LayeredSaveContext::new(&options)
+                .delete_provider(&path, &name)
+                .map_err(|e| e.to_string())?;
             if !shared_account
                 && let Some(config::CredentialRefConfig::Keyring { account, .. }) = credential
             {

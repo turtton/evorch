@@ -40,11 +40,16 @@ pub use orchestration::OrchestrationConfig;
 pub use ownership::OwnershipConfig;
 pub use panel::PanelConfig;
 pub use provider::{
-    ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig,
+    ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig, ModelKind,
     ProviderProfileConfig, ProviderTypeConfig,
 };
-pub use role_profile::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
-pub use routing::{CooldownConfig, FallbackConfig, RouteCandidateConfig, RoutingConfig};
+pub use role_profile::{
+    DEFAULT_ROLE_PROFILE, RoleProfileConfig, chain_kind_problems, is_valid_role_profile_name,
+    route_mixing_problems, scope_kind_problems,
+};
+pub use routing::{
+    ChainPurpose, CooldownConfig, FallbackConfig, RouteCandidateConfig, RoutingConfig,
+};
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use team::TeamConfig;

@@ -270,3 +270,88 @@ fn shows_fetched_context_window_and_override_control() {
             .is_some()
     );
 }
+
+#[test]
+fn offers_the_fixed_image_model_and_keeps_it_out_of_the_default() {
+    // Given: a new Codex profile; its catalog never lists image models.
+    let mut harness = editor();
+    harness.run_steps(16);
+    // When: the fixed image model is added.
+    harness.get_by_label("Add gpt-image-2").click();
+    harness.run_steps(16);
+    // Then: it is configured as an image model, and the button is gone.
+    let editor = harness.state_mut().codex_mut().unwrap();
+    assert_eq!(editor.models.last().unwrap(), "gpt-image-2");
+    assert_eq!(
+        editor.model_entries["gpt-image-2"].kind,
+        Some(config::ModelKind::ImageGeneration)
+    );
+    assert_eq!(editor.default_model, "gpt-6-astra");
+    assert!(harness.query_by_label("Add gpt-image-2").is_none());
+    assert_eq!(
+        harness.get_by_label("Kind gpt-image-2").value().as_deref(),
+        Some("Image generation")
+    );
+    // When: the default model picker opens.
+    harness.get_by_label("Default model").click();
+    harness.run_steps(16);
+    // Then: the image model is not a default choice.
+    assert!(
+        harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::Button)
+                    .label("gpt-image-2"),
+            )
+            .is_none()
+    );
+    assert!(
+        harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::Button)
+                    .label("gpt-5.5"),
+            )
+            .is_some()
+    );
+}
+
+#[test]
+fn typed_models_record_their_inferred_kind_and_the_kind_can_be_changed() {
+    // Given
+    let mut harness = editor();
+    harness.run_steps(16);
+    harness.get_by_label("Add model").click();
+    harness.run_steps(16);
+    harness.get_by_label("Add model").type_text("gpt-image-1");
+    harness.run_steps(16);
+    // When
+    harness.get_by_label("Add").click();
+    harness.run_steps(16);
+    harness.get_by_label("Kind gpt-5.5").click();
+    harness.run_steps(16);
+    harness.get_by_label("Image generation").click();
+    harness.run_steps(16);
+    // Then
+    let editor = harness.state_mut().codex_mut().unwrap();
+    assert_eq!(
+        editor.model_entries["gpt-image-1"].kind,
+        Some(config::ModelKind::ImageGeneration)
+    );
+    assert_eq!(
+        editor.model_entries["gpt-5.5"].kind,
+        Some(config::ModelKind::ImageGeneration)
+    );
+    assert!(
+        !editor
+            .default_model_choices()
+            .contains(&"gpt-5.5".to_owned())
+    );
+    // Models the user did not touch keep no explicit kind.
+    assert!(
+        editor
+            .model_entries
+            .get("gpt-6-astra")
+            .is_none_or(|entry| entry.kind.is_none())
+    );
+}

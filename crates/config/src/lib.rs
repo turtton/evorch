@@ -16,6 +16,7 @@ pub mod prompt_sources;
 pub mod save;
 mod save_agents;
 mod save_codex;
+mod save_context;
 mod save_role_profiles;
 mod save_routing;
 mod save_sandbox;
@@ -38,17 +39,22 @@ pub use save::{
 };
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
-    CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
+    CodexModelIntent, CodexProviderInput, delete_provider, save_codex_provider,
+    save_codex_provider_edit, save_codex_provider_edit_with_options,
 };
+pub use save_context::{LayeredSaveContext, StandaloneSaveContext};
 pub use save_role_profiles::{
     RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings,
     save_project_role_profile, save_role_profile, save_role_profile_bindings,
-    save_role_profiles_bindings,
+    save_role_profile_bindings_with_options, save_role_profiles_bindings,
 };
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;
 pub use save_self_improvement::save_self_improvement;
-pub use save_subscription::{SubscriptionProviderInput, save_subscription_provider_edit};
+pub use save_subscription::{
+    SubscriptionProviderInput, save_subscription_provider_edit,
+    save_subscription_provider_edit_with_options,
+};
 pub use schema::json_schema;
 pub use types::BudgetConfig;
 pub use types::OrchestrationConfig;
@@ -58,10 +64,11 @@ pub use types::{
     CategoryBindingConfig, ChainEntryConfig, CommentCheckerConfig, CompactionConfig, Config,
     CooldownConfig, CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig,
     EscalationApproval, EvalBudgetConfig, EvalConfig, FallbackConfig, GenerationOverridesConfig,
-    MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
+    MetadataSource, MetricsConfig, ModelEntryConfig, ModelKind, ModelPresetConfig, PanelConfig,
     PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
     RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
     SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
 };
 pub use types::{BrowserToolsConfig, ToolsConfig};
+pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
