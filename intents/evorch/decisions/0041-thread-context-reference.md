@@ -319,7 +319,7 @@ Phase 0 の計測は未実施で、索引サイズ・正規化時間・旧デー
 
 - [x] ADR 作成 — commit: （この ADR を追加したコミット。`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [ ] Phase 0 計測 — commit: ____（結果を「Phase 0 計測」節に記入）
-- [ ] A-1 storage — commit: ____
+- [x] A-1 storage — commit: 35021ada
 - [ ] A-2 runtime — commit: ____
 - [ ] A-3 GUI — commit: ____
 - [ ] A-4 inspect（任意）— commit: ____
