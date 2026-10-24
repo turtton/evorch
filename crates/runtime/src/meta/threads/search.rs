@@ -131,11 +131,16 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         .cursor
         .as_deref()
         .map(|cursor| {
-            scope
+            let invalid = || "thread_cursor_invalid: pass next_cursor unchanged".to_owned();
+            let position = scope
                 .store
                 .thread_cursor_from_token(cursor)
-                .map_err(|_| STORE_ERROR.to_owned())?
-                .ok_or_else(|| "thread_cursor_invalid: pass next_cursor unchanged".to_owned())
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            // A rowid is untrusted input, not evidence of access. Missing and
+            // invisible positions must fail identically before scanning begins.
+            scope.resolve(&position.thread_id).map_err(|_| invalid())?;
+            Ok::<_, String>(position)
         })
         .transpose()?;
     let kinds: Option<HashSet<SearchKind>> = args.kinds.map(|kinds| kinds.into_iter().collect());
@@ -273,6 +278,9 @@ fn candidates(scope: &Scope<'_>, after: Option<&ThreadCursor>) -> Result<Vec<Thr
         rows.extend(store.thread_children(own).map_err(fail)?);
         rows.push(row);
     }
+    // Related candidates can include fork children, which are not necessarily
+    // visible. Never issue a continuation position the caller cannot resolve.
+    rows.retain(|row| scope.resolve(&row.thread_id).is_ok());
     if let Some(root) = &scope.caller.project_root {
         // Bound work per invocation, not the total searchable history. One
         // lookahead candidate distinguishes an exhausted scan from a full page.

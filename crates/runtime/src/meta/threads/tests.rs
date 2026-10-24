@@ -993,6 +993,121 @@ fn search_cursors_reach_every_thread_beyond_two_thousand_candidates() {
 }
 
 #[test]
+fn cursors_cannot_probe_invisible_or_missing_threads_or_runs() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("foreign", Some(f.other.path()), "run-200", |_| {});
+    f.run(
+        "run-200",
+        Some("foreign"),
+        None,
+        vec![user(vec![text("foreign")])],
+    );
+    let token = f
+        .store()
+        .thread_cursor_token(&storage::threads::ThreadCursor {
+            updated_at_ns: 0,
+            thread_id: "foreign".into(),
+        })
+        .unwrap();
+    let missing = format!("v1:0:{}", i64::MAX);
+    assert!(
+        f.store()
+            .thread_cursor_from_token(&missing)
+            .unwrap()
+            .is_none()
+    );
+    // Both an empty visibility set and a caller with its own project must see
+    // exactly the same error for a foreign rowid and a nonexistent rowid.
+    for who in [("run-100", None, None), own] {
+        let hidden_error = f
+            .call(who, "thread_search", json!({"cursor": token}))
+            .unwrap_err();
+        let missing_error = f
+            .call(who, "thread_search", json!({"cursor": missing}))
+            .unwrap_err();
+        assert_eq!(hidden_error, missing_error);
+        assert_eq!(
+            hidden_error,
+            "thread_cursor_invalid: pass next_cursor unchanged"
+        );
+    }
+    let foreign = ("run-200", Some("foreign"), Some(f.other.path()));
+    assert!(
+        f.call(foreign, "thread_search", json!({"cursor": token}))
+            .is_ok()
+    );
+    // Revoking project visibility invalidates a previously usable token too.
+    assert!(
+        f.call(
+            ("run-200", None, None),
+            "thread_search",
+            json!({"cursor": token})
+        )
+        .is_err()
+    );
+    for cursor in ["run-200#0.0@0", "run-999#0.0@0"] {
+        assert_eq!(
+            f.call(
+                own,
+                "thread_read",
+                json!({"thread": "own", "view": "messages", "cursor": cursor})
+            )
+            .unwrap_err(),
+            "thread_cursor_invalid: pass next_cursor with the same thread, run and around"
+        );
+    }
+    // grep's cursor is only a numeric offset, never a database/run reference;
+    // the explicit thread target still passes the common visibility gate.
+    for cursor in ["run-200#0.0@0", "run-999#0.0@0"] {
+        assert_eq!(
+            f.call(
+                own,
+                "thread_grep",
+                json!({"thread": "own", "pattern": "x", "cursor": cursor})
+            )
+            .unwrap_err(),
+            "thread_cursor_invalid: pass next_cursor unchanged"
+        );
+    }
+    for tool in ["thread_read", "thread_grep"] {
+        for id in ["foreign", "missing"] {
+            let args = if tool == "thread_read" {
+                json!({"thread": id, "view": "messages", "cursor": "run-200#0.0@0"})
+            } else {
+                json!({"thread": id, "pattern": "x", "cursor": "0"})
+            };
+            assert_eq!(f.call(own, tool, args).unwrap_err(), denial(id));
+        }
+    }
+}
+
+#[test]
+fn invisible_lineage_candidates_never_become_search_cursor_positions() {
+    let f = Fixture::new();
+    let own = f.own();
+    let rows: Vec<_> = (0..110)
+        .map(|n| ThreadUpsert {
+            thread_id: format!("hidden-fork-{n}"),
+            parent_thread_id: Some("own".into()),
+            lineage_kind: Some(ThreadLineageKind::Fork),
+            project_root: Some(Fixture::canonical(f.other.path())),
+            updated_at_ns: 2,
+            ..Default::default()
+        })
+        .collect();
+    f.store().handle.upsert_threads_host(&rows).unwrap();
+    let page = f
+        .call(own, "thread_search", json!({"query": "no match"}))
+        .unwrap();
+    assert_eq!(page["threads"], json!([]));
+    assert!(
+        page["next_cursor"].is_null(),
+        "invisible candidates must not emit a position: {page}"
+    );
+}
+
+#[test]
 fn a_thread_less_cli_caller_sees_only_its_project() {
     let f = Fixture::new();
     f.thread("inside", Some(f.project.path()), "run-1000", |_| {});
