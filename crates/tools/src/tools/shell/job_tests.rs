@@ -407,7 +407,13 @@ async fn escalated_stdin_requires_a_fresh_review() {
     .await;
     assert!(denied.is_error);
     assert!(denied.content.contains("input review denied"));
-    assert_eq!(denied.content.matches(super::DENIAL_GUIDANCE).count(), 1);
+    assert_eq!(
+        denied
+            .content
+            .matches(crate::tools::shell_escalation::DENIAL_GUIDANCE)
+            .count(),
+        1
+    );
     assert_eq!(gate.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     shell.drain_shell_jobs("owner").await.unwrap();
 }

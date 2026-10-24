@@ -9,6 +9,8 @@ use crate::escalation_review::{DENIAL_GUIDANCE, ReviewRunContext, support::Scrip
 
 #[path = "denial_result_tests.rs"]
 mod denial_result_tests;
+#[path = "environment_tests.rs"]
+mod environment_tests;
 #[path = "handoff_tests.rs"]
 mod handoff_tests;
 
@@ -148,12 +150,12 @@ impl Fixture {
 fn describe(decision: &EscalationDecision) -> &str {
     match decision {
         EscalationDecision::Approve => "approved",
-        EscalationDecision::Deny { reason } => reason,
+        EscalationDecision::Deny { reason } | EscalationDecision::Suspended { reason } => reason,
     }
 }
 
 fn refused_without_review(decision: &EscalationDecision) -> bool {
-    matches!(decision, EscalationDecision::Deny { reason } if reason.contains("refused without review"))
+    matches!(decision, EscalationDecision::Suspended { reason } if reason.contains("refused without review"))
 }
 
 #[tokio::test]
@@ -173,7 +175,7 @@ async fn three_consecutive_denials_refuse_the_fourth_without_review() {
 
         // Even with deny fallback, the user is not asked once suspended.
         let decision = fixture.decide(Ok(ReviewVerdict::Approve), true).await;
-        let EscalationDecision::Deny { reason } = decision else {
+        let EscalationDecision::Suspended { reason } = decision else {
             panic!("suspended run must be refused");
         };
         assert!(
@@ -341,7 +343,7 @@ async fn parallel_old_generation_completions_cannot_change_current_streak() {
                     }
                 }
                 release.notify_one();
-                if approve {
+                if approve && current_denials != CONSECUTIVE_DENIAL_LIMIT {
                     loop {
                         if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
                             call_id,
@@ -363,7 +365,18 @@ async fn parallel_old_generation_completions_cannot_change_current_streak() {
                 tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(old, newer) })
                     .await
                     .expect("ordered old-generation completion");
-            assert_eq!(matches!(decision, EscalationDecision::Approve), approve);
+            // New input invalidates the old evidence, even when its human
+            // handoff is allowed because the newer generation is not suspended.
+            assert!(!matches!(decision, EscalationDecision::Approve));
+            if approve && current_denials == CONSECUTIVE_DENIAL_LIMIT {
+                assert!(refused_without_review(&decision));
+                assert!(
+                    !events.drain_pending_snapshot().iter().any(|event| matches!(
+                        event.kind,
+                        EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { .. })
+                    ))
+                );
+            }
             assert_eq!(
                 fixture.denials(&fixture.ctx),
                 current_denials,
@@ -586,6 +599,8 @@ async fn new_real_user_input_lifts_the_suspension() {
     ));
     assert_eq!(fixture.reviewed(), 3);
 
+    // A fresh input lifts suspension, but review evidence must also be synced.
+    fixture.run.user_requests.lock().unwrap().synced = true;
     fixture
         .run
         .add_user_request(&fixture.ctx.run_id, "Try once more with the narrower scope");
@@ -645,7 +660,7 @@ async fn gate_denial_reasons_and_diagnostics_exclude_agent_guidance() {
     assert!(refused_without_review(decisions.last().unwrap()));
     for decision in &decisions {
         assert!(
-            matches!(decision, EscalationDecision::Deny { reason }
+            matches!(decision, EscalationDecision::Deny { reason } | EscalationDecision::Suspended { reason }
                 if !reason.contains(DENIAL_GUIDANCE)),
             "{}",
             describe(decision)

@@ -135,13 +135,14 @@ async fn consecutive_reviewer_denials_suspend_automatic_review_for_the_run() {
             "shell escalation refused without review: the automatic reviewer denied 3 consecutive requests in this run (last: not requested)."
         };
         assert!(result.content.starts_with(expected), "{}", result.content);
-        assert!(
-            result
-                .content
-                .ends_with("or report the blocker in your result."),
-            "{}",
-            result.content
-        );
+        use tools::tools::shell_escalation::{DENIAL_GUIDANCE, SUSPENSION_GUIDANCE};
+        let guidance = if index < 3 {
+            DENIAL_GUIDANCE
+        } else {
+            SUSPENSION_GUIDANCE
+        };
+        assert!(result.content.ends_with(guidance), "{}", result.content);
+        assert_eq!(result.content.matches(DENIAL_GUIDANCE).count(), 1);
     }
     assert_eq!(fixture.model.observed().await.len(), 3);
     fixture.assert_wraps(0);

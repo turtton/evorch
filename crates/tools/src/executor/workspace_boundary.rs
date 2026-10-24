@@ -4,7 +4,7 @@ use sandbox::{BoundaryRegion, PathAccess, SandboxBoundary};
 
 use super::ToolExecutor;
 use crate::tools::file_access::{JUSTIFICATION, SANDBOX_ACCESS};
-use crate::tools::shell_escalation::{EscalationDecision, FileAccessRequest};
+use crate::tools::shell_escalation::FileAccessRequest;
 use crate::{Permissions, ToolError, ToolExecutionContext, ToolResult};
 
 impl ToolExecutor {
@@ -255,20 +255,20 @@ impl ToolExecutor {
             justification: justification.to_owned(),
             change: requested_change(name, args),
         };
-        match gate.decide_file_access(ctx, &request).await {
-            EscalationDecision::Approve => Ok(()),
-            EscalationDecision::Deny { reason } => {
-                let reason = if reason.starts_with("file access escalation") {
-                    reason
-                } else {
-                    format!("file access escalation denied: {reason}")
-                };
-                Err(ToolError::ExecutionDenied {
-                    tool_name: name.into(),
-                    reason,
-                    guidance: Some(crate::tools::shell_escalation::DENIAL_GUIDANCE),
-                })
-            }
+        let decision = gate.decide_file_access(ctx, &request).await;
+        if let Some((reason, guidance)) = decision.denial() {
+            let reason = if reason.starts_with("file access escalation") {
+                reason.to_owned()
+            } else {
+                format!("file access escalation denied: {reason}")
+            };
+            Err(ToolError::ExecutionDenied {
+                tool_name: name.into(),
+                reason,
+                guidance: Some(guidance),
+            })
+        } else {
+            Ok(())
         }
     }
 }

@@ -182,9 +182,8 @@ impl SandboxEscalationGate {
         Some((shared, run_id, user_inputs))
     }
 
-    /// Recheck the starting input generation immediately before a human handoff.
-    /// New real-user input lifts suspension; old completions still cannot count
-    /// against that newer generation.
+    /// Use the current generation for handoff admission; a newer generation
+    /// may already have reached the limit while an older review was pending.
     fn suspended_decision(
         &self,
         ctx: &ToolExecutionContext,
@@ -192,20 +191,15 @@ impl SandboxEscalationGate {
         streak: &Option<(Arc<Shared>, RunId, usize)>,
     ) -> Option<EscalationDecision> {
         let (shared, run_id, user_inputs) = streak.as_ref()?;
-        if let Some((_, _, current_inputs)) = self.denial_streak(ctx) {
-            shared
-                .escalation_denials
-                .suspension(*run_id, current_inputs);
-            if current_inputs != *user_inputs {
-                return None;
-            }
-        }
+        let current_inputs = self
+            .denial_streak(ctx)
+            .map_or(*user_inputs, |(_, _, inputs)| inputs);
         let last = shared
             .escalation_denials
-            .suspension(*run_id, *user_inputs)?;
-        Some(EscalationDecision::Deny {
+            .suspension(*run_id, current_inputs)?;
+        Some(EscalationDecision::Suspended {
             reason: format!(
-                "{label} refused without review: the automatic reviewer denied {CONSECUTIVE_DENIAL_LIMIT} consecutive requests in this run (last: {last}). Further requests are refused until the user sends new input to this conversation; do not reword and resubmit. Work inside the sandbox can continue."
+                "{label} refused without review: the automatic reviewer denied {CONSECUTIVE_DENIAL_LIMIT} consecutive requests in this run (last: {last}). Further requests are refused until the user sends new input to this conversation."
             ),
         })
     }
@@ -229,6 +223,7 @@ impl SandboxEscalationGate {
         HF: Future<Output = EscalationDecision>,
     {
         let settings = self.settings.lock().ok().map(|settings| *settings);
+        let starting_stamp = self.current_stamp(ctx);
         let mut reviewed_stamp = None;
         // Capture the input generation in every mode: a valid human approval
         // in User mode resets the same run-local streak as an Auto approval.
@@ -271,28 +266,29 @@ impl SandboxEscalationGate {
                 }
             }
         };
-        let decision = match decision {
-            EscalationDecision::Approve => {
-                let current = self.settings.lock().ok().map(|settings| *settings);
-                if reviewed_stamp
-                    .is_some_and(|stamp| !stamp.synced || self.current_stamp(ctx) != Some(stamp))
-                {
-                    counted = None;
-                    EscalationDecision::Deny {
-                        reason: "review context changed during review".into(),
-                    }
-                } else if current.is_some() && current == settings {
-                    EscalationDecision::Approve
-                } else {
-                    // Even a model Deny followed by human approval must not
-                    // count when the final approval is environmentally invalid.
-                    counted = None;
-                    EscalationDecision::Deny {
-                        reason: format!("{label} settings changed during review"),
-                    }
+        // Environmental invalidation neither counts a denial nor resets the
+        // streak, regardless of the model's or human's final answer.
+        let current = self.settings.lock().ok().map(|settings| *settings);
+        let context_changed = [starting_stamp, reviewed_stamp]
+            .into_iter()
+            .flatten()
+            .any(|stamp| !stamp.synced || self.current_stamp(ctx) != Some(stamp));
+        let settings_changed = current.is_none() || current != settings;
+        let decision = if context_changed || settings_changed {
+            counted = None;
+            if matches!(decision, EscalationDecision::Approve) {
+                EscalationDecision::Deny {
+                    reason: if context_changed {
+                        "review context changed during review".into()
+                    } else {
+                        format!("{label} settings changed during review")
+                    },
                 }
+            } else {
+                decision
             }
-            EscalationDecision::Deny { reason } => EscalationDecision::Deny { reason },
+        } else {
+            decision
         };
         if let Some((shared, run_id, user_inputs)) = &streak {
             // Observe input that arrived while this decision was pending. Old
@@ -307,23 +303,27 @@ impl SandboxEscalationGate {
                 (EscalationDecision::Approve, _) => shared
                     .escalation_denials
                     .record_approval(*run_id, *user_inputs),
-                (EscalationDecision::Deny { .. }, Some(reason)) => {
+                (
+                    EscalationDecision::Deny { .. } | EscalationDecision::Suspended { .. },
+                    Some(reason),
+                ) => {
                     shared
                         .escalation_denials
                         .record_denial(*run_id, *user_inputs, reason);
                 }
                 // Environment failures, critical handoffs, and approvals voided
                 // by a context change neither count nor reset.
-                (EscalationDecision::Deny { .. }, None) => {}
+                (EscalationDecision::Deny { .. } | EscalationDecision::Suspended { .. }, None) => {}
             }
         }
         match &decision {
             EscalationDecision::Approve => self.diagnose(ctx, DiagnosticSeverity::Info, "approved"),
-            EscalationDecision::Deny { reason } => self.diagnose(
-                ctx,
-                DiagnosticSeverity::Warning,
-                &format!("denied: {reason}"),
-            ),
+            EscalationDecision::Deny { reason } | EscalationDecision::Suspended { reason } => self
+                .diagnose(
+                    ctx,
+                    DiagnosticSeverity::Warning,
+                    &format!("denied: {reason}"),
+                ),
         }
         decision
     }
@@ -350,11 +350,11 @@ impl SandboxEscalationGate {
             Some(reviewer) => review(Arc::clone(reviewer)).await,
             None => Err(ReviewError::Model),
         };
+        if let Ok((_, stamp)) = &verdict {
+            *reviewed_stamp = *stamp;
+        }
         let (reason, requires_user) = match verdict {
-            Ok((ReviewVerdict::Approve, stamp)) => {
-                *reviewed_stamp = stamp;
-                (None, false)
-            }
+            Ok((ReviewVerdict::Approve, _)) => (None, false),
             Ok((ReviewVerdict::RequiresUser { reason }, _)) => (Some(reason), true),
             Ok((ReviewVerdict::Deny { reason }, _)) => {
                 *counted = Some(reason.clone());

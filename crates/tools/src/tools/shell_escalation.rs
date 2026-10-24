@@ -16,13 +16,40 @@ pub enum ShellAccess {
     Network,
 }
 
+macro_rules! denial_guidance {
+    () => {
+        "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), escalate when available, or report the blocker in your result."
+    };
+}
+
 /// Appended only to agent-facing results, never audit or diagnostic reasons.
-pub const DENIAL_GUIDANCE: &str = "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), escalate when available, or report the blocker in your result.";
+pub const DENIAL_GUIDANCE: &str = denial_guidance!();
+
+/// Suspension adds no alternative retry route; ordinary sandbox work remains available.
+pub const SUSPENSION_GUIDANCE: &str =
+    concat!(denial_guidance!(), " Work inside the sandbox can continue.");
 
 /// 明示的な隔離解除の審査結果。拒否理由にはエージェント向けガイダンスを含めない。
 pub enum EscalationDecision {
     Approve,
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
+    /// Automatic review is suspended for the current user-input generation.
+    Suspended {
+        reason: String,
+    },
+}
+
+impl EscalationDecision {
+    /// Keep agent-only instructions separate from the auditable reason.
+    pub fn denial(&self) -> Option<(&str, &'static str)> {
+        match self {
+            Self::Approve => None,
+            Self::Deny { reason } => Some((reason, DENIAL_GUIDANCE)),
+            Self::Suspended { reason } => Some((reason, SUSPENSION_GUIDANCE)),
+        }
+    }
 }
 
 /// One direct file-tool call that needs paths outside the sandbox boundary.

@@ -2,7 +2,19 @@
 use super::*;
 use event_bus::ToolEvent;
 use serde_json::json;
-use tools::tools::shell_escalation::DENIAL_GUIDANCE;
+use tools::tools::shell_escalation::{DENIAL_GUIDANCE, SUSPENSION_GUIDANCE};
+
+fn assert_no_agent_instructions(reason: &str) {
+    for instruction in [
+        DENIAL_GUIDANCE,
+        "do not reword",
+        "Work inside the sandbox",
+        "ask_user",
+        "consult instead",
+    ] {
+        assert!(!reason.contains(instruction), "{reason}");
+    }
+}
 
 #[tokio::test]
 async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
@@ -93,7 +105,7 @@ async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
                 let tools::ToolError::ExecutionDenied { reason, .. } = &error else {
                     panic!("{error:?}")
                 };
-                assert!(!reason.contains(DENIAL_GUIDANCE));
+                assert_no_agent_instructions(reason);
                 if outcome != "suspended" {
                     assert_eq!(reason, &expected);
                 }
@@ -107,6 +119,12 @@ async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
             );
             if outcome == "suspended" {
                 assert!(text.contains("refused without review"));
+                assert_eq!(text.matches(SUSPENSION_GUIDANCE).count(), 1);
+                assert_eq!(
+                    text.matches("Work inside the sandbox can continue.")
+                        .count(),
+                    1
+                );
             } else {
                 assert!(text.contains(&expected), "{text}");
             }
@@ -115,13 +133,13 @@ async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
                 match event.kind {
                     EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) => {
                         denied_events += 1;
-                        assert!(!reason.contains(DENIAL_GUIDANCE));
+                        assert_no_agent_instructions(&reason);
                         if outcome != "suspended" {
                             assert_eq!(reason, expected);
                         }
                     }
                     EventKind::Diagnostic(diagnostic) => {
-                        assert!(!diagnostic.detail.contains(DENIAL_GUIDANCE))
+                        assert_no_agent_instructions(&diagnostic.detail)
                     }
                     EventKind::Tool(ToolEvent::ToolCompleted { output, .. }) if tool != "shell" => {
                         assert!(!output.unwrap().contains(DENIAL_GUIDANCE));
@@ -134,6 +152,72 @@ async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
                 std::fs::read_to_string(outside).unwrap(),
                 "must not be read or changed"
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_policy_and_approval_gates_still_have_no_escalation_guidance() {
+    use sandbox::{ApprovalMode, ApprovalPolicy, PolicyDecision};
+
+    for prepared in [false, true] {
+        for outcome in ["policy", "missing_gate", "timeout"] {
+            let bus = Arc::new(EventBus::new(32));
+            let mut events = bus.subscribe();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("file");
+            std::fs::write(&path, "not executed").unwrap();
+            let mut executor = tools::ToolExecutor::with_standard_tools(
+                bus.clone(),
+                Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            );
+            executor.set_policy(
+                ApprovalPolicy::standard(ApprovalMode::OnRequest).with_override(
+                    "read",
+                    if outcome == "policy" {
+                        PolicyDecision::Deny
+                    } else {
+                        PolicyDecision::Ask
+                    },
+                ),
+            );
+            if outcome == "timeout" {
+                executor.set_approval_gate(ApprovalGate::new(bus, Duration::ZERO));
+            }
+            let executor = Arc::new(executor);
+            let ctx = ToolExecutionContext {
+                run_id: "ordinary-gate".into(),
+                thread_id: None,
+                call_id: None,
+            };
+            let args = json!({"path":path});
+            let error = if prepared {
+                let result = executor
+                    .validate_call(ctx, "read".into(), "denied".into(), args)
+                    .unwrap()
+                    .authorize()
+                    .await;
+                let Err(error) = result else {
+                    panic!("ordinary gate must deny");
+                };
+                error
+            } else {
+                executor
+                    .execute(&ctx, "read", "denied", args)
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(
+                &error,
+                tools::ToolError::ExecutionDenied { guidance: None, .. }
+            ));
+            assert_eq!(error.agent_message(), error.to_string());
+            assert_no_agent_instructions(&error.agent_message());
+            for event in events.drain_pending_snapshot() {
+                if let EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) = event.kind {
+                    assert_no_agent_instructions(&reason);
+                }
+            }
         }
     }
 }
