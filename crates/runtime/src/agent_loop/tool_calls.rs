@@ -1017,7 +1017,7 @@ impl LoopState {
                 }
                 NetworkGate::Reject(ToolResult::error(reason))
             }
-            NetworkAccessDecision::Ask { reason } => {
+            NetworkAccessDecision::Ask { mut reason } => {
                 if crate::network::reviews_each_call(name) && per_tool == PolicyDecision::AutoAllow
                 {
                     let context = self
@@ -1034,8 +1034,6 @@ impl LoopState {
                             crate::escalation_review::review_context(
                                 run,
                                 self.shared.rules.as_deref(),
-                                None,
-                                "",
                             )
                             .ok()
                         });
@@ -1076,7 +1074,7 @@ impl LoopState {
                         }
                         verdict = review => verdict,
                     };
-                    return match verdict {
+                    match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {
                             let current = self.runtime().and_then(|runtime| {
                                 runtime.shared.review_runs.lock().ok().and_then(|runs| {
@@ -1098,19 +1096,14 @@ impl LoopState {
                                 "auto_review",
                                 "approved",
                             );
-                            NetworkGate::Proceed
+                            return NetworkGate::Proceed;
                         }
-                        outcome => {
-                            let error = match outcome {
-                                Ok(
-                                    crate::escalation_review::ReviewVerdict::Deny { reason }
-                                    | crate::escalation_review::ReviewVerdict::RequiresUser {
-                                        reason,
-                                    },
-                                ) => reason,
-                                Err(error) => error.to_string(),
-                                _ => unreachable!(),
-                            };
+                        // A critical-risk approval is the user's decision: fall
+                        // through to the human approval below.
+                        Ok(crate::escalation_review::ReviewVerdict::RequiresUser {
+                            reason: critical,
+                        }) => reason = critical,
+                        Ok(crate::escalation_review::ReviewVerdict::Deny { reason: error }) => {
                             self.audit_network_call(
                                 name,
                                 call_id,
@@ -1119,9 +1112,21 @@ impl LoopState {
                                 "auto_review",
                                 &error,
                             );
-                            NetworkGate::Reject(ToolResult::error(error))
+                            return NetworkGate::Reject(ToolResult::error(error));
                         }
-                    };
+                        Err(error) => {
+                            let error = error.to_string();
+                            self.audit_network_call(
+                                name,
+                                call_id,
+                                input,
+                                "deny",
+                                "auto_review",
+                                &error,
+                            );
+                            return NetworkGate::Reject(ToolResult::error(error));
+                        }
+                    }
                 }
                 let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
                 // Model call IDs are run-local. Scope approval IDs to the run.

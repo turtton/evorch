@@ -235,6 +235,77 @@ async fn web_fetch_auto_review_audits_actual_url_and_verdict() {
     }
 }
 
+// Given: per-call automatic review / When: the reviewer approves at critical risk /
+// Then: the user decides through the approval gate, and only their answer is audited.
+#[tokio::test]
+async fn web_fetch_critical_approval_is_handed_to_the_user() {
+    for approved in [true, false] {
+        let bus = Arc::new(EventBus::new(128));
+        let executor = ToolExecutor::with_standard_tools(
+            Arc::clone(&bus),
+            Arc::new(DirectSandbox::new_unchecked()),
+        )
+        .with_web_tools()
+        .expect("Web tools");
+        let model = Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "fetch-critical",
+                "web_fetch",
+                json!({"url":"http://127.0.0.1/"}),
+            )),
+            Ok(text_response(
+                r#"{"approve":true,"reason":"sends private data","risk_level":"critical","authorization_level":"high"}"#,
+                FinishReason::Stop,
+            )),
+            Ok(text_response("finished", FinishReason::Stop)),
+        ]));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+        let mut events = bus.subscribe();
+        let responder = spawn_approval_responder(Arc::clone(&bus), bus.subscribe(), approved);
+        let run_id = runtime
+            .delegate_chat(
+                "review",
+                Role::Orchestrator,
+                "Read a public page".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+        responder.await.expect("responder");
+        let events = drain_events(&mut events).await;
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
+                if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-critical")
+        )));
+        assert_eq!(
+            events.iter().any(|event| matches!(
+                &event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. })
+                    if tool_name == "web_fetch" && call_id == "fetch-critical"
+            )),
+            approved
+        );
+        let audits: Vec<serde_json::Value> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Diagnostic(diag)
+                    if diag.code == "tool_call_access"
+                        && diag.call_id.as_deref() == Some("fetch-critical") =>
+                {
+                    Some(serde_json::from_str(&diag.detail).expect("audit JSON"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audits.len(), 1, "{audits:?}");
+        assert_eq!(audits[0]["reviewer"], "user_review");
+        assert_eq!(
+            audits[0]["decision"],
+            if approved { "allow" } else { "deny" }
+        );
+    }
+}
+
 #[tokio::test]
 async fn web_fetch_user_review_executes_only_after_approval() {
     // Given: per-call user review with an approving responder.

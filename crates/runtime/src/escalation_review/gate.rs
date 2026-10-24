@@ -138,8 +138,6 @@ impl SandboxEscalationGate {
     fn review_context_for(
         &self,
         ctx: &ToolExecutionContext,
-        cwd: Option<&Path>,
-        command: &str,
     ) -> Option<(ReviewContext, EvidenceStamp)> {
         let shared = self.runtime.as_ref().and_then(Weak::upgrade)?;
         let run_id = ctx.run_id.parse::<crate::RunId>().ok()?;
@@ -153,7 +151,7 @@ impl SandboxEscalationGate {
             Some(project) => project.rules.clone(),
             None => shared.rules(),
         };
-        review_context(run, rules.as_deref(), cwd, command).ok()
+        review_context(run, rules.as_deref()).ok()
     }
 
     fn current_stamp(&self, ctx: &ToolExecutionContext) -> Option<EvidenceStamp> {
@@ -290,14 +288,14 @@ impl ShellEscalationGate for SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         command: &str,
         justification: &str,
-        cwd: Option<&Path>,
+        _cwd: Option<&Path>,
         access: ShellAccess,
     ) -> EscalationDecision {
         self.arbitrate(
             ctx,
             "shell escalation",
             |reviewer| async move {
-                let snapshot = self.review_context_for(ctx, cwd, command);
+                let snapshot = self.review_context_for(ctx);
                 if self.runtime.is_some() && snapshot.is_none() {
                     return Err(ReviewError::Unsynced);
                 }
@@ -329,7 +327,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
             ctx,
             "file access escalation",
             |reviewer| async move {
-                let snapshot = self.review_context_for(ctx, None, "");
+                let snapshot = self.review_context_for(ctx);
                 if self.runtime.is_some() && snapshot.is_none() {
                     return Err(ReviewError::Unsynced);
                 }
@@ -435,7 +433,7 @@ mod evidence_tests {
             &ctx,
             "test",
             |_| async {
-                let (_, stamp) = gate.review_context_for(&ctx, None, "").unwrap();
+                let (_, stamp) = gate.review_context_for(&ctx).unwrap();
                 entered.notify_one();
                 changed.notified().await;
                 Ok((ReviewVerdict::Approve, Some(stamp)))
@@ -476,7 +474,7 @@ mod evidence_tests {
                 gate.decide_file_access(&ctx, &request).await,
                 EscalationDecision::Deny { .. }
             ));
-            let snapshot = review_context(run, None, None, "");
+            let snapshot = review_context(run, None);
             assert!(matches!(snapshot, Err(ReviewError::Unsynced)));
             let context = snapshot.ok().map(|(context, _)| context);
             let verdict = gate

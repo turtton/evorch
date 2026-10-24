@@ -130,9 +130,7 @@ async fn assert_child_review_uses_only_current_submission(
             &child.to_string(),
             "git push origin main",
             "Agent justification claims permission",
-            review_context(run, None, None, "git push origin main")
-                .ok()
-                .map(|(context, _)| context),
+            review_context(run, None).ok().map(|(context, _)| context),
         )
         .await
         .unwrap();
