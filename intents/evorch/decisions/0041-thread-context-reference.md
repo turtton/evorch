@@ -356,6 +356,19 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 - [ ] 受け入れレビュー — commit: ____
 - [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: ____
 
+### 受け入れレビュー 1 回目の指摘への対応
+
+独立レビューの初回判定は不合格（対象 `bed2cc25`）。以下を修正済み。独立した再レビューの合格判定は未取得のため、上の受け入れレビューは未完了のままとする。
+
+- **M1** — `4abdd2e3` (`fix(runtime): preserve complete trusted thread authorization input`): 認可に使う `trusted_thread_request` と pending escalation の継続リクエストは完全な人間入力を保持し、goal 表示用の切り詰めと分離。8,192 / 4,096 / 4,064 文字の境界で `thread-10` が `thread-1` の認可にならないことを確認。
+  - 補完 `0d729902` (`fix(runtime): keep goal display bounded beside trusted input`): goal 作成時の表示欄だけ従来の 8,192 文字上限を保ち、全文認可を維持しつつ goal の復元が成功する回帰テストを追加。
+- **M2** — `c34339a7` (`fix(runtime): redact all thread metadata and separate search cursors`): JSON のキー・値を含め全出力文字列を `SecretRedactor` に通す。認可・比較用の生値はそのまま保ち、検索 cursor は ID 平文を含まない timestamp / DB rowid の位置トークンに分離（可視性は毎回再判定）。`ghp_` + 40 字の credential 形状を project ID / canonical root / thread ID に含め、非漏えい・認可不変・cursor 継続を検証。
+- **M3** — `7ef3aead` (`fix(runtime): bound thread tool headers and enforce cursor progress`): `tool_name` / `call_id` の表示を 80 文字以下（省略記号つき）とする。正規化の照合・反復折り畳み用の値は切らない。空ページで同じ cursor を返さず、予算内に収まらない場合は明示エラー。18,000 バイトの ToolUse ID / name で read（1,024 バイト予算）/ grep が有限回のページングで後続へ到達することを検証。
+- **M4** — `ce4c91ca` (`fix(runtime): cap and redact thread tool preflight errors`): handler の parse / エラーと agent loop の preflight 拒否を thread ツール専用に redact 後 16 KiB 以下に制限。汎用 schema 検証および `crates/tools` は変更しない。約 30 KiB の未知フィールド名・不正 enum 値を実 agent loop へ渡し、ツール結果・完了イベントの上限と非漏えい、他ツール不変を検証。
+- **S1** — `2b58604a` (`fix(runtime): apply thread search cursors before project scans`): storage 取得開始位置に cursor を反映。1 呼び出し 100 候補の走査上限と全体の検索範囲を分離し、先読み 1 件で継続を判断する。2,106 スレッドの全件列挙・最古ヒットへの到達・同一更新時刻の ID 順を検証。
+- **N1 / N2** — `95fae8f9` (`docs(runtime): clarify thread terminal reason limits and ADR status`): tool description に終了理由は live 登録中のみと明記し契約テストで固定。この ADR の既知の制限と Status（A-1〜A-3 実装済み、A-4 見送り）を更新。
+- 区切りごとの検証: M1 関連 35 件、M2 thread 関連 23 件、M3 24 件、M4 25 件、S1 26 件、description 契約 5 件、M1 補完 goal 関連 25 件がすべて成功。各コミットの fmt / pre-push clippy フックも成功。署名付きコミットは各回通常の fast-forward push を実施。
+
 ### 触らない範囲
 
 別の担当が変更中のため、次には触れない。`crates/tools` の edit / executor、runtime の `identical_calls.rs`、`budget_tracker.rs`、`completion_relay.rs`。
