@@ -79,15 +79,23 @@ the conversation. Policy denials count, including model `approve: false`, approv
 converted to denials for insufficient authorization, and missing-real-user-request
 denials returned without calling the model. Model failures, timeouts, invalid
 verdicts, unsynchronized evidence, settings/context changes during review, and
-human refusals do not count. Settings/context changes during review neither add
+human refusals do not count. Settings/evidence changes during review neither add
 a denial nor reset the streak, regardless of the final model or human verdict.
+Evidence that was already unsynchronized at the start, but remains unchanged,
+does not by itself invalidate human approval in `user` mode or `auto` fallback;
+automatic review still rejects unsynchronized evidence.
 A valid final approval in any approval mode resets the streak.
 Only new real-user input visible in the run's lineage lifts suspension, including
 host-submitted answers, not parent-agent answers or delegated prompts. Delayed
 results from an older input generation cannot change the current generation.
-Before opening a new human approval dialog, even an older pending review checks
-the current generation's suspension: new input may have lifted the old suspension
-or the newer generation may already have reached the limit again.
+Before handing off to human approval, even an older pending review checks the
+current generation's suspension: new input may have lifted the old suspension
+or the newer generation may already have reached the limit again. The suspension
+check and denial recording share one mutex; that check is the handoff-admission
+linearization point, not the later `ApprovalRequested` event. A handoff admitted
+before the third denial may publish its dialog afterward. A check ordered after
+the threshold is reached refuses without calling the user, for both critical
+verdicts and deny fallback. The mutex is released before waiting for approval.
 Audit and diagnostic reasons contain only the refusal facts, limit, and reset
 condition; workaround/consultation guidance and the reminder that sandbox work
 can continue appear only in agent-facing tool results.

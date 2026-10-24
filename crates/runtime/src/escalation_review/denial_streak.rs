@@ -40,6 +40,8 @@ pub(crate) struct DenialStreaks {
 impl DenialStreaks {
     /// The last denial reason while suspended. New input resets the count but
     /// retains the generation watermark; stale lookups cannot lift suspension.
+    /// This lookup is the handoff-admission linearization point: it shares
+    /// `runs`' mutex with `record_denial`, but releases it before any dialog.
     pub(crate) fn suspension(&self, run_id: RunId, user_inputs: usize) -> Option<String> {
         let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let streak = runs

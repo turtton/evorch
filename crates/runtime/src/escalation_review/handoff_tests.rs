@@ -118,6 +118,102 @@ async fn pending_handoff(critical: bool, new_input: bool, suspend_again: bool) {
     );
 }
 
+async fn handoff_admitted_before_threshold(critical: bool) {
+    let fixture = Fixture::new(!critical);
+    for _ in 1..CONSECUTIVE_DENIAL_LIMIT {
+        fixture.deny("earlier").await;
+    }
+    let admitted = Notify::new();
+    let release = Notify::new();
+    let mut events = fixture.gate.bus.subscribe();
+    let pending = fixture.gate.arbitrate(
+        &fixture.ctx,
+        "shell escalation",
+        |_| async {
+            Ok((
+                if critical {
+                    ReviewVerdict::RequiresUser {
+                        reason: "critical".into(),
+                    }
+                } else {
+                    ReviewVerdict::Deny {
+                        reason: "policy denial".into(),
+                    }
+                },
+                None,
+            ))
+        },
+        || async {
+            // The gate's suspension check has admitted this handoff, but no
+            // ApprovalRequested event has been emitted yet.
+            admitted.notify_one();
+            release.notified().await;
+            fixture
+                .gate
+                .human(&fixture.ctx, "inspection", "inspect", ShellAccess::Host)
+                .await
+        },
+    );
+    let threshold_then_answer = async {
+        admitted.notified().await;
+        assert!(
+            !events.drain_pending_snapshot().iter().any(|event| matches!(
+                event.kind,
+                EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { .. })
+            ))
+        );
+        fixture.deny("threshold denial").await;
+        assert_eq!(fixture.denials(&fixture.ctx), CONSECUTIVE_DENIAL_LIMIT);
+        assert!(
+            fixture
+                .runtime
+                .shared
+                .escalation_denials
+                .suspension(Fixture::run_id(&fixture.ctx), 0)
+                .is_some()
+        );
+        // Only after the third denial is recorded may the admitted handoff
+        // publish its dialog. This ordering is intentionally allowed.
+        release.notify_one();
+        loop {
+            if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { call_id, .. }) =
+                events.recv().await.unwrap().kind
+            {
+                assert_eq!(fixture.denials(&fixture.ctx), CONSECUTIVE_DENIAL_LIMIT);
+                fixture
+                    .gate
+                    .bus
+                    .emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved: true,
+                    }));
+                break;
+            }
+        }
+    };
+    let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(pending, threshold_then_answer)
+    })
+    .await
+    .expect("handoff admission before threshold, dialog after threshold");
+    assert!(matches!(decision, EscalationDecision::Approve));
+    assert_eq!(
+        fixture.denials(&fixture.ctx),
+        0,
+        "valid human approval resets"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_critical_handoff_admitted_before_threshold_can_open_dialog_afterward() {
+    handoff_admitted_before_threshold(true).await;
+}
+
+#[tokio::test]
+async fn concurrent_fallback_handoff_admitted_before_threshold_can_open_dialog_afterward() {
+    handoff_admitted_before_threshold(false).await;
+}
+
 #[tokio::test]
 async fn concurrent_old_generation_fallback_cannot_bypass_new_generation_suspension() {
     pending_handoff(false, true, true).await;

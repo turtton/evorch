@@ -184,6 +184,9 @@ impl SandboxEscalationGate {
 
     /// Use the current generation for handoff admission; a newer generation
     /// may already have reached the limit while an older review was pending.
+    /// `suspension` linearizes admission with `record_denial` under the same
+    /// mutex. An admitted handoff may emit its dialog after a later denial
+    /// reaches the limit; the mutex is never held while waiting for approval.
     fn suspended_decision(
         &self,
         ctx: &ToolExecutionContext,
@@ -248,8 +251,8 @@ impl SandboxEscalationGate {
                         |handoff| {
                             let streak = &streak;
                             async move {
-                                // A concurrent review may have reached the limit while
-                                // this one was pending. Do not open a new dialog then.
+                                // Admission is ordered against concurrent denials
+                                // by suspension's mutex, not by dialog emission.
                                 if let Some(decision) = self.suspended_decision(ctx, label, streak)
                                 {
                                     return decision;
@@ -269,10 +272,13 @@ impl SandboxEscalationGate {
         // Environmental invalidation neither counts a denial nor resets the
         // streak, regardless of the model's or human's final answer.
         let current = self.settings.lock().ok().map(|settings| *settings);
+        let current_stamp = self.current_stamp(ctx);
+        // An initially unsynced snapshot still permits a human decision when
+        // unchanged. Automatic review rejects unsynced evidence at its entry.
         let context_changed = [starting_stamp, reviewed_stamp]
             .into_iter()
             .flatten()
-            .any(|stamp| !stamp.synced || self.current_stamp(ctx) != Some(stamp));
+            .any(|stamp| current_stamp != Some(stamp));
         let settings_changed = current.is_none() || current != settings;
         let decision = if context_changed || settings_changed {
             counted = None;
