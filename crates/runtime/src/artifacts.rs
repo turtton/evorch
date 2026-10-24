@@ -213,6 +213,8 @@ impl ArtifactStore {
 struct SourceRoots {
     workspace: PathBuf,
     scratch: Option<PathBuf>,
+    workspace_fd: std::fs::File,
+    scratch_fd: Option<std::fs::File>,
 }
 
 impl SourceRoots {
@@ -222,7 +224,19 @@ impl SourceRoots {
             .map_err(|error| format!("workspace is unavailable: {error}"))?;
         // A temporary directory that does not exist holds no file to capture.
         let scratch = scratch.and_then(|dir| dir.canonicalize().ok());
-        Ok(Self { workspace, scratch })
+        let workspace_fd = source_io::open_root(&workspace)
+            .map_err(|error| format!("workspace is unavailable: {error}"))?;
+        let scratch_fd = scratch
+            .as_deref()
+            .map(source_io::open_root)
+            .transpose()
+            .map_err(|error| format!("$TMPDIR is unavailable: {error}"))?;
+        Ok(Self {
+            workspace,
+            scratch,
+            workspace_fd,
+            scratch_fd,
+        })
     }
 
     /// Whether `path`, already resolved, lies inside one of the roots.
@@ -232,6 +246,21 @@ impl SourceRoots {
                 .scratch
                 .as_ref()
                 .is_some_and(|scratch| path.starts_with(scratch))
+    }
+
+    fn open(&self, source: &Path) -> Result<std::fs::File, String> {
+        let (root, relative) = if let Ok(relative) = source.strip_prefix(&self.workspace) {
+            (&self.workspace_fd, relative)
+        } else if let Some((scratch, fd)) = self.scratch.as_ref().zip(self.scratch_fd.as_ref())
+            && let Ok(relative) = source.strip_prefix(scratch)
+        {
+            (fd, relative)
+        } else {
+            return Err(self.outside().to_owned());
+        };
+        #[cfg(test)]
+        source_io::before_open(source);
+        source_io::open_file(root, relative).map_err(|error| format!("cannot be opened: {error}"))
     }
 
     const fn outside(&self) -> &'static str {
@@ -265,21 +294,14 @@ fn read_source_file(
             path.display()
         )
     })?;
-    let bytes =
-        read_limited(&source, kind).map_err(|reason| format!("{} {reason}", path.display()))?;
+    let bytes = read_limited(roots, &source, kind)
+        .map_err(|reason| format!("{} {reason}", path.display()))?;
     Ok((source, kind, bytes))
 }
 
-/// Read the resolved `source` as `kind`. Errors complete a sentence about the file.
-fn read_limited(source: &Path, kind: ArtifactKind) -> Result<Vec<u8>, String> {
-    // Check before opening too: opening a FIFO for reading blocks until a writer appears.
-    let regular = std::fs::metadata(source)
-        .map_err(|error| format!("cannot be opened: {error}"))?
-        .is_file();
-    if !regular {
-        return Err("is not a regular file".into());
-    }
-    let file = std::fs::File::open(source).map_err(|error| format!("cannot be opened: {error}"))?;
+/// Read through a root-relative descriptor, never by re-opening a checked path.
+fn read_limited(roots: &SourceRoots, source: &Path, kind: ArtifactKind) -> Result<Vec<u8>, String> {
+    let file = roots.open(source)?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("cannot be opened: {error}"))?;
@@ -535,6 +557,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
 
 mod inline_images;
 mod inspect;
+mod source_io;
 pub use inspect::{ArtifactPage, ArtifactPages, INSPECT_ARTIFACT};
 pub(crate) use inspect::{inspect, spec as inspect_spec};
 

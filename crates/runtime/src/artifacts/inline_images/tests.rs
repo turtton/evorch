@@ -1,3 +1,6 @@
+#[path = "regression_tests.rs"]
+mod regression_tests;
+
 use std::path::PathBuf;
 
 use super::*;
@@ -555,6 +558,7 @@ fn metadata_without_inlined_assets_keeps_its_previous_form() {
 fn css_url_tokens_follow_the_css_tokenizer() {
     let found = |css: &str, expected: &[(&str, &str)]| {
         let actual = css_urls(css)
+            .unwrap()
             .into_iter()
             .map(|(range, value)| (&css[range], value))
             .collect::<Vec<_>>();
@@ -579,6 +583,16 @@ fn css_url_tokens_follow_the_css_tokenizer() {
     );
     found(r#"content:"url(no.png)"; x:'url(no)'"#, &[]);
     found(r#"\"url(no.png) x\url(no.png)"#, &[]);
+    found(r"\75rl(x.png)", &[(r"\75rl(x.png)", "x.png")]);
+    found(
+        r#"url("x.png"/* after */)"#,
+        &[(r#"url("x.png"/* after */)"#, "x.png")],
+    );
+    found("@url(no.png) #url(no.png) 1url(no.png)", &[]);
+    found(
+        r#"/* \75rl(no.png) */ url(yes.png)"#,
+        &[("url(yes.png)", "yes.png")],
+    );
     found("myurl(no.png) -url(no.png) url-x(no.png)", &[]);
     found("url(a b.png) url(ok.png)", &[("url(ok.png)", "ok.png")]);
     found(r#"url(a"b.png) url(ok.png)"#, &[("url(ok.png)", "ok.png")]);

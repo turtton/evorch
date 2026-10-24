@@ -35,7 +35,10 @@ input. Each tool checks them again when it runs.
   Another thread's `$TMPDIR` and allowed directories
   ([ADR 0032](../intents/evorch/decisions/0032-project-allowed-directories.md)) are not
   sources, even when file tools can read them. Reference material and drafts
-  can stay in `$TMPDIR` so they do not touch the repository.
+  can stay in `$TMPDIR` so they do not touch the repository. Reads use retained
+  root directory descriptors, refuse symlinks in every resolved path component,
+  and check the opened descriptor is a regular file; concurrent symlink or FIFO
+  replacements cannot redirect or block a capture.
 - Supported formats: `.png`, `.jpg`/`.jpeg`, `.gif`, `.webp` up to 8 MiB, and
   `.html`/`.htm` up to 2 MiB as written. The content must match the extension.
 - HTML is rejected when the secret guard detects a credential in it. The guard
@@ -53,7 +56,10 @@ references by path ([ADR 0038](../intents/evorch/decisions/0038-image-generation
   attributes become `data:` URIs. Paths resolve like a browser opening the real
   HTML file (after symlinks): relative to its directory, `/` from the
   filesystem root, with `?query` and `#fragment` ignored and percent escapes
-  decoded.
+  decoded. Attribute values decode the complete WHATWG character-reference
+  table (including legacy names), and CSS uses tokenization for escaped `url`
+  names, strings and comments. CSS nested more than 128 blocks/functions is
+  rejected rather than leaving deep references unresolved.
 - References with a scheme (`http:`, `https:`, `data:`, `file:`, `blob:`, …), a
   host (`//host/…`), only a fragment (`#id`) or no value are kept as written.
   Comments, strings and raw text such as `<script>`, `<textarea>` and

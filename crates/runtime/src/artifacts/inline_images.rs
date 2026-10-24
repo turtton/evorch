@@ -15,8 +15,10 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use cssparser::{Parser, ParserInput, Token};
 use lol_html::html_content::TextType;
 use lol_html::{HtmlRewriter, Settings, element, text};
+use markup5ever::data::{C1_REPLACEMENTS, NAMED_ENTITIES};
 use sha2::{Digest, Sha256};
 use tools::image::ImageFormat;
 
@@ -44,7 +46,7 @@ pub(super) fn inline(
             label.display()
         )
     })?;
-    let references = references(text, &sites);
+    let references = references(text, &sites)?;
     if references.is_empty() {
         return Ok((html, Vec::new()));
     }
@@ -223,7 +225,7 @@ impl Reference {
 }
 
 /// The local references of `sites` in document order, none overlapping another.
-fn references(html: &str, sites: &[Site]) -> Vec<Reference> {
+fn references(html: &str, sites: &[Site]) -> Result<Vec<Reference>, String> {
     let mut found = Vec::new();
     for site in sites {
         let value = Decoded::new(&html[site.range.clone()], site.escaped);
@@ -238,7 +240,7 @@ fn references(html: &str, sites: &[Site]) -> Vec<Reference> {
             }
             continue;
         }
-        for (token, url) in css_urls(&value.text) {
+        for (token, url) in css_urls(&value.text)? {
             let url = browser_url(&url);
             if is_local(&url) {
                 let raw = value.raw_range(token);
@@ -259,7 +261,7 @@ fn references(html: &str, sites: &[Site]) -> Vec<Reference> {
         }
         disjoint
     });
-    found
+    Ok(found)
 }
 
 /// The URL parser drops surrounding spaces and control characters, and every
@@ -388,7 +390,7 @@ impl Images {
         }
         let format = ImageFormat::from_extension(&file)
             .ok_or_else(|| "is not a .png, .jpg, .gif or .webp file".to_owned())?;
-        let bytes = read_limited(&file, ArtifactKind::Image(format))?;
+        let bytes = read_limited(roots, &file, ArtifactKind::Image(format))?;
         let byte_len = bytes.len() as u64;
         self.encoded_len += byte_len.div_ceil(3) * 4;
         // The document cannot fit any more; keep checking the rest without holding them.
@@ -447,12 +449,18 @@ impl<'a> Decoded<'a> {
         let mut index = 0;
         while let Some(next) = raw[index..].chars().next() {
             let (decoded, len) = if next == '&' {
-                char_reference(&raw[index + 1..]).map_or(('&', 1), |(c, len)| (c, len + 1))
+                char_reference(&raw[index + 1..])
+                    .map_or((['&', '\0'], 1), |(chars, len)| (chars, len + 1))
             } else {
-                (next, next.len_utf8())
+                ([next, '\0'], next.len_utf8())
             };
-            offsets.extend(std::iter::repeat_n(index, decoded.len_utf8()));
-            text.push(decoded);
+            for (position, c) in decoded.into_iter().enumerate() {
+                if position == 1 && c == '\0' {
+                    continue;
+                }
+                offsets.extend(std::iter::repeat_n(index, c.len_utf8()));
+                text.push(c);
+            }
             index += len;
         }
         offsets.push(raw.len());
@@ -470,10 +478,9 @@ impl<'a> Decoded<'a> {
     }
 }
 
-/// The character `rest` (the text after `&`) starts with and the bytes it
-/// takes: numeric references and the named ones that can matter in a URL or
-/// in CSS. Other names stay as written.
-fn char_reference(rest: &str) -> Option<(char, usize)> {
+/// WHATWG character references in attribute context, including the longest
+/// legacy name, its ambiguous-ampersand exception, and two-codepoint results.
+fn char_reference(rest: &str) -> Option<([char; 2], usize)> {
     if let Some(number) = rest.strip_prefix('#') {
         let (radix, start) = match number.as_bytes().first() {
             Some(b'x' | b'X') => (16, 2),
@@ -487,233 +494,103 @@ fn char_reference(rest: &str) -> Option<(char, usize)> {
             return None;
         }
         let end = start + digits;
-        let decoded = u32::from_str_radix(&rest[start..end], radix)
-            .ok()
-            .and_then(char::from_u32)
-            .filter(|c| *c != '\0')
-            .unwrap_or('\u{FFFD}');
+        let codepoint = u32::from_str_radix(&rest[start..end], radix).unwrap_or(u32::MAX);
+        let decoded = if (0x80..=0x9f).contains(&codepoint) {
+            C1_REPLACEMENTS[(codepoint - 0x80) as usize]
+                .unwrap_or_else(|| char::from_u32(codepoint).unwrap())
+        } else {
+            char::from_u32(codepoint)
+                .filter(|c| *c != '\0')
+                .unwrap_or('\u{FFFD}')
+        };
         let end = end + usize::from(rest.as_bytes().get(end) == Some(&b';'));
-        return Some((decoded, end));
+        return Some(([decoded, '\0'], end));
     }
-    let len = rest.bytes().take_while(u8::is_ascii_alphanumeric).count();
-    if rest.as_bytes().get(len) != Some(&b';') {
+    let mut longest = None;
+    for (index, byte) in rest.bytes().enumerate() {
+        if !(byte.is_ascii_alphanumeric() || byte == b';') {
+            break;
+        }
+        let len = index + 1;
+        let Some(&(first, second)) = NAMED_ENTITIES.get(&rest[..len]) else {
+            break;
+        };
+        if first != 0 {
+            longest = Some((
+                [
+                    char::from_u32(first).unwrap(),
+                    char::from_u32(second).unwrap(),
+                ],
+                len,
+            ));
+        }
+    }
+    let (chars, len) = longest?;
+    if !rest[..len].ends_with(';')
+        && rest
+            .as_bytes()
+            .get(len)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'=')
+    {
         return None;
     }
-    let decoded = match &rest[..len] {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "quot" => '"',
-        "apos" => '\'',
-        "nbsp" => '\u{A0}',
-        "Tab" => '\t',
-        "NewLine" => '\n',
-        "excl" => '!',
-        "num" => '#',
-        "dollar" => '$',
-        "percnt" => '%',
-        "lpar" => '(',
-        "rpar" => ')',
-        "ast" | "midast" => '*',
-        "plus" => '+',
-        "comma" => ',',
-        "period" => '.',
-        "sol" => '/',
-        "colon" => ':',
-        "semi" => ';',
-        "equals" => '=',
-        "quest" => '?',
-        "commat" => '@',
-        "lsqb" | "lbrack" => '[',
-        "bsol" => '\\',
-        "rsqb" | "rbrack" => ']',
-        "lowbar" | "UnderBar" => '_',
-        "grave" | "DiacriticalGrave" => '`',
-        "lcub" | "lbrace" => '{',
-        "verbar" | "vert" | "VerticalLine" => '|',
-        "rcub" | "rbrace" => '}',
-        _ => return None,
-    };
-    Some((decoded, len + 1))
+    Some((chars, len))
 }
 
-/// The `url()` tokens of a style sheet or a declaration list with their values,
-/// skipping comments and strings as the CSS tokenizer does.
-fn css_urls(css: &str) -> Vec<(Range<usize>, String)> {
-    let bytes = css.as_bytes();
+/// Tokenize without parsing declarations: nested blocks still need visiting,
+/// while comments, strings and bad URLs must never become image references.
+fn css_urls(css: &str) -> Result<Vec<(Range<usize>, String)>, String> {
+    let mut input = ParserInput::new(css);
+    let mut parser = Parser::new(&mut input);
     let mut urls = Vec::new();
-    let mut index = 0;
-    // An escaped character continues a name, so `\"url(` is not a URL.
-    let mut escape_end = None;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index = css[index + 2..]
-                    .find("*/")
-                    .map_or(bytes.len(), |end| index + 2 + end + 2);
-            }
-            quote @ (b'"' | b'\'') => index = css_string(css, index + 1, quote).1,
-            b'\\' if matches!(bytes.get(index + 1), None | Some(b'\n' | b'\r' | b'\x0C')) => {
-                index += 1;
-            }
-            b'\\' => {
-                index = css_escape(css, index + 1).1;
-                escape_end = Some(index);
-            }
-            _ if escape_end != Some(index) && starts_url(bytes, index) => {
-                let (end, value) = url_token(css, index + 4);
-                if let Some(value) = value {
-                    urls.push((index..end, value));
-                }
-                index = end;
-            }
-            _ => index += 1,
-        }
-    }
-    urls
+    collect_css_urls(&mut parser, &mut urls, 0)?;
+    Ok(urls)
 }
 
-/// A case-insensitive `url(` that is not the end of a longer name.
-fn starts_url(bytes: &[u8], index: usize) -> bool {
-    bytes
-        .get(index..index + 4)
-        .is_some_and(|name| name.eq_ignore_ascii_case(b"url("))
-        && (index == 0 || !is_name_byte(bytes[index - 1]))
-}
-
-const fn is_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'\\') || byte >= 0x80
-}
-
-const fn is_css_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')
-}
-
-fn skip_spaces(bytes: &[u8], mut index: usize) -> usize {
-    while bytes.get(index).copied().is_some_and(is_css_space) {
-        index += 1;
-    }
-    index
-}
-
-/// The value and end of the `url(` token whose arguments start at `start`;
-/// no value for malformed tokens, which CSS ignores.
-fn url_token(css: &str, start: usize) -> (usize, Option<String>) {
-    let bytes = css.as_bytes();
-    let start = skip_spaces(bytes, start);
-    if let Some(&quote @ (b'"' | b'\'')) = bytes.get(start) {
-        let (value, after) = css_string(css, start + 1, quote);
-        let close = skip_spaces(bytes, after);
-        return match (value, bytes.get(close)) {
-            (Some(value), Some(b')')) => (close + 1, Some(value)),
-            (Some(value), None) => (close, Some(value)),
-            _ => (after, None),
+fn collect_css_urls(
+    parser: &mut Parser<'_, '_>,
+    urls: &mut Vec<(Range<usize>, String)>,
+    depth: usize,
+) -> Result<(), String> {
+    loop {
+        let start = parser.position().byte_index();
+        let Ok(token) = parser.next_including_whitespace_and_comments().cloned() else {
+            break;
         };
-    }
-    let mut value = String::new();
-    let mut index = start;
-    while let Some(next) = css[index..].chars().next() {
-        match next {
-            ')' => return (index + 1, Some(value)),
-            ' ' | '\t' | '\n' | '\r' | '\x0C' => {
-                let close = skip_spaces(bytes, index);
-                return match bytes.get(close) {
-                    Some(b')') => (close + 1, Some(value)),
-                    None => (close, Some(value)),
-                    Some(_) => (bad_url_end(css, close), None),
-                };
+        match token {
+            Token::UnquotedUrl(value) => {
+                urls.push((start..parser.position().byte_index(), value.to_string()))
             }
-            '"' | '\'' | '(' | '\0'..='\x08' | '\x0B' | '\x0E'..='\x1F' | '\x7F' => {
-                return (bad_url_end(css, index), None);
-            }
-            '\\' => {
-                if matches!(bytes.get(index + 1), None | Some(b'\n' | b'\r' | b'\x0C')) {
-                    return (bad_url_end(css, index), None);
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                let value = parser.parse_nested_block(|args| {
+                    let value = args.expect_string_cloned()?;
+                    args.expect_exhausted()?;
+                    Ok::<_, cssparser::ParseError<'_, ()>>(value)
+                });
+                if let Ok(value) = value {
+                    urls.push((start..parser.position().byte_index(), value.to_string()));
                 }
-                let (escaped, end) = css_escape(css, index + 1);
-                value.push(escaped);
-                index = end;
             }
-            other => {
-                value.push(other);
-                index += other.len_utf8();
-            }
-        }
-    }
-    (index, Some(value))
-}
-
-/// Where the remnants of a malformed `url(` token end.
-fn bad_url_end(css: &str, mut index: usize) -> usize {
-    let bytes = css.as_bytes();
-    while index < bytes.len() {
-        match bytes[index] {
-            b')' => return index + 1,
-            b'\\' if !matches!(bytes.get(index + 1), None | Some(b'\n' | b'\r' | b'\x0C')) => {
-                index = css_escape(css, index + 1).1;
-            }
-            _ => index += 1,
-        }
-    }
-    index
-}
-
-/// The value of the string whose content starts at `start` and the index after
-/// it. A newline ends a string without a value, as CSS discards it.
-fn css_string(css: &str, start: usize, quote: u8) -> (Option<String>, usize) {
-    let bytes = css.as_bytes();
-    let mut value = String::new();
-    let mut index = start;
-    while let Some(next) = css[index..].chars().next() {
-        match next {
-            _ if next == char::from(quote) => return (Some(value), index + 1),
-            '\n' | '\r' | '\x0C' => return (None, index),
-            '\\' => match bytes.get(index + 1) {
-                None => index += 1,
-                Some(b'\r') if bytes.get(index + 2) == Some(&b'\n') => index += 3,
-                Some(b'\n' | b'\r' | b'\x0C') => index += 2,
-                Some(_) => {
-                    let (escaped, end) = css_escape(css, index + 1);
-                    value.push(escaped);
-                    index = end;
+            Token::Function(_)
+            | Token::ParenthesisBlock
+            | Token::SquareBracketBlock
+            | Token::CurlyBracketBlock => {
+                // Reject rather than silently miss URLs or exhaust the stack.
+                if depth >= 128 {
+                    return Err("HTML was not captured: CSS nesting exceeds 128 levels".into());
                 }
-            },
-            other => {
-                value.push(other);
-                index += other.len_utf8();
+                let mut result = Ok(());
+                let _: Result<(), cssparser::ParseError<'_, ()>> =
+                    parser.parse_nested_block(|nested| {
+                        result = collect_css_urls(nested, urls, depth + 1);
+                        Ok(())
+                    });
+                result?;
             }
+            _ => {}
         }
     }
-    (Some(value), index)
-}
-
-/// The character an escape whose backslash precedes `start` stands for, and
-/// the index after it.
-fn css_escape(css: &str, start: usize) -> (char, usize) {
-    let bytes = css.as_bytes();
-    let digits = bytes[start..]
-        .iter()
-        .take(6)
-        .take_while(|byte| byte.is_ascii_hexdigit())
-        .count();
-    if digits == 0 {
-        return css[start..]
-            .chars()
-            .next()
-            .map_or(('\u{FFFD}', start), |c| (c, start + c.len_utf8()));
-    }
-    let mut end = start + digits;
-    let decoded = u32::from_str_radix(&css[start..end], 16)
-        .ok()
-        .and_then(char::from_u32)
-        .filter(|c| *c != '\0')
-        .unwrap_or('\u{FFFD}');
-    if bytes.get(end) == Some(&b'\r') && bytes.get(end + 1) == Some(&b'\n') {
-        end += 2;
-    } else if bytes.get(end).copied().is_some_and(is_css_space) {
-        end += 1;
-    }
-    (decoded, end)
+    Ok(())
 }
 
 #[cfg(test)]
