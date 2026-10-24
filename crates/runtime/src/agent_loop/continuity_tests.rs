@@ -203,14 +203,21 @@ async fn chained_frozen_sources_are_isolated_redacted_and_bounded() {
     runtime.cancel(source).unwrap();
 }
 
+async fn denied(state: &mut LoopState, source: &str) -> String {
+    let result = crate::meta::dispatch(state, "history_read", json!({"source":source})).await;
+    assert!(result.result.is_error);
+    assert!(
+        result.result.content.starts_with("history_source_denied: "),
+        "{}",
+        result.result.content
+    );
+    result.result.content
+}
+
 #[tokio::test]
 async fn source_handles_gate_reads_and_note_or_history_never_add_review_evidence() {
     let (_dir, storage, runtime, mut state) = stored_fixture();
     let run = state.caller_run_id();
-    state.continuity = state
-        .continuity
-        .freeze(&runtime, RunId::new(999), &state.context.messages)
-        .unwrap();
     let before = runtime
         .shared
         .run_store
@@ -218,10 +225,27 @@ async fn source_handles_gate_reads_and_note_or_history_never_add_review_evidence
         .unwrap()
         .review_evidence_for_lineage(&[run.to_string()])
         .unwrap();
+    assert!(
+        denied(&mut state, "escalation-run-999")
+            .await
+            .contains("no handoff handles")
+    );
+    state.continuity = state
+        .continuity
+        .freeze(&runtime, RunId::new(999), &state.context.messages)
+        .unwrap();
+    assert!(
+        denied(&mut state, "escalation-run-999")
+            .await
+            .contains(r#"did you mean "handoff:run-999"?"#)
+    );
+    assert!(
+        denied(&mut state, &run.to_string())
+            .await
+            .contains(r#"did you mean "self"?"#)
+    );
     for source in ["run-999", "run-1", "handoff:run-998"] {
-        let result =
-            crate::meta::dispatch(&mut state, "history_read", json!({"source":source})).await;
-        assert!(result.result.is_error);
+        denied(&mut state, source).await;
     }
     let result = crate::meta::dispatch(
         &mut state,
