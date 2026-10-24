@@ -78,7 +78,38 @@ by the same gate as shell escalation, under `sandbox.escalation_approval` and
 `escalate_to_user_on_deny`: `off` denies every outside access, `user` asks the
 user (approval input `kind: "file_access"` with the tool, canonical `path`,
 `access`, justification and change), and `auto` asks the escalation reviewer,
-falling back to the user on a decline when configured. The reviewer and user
+falling back to the user on a decline when configured. An approval the
+reviewer rates critical-risk always goes to the user for the final decision,
+whatever `escalate_to_user_on_deny` says. When the automatic reviewer denies
+three consecutive shell or file escalation requests in one run, that run's
+later requests are refused
+without review (and without asking the user) until the user sends new input to
+the conversation. Policy denials count, including model `approve: false`, approvals
+converted to denials for insufficient authorization, and missing-real-user-request
+denials returned without calling the model. Model failures, timeouts, invalid
+verdicts, unsynchronized evidence, settings/context changes during review, and
+human refusals do not count. Settings/evidence changes during review neither add
+a denial nor reset the streak, regardless of the final model or human verdict.
+Evidence that was already unsynchronized at the start, but remains unchanged,
+does not by itself invalidate human approval in `user` mode or `auto` fallback;
+automatic review still rejects unsynchronized evidence.
+A valid final approval in any approval mode resets the streak.
+Only new real-user input visible in the run's lineage lifts suspension, including
+host-submitted answers, not parent-agent answers or delegated prompts. Delayed
+results from an older input generation cannot change the current generation.
+Before handing off to human approval, even an older pending review checks the
+current generation's suspension: new input may have lifted the old suspension
+or the newer generation may already have reached the limit again. The suspension
+check and denial recording share one mutex; that check is the handoff-admission
+linearization point, not the later `ApprovalRequested` event. A handoff admitted
+before the third denial may publish its dialog afterward. A check ordered after
+the threshold is reached refuses without calling the user, for both critical
+verdicts and deny fallback. The mutex is released before waiting for approval.
+Audit and diagnostic reasons contain only the refusal facts, limit, and reset
+condition; workaround/consultation guidance and the reminder that sandbox work
+can continue appear only in agent-facing tool results.
+The per-call reviews of Web fetches, navigation and uploads are outside this count.
+The reviewer and user
 see the tool, the canonicalized target paths and the justification, plus for
 `write` the first 4000 bytes of the content and for `edit` every edit with its
 `edits[i]` index and `replace_all` flag. Only the old/new strings are cut: they

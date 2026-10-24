@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
-use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
+use crate::tools::shell_escalation::{ShellAccess, ShellEscalationGate};
 use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 
 #[cfg(test)]
@@ -298,7 +298,7 @@ impl JobRegistry {
                         "{}\n[stdin continuation; close_stdin={}]\n{}",
                         escalated.command, args.close_stdin, input
                     );
-                    if let EscalationDecision::Deny { reason } = escalated
+                    let decision = escalated
                         .gate
                         .decide_scoped_with_cwd(
                             ctx,
@@ -307,9 +307,9 @@ impl JobRegistry {
                             escalated.cwd.as_deref(),
                             escalated.access,
                         )
-                        .await
-                    {
-                        return Ok(ToolResult::error(reason));
+                        .await;
+                    if let Some((reason, guidance)) = decision.denial() {
+                        return Ok(ToolResult::error(format!("{reason}\n{guidance}")));
                     }
                 }
                 let (result, received) = oneshot::channel();

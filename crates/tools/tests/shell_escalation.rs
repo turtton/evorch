@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use sandbox::{CommandSpec, DirectSandbox, Sandbox, SandboxError, WrappedCommand};
 use serde_json::{Value, json};
-use tools::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
+use tools::tools::shell_escalation::{
+    DENIAL_GUIDANCE, EscalationDecision, ShellAccess, ShellEscalationGate,
+};
 use tools::{ToolExecutionContext, ToolExecutor, ToolResult};
 
 #[derive(Default)]
@@ -282,7 +284,11 @@ async fn denied_merge_is_reviewed_without_spawning_gh() {
         }))
         .await;
     assert!(result.is_error);
-    assert_eq!(result.content, "merge refused by reviewer");
+    assert_eq!(
+        result.content,
+        format!("merge refused by reviewer\n{DENIAL_GUIDANCE}")
+    );
+    assert_eq!(result.content.matches(DENIAL_GUIDANCE).count(), 1);
     fixture.assert_wraps(0, 0);
     assert_eq!(fixture.gate.calls.lock().expect("gate lock").len(), 1);
     assert!(!fake.invocation().exists());
@@ -407,7 +413,11 @@ async fn network_only_denial_and_invalid_scope_never_spawn() {
         "command":"printf denied", "sandbox_access":"network", "justification":"fetch dependencies"
     })).await.expect("tool result");
     assert!(denied.is_error);
-    assert_eq!(denied.content, "network refused");
+    assert_eq!(
+        denied.content,
+        format!("network refused\n{DENIAL_GUIDANCE}")
+    );
+    assert_eq!(denied.content.matches(DENIAL_GUIDANCE).count(), 1);
     let invalid = executor
         .execute(
             &ctx,
