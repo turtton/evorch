@@ -156,7 +156,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
         match &editor.fetch.models_fetch_state {
             ModelsFetchState::Idle => {}
             ModelsFetchState::Loading => {
-                ui.spinner();
+                crate::theme::widgets::spinner(ui);
                 ui.label(muted("Loading models…"));
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(200));

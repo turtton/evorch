@@ -14,7 +14,7 @@ pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
             state.start(CatalogRequest::ForceRefresh);
         }
         if state.is_busy() {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
         }
         match state.modified {
             Some(modified) => {
