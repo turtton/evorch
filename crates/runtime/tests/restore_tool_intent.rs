@@ -427,7 +427,15 @@ async fn recovery_notice_does_not_grant_disk_authoritative_delivery() {
             None,
         )
         .unwrap_err();
-    assert!(error.to_string().contains("unresolved_tool_calls"));
+    // The cancelled root refuses any continuation before its uncertain calls
+    // are considered, so the write is never replayed.
+    assert!(matches!(
+        error,
+        runtime::RuntimeError::RunRestoreFailed {
+            reason: runtime::RunRestoreFailure::Cancelled,
+            ..
+        }
+    ));
     assert!(
         runtime
             .restore_diagnostics(root)

@@ -302,6 +302,8 @@ impl AgentRuntime {
         if let Some(request) = pending_request {
             self.remember_thread_request(run_id, &request);
         }
+        // Resuming the root is the operator's go-ahead for the tree they stopped.
+        self.lift_operator_stops(run_id);
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

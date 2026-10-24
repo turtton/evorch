@@ -6,6 +6,7 @@ mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
 mod chat_restore;
+mod child_renewal;
 mod completion_relay;
 mod output;
 mod project;
@@ -85,6 +86,9 @@ pub(crate) struct Shared {
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
+    /// Runs the operator stopped. Neither agent messages nor answers continue them
+    /// until the operator resumes their thread root, which lifts the whole tree.
+    pub(crate) operator_stops: Mutex<HashSet<RunId>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -649,6 +653,7 @@ impl AgentRuntime {
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
+                operator_stops: Mutex::new(HashSet::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
@@ -956,6 +961,7 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
+                operator_stops: Mutex::new(HashSet::new()),
                 bus,
                 executor: Mutex::new(executor),
                 model,
@@ -1919,9 +1925,33 @@ impl AgentRuntime {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
                 entry.cancel_tx.send_replace(RunInterrupt::Stop);
+                self.shared
+                    .operator_stops
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(target);
             }
         }
         Ok(())
+    }
+
+    /// Whether the operator stopped this run and has not resumed its thread root since.
+    pub(crate) fn operator_stopped(&self, run_id: RunId) -> bool {
+        self.shared
+            .operator_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&run_id)
+    }
+
+    /// The operator resumed this root: its whole tree may be continued again.
+    pub(crate) fn lift_operator_stops(&self, root: RunId) {
+        let tree = self.run_subtree_ids(root);
+        self.shared
+            .operator_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|run| !tree.contains(run));
     }
 
     /// Hard-cancel a root and all descendants, fencing even in-flight child spawns.
