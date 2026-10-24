@@ -18,7 +18,7 @@ use crate::output::Capture;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_escalation::{
-    EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
+    DENIAL_GUIDANCE, EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
 };
 
 mod guidance;
@@ -442,7 +442,9 @@ impl Tool for Shell {
                     });
                     network_sandbox.unwrap_or(escalation.unsandboxed)
                 }
-                EscalationDecision::Deny { reason } => return Ok(ToolResult::error(reason)),
+                EscalationDecision::Deny { reason } => {
+                    return Ok(ToolResult::error(format!("{reason}\n{DENIAL_GUIDANCE}")));
+                }
             }
         } else {
             Arc::clone(&self.sandbox)

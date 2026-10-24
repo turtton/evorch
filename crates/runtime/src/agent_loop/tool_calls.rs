@@ -311,6 +311,102 @@ mod rework_tests {
     }
 
     #[tokio::test]
+    async fn file_escalation_denial_reaches_agent_once_without_polluting_events() {
+        struct Deny;
+        #[async_trait::async_trait]
+        impl tools::tools::shell_escalation::ShellEscalationGate for Deny {
+            async fn decide(
+                &self,
+                _: &ToolExecutionContext,
+                _: &str,
+                _: &str,
+            ) -> tools::tools::shell_escalation::EscalationDecision {
+                unreachable!("only file access")
+            }
+            async fn decide_file_access(
+                &self,
+                _: &ToolExecutionContext,
+                _: &tools::tools::shell_escalation::FileAccessRequest,
+            ) -> tools::tools::shell_escalation::EscalationDecision {
+                tools::tools::shell_escalation::EscalationDecision::Deny {
+                    reason: "policy denial".into(),
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let bus = Arc::new(event_bus::EventBus::new(128));
+        let mut events = bus.subscribe();
+        let executor = tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        executor.set_file_boundary(&sandbox::SandboxBoundary::new(project));
+        executor.set_shell_escalation(
+            Arc::new(Deny),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        let model = Arc::new(ScriptedModel::new([
+            tool_response(
+                "denied",
+                "read",
+                json!({"path":temp.path().join("outside"), "sandbox_access":"unsandboxed", "justification":"inspect"}),
+            ),
+            text_response("done", providers::FinishReason::Stop),
+        ]));
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone());
+        let run = runtime.delegate_background(Role::Worker, "inspect".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+        let observed = model.observed().await;
+        let results: Vec<_> = observed
+            .last()
+            .unwrap()
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|block| match block {
+                providers::ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert!(*is_error);
+                    Some(
+                        content
+                            .iter()
+                            .map(|part| part.text_or_image_note())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("file access escalation denied: policy denial"));
+        assert_eq!(
+            results[0]
+                .matches(crate::escalation_review::DENIAL_GUIDANCE)
+                .count(),
+            1
+        );
+        let mut denied = 0;
+        for event in events.drain_pending_snapshot() {
+            match event.kind {
+                EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) => {
+                    denied += 1;
+                    assert_eq!(reason, "file access escalation denied: policy denial");
+                }
+                EventKind::Diagnostic(diagnostic) => assert!(
+                    !diagnostic
+                        .detail
+                        .contains(crate::escalation_review::DENIAL_GUIDANCE)
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(denied, 1);
+    }
+
+    #[tokio::test]
     async fn terminal_barrier_skips_tail_preflight_events() {
         let (events, _, _) = scenario("terminal").await;
         assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. } | ToolEvent::ExecutionDenied { call_id, .. } | ToolEvent::ApprovalRequested { call_id, .. }) if call_id.contains("second"))));
@@ -807,7 +903,7 @@ impl LoopState {
                         if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
                             result
                         } else if let ReadyCall::Failed(error) = ready {
-                            ToolResult::error(error.to_string())
+                            ToolResult::error(error.agent_message())
                         } else if let ReadyCall::Invalid(error) = ready {
                             self.shared.executor.report_invalid_call(
                                 &ctx,
@@ -816,7 +912,7 @@ impl LoopState {
                                 input.clone(),
                                 &error,
                             );
-                            ToolResult::error(error.to_string())
+                            ToolResult::error(error.agent_message())
                         } else if matches!(
                             name.as_str(),
                             "task_claim" | "task_complete" | "finding_append"

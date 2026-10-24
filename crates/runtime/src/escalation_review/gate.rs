@@ -17,8 +17,8 @@ use tools::{
 };
 
 use super::{
-    CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, QuickModelReviewer, ReviewContext, ReviewError,
-    ReviewVerdict, review_context,
+    CONSECUTIVE_DENIAL_LIMIT, QuickModelReviewer, ReviewContext, ReviewError, ReviewVerdict,
+    review_context,
 };
 use crate::{RunId, runtime::Shared};
 
@@ -182,6 +182,34 @@ impl SandboxEscalationGate {
         Some((shared, run_id, user_inputs))
     }
 
+    /// Recheck the starting input generation immediately before a human handoff.
+    /// New real-user input lifts suspension; old completions still cannot count
+    /// against that newer generation.
+    fn suspended_decision(
+        &self,
+        ctx: &ToolExecutionContext,
+        label: &str,
+        streak: &Option<(Arc<Shared>, RunId, usize)>,
+    ) -> Option<EscalationDecision> {
+        let (shared, run_id, user_inputs) = streak.as_ref()?;
+        if let Some((_, _, current_inputs)) = self.denial_streak(ctx) {
+            shared
+                .escalation_denials
+                .suspension(*run_id, current_inputs);
+            if current_inputs != *user_inputs {
+                return None;
+            }
+        }
+        let last = shared
+            .escalation_denials
+            .suspension(*run_id, *user_inputs)?;
+        Some(EscalationDecision::Deny {
+            reason: format!(
+                "{label} refused without review: the automatic reviewer denied {CONSECUTIVE_DENIAL_LIMIT} consecutive requests in this run (last: {last}). Further requests are refused until the user sends new input to this conversation; do not reword and resubmit. Work inside the sandbox can continue."
+            ),
+        })
+    }
+
     /// Applies `sandbox.escalation_approval` identically for every escalation
     /// kind: off denies, user asks, auto reviews and may fall back to the user.
     /// Approval is void if the settings change while the decision is pending.
@@ -216,21 +244,25 @@ impl SandboxEscalationGate {
             },
             Some((EscalationApproval::User, _)) => human().await,
             Some((EscalationApproval::Auto, fallback)) => {
-                let suspended = streak.as_ref().and_then(|(shared, run_id, user_inputs)| {
-                    shared.escalation_denials.suspension(*run_id, *user_inputs)
-                });
-                if let Some(last) = suspended {
+                if let Some(decision) = self.suspended_decision(ctx, label, &streak) {
                     // Neither the reviewer nor the user is asked, even with fallback.
-                    EscalationDecision::Deny {
-                        reason: format!(
-                            "{label} refused without review: the automatic reviewer denied {CONSECUTIVE_DENIAL_LIMIT} consecutive requests in this run (last: {last}). Further requests are refused until the user sends new input to this conversation; do not reword and resubmit. Work inside the sandbox can continue."
-                        ),
-                    }
+                    decision
                 } else {
                     self.review_automatically(
-                        ctx,
                         review,
-                        human,
+                        |handoff| {
+                            let streak = &streak;
+                            async move {
+                                // A concurrent review may have reached the limit while
+                                // this one was pending. Do not open a new dialog then.
+                                if let Some(decision) = self.suspended_decision(ctx, label, streak)
+                                {
+                                    return decision;
+                                }
+                                self.diagnose(ctx, DiagnosticSeverity::Info, &handoff);
+                                human().await
+                            }
+                        },
                         fallback,
                         &mut reviewed_stamp,
                         &mut counted,
@@ -293,20 +325,15 @@ impl SandboxEscalationGate {
                 &format!("denied: {reason}"),
             ),
         }
-        match decision {
-            EscalationDecision::Approve => EscalationDecision::Approve,
-            EscalationDecision::Deny { reason } => EscalationDecision::Deny {
-                reason: format!("{reason}\n{DENIAL_GUIDANCE}"),
-            },
-        }
+        decision
     }
 
     /// One automatic review: the reviewer's verdict, then the user when the
     /// model approved a critical action or declined with fallback enabled.
-    /// `counted` receives the reviewer's denial reason.
+    /// `counted` receives the reviewer's denial reason. The human callback
+    /// receives a diagnostic and rechecks suspension before opening a dialog.
     async fn review_automatically<R, RF, H, HF>(
         &self,
-        ctx: &ToolExecutionContext,
         review: R,
         human: H,
         fallback: bool,
@@ -316,7 +343,7 @@ impl SandboxEscalationGate {
     where
         R: FnOnce(Arc<QuickModelReviewer>) -> RF,
         RF: Future<Output = Result<(ReviewVerdict, Option<EvidenceStamp>), ReviewError>>,
-        H: FnOnce() -> HF,
+        H: FnOnce(String) -> HF,
         HF: Future<Output = EscalationDecision>,
     {
         let verdict = match &self.reviewer {
@@ -338,20 +365,13 @@ impl SandboxEscalationGate {
         match reason {
             None => EscalationDecision::Approve,
             Some(reason) if requires_user => {
-                self.diagnose(
-                    ctx,
-                    DiagnosticSeverity::Info,
-                    &format!("automatic review requires user approval: {reason}"),
-                );
-                human().await
+                human(format!("automatic review requires user approval: {reason}")).await
             }
             Some(reason) if fallback => {
-                self.diagnose(
-                    ctx,
-                    DiagnosticSeverity::Info,
-                    &format!("automatic review declined; requesting user approval: {reason}"),
-                );
-                human().await
+                human(format!(
+                    "automatic review declined; requesting user approval: {reason}"
+                ))
+                .await
             }
             Some(reason) => EscalationDecision::Deny { reason },
         }
@@ -549,7 +569,7 @@ mod evidence_tests {
         };
         let (decision, ()) = tokio::join!(review, input);
         assert!(
-            matches!(decision, EscalationDecision::Deny { reason } if reason.starts_with("review context changed during review\n"))
+            matches!(decision, EscalationDecision::Deny { reason } if reason == "review context changed during review")
         );
     }
 

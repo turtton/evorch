@@ -12,8 +12,7 @@ use crate::RunId;
 
 pub(crate) const CONSECUTIVE_DENIAL_LIMIT: u32 = 3;
 
-/// Appended to every escalation denial the agent sees.
-pub(crate) const DENIAL_GUIDANCE: &str = "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), escalate when available, or report the blocker in your result.";
+pub(crate) use tools::tools::shell_escalation::DENIAL_GUIDANCE;
 
 struct Streak {
     denials: u32,

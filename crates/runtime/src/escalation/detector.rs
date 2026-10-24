@@ -130,6 +130,7 @@ mod tests {
                 ToolError::ExecutionDenied {
                     tool_name: "edit".into(),
                     reason: sentinel.clone(),
+                    guidance: None,
                 },
                 "permission_denied",
             ),

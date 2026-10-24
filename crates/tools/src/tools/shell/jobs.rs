@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
-use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
+use crate::tools::shell_escalation::{
+    DENIAL_GUIDANCE, EscalationDecision, ShellAccess, ShellEscalationGate,
+};
 use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 
 #[cfg(test)]
@@ -309,7 +311,7 @@ impl JobRegistry {
                         )
                         .await
                     {
-                        return Ok(ToolResult::error(reason));
+                        return Ok(ToolResult::error(format!("{reason}\n{DENIAL_GUIDANCE}")));
                     }
                 }
                 let (result, received) = oneshot::channel();

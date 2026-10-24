@@ -724,9 +724,11 @@ impl ToolExecutor {
             )
         });
         if action != Action::Deny
-            && let Err(reason) = self.enforce_file_boundary(ctx, tool_name, &args).await
+            && let Err(error) = self.enforce_file_boundary(ctx, tool_name, &args).await
         {
-            return self.deny(ctx, tool_name, call_id, &reason);
+            self.emit_denied(tool_name, call_id, &error);
+            self.emit_completed(ctx, tool_name, call_id, Err(&error));
+            return Err(error);
         }
         let outcome = match action {
             Action::Proceed => {
@@ -878,17 +880,24 @@ impl ToolExecutor {
         call_id: &str,
         reason: &str,
     ) -> Result<T, ToolError> {
-        self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {
-            tool_name: tool_name.to_string(),
-            call_id: call_id.to_string(),
-            reason: reason.to_string(),
-        }));
         let error = ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            guidance: None,
         };
+        self.emit_denied(tool_name, call_id, &error);
         self.emit_completed(ctx, tool_name, call_id, Err(&error));
         Err(error)
+    }
+
+    fn emit_denied(&self, tool_name: &str, call_id: &str, error: &ToolError) {
+        if let ToolError::ExecutionDenied { reason, .. } = error {
+            self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {
+                tool_name: tool_name.to_owned(),
+                call_id: call_id.to_owned(),
+                reason: reason.clone(),
+            }));
+        }
     }
 }
 

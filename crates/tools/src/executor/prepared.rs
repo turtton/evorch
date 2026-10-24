@@ -133,6 +133,7 @@ impl ValidatedToolCall {
             return Err(ToolError::ExecutionDenied {
                 tool_name: self.name,
                 reason: reason.into(),
+                guidance: None,
             });
         }
         Ok(PreparedToolCall(self))

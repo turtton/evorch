@@ -5,7 +5,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use event_bus::{AgentRunPhase, EventKind, LifecycleEvent};
 
 use super::*;
-use crate::escalation_review::{ReviewRunContext, support::ScriptedModel};
+use crate::escalation_review::{DENIAL_GUIDANCE, ReviewRunContext, support::ScriptedModel};
+
+#[path = "denial_result_tests.rs"]
+mod denial_result_tests;
+#[path = "handoff_tests.rs"]
+mod handoff_tests;
 
 struct Fixture {
     runtime: crate::AgentRuntime,
@@ -287,7 +292,7 @@ async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
     .await
     .expect("ordered settings change");
     assert!(matches!(decision, EscalationDecision::Deny { reason }
-        if reason.starts_with("shell escalation settings changed during review\n")));
+        if reason == "shell escalation settings changed during review"));
     assert_eq!(fixture.denials(&fixture.ctx), 1);
 }
 
@@ -489,7 +494,7 @@ async fn critical_human_timeout_or_cancel_does_not_change_streak() {
         } else {
             tokio::time::advance(HUMAN_APPROVAL_TIMEOUT).await;
             assert!(matches!(decision.await, EscalationDecision::Deny { reason }
-                if reason.contains("approval timed out") && reason.contains(DENIAL_GUIDANCE)));
+                if reason.contains("approval timed out") && !reason.contains(DENIAL_GUIDANCE)));
         }
         assert_eq!(fixture.denials(&fixture.ctx), 1);
     }
@@ -535,7 +540,7 @@ async fn environment_failures_and_requires_user_do_not_count() {
         )
         .await;
     assert!(
-        matches!(&decision, EscalationDecision::Deny { reason } if reason.starts_with("review context changed during review\n")),
+        matches!(&decision, EscalationDecision::Deny { reason } if reason == "review context changed during review"),
         "{}",
         describe(&decision)
     );
@@ -623,7 +628,7 @@ async fn run_termination_clears_the_streak() {
 }
 
 #[tokio::test]
-async fn every_denial_carries_the_guidance() {
+async fn gate_denial_reasons_and_diagnostics_exclude_agent_guidance() {
     let fixture = Fixture::new(false);
     let mut events = fixture.gate.bus.subscribe();
     let mut decisions = Vec::new();
@@ -641,15 +646,14 @@ async fn every_denial_carries_the_guidance() {
     for decision in &decisions {
         assert!(
             matches!(decision, EscalationDecision::Deny { reason }
-                if reason.ends_with(&format!("\n{DENIAL_GUIDANCE}"))
-                    && reason.matches(DENIAL_GUIDANCE).count() == 1),
+                if !reason.contains(DENIAL_GUIDANCE)),
             "{}",
             describe(decision)
         );
     }
     // Diagnostics keep the bare reason.
     let mut diagnostics = 0;
-    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+    for event in events.drain_pending_snapshot() {
         if let EventKind::Diagnostic(diagnostic) = event.kind {
             diagnostics += 1;
             assert!(

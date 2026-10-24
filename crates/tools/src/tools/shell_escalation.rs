@@ -16,7 +16,10 @@ pub enum ShellAccess {
     Network,
 }
 
-/// 明示的な隔離解除の審査結果。
+/// Appended only to agent-facing results, never audit or diagnostic reasons.
+pub const DENIAL_GUIDANCE: &str = "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), escalate when available, or report the blocker in your result.";
+
+/// 明示的な隔離解除の審査結果。拒否理由にはエージェント向けガイダンスを含めない。
 pub enum EscalationDecision {
     Approve,
     Deny { reason: String },
