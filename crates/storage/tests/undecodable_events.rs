@@ -145,7 +145,11 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
         .expect("reconcile must skip the removed variants");
     storage.close();
     let database = Database::open(&config).expect("database must reopen");
-    let ((all, by_session), logs) = capture_logs(|| {
+    let ((all, by_session, streamed), logs) = capture_logs(|| {
+        let mut streamed = Vec::new();
+        database
+            .for_each_event_ordered(|stored| streamed.push(stored))
+            .expect("streamed events must read");
         (
             database
                 .events_all_ordered()
@@ -153,6 +157,7 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
             database
                 .events_by_session("session-1")
                 .expect("session events must read"),
+            streamed,
         )
     });
 
@@ -160,7 +165,8 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
     let expected = vec![started, goal, todo, task];
     assert_eq!(events(all), expected);
     assert_eq!(events(by_session), expected);
-    assert_eq!(logs.matches("skipped=3").count(), 2, "{logs}");
+    assert_eq!(events(streamed), expected);
+    assert_eq!(logs.matches("skipped=3").count(), 3, "{logs}");
     assert!(logs.contains("skipped stored events that no longer decode"));
     let tasks = database.durable_tasks().expect("durable tasks must read");
     assert_eq!(tasks.len(), 1);
