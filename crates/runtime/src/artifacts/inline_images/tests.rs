@@ -1,5 +1,7 @@
 #[path = "regression_tests.rs"]
 mod regression_tests;
+#[path = "style_context_tests.rs"]
+mod style_context_tests;
 
 use std::path::PathBuf;
 
@@ -615,12 +617,12 @@ fn css_url_tokens_follow_the_css_tokenizer() {
 #[test]
 fn character_references_map_back_to_their_raw_span() {
     let raw = "a&quot;b&#x41;&#66&amp;&unknown;&";
-    let decoded = Decoded::new(raw, true);
+    let decoded = Decoded::new(raw, CharacterReferences::Attribute);
     assert_eq!(decoded.text, "a\"bAB&&unknown;&");
     let position = decoded.text.find('A').unwrap();
     assert_eq!(&raw[decoded.raw_range(position..position + 1)], "&#x41;");
     assert_eq!(&raw[decoded.raw_range(0..decoded.text.len())], raw);
-    let plain = Decoded::new("a&quot;", false);
+    let plain = Decoded::new("a&quot;", CharacterReferences::Literal);
     assert_eq!(plain.text, "a&quot;");
     assert_eq!(plain.raw_range(1..3), 1..3);
 }

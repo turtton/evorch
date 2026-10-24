@@ -12,12 +12,12 @@ use std::ffi::OsStr;
 use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use cssparser::{Parser, ParserInput, Token};
-use lol_html::html_content::TextType;
-use lol_html::{HtmlRewriter, Settings, element, text};
+use lol_html::{HtmlRewriter, Settings, element, end_tag};
 use markup5ever::data::{C1_REPLACEMENTS, NAMED_ENTITIES};
 use sha2::{Digest, Sha256};
 use tools::image::ImageFormat;
@@ -125,23 +125,44 @@ enum SiteKind {
     StyleElement,
 }
 
+/// HTML tokenizer context for character references. The legacy-name exception
+/// belongs only to attributes, not Data/RCDATA. RawText, PlainText and CDATA
+/// are literal (CDATA-bearing style elements are rejected before decoding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterReferences {
+    Literal,
+    Attribute,
+    Text,
+}
+
 /// A span of the document whose value may reference images.
 #[derive(Debug)]
 struct Site {
     kind: SiteKind,
     range: Range<usize>,
-    /// Whether character references apply, as everywhere but in raw text.
-    escaped: bool,
+    context: CharacterReferences,
+}
+
+struct StyleSpan {
+    range: Range<usize>,
+    foreign: bool,
+    closed: bool,
 }
 
 /// The first `src` of each `<img>`, the first `style` attribute of each
-/// element (browsers drop repeated attributes) and the text of `<style>`.
+/// element (browsers drop repeated attributes) and the entire text of `<style>`.
+///
+/// A foreign style may contain markup/CDATA that splits CSS tokens across text
+/// nodes. Rather than guess at DOM text and rewrite through markup boundaries,
+/// reject all foreign styles containing a literal `<`, including comments,
+/// CDATA and child elements. Encoded `<` is ordinary Data text and is supported.
 fn locate(html: &str) -> Result<Vec<Site>, String> {
     let sites = RefCell::new(Vec::new());
-    let style = RefCell::new(None::<(Range<usize>, bool)>);
+    let styles = Rc::new(RefCell::new(Vec::<StyleSpan>::new()));
     let settings = Settings::new()
         // Rare misnested markup may parse differently in a browser; the
-        // capture still stores the document as written.
+        // capture still stores the document as written, except for ambiguous
+        // foreign styles which are explicitly refused below.
         .with_strict(false)
         .append_element_content_handler(element!("*", |element| {
             let image = element.tag_name() == "img";
@@ -166,33 +187,23 @@ fn locate(html: &str) -> Result<Vec<Site>, String> {
                 sites.borrow_mut().push(Site {
                     kind,
                     range,
-                    escaped: true,
+                    context: CharacterReferences::Attribute,
                 });
             }
-            Ok(())
-        }))
-        .append_element_content_handler(text!("style", |chunk| {
-            let range = chunk.source_location().bytes();
-            if html.get(range.clone()) != Some(chunk.as_str()) {
-                return Err("style text does not match its source position".into());
-            }
-            let mut pending = style.borrow_mut();
-            let (span, _) = pending.get_or_insert_with(|| {
-                (
-                    range.clone(),
-                    !matches!(chunk.text_type(), TextType::RawText | TextType::PlainText),
-                )
-            });
-            span.end = span.end.max(range.end);
-            if chunk.last_in_text_node()
-                && let Some((range, escaped)) = pending.take()
-                && !range.is_empty()
-            {
-                sites.borrow_mut().push(Site {
-                    kind: SiteKind::StyleElement,
-                    range,
-                    escaped,
+            if element.tag_name() == "style" && element.can_have_content() {
+                let index = styles.borrow().len();
+                styles.borrow_mut().push(StyleSpan {
+                    range: element.source_location().bytes().end..html.len(),
+                    foreign: element.namespace_uri() != "http://www.w3.org/1999/xhtml",
+                    closed: false,
                 });
+                let styles = Rc::clone(&styles);
+                element.on_end_tag(end_tag!(move |end| {
+                    let mut styles = styles.borrow_mut();
+                    styles[index].range.end = end.source_location().bytes().start;
+                    styles[index].closed = true;
+                    Ok(())
+                }))?;
             }
             Ok(())
         }));
@@ -201,7 +212,46 @@ fn locate(html: &str) -> Result<Vec<Site>, String> {
         .write(html.as_bytes())
         .and_then(|()| rewriter.end())
         .map_err(|error| error.to_string())?;
-    Ok(sites.into_inner())
+    let mut sites = sites.into_inner();
+    let mut unsupported = Vec::new();
+    for style in styles.borrow().iter() {
+        let raw = html
+            .get(style.range.clone())
+            .ok_or("style content does not match its source position")?;
+        if style.foreign && (!style.closed || raw.contains('<')) {
+            unsupported.push(format!(
+                "foreign <style> content at byte {}: {}",
+                style.range.start,
+                if !style.closed {
+                    "no explicit closing tag"
+                } else {
+                    "literal '<' (CDATA, comments or child markup are not supported)"
+                }
+            ));
+            continue;
+        }
+        sites.push(Site {
+            kind: SiteKind::StyleElement,
+            range: style.range.clone(),
+            context: if style.foreign {
+                CharacterReferences::Text
+            } else {
+                CharacterReferences::Literal
+            },
+        });
+    }
+    if !unsupported.is_empty() {
+        let mut error = String::from("HTML was not captured: unsupported style content:");
+        for reason in unsupported.iter().take(MAX_LISTED) {
+            error.push_str(&format!("\n- {reason}"));
+        }
+        if unsupported.len() > MAX_LISTED {
+            error.push_str(&format!("\n- and {} more", unsupported.len() - MAX_LISTED));
+        }
+        error.push_str("\nUse plain CSS text in foreign style elements, or move the CSS to an HTML <style> element.");
+        return Err(error);
+    }
+    Ok(sites)
 }
 
 /// A reference to a local file and the bytes of the document it replaces.
@@ -228,7 +278,7 @@ impl Reference {
 fn references(html: &str, sites: &[Site]) -> Result<Vec<Reference>, String> {
     let mut found = Vec::new();
     for site in sites {
-        let value = Decoded::new(&html[site.range.clone()], site.escaped);
+        let value = Decoded::new(&html[site.range.clone()], site.context);
         if site.kind == SiteKind::ImageSource {
             let url = browser_url(&value.text);
             if is_local(&url) {
@@ -437,8 +487,8 @@ struct Decoded<'a> {
 }
 
 impl<'a> Decoded<'a> {
-    fn new(raw: &'a str, escaped: bool) -> Self {
-        if !escaped || !raw.contains('&') {
+    fn new(raw: &'a str, context: CharacterReferences) -> Self {
+        if context == CharacterReferences::Literal || !raw.contains('&') {
             return Self {
                 text: Cow::Borrowed(raw),
                 offsets: None,
@@ -449,7 +499,7 @@ impl<'a> Decoded<'a> {
         let mut index = 0;
         while let Some(next) = raw[index..].chars().next() {
             let (decoded, len) = if next == '&' {
-                char_reference(&raw[index + 1..])
+                char_reference(&raw[index + 1..], context)
                     .map_or((['&', '\0'], 1), |(chars, len)| (chars, len + 1))
             } else {
                 ([next, '\0'], next.len_utf8())
@@ -478,9 +528,9 @@ impl<'a> Decoded<'a> {
     }
 }
 
-/// WHATWG character references in attribute context, including the longest
-/// legacy name, its ambiguous-ampersand exception, and two-codepoint results.
-fn char_reference(rest: &str) -> Option<([char; 2], usize)> {
+/// WHATWG character references in attribute or Data/RCDATA context, including
+/// the longest legacy name, attribute-only exception and two-codepoint results.
+fn char_reference(rest: &str, context: CharacterReferences) -> Option<([char; 2], usize)> {
     if let Some(number) = rest.strip_prefix('#') {
         let (radix, start) = match number.as_bytes().first() {
             Some(b'x' | b'X') => (16, 2),
@@ -526,7 +576,8 @@ fn char_reference(rest: &str) -> Option<([char; 2], usize)> {
         }
     }
     let (chars, len) = longest?;
-    if !rest[..len].ends_with(';')
+    if context == CharacterReferences::Attribute
+        && !rest[..len].ends_with(';')
         && rest
             .as_bytes()
             .get(len)

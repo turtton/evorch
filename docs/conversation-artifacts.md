@@ -60,6 +60,14 @@ references by path ([ADR 0038](../intents/evorch/decisions/0038-image-generation
   table (including legacy names), and CSS uses tokenization for escaped `url`
   names, strings and comments. CSS nested more than 128 blocks/functions is
   rejected rather than leaving deep references unresolved.
+- HTML `<style>` text is literal; plain SVG/MathML `<style>` text decodes
+  character references in Data context (legacy-name exceptions apply only to
+  attribute values). CSS is parsed over the whole style element with source
+  offsets preserved. Foreign style elements containing a literal `<` (including
+  CDATA, comments, child markup, or even `<` in a CSS string), or lacking an
+  explicit closing tag, are conservatively refused. The error lists the first
+  eight unsupported style positions/reasons and counts the rest; nothing is
+  stored. Use plain text there or move the CSS to an HTML `<style>` element.
 - References with a scheme (`http:`, `https:`, `data:`, `file:`, `blob:`, …), a
   host (`//host/…`), only a fragment (`#id`) or no value are kept as written.
   Comments, strings and raw text such as `<script>`, `<textarea>` and

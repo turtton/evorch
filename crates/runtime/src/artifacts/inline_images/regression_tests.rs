@@ -263,8 +263,14 @@ fn every_whatwg_named_entity_and_legacy_exception_is_decoded() {
             expected.push(char::from_u32(second).unwrap());
         }
         let raw = format!("&{name}.png");
-        let decoded = Decoded::new(&raw, true);
+        let decoded = Decoded::new(&raw, CharacterReferences::Attribute);
         assert_eq!(decoded.text, format!("{expected}.png"), "{name}");
+        assert_eq!(
+            Decoded::new(&raw, CharacterReferences::Text).text,
+            format!("{expected}.png"),
+            "{name} in Data/RCDATA"
+        );
+        assert_eq!(Decoded::new(&raw, CharacterReferences::Literal).text, raw);
         assert_eq!(
             &raw[decoded.raw_range(0..expected.len())],
             format!("&{name}")
@@ -272,13 +278,26 @@ fn every_whatwg_named_entity_and_legacy_exception_is_decoded() {
         if !name.ends_with(';') {
             for suffix in ["a", "=", "0"] {
                 let raw = format!("&{name}{suffix}");
-                assert_eq!(Decoded::new(&raw, true).text, raw, "{name}");
+                assert_eq!(
+                    Decoded::new(&raw, CharacterReferences::Attribute).text,
+                    raw,
+                    "{name}"
+                );
+                assert_eq!(
+                    Decoded::new(&raw, CharacterReferences::Text).text,
+                    format!("{expected}{suffix}"),
+                    "{name} in Data/RCDATA"
+                );
             }
         }
     }
     assert_eq!(count, 2231);
     assert_eq!(
-        Decoded::new("&#128;&#x80;&#0;&#xD800;&#999999999999999999;", true).text,
+        Decoded::new(
+            "&#128;&#x80;&#0;&#xD800;&#999999999999999999;",
+            CharacterReferences::Attribute,
+        )
+        .text,
         "€€���"
     );
 }
