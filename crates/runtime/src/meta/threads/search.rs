@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use storage::threads::{MAX_THREAD_PAGE, ThreadCursor, ThreadRow};
+use storage::threads::{ThreadCursor, ThreadRow};
 
 use super::normalize::UNTRUSTED_NOTE;
 use super::{
@@ -17,8 +17,6 @@ const MAX_LIMIT: usize = 20;
 const MAX_TERMS: usize = 8;
 /// Candidate threads examined per call; `next_cursor` continues after them.
 const MAX_SCAN: usize = 100;
-/// Project threads gathered for ordering; older ones are not offered.
-const MAX_PROJECT_THREADS: usize = 10 * MAX_THREAD_PAGE;
 const SNIPPET_CHARS: usize = 200;
 const MAX_SNIPPETS: usize = 3;
 const MAX_MATCHED_RUNS: usize = 10;
@@ -142,14 +140,8 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         .transpose()?;
     let kinds: Option<HashSet<SearchKind>> = args.kinds.map(|kinds| kinds.into_iter().collect());
     let wanted = |kind: SearchKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(&kind));
-    let candidates: Vec<ThreadRow> = candidates(scope)?
+    let candidates: Vec<ThreadRow> = candidates(scope, after.as_ref())?
         .into_iter()
-        .filter(|row| {
-            after.as_ref().is_none_or(|after| {
-                (row.updated_at_ns, row.thread_id.as_str())
-                    < (after.updated_at_ns, after.thread_id.as_str())
-            })
-        })
         .filter(|row| {
             args.updated_after
                 .is_none_or(|after| row.updated_at_ns > after)
@@ -261,7 +253,7 @@ fn position(scope: &Scope<'_>, row: &ThreadRow) -> Result<String, String> {
 }
 
 /// Own thread, its recorded lineage and the project's threads, newest first.
-fn candidates(scope: &Scope<'_>) -> Result<Vec<ThreadRow>, String> {
+fn candidates(scope: &Scope<'_>, after: Option<&ThreadCursor>) -> Result<Vec<ThreadRow>, String> {
     let store = scope.store;
     let fail = |_| STORE_ERROR.to_owned();
     let mut rows = Vec::new();
@@ -282,23 +274,25 @@ fn candidates(scope: &Scope<'_>) -> Result<Vec<ThreadRow>, String> {
         rows.push(row);
     }
     if let Some(root) = &scope.caller.project_root {
-        let mut cursor = None;
-        while rows.len() < MAX_PROJECT_THREADS {
-            let page = store
-                .threads_in_project(root, cursor.as_ref(), MAX_THREAD_PAGE)
-                .map_err(fail)?;
-            rows.extend(page.threads);
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
+        // Bound work per invocation, not the total searchable history. One
+        // lookahead candidate distinguishes an exhausted scan from a full page.
+        let page = store
+            .threads_in_project(root, after, MAX_SCAN + 1)
+            .map_err(fail)?;
+        rows.extend(page.threads);
     }
     let mut seen = HashSet::new();
-    rows.retain(|row| seen.insert(row.thread_id.clone()));
+    rows.retain(|row| {
+        seen.insert(row.thread_id.clone())
+            && after.is_none_or(|after| {
+                (row.updated_at_ns, row.thread_id.as_str())
+                    < (after.updated_at_ns, after.thread_id.as_str())
+            })
+    });
     rows.sort_by(|left, right| {
         (right.updated_at_ns, &right.thread_id).cmp(&(left.updated_at_ns, &left.thread_id))
     });
+    rows.truncate(MAX_SCAN + 1);
     Ok(rows)
 }
 

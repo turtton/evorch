@@ -934,6 +934,65 @@ fn search_matches_metadata_only_and_pages_by_cursor() {
 }
 
 #[test]
+fn search_cursors_reach_every_thread_beyond_two_thousand_candidates() {
+    let f = Fixture::new();
+    let own = f.own();
+    let rows: Vec<_> = (0..2105)
+        .map(|n| ThreadUpsert {
+            thread_id: format!("page-{n:04}"),
+            project_root: Some(Fixture::canonical(f.project.path())),
+            title: Some(if n == 0 {
+                "oldest needle".into()
+            } else {
+                "ordinary".into()
+            }),
+            // Equal timestamps also exercise the thread ID tie-breaker.
+            created_at_ns: 2,
+            updated_at_ns: 2,
+            ..Default::default()
+        })
+        .collect();
+    f.store().handle.upsert_threads_host(&rows).unwrap();
+    let mut args = json!({"limit": 20});
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = f.call(own, "thread_search", args.clone()).unwrap();
+        for row in page["threads"].as_array().unwrap() {
+            assert!(seen.insert(row["thread_id"].as_str().unwrap().to_owned()));
+        }
+        if page["next_cursor"].is_null() {
+            break;
+        }
+        assert_ne!(page["next_cursor"], args["cursor"]);
+        args["cursor"] = page["next_cursor"].clone();
+        assert!(seen.len() <= 2106);
+    }
+    assert_eq!(seen.len(), 2106);
+    assert!(seen.contains("page-0000") && seen.contains("own"));
+    let mut args = json!({"query": "oldest needle", "match": "phrase", "kinds": ["title"]});
+    let mut found = false;
+    let mut exhausted = false;
+    for _ in 0..30 {
+        let page = f.call(own, "thread_search", args.clone()).unwrap();
+        found |= page["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["thread_id"] == "page-0000");
+        if page["next_cursor"].is_null() {
+            exhausted = true;
+            break;
+        }
+        assert_ne!(page["next_cursor"], args["cursor"]);
+        args["cursor"] = page["next_cursor"].clone();
+    }
+    assert!(
+        found && exhausted,
+        "bounded scans must cover the whole project"
+    );
+}
+
+#[test]
 fn a_thread_less_cli_caller_sees_only_its_project() {
     let f = Fixture::new();
     f.thread("inside", Some(f.project.path()), "run-1000", |_| {});
