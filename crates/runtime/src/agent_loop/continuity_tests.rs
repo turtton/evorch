@@ -4,7 +4,7 @@ use crate::restore::{RestoredState, RunRestoreDescriptor};
 use providers::{Message, Role as MessageRole};
 use serde_json::json;
 
-fn stored_fixture() -> (
+async fn stored_fixture() -> (
     tempfile::TempDir,
     storage::Storage,
     crate::AgentRuntime,
@@ -17,7 +17,7 @@ fn stored_fixture() -> (
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
     let (_, cancel_rx) = watch::channel(RunInterrupt::None);
-    let (runtime, mut state) = super::delegate_cleanup_tests::fixture(cancel_rx);
+    let (runtime, mut state) = super::delegate_cleanup_tests::started_fixture(cancel_rx).await;
     let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     state.shared.compaction.summarizer = crate::compaction::policy::SummarizerKindSel::Structural;
     state.shared.compaction.keep_recent_tokens = 1;
@@ -36,7 +36,7 @@ fn stored_fixture() -> (
 #[tokio::test]
 async fn prepared_checkpoint_restores_boundary_bookkeeping_and_failed_preparation_changes_nothing()
 {
-    let (dir, storage, runtime, mut state) = stored_fixture();
+    let (dir, storage, runtime, mut state) = stored_fixture().await;
     let run = state.caller_run_id();
     state.told_directories.mentioned = true;
     state
@@ -98,7 +98,7 @@ async fn prepared_checkpoint_restores_boundary_bookkeeping_and_failed_preparatio
 
 #[tokio::test]
 async fn chained_frozen_sources_are_isolated_redacted_and_bounded() {
-    let (_dir, storage, runtime, mut state) = stored_fixture();
+    let (_dir, storage, runtime, mut state) = stored_fixture().await;
     let source = state.caller_run_id();
     let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
     state.context.push_system("hidden system instruction");
@@ -216,7 +216,7 @@ async fn denied(state: &mut LoopState, source: &str) -> String {
 
 #[tokio::test]
 async fn source_handles_gate_reads_and_note_or_history_never_add_review_evidence() {
-    let (_dir, storage, runtime, mut state) = stored_fixture();
+    let (_dir, storage, runtime, mut state) = stored_fixture().await;
     let run = state.caller_run_id();
     let before = runtime
         .shared
@@ -278,7 +278,7 @@ async fn source_handles_gate_reads_and_note_or_history_never_add_review_evidence
 
 #[tokio::test]
 async fn seed_write_failure_does_not_publish_or_spawn_a_receiver() {
-    let (dir, _storage, runtime, state) = stored_fixture();
+    let (dir, _storage, runtime, state) = stored_fixture().await;
     let source = state.caller_run_id();
     let frozen = state
         .continuity
@@ -319,7 +319,7 @@ async fn checkpoint_preflight_observes_stop_and_cancel_before_finalization_drain
         (RunInterrupt::Stop, AgentRunPhase::Stopped),
         (RunInterrupt::Cancel, AgentRunPhase::Error),
     ] {
-        let (dir, _storage, runtime, mut state) = stored_fixture();
+        let (dir, _storage, runtime, mut state) = stored_fixture().await;
         let run = state.caller_run_id();
         state.transition(AgentRunPhase::Running, None).unwrap();
         let (cancel, cancel_rx) = watch::channel(RunInterrupt::None);
