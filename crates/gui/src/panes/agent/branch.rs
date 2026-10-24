@@ -139,7 +139,12 @@ pub(super) fn edit_row(
         return;
     };
     let versions = workspace_ui::point_versions(branch.threads, &branch.thread.id, point.as_ref());
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    // One row tall: a centered horizontal layout grows each widget to the
+    // height it is given, and `with_layout` would give it the rest of the
+    // scroll viewport, pushing the transcript below the first message down.
+    let row = egui::vec2(ui.available_width(), ACTION_SIDE);
+    let layout = egui::Layout::right_to_left(egui::Align::Center);
+    ui.allocate_ui_with_layout(row, layout, |ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
         // Laid out right to left: the switcher sits at the far right.
         if let Some(current) = version_position(branch, &versions) {
