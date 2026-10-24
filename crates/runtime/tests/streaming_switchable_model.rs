@@ -79,6 +79,7 @@ profile = "local"
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .expect("routed model");
     let switchable: Arc<dyn AgentModel> = Arc::new(SwitchableModel::new(Arc::clone(&routed)));

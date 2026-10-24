@@ -61,6 +61,7 @@ impl Tool for GatedShell {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_publication_waits_for_drain_and_same_id_continuation_keeps_new_context_and_job() {
+    test_support::isolated_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("history.db"),
@@ -167,6 +168,7 @@ async fn terminal_publication_waits_for_drain_and_same_id_continuation_keeps_new
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_durable_uncertainty() {
+    test_support::isolated_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("history.db"),
@@ -228,6 +230,7 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_terminal_snapshot_keeps_unobserved_handles_and_prior_uncertainty() {
+    test_support::isolated_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("history.db"),
@@ -271,6 +274,7 @@ async fn failed_terminal_snapshot_keeps_unobserved_handles_and_prior_uncertainty
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_job_allows_mutation_reads_and_all_continuations() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let (started, _draining) = mpsc::unbounded_channel();
@@ -381,6 +385,7 @@ fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
+    test_support::isolated_state_dir();
     use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
     for mode in ["absent", "failed"] {
         let dir = tempfile::tempdir().unwrap();
@@ -460,6 +465,7 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_store_rejecting_assistant_reference_is_fatal_in_round_and_finalize() {
+    test_support::isolated_state_dir();
     for path in ["round", "finalize"] {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {

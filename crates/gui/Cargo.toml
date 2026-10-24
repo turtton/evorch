@@ -66,6 +66,7 @@ workspace-ui = { path = "../workspace-ui" }
 notify-rust = "4"
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 tools = { path = "../tools" }

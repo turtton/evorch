@@ -238,7 +238,9 @@
             cp -r include $out/
             rm $out/chrome-sandbox
             find $out/locales -name '*.pak' ! -name en-US.pak ! -name ja.pak -delete
-            $STRIP --strip-debug $out/libcef.so
+            # The package links these files rather than copying them under
+            # libexec, so its strip pass no longer reaches them.
+            $STRIP --strip-debug $out/libcef.so $out/libvk_swiftshader.so $out/libvulkan.so.1
             cat > $out/archive.json <<EOF
             {"type":"minimal","name":"${cefArchive}","sha1":"15c91ad767097217b2e82ba8b933fe30b134be69"}
             EOF
@@ -257,22 +259,40 @@
         # No derivation runs the CEF tests, so dev-dependencies are not cached.
         cefCargoArtifacts = craneLib.buildDepsOnly (cefArgs // depsOnlyArgs // {
           doCheck = false;
+          # cef-dll-sys copies the CEF runtime (~0.5 GB, libcef.so alone 444 MB)
+          # beside the binaries for `cargo run`. Linking reads libcef.so from
+          # CEF_PATH and the package links cefDist, so the copy only bloated the
+          # archive CI pushes to attic.
+          postBuild = ''
+            for entry in ${cefDist}/* ${cefDist}/locales/*; do
+              copy="''${CARGO_TARGET_DIR:-target}/release/''${entry#${cefDist}/}"
+              if [ -f "$entry" ] && [ -f "$copy" ]; then rm "$copy"; fi
+            done
+          '';
         });
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
           cargoArtifacts = cefCargoArtifacts;
           cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
           doCheck = false;
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
-          # CEF resolves its paks, locales and the helper beside the executable,
-          # so everything shares one libexec directory behind the wrapper.
+          # The GUI starts the helper beside its executable and CEF reads its
+          # paks and locales beside libcef.so, so everything shares one libexec
+          # directory behind the wrapper. The CEF files are symlinks into
+          # cefDist rather than copies: the 0.5 GB distribution stays one store
+          # path that attic receives once per CEF version instead of inside
+          # every build of this package. autoPatchelf resolves the libcef.so
+          # link, so both binaries load libcef.so and its resources from cefDist.
           postInstall = ''
             app=$out/libexec/evorch-gui-cef
             mkdir -p $app
             mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $app/
             rm -rf $out/bin
-            cp -r ${cefDist}/. $app/
-            chmod -R u+w $app
-            rm -rf $app/include $app/archive.json
+            for entry in ${cefDist}/*; do
+              case "''${entry##*/}" in
+                include | archive.json) ;;
+                *) ln -s "$entry" $app/ ;;
+              esac
+            done
             # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
@@ -281,6 +301,8 @@
           doInstallCheck = true;
           installCheckPhase = ''
             runHook preInstallCheck
+            # Every CEF symlink must resolve into cefDist.
+            test -z "$(find "$out/libexec/evorch-gui-cef" -xtype l)"
             for binary in evorch-gui evorch-cef-helper libcef.so; do
               env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
                 "$out/libexec/evorch-gui-cef/$binary" > /dev/null
@@ -304,6 +326,21 @@
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
         '';
         defaultPackage = if isCefSystem then evorch-with-cef else evorch;
+        # The client CI pushes to attic with. attic builds its HTTP client with
+        # reqwest 0.13, whose Linux default TCP_USER_TIMEOUT is 30 s, so the
+        # kernel drops an upload as soon as atticd leaves the body unread for
+        # 30 s while it stores earlier chunks: every failed main push ended in
+        # "Connection timed out (os error 110)" that way. Five minutes rides out
+        # those stalls and still ends an upload whose peer is gone. attic offers
+        # no setting for it, and --replace-fail stops the build once upstream
+        # changes this builder. reqwest has the option on Linux only.
+        atticClient = pkgs.attic-client.overrideAttrs (old: {
+          postPatch = (old.postPatch or "") + ''
+            substituteInPlace client/src/api/mod.rs --replace-fail \
+              '.default_headers(headers)' \
+              '.default_headers(headers).tcp_user_timeout(std::time::Duration::from_secs(300))'
+          '';
+        });
         devShell = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
@@ -343,6 +380,9 @@
           # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
           # バイナリとセットで push することで次回 run の deps build を skip させる。
           evorch-deps = cargoArtifacts;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # CI only: the attic client for the push step (see atticClient).
+          attic-client = atticClient;
         } // pkgs.lib.optionalAttrs isCefSystem {
           inherit evorch-gui-cef evorch-with-cef cefDist;
           # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.

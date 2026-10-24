@@ -35,6 +35,7 @@ default_model = "fast"
     let mut load_options = load_options(root);
     configure(&mut load_options);
     let context = gui::model::production::ProductionModel {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         load_options,
         credential_store: Arc::new(
             sandbox::credential::FileCredentialStore::open(root.join("credentials"))

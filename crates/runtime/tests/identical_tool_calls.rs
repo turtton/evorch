@@ -15,6 +15,7 @@ async fn run_script(
     let dir = tempfile::tempdir().unwrap();
     let model = Arc::new(ScriptedModel::new(script.into_iter().map(Ok)));
     let composed = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(tools::ToolExecutor::with_standard_tools(

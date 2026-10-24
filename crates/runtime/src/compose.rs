@@ -75,6 +75,9 @@ pub struct RuntimeComposition<'a> {
     pub config: &'a config::Config,
     /// 明示指定がなければ標準のユーザ config ディレクトリを遅延解決する。
     pub user_config_dir: Option<PathBuf>,
+    /// models.dev カタログのキャッシュディレクトリ。明示指定がなければ
+    /// [`catalog::default_cache_dir`] を遅延解決する。
+    pub model_catalog_dir: Option<PathBuf>,
     pub bus: Arc<EventBus>,
     pub executor: Arc<ToolExecutor>,
     pub credential_store: Arc<dyn CredentialStore>,
@@ -159,6 +162,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                         ..Default::default()
                     },
                 },
+                input.model_catalog_dir.clone(),
             )?;
             let profiles = model.providers.keys().cloned().collect();
             let selected = routed_roles()
@@ -171,9 +175,11 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             }
         }
     };
-    let runtime = composed
-        .runtime
-        .with_model_resolution(input.config, Some(input.credential_store));
+    let runtime = composed.runtime.with_model_resolution(
+        input.config,
+        Some(input.credential_store),
+        input.model_catalog_dir,
+    );
     let runtime = runtime.with_project_rules(Arc::new(RulesSource::new(
         ProjectTrust::Unapproved,
         RulesSettings::from(&input.config.rules),
@@ -239,6 +245,8 @@ pub struct RoutedModel {
     provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
     image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
     metadata_catalog: tokio::sync::OnceCell<Option<catalog::ModelCatalog>>,
+    /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
+    metadata_catalog_dir: Option<PathBuf>,
     model_presets: BTreeMap<String, config::ModelPresetConfig>,
 }
 
@@ -292,6 +300,7 @@ impl RoutedModel {
             provider_configs: BTreeMap::new(),
             image_input: tokio::sync::OnceCell::new(),
             metadata_catalog: tokio::sync::OnceCell::new(),
+            metadata_catalog_dir: None,
             model_presets: BTreeMap::new(),
         }
     }
@@ -1341,9 +1350,12 @@ fn configured_windows(config: &config::Config) -> BTreeMap<String, u64> {
     windows
 }
 
+/// Builds the routed model. `model_catalog_dir` locates the models.dev cache;
+/// `None` uses [`catalog::default_cache_dir`].
 pub fn compose_routed_model(
     config: &config::Config,
     deps: ComposeDeps,
+    model_catalog_dir: Option<PathBuf>,
 ) -> Result<Arc<RoutedModel>, CompositionError> {
     let event_bus = deps.event_bus.clone();
     let composed = routing::compose_providers(config, deps).map_err(|error| match error {
@@ -1381,6 +1393,7 @@ pub fn compose_routed_model(
     model.configured_windows = configured_windows(config);
     model.provider_configs = config.providers.clone();
     model.model_presets = config.model_presets.clone();
+    model.metadata_catalog_dir = model_catalog_dir;
     model.event_bus = event_bus;
     Ok(Arc::new(model))
 }

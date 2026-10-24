@@ -122,6 +122,7 @@ fn assert_pid_reaped(pid: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn yielded_job_allows_reads_and_same_run_mutation_while_it_runs() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -199,6 +200,7 @@ async fn yielded_job_allows_reads_and_same_run_mutation_while_it_runs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_job_does_not_block_mutations_of_another_run_in_the_same_workspace() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -246,6 +248,7 @@ async fn running_job_does_not_block_mutations_of_another_run_in_the_same_workspa
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -293,6 +296,7 @@ async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_reaps_job_and_preserves_uncertain_effects_in_storage() {
+    test_support::isolated_state_dir();
     let (temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -364,6 +368,7 @@ async fn cancellation_reaps_job_and_preserves_uncertain_effects_in_storage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -403,6 +408,7 @@ async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     let bus = Arc::new(EventBus::new(256));
     let executor = executor(&bus, &root);
@@ -476,6 +482,7 @@ async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop() {
+    test_support::isolated_state_dir();
     let (_temp, root) = init_git_repo();
     // A FIFO releases the real child without polling the filesystem or relying
     // on elapsed time. Job completion itself is awaited through its watch.

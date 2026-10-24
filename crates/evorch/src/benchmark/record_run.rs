@@ -22,9 +22,18 @@ pub async fn record(
     user_config_dir: Option<PathBuf>,
     env: Arc<dyn EnvLookup>,
     sandbox: SandboxChoice,
+    model_catalog_dir: Option<PathBuf>,
 ) -> BenchmarkResult<Baseline> {
     let existed = output.exists();
-    let result = record_inner(spec_path, output, user_config_dir, env, sandbox).await;
+    let result = record_inner(
+        spec_path,
+        output,
+        user_config_dir,
+        env,
+        sandbox,
+        model_catalog_dir,
+    )
+    .await;
     if !existed
         && output.is_dir()
         && let Err(error) = &result
@@ -43,6 +52,7 @@ async fn record_inner(
     user_config_dir: Option<PathBuf>,
     env: Arc<dyn EnvLookup>,
     sandbox: SandboxChoice,
+    model_catalog_dir: Option<PathBuf>,
 ) -> BenchmarkResult<Baseline> {
     let spec = TaskSpec::load(spec_path)?;
     let user_config_dir = user_config_dir
@@ -100,6 +110,7 @@ async fn record_inner(
     let session = compose(
         &workspace,
         user_config_dir.clone(),
+        model_catalog_dir,
         env,
         sandbox,
         Role::Orchestrator,

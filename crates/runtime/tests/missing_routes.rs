@@ -85,8 +85,12 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
                 }],
             );
         }
-        let model = compose_routed_model(&config, deps(&directory))
-            .expect("missing routes must not block startup");
+        let model = compose_routed_model(
+            &config,
+            deps(&directory),
+            Some(test_support::model_catalog_dir()),
+        )
+        .expect("missing routes must not block startup");
         assert_eq!(
             model.selected_model(Role::Worker, None),
             "unresolved:coding"
@@ -122,7 +126,12 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
 async fn admission_reports_the_missing_logical_route_and_invocation_context() {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn(vec![]);
-    let model = compose_routed_model(&configured(&mock), deps(&directory)).unwrap();
+    let model = compose_routed_model(
+        &configured(&mock),
+        deps(&directory),
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
     for category in [None, Some("quick")] {
         let error = model
             .admit(
@@ -159,7 +168,12 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
             auto: false,
         }],
     );
-    let model = compose_routed_model(&config, deps(&directory)).unwrap();
+    let model = compose_routed_model(
+        &config,
+        deps(&directory),
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
     for category in [None, Some("quick")] {
         // When: completion attempts to resolve the configured route.
         let error = model
@@ -211,7 +225,12 @@ async fn explicit_model_preference_remains_authoritative_without_routes() {
         "gpt-4o",
         ["done"],
     )]);
-    let model = compose_routed_model(&configured(&mock), deps(&directory)).unwrap();
+    let model = compose_routed_model(
+        &configured(&mock),
+        deps(&directory),
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
     model
         .complete(
             &AgentInvocationContext {

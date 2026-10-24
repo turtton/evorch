@@ -149,6 +149,7 @@ summarizer = "structural"
     executor.register(read.clone()).unwrap();
     let (factory, _) = support::recording_factory();
     let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(user_config),
         config: &config,
         bus,
