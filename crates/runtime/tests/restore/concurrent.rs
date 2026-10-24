@@ -77,7 +77,7 @@ async fn second_send_after_restored_model_starts_delivers_both_turns() {
     terminal(&runtime, child).await;
     observed.recv().await.unwrap();
     release.send_replace(false);
-    runtime
+    let first = runtime
         .send_agent_message(parent, child, AgentMessageKind::Send, "turn-0", None)
         .unwrap();
     timeout(Duration::from_secs(5), observed.recv())
@@ -86,7 +86,7 @@ async fn second_send_after_restored_model_starts_delivers_both_turns() {
         .unwrap();
 
     // When: the second send arrives after the first model input is fixed.
-    runtime
+    let second_id = runtime
         .send_agent_message(parent, child, AgentMessageKind::Send, "turn-1", None)
         .unwrap();
     release.send_replace(true);
@@ -97,7 +97,7 @@ async fn second_send_after_restored_model_starts_delivers_both_turns() {
         .unwrap()
         .unwrap();
     assert_eq!(second.last().unwrap().role, providers::Role::User);
-    for (id, turn) in [("msg-1", "turn-0"), ("msg-2", "turn-1")] {
+    for (id, turn) in [(first.as_str(), "turn-0"), (second_id.as_str(), "turn-1")] {
         assert_eq!(
             second
                 .iter()
@@ -155,8 +155,9 @@ async fn concurrent_sends_restore_once_and_deliver_both_turns() {
         ids.push(job.await.unwrap().unwrap());
     }
     ids.sort();
+    ids.dedup();
     // Then: exactly one restore owns the first message, with the second queued live.
-    assert_eq!(ids, ["msg-1", "msg-2"]);
+    assert_eq!(ids.len(), 2, "each send gets its own message ID");
     let mut restores = 0;
     let mut deliveries = 0;
     timeout(Duration::from_secs(5), async {

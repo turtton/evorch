@@ -204,6 +204,8 @@ async fn full_history_restore_does_not_replay_working_notes() {
         Ok(text_response("done", FinishReason::Stop)),
         Ok(text_response("sender", FinishReason::Stop)),
         Ok(text_response("restored", FinishReason::Stop)),
+        // The sender's completion report, held while the run was finished.
+        Ok(text_response("report handled", FinishReason::Stop)),
     ]));
     let (runtime, _) = runtime_with(Arc::clone(&model));
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());

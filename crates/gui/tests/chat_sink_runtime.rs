@@ -398,6 +398,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     thread_id: "conversation".into(),
                     composer_role: next_composer,
                     model_preference: None,
+                    automatic: false,
                 })
             } else {
                 WorkbenchCommand::SendChat(ChatSubmission {

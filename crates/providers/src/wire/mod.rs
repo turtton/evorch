@@ -3,3 +3,4 @@
 pub mod anthropic;
 pub mod codex;
 pub mod openai;
+pub mod responses;

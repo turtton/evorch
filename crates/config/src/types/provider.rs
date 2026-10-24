@@ -628,6 +628,21 @@ pub const CODEX_DEFAULT_MODEL: &str = "gpt-6-astra";
 /// 画像生成の実装と共有する一覧なので、名前はここだけで管理する。
 pub const CODEX_IMAGE_MODELS: &[&str] = &["gpt-image-2"];
 
+/// OpenAI API (Responses) の既定ベース URL。
+pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// OpenAI API プロファイルの既定モデル一覧。
+pub const OPENAI_DEFAULT_MODELS: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
+
+/// OpenAI API プロファイルで既定選択するモデル。
+pub const OPENAI_DEFAULT_MODEL: &str = "gpt-6-astra";
+
 /// Kimi For Coding (サブスクリプション) の既定ベース URL。
 pub const KIMI_DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
 
@@ -730,11 +745,19 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
         }
         let credential = match value.api_key_env {
             Some(var) => CredentialRefConfig::Env { var },
-            None => value.credential.unwrap_or_default(),
+            None => value
+                .credential
+                .unwrap_or_else(|| match value.provider_type {
+                    ProviderTypeConfig::OpenAi => CredentialRefConfig::Env {
+                        var: "OPENAI_API_KEY".to_owned(),
+                    },
+                    _ => CredentialRefConfig::default(),
+                }),
         };
-        // api_protocol が省略された場合のみ、openai-compatible の既定プロトコル
-        // (openai-completions) を適用する。明示指定は常に優先される。
+        // api_protocol が省略された場合のみ、種別ごとの既定プロトコルを適用する。
+        // 明示指定は常に優先される。
         let api_protocol = value.api_protocol.unwrap_or(match value.provider_type {
+            ProviderTypeConfig::OpenAi => ApiProtocolConfig::OpenAiResponses,
             ProviderTypeConfig::OpenAiCompatible | ProviderTypeConfig::KimiSubscription => {
                 ApiProtocolConfig::OpenAiCompletions
             }
@@ -742,12 +765,12 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             _ => ApiProtocolConfig::default(),
         });
         let (default_models, default_model): (&[&str], &str) = match value.provider_type {
+            ProviderTypeConfig::OpenAi => (OPENAI_DEFAULT_MODELS, OPENAI_DEFAULT_MODEL),
             ProviderTypeConfig::OpenAiCodex => (CODEX_DEFAULT_MODELS, CODEX_DEFAULT_MODEL),
             ProviderTypeConfig::KimiSubscription => (KIMI_DEFAULT_MODELS, KIMI_DEFAULT_MODEL),
             ProviderTypeConfig::Cursor => (CURSOR_DEFAULT_MODELS, CURSOR_DEFAULT_MODEL),
             ProviderTypeConfig::Anthropic
             | ProviderTypeConfig::AnthropicSubscription
-            | ProviderTypeConfig::OpenAi
             | ProviderTypeConfig::GithubCopilot
             | ProviderTypeConfig::Openrouter
             | ProviderTypeConfig::OpenAiCompatible => (&["claude-sonnet-4-5"], "claude-sonnet-4-5"),
@@ -767,6 +790,7 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             value.default_model
         };
         let base_url = value.base_url.unwrap_or_else(|| match value.provider_type {
+            ProviderTypeConfig::OpenAi => OPENAI_DEFAULT_BASE_URL.to_owned(),
             ProviderTypeConfig::KimiSubscription => KIMI_DEFAULT_BASE_URL.to_owned(),
             ProviderTypeConfig::Cursor => CURSOR_DEFAULT_BASE_URL.to_owned(),
             _ => "https://api.anthropic.com".to_owned(),
@@ -1194,6 +1218,102 @@ default_model = "local-model"
             toml::from_str(doc).expect("明示 protocol 付き sugar 形式を解析できる");
 
         assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiResponses);
+    }
+
+    // Given: openai の sugar 形式 (type + api_key_env) で他フィールド省略 / When: パースする
+    // Then: Responses protocol・公式 base URL・OpenAI 既定モデルが補完され、
+    //       api_key_env が env credential へ正規化される
+    #[test]
+    fn provider_profile_openai_sugar_applies_responses_defaults() {
+        let doc = r#"
+type = "openai"
+api_key_env = "OPENAI_API_KEY"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("openai の sugar 形式を解析できる");
+
+        assert_eq!(profile.provider_type, ProviderTypeConfig::OpenAi);
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiResponses);
+        assert_eq!(profile.base_url, "https://api.openai.com/v1");
+        assert_eq!(profile.base_url, OPENAI_DEFAULT_BASE_URL);
+        assert_eq!(
+            profile.credential,
+            CredentialRefConfig::Env {
+                var: "OPENAI_API_KEY".to_string()
+            }
+        );
+        assert_eq!(
+            profile.models,
+            OPENAI_DEFAULT_MODELS
+                .iter()
+                .copied()
+                .map(ModelEntryConfig::enabled)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(profile.default_model, OPENAI_DEFAULT_MODEL);
+    }
+
+    // Given: openai で credential と api_key_env を両方省略 / When: パースする
+    // Then: OPENAI_API_KEY 環境変数参照が既定になる (ANTHROPIC_API_KEY ではない)
+    #[test]
+    fn provider_profile_openai_without_credential_defaults_to_openai_api_key_env() {
+        let profile: ProviderProfileConfig =
+            toml::from_str("type = \"openai\"").expect("openai の最小構成を解析できる");
+
+        assert_eq!(
+            profile.credential,
+            CredentialRefConfig::Env {
+                var: "OPENAI_API_KEY".to_string()
+            }
+        );
+    }
+
+    // Given: openai で api_protocol・base_url・credential・models を明示 / When: パースする
+    // Then: 種別既定より明示指定が優先される
+    #[test]
+    fn provider_profile_openai_explicit_fields_win_over_defaults() {
+        let doc = r#"
+type = "openai"
+api_protocol = "openai-completions"
+base_url = "https://proxy.example.test/v1"
+credential = { type = "keyring", service = "evorch", account = "openai-main" }
+models = ["custom-model"]
+default_model = "custom-model"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("明示指定付き openai を解析できる");
+
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiCompletions);
+        assert_eq!(profile.base_url, "https://proxy.example.test/v1");
+        assert_eq!(
+            profile.credential,
+            CredentialRefConfig::Keyring {
+                service: "evorch".to_string(),
+                account: "openai-main".to_string()
+            }
+        );
+        assert_eq!(profile.models, ["custom-model"]);
+        assert_eq!(profile.default_model, "custom-model");
+    }
+
+    // Given: openai 以外の種別で credential 省略 / When: パースする
+    // Then: 従来どおり ANTHROPIC_API_KEY 環境変数参照が既定のまま
+    #[test]
+    fn provider_profile_non_openai_keeps_default_credential() {
+        for provider_type in ["anthropic", "openrouter", "openai-compatible"] {
+            let doc = format!("type = \"{provider_type}\"");
+
+            let profile: ProviderProfileConfig =
+                toml::from_str(&doc).expect("最小構成を解析できる");
+
+            assert_eq!(
+                profile.credential,
+                CredentialRefConfig::default(),
+                "{provider_type} の既定 credential は変わらない"
+            );
+        }
     }
 
     // Given: api_key_env と credential の併用 / When: パースする

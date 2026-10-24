@@ -380,22 +380,24 @@ fn delta(run: &str, reasoning: bool, chars: usize) -> Event {
 
 #[test]
 fn summarized_reasoning_is_excluded_from_throughput_tokens_and_time() {
-    let mut telemetry = TelemetryOverlay::new();
-    let start = Instant::now();
-    let [started, first_token, mut completed] = protocol_request("run", "openai-codex-responses");
-    telemetry.apply_event_at(&started, start);
-    // The summary streams before the first visible output at 1s.
-    telemetry.apply_event_at(&delta("run", true, 4_000), start);
-    telemetry.apply_event_at(&first_token, start + Duration::from_secs(1));
-    telemetry.apply_event_at(&delta("run", false, 400), start + Duration::from_secs(2));
-    let live = telemetry.thread_metrics_at(&["run".into()], start + Duration::from_secs(2));
-    assert_eq!(live.tok_s, Some(100.0));
+    for protocol in ["openai-codex-responses", "openai-responses"] {
+        let mut telemetry = TelemetryOverlay::new();
+        let start = Instant::now();
+        let [started, first_token, mut completed] = protocol_request("run", protocol);
+        telemetry.apply_event_at(&started, start);
+        // The summary streams before the first visible output at 1s.
+        telemetry.apply_event_at(&delta("run", true, 4_000), start);
+        telemetry.apply_event_at(&first_token, start + Duration::from_secs(1));
+        telemetry.apply_event_at(&delta("run", false, 400), start + Duration::from_secs(2));
+        let live = telemetry.thread_metrics_at(&["run".into()], start + Duration::from_secs(2));
+        assert_eq!(live.tok_s, Some(100.0), "{protocol}");
 
-    complete_with(&mut completed, 1_100, Some(1_000), 3_000);
-    telemetry.apply_event_at(&completed, start + Duration::from_secs(3));
-    let done = telemetry.thread_metrics(&["run".into()]);
-    assert_eq!(done.tok_s, Some(50.0));
-    assert_eq!(done.average_tok_s, Some(50.0));
+        complete_with(&mut completed, 1_100, Some(1_000), 3_000);
+        telemetry.apply_event_at(&completed, start + Duration::from_secs(3));
+        let done = telemetry.thread_metrics(&["run".into()]);
+        assert_eq!(done.tok_s, Some(50.0), "{protocol}");
+        assert_eq!(done.average_tok_s, Some(50.0), "{protocol}");
+    }
 }
 
 #[test]

@@ -54,17 +54,23 @@ impl PromptCache {
     }
 }
 
+/// Canonical settings (Responses `instructions` and `tools` included) followed by one
+/// line per Chat Completions `messages` or Responses `input` item.
 fn prompt_bytes(request: &Value) -> Vec<u8> {
     let mut settings = request.clone();
     if let Some(object) = settings.as_object_mut() {
-        for field in ["messages", "stream", "stream_options"] {
+        for field in ["messages", "input", "stream", "stream_options"] {
             object.remove(field);
         }
     }
     let mut bytes = Vec::new();
     append_json(&settings, &mut bytes);
     bytes.push(b'\n');
-    if let Some(messages) = request.get("messages").and_then(Value::as_array) {
+    let history = request
+        .get("messages")
+        .or_else(|| request.get("input"))
+        .and_then(Value::as_array);
+    if let Some(messages) = history {
         for message in messages {
             append_json(message, &mut bytes);
             bytes.push(b'\n');

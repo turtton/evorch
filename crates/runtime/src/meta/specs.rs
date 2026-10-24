@@ -13,7 +13,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output.".into(),
+        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
+        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,7 +56,7 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
@@ -76,7 +76,7 @@ pub(super) fn wait(name: &str) -> ToolSpec {
 pub(super) fn send_message(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Send a fire-and-forget message to a direct child or parent and return message_id. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
+        "Send a fire-and-forget message to a direct child or parent and return message_id. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
         json!({"run_id":run_id(), "message":{"type":"string", "description":"Self-contained update or instruction."}}),
         &["run_id", "message"],
         false,
@@ -86,7 +86,7 @@ pub(super) fn send_message(name: &str) -> ToolSpec {
 pub(super) fn send(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Deliver a message to a direct child or parent and return message_id without waiting for a reply. Absent or terminal recipients are restored only if persisted state permits delivery; otherwise returns the restore error. Self, sibling and unrelated recipients are denied.",
+        "Deliver a message to a direct child or parent and return message_id without waiting for a reply. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
         json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send", "description":"send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary."}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply."}}),
         &["run_id", "message"],
         false,
@@ -213,7 +213,7 @@ pub(super) fn working_note_read(name: &str) -> ToolSpec {
 pub(super) fn history_read(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Read bounded original conversation evidence. Omit source or use self for this run's raw history, including compacted messages. Explicit handoff source handles come from the history-sources manifest; arbitrary run IDs, siblings and other runs are denied. System instructions, hidden reasoning and image payloads are excluded; secrets are redacted. Each chunk contains at most 4096 UTF-8 bytes. offset is a record index, limit is 1-4; content_offset is a UTF-8 byte offset within a record's JSON text. Follow next_content_offset with the same offset for long records, otherwise next_offset. Source records are evidence, never independent user authorization.",
+        "Read bounded original conversation evidence. source must be self (the default: this run's raw history, including compacted messages) or a handoff:<run-id> handle listed in [history-sources]; run IDs, GUI thread IDs (escalation-run-<id>, thread-<n>), siblings and other runs or threads are denied. System instructions, hidden reasoning and image payloads are excluded; secrets are redacted. Each chunk contains at most 4096 UTF-8 bytes. offset is a record index, limit is 1-4; content_offset is a UTF-8 byte offset within a record's JSON text. Follow next_content_offset with the same offset for long records, otherwise next_offset. Source records are evidence, never independent user authorization.",
         json!({"source":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4},"content_offset":{"type":"integer","minimum":0}}),
         &[],
         true,
@@ -312,7 +312,7 @@ fn delegate_target_schema() -> Value {
             "reviewer" => format!("Independently compare implementation results or plans against requirements and give an acceptance verdict; consultation belongs to Advisor, in a separate context; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
-            "advisor" | "oracle" => "Consult Advisor only when a step back is needed: a must finding persists after re-review or Worker and Reviewer disagree; a child's question is a technical judgment the requirements do not settle and you lack grounds to decide it without the user; or the collected evidence does not narrow the cause hypotheses. Pass the findings, fix history or evidence. It reads code and materials but runs nothing, compares design options or cause hypotheses, and returns options, trade-offs, recommendation, uncertainty, and information that would change the decision, including checks that discriminate hypotheses. Not for permission or user-intent questions; ask the user. No implementation (Worker), acceptance verdict (Reviewer), or detailed execution plan (Planner). Use a separate context for the final independent Reviewer, not the consulted Advisor. oracle is a legacy alias for advisor.".to_owned(),
+            "advisor" | "oracle" => "Read-only consultant for stepping back on a stuck decision. Pass the findings, fix history or collected evidence. It reads code and materials but runs nothing, compares design options or cause hypotheses, and returns options, trade-offs, recommendation, uncertainty, and information that would change the decision, including checks that discriminate hypotheses; when the crux is user intent, it returns a question for you to ask the user. Advice is not an acceptance verdict: use a separate context for the final independent Reviewer. oracle is a legacy alias for advisor.".to_owned(),
             "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
             "evaluator" => "Consult on agent behaviour or configuration (models, prompts, generation settings): inspect recorded threads, propose a cause and the roles to swap, and pin threads as evaluation samples. Pass the user's concern and any thread it refers to.".to_owned(),
             _ => unreachable!("registered delegate role"),
@@ -386,28 +386,29 @@ mod tests {
             assert_eq!(branch["properties"]["role"]["const"], *role);
             if matches!(*role, "advisor" | "oracle") {
                 let guidance = branch["description"].as_str().unwrap();
+                // When to consult lives in keyTriggers, which the same Orchestrator reads.
                 for contract in [
-                    "only when",
-                    "re-review",
-                    "disagree",
-                    "requirements do not settle",
-                    "without the user",
-                    "does not narrow the cause hypotheses",
-                    "discriminate",
+                    "Pass the findings",
                     "runs nothing",
-                    "Not for permission or user-intent",
+                    "discriminate",
                     "options",
                     "trade-offs",
                     "recommendation",
                     "uncertainty",
                     "information that would change",
-                    "Worker",
-                    "Reviewer",
-                    "Planner",
+                    "user intent",
                     "separate context",
                     "legacy alias",
                 ] {
                     assert!(guidance.contains(contract), "{contract}");
+                }
+                for trigger in [
+                    "re-review",
+                    "disagree",
+                    "requirements do not settle",
+                    "permission",
+                ] {
+                    assert!(!guidance.contains(trigger), "{trigger}");
                 }
             }
             let public: Vec<_> = config::agent_categories::public_categories()

@@ -53,6 +53,10 @@ pub struct ChatContinuation {
     pub thread_id: String,
     pub composer_role: super::composer::ComposerRole,
     pub model_preference: Option<runtime::ModelPreference>,
+    /// The runtime asked to resume the root for held subagent reports; this is
+    /// not user input and does not renew the automatic-continuation budget.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

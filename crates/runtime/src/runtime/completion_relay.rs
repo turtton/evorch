@@ -104,11 +104,9 @@ impl AgentRuntime {
         let Some(recipient) = runs.get(&parent) else {
             return;
         };
-        let disposition = match *recipient.phase_rx.borrow() {
-            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => return,
-            AgentRunPhase::Waiting => DeliveryDisposition::Wake,
-            AgentRunPhase::Pending | AgentRunPhase::Running => DeliveryDisposition::Aside,
-        };
+        let parent_phase = *recipient.phase_rx.borrow();
+        let parent_cancelled = matches!(*recipient.cancel_tx.borrow(), RunInterrupt::Cancel)
+            || recipient.terminal_reason.as_deref() == Some(event_bus::CANCELLED_REASON);
         let message = AgentMessage {
             message_id: format!(
                 "msg-{}",
@@ -119,6 +117,22 @@ impl AgentRuntime {
             kind: AgentMessageKind::Send,
             content,
             reply_to: None,
+        };
+        // A finished or stopped parent keeps the report and is woken for it;
+        // a cancelled parent was discarded with its subtree.
+        let hold = |runtime: &Self| {
+            if !parent_cancelled {
+                runtime.hold_message(parent, message.clone());
+                runtime.schedule_wake(parent);
+            }
+        };
+        let disposition = match parent_phase {
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
+                hold(self);
+                return;
+            }
+            AgentRunPhase::Waiting => DeliveryDisposition::Wake,
+            AgentRunPhase::Pending | AgentRunPhase::Running => DeliveryDisposition::Aside,
         };
         match recipient.mailbox.try_push_completion(message.clone()) {
             Ok(()) => {
@@ -143,7 +157,8 @@ impl AgentRuntime {
             Err(PushError::Full) => {
                 tracing::warn!(child = %run_id, %parent, "completion relay dropped: parent mailbox full")
             }
-            Err(PushError::Closed) => {}
+            // The parent is finishing; keep the report for when it continues.
+            Err(PushError::Closed) => hold(self),
         }
     }
 }

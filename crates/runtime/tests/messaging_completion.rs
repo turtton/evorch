@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agents::Role;
 use event_bus::{
-    AgentMessageEvent, AgentMessageKind, AgentRunPhase, Event, EventBus, EventKind, LifecycleEvent,
+    AgentMessageEvent, AgentMessageKind, AgentRunPhase, EventBus, EventKind, LifecycleEvent,
 };
 use providers::FinishReason;
 use runtime::{AgentRuntime, CoordinationTopology, RunConfig, RunId};
@@ -105,8 +105,8 @@ async fn cancelled_child_relays_metadata_only_terminal_notice() {
 }
 
 #[tokio::test]
-async fn relay_skipped_when_parent_terminal_and_never_restored() {
-    // Given: a completed parent remains registered.
+async fn relay_holds_report_for_a_finished_root_and_requests_its_wake() {
+    // Given: a completed root remains registered.
     let (runtime, bus, model) = fixture().await;
     model
         .add_keyed(
@@ -123,27 +123,35 @@ async fn relay_skipped_when_parent_terminal_and_never_restored() {
         .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
         .unwrap();
     assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
-    bus.emit(Event::new(LifecycleEvent::BackgroundTaskCompleted {
-        task_id: "probe-end".into(),
-    }));
-    // Then: a bounded event prefix contains neither delivery nor restoration.
+    // Then: the report is held, not dropped, and the host is asked to resume
+    // the root; the runtime never restores the root on its own.
+    let mut held = false;
     loop {
         let event = receiver.recv().await.unwrap();
         assert!(
-            !matches!(&event.kind, EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) if message.recipient_run_id == parent.to_string())
-        );
-        assert!(
             !matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunRestored { run_id, .. }) if run_id == &parent.to_string())
         );
-        if matches!(event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == "probe-end")
-        {
-            break;
+        match &event.kind {
+            EventKind::AgentMessage(AgentMessageEvent::Delivered {
+                message,
+                disposition,
+            }) if message.recipient_run_id == parent.to_string() => {
+                assert_eq!(*disposition, event_bus::DeliveryDisposition::Held);
+                assert!(message.content.contains("fixed child result"));
+                held = true;
+            }
+            EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id })
+                if run_id == &parent.to_string() =>
+            {
+                assert!(held, "the report is held before the wake is requested");
+                break;
+            }
+            _ => {}
         }
     }
-    let agents = runtime.list_agents();
-    assert_eq!(agents.len(), 2);
     assert_eq!(
-        agents
+        runtime
+            .list_agents()
             .iter()
             .find(|agent| agent.run_id == parent)
             .unwrap()

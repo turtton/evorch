@@ -328,13 +328,13 @@ async fn interruption_during_finalization_prevents_answer_continuation() {
                 .unwrap();
         }
         gate.release.notify_one();
-        assert!(
-            answering
-                .await
-                .unwrap()
-                .unwrap_err()
-                .contains("requires explicit recovery")
-        );
+        let expected = if cancel {
+            runtime::RunRestoreFailure::Cancelled
+        } else {
+            runtime::RunRestoreFailure::StoppedByOperator
+        };
+        let error = answering.await.unwrap().unwrap_err();
+        assert!(error.contains(&expected.to_string()), "{error}");
         fixture.runtime.wait(fixture.child).await.unwrap();
         assert_eq!(fixture.model.observed().await.len(), before);
         fixture.runtime.cancel(fixture.parent).unwrap();
@@ -357,21 +357,6 @@ async fn delayed_parent_answer_resumes_done_child_once_with_saved_history() {
         assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
         let question = runtime.user_answers(child).unwrap().remove(0);
         let before = model.observed().await;
-        if owned {
-            assert!(matches!(
-                runtime.send_agent_message(
-                    parent,
-                    child,
-                    event_bus::AgentMessageKind::Send,
-                    "ordinary delivery",
-                    None
-                ),
-                Err(runtime::RuntimeError::RunRestoreFailed {
-                    reason: runtime::RunRestoreFailure::UnsupportedConfig(_),
-                    ..
-                })
-            ));
-        }
 
         runtime
             .answer_subagent_question(parent, &question.id, "Use A")
@@ -495,57 +480,29 @@ async fn failed_child_restore_reports_error_and_identical_answer_can_retry() {
 }
 
 #[tokio::test]
-async fn stopped_cancelled_and_failed_children_are_not_restarted_by_answers() {
-    for terminal in ["stopped", "cancelled", "failed"] {
+async fn stopped_and_cancelled_children_are_not_restarted_by_answers() {
+    for (stop, expected) in [
+        (true, runtime::RunRestoreFailure::StoppedByOperator),
+        (false, runtime::RunRestoreFailure::Cancelled),
+    ] {
         let fixture = fixture(true, false).await;
-        let mut events = fixture.bus.subscribe();
-        while fixture.runtime.inspect_agent(fixture.child).unwrap().phase != AgentRunPhase::Waiting
-        {
-            events.recv().await.unwrap();
-        }
-        let question = fixture
-            .runtime
-            .user_answers(fixture.child)
-            .unwrap()
-            .remove(0);
-        match terminal {
-            "stopped" => fixture
+        let question = waiting_question(&fixture).await;
+        if stop {
+            fixture
                 .runtime
                 .stop(fixture.child, runtime::StopScope::SelfOnly)
-                .unwrap(),
-            "cancelled" => fixture.runtime.cancel(fixture.child).unwrap(),
-            _ => {
-                fixture
-                    .model
-                    .add_keyed(
-                        "CHILD",
-                        [Err(runtime::RuntimeError::Model {
-                            reason: "injected failure".into(),
-                        })],
-                    )
-                    .await;
-                fixture
-                    .runtime
-                    .send_message(fixture.child, "continue independently".into())
-                    .unwrap();
-            }
+                .unwrap();
+        } else {
+            fixture.runtime.cancel(fixture.child).unwrap();
         }
         let phase = fixture.runtime.wait(fixture.child).await.unwrap();
-        assert_eq!(
-            phase,
-            if terminal == "stopped" {
-                AgentRunPhase::Stopped
-            } else {
-                AgentRunPhase::Error
-            }
-        );
         let before = fixture.model.observed().await.len();
         let error = fixture
             .runtime
             .answer_subagent_question(fixture.parent, &question.id, "Use A")
             .await
             .unwrap_err();
-        assert!(error.contains("requires explicit recovery"), "{error}");
+        assert!(error.contains(&expected.to_string()), "{error}");
         assert_eq!(
             fixture.runtime.inspect_agent(fixture.child).unwrap().phase,
             phase
@@ -554,6 +511,66 @@ async fn stopped_cancelled_and_failed_children_are_not_restarted_by_answers() {
         fixture.runtime.cancel(fixture.parent).unwrap();
         fixture.runtime.wait(fixture.parent).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn failed_child_resumes_with_the_answer_under_the_parents_current_owner() {
+    // Given: an owned child that failed while waiting for its question.
+    let fixture = fixture(true, true).await;
+    let question = waiting_question(&fixture).await;
+    fixture
+        .model
+        .add_keyed(
+            "CHILD",
+            [Err(runtime::RuntimeError::Model {
+                reason: "injected failure".into(),
+            })],
+        )
+        .await;
+    fixture
+        .runtime
+        .send_message(fixture.child, "continue independently".into())
+        .unwrap();
+    assert_eq!(
+        fixture.runtime.wait(fixture.child).await.unwrap(),
+        AgentRunPhase::Error
+    );
+    fixture
+        .model
+        .add_keyed(
+            "CHILD",
+            [Ok(text_response("Applied the answer", FinishReason::Stop))],
+        )
+        .await;
+    // When: the parent answers.
+    fixture
+        .runtime
+        .answer_subagent_question(fixture.parent, &question.id, "Use A")
+        .await
+        .unwrap();
+    // Then: the same child continues with its history and the answer.
+    assert_eq!(
+        fixture.runtime.wait(fixture.child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let last = serde_json::to_string(fixture.model.observed().await.last().unwrap()).unwrap();
+    assert!(last.contains("Which implementation?"), "{last}");
+    assert!(last.contains("continue independently"), "{last}");
+    assert_eq!(last.matches("[user-answer id=").count(), 1);
+    fixture.runtime.cancel(fixture.parent).unwrap();
+    fixture.runtime.wait(fixture.parent).await.unwrap();
+}
+
+async fn waiting_question(fixture: &Fixture) -> event_bus::UserQuestion {
+    let mut events = fixture.bus.subscribe();
+    while fixture.runtime.inspect_agent(fixture.child).unwrap().phase != AgentRunPhase::Waiting {
+        events.recv().await.unwrap();
+    }
+    fixture
+        .runtime
+        .user_answers(fixture.child)
+        .unwrap()
+        .remove(0)
 }
 
 #[tokio::test]

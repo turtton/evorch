@@ -150,7 +150,6 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
         "判断を変える追加情報",
     ] {
         assert!(advisor.contains(contract), "{contract}");
-        assert!(guidance.contains(contract), "{contract}");
     }
     for boundary in [
         "Worker",
@@ -158,12 +157,12 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
         "Planner",
         "合否",
         "詳細実行計画",
-        "別 context",
         "固定工程",
     ] {
         assert!(advisor.contains(boundary), "{boundary}");
         assert!(guidance.contains(boundary), "{boundary}");
     }
+    assert!(advisor.contains("別 context"));
     for contract in [
         "実装結果",
         "計画",
@@ -179,11 +178,24 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
     assert!(!triggers.iter().any(|t| t.name == "Oracle"));
 }
 
-/// ADR 0040: Advisor は 3 つの行き詰まりの場面で起用され、権限や意図の確認には使わない。
+/// ADR 0040: 起用条件は Orchestrator には keyTriggers の 1 か所だけで届き、
+/// Advisor には自分が呼ばれる場面として届く。
 #[test]
-fn advisor_is_consulted_at_the_three_stuck_points_named_in_every_surface() {
-    let advisor = config::PresetStore::resolve("role-advisor", None).unwrap();
-    let orchestrator = config::PresetStore::resolve("role-orchestrator", None).unwrap();
+fn advisor_stuck_points_reach_the_orchestrator_once_and_the_advisor() {
+    let config = config::Config::default();
+    let catalog = runtime::prompt::build_catalog(&runtime::prompt::CatalogBuildInput {
+        config: &config,
+        user_presets_dir: None,
+        available_agents: &[],
+        available_skills: &[],
+    })
+    .expect("production catalog");
+    let orchestrator = catalog
+        .system_prompt_for(Role::Orchestrator, None, "generic")
+        .expect("Orchestrator prompt");
+    let advisor = catalog
+        .system_prompt_for(Role::Advisor, None, "generic")
+        .expect("Advisor prompt");
     let triggers = runtime::prompt::default_role_triggers();
     let guidance = &triggers
         .iter()
@@ -195,19 +207,18 @@ fn advisor_is_consulted_at_the_three_stuck_points_named_in_every_surface() {
         "食い違",
         "仕様では決まらない",
         "仮説を絞りきれない",
-        "権限",
     ] {
-        assert!(advisor.contains(trigger), "advisor preset: {trigger}");
-        assert!(guidance.contains(trigger), "trigger guidance: {trigger}");
-        assert!(
-            orchestrator.contains(trigger),
-            "orchestrator preset: {trigger}"
+        assert!(guidance.contains(trigger), "keyTriggers: {trigger}");
+        assert_eq!(
+            orchestrator.matches(trigger).count(),
+            1,
+            "Orchestrator prompt repeats {trigger}"
         );
+        assert!(advisor.contains(trigger), "Advisor prompt: {trigger}");
     }
-    assert!(orchestrator.contains("Advisor"));
+    assert!(guidance.contains("権限"));
     // 読み取り専用のため、原因の相談では実行せず次の確認を提案する。
-    for contract in ["仮説を見分ける", "実行しない"] {
-        assert!(advisor.contains(contract), "advisor preset: {contract}");
-        assert!(guidance.contains(contract), "trigger guidance: {contract}");
+    for contract in ["仮説を見分ける", "実行しない", "権限"] {
+        assert!(advisor.contains(contract), "Advisor prompt: {contract}");
     }
 }

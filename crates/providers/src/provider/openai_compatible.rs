@@ -1,12 +1,13 @@
 //! OpenAI 互換 provider 実装を提供します。
 
+mod chat_completions;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use event_bus::EventBus;
 
-use super::openai::{ChatCompletionsClient, ChatCompletionsConfig, OutputLimitField};
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
@@ -15,6 +16,7 @@ use crate::message::{ChatRequest, ChatResponse, FinishReason, ProviderCapabiliti
 use crate::sse::SseFrame;
 use crate::stream::DeltaStream;
 use crate::wire::openai::OpenAiStreamInterpreter;
+use chat_completions::{ChatCompletionsClient, ChatCompletionsConfig, OutputLimitField};
 
 /// OpenAI Chat Completions 互換 API を呼び出す provider クライアント。
 pub struct OpenAiCompatibleClient {
@@ -43,7 +45,6 @@ impl OpenAiCompatibleClient {
                 timeout,
                 event_bus,
                 profile: None,
-                prompt_cache_key: false,
                 output_limit_field,
             })?,
         })

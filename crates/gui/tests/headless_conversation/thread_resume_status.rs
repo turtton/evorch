@@ -233,3 +233,42 @@ fn resumed_thread_status_is_reconstructed_from_persisted_events() {
         ["old-root", "root", "child"]
     );
 }
+
+#[test]
+fn runtime_wake_resumes_the_thread_root_and_a_pause_is_announced() {
+    // Given: a finished conversation root.
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = HeadlessWorkbench::new(state(dir.path()), [1200.0, 900.0]);
+    harness.state_mut().apply_events([
+        started("root", None),
+        phase("root", AgentRunPhase::Running, AgentRunPhase::Done),
+    ]);
+    // When: the runtime asks to wake an unknown run, then this root.
+    harness
+        .state_mut()
+        .apply_events([Event::new(LifecycleEvent::RootWakeRequested {
+            run_id: "unknown".into(),
+        })]);
+    assert!(harness.state().issued().is_empty());
+    harness
+        .state_mut()
+        .apply_events([Event::new(LifecycleEvent::RootWakeRequested {
+            run_id: "root".into(),
+        })]);
+    // Then: the thread is continued as an automatic, not a user, resume.
+    assert!(matches!(
+        harness.state().issued(),
+        [WorkbenchCommand::ContinueChat(request)] if request.thread_id == "thread" && request.automatic
+    ));
+    // When: automatic continuation reaches its limit, the user is told how to go on.
+    harness
+        .state_mut()
+        .apply_events([Event::new(LifecycleEvent::AutoContinuationPaused {
+            run_id: "root".into(),
+            limit: 20,
+        })]);
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, gui::model::transcript::TranscriptEntry::Notice { text }
+            if text.contains("Paused automatic continuation"))
+    ));
+}

@@ -109,7 +109,8 @@ async fn final_text_when_background_child_completed() {
     // Then: the final output is returned, independent of completion inbox delivery.
     assert_eq!(
         result,
-        json!({"run_id":"run-2", "phase":"Done", "status":"completed", "output":"child final answer", "reason":null})
+        json!({"run_id":"run-2", "phase":"Done", "status":"completed", "output":"child final answer", "reason":null,
+            "continuable":false, "continuation_blocked":runtime::RunRestoreFailure::StorageNotConfigured.to_string()})
     );
 }
 
@@ -273,7 +274,8 @@ async fn cancelled_status_and_reason_when_child_cancelled() {
     // Then: cancellation is distinguishable from other failures.
     assert_eq!(
         result,
-        json!({"run_id":"run-2", "phase":"Error", "status":"cancelled", "output":null, "reason":"cancelled"})
+        json!({"run_id":"run-2", "phase":"Error", "status":"cancelled", "output":null, "reason":"cancelled",
+            "continuable":false, "continuation_blocked":runtime::RunRestoreFailure::Cancelled.to_string()})
     );
 }
 
