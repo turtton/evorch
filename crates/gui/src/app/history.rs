@@ -50,16 +50,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db: &storage::Database,
         registry_path: Option<&std::path::Path>,
     ) -> Result<(), storage::StorageError> {
-        let events = db.events_all_ordered()?;
-        self.tasks
-            .restore_events(events.iter().map(|stored| &stored.event));
+        // Two streamed passes keep a long history out of memory: the first
+        // finds where each run last waited, the second replays.
+        let mut restored_tasks = crate::model::tasks::TaskRestore::default();
         // A legacy event subscriber could drop stream deltas under load. The
         // context snapshot still contains the complete accepted response.
         // Repair the final waiting turn at its original position in the replay.
         let mut last_waiting = std::collections::BTreeMap::new();
         let mut completed_at_waiting = std::collections::BTreeMap::new();
         let mut completed_since_request = std::collections::BTreeMap::new();
-        for (index, stored) in events.iter().enumerate() {
+        let mut replay_end = None;
+        db.for_each_event_ordered(|stored| {
+            self.tasks.restore_event(&mut restored_tasks, &stored.event);
+            replay_end = Some(stored.event.meta.wall_clock);
             match &stored.event.kind {
                 event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
                     run_id: Some(run_id),
@@ -80,7 +83,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         ..
                     },
                 ) => {
-                    last_waiting.insert(run_id.clone(), index);
+                    last_waiting.insert(run_id.clone(), stored.id);
                     completed_at_waiting.insert(
                         run_id.clone(),
                         completed_since_request
@@ -91,7 +94,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 _ => {}
             }
-        }
+        })?;
+        self.tasks.finish_restore(restored_tasks);
         self.user_questions = db
             .pending_user_questions()?
             .into_iter()
@@ -204,8 +208,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut messages = messages.into_iter().peekable();
         self.telemetry = crate::model::telemetry::TelemetryOverlay::new();
         let replay_now = std::time::Instant::now();
-        let replay_end = events.last().map(|stored| stored.event.meta.wall_clock);
-        for (index, stored) in events.into_iter().enumerate() {
+        db.for_each_event_ordered(|stored| {
             while messages
                 .peek()
                 .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
@@ -243,7 +246,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if let event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
             ) = &stored.event.kind
-                && last_waiting.get(run_id) == Some(&index)
+                && last_waiting.get(run_id) == Some(&stored.id)
                 && !completed_at_waiting.get(run_id).copied().unwrap_or(false)
                 && let Some(text) = completed_snapshots.get(run_id)
             {
@@ -254,7 +257,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     },
                 ));
             }
-        }
+        })?;
         self.reconcile_restored_phases(db, registry_path);
         for message in messages {
             self.restore_user_message(message);
