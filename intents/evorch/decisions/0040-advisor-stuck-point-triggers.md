@@ -4,6 +4,8 @@
 
 Accepted（2026-10-23）。利用者との相談で、ADR 0035 の Advisor を残し、起用条件を 3 つの場面に具体化することに合意した。ADR 0035 の役割境界（read-only、delegate 不可、出力契約、Reviewer との別 context）は変えない。
 
+2026-10-23 追記: 当初は起用条件を Orchestrator のプリセット・key triggers・delegate の説明の 3 か所に書いたが、どれも同じ Orchestrator のプロンプトに入るため重複していた。「役割の記述と責務」の節のように、情報ごとに 1 か所へ整理した。
+
 ## Context
 
 ADR 0035 で Oracle を相談専用の Advisor に改称したが、改称後に Advisor が起用された run は 1 件もない。
@@ -38,7 +40,16 @@ Advisor を残し、次の 3 つの場面で起用する相談役と定める。
 
 権限やユーザーの意図の確認には Advisor を使わず、ユーザーに聞く。Advisor が判断の要をユーザーの意図と見たときは、親がユーザーに確認すべき質問として返す。
 
-これを Advisor と Orchestrator のプリセット、ロールの用途案内（key triggers）、delegate の target 説明に反映する。Advisor の権限と出力契約の項目は変えない。
+Advisor の権限と出力契約の項目は変えない。
+
+### 役割の記述と責務
+
+Orchestrator には、プリセット・key triggers（Intent Gate 内）・delegate の説明がすべて同じプロンプトで届く。同じ情報を複数の箇所に書かず、次のように分ける。
+
+- key triggers（ロールの用途・起用条件）: 3 つの場面、権限や意図の確認には使わないこと、他ロールとの選び分け。
+- delegate の advisor target の説明（委譲先の仕様）: 渡すもの、読み取り専用で実行しないこと、返す内容、最終 Reviewer との別 context。
+- Orchestrator のプリセット: Advisor の起用条件は書かない。
+- Advisor のプリセット: 受け手が違うので、自分が呼ばれる場面と応答の契約を持つ。
 
 ## Alternatives
 
@@ -48,6 +59,6 @@ Advisor を残し、次の 3 つの場面で起用する相談役と定める。
 
 ## Validation and limits
 
-Advisor と Orchestrator のプリセット、key triggers、delegate の説明に 3 つの場面と「権限・意図の確認には使わない」「検証は実行しない」が入っていることを自動テストする。
+自動テストで次を確かめる。合成した Orchestrator のプロンプトで、各場面が 1 回だけ現れる。Advisor のプロンプトに場面と「検証は実行しない」が入っている。delegate の説明は仕様だけを持ち、起用条件を繰り返さない。
 
 これはプロンプト契約の変更で、モデルが条件どおり Advisor を起用することや、判断やループの収束が良くなることは保証しない。採用後は store で Advisor の起用回数、起用した場面、相談後に再レビューのループが収束したかを追い、効果がなければ見直す。

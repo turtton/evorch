@@ -312,7 +312,7 @@ fn delegate_target_schema() -> Value {
             "reviewer" => format!("Independently compare implementation results or plans against requirements and give an acceptance verdict; consultation belongs to Advisor, in a separate context; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
-            "advisor" | "oracle" => "Consult Advisor only when a step back is needed: a must finding persists after re-review or Worker and Reviewer disagree; a child's question is a technical judgment the requirements do not settle and you lack grounds to decide it without the user; or the collected evidence does not narrow the cause hypotheses. Pass the findings, fix history or evidence. It reads code and materials but runs nothing, compares design options or cause hypotheses, and returns options, trade-offs, recommendation, uncertainty, and information that would change the decision, including checks that discriminate hypotheses. Not for permission or user-intent questions; ask the user. No implementation (Worker), acceptance verdict (Reviewer), or detailed execution plan (Planner). Use a separate context for the final independent Reviewer, not the consulted Advisor. oracle is a legacy alias for advisor.".to_owned(),
+            "advisor" | "oracle" => "Read-only consultant for stepping back on a stuck decision. Pass the findings, fix history or collected evidence. It reads code and materials but runs nothing, compares design options or cause hypotheses, and returns options, trade-offs, recommendation, uncertainty, and information that would change the decision, including checks that discriminate hypotheses; when the crux is user intent, it returns a question for you to ask the user. Advice is not an acceptance verdict: use a separate context for the final independent Reviewer. oracle is a legacy alias for advisor.".to_owned(),
             "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
             "evaluator" => "Consult on agent behaviour or configuration (models, prompts, generation settings): inspect recorded threads, propose a cause and the roles to swap, and pin threads as evaluation samples. Pass the user's concern and any thread it refers to.".to_owned(),
             _ => unreachable!("registered delegate role"),
@@ -386,28 +386,29 @@ mod tests {
             assert_eq!(branch["properties"]["role"]["const"], *role);
             if matches!(*role, "advisor" | "oracle") {
                 let guidance = branch["description"].as_str().unwrap();
+                // When to consult lives in keyTriggers, which the same Orchestrator reads.
                 for contract in [
-                    "only when",
-                    "re-review",
-                    "disagree",
-                    "requirements do not settle",
-                    "without the user",
-                    "does not narrow the cause hypotheses",
-                    "discriminate",
+                    "Pass the findings",
                     "runs nothing",
-                    "Not for permission or user-intent",
+                    "discriminate",
                     "options",
                     "trade-offs",
                     "recommendation",
                     "uncertainty",
                     "information that would change",
-                    "Worker",
-                    "Reviewer",
-                    "Planner",
+                    "user intent",
                     "separate context",
                     "legacy alias",
                 ] {
                     assert!(guidance.contains(contract), "{contract}");
+                }
+                for trigger in [
+                    "re-review",
+                    "disagree",
+                    "requirements do not settle",
+                    "permission",
+                ] {
+                    assert!(!guidance.contains(trigger), "{trigger}");
                 }
             }
             let public: Vec<_> = config::agent_categories::public_categories()
