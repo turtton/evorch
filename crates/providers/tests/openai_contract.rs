@@ -24,7 +24,7 @@ async fn cache_key_is_serialized_when_run_is_set_and_omitted_otherwise() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_text.json")),
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let client = client(&server, Duration::from_secs(1), None);
@@ -57,7 +57,7 @@ async fn cache_tools_are_byte_stable_when_registration_order_changes() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_text.json")),
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let mut input = request();
@@ -125,7 +125,7 @@ fn client(
 
 async fn mount(server: &MockServer, response: ResponseTemplate) {
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/responses"))
         .and(header("authorization", "Bearer sk-contract"))
         .respond_with(response)
         .mount(server)
@@ -138,8 +138,19 @@ fn expected_usage() -> Usage {
         output_tokens: 7,
         cache_read_tokens: 3,
         cache_write_tokens: 0,
-        reasoning_tokens: None,
+        reasoning_tokens: Some(2),
     }
+}
+
+fn expected_text_content() -> Vec<ContentBlock> {
+    vec![
+        ContentBlock::Reasoning {
+            text: "Greeting the user.".to_string(),
+        },
+        ContentBlock::Text {
+            text: "Hello from OpenAI.".to_string(),
+        },
+    ]
 }
 
 fn assert_usage_event(event: UsageEvent, provider: &str, usage: Usage) {
@@ -163,13 +174,13 @@ fn assert_usage_event(event: UsageEvent, provider: &str, usage: Usage) {
     }
 }
 
-// Given: OpenAI text応答 / When: send / Then: canonical応答、usage、capabilitiesへ変換される
+// Given: Responses SSE / When: send / Then: canonical応答、usage、capabilitiesへ変換される
 #[tokio::test(flavor = "multi_thread")]
 async fn send_text_maps_response_and_capabilities() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_text.json")),
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let client = client(&server, Duration::from_secs(1), None);
@@ -179,12 +190,7 @@ async fn send_text_maps_response_and_capabilities() {
         .await
         .expect("send は成功する");
 
-    assert_eq!(
-        response.message.content,
-        vec![ContentBlock::Text {
-            text: "Hello from OpenAI.".to_string()
-        }]
-    );
+    assert_eq!(response.message.content, expected_text_content());
     assert_eq!(response.usage, expected_usage());
     assert_eq!(response.finish_reason, FinishReason::Stop);
     assert_eq!(
@@ -192,7 +198,7 @@ async fn send_text_maps_response_and_capabilities() {
         ProviderCapabilities {
             streaming: true,
             tool_use: true,
-            reasoning: false
+            reasoning: true
         }
     );
 }
@@ -203,7 +209,7 @@ async fn send_tool_call_maps_canonical_tool_use() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_tool_call.json")),
+        sse_response(&fixture("openai", "responses_tool_call.sse")),
     )
     .await;
 
@@ -223,60 +229,13 @@ async fn send_tool_call_maps_canonical_tool_use() {
     assert_eq!(response.finish_reason, FinishReason::ToolUse);
 }
 
-// Given: text差分とusageとDONE / When: streamを収集 / Then: 差分列と累積Completedになる
+// Given: reasoning summaryとtext差分とresponse.completed / When: streamを収集 / Then: 差分列と累積Completedになる
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_text_emits_deltas_and_completed_response() {
     let server = MockServer::start().await;
-    mount(&server, sse_response(&fixture("openai", "stream_text.sse"))).await;
-
-    let events = client(&server, Duration::from_secs(1), None)
-        .stream(&ProviderAuth::new("sk-contract"), &request())
-        .await
-        .expect("stream を開始できる")
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("stream は成功する");
-
-    assert_eq!(
-        &events[..3],
-        &[
-            StreamEvent::TextDelta {
-                text: "Hello".into()
-            },
-            StreamEvent::TextDelta {
-                text: " from".into()
-            },
-            StreamEvent::TextDelta {
-                text: " OpenAI.".into()
-            }
-        ]
-    );
-    assert_eq!(
-        events[3],
-        StreamEvent::Completed {
-            response: providers::ChatResponse {
-                message: Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: "Hello from OpenAI.".into()
-                    }]
-                },
-                usage: expected_usage(),
-                finish_reason: FinishReason::Stop
-            }
-        }
-    );
-}
-
-// Given: 分割されたtool call差分 / When: streamを収集 / Then: 断片と再構築済みToolUseになる
-#[tokio::test(flavor = "multi_thread")]
-async fn stream_tool_call_emits_fragments_and_completed_tool_use() {
-    let server = MockServer::start().await;
     mount(
         &server,
-        sse_response(&fixture("openai", "stream_tool_call.sse")),
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
 
@@ -291,29 +250,82 @@ async fn stream_tool_call_emits_fragments_and_completed_tool_use() {
         .expect("stream は成功する");
 
     assert_eq!(
-        &events[..3],
+        &events[..4],
         &[
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: Some("call_1".into()),
-                name: Some("get_weather".into()),
-                arguments_delta: "{\"location\":".into()
+            StreamEvent::ReasoningDelta {
+                text: "Greeting the user.".into()
             },
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: None,
-                name: None,
-                arguments_delta: "\"Tok".into()
+            StreamEvent::TextDelta {
+                text: "Hello".into()
             },
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: None,
-                name: None,
-                arguments_delta: "yo\"}".into()
+            StreamEvent::TextDelta {
+                text: " from".into()
+            },
+            StreamEvent::TextDelta {
+                text: " OpenAI.".into()
             }
         ]
     );
-    let StreamEvent::Completed { response } = &events[3] else {
+    assert_eq!(
+        events[4..],
+        [StreamEvent::Completed {
+            response: providers::ChatResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: expected_text_content(),
+                },
+                usage: expected_usage(),
+                finish_reason: FinishReason::Stop
+            }
+        }]
+    );
+}
+
+// Given: 分割されたtool call差分 / When: streamを収集 / Then: 断片と再構築済みToolUseになる
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_tool_call_emits_fragments_and_completed_tool_use() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_tool_call.sse")),
+    )
+    .await;
+
+    let events = client(&server, Duration::from_secs(1), None)
+        .stream(&ProviderAuth::new("sk-contract"), &request())
+        .await
+        .expect("stream を開始できる")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream は成功する");
+
+    let (completed, deltas) = events.split_last().expect("イベントがある");
+    assert_eq!(
+        deltas.first(),
+        Some(&StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            name: Some("get_weather".into()),
+            arguments_delta: String::new(),
+        }),
+        "output_item.added が呼び出しの識別子を先に運ぶ"
+    );
+    let fragments: Vec<&str> = deltas
+        .iter()
+        .map(|event| match event {
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta,
+                ..
+            } => arguments_delta.as_str(),
+            other => panic!("tool call 差分以外は来ない: {other:?}"),
+        })
+        .filter(|fragment| !fragment.is_empty())
+        .collect();
+    assert_eq!(fragments, ["{\"location\":", "\"Tok", "yo\"}"]);
+    let StreamEvent::Completed { response } = completed else {
         panic!("最後のイベントは Completed である必要がある");
     };
     assert_eq!(
@@ -325,6 +337,7 @@ async fn stream_tool_call_emits_fragments_and_completed_tool_use() {
         }]
     );
     assert_eq!(response.usage.input_tokens, 13);
+    assert_eq!(response.usage.cache_read_tokens, 4);
     assert_eq!(response.finish_reason, FinishReason::ToolUse);
 }
 
@@ -334,7 +347,7 @@ async fn send_emits_usage_event() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_text.json")),
+        sse_response(&fixture("openai", "responses_text.sse")),
     )
     .await;
     let bus = Arc::new(EventBus::new(16));
@@ -370,7 +383,11 @@ async fn send_emits_usage_event() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_emits_usage_event() {
     let server = MockServer::start().await;
-    mount(&server, sse_response(&fixture("openai", "stream_text.sse"))).await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
     let bus = Arc::new(EventBus::new(16));
     let mut receiver = bus.subscribe();
 
@@ -471,7 +488,7 @@ async fn malformed_sse_json_yields_invalid_json_error() {
     let server = MockServer::start().await;
     mount(
         &server,
-        sse_response("data: {invalid json}\n\ndata: [DONE]\n\n"),
+        sse_response("event: response.output_text.delta\ndata: {invalid json}\n\n"),
     )
     .await;
 
@@ -494,7 +511,7 @@ async fn delayed_send_response_times_out() {
     let server = MockServer::start().await;
     mount(
         &server,
-        json_response(200, &fixture("openai", "send_text.json")).set_delay(Duration::from_secs(2)),
+        sse_response(&fixture("openai", "responses_text.sse")).set_delay(Duration::from_secs(2)),
     )
     .await;
 
@@ -504,4 +521,133 @@ async fn delayed_send_response_times_out() {
         .expect_err("send はタイムアウトする");
 
     assert_eq!(error, ProviderError::Timeout);
+}
+
+// Given: system・tool・推論強度・上限を持つ要求 / When: send と stream で送信
+// Then: 公式 Responses endpoint へ SSE を要求し、Codex 固有ヘッダを付けず、同じ本文を送る
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_use_the_official_responses_endpoint_and_shape() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let mut input = request();
+    input.messages.insert(
+        0,
+        Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text {
+                text: "Be accurate.".into(),
+            }],
+        },
+    );
+    input.tools = vec![providers::ToolSpec {
+        name: "get_weather".into(),
+        description: "Weather".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+    input.reasoning_effort = Some("low".into());
+    input.max_tokens = Some(512);
+    input.temperature = Some(0.5);
+    input.observation = Some(providers::ObservationContext {
+        turn: None,
+        run_id: "run-shape".into(),
+        purpose: Default::default(),
+    });
+    let client = client(&server, Duration::from_secs(1), None);
+    let auth = ProviderAuth::new("sk-contract");
+
+    client.send(&auth, &input).await.expect("send は成功する");
+    let _: Vec<_> = client
+        .stream(&auth, &input)
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.headers["accept"], "text/event-stream");
+        for codex_only in [
+            "chatgpt-account-id",
+            "originator",
+            "openai-beta",
+            "session-id",
+        ] {
+            assert!(!request.headers.contains_key(codex_only), "{codex_only}");
+        }
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": MODEL,
+                "instructions": "Be accurate.",
+                "input": [{"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "Hello"}]}],
+                "tools": [{"type": "function", "name": "get_weather", "description": "Weather",
+                    "parameters": {"type": "object"}, "strict": false}],
+                "store": false,
+                "stream": true,
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "reasoning": {"effort": "low", "summary": "auto"},
+                "max_output_tokens": 512,
+                "temperature": 0.5,
+                "prompt_cache_key": "run-shape",
+                "include": []
+            })
+        );
+    }
+}
+
+// Given: max_output_tokens で打ち切られた SSE / When: send / Then: 部分応答を Length で返す
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_response_completes_with_length() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_incomplete.sse")),
+    )
+    .await;
+
+    let response = client(&server, Duration::from_secs(1), None)
+        .send(&ProviderAuth::new("sk-contract"), &request())
+        .await
+        .expect("打ち切りは完了として扱う");
+
+    assert_eq!(response.finish_reason, FinishReason::Length);
+    assert_eq!(
+        response.message.content,
+        vec![ContentBlock::Text {
+            text: "Truncated answer".into()
+        }]
+    );
+    assert_eq!(response.usage.output_tokens, 16);
+}
+
+// Given: stream 途中のトップレベル error event / When: stream / Then: code 付き Http 400 が item になる
+#[tokio::test(flavor = "multi_thread")]
+async fn error_event_yields_http_error_item() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_error_event.sse")),
+    )
+    .await;
+
+    let events = client(&server, Duration::from_secs(1), None)
+        .stream(&ProviderAuth::new("sk-contract"), &request())
+        .await
+        .expect("HTTP stream は開始できる")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [Err(ProviderError::Http { status: 400, body })]
+            if body.starts_with("context_length_exceeded: ")
+    ));
 }

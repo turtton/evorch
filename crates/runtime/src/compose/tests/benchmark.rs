@@ -6,6 +6,7 @@ async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
         model::ApiProtocol::OpenAiCodexResponses,
         model::ApiProtocol::AnthropicMessages,
         model::ApiProtocol::OpenAiCompletions,
+        model::ApiProtocol::OpenAiResponses,
     ] {
         let (mut model, requests) = routed_model(Ok(response()), "custom", None);
         model
@@ -23,13 +24,58 @@ async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
             model::ApiProtocol::AnthropicMessages => {
                 settings.preference.reasoning_effort = Some("high".into())
             }
-            model::ApiProtocol::OpenAiCompletions => settings.generation.top_p = Some(0.5),
+            model::ApiProtocol::OpenAiCompletions | model::ApiProtocol::OpenAiResponses => {
+                settings.generation.top_p = Some(0.5)
+            }
             // Fixture already has temperature/max_tokens, neither reaches Codex wire.
             _ => {}
         }
         assert!(model.freeze_for_benchmark(settings).is_err());
         assert!(requests.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn openai_responses_benchmark_replays_every_generation_field() {
+    // Given: an OpenAI Responses profile, whose wire keeps temperature, the output
+    // limit, reasoning effort and service tier, captured with all four set.
+    let (mut model, requests) = routed_model(Ok(response()), "model-a", None);
+    let profile = &mut model.providers.get_mut("local").unwrap().profile;
+    profile.provider_type = ProviderType::OpenAi;
+    profile.api_protocol = model::ApiProtocol::OpenAiResponses;
+    let model = Arc::new(model);
+    let mut settings = model
+        .benchmark_settings(&AgentInvocationContext::default(), Role::Worker, &[])
+        .await
+        .unwrap();
+    settings.preference.reasoning_effort = Some("high".into());
+    settings.service_tier = Some(providers::ServiceTier::Priority);
+    let tools = vec![ToolSpec {
+        name: "read".into(),
+        description: String::new(),
+        input_schema: serde_json::json!({}),
+    }];
+    // When: the frozen candidate replays a request.
+    let frozen = model.freeze_for_benchmark(settings).unwrap();
+    frozen
+        .complete(
+            &AgentInvocationContext::default(),
+            Role::Worker,
+            &[],
+            &tools,
+        )
+        .await
+        .unwrap();
+    // Then: every recorded generation field reaches the provider request.
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded[0].model, "model-a");
+    assert_eq!(recorded[0].temperature, Some(0.25));
+    assert_eq!(recorded[0].max_tokens, Some(321));
+    assert_eq!(recorded[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        recorded[0].service_tier,
+        Some(providers::ServiceTier::Priority)
+    );
 }
 
 #[tokio::test]

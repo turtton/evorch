@@ -16,6 +16,7 @@ use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::provider::cursor::{
     CursorClient, CursorConfig, CursorTokenBundle, CursorTokenStore,
 };
+use providers::provider::openai::{OpenAiClient, OpenAiConfig};
 use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use sandbox::credential::{CredentialStore, Secret};
 
@@ -194,8 +195,8 @@ pub struct FactoryOptions {
 ///
 /// Codex、Claude OAuth、Cursor はネイティブ protocol と
 /// [`CredentialRef::Keyring`] を要求します。Claude API は Anthropic Messages、
-/// OpenAI 互換・Kimi は OpenAI Completions を使用します。
-/// 未実装の種別は [`RoutingError::UnsupportedProviderType`] を返します。
+/// OpenAI API は OpenAI Responses、OpenAI 互換・Kimi は OpenAI Completions を使用します。
+/// GitHub Copilot と OpenRouter は未実装で、[`RoutingError::UnsupportedProviderType`] を返します。
 ///
 /// キーリングの参照先は `credential.account` をキーとし、service フィールドは
 /// 現状の [`sandbox::credential::CredentialStore`] 実装では装飾的な値です。
@@ -215,14 +216,15 @@ pub fn build_provider_client(
             build_claude(profile, store, event_bus, options)
         }
         model::ProviderType::OpenAiCodex => build_codex(profile, store, event_bus, options),
+        model::ProviderType::OpenAi => build_openai(profile, event_bus, options),
         model::ProviderType::OpenAiCompatible | model::ProviderType::KimiSubscription => {
             build_openai_compatible(profile, event_bus, options)
         }
-        other @ (model::ProviderType::OpenAi
-        | model::ProviderType::GithubCopilot
-        | model::ProviderType::Openrouter) => Err(RoutingError::UnsupportedProviderType {
-            provider_type: provider_type_label(other).to_string(),
-        }),
+        other @ (model::ProviderType::GithubCopilot | model::ProviderType::Openrouter) => {
+            Err(RoutingError::UnsupportedProviderType {
+                provider_type: provider_type_label(other).to_string(),
+            })
+        }
     }
 }
 
@@ -280,14 +282,7 @@ fn build_claude(
             reason: "Claude requires anthropic-messages".into(),
         });
     }
-    let base = profile.base_url.trim_end_matches('/');
-    let base_url = if base.is_empty() {
-        "https://api.anthropic.com/v1".into()
-    } else if base.ends_with("/v1") {
-        base.to_owned()
-    } else {
-        format!("{base}/v1")
-    };
+    let base_url = v1_base_url(&profile.base_url, "https://api.anthropic.com/v1");
     let config = AnthropicConfig {
         base_url,
         timeout: options.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT),
@@ -369,6 +364,37 @@ fn build_codex(
     Ok(Box::new(client.with_profile(&profile.name)))
 }
 
+fn build_openai(
+    profile: &ProviderProfile,
+    event_bus: Option<Arc<EventBus>>,
+    options: &FactoryOptions,
+) -> Result<Box<dyn ProviderClient>, RoutingError> {
+    if profile.api_protocol != model::ApiProtocol::OpenAiResponses {
+        return Err(RoutingError::InvalidProfile {
+            reason: format!(
+                "provider type `openai` は api protocol `openai-responses` のみを\
+                 サポートします (actual: {})。api_protocol を `openai-responses` に\
+                 変更してください",
+                protocol_label(profile.api_protocol)
+            ),
+        });
+    }
+    let config = OpenAiConfig {
+        base_url: v1_base_url(
+            &profile.base_url,
+            config::types::provider::OPENAI_DEFAULT_BASE_URL,
+        ),
+        timeout: options.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+        event_bus,
+    };
+    let client = OpenAiClient::new(config)
+        .map_err(|error| RoutingError::InvalidProfile {
+            reason: format!("openai client の構築に失敗しました: {error}"),
+        })?
+        .with_profile(&profile.name);
+    Ok(Box::new(client))
+}
+
 fn build_openai_compatible(
     profile: &ProviderProfile,
     event_bus: Option<Arc<EventBus>>,
@@ -403,6 +429,19 @@ fn resolve_base_url(profile: &ProviderProfile) -> String {
         DEFAULT_CODEX_BASE_URL.to_string()
     } else {
         profile.base_url.clone()
+    }
+}
+
+/// Anthropic・OpenAI の endpoint は `/v1` 配下にあるため、`https://host` と
+/// `https://host/v1` (末尾 `/` の有無を含む) を同じ URL へ揃える。空なら `default` を使う。
+fn v1_base_url(base_url: &str, default: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.is_empty() {
+        default.to_owned()
+    } else if base.ends_with("/v1") {
+        base.to_owned()
+    } else {
+        format!("{base}/v1")
     }
 }
 

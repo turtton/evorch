@@ -45,56 +45,79 @@ fn canonical_output_schema_round_trips_and_is_omitted_by_default() {
 }
 
 #[tokio::test]
-async fn openai_and_compatible_send_strict_schema_only_when_configured() {
-    for compatible in [false, true] {
-        let server = MockServer::start().await;
-        for streaming in [false, true] {
-            let response = if streaming {
-                support::sse_response(&support::fixture("openai", "stream_text.sse"))
-            } else {
-                support::json_response(200, &support::fixture("openai", "send_text.json"))
-            };
-            Mock::given(method("POST"))
-                .and(path("/chat/completions"))
-                .and(body_partial_json(json!({"stream": streaming})))
-                .respond_with(response)
-                .expect(2)
-                .mount(&server)
-                .await;
-        }
-        let client: Box<dyn ProviderClient> = if compatible {
-            Box::new(
-                OpenAiCompatibleClient::new(server.uri(), "test", Duration::from_secs(5), None)
-                    .unwrap(),
-            )
+async fn compatible_send_strict_schema_only_when_configured() {
+    let server = MockServer::start().await;
+    for streaming in [false, true] {
+        let response = if streaming {
+            support::sse_response(&support::fixture("openai", "stream_text.sse"))
         } else {
-            Box::new(
-                OpenAiClient::new(OpenAiConfig {
-                    base_url: server.uri(),
-                    timeout: Duration::from_secs(5),
-                    event_bus: None,
-                })
-                .unwrap(),
-            )
+            support::json_response(200, &support::fixture("openai", "send_text.json"))
         };
-        assert!(client.supports_structured_output());
-        for streaming in [false, true] {
-            send_with_and_without_schema(client.as_ref(), streaming).await;
-        }
-        let bodies = request_bodies(&server).await;
-        for pair in bodies.as_chunks::<2>().0 {
-            assert_eq!(
-                pair[1]["response_format"],
-                json!({
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "escalation_verdict", "strict": true,
-                        "schema": output_schema().schema,
-                    },
-                })
-            );
-            assert_only_format_changed(&pair[0], &pair[1], "response_format");
-        }
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(json!({"stream": streaming})))
+            .respond_with(response)
+            .expect(2)
+            .mount(&server)
+            .await;
+    }
+    let client =
+        OpenAiCompatibleClient::new(server.uri(), "test", Duration::from_secs(5), None).unwrap();
+    assert!(client.supports_structured_output());
+    for streaming in [false, true] {
+        send_with_and_without_schema(&client, streaming).await;
+    }
+    let bodies = request_bodies(&server).await;
+    for pair in bodies.as_chunks::<2>().0 {
+        assert_eq!(
+            pair[1]["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "escalation_verdict", "strict": true,
+                    "schema": output_schema().schema,
+                },
+            })
+        );
+        assert_only_format_changed(&pair[0], &pair[1], "response_format");
+    }
+}
+
+#[tokio::test]
+async fn openai_send_and_stream_send_text_format_only_when_configured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(support::sse_response(&support::fixture(
+            "openai",
+            "responses_text.sse",
+        )))
+        .expect(4)
+        .mount(&server)
+        .await;
+    let client = OpenAiClient::new(OpenAiConfig {
+        base_url: server.uri(),
+        timeout: Duration::from_secs(5),
+        event_bus: None,
+    })
+    .unwrap();
+    assert!(client.supports_structured_output());
+    for streaming in [false, true] {
+        send_with_and_without_schema(&client, streaming).await;
+    }
+    assert_responses_text_format(&request_bodies(&server).await);
+}
+
+fn assert_responses_text_format(bodies: &[Value]) {
+    for pair in bodies.as_chunks::<2>().0 {
+        assert_eq!(
+            pair[1]["text"],
+            json!({"format": {
+                "type": "json_schema", "name": "escalation_verdict", "strict": true,
+                "schema": output_schema().schema,
+            }})
+        );
+        assert_only_format_changed(&pair[0], &pair[1], "text");
     }
 }
 
@@ -115,17 +138,7 @@ async fn codex_send_and_stream_send_text_format_only_when_configured() {
     for streaming in [false, true] {
         send_with_and_without_schema(&client, streaming).await;
     }
-    let bodies = request_bodies(&server).await;
-    for pair in bodies.as_chunks::<2>().0 {
-        assert_eq!(
-            pair[1]["text"],
-            json!({"format": {
-                "type": "json_schema", "name": "escalation_verdict", "strict": true,
-                "schema": output_schema().schema,
-            }})
-        );
-        assert_only_format_changed(&pair[0], &pair[1], "text");
-    }
+    assert_responses_text_format(&request_bodies(&server).await);
 }
 
 async fn send_with_and_without_schema(client: &dyn ProviderClient, streaming: bool) {

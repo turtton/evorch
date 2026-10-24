@@ -121,9 +121,9 @@ impl TelemetryRow {
     }
 }
 
-/// Codex Responses streams reasoning summaries in place of reasoning text.
+/// Responses API streams reasoning summaries in place of reasoning text.
 fn protocol_summarizes_reasoning(protocol: &str) -> bool {
-    protocol == "openai-codex-responses"
+    matches!(protocol, "openai-codex-responses" | "openai-responses")
 }
 
 /// A sandbox escalation review shares the reviewed run's ID but runs another

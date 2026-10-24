@@ -6,11 +6,11 @@ use std::time::Duration;
 use event_bus::{
     AgentRunPhase, EventBus, EventKind, MessageEvent, ProviderEvent, ProviderFailureKind,
 };
-use providers::provider::openai::{OpenAiClient, OpenAiConfig};
+use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use providers::{ChatRequest, ProviderAuth, ProviderClient};
 use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
 
-struct HttpModel(OpenAiClient);
+struct HttpModel(OpenAiCompatibleClient);
 
 #[async_trait::async_trait]
 impl AgentModel for HttpModel {
@@ -96,11 +96,12 @@ async fn failed_stream(tail: &'static str, cancel: bool) {
     });
     let bus = Arc::new(EventBus::new(64));
     let mut receiver = bus.subscribe();
-    let client = OpenAiClient::new(OpenAiConfig {
-        base_url: format!("http://{address}"),
-        event_bus: Some(bus.clone()),
-        ..OpenAiConfig::default()
-    })
+    let client = OpenAiCompatibleClient::new(
+        format!("http://{address}"),
+        "openai-compatible",
+        Duration::from_secs(60),
+        Some(bus.clone()),
+    )
     .expect("client");
     let runtime = AgentRuntime::new(
         bus.clone(),

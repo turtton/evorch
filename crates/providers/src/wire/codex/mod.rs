@@ -1,330 +1,35 @@
 //! OpenAI Codex Responses API の wire 形式を扱います。
+//!
+//! 変換と SSE 解釈は [`super::responses`] が担い、ここは Codex dialect を固定する
+//! facade です。Codex backend での契約が未確定なため、canonical `max_tokens` は
+//! `max_output_tokens` へ変換せず常に省略します。
 
 mod sse;
 
-use serde::Serialize;
-
-use crate::message::{ChatRequest, ContentBlock, Role, ServiceTier};
+use super::responses::{self, ResponsesDialect, ResponsesRequest, ResponsesRequestOptions};
+use crate::message::ChatRequest;
 
 pub use sse::CodexStreamInterpreter;
 
 /// Codex Responses API に送信するリクエスト本文。
-///
-/// Codex backend での契約が未確定なため、canonical `max_tokens` は
-/// `max_output_tokens` へ変換せず常に省略します。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct CodexResponsesRequest {
-    model: String,
-    instructions: String,
-    input: Vec<InputItem>,
-    tools: Vec<FunctionTool>,
-    store: bool,
-    stream: bool,
-    tool_choice: ToolChoice,
-    parallel_tool_calls: bool,
-    reasoning: Reasoning,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    service_tier: Option<ServiceTier>,
-    include: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<TextFormat>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct TextFormat {
-    format: JsonSchemaFormat,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct JsonSchemaFormat {
-    r#type: &'static str,
-    name: String,
-    strict: bool,
-    schema: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct InputMessage {
-    #[serde(rename = "type")]
-    kind: MessageType,
-    role: InputRole,
-    content: Vec<InputContent>,
-}
-
-/// Responses API の入力項目。ツール往復の再生には message 以外に
-/// function_call / function_call_output が必要です。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-enum InputItem {
-    Message(InputMessage),
-    Compaction {
-        r#type: &'static str,
-        encrypted_content: String,
-    },
-    CompactionTrigger {
-        r#type: &'static str,
-    },
-    FunctionCall {
-        r#type: &'static str,
-        call_id: String,
-        name: String,
-        arguments: String,
-    },
-    FunctionCallOutput {
-        r#type: &'static str,
-        call_id: String,
-        output: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum MessageType {
-    Message,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum InputRole {
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct InputText {
-    #[serde(rename = "type")]
-    kind: TextType,
-    text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-enum InputContent {
-    Text(InputText),
-    Image {
-        r#type: &'static str,
-        image_url: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum TextType {
-    InputText,
-    OutputText,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct FunctionTool {
-    #[serde(rename = "type")]
-    kind: ToolType,
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ToolType {
-    Function,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ToolChoice {
-    Auto,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Reasoning {
-    effort: String,
-    summary: ReasoningSummary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ReasoningSummary {
-    Auto,
-}
-
-impl CodexResponsesRequest {
-    /// wire に載せる reasoning effort。
-    #[must_use]
-    pub fn reasoning_effort(&self) -> &str {
-        &self.reasoning.effort
-    }
-}
+pub type CodexResponsesRequest = ResponsesRequest;
 
 /// canonical request を Codex Responses API のリクエストへ変換します。
 #[must_use]
 pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
-    let mut sorted_tools: Vec<_> = request.tools.iter().collect();
-    sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
-    let instructions = request
-        .messages
-        .iter()
-        .filter(|message| message.role == Role::System)
-        .flat_map(|message| message.content.iter())
-        .filter_map(|block| match block {
-            ContentBlock::Compaction { .. } => {
-                tracing::warn!("system instructions 内の compaction block をスキップします");
-                None
-            }
-            ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Image { .. }
-            | ContentBlock::Anthropic { .. }
-            | ContentBlock::Reasoning { .. }
-            | ContentBlock::ToolUse { .. }
-            | ContentBlock::ToolResult { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let input = request
-        .messages
-        .iter()
-        .flat_map(|message| match message.role {
-            Role::System => Vec::new(),
-            Role::User => to_input_items(message, InputRole::User, TextType::InputText),
-            Role::Assistant => to_input_items(message, InputRole::Assistant, TextType::OutputText),
-        })
-        .collect();
-    CodexResponsesRequest {
-        model: request.model.clone(),
-        instructions,
-        input,
-        tools: sorted_tools
-            .into_iter()
-            .map(|tool| FunctionTool {
-                kind: ToolType::Function,
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool.input_schema.clone(),
-            })
-            .collect(),
-        store: false,
-        stream: true,
-        tool_choice: ToolChoice::Auto,
-        parallel_tool_calls: true,
-        reasoning: Reasoning {
-            effort: request
-                .reasoning_effort
-                .clone()
-                .unwrap_or_else(|| "medium".to_owned()),
-            summary: ReasoningSummary::Auto,
+    responses::to_wire_request(
+        request,
+        &ResponsesRequestOptions {
+            dialect: ResponsesDialect::Codex,
+            prompt_cache_key: None,
         },
-        include: Vec::new(),
-        service_tier: request.service_tier,
-        text: request.output_schema.as_ref().map(|schema| TextFormat {
-            format: JsonSchemaFormat {
-                r#type: "json_schema",
-                name: schema.name.clone(),
-                strict: true,
-                schema: schema.schema.clone(),
-            },
-        }),
-    }
+    )
 }
 
 /// 公式 compaction を要求するトリガーを入力末尾に追加します。
 #[must_use]
 pub fn to_wire_compaction_request(request: &ChatRequest) -> CodexResponsesRequest {
-    let mut wire = to_wire_request(request);
-    wire.input.push(InputItem::CompactionTrigger {
-        r#type: "compaction_trigger",
-    });
-    wire
-}
-
-fn to_input_items(
-    message: &crate::message::Message,
-    role: InputRole,
-    text_type: TextType,
-) -> Vec<InputItem> {
-    let mut items = Vec::new();
-    let mut content: Vec<InputContent> = Vec::new();
-    let mut result_images: Vec<InputContent> = Vec::new();
-    for block in &message.content {
-        match block {
-            ContentBlock::Image { media_type, data } => content.push(InputContent::Image {
-                r#type: "input_image",
-                image_url: format!("data:{media_type};base64,{data}"),
-            }),
-            ContentBlock::Text { text } => content.push(InputContent::Text(InputText {
-                kind: text_type,
-                text: text.clone(),
-            })),
-            ContentBlock::ToolUse { id, name, input } => {
-                flush_message(&mut items, &mut content, role);
-                items.push(InputItem::FunctionCall {
-                    r#type: "function_call",
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    arguments: input.to_string(),
-                });
-            }
-            ContentBlock::ToolResult {
-                tool_call_id,
-                content: blocks,
-                ..
-            } => {
-                flush_message(&mut items, &mut content, role);
-                let mut images = blocks.iter().filter_map(|block| match block {
-                    crate::message::ToolResultContent::Image {
-                        media_type, data, ..
-                    } => Some(InputContent::Image {
-                        r#type: "input_image",
-                        image_url: format!("data:{media_type};base64,{data}"),
-                    }),
-                    crate::message::ToolResultContent::Text { .. } => None,
-                });
-                if let Some(first) = images.next() {
-                    result_images.push(InputContent::Text(InputText {
-                        kind: text_type,
-                        text: format!("Images returned by tool call {tool_call_id}:"),
-                    }));
-                    result_images.push(first);
-                    result_images.extend(images);
-                }
-                let output = blocks
-                    .iter()
-                    .map(|block| match block {
-                        crate::message::ToolResultContent::Text { text } => text.clone(),
-                        crate::message::ToolResultContent::Image { media_type, .. } => {
-                            format!("[image {media_type} attached in the next user message]")
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                items.push(InputItem::FunctionCallOutput {
-                    r#type: "function_call_output",
-                    call_id: tool_call_id.clone(),
-                    output,
-                });
-            }
-            ContentBlock::Compaction { encrypted_content } => {
-                flush_message(&mut items, &mut content, role);
-                items.push(InputItem::Compaction {
-                    r#type: "compaction",
-                    encrypted_content: encrypted_content.clone(),
-                });
-            }
-            ContentBlock::Reasoning { .. } | ContentBlock::Anthropic { .. } => {}
-        }
-    }
-    flush_message(&mut items, &mut content, role);
-    flush_message(&mut items, &mut result_images, role);
-    items
-}
-
-fn flush_message(items: &mut Vec<InputItem>, content: &mut Vec<InputContent>, role: InputRole) {
-    if content.is_empty() {
-        return;
-    }
-    items.push(InputItem::Message(InputMessage {
-        kind: MessageType::Message,
-        role,
-        content: std::mem::take(content),
-    }));
+    to_wire_request(request).with_compaction_trigger()
 }
 
 #[cfg(test)]

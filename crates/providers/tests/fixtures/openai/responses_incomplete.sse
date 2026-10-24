@@ -1,0 +1,17 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_incomplete","object":"response","status":"in_progress","model":"gpt-contract","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Truncated"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":" answer"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"msg_1","type":"message","status":"incomplete","role":"assistant","content":[{"type":"output_text","text":"Truncated answer","annotations":[]}]}}
+
+event: response.incomplete
+data: {"type":"response.incomplete","sequence_number":5,"response":{"id":"resp_incomplete","object":"response","status":"incomplete","model":"gpt-contract","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":21,"input_tokens_details":{"cached_tokens":5},"output_tokens":16,"output_tokens_details":{"reasoning_tokens":14},"total_tokens":37}}}

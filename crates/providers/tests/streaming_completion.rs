@@ -109,14 +109,14 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
 
 #[tokio::test]
 async fn streaming_completion_retries_premature_eof_then_exhausts() {
-    // Given: an OpenAI server that closes after a valid delta without DONE.
+    // Given: an OpenAI server that closes after a valid delta without response.completed.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(
-                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
                 ),
         )
         .expect(3)

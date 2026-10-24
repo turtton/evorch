@@ -283,7 +283,6 @@ fn factory_rejects_protocol_mismatch() {
 #[test]
 fn factory_returns_unsupported_for_unimplemented_types() {
     for (provider_type, label) in [
-        (model::ProviderType::OpenAi, "openai"),
         (model::ProviderType::GithubCopilot, "github-copilot"),
         (model::ProviderType::Openrouter, "openrouter"),
     ] {

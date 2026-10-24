@@ -14,12 +14,11 @@ use tcp_mock::{TcpBehavior, TcpMockServer};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-const PARTIAL: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n";
+const PARTIAL: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
 const FULL: &str = concat!(
-    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
-    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" tail\"}}]}\n\n",
-    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-    "data: [DONE]\n\n",
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" tail\"}\n\n",
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
 );
 
 async fn send(base_url: &str, bus: &EventBus) -> Result<ChatResponse, ProviderError> {
@@ -95,8 +94,8 @@ async fn mid_frame_disconnect_retries_and_deduplicates_complete_prefix() {
     // Given: 完全な接頭辞の次の JSON フレーム途中で切断し、次の接続で完了する。
     let server = TcpMockServer::start(vec![
         TcpBehavior::PartialThenDrop(concat!(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
-            "data: {\"choices\":",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":",
         )),
         TcpBehavior::FullSse(FULL),
     ]);
@@ -154,7 +153,7 @@ async fn auth_error_is_not_retried() {
     // Given: 認証エラーを返す HTTP サーバー。
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/responses"))
         .respond_with(json_response(401, r#"{"error":"unauthorized"}"#))
         .expect(1)
         .mount(&server)
