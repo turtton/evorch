@@ -3,6 +3,8 @@
 //! 空でない `old_string` の一致箇所を `new_string` へ置換する。`replace_all` が
 //! なければ一致は 1 箇所に限る。`edits` の複数置換はすべて元の内容に対して照合し、
 //! 見つからない・一意でない・重なる置換が 1 つでもあれば何も書き込まない。
+//! `edits` と一緒に渡された単一置換の欄は、空文字への置換（埋め草）なら無視して
+//! 結果で知らせ、中身があれば拒否する。
 //! 書き込みは必ず同一親ディレクトリ上の一時ファイル経由で行い、`persist` に
 //! よる原子的リネームで反映する。ディスクへの書き込みはバイト一致とし、制御
 //! マーカーのエスケープは行わない（ADR 0008。エスケープは wave 3 の
@@ -126,7 +128,10 @@ impl Tool for Edit {
     /// [`ToolError::EditTargetNotUnique`]、入出力に失敗すれば [`ToolError::Io`] を返す。
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         let path_text = required_str(&args, "path")?;
-        let replacements = replacements(&args)?;
+        let Replacements {
+            replacements,
+            ignored_single,
+        } = replacements(&args)?;
         let path = Path::new(path_text);
         let current = std::fs::read_to_string(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -171,11 +176,11 @@ impl Tool for Edit {
             copied = span.end;
         }
         next_content.push_str(&current[copied..]);
-        let mut result = ToolResult::success(file_diff::changed_file(
-            path_text,
-            Some(&current),
-            &next_content,
-        ));
+        let mut diff = file_diff::changed_file(path_text, Some(&current), &next_content);
+        if ignored_single {
+            diff.push_str(IGNORED_SINGLE_NOTE);
+        }
+        let mut result = ToolResult::success(diff);
         if next_content == current {
             return Ok(result);
         }
@@ -264,8 +269,24 @@ struct Span {
     owner: usize,
 }
 
+/// `edits` と一緒に渡された空の単一置換を無視したときの、結果への注記。
+const IGNORED_SINGLE_NOTE: &str = "\nNote: ignored old_string/new_string/replace_all because edits was given; only edits were applied. Omit them, or put every replacement in edits.";
+
+/// 引数から取り出した置換。
+struct Replacements<'a> {
+    replacements: Vec<Replacement<'a>>,
+    /// `edits` と一緒に渡された、`new_string` が空の単一置換を無視したか。
+    ignored_single: bool,
+}
+
 /// 単一置換または `edits` のどちらか一方を取り出す。
-fn replacements(args: &Value) -> Result<Vec<Replacement<'_>>, ToolError> {
+///
+/// スキーマの全プロパティを毎回埋めるモデルは、`edits` に本来の置換を書き、
+/// 単一置換の欄には `old_string: "x"`, `new_string: ""` のような埋め草を入れる。
+/// `edits` があり、単一置換が「空文字への置換・`replace_all` なし」のときは
+/// 埋め草として無視し、結果で知らせる。中身のある単一置換との併用は
+/// どちらの意図か決められないため、従来どおり拒否する。
+fn replacements(args: &Value) -> Result<Replacements<'_>, ToolError> {
     let Some(edits) = args.get("edits") else {
         if args.get("old_string").is_none() && args.get("new_string").is_none() {
             return Err(invalid(
@@ -278,17 +299,20 @@ fn replacements(args: &Value) -> Result<Vec<Replacement<'_>>, ToolError> {
                 "old_string must be non-empty; use write(path, content) to create or replace a file",
             ));
         }
-        return Ok(vec![Replacement {
-            edit: None,
-            old,
-            new: required_str(args, "new_string")?,
-            replace_all: replace_all(args, "")?,
-        }]);
+        return Ok(Replacements {
+            replacements: vec![Replacement {
+                edit: None,
+                old,
+                new: required_str(args, "new_string")?,
+                replace_all: replace_all(args, "")?,
+            }],
+            ignored_single: false,
+        });
     };
-    if ["old_string", "new_string", "replace_all"]
+    let ignored_single = ["old_string", "new_string", "replace_all"]
         .iter()
-        .any(|key| args.get(key).is_some())
-    {
+        .any(|key| args.get(key).is_some());
+    if ignored_single && !is_placeholder_single(args) {
         return Err(invalid(
             "use either old_string/new_string/replace_all or edits, not both; put every replacement in edits",
         ));
@@ -299,7 +323,7 @@ fn replacements(args: &Value) -> Result<Vec<Replacement<'_>>, ToolError> {
         .ok_or_else(|| {
             invalid("edits must be a non-empty array of {old_string, new_string, replace_all?}")
         })?;
-    edits
+    let replacements = edits
         .iter()
         .enumerate()
         .map(|(index, edit)| {
@@ -320,7 +344,26 @@ fn replacements(args: &Value) -> Result<Vec<Replacement<'_>>, ToolError> {
                 replace_all: replace_all(edit, &label)?,
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok(Replacements {
+        replacements,
+        ignored_single,
+    })
+}
+
+/// 単一置換の欄が、何も書き換えない埋め草か。
+///
+/// `old_string` は文字列（空でもよい）か省略、`new_string` は空文字か省略、
+/// `replace_all` は `false` か省略のときに限る。
+fn is_placeholder_single(args: &Value) -> bool {
+    let old = args.get("old_string").is_none_or(Value::is_string);
+    let new = args
+        .get("new_string")
+        .is_none_or(|value| value.as_str() == Some(""));
+    let all = args
+        .get("replace_all")
+        .is_none_or(|value| value.as_bool() == Some(false));
+    old && new && all
 }
 
 fn replace_all(value: &Value, label: &str) -> Result<bool, ToolError> {
