@@ -367,6 +367,13 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 - **M4** — `ce4c91ca` (`fix(runtime): cap and redact thread tool preflight errors`): handler の parse / エラーと agent loop の preflight 拒否を thread ツール専用に redact 後 16 KiB 以下に制限。汎用 schema 検証および `crates/tools` は変更しない。約 30 KiB の未知フィールド名・不正 enum 値を実 agent loop へ渡し、ツール結果・完了イベントの上限と非漏えい、他ツール不変を検証。
 - **S1** — `2b58604a` (`fix(runtime): apply thread search cursors before project scans`): storage 取得開始位置に cursor を反映。1 呼び出し 100 候補の走査上限と全体の検索範囲を分離し、先読み 1 件で継続を判断する。2,106 スレッドの全件列挙・最古ヒットへの到達・同一更新時刻の ID 順を検証。
 - **N1 / N2** — `95fae8f9` (`docs(runtime): clarify thread terminal reason limits and ADR status`): tool description に終了理由は live 登録中のみと明記し契約テストで固定。この ADR の既知の制限と Status（A-1〜A-3 実装済み、A-4 見送り）を更新。
+- 最終検証（コード最終 `0d729902`、ADR 記録を含む対象 HEAD `91633635`）: 権限昇格し、`CARGO_TARGET_DIR=$PWD/target`（この worktree のみ）、`CARGO_BUILD_JOBS=4`、`TMPDIR=/tmp/evt`（`mkdir -p` 済み）で実行。
+  - `cargo nextest run -p storage -p runtime -p agents -p gui --locked -j 4`: 3,529 件すべて成功、42 件 skip（nextest run `f913dcec-c390-4eb2-a104-a5f1ebccde73`）。
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`: 成功、警告なし。
+  - `cargo fmt --all --check`: 成功、差分なし。
+  - `scripts/check-cache-contracts.sh -j 4`: 263 件すべて成功（`thread_tools_cache` 2 件を含む。nextest run `9856e61a-4eec-45fd-ae34-3519c36cf83f`）。
+  - 今回の検証ではコード起因・環境起因の失敗ともになし。`crates/tools` は変更していない。実 store は使用していない。
+  - 修正 7 コミットおよび ADR 対応記録 `91633635` の 8 件は GitHub API の `commit.verification` で `verified=true, reason=valid` を確認済み。全 push は gh auth token を使った HTTPS、通常の fast-forward（force / ssh / フック迂回なし）。
 - 区切りごとの検証: M1 関連 35 件、M2 thread 関連 23 件、M3 24 件、M4 25 件、S1 26 件、description 契約 5 件、M1 補完 goal 関連 25 件がすべて成功。各コミットの fmt / pre-push clippy フックも成功。署名付きコミットは各回通常の fast-forward push を実施。
 
 ### 触らない範囲
