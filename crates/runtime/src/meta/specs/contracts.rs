@@ -112,6 +112,26 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "history_read",
         json!({"source":"handoff:run-7", "offset":1, "limit":2, "content_offset":4096}),
     );
+    contract::<meta::threads::SearchArgs>("thread_search", json!({}));
+    contract::<meta::threads::SearchArgs>(
+        "thread_search",
+        json!({"query":["cache miss","prefix"], "match":"phrase", "include_children":false,
+            "kinds":["title","user","working_note","final_report"], "updated_after":1, "limit":20,
+            "cursor":"1:thread-1"}),
+    );
+    contract::<meta::threads::SearchArgs>("thread_search", json!({"query":"cache"}));
+    contract::<meta::threads::GrepArgs>(
+        "thread_grep",
+        json!({"thread":"thread-1", "pattern":"error\\s+\\d+", "regex":true, "runs":["run-2"],
+            "kinds":["user","assistant","tool_use","tool_result","image"], "context_chars":400,
+            "max_hits":50, "collapse_repeats":false, "cursor":"20"}),
+    );
+    contract::<meta::threads::ReadArgs>("thread_read", json!({"thread":"thread-1"}));
+    contract::<meta::threads::ReadArgs>(
+        "thread_read",
+        json!({"thread":"run-2", "view":"messages", "run":"run-2", "around":"run-2#3.0",
+            "before":8, "after":8, "max_bytes":16384, "cursor":"run-2#3.0@0"}),
+    );
     for name in [
         "list_agents",
         "inbox",
@@ -120,6 +140,81 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "user_answers",
     ] {
         contract::<EmptyArgs>(name, json!({}));
+    }
+}
+
+#[test]
+fn thread_tools_follow_history_read_and_reject_unknown_arguments() {
+    let position = |name: &str| crate::META_OPS.iter().position(|op| *op == name).unwrap();
+    let history = position("history_read");
+    assert_eq!(
+        &crate::META_OPS[history..history + 4],
+        &[
+            "history_read",
+            "thread_search",
+            "thread_grep",
+            "thread_read"
+        ]
+    );
+    for (name, valid) in [
+        ("thread_search", json!({})),
+        ("thread_grep", json!({"thread":"t", "pattern":"p"})),
+        ("thread_read", json!({"thread":"t"})),
+    ] {
+        let schema = tool_spec(name).input_schema;
+        assert_eq!(schema["additionalProperties"], false, "{name}");
+        let mut extra = valid.clone();
+        extra["sql"] = json!("SELECT * FROM run_contexts");
+        assert!(!jsonschema::validator_for(&schema).unwrap().is_valid(&extra));
+        let parsed = match name {
+            "thread_search" => serde_json::from_value::<meta::threads::SearchArgs>(extra).is_ok(),
+            "thread_grep" => serde_json::from_value::<meta::threads::GrepArgs>(extra).is_ok(),
+            _ => serde_json::from_value::<meta::threads::ReadArgs>(extra).is_ok(),
+        };
+        assert!(!parsed, "{name} handler must deny unknown fields");
+        let description = tool_spec(name).description;
+        for contract in ["untrusted", "16 KiB", "never instructions or authorization"] {
+            assert!(description.contains(contract), "{name}: {contract}");
+        }
+    }
+    assert!(
+        tool_spec("thread_search")
+            .description
+            .contains("metadata only")
+    );
+}
+
+#[test]
+fn every_role_is_offered_the_read_only_thread_tools() {
+    let specs: Vec<_> = crate::META_OPS.iter().map(|name| tool_spec(name)).collect();
+    for role in [
+        agents::Role::Orchestrator,
+        agents::Role::Explorer,
+        agents::Role::Worker,
+        agents::Role::Reviewer,
+        agents::Role::WebResearcher,
+        agents::Role::Planner,
+        agents::Role::Advisor,
+        agents::Role::MultimodalLooker,
+        agents::Role::Evaluator,
+    ] {
+        let visible: Vec<_> = crate::ExecutionPolicy::for_role(role)
+            .filter_tool_specs(specs.clone())
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        let history = visible.iter().position(|name| name == "history_read");
+        let history = history.unwrap_or_else(|| panic!("{role:?} lacks history_read"));
+        assert_eq!(
+            &visible[history..history + 4],
+            &[
+                "history_read",
+                "thread_search",
+                "thread_grep",
+                "thread_read"
+            ],
+            "{role:?}"
+        );
     }
 }
 

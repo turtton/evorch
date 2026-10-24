@@ -21,7 +21,6 @@ mod runs;
 mod skills;
 mod specs;
 pub(crate) use specs::tool_spec;
-#[cfg_attr(not(test), allow(dead_code))] // Consumed by the thread tools (ADR 0041).
 mod threads;
 
 use agents::Role;

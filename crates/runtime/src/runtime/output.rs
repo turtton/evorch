@@ -31,6 +31,15 @@ enum OutputStatus {
 }
 
 impl AgentRuntime {
+    /// Live phase and terminal reason of a registered run, with no relation check.
+    /// Only for runs whose conversation the caller is already authorized to read
+    /// (ADR 0041 thread tools); `run_output` keeps its parent/child rule.
+    pub(crate) fn live_run_status(&self, run: RunId) -> Option<(AgentRunPhase, Option<String>)> {
+        let runs = lock_runs(&self.shared.runs);
+        let entry = runs.get(&run)?;
+        Some((*entry.phase_rx.borrow(), entry.terminal_reason.clone()))
+    }
+
     pub(crate) fn run_output(
         &self,
         caller: RunId,

@@ -19,7 +19,6 @@ pub struct RunStore {
 
 impl RunStore {
     /// Thread definition by exact ID; no visibility check is performed here.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn thread(
         &self,
         id: &str,
@@ -42,7 +41,6 @@ impl RunStore {
     }
 
     /// Page through exact canonical-project matches; unknown roots never match.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn threads_in_project(
         &self,
         root: &str,
@@ -56,7 +54,6 @@ impl RunStore {
     }
 
     /// Children recorded by fork/rewind/escalation metadata.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn thread_children(
         &self,
         id: &str,
@@ -68,7 +65,6 @@ impl RunStore {
     }
 
     /// Saved runs of a conversation, including delegated children.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn runs_of_thread(
         &self,
         id: &str,
@@ -80,7 +76,6 @@ impl RunStore {
     }
 
     /// Load histories only after the caller has authorized their conversation.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn run_contexts_for(
         &self,
         ids: &[String],
@@ -92,7 +87,6 @@ impl RunStore {
     }
 
     /// Latest working note revisions; never evidence for visibility.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn latest_ledgers(
         &self,
         ids: &[String],
@@ -104,7 +98,6 @@ impl RunStore {
     }
 
     /// Terminal summaries without decoding full histories.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn terminal_summaries(
         &self,
         ids: &[String],
@@ -116,7 +109,6 @@ impl RunStore {
     }
 
     /// Questions delivered to these runs, deduplicated by durable question ID.
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by ADR 0041 A-2b.
     pub(crate) fn user_questions_for_runs(
         &self,
         ids: &[String],
