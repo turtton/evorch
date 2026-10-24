@@ -40,6 +40,7 @@ pub fn sized_fixture(
     size: [f32; 2],
 ) -> (HeadlessWorkbench<DemoSource>, Arc<SwitchableModel>) {
     let context = gui::model::production::ProductionModel {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         load_options: config::LoadOptions {
             project_dir: Some(root.into()),
             user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),

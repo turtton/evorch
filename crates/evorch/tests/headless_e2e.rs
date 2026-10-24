@@ -180,6 +180,7 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
         prompt: PROMPT.to_string(),
         user_config_dir,
         web_tools_enabled: None,
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
     }
 }
 
@@ -206,18 +207,21 @@ async fn headless_run_injects_user_agents_from_explicit_config_directory() {
         "UNAPPROVED-PROJECT-RULE",
     )
     .expect("project AGENTS.md");
-    let args = parse_args(argv(&[
-        "run",
-        "--project",
-        directory.path().to_str().unwrap(),
-        "--role",
-        "worker",
-        "--prompt",
-        PROMPT,
-        "--user-config",
-        user_config.to_str().unwrap(),
-    ]))
-    .expect("headless CLI args");
+    let args = HeadlessArgs {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        ..parse_args(argv(&[
+            "run",
+            "--project",
+            directory.path().to_str().unwrap(),
+            "--role",
+            "worker",
+            "--prompt",
+            PROMPT,
+            "--user-config",
+            user_config.to_str().unwrap(),
+        ]))
+        .expect("headless CLI args")
+    };
 
     let outcome = run_headless(args, Arc::new(env), SandboxChoice::DirectUnchecked)
         .await

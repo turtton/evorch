@@ -20,6 +20,7 @@ pub async fn replay(
     user_config_dir: Option<PathBuf>,
     env: Arc<dyn EnvLookup>,
     sandbox: SandboxChoice,
+    model_catalog_dir: Option<PathBuf>,
 ) -> BenchmarkResult<Trial> {
     if !super::spec::valid_trial(trial_name) {
         return Err(invalid("invalid trial name"));
@@ -73,6 +74,7 @@ pub async fn replay(
         let session = compose(
             &baseline.workspace,
             user_config_dir.or(baseline.user_config_dir.clone()),
+            model_catalog_dir,
             env,
             sandbox,
             checkpoint.role,

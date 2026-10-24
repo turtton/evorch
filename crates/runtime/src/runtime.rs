@@ -766,6 +766,7 @@ impl AgentRuntime {
         self,
         config: &config::Config,
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
+        catalog_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let _ = self
             .shared
@@ -788,6 +789,7 @@ impl AgentRuntime {
             .set(crate::model_resolve::ModelResolution::new(
                 config,
                 credential_store,
+                catalog_dir,
             ));
         let _ = self
             .shared

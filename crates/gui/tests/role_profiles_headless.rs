@@ -40,6 +40,7 @@ fn user_options(root: &Path) -> config::LoadOptions {
 /// The startup model context for `<root>/project`.
 fn production(root: &Path) -> gui::model::production::ProductionModel {
     gui::model::production::ProductionModel {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         load_options: config::LoadOptions {
             project_dir: Some(root.join("project")),
             ..user_options(root)

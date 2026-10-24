@@ -78,6 +78,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
+        Some(test_support::model_catalog_dir()),
     )
     .unwrap();
     AgentRuntime::new(

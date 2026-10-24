@@ -5,6 +5,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::ToolError;
 
@@ -13,6 +14,63 @@ const FORMAT: &str = "evorch-shell-handles-v1\n";
 /// Normal allocation retains u64 capacity; already-issued high numbers
 /// remain protected by the durable counter.
 pub const MAX_RESTORED_HANDLE_FLOOR: u64 = u32::MAX as u64;
+
+/// Where this process keeps its durable shell handle state: `Some` holds an
+/// explicit directory and `None` the user configuration default.
+///
+/// Every allocator and executor in a process, including executors rebuilt
+/// later, must share one state directory, so the location is decided once:
+/// the first allocation fixes the default, and an explicit directory is
+/// accepted only before that.
+static LOCATION: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Keep this process's durable shell job handle state in `dir` instead of the
+/// user configuration directory.
+///
+/// Production never calls this; it exists for tests and embedders that must
+/// not touch the user's state. It must run before the first shell handle is
+/// allocated or reserved. Setting the same directory again is accepted, while
+/// a different directory, a relative path or a call after the default location
+/// was already used is rejected and leaves the current location unchanged.
+///
+/// # Errors
+/// Returns [`ToolError::InvalidArgs`] for a non-absolute path and
+/// [`ToolError::Io`] when the location is already fixed elsewhere.
+pub fn set_shell_job_handle_dir(dir: impl Into<PathBuf>) -> Result<(), ToolError> {
+    set_location(&LOCATION, dir.into())
+}
+
+fn set_location(slot: &OnceLock<Option<PathBuf>>, dir: PathBuf) -> Result<(), ToolError> {
+    if !dir.is_absolute()
+        || dir
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ToolError::InvalidArgs {
+            detail: format!(
+                "shell job handle directory must be an absolute path without '..': {}",
+                dir.display()
+            ),
+        });
+    }
+    match slot.get_or_init(|| Some(dir.clone())) {
+        Some(current) if *current == dir => Ok(()),
+        Some(current) => Err(ToolError::Io {
+            detail: format!(
+                "shell job handle directory is already set to {}",
+                current.display()
+            ),
+        }),
+        None => Err(ToolError::Io {
+            detail: "shell job handles were already allocated in the default directory".into(),
+        }),
+    }
+}
+
+/// Returns the explicit directory, or records that the default is in use.
+fn resolve_location(slot: &OnceLock<Option<PathBuf>>) -> Option<PathBuf> {
+    slot.get_or_init(|| None).clone()
+}
 
 #[derive(Default)]
 pub(crate) struct HandleAllocator {
@@ -29,14 +87,19 @@ impl HandleAllocator {
 
     fn root(&self) -> io::Result<PathBuf> {
         #[cfg(test)]
+        if let Some(root) = &self.root {
+            return Ok(root.clone());
+        }
+        if let Some(dir) = resolve_location(&LOCATION) {
+            return Ok(dir);
+        }
+        #[cfg(test)]
         {
-            static STATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-            Ok(self.root.clone().unwrap_or_else(|| {
-                STATE
-                    .get_or_init(|| tempfile::tempdir().expect("test shell handle directory"))
-                    .path()
-                    .join("shell-job-handles")
-            }))
+            static STATE: OnceLock<tempfile::TempDir> = OnceLock::new();
+            Ok(STATE
+                .get_or_init(|| tempfile::tempdir().expect("test shell handle directory"))
+                .path()
+                .join("shell-job-handles"))
         }
         #[cfg(not(test))]
         config::user_config_dir()

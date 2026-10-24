@@ -29,7 +29,15 @@ pub async fn run(
 ) -> BenchmarkResult<String> {
     match args.command {
         BenchmarkCommand::Record { spec, output } => {
-            let baseline = record(&spec, &output, args.user_config_dir, env, sandbox).await?;
+            let baseline = record(
+                &spec,
+                &output,
+                args.user_config_dir,
+                env,
+                sandbox,
+                args.model_catalog_dir,
+            )
+            .await?;
             if baseline.poisoned.is_some() || baseline.checkpoint.is_none() {
                 return Err(invalid(format!(
                     "baseline cannot be replayed; evidence retained at {}: {}",
@@ -63,6 +71,7 @@ pub async fn run(
                 args.user_config_dir,
                 env,
                 sandbox,
+                args.model_catalog_dir,
             )
             .await?;
             if outcome.phase != event_bus::AgentRunPhase::Done {

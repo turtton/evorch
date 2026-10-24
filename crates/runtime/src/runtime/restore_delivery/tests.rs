@@ -32,6 +32,7 @@ impl AgentModel for CompletingModel {
 
 #[tokio::test]
 async fn live_delivery_restores_when_mailbox_closed_before_push() {
+    test_support::isolated_state_dir();
     for phase in [AgentRunPhase::Done, AgentRunPhase::Running] {
         // Given: the completed snapshot/mailbox state at the live-to-terminal race seam.
         let dir = tempfile::tempdir().unwrap();
@@ -72,6 +73,7 @@ async fn live_delivery_restores_when_mailbox_closed_before_push() {
 
 #[tokio::test]
 async fn message_driven_restore_ignores_quoted_huge_handles_and_preserves_history() {
+    test_support::isolated_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("handles.sqlite3"),
@@ -116,6 +118,7 @@ async fn message_driven_restore_ignores_quoted_huge_handles_and_preserves_histor
 
 #[tokio::test]
 async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent() {
+    test_support::isolated_state_dir();
     for nested in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let config = storage::StorageConfig {

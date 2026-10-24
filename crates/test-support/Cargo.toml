@@ -1,0 +1,22 @@
+[package]
+name = "test-support"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Shared helpers for tests only; production crates must list this crate under
+# [dev-dependencies] and never under [dependencies].
+[lib]
+name = "test_support"
+
+[dependencies]
+tempfile = { workspace = true }
+tools = { path = "../tools" }
+
+[target.'cfg(unix)'.dependencies]
+# Removes the per-process state directory at exit (atexit).
+libc = "0.2"
+
+[dev-dependencies]
+catalog = { path = "../catalog" }
+tokio = { workspace = true, features = ["macros", "rt"] }

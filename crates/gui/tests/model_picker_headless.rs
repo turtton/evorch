@@ -55,6 +55,7 @@ default_model = "model-c"
         )
         .unwrap();
         let context = ProductionModel {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
             load_options: config::LoadOptions {
                 project_dir: Some(root.to_owned()),
                 user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),

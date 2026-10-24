@@ -8,6 +8,8 @@ pub struct ProductionModel {
     pub credential_store: Arc<dyn sandbox::CredentialStore>,
     pub bus: Arc<event_bus::EventBus>,
     pub env: Arc<dyn routing::EnvLookup>,
+    /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
+    pub model_catalog_dir: Option<std::path::PathBuf>,
 }
 
 pub fn compose_production_model(
@@ -43,6 +45,7 @@ pub fn compose_production_model(
                 ..Default::default()
             },
         },
+        context.model_catalog_dir.clone(),
     )
 }
 

@@ -100,6 +100,7 @@ profile = "local"
     executor.set_default_cwd(root.to_path_buf());
     let runtime = runtime::compose_runtime(RuntimeComposition {
         config: &config,
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(config_root.join("empty-user")),
         bus,
         executor: Arc::new(executor),

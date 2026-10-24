@@ -258,15 +258,22 @@ pub(crate) struct ModelResolution {
     catalog: tokio::sync::OnceCell<Option<ModelCatalog>>,
     credential_store: Option<Arc<dyn CredentialStore>>,
     provider_windows: tokio::sync::OnceCell<BTreeMap<String, u64>>,
+    /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
+    catalog_dir: Option<std::path::PathBuf>,
 }
 
 impl ModelResolution {
-    pub(crate) fn new(config: &Config, credential_store: Option<Arc<dyn CredentialStore>>) -> Self {
+    pub(crate) fn new(
+        config: &Config,
+        credential_store: Option<Arc<dyn CredentialStore>>,
+        catalog_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             config: config.clone(),
             catalog: tokio::sync::OnceCell::new(),
             credential_store,
             provider_windows: tokio::sync::OnceCell::new(),
+            catalog_dir,
         }
     }
 
@@ -279,7 +286,11 @@ impl ModelResolution {
         let (catalog, provider_windows) = tokio::join!(
             self.catalog.get_or_init(|| async {
                 if needs_catalog {
-                    load_catalog(&catalog::default_cache_dir()).await
+                    let directory = self
+                        .catalog_dir
+                        .clone()
+                        .unwrap_or_else(catalog::default_cache_dir);
+                    load_catalog(&directory).await
                 } else {
                     None
                 }

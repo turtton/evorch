@@ -28,6 +28,9 @@ pub struct HeadlessArgs {
     pub user_config_dir: Option<PathBuf>,
     /// Optional override of the saved Web tool availability switch.
     pub web_tools_enabled: Option<bool>,
+    /// models.dev cache directory; not a CLI option. `None` uses
+    /// [`catalog::default_cache_dir`].
+    pub model_catalog_dir: Option<PathBuf>,
 }
 
 /// tool 実行の sandbox 方式。
@@ -114,6 +117,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, He
         prompt,
         user_config_dir: user_config.map(PathBuf::from),
         web_tools_enabled,
+        model_catalog_dir: None,
     })
 }
 
@@ -181,6 +185,7 @@ pub async fn run_headless(
         tokio::task::spawn_blocking(move || open_credential_store(&credential_args)).await??;
 
     let composed = compose_runtime(RuntimeComposition {
+        model_catalog_dir: args.model_catalog_dir.clone(),
         user_config_dir: args.user_config_dir.clone(),
         config: &config,
         bus: Arc::clone(&bus),

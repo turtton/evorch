@@ -14,6 +14,7 @@ fn options(root: &std::path::Path) -> config::LoadOptions {
 
 fn production(root: &std::path::Path, store: Arc<dyn CredentialStore>) -> ProductionModel {
     ProductionModel {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
         load_options: options(root),
         credential_store: store,
         bus: Arc::new(event_bus::EventBus::new(32)),

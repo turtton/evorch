@@ -2284,6 +2284,7 @@ dependencies = [
  "serde_json",
  "storage",
  "tempfile",
+ "test-support",
  "thiserror 2.0.18",
  "tokio",
  "tools",
@@ -2859,6 +2860,7 @@ dependencies = [
  "serde_json",
  "storage",
  "tempfile",
+ "test-support",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -5549,6 +5551,7 @@ dependencies = [
  "socket2",
  "storage",
  "tempfile",
+ "test-support",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -6481,6 +6484,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "test-support"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tools",
 ]
 
 [[package]]

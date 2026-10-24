@@ -623,6 +623,7 @@ fn run() -> Result<(), GuiError> {
         .unwrap_or_else(|| Arc::new(UnwiredCredentialStore));
     let production_model = (!arguments.demo).then(|| {
         let context = gui::model::production::ProductionModel {
+            model_catalog_dir: None,
             load_options: load_options.clone(),
             credential_store: credential_store.clone(),
             bus: bus.clone(),
@@ -685,6 +686,7 @@ fn run() -> Result<(), GuiError> {
                 runtime,
                 model_identity,
             } = compose_runtime(RuntimeComposition {
+                model_catalog_dir: None,
                 user_config_dir: Some(directory.path().to_path_buf()),
                 config: &composition_config,
                 bus: Arc::clone(&bus),
@@ -717,6 +719,7 @@ fn run() -> Result<(), GuiError> {
                 runtime,
                 model_identity,
             } = compose_runtime(RuntimeComposition {
+                model_catalog_dir: None,
                 user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
@@ -1605,6 +1608,7 @@ mod effective_project_tests {
             ));
             let composed = compose_runtime(RuntimeComposition {
                 config: &config,
+                model_catalog_dir: Some(test_support::model_catalog_dir()),
                 user_config_dir: Some(trusted.path().to_path_buf()),
                 bus,
                 executor,
