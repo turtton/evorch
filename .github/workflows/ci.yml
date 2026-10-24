@@ -127,7 +127,7 @@ jobs:
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
   nix-build:
     runs-on: ubuntu-latest
-    # A cold deps build takes ~35-45 min and the attic push retries add ~30.
+    # A cold deps build takes ~35-45 min and the attic push step is capped at 60.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -159,23 +159,42 @@ jobs:
       # attic への push は main の push に限る。PR は main の closure を substitute する。
       - name: Push to attic
         if: success() && github.ref == 'refs/heads/main'
+        timeout-minutes: 60
         run: |
+          set -o pipefail
           # 最終 out のみでは build-time 依存 (crane cargoArtifacts / fenix toolchain /
           # vendored crate sources) が attic に入らず毎回再 build になるため、
           # 出力の runtime closure ごと push して次回 run で substitute させる。
-          # tailscaled ingress stalls under concurrent large uploads (issue #72); retry with backoff
-          CLOSURE=$(nix path-info --recursive ./result-evorch ./result-deps ./result-default ./result-cef-deps)
-          for attempt in 1 2 3 4; do
-            if echo "$CLOSURE" | xargs -r attic push home; then
-              exit 0
-            fi
-            if [ "$attempt" -lt 4 ]; then
-              delay=$((attempt * 120 + RANDOM % 60))
-              echo "attic push failed (attempt $attempt/4); retrying in ${delay}s"
+          # tailscaled ingress stalls under concurrent large uploads (issue #72).
+          # Since the CEF build joined the default package, each main push
+          # carried four 0.15-0.9 GB NARs (about 2 GB) at once over the default
+          # five upload jobs, and every upload-path request ended in
+          # "Connection timed out (os error 110)" through all retries (runs
+          # 39813604265 .. 40051380823). attic streams the whole NAR on every
+          # attempt and deduplicates only on the server, so a retry resends it.
+          # Upload one NAR at a time, the shipped packages before the deps
+          # archives, and retry each set on its own so a stalled deps archive
+          # no longer discards the others.
+          # How the runner reaches attic (direct or DERP relay) bounds throughput.
+          timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
+          status=0
+          for result in ./result-evorch ./result-default ./result-deps ./result-cef-deps; do
+            for attempt in 1 2 3 4; do
+              if nix path-info --recursive "$result" |
+                timeout 20m attic push --stdin --jobs 1 home; then
+                break
+              fi
+              if [ "$attempt" -eq 4 ]; then
+                echo "::error::attic push of $result failed after 4 attempts"
+                status=1
+                break
+              fi
+              delay=$((attempt * 60 + RANDOM % 60))
+              echo "attic push of $result failed (attempt $attempt/4); retrying in ${delay}s"
               sleep "$delay"
-            fi
+            done
           done
-          exit 1
+          exit "$status"
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。

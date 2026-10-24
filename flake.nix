@@ -238,7 +238,9 @@
             cp -r include $out/
             rm $out/chrome-sandbox
             find $out/locales -name '*.pak' ! -name en-US.pak ! -name ja.pak -delete
-            $STRIP --strip-debug $out/libcef.so
+            # The package links these files rather than copying them under
+            # libexec, so its strip pass no longer reaches them.
+            $STRIP --strip-debug $out/libcef.so $out/libvk_swiftshader.so $out/libvulkan.so.1
             cat > $out/archive.json <<EOF
             {"type":"minimal","name":"${cefArchive}","sha1":"15c91ad767097217b2e82ba8b933fe30b134be69"}
             EOF
@@ -257,22 +259,40 @@
         # No derivation runs the CEF tests, so dev-dependencies are not cached.
         cefCargoArtifacts = craneLib.buildDepsOnly (cefArgs // depsOnlyArgs // {
           doCheck = false;
+          # cef-dll-sys copies the CEF runtime (~0.5 GB, libcef.so alone 444 MB)
+          # beside the binaries for `cargo run`. Linking reads libcef.so from
+          # CEF_PATH and the package links cefDist, so the copy only bloated the
+          # archive CI pushes to attic.
+          postBuild = ''
+            for entry in ${cefDist}/* ${cefDist}/locales/*; do
+              copy="''${CARGO_TARGET_DIR:-target}/release/''${entry#${cefDist}/}"
+              if [ -f "$entry" ] && [ -f "$copy" ]; then rm "$copy"; fi
+            done
+          '';
         });
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
           cargoArtifacts = cefCargoArtifacts;
           cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
           doCheck = false;
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
-          # CEF resolves its paks, locales and the helper beside the executable,
-          # so everything shares one libexec directory behind the wrapper.
+          # The GUI starts the helper beside its executable and CEF reads its
+          # paks and locales beside libcef.so, so everything shares one libexec
+          # directory behind the wrapper. The CEF files are symlinks into
+          # cefDist rather than copies: the 0.5 GB distribution stays one store
+          # path that attic receives once per CEF version instead of inside
+          # every build of this package. autoPatchelf resolves the libcef.so
+          # link, so both binaries load libcef.so and its resources from cefDist.
           postInstall = ''
             app=$out/libexec/evorch-gui-cef
             mkdir -p $app
             mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $app/
             rm -rf $out/bin
-            cp -r ${cefDist}/. $app/
-            chmod -R u+w $app
-            rm -rf $app/include $app/archive.json
+            for entry in ${cefDist}/*; do
+              case "''${entry##*/}" in
+                include | archive.json) ;;
+                *) ln -s "$entry" $app/ ;;
+              esac
+            done
             # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
@@ -281,6 +301,8 @@
           doInstallCheck = true;
           installCheckPhase = ''
             runHook preInstallCheck
+            # Every CEF symlink must resolve into cefDist.
+            test -z "$(find "$out/libexec/evorch-gui-cef" -xtype l)"
             for binary in evorch-gui evorch-cef-helper libcef.so; do
               env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
                 "$out/libexec/evorch-gui-cef/$binary" > /dev/null
