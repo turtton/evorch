@@ -328,7 +328,10 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 - [x] ADR 作成 — commit: （この ADR を追加したコミット。`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [x] Phase 0 計測 — commit: 計測結果を記入したコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）
 - [x] A-1 storage — commit: 35021ada
-- [ ] A-2 runtime — commit: ____
+- [x] A-2 runtime — commit: 11d6a7ae（系譜の記録）, 20f18190（visibility / normalize）, 2dfdabcc（3 ツールと登録）, ee488e59（history_read の案内）, 25b4b6a6（受け入れテストとキャッシュ契約テスト）
+  - ADR に記載のない実装判断: 3 ツールを `agent_loop/tool_calls/ledger_events.rs` の `VISIBLE_META_OPS` に加え、GUI の会話にツール呼び出しとして表示する（他スレッドを読んだことを利用者が見られるようにするため。Orchestrator 承認済み）。`thread_grep` / `thread_read` の `thread` 引数は 256 バイト以下とし、超えると存在に依存しない `thread_args_invalid` で拒否する（拒否文が ID をそのまま返すので、出力上限内に収めるため）。
+  - キャッシュ契約テストは `crates/runtime/tests/thread_tools_cache.rs`（`scripts/contract-test-filters.sh` の `binary(=thread_tools_cache)`）。
+  - 保存済み run の終了理由は A-1 の読み取り API（`RunTerminalSummary`）に含まれないため、`thread_read` の終了理由は runtime に登録中の run についてのみ返す（それ以外は phase だけ）。
 - [ ] A-3 GUI — commit: ____
 - [ ] A-4 inspect（任意）— commit: ____
 - [ ] 検証（`cargo nextest run`、`cargo clippy --workspace -- -D warnings`、`cargo fmt --check`、`scripts/check-cache-contracts.sh`）— commit: ____
