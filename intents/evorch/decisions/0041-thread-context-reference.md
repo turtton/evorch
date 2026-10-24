@@ -354,7 +354,7 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 環境起因の失敗: rebase した結果での最初の実行（sandbox の長い `TMPDIR`）では、上の 4 crate のうち 4 件が失敗し 1 件がタイムアウトした。3 件は `path must be shorter than SUN_LEN`（Unix ソケットのパスが長すぎる）で失敗した。残りの 2 件（ownership IPC を使う `headless_layout` の 1 件と、端末の `terminal_headless` の 1 件）も `TMPDIR=/tmp/evt` では成功したため、同じソケットパス長の問題と判断した。
   - コード起因の失敗はなかった。
 - [x] 受け入れレビュー — 独立 Reviewer 合格（対象 HEAD: `51c6ba50`、must / should / nit なし）
-- [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: ____
+- [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: [#351](https://github.com/turtton/evorch/pull/351)、PR 作成時 head: `e7b79534`
 
 ### 受け入れレビュー 1 回目の指摘への対応
 
