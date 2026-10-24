@@ -241,6 +241,38 @@ fn failed_atomic_save_does_not_issue_or_reset_a_number() {
     assert_eq!(allocator(&root).allocate().unwrap(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn default_test_state_is_shared_and_removed_on_normal_exit() {
+    const CHILD: &str = "EVORCH_TEST_STATE_EXIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let first = HandleAllocator::default();
+        let second = HandleAllocator::default();
+        assert_eq!(first.root().unwrap(), second.root().unwrap());
+        let number = first.allocate().unwrap();
+        assert_eq!(second.allocate().unwrap(), number + 1);
+        assert!(set_shell_job_handle_dir(first.root().unwrap()).is_err());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "shell_handles::tests::default_test_state_is_shared_and_removed_on_normal_exit",
+        ])
+        .env(CHILD, "1")
+        .env("TMPDIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn explicit_location_is_first_wins_absolute_and_never_replaces_a_used_default() {
     let slot = OnceLock::new();

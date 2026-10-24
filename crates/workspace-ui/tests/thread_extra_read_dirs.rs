@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use workspace_ui::{
     ProjectId, SidebarError, SidebarState, ThreadError, ThreadId, ThreadRecord, sidebar_from_json,
     sidebar_to_json,
 };
 
-fn sidebar() -> SidebarState {
+fn sidebar() -> (TempDir, SidebarState) {
     let directory = tempdir().expect("temporary directory must be created");
-    let root = directory.keep().join("project");
+    let root = directory.path().join("project");
     std::fs::create_dir(&root).expect("project directory must be created");
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("project");
@@ -18,12 +18,13 @@ fn sidebar() -> SidebarState {
     sidebar
         .create_thread(ThreadId::new("thread"), project_id, "Thread")
         .expect("thread must be added");
-    sidebar
+    (directory, sidebar)
 }
 
 #[test]
 fn old_thread_json_without_extra_read_dirs_deserializes() {
-    let mut value = serde_json::to_value(sidebar()).expect("sidebar serializes");
+    let (_project, state) = sidebar();
+    let mut value = serde_json::to_value(state).expect("sidebar serializes");
     value["threads"][0]
         .as_object_mut()
         .expect("thread is an object")
@@ -43,7 +44,7 @@ fn empty_extra_read_dirs_are_omitted_from_json() {
 
 #[test]
 fn setter_canonicalizes_deduplicates_and_rejects_too_broad_or_missing_paths() {
-    let mut state = sidebar();
+    let (_project, mut state) = sidebar();
     let thread_id = ThreadId::new("thread");
     let directories = tempdir().expect("temporary directory must be created");
     let read_dir = directories.path().join("read");
@@ -81,7 +82,7 @@ fn setter_canonicalizes_deduplicates_and_rejects_too_broad_or_missing_paths() {
 
 #[test]
 fn validate_rejects_relative_extra_read_directory_but_allows_missing_absolute_path() {
-    let mut state = sidebar();
+    let (_project, mut state) = sidebar();
     state.threads[0].extra_read_dirs = vec![PathBuf::from("relative")];
     assert!(matches!(state.validate(), Err(SidebarError::Validation(_))));
 
@@ -91,7 +92,7 @@ fn validate_rejects_relative_extra_read_directory_but_allows_missing_absolute_pa
 
 #[test]
 fn setter_rejects_unknown_thread() {
-    let mut state = sidebar();
+    let (_project, mut state) = sidebar();
     assert_eq!(
         state.set_thread_extra_read_dirs(&ThreadId::new("missing"), &[]),
         Err(ThreadError::UnknownThread)
@@ -100,7 +101,7 @@ fn setter_rejects_unknown_thread() {
 
 #[test]
 fn sidebar_json_round_trip_preserves_extra_read_dirs() {
-    let mut state = sidebar();
+    let (_project, mut state) = sidebar();
     let directory = tempdir().expect("temporary directory must be created");
     let read_dir = directory
         .path()
@@ -114,7 +115,7 @@ fn sidebar_json_round_trip_preserves_extra_read_dirs() {
 
 #[test]
 fn project_ancestors_root_and_descendants_are_rejected_atomically() {
-    let mut state = sidebar();
+    let (_project, mut state) = sidebar();
     let root = state.projects[0].repo_root.clone();
     let inside = root.join("drafts");
     std::fs::create_dir(&inside).unwrap();

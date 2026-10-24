@@ -247,6 +247,11 @@ impl ProviderSettingsModel {
         recorder::pricing::UsagePricing::new(self.entries.clone(), self.catalog.catalog.clone())
     }
 
+    /// Saved provider profiles, which decide model prices and metadata.
+    pub(crate) fn profile_entries(&self) -> &BTreeMap<String, config::ProviderProfileConfig> {
+        &self.entries
+    }
+
     pub fn model_entry(&self, profile: &str, model: &str) -> Option<&config::ModelEntryConfig> {
         self.entries
             .get(profile)?

@@ -351,7 +351,7 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
 #[cfg(unix)]
 fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
     use runtime::ownership::Registry;
-    use runtime::ownership::ipc::{Request, Response, request, serve_connection};
+    use runtime::ownership::ipc::{Request, Response, request_with_timeout, serve_connection};
     let socket = permit.registry_path.with_extension("sock");
     let _ = std::fs::remove_file(&socket);
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -363,18 +363,22 @@ fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
             serve_connection(&mut stream, &mut registry, 20).unwrap();
         }
     });
-    assert!(matches!(request(&socket, &Request::Quiesce {
+    // Ownership, not IPC speed: slow registry I/O must not close the client
+    // before the server responds (which turns its reply into BrokenPipe).
+    let ipc_timeout = Duration::from_secs(30);
+    assert!(matches!(request_with_timeout(&socket, &Request::Quiesce {
         thread_id: permit.thread_id.clone(), token: permit.lease.clone(),
-    }).unwrap(), Response::Status(owner) if owner.active_turn && owner.active_runs.len() == 1));
+    }, ipc_timeout).unwrap(), Response::Status(owner) if owner.active_turn && owner.active_runs.len() == 1));
     assert!(matches!(
-        request(
+        request_with_timeout(
             &socket,
             &Request::Handoff {
                 thread_id: permit.thread_id.clone(),
                 token: permit.lease.clone(),
                 successor_id: "successor".into(),
                 settings: config::OwnershipConfig::default(),
-            }
+            },
+            ipc_timeout,
         )
         .unwrap(),
         Response::Rejected(_)
