@@ -44,7 +44,7 @@ pub fn list_all(conn: &Connection) -> Result<Vec<RunLedgerEntry>, StorageError> 
         .collect::<Result<_, _>>()?)
 }
 
-fn from_row(row: &Row<'_>) -> rusqlite::Result<RunLedgerEntry> {
+pub(crate) fn from_row(row: &Row<'_>) -> rusqlite::Result<RunLedgerEntry> {
     Ok(RunLedgerEntry {
         seq: {
             let seq: i64 = row.get(0)?;

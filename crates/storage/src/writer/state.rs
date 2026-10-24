@@ -94,6 +94,25 @@ pub(super) fn run_writer(
                     tracing::warn!(error = %error, "usage attribution failed");
                 }
             }
+            Ok(Command::UpsertThreads(writer, threads, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "thread writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::threads::upsert(&state.conn, writer, &threads)
+                };
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(result);
+                    }
+                    None => {
+                        if let Err(error) = result {
+                            tracing::warn!(error = %error, "thread mirror write failed");
+                        }
+                    }
+                }
+            }
             Ok(Command::AppendEvent(session_id, event, reply)) => {
                 let result = if state.writes_suspended {
                     handle_suspended_append(&mut state, &session_id, &event)
@@ -184,7 +203,7 @@ pub(super) fn run_writer(
                         "run context writes suspended by storage limit".into(),
                     ))
                 } else {
-                    crate::repo::run_context::upsert(&state.conn, &record)
+                    upsert_run_context(&state.conn, &record)
                 };
                 let _ = reply.send(result);
             }
@@ -364,6 +383,17 @@ fn save_thread_start(
     let inserted = crate::repo::thread_start::save(&transaction, start)?;
     transaction.commit()?;
     Ok(inserted)
+}
+
+/// The snapshot and its thread binding commit together.
+fn upsert_run_context(
+    conn: &Connection,
+    record: &crate::RunContextRecord,
+) -> Result<crate::RunContextReceipt, StorageError> {
+    let transaction = conn.unchecked_transaction()?;
+    let receipt = crate::repo::run_context::upsert(&transaction, record)?;
+    transaction.commit()?;
+    Ok(receipt)
 }
 
 fn merge_usage(pending: &mut HashMap<BucketKey, UsageBucket>, buckets: Vec<UsageBucket>) {

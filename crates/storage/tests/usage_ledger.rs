@@ -86,7 +86,9 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+        "DROP TABLE threads; DROP TABLE thread_runs;
+         DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
+         ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
          ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
          DROP TABLE eval_samples; DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
@@ -321,7 +323,9 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
+        "DROP TABLE threads; DROP TABLE thread_runs;
+         DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
+         ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
          ALTER TABLE tasks ADD COLUMN resume_cursor_json TEXT;
          DROP TABLE eval_samples; DROP TABLE thread_start_untracked; DROP TABLE thread_start_states;
