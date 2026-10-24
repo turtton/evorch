@@ -178,6 +178,16 @@ fn thread_tools_follow_history_read_and_reject_unknown_arguments() {
         }
     }
     assert!(
+        tool_spec("thread_read")
+            .description
+            .contains("only for runs still registered in the live runtime")
+    );
+    assert!(
+        tool_spec("thread_read")
+            .description
+            .contains("saved-only runs return their phase without a terminal reason")
+    );
+    assert!(
         tool_spec("thread_search")
             .description
             .contains("metadata only")

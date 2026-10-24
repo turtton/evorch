@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a〜i と権限モデル、Phase A の設計）をすべて推奨案どおりに承認した。Phase A の実装は一部着手済みで、進捗は末尾の「実装状況」に記録する。
+Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a〜i と権限モデル、Phase A の設計）をすべて推奨案どおりに承認した。Phase A の A-1〜A-3 は実装済みで、任意の A-4 は今回は見送る。進捗は末尾の「実装状況」に記録する。
 
 この ADR は、evorch の再起動で作業が失われても、次の担当がこの ADR だけを読んで再開できるように、承認済みの仕様をすべて書く。
 
@@ -317,6 +317,8 @@ Phase A の検索対象はメタデータ（title、人間の発話、working no
 - Phase A は本文の索引を持たないので、`thread_grep` の線形走査は大きなスレッドで遅くなりうる。Phase 0 の計測と、Phase A 後の利用実績を見て Phase B を決める。
 
 ## 計測と検証の限界
+
+既知の制限: `thread_read` の root / child run の終了理由は、live runtime に登録中の run についてのみ返す。保存済みデータだけの run は終了理由を返さず、保存された phase を返す。これは storage の `RunTerminalSummary` が終了理由を保持しないためであり、tool description にも明記する。
 
 Phase 0 の計測は完了した。正規化時間は Python の JSON parse・テキスト化による参考値であり、Rust 実装性能を示すものではない。FTS の全量サイズは 10% サンプルの SQLite DB ファイル実測値を単純に 10 倍した外挿であり、SQLite の管理 overhead を含むサンプル値から全量索引の実サイズを保証するものではない。
 
