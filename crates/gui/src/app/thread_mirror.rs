@@ -37,19 +37,18 @@ pub(crate) struct ThreadMirrorLink {
 struct CanonicalRoots(HashMap<PathBuf, String>);
 
 impl CanonicalRoots {
-    /// The project root as the runtime binds runs to it: canonical when it can
-    /// be resolved, else the recorded path (the runtime falls back the same
-    /// way), as lossy UTF-8. An unresolved root is tried again on the next sync.
-    fn get(&mut self, repo_root: &Path) -> String {
+    /// The project root as the runtime binds runs to it: canonical, as lossy
+    /// UTF-8. `None` while it cannot be resolved (the directory is gone), so
+    /// a path that is not canonical never becomes the visibility key and a
+    /// stored root is kept; it is tried again on the next sync.
+    fn get(&mut self, repo_root: &Path) -> Option<String> {
         if let Some(root) = self.0.get(repo_root) {
-            return root.clone();
+            return Some(root.clone());
         }
-        let Ok(canonical) = std::fs::canonicalize(repo_root) else {
-            return repo_root.to_string_lossy().into_owned();
-        };
+        let canonical = std::fs::canonicalize(repo_root).ok()?;
         let root = canonical.to_string_lossy().into_owned();
         self.0.insert(repo_root.to_path_buf(), root.clone());
-        root
+        Some(root)
     }
 }
 
@@ -79,7 +78,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .sidebar
             .projects
             .iter()
-            .map(|project| (&project.id, link.canonical_roots.get(&project.repo_root)))
+            .filter_map(|project| {
+                Some((&project.id, link.canonical_roots.get(&project.repo_root)?))
+            })
             .collect();
         let changed: Vec<ThreadUpsert> = self
             .sidebar
@@ -255,12 +256,18 @@ mod tests {
         let mut roots = CanonicalRoots::default();
         let canonical = |path: &Path| std::fs::canonicalize(path).unwrap();
 
-        // When / Then: the symlink names its target; the missing root keeps its path.
-        assert_eq!(roots.get(&link), canonical(&real).to_string_lossy());
-        assert_eq!(roots.get(&pending), pending.to_string_lossy());
+        // When / Then: the symlink names its target; the missing root stays unknown.
+        assert_eq!(
+            roots.get(&link).as_deref(),
+            Some(canonical(&real).to_string_lossy().as_ref())
+        );
+        assert_eq!(roots.get(&pending), None);
 
         // When / Then: once the root exists, the next sync resolves it.
         std::fs::create_dir(&pending).unwrap();
-        assert_eq!(roots.get(&pending), canonical(&pending).to_string_lossy());
+        assert_eq!(
+            roots.get(&pending).as_deref(),
+            Some(canonical(&pending).to_string_lossy().as_ref())
+        );
     }
 }
