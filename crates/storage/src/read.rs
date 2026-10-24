@@ -403,6 +403,15 @@ impl Database {
         event::list_all_ordered(&self.conn)
     }
 
+    /// `EventKind::Orchestrator` events in ID order, such as thread goal and
+    /// procedure snapshots, without decoding the rest of the history.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn orchestrator_events_ordered(&self) -> Result<Vec<StoredEvent>, StorageError> {
+        event::list_orchestrator_ordered(&self.conn)
+    }
+
     /// `run_ids` and every run delegated from them, sorted.
     ///
     /// # Errors
