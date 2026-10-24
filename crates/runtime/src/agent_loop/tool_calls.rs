@@ -846,6 +846,7 @@ impl LoopState {
                         } else {
                             ToolResult::error("invalid prepared local call")
                         };
+                    let result = meta::bound_thread_result(&name, result);
                     self.ledger_tool_completed(&name, &id, &result);
                     let error_class = self.record_tool_outcome(&name, &result, typed_error_class);
                     if reports_progress {

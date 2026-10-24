@@ -970,6 +970,91 @@ fn a_thread_less_cli_caller_sees_only_its_project() {
 }
 
 #[tokio::test]
+async fn thread_argument_errors_are_redacted_and_bounded_through_the_agent_loop() {
+    let secret = format!("ghp_{}", "B".repeat(40));
+    let huge = format!("{secret} {}", "界".repeat(10_000));
+    let inputs = [
+        ("thread_read", json!({"thread": "own", huge.clone(): 1})),
+        ("thread_read", json!({"thread": "own", "view": huge})),
+        ("thread_search", json!({"match": huge})),
+        (
+            "thread_grep",
+            json!({"thread": "own", "pattern": "x", "kinds": [huge]}),
+        ),
+    ];
+    let script = inputs
+        .iter()
+        .enumerate()
+        .map(|(n, (name, input))| {
+            reply(
+                vec![ContentBlock::ToolUse {
+                    id: format!("bad-{n}"),
+                    name: (*name).into(),
+                    input: input.clone(),
+                }],
+                FinishReason::ToolUse,
+            )
+        })
+        .collect();
+    let f = Fixture::with_script(script);
+    let mut events = f.runtime.shared.bus.subscribe();
+    let run = f
+        .runtime
+        .delegate_chat(
+            "caller",
+            Role::Worker,
+            "test invalid arguments".into(),
+            RunConfig {
+                project_root: Some(f.project.path().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.runtime.wait(run).await.unwrap();
+    let record = f.store().restore_record(run).unwrap().unwrap();
+    let messages: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    let mut count = 0;
+    for block in messages.iter().flat_map(|m| &m.content) {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = block
+        {
+            assert!(is_error);
+            let text: String = content
+                .iter()
+                .map(|p| p.text_or_image_note().into_owned())
+                .collect();
+            assert!(text.len() <= MAX_OUTPUT_BYTES, "{}", text.len());
+            assert!(!text.contains(&secret));
+            count += 1;
+        }
+    }
+    assert_eq!(count, inputs.len());
+    let mut completed = 0;
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await
+    {
+        if let event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+            output: Some(output),
+            ..
+        }) = event.kind
+        {
+            assert!(output.len() <= MAX_OUTPUT_BYTES);
+            assert!(!output.contains(&secret));
+            completed += 1;
+        }
+    }
+    assert_eq!(completed, inputs.len());
+    // The handler's serde path is bounded too, even if no preflight ran.
+    let parse_error = super::parse::<read::ReadArgs>(json!({"thread": "own", "view": huge}))
+        .err()
+        .unwrap();
+    assert!(super::error(parse_error).result.content.len() <= MAX_OUTPUT_BYTES);
+    let other = tools::ToolResult::error(huge.clone());
+    assert_eq!(super::bound_result("read", other.clone()), other);
+}
+
+#[tokio::test]
 async fn a_chat_run_reads_a_sibling_thread_through_the_registered_tools() {
     let tool = |id: &str, name: &str, input: Value| {
         reply(

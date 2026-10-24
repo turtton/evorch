@@ -21,6 +21,7 @@ mod runs;
 mod skills;
 mod specs;
 pub(crate) use specs::tool_spec;
+pub(crate) use threads::bound_result as bound_thread_result;
 mod threads;
 
 use agents::Role;
@@ -69,7 +70,9 @@ pub(crate) async fn dispatch(
     if matches!(op, MetaOp::Wait | MetaOp::WaitReply | MetaOp::Delegate) {
         state.activity(event_bus::RunActivity::Children);
     }
-    op.handle(state, &runtime, input).await
+    let mut dispatch = op.handle(state, &runtime, input).await;
+    dispatch.result = bound_thread_result(name, dispatch.result);
+    dispatch
 }
 
 fn finish(

@@ -28,7 +28,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use storage::threads::{RunTerminalSummary, ThreadRow, ThreadRunRow};
 
-use super::{DispatchResult, error, parse, success};
+use super::{DispatchResult, parse, success};
 use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, RunStore};
 use visibility::{Caller, Target};
@@ -48,6 +48,31 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Storage failures after authorization never echo stored text.
 const STORE_ERROR: &str = "thread_unavailable: the thread's saved records could not be read";
+
+/// Thread errors can contain serde/schema diagnostics echoing arbitrary input.
+/// Redact before clipping, so a cut cannot expose an unrecognized secret prefix.
+fn error(reason: impl Into<String>) -> DispatchResult {
+    super::error(safe_error(&reason.into()))
+}
+
+fn safe_error(reason: &str) -> String {
+    clip_bytes(
+        &SecretRedactor::from_env().redact(reason).text,
+        MAX_OUTPUT_BYTES,
+    )
+}
+
+pub(crate) fn bound_result(name: &str, mut result: tools::ToolResult) -> tools::ToolResult {
+    if matches!(name, "thread_search" | "thread_grep" | "thread_read") {
+        if result.is_error {
+            result.content = safe_error(&result.content);
+            result.detail = None;
+        } else if result.content.len() > MAX_OUTPUT_BYTES {
+            return tools::ToolResult::error("thread_output_too_large: output exceeds 16 KiB");
+        }
+    }
+    result
+}
 
 pub(super) fn search(state: &LoopState, runtime: &AgentRuntime, input: Value) -> DispatchResult {
     invoke(state, runtime, input, search::run)
