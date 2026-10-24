@@ -4,10 +4,14 @@
 use std::path::Path;
 use std::time::Duration;
 
+use event_bus::{AgentRunPhase, EscalationMemoSummary, Event, LifecycleEvent, MessageEvent};
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
+use gui::model::composer::ProviderStatus;
+use gui::model::transcript::TranscriptEntry;
 use storage::threads::{ThreadLineageKind, ThreadRow, ThreadSource, ThreadUpsert};
 use storage::{Database, Storage, StorageConfig};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 /// Steps frames until the mirrored row of `thread_id` satisfies `ready`. The
 /// mirror syncs once a second; a hang is reported by the nextest watchdog
@@ -28,6 +32,77 @@ fn step_until_row(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A mirroring workbench whose project at `root` holds `threads`; the first is active.
+fn mirrored_workbench(
+    root: &Path,
+    threads: &[(&str, &str)],
+    storage: &Storage,
+) -> HeadlessWorkbench<DemoSource> {
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("project");
+    sidebar
+        .add_project(project.clone(), "project", root)
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    for (id, title) in threads {
+        sidebar
+            .create_thread(ThreadId::new(*id), project.clone(), *title)
+            .unwrap();
+    }
+    sidebar.switch_thread(&ThreadId::new(threads[0].0)).unwrap();
+    let state = gui::app::WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("workbench")
+        .with_sidebar(sidebar)
+        .with_provider_status(ProviderStatus::Configured)
+        .with_thread_mirror(storage.handle());
+    HeadlessWorkbench::new(state, [1200.0, 800.0])
+}
+
+fn started(run: &str, agent_name: &str) -> Event {
+    Event::new(LifecycleEvent::AgentRunStarted {
+        run_id: run.into(),
+        parent_run_id: None,
+        agent_name: agent_name.into(),
+        role: "worker".into(),
+    })
+}
+
+fn phase(run: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from,
+        to,
+        reason: None,
+    })
+}
+
+/// One user message and a completed reply on thread `one`'s chat run `run`.
+fn turn(harness: &mut HeadlessWorkbench<DemoSource>, run: &str, first: bool, context_len: u64) {
+    let gui = harness.state_mut();
+    gui.composer_mut().input = format!("prompt {context_len}");
+    gui.submit_composer();
+    let mut events = Vec::new();
+    let from = if first {
+        events.push(started(run, "chat:Worker:one"));
+        AgentRunPhase::Pending
+    } else {
+        AgentRunPhase::Waiting
+    };
+    events.extend([
+        phase(run, from, AgentRunPhase::Running),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: run.into(),
+            text: format!("reply {context_len}"),
+        }),
+        phase(run, AgentRunPhase::Running, AgentRunPhase::Waiting),
+        Event::new(LifecycleEvent::TurnCompleted {
+            run_id: run.into(),
+            context_len,
+        }),
+    ]);
+    gui.apply_events(events);
 }
 
 #[test]
@@ -185,6 +260,133 @@ fn restored_sidebar_is_mirrored_under_canonical_roots_beside_runtime_values() {
         row.created_at_ns > 5,
         "the host's creation time replaces it"
     );
+    drop(harness);
+    storage.close();
+}
+
+#[test]
+fn rewound_and_switched_versions_follow_into_storage() {
+    // Given: a mirrored thread with two completed turns on its chat run.
+    let directory = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: directory.path().join("events.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut harness = mirrored_workbench(project.path(), &[("one", "Topic")], &storage);
+    turn(&mut harness, "run-1", true, 2);
+    turn(&mut harness, "run-1", false, 4);
+    let canonical_root = std::fs::canonicalize(project.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // Then: the run the conversation bound is mirrored as its root, with its role.
+    let original = step_until_row(&mut harness, &config.db_path, "one", |row| {
+        row.root_run_id.is_some()
+    });
+    assert_eq!(original.root_run_id.as_deref(), Some("run-1"));
+    assert_eq!(original.chat_role.as_deref(), Some("Worker"));
+    assert!(!original.superseded);
+
+    // When: the conversation is rewound to its first turn.
+    let first_turn = harness
+        .state()
+        .transcript()
+        .entries()
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::TurnEnd { .. }))
+        .unwrap();
+    let version = harness
+        .state_mut()
+        .rewind_to_turn(ThreadId::new("one"), first_turn)
+        .unwrap();
+    let version_id = version.to_string();
+
+    // Then: the new version is mirrored as a rewind of the original at that
+    // turn, and the original as superseded.
+    let row = step_until_row(&mut harness, &config.db_path, &version_id, |_| true);
+    assert_eq!(row.parent_thread_id.as_deref(), Some("one"));
+    assert_eq!(row.lineage_kind, Some(ThreadLineageKind::Rewind));
+    assert_eq!(row.fork_point_run_id.as_deref(), Some("run-1"));
+    assert_eq!(row.fork_point_context_len, Some(2));
+    assert_eq!(row.escalation_source_run_id, None);
+    assert_eq!(row.chat_role.as_deref(), Some("Worker"));
+    assert_eq!(row.title.as_deref(), Some("Topic"));
+    assert_eq!(row.project_root.as_deref(), Some(canonical_root.as_str()));
+    assert_eq!(row.created_at_ns, original.created_at_ns);
+    assert!(!row.superseded);
+    step_until_row(&mut harness, &config.db_path, "one", |row| row.superseded);
+
+    // When: the original version is shown again.
+    harness
+        .state_mut()
+        .switch_version(ThreadId::new("one"))
+        .unwrap();
+
+    // Then: the superseded flags swap in storage.
+    let row = step_until_row(&mut harness, &config.db_path, "one", |row| !row.superseded);
+    assert_eq!(row.root_run_id.as_deref(), Some("run-1"));
+    step_until_row(&mut harness, &config.db_path, &version_id, |row| {
+        row.superseded
+    });
+    drop(harness);
+    storage.close();
+}
+
+#[test]
+fn escalated_conversation_is_mirrored_as_a_child_of_its_source() {
+    // Given: a mirrored worker thread.
+    let directory = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: directory.path().join("events.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut harness = mirrored_workbench(project.path(), &[("parent", "Worker task")], &storage);
+    let canonical_root = std::fs::canonicalize(project.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // When: its chat run starts and escalates to a new orchestrator run.
+    harness.state_mut().apply_events([
+        started("run-1", "chat:Worker:parent"),
+        Event::new(LifecycleEvent::EscalationRequested {
+            source_run_id: "run-1".into(),
+            new_run_id: "run-2".into(),
+            summary: EscalationMemoSummary {
+                original_request: "Implement the feature".into(),
+                escalation_reason: "Coordination required".into(),
+                files_touched: Vec::new(),
+                blockers: Vec::new(),
+                suggested_next: "Inspect the design".into(),
+            },
+        }),
+    ]);
+
+    // Then: the escalated conversation is mirrored with its escalation lineage,
+    // in the source's project, and the source keeps its own root run.
+    let escalated = event_bus::escalation_thread_id("run-2");
+    let row = step_until_row(&mut harness, &config.db_path, &escalated, |_| true);
+    assert_eq!(row.parent_thread_id.as_deref(), Some("parent"));
+    assert_eq!(row.lineage_kind, Some(ThreadLineageKind::Escalation));
+    assert_eq!(row.escalation_source_run_id.as_deref(), Some("run-1"));
+    assert_eq!(row.fork_point_run_id, None);
+    assert_eq!(row.root_run_id.as_deref(), Some("run-2"));
+    assert_eq!(row.chat_role.as_deref(), Some("Orchestrator"));
+    assert_eq!(row.title.as_deref(), Some("Orchestrator · Worker task"));
+    assert_eq!(row.project_id.as_deref(), Some("project"));
+    assert_eq!(row.project_root.as_deref(), Some(canonical_root.as_str()));
+    assert_eq!(row.source, ThreadSource::Host);
+    let parent = step_until_row(&mut harness, &config.db_path, "parent", |row| {
+        row.root_run_id.is_some()
+    });
+    assert_eq!(parent.root_run_id.as_deref(), Some("run-1"));
+    assert_eq!(parent.chat_role.as_deref(), Some("Worker"));
+    assert_eq!(parent.lineage_kind, None);
     drop(harness);
     storage.close();
 }
