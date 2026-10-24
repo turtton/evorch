@@ -18,6 +18,137 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    /// Thread definition by exact ID; no visibility check is performed here.
+    pub(crate) fn thread(
+        &self,
+        id: &str,
+    ) -> Result<Option<storage::threads::ThreadRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread(id)
+    }
+
+    /// Resolve a saved run's conversation, including legacy parent/name fallback.
+    pub(crate) fn thread_of_run(
+        &self,
+        id: &str,
+    ) -> Result<Option<storage::threads::ThreadRunRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_of_run(id)
+    }
+
+    /// Page through exact canonical-project matches; unknown roots never match.
+    pub(crate) fn threads_in_project(
+        &self,
+        root: &str,
+        cursor: Option<&storage::threads::ThreadCursor>,
+        limit: usize,
+    ) -> Result<storage::threads::ThreadPage, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .threads_in_project(root, cursor, limit)
+    }
+
+    pub(crate) fn thread_cursor_token(
+        &self,
+        cursor: &storage::threads::ThreadCursor,
+    ) -> Result<String, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_cursor_token(cursor)
+    }
+
+    pub(crate) fn thread_cursor_from_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<storage::threads::ThreadCursor>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_cursor_from_token(token)
+    }
+
+    /// Children recorded by fork/rewind/escalation metadata.
+    pub(crate) fn thread_children(
+        &self,
+        id: &str,
+    ) -> Result<Vec<storage::threads::ThreadRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_children(id)
+    }
+
+    /// Saved runs of a conversation, including delegated children.
+    pub(crate) fn runs_of_thread(
+        &self,
+        id: &str,
+    ) -> Result<Vec<storage::threads::ThreadRunRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .runs_of_thread(id)
+    }
+
+    /// Load histories only after the caller has authorized their conversation.
+    pub(crate) fn run_contexts_for(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<RunContextRecord>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .run_contexts_for(ids)
+    }
+
+    /// Latest working note revisions; never evidence for visibility.
+    pub(crate) fn latest_ledgers(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<RunLedgerEntry>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .latest_ledgers(ids)
+    }
+
+    /// Terminal summaries without decoding full histories.
+    pub(crate) fn terminal_summaries(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<storage::threads::RunTerminalSummary>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .terminal_summaries(ids)
+    }
+
+    /// Questions delivered to these runs, deduplicated by durable question ID.
+    pub(crate) fn user_questions_for_runs(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<event_bus::UserQuestion>, StorageError> {
+        let db = self
+            .database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for id in ids {
+            for question in db.user_questions_for_run(id)? {
+                if seen.insert(question.id.clone()) {
+                    result.push(question);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub(crate) fn learning_source_contexts(
         &self,
         root: RunId,

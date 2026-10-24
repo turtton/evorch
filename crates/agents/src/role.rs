@@ -201,6 +201,9 @@ impl Role {
                 "working_note_write",
                 "working_note_read",
                 "history_read",
+                "thread_search",
+                "thread_grep",
+                "thread_read",
                 "ask_user",
                 "user_answers",
             ]

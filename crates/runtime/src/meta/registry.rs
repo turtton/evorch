@@ -121,6 +121,15 @@ define_meta_ops! {
     HistoryRead => "history_read" => specs::history_read => |state, runtime, input| {
         super::history::read(state, input)
     },
+    ThreadSearch => "thread_search" => specs::thread_search => |state, runtime, input| {
+        super::threads::search(state, runtime, input)
+    },
+    ThreadGrep => "thread_grep" => specs::thread_grep => |state, runtime, input| {
+        super::threads::grep(state, runtime, input)
+    },
+    ThreadRead => "thread_read" => specs::thread_read => |state, runtime, input| {
+        super::threads::read(state, runtime, input)
+    },
     AskUser => "ask_user" => specs::ask_user => |state, runtime, input| {
         questions::ask_user(state, runtime, input)
     },

@@ -167,10 +167,14 @@ impl AgentRuntime {
             .restore_route_pins(&run_id.to_string(), &descriptor.route_pins);
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
-            match (pending.trusted_request.as_deref(), prompt) {
-                (Some(original), Some(prompt)) => {
-                    Some(crate::thread_goals::continued_request(original, prompt))
-                }
+            let original = pending
+                .trusted_request
+                .as_deref()
+                .filter(|_| pending.trusted_request_complete);
+            match (original, prompt) {
+                (Some(original), Some(prompt)) => Some(
+                    crate::thread_goals::continued_thread_request(original, prompt),
+                ),
                 (Some(original), None) => Some(original.into()),
                 (None, Some(prompt)) => Some(prompt.into()),
                 (None, None) => None,
@@ -217,6 +221,7 @@ impl AgentRuntime {
             descriptor.outcome_notices_persisted = true;
             if let Some(pending) = &mut descriptor.pending_escalation {
                 pending.trusted_request = pending_request.clone();
+                pending.trusted_request_complete = true;
             }
             descriptor.turn = Some(crate::request_turn::initial(
                 Default::default(),
@@ -451,9 +456,9 @@ impl AgentRuntime {
                     }
                 }
                 match record {
-                    None => match seed {
+                    None => match seed.as_ref() {
                         None => None,
-                        Some(seed) => Some(self.fork_seed_history(store, &seed, role, &config)?),
+                        Some(seed) => Some(self.fork_seed_history(store, seed, role, &config)?),
                     },
                     Some(record) => {
                         let descriptor: RunRestoreDescriptor =
@@ -576,6 +581,14 @@ impl AgentRuntime {
                 reason: RunRestoreFailure::CorruptContext(reason),
             }
         })?;
+        crate::thread_lineage::record_chat_root(
+            self,
+            thread_id,
+            run_id,
+            role,
+            &config,
+            seed.as_ref().filter(|_| restored_source.is_none()),
+        );
         if let Some((objective, criteria)) = config.initial_thread_goal.take() {
             self.create_thread_goal(thread_id, run_id, objective, criteria)
                 .map_err(|reason| RuntimeError::RunRestoreFailed {

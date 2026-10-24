@@ -21,6 +21,9 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "ask_user",
     "user_answers",
 ];
@@ -31,6 +34,9 @@ pub const EXPLORER_TOOLS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "ask_user",
     "user_answers",
 ];
@@ -50,6 +56,9 @@ pub const WORKER_TOOLS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "ask_user",
     "user_answers",
 ];
@@ -61,6 +70,9 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "ask_user",
     "user_answers",
 ];
@@ -92,6 +104,9 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "ask_user",
     "user_answers",
 ];

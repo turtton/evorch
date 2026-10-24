@@ -1078,7 +1078,8 @@ fn run() -> Result<(), GuiError> {
             self_improvement.enabled,
             improvement_draft_dir,
         )
-        .with_usage_ledger(storage.handle(), usage_pricing);
+        .with_usage_ledger(storage.handle(), usage_pricing)
+        .with_thread_mirror(storage.handle());
     state.restore_history_with_ownership(
         &storage::Database::open(&storage_config)?,
         &ownership_root.join("owners.db"),

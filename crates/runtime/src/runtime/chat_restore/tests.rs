@@ -7,6 +7,7 @@ mod registration;
 mod resume;
 mod review_authority;
 mod shell_handles;
+mod thread_lineage;
 mod thread_start;
 
 struct CompletingModel;

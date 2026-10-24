@@ -33,7 +33,8 @@ CACHE_CONTRACT_FILTER='
       | binary(=model_switch_cache)
       | binary(=owned_route_fallback)
       | binary(=builtin_git_skill)
-      | binary(=skill_hot_reload_cache)))
+      | binary(=skill_hot_reload_cache)
+      | binary(=thread_tools_cache)))
   | (package(=tools) & binary(=bounded_output))
 '
 IO_CONTRACT_FILTER='

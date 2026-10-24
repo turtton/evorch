@@ -32,6 +32,11 @@ enum Command {
     Usage(Vec<UsageBucket>),
     RecordUsageRequests(Vec<crate::usage::UsageRequestRecord>, ReplyTx),
     AttributeUsageRuns(Vec<crate::usage::RunAttribution>),
+    UpsertThreads(
+        crate::threads::ThreadWriter,
+        Vec<crate::threads::ThreadUpsert>,
+        Option<ReplyTx>,
+    ),
     AppendEvent(Option<String>, Event, ReplyTx),
     AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
     AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
@@ -307,7 +312,8 @@ impl StorageHandle {
         self.request(|reply| Command::DeleteEvalSample(thread_id.into(), reply))
     }
 
-    /// Replace the stored snapshot for a run; the last write wins.
+    /// Replace the stored snapshot for a run; the last write wins. The run's
+    /// thread binding is updated in the same transaction.
     ///
     /// # Errors
     /// Returns an error for suspended writes, SQLite failure or a closed writer.
@@ -636,6 +642,68 @@ impl StorageHandle {
             Err(TrySendError::Full(_)) => false,
             Err(TrySendError::Disconnected(_)) => {
                 tracing::warn!("storage writer is closed; dropping usage attribution");
+                true
+            }
+        }
+    }
+
+    /// Record a thread the runtime started or branched (ADR 0041). Columns the
+    /// host already mirrored are kept; the runtime fills only the ones it left
+    /// empty, and `None` never erases a stored value.
+    ///
+    /// # Errors
+    /// Rejects an empty thread ID, suspended writes, SQLite failure or a closed writer.
+    pub fn upsert_thread_runtime(
+        &self,
+        thread: &crate::threads::ThreadUpsert,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::UpsertThreads(
+                crate::threads::ThreadWriter::Runtime,
+                vec![thread.clone()],
+                Some(reply),
+            )
+        })
+    }
+
+    /// Mirror `sidebar.json` thread definitions and wait for the commit. Every
+    /// supplied value replaces the stored one; `None` keeps it.
+    ///
+    /// # Errors
+    /// Rejects the whole batch for an empty thread ID; also fails for suspended
+    /// writes, SQLite failure or a closed writer.
+    pub fn upsert_threads_host(
+        &self,
+        threads: &[crate::threads::ThreadUpsert],
+    ) -> Result<(), StorageError> {
+        if threads.is_empty() {
+            return Ok(());
+        }
+        self.request(|reply| {
+            Command::UpsertThreads(
+                crate::threads::ThreadWriter::Host,
+                threads.to_vec(),
+                Some(reply),
+            )
+        })
+    }
+
+    /// Mirror `sidebar.json` thread definitions like [`Self::upsert_threads_host`]
+    /// without waiting. Returns `false`, sending nothing, when the queue is full
+    /// so the caller can resend on its next tick. Write failures are only logged.
+    pub fn try_upsert_threads(&self, threads: Vec<crate::threads::ThreadUpsert>) -> bool {
+        if threads.is_empty() {
+            return true;
+        }
+        match self.0.try_send(Command::UpsertThreads(
+            crate::threads::ThreadWriter::Host,
+            threads,
+            None,
+        )) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!("storage writer is closed; dropping thread mirror");
                 true
             }
         }

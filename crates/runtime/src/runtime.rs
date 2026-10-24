@@ -145,7 +145,7 @@ pub(crate) struct Shared {
     pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
     next_reference_token: AtomicU64,
-    runs: Mutex<HashMap<RunId, RunEntry>>,
+    pub(crate) runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
 }
 
@@ -249,12 +249,12 @@ impl PendingReference {
     }
 }
 
-struct RunEntry {
+pub(crate) struct RunEntry {
     role: Role,
     name: String,
     model: String,
     config: RunConfig,
-    parent: Option<RunId>,
+    pub(crate) parent: Option<RunId>,
     escalated_from: Option<RunId>,
     completion_relayed: bool,
     terminal_reason: Option<String>,
@@ -1645,6 +1645,7 @@ impl AgentRuntime {
             ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
+        let parent_thread_id = crate::thread_lineage::source_thread(self, source_run_id);
         let run_id = self.shared.run_ids.next();
         // Escalation starts from the memo, not the source conversation. Every
         // source question/answer therefore still needs delivery to this root.
@@ -1699,6 +1700,13 @@ impl AgentRuntime {
                     }));
             },
         )?;
+        crate::thread_lineage::record_escalation(
+            self,
+            run_id,
+            source_run_id,
+            parent_thread_id,
+            &config,
+        );
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,
@@ -2745,7 +2753,9 @@ fn unknown_run(run_id: RunId) -> RuntimeError {
     }
 }
 
-fn lock_runs(runs: &Mutex<HashMap<RunId, RunEntry>>) -> MutexGuard<'_, HashMap<RunId, RunEntry>> {
+pub(crate) fn lock_runs(
+    runs: &Mutex<HashMap<RunId, RunEntry>>,
+) -> MutexGuard<'_, HashMap<RunId, RunEntry>> {
     runs.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

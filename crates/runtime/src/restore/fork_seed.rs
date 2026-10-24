@@ -70,6 +70,7 @@ impl RestoredState {
             serde_json::from_str(&record.checkpoints_json)
                 .map_err(|error| corrupt(error.to_string()))?;
         // Interrupted calls belong to a batch after the boundary.
+        descriptor.thread_id = None;
         descriptor.interrupted_tool_calls.clear();
         descriptor.pending_reference_id = None;
         if end != messages.len() {

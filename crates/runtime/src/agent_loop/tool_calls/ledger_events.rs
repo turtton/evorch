@@ -1,6 +1,6 @@
 //! Meta operations bypass ToolExecutor; the ones the user should see in the
-//! conversation (ledger access, skill loads, goal creation) still share the
-//! GUI tool lifecycle.
+//! conversation (ledger access, other-thread reads, skill loads, goal creation)
+//! still share the GUI tool lifecycle.
 
 use event_bus::{Event, ToolEvent};
 use serde_json::Value;
@@ -13,6 +13,9 @@ const VISIBLE_META_OPS: &[&str] = &[
     "working_note_write",
     "working_note_read",
     "history_read",
+    "thread_search",
+    "thread_grep",
+    "thread_read",
     "skill_load",
     "create_goal",
 ];

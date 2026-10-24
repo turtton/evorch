@@ -77,7 +77,7 @@ fn denied(source: &str, caller: RunId, sources: &[HistorySource]) -> String {
         }
         message.push('.');
     }
-    message.push_str(" Run IDs and GUI thread IDs (escalation-run-<id>, thread-<n>) are not handles; other threads' and runs' histories cannot be read with this tool. Instead, use run_output for a direct child or parent; if the user wants another thread's content, tell them it cannot be read here and ask them to share the needed part.");
+    message.push_str(" Run IDs and GUI thread IDs (escalation-run-<id>, thread-<n>) are not handles; other threads' and runs' histories cannot be read with this tool. Use run_output for a direct child or parent. For another thread's conversation, use thread_read with its thread ID or a run ID in it. If thread_read denies a thread outside your project, ask the user to name its ID in this conversation or to share the needed part.");
     message
 }
 
@@ -206,6 +206,31 @@ mod tests {
                 None => assert!(!message.contains("did you mean"), "{source}: {message}"),
             }
         }
+    }
+
+    #[test]
+    fn denial_points_other_threads_to_thread_read_without_calling_them_unreadable() {
+        let caller = RunId::new(1);
+        for (source, sources) in [
+            ("thread-3", Vec::new()),
+            ("escalation-run-8", vec![handle("run-7")]),
+            (ULID_RUN, vec![handle(ULID_RUN)]),
+        ] {
+            let message = denied(source, caller, &sources);
+            assert!(message.starts_with(CODE), "{message}");
+            assert!(
+                message.contains("For another thread's conversation, use thread_read"),
+                "{message}"
+            );
+            assert!(message.contains("run_output"), "{message}");
+            assert!(!message.contains("cannot be read here"), "{message}");
+            assert!(
+                message.contains("name its ID in this conversation"),
+                "{message}"
+            );
+        }
+        let message = denied(ULID_RUN, caller, &[handle(ULID_RUN)]);
+        assert!(message.starts_with(&format!("{CODE}did you mean \"handoff:{ULID_RUN}\"? ")));
     }
 
     #[test]

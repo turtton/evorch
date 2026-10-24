@@ -18,6 +18,7 @@ pub mod run_ledger;
 pub mod session;
 pub mod task;
 pub(crate) mod thread_start;
+pub(crate) mod threads;
 pub(crate) mod usage;
 pub(crate) mod user_questions;
 

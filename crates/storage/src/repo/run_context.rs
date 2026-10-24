@@ -57,6 +57,7 @@ pub fn upsert(
             record.updated_at_ns
         ],
     )?;
+    crate::repo::threads::bind_saved_run(conn, record)?;
     if count > 0 {
         tracing::info!(run_id = %record.run_id, redacted_spans = count, "run context saved with credential redactions");
     }
@@ -143,29 +144,33 @@ fn redact_anthropic_block(
     Ok(count)
 }
 
+/// Columns decoded by [`from_row`], in order.
+pub(crate) const COLUMNS: &str = "run_id, role, name, parent_run_id, config_json, messages_json, \
+                                  checkpoints_json, terminal_phase, restorable, updated_at_ns";
+
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
     Ok(conn
         .query_row(
-            "SELECT run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns \
-         FROM run_contexts WHERE run_id = ?1",
+            &format!("SELECT {COLUMNS} FROM run_contexts WHERE run_id = ?1"),
             [run_id],
-            |row| {
-                Ok(RunContextRecord {
-                    run_id: row.get(0)?,
-                    role: row.get(1)?,
-                    name: row.get(2)?,
-                    parent_run_id: row.get(3)?,
-                    config_json: row.get(4)?,
-                    messages_json: row.get(5)?,
-                    checkpoints_json: row.get(6)?,
-                    terminal_phase: row.get(7)?,
-                    restorable: row.get(8)?,
-                    updated_at_ns: row.get(9)?,
-                })
-            },
+            from_row,
         )
         .optional()?)
+}
+
+pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRecord> {
+    Ok(RunContextRecord {
+        run_id: row.get(0)?,
+        role: row.get(1)?,
+        name: row.get(2)?,
+        parent_run_id: row.get(3)?,
+        config_json: row.get(4)?,
+        messages_json: row.get(5)?,
+        checkpoints_json: row.get(6)?,
+        terminal_phase: row.get(7)?,
+        restorable: row.get(8)?,
+        updated_at_ns: row.get(9)?,
+    })
 }
 
 pub fn compare_and_swap_restore_state(
