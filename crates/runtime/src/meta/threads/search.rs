@@ -133,7 +133,10 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         .cursor
         .as_deref()
         .map(|cursor| {
-            ThreadCursor::decode(cursor)
+            scope
+                .store
+                .thread_cursor_from_token(cursor)
+                .map_err(|_| STORE_ERROR.to_owned())?
                 .ok_or_else(|| "thread_cursor_invalid: pass next_cursor unchanged".to_owned())
         })
         .transpose()?;
@@ -161,7 +164,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             exhausted = false;
             break;
         }
-        last_examined = Some(position(candidate));
+        last_examined = Some(position(scope, candidate)?);
         // Gathered candidates are re-checked by the single visibility gate.
         let Ok(row) = scope.resolve(&candidate.thread_id) else {
             continue;
@@ -215,7 +218,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
                 )
             }
         };
-        positions.push(position(&row));
+        positions.push(position(scope, &row)?);
         results.push(entry(
             scope,
             &row,
@@ -227,7 +230,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
     }
     let next = (!exhausted).then(|| last_examined.clone()).flatten();
     let total = results.len();
-    Ok(fit(MAX_OUTPUT_BYTES, total, |count| {
+    Ok(scope.output(fit(MAX_OUTPUT_BYTES, total, |count| {
         // A trimmed page resumes after the last thread it still shows.
         let next_cursor = if count < total {
             count
@@ -238,21 +241,23 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         } else {
             next.clone()
         };
-        json!({
+        scope.output(json!({
             "note": UNTRUSTED_NOTE,
             "scope": "own thread, its lineage and threads of this project; metadata only (titles, human messages, working notes, final reports)",
             "threads": &results[..count],
             "next_cursor": next_cursor,
-        })
-    }))
+        }))
+    })))
 }
 
-fn position(row: &ThreadRow) -> String {
-    ThreadCursor {
-        updated_at_ns: row.updated_at_ns,
-        thread_id: row.thread_id.clone(),
-    }
-    .encode()
+fn position(scope: &Scope<'_>, row: &ThreadRow) -> Result<String, String> {
+    scope
+        .store
+        .thread_cursor_token(&ThreadCursor {
+            updated_at_ns: row.updated_at_ns,
+            thread_id: row.thread_id.clone(),
+        })
+        .map_err(|_| STORE_ERROR.to_owned())
 }
 
 /// Own thread, its recorded lineage and the project's threads, newest first.

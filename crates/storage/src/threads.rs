@@ -259,6 +259,48 @@ impl Database {
         crate::repo::threads::in_project(&self.conn, project_root, cursor, limit)
     }
 
+    /// Encode a position without exposing a potentially secret-bearing thread ID.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails or the thread was removed.
+    pub fn thread_cursor_token(&self, cursor: &ThreadCursor) -> Result<String, StorageError> {
+        let rowid: i64 = self.conn.query_row(
+            "SELECT rowid FROM threads WHERE thread_id = ?1",
+            [&cursor.thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(format!("v1:{}:{rowid}", cursor.updated_at_ns))
+    }
+
+    /// Resolve an opaque position. This grants no visibility to its thread.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn thread_cursor_from_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<ThreadCursor>, StorageError> {
+        use rusqlite::OptionalExtension;
+        let Some((time, rowid)) = token.strip_prefix("v1:").and_then(|s| s.split_once(':')) else {
+            return Ok(None);
+        };
+        let (Ok(updated_at_ns), Ok(rowid)) = (time.parse::<i64>(), rowid.parse::<i64>()) else {
+            return Ok(None);
+        };
+        let thread_id = self
+            .conn
+            .query_row(
+                "SELECT thread_id FROM threads WHERE rowid = ?1",
+                [rowid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(thread_id.map(|thread_id| ThreadCursor {
+            updated_at_ns,
+            thread_id,
+        }))
+    }
+
     /// Threads branched from `thread_id`, and escalations requested by its
     /// runs, oldest first.
     ///

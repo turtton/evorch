@@ -91,8 +91,8 @@ fn invoke<A: DeserializeOwned>(
     );
     let scope = Scope::new(store, runtime, caller, SecretRedactor::from_env());
     match handler(&scope, args) {
-        Ok(value) => success(value.to_string()),
-        Err(reason) => error(reason),
+        Ok(value) => success(scope.output(value).to_string()),
+        Err(reason) => error(scope.redact(&reason)),
     }
 }
 
@@ -137,6 +137,24 @@ impl<'a> Scope<'a> {
 
     fn redact(&self, text: &str) -> String {
         self.redactor.redact(text).text
+    }
+
+    /// Redact keys as well as values after composing metadata; raw rows remain
+    /// separate for authorization and cursor comparisons.
+    fn output(&self, value: Value) -> Value {
+        match value {
+            Value::String(text) => Value::String(self.redact(&text)),
+            Value::Array(values) => {
+                Value::Array(values.into_iter().map(|v| self.output(v)).collect())
+            }
+            Value::Object(values) => Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (self.redact(&key), self.output(value)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     /// Runs of an authorized thread with their saved terminal state.

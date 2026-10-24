@@ -53,6 +53,26 @@ impl RunStore {
             .threads_in_project(root, cursor, limit)
     }
 
+    pub(crate) fn thread_cursor_token(
+        &self,
+        cursor: &storage::threads::ThreadCursor,
+    ) -> Result<String, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_cursor_token(cursor)
+    }
+
+    pub(crate) fn thread_cursor_from_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<storage::threads::ThreadCursor>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .thread_cursor_from_token(token)
+    }
+
     /// Children recorded by fork/rewind/escalation metadata.
     pub(crate) fn thread_children(
         &self,

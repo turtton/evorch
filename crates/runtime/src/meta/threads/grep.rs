@@ -169,7 +169,7 @@ pub(super) fn run(scope: &Scope<'_>, args: GrepArgs) -> Result<Value, String> {
     let shown = page.len();
     Ok(fit(MAX_OUTPUT_BYTES, shown, |count| {
         let next = start + count;
-        json!({
+        scope.output(json!({
             "note": UNTRUSTED_NOTE,
             "thread_id": row.thread_id,
             "runs_scanned": selected.len(),
@@ -177,6 +177,6 @@ pub(super) fn run(scope: &Scope<'_>, args: GrepArgs) -> Result<Value, String> {
             "hits": &page[..count],
             "next_cursor": (next < total).then(|| next.to_string()),
             "notes": notes,
-        })
+        }))
     }))
 }

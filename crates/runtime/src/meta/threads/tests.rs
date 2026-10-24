@@ -566,6 +566,62 @@ fn hidden_blocks_images_and_secrets_never_reach_any_output() {
 }
 
 #[test]
+fn metadata_is_redacted_without_changing_authorization_or_search_cursors() {
+    let f = Fixture::new();
+    let secret = format!("ghp_{}", "A".repeat(40));
+    assert!(
+        SecretRedactor::from_env()
+            .redact(&secret)
+            .text
+            .contains("REDACTED")
+    );
+    let project = f.project.path().join(&secret);
+    std::fs::create_dir(&project).unwrap();
+    for (id, time) in [(secret.as_str(), 2), ("older", 1)] {
+        f.thread(id, Some(&project), "run-800", |row| {
+            row.project_id = Some(secret.clone());
+            row.updated_at_ns = time;
+        });
+    }
+    f.run(
+        "run-800",
+        Some(&secret),
+        None,
+        vec![user(vec![text("needle")])],
+    );
+    let caller = ("run-100", Some("own"), Some(project.as_path()));
+    for (tool, args) in [
+        ("thread_read", json!({"thread": secret})),
+        ("thread_read", json!({"thread": secret, "view": "messages"})),
+        (
+            "thread_grep",
+            json!({"thread": secret, "pattern": "needle"}),
+        ),
+        ("thread_search", json!({"limit": 1})),
+    ] {
+        let value = f.call(caller, tool, args).unwrap();
+        assert!(!value.to_string().contains(&secret), "{tool}: {value}");
+        assert!(value.to_string().contains("REDACTED"), "{tool}: {value}");
+        if tool == "thread_search" {
+            let next = value["next_cursor"].as_str().unwrap();
+            let page = f
+                .call(caller, tool, json!({"limit": 1, "cursor": next}))
+                .unwrap();
+            assert_eq!(page["threads"][0]["thread_id"], "older");
+        }
+    }
+    // Redacting the canonical path in output must not broaden project visibility.
+    assert!(
+        f.call(
+            ("run-100", Some("own"), Some(f.other.path())),
+            "thread_read",
+            json!({"thread": secret})
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn around_refs_stay_stable_and_max_bytes_pages_with_a_cursor() {
     let f = Fixture::new();
     let own = f.own();

@@ -323,18 +323,18 @@ fn overview(
         })
     };
     for (level, detail) in DETAILS.iter().enumerate() {
-        let value = render(*detail, level > 0);
+        let value = scope.output(render(*detail, level > 0));
         if value.to_string().len() <= max_bytes {
             return Ok(value);
         }
     }
-    Ok(json!({
+    Ok(scope.output(json!({
         "note": UNTRUSTED_NOTE,
         "view": "overview",
         "thread": {"thread_id": row.thread_id},
         "truncated": true,
         "inconsistencies": ["overview exceeds max_bytes; raise max_bytes or use view=messages"],
-    }))
+    })))
 }
 
 /// The last failed tool result, classified by its leading error code.
@@ -499,7 +499,7 @@ fn messages(
         Some(cursor) => parse_cursor(cursor, &run, from, to)?,
     };
     let render = |messages: &[Value], next: Option<&str>| {
-        json!({
+        scope.output(json!({
             "note": UNTRUSTED_NOTE,
             "view": "messages",
             "thread_id": row.thread_id,
@@ -510,7 +510,7 @@ fn messages(
             "focus": around.map(|focus| focus.to_string()),
             "messages": messages,
             "next_cursor": next,
-        })
+        }))
     };
     // Room for any cursor this response could return.
     let reserve = cursor_text(
