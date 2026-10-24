@@ -353,12 +353,12 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 依存 crate: `cargo nextest run -p evorch -p eval -p recorder --locked -j 4` で 124 件すべて成功。
   - 環境起因の失敗: rebase した結果での最初の実行（sandbox の長い `TMPDIR`）では、上の 4 crate のうち 4 件が失敗し 1 件がタイムアウトした。3 件は `path must be shorter than SUN_LEN`（Unix ソケットのパスが長すぎる）で失敗した。残りの 2 件（ownership IPC を使う `headless_layout` の 1 件と、端末の `terminal_headless` の 1 件）も `TMPDIR=/tmp/evt` では成功したため、同じソケットパス長の問題と判断した。
   - コード起因の失敗はなかった。
-- [ ] 受け入れレビュー — commit: ____
+- [x] 受け入れレビュー — 独立 Reviewer 合格（対象 HEAD: `51c6ba50`、must / should / nit なし）
 - [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: ____
 
 ### 受け入れレビュー 1 回目の指摘への対応
 
-独立レビューの初回判定は不合格（対象 `bed2cc25`）。以下を修正済み。独立した再レビューの合格判定は未取得のため、上の受け入れレビューは未完了のままとする。
+独立レビューの初回判定は不合格（対象 `bed2cc25`）。以下を修正済み。独立した再レビューの合格判定はこの時点では未取得だった。受け入れレビュー 3 回目で合格した（下記参照）。
 
 - **M1** — `4abdd2e3` (`fix(runtime): preserve complete trusted thread authorization input`): 認可に使う `trusted_thread_request` と pending escalation の継続リクエストは完全な人間入力を保持し、goal 表示用の切り詰めと分離。8,192 / 4,096 / 4,064 文字の境界で `thread-10` が `thread-1` の認可にならないことを確認。
   - 補完 `0d729902` (`fix(runtime): keep goal display bounded beside trusted input`): goal 作成時の表示欄だけ従来の 8,192 文字上限を保ち、全文認可を維持しつつ goal の復元が成功する回帰テストを追加。
@@ -378,7 +378,7 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 
 ### 受け入れレビュー 2 回目の指摘への対応
 
-再レビューも不合格（対象 `9cfa08c0`、must 2 件）。R1 / R2 を以下のとおり修正。修正後の独立レビュー合格判定は未取得のため、受け入れレビューは未完了のままとする。
+2 回目の独立レビューも不合格（対象 `9cfa08c0`、must 2 件: R1 / R2）。その修正は以下のとおり。3 回目の独立レビューは合格（対象 `51c6ba50`、must / should / nit なし）。したがって受け入れレビューは完了。
 
 - **R1** — `f0d0c207` (`fix(runtime): reject incomplete legacy handoff authorization`): `PendingEscalation` に `trusted_request_complete` を追加。完全な人間入力を保持する新 writer のみ true とし、serde default は false。旧形式・マーカーなしの保存値は `trusted_thread_request` の認可証拠へ戻さない。follow-up がある場合は、旧保存値を混ぜず完全な新入力だけを認可証拠として保存する。新入力なしでは単なる再保存で完全性を昇格させない。
   - 回帰テスト: 旧形式の 8,192 文字切り詰め済み pending escalation と新形式の全文を保存し、fresh runtime で新入力なし／follow-up ありの 4 通りを復元。別プロジェクトの `thread-1` が許可されないこと、follow-up の `thread-20` は許可されること、新形式の完全入力が維持されることを確認。関連 12 件すべて成功。
