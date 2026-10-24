@@ -519,6 +519,41 @@ async fn later_turn_goal_captures_current_host_request_not_initial_greeting() {
 }
 
 #[tokio::test]
+async fn complete_trusted_input_keeps_goal_display_bounded_and_restorable() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (runtime, _, _) = harness(
+        vec![Step::Create, Step::Hold(entered.clone(), release.clone())],
+        vec![],
+    );
+    let request = format!("{} thread-10", "a".repeat(8183));
+    let root = runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            request.clone(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    entered.notified().await;
+    let goal = runtime.thread_goal("thread").unwrap();
+    assert_eq!(goal.original_request.chars().count(), MAX_TEXT);
+    assert_eq!(
+        runtime.trusted_thread_request(root).as_deref(),
+        Some(request.as_str())
+    );
+    runtime
+        .set_goal_checks_paused("thread", &goal.goal_id, true)
+        .unwrap();
+    release.notify_one();
+    runtime.wait(root).await.unwrap();
+    let (fresh, _, _) = harness(vec![], vec![]);
+    fresh
+        .restore_thread_goal(runtime.thread_goal("thread").unwrap())
+        .unwrap();
+}
+
+#[tokio::test]
 async fn rejected_new_goal_does_not_rebind_existing_root() {
     let (runtime, _, _) = harness(vec![], vec![]);
     let root = runtime.reserve_run_id();

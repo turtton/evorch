@@ -118,7 +118,7 @@ fn handle(
             let original_request = goals
                 .requests
                 .get(&root)
-                .cloned()
+                .map(|request| bounded(request, MAX_TEXT))
                 .unwrap_or_else(|| bounded(&state.task.prompt, MAX_TEXT));
             let entry = goals.goals.get_mut(&thread).ok_or("goal disappeared")?;
             entry.snapshot.original_request = original_request;
