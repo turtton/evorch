@@ -128,7 +128,11 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
         match mode {
             EscalationApproval::Off => {
                 assert!(result.is_error);
-                assert_eq!(result.content, "shell escalation is disabled");
+                assert!(
+                    result.content.starts_with("shell escalation is disabled\n"),
+                    "{}",
+                    result.content
+                );
             }
             EscalationApproval::Auto => {
                 assert!(!result.is_error);

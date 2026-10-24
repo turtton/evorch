@@ -69,7 +69,15 @@ by the same gate as shell escalation, under `sandbox.escalation_approval` and
 `escalate_to_user_on_deny`: `off` denies every outside access, `user` asks the
 user (approval input `kind: "file_access"` with the tool, canonical `path`,
 `access`, justification and change), and `auto` asks the escalation reviewer,
-falling back to the user on a decline when configured. The reviewer and user
+falling back to the user on a decline when configured. An approval the
+reviewer rates critical-risk always goes to the user for the final decision,
+whatever `escalate_to_user_on_deny` says. When the automatic reviewer denies
+three consecutive shell or file escalation requests in one run, that run's
+later requests are refused
+without review (and without asking the user) until the user sends new input to
+the conversation; an approval ends the streak, while reviewer failures and
+user decisions on critical approvals do not count. The per-call reviews of
+Web fetches, navigation and uploads are outside this count. The reviewer and user
 see the tool, the canonicalized target paths and the justification, plus for
 `write` the first 4000 bytes of the content and for `edit` every edit with its
 `edits[i]` index and `replace_all` flag. Only the old/new strings are cut: they

@@ -16,8 +16,11 @@ use tools::{
     },
 };
 
-use super::{QuickModelReviewer, ReviewContext, ReviewError, ReviewVerdict, review_context};
-use crate::runtime::Shared;
+use super::{
+    CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, QuickModelReviewer, ReviewContext, ReviewError,
+    ReviewVerdict, review_context,
+};
+use crate::{RunId, runtime::Shared};
 
 const HUMAN_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -165,9 +168,25 @@ impl SandboxEscalationGate {
             .map(|run| run.stamp())
     }
 
+    /// The run's breaker state: the shared streaks, the run, and how many real
+    /// user inputs its lineage sees now. None outside a runtime.
+    fn denial_streak(&self, ctx: &ToolExecutionContext) -> Option<(Arc<Shared>, RunId, usize)> {
+        let shared = self.runtime.as_ref()?.upgrade()?;
+        let run_id = ctx.run_id.parse::<RunId>().ok()?;
+        let user_inputs = shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)?
+            .visible_request_count();
+        Some((shared, run_id, user_inputs))
+    }
+
     /// Applies `sandbox.escalation_approval` identically for every escalation
     /// kind: off denies, user asks, auto reviews and may fall back to the user.
     /// Approval is void if the settings change while the decision is pending.
+    /// After [`CONSECUTIVE_DENIAL_LIMIT`] consecutive reviewer denials, auto
+    /// refuses without review until the user sends new input.
     async fn arbitrate<R, RF, H, HF>(
         &self,
         ctx: &ToolExecutionContext,
@@ -183,6 +202,9 @@ impl SandboxEscalationGate {
     {
         let settings = self.settings.lock().ok().map(|settings| *settings);
         let mut reviewed_stamp = None;
+        let mut streak = None;
+        // The reviewer's own denial reason, when the outcome hinges on it.
+        let mut counted = None;
         let decision = match settings {
             None => EscalationDecision::Deny {
                 reason: format!("{label} settings unavailable"),
@@ -192,40 +214,27 @@ impl SandboxEscalationGate {
             },
             Some((EscalationApproval::User, _)) => human().await,
             Some((EscalationApproval::Auto, fallback)) => {
-                let verdict = match &self.reviewer {
-                    Some(reviewer) => review(Arc::clone(reviewer)).await,
-                    None => Err(ReviewError::Model),
-                };
-                let (reason, requires_user) = match verdict {
-                    Ok((ReviewVerdict::Approve, stamp)) => {
-                        reviewed_stamp = stamp;
-                        (None, false)
+                streak = self.denial_streak(ctx);
+                let suspended = streak.as_ref().and_then(|(shared, run_id, user_inputs)| {
+                    shared.escalation_denials.suspension(*run_id, *user_inputs)
+                });
+                if let Some(last) = suspended {
+                    // Neither the reviewer nor the user is asked, even with fallback.
+                    EscalationDecision::Deny {
+                        reason: format!(
+                            "{label} refused without review: the automatic reviewer denied {CONSECUTIVE_DENIAL_LIMIT} consecutive requests in this run (last: {last}). Further requests are refused until the user sends new input to this conversation; do not reword and resubmit. Work inside the sandbox can continue."
+                        ),
                     }
-                    Ok((ReviewVerdict::RequiresUser { reason }, _)) => (Some(reason), true),
-                    Ok((ReviewVerdict::Deny { reason }, _)) => (Some(reason), false),
-                    Err(error) => (Some(error.to_string()), false),
-                };
-                match reason {
-                    None => EscalationDecision::Approve,
-                    Some(reason) if requires_user => {
-                        self.diagnose(
-                            ctx,
-                            DiagnosticSeverity::Info,
-                            &format!("automatic review requires user approval: {reason}"),
-                        );
-                        human().await
-                    }
-                    Some(reason) if fallback => {
-                        self.diagnose(
-                            ctx,
-                            DiagnosticSeverity::Info,
-                            &format!(
-                                "automatic review declined; requesting user approval: {reason}"
-                            ),
-                        );
-                        human().await
-                    }
-                    Some(reason) => EscalationDecision::Deny { reason },
+                } else {
+                    self.review_automatically(
+                        ctx,
+                        review,
+                        human,
+                        fallback,
+                        &mut reviewed_stamp,
+                        &mut counted,
+                    )
+                    .await
                 }
             }
         };
@@ -248,6 +257,20 @@ impl SandboxEscalationGate {
             }
             EscalationDecision::Deny { reason } => EscalationDecision::Deny { reason },
         };
+        if let Some((shared, run_id, user_inputs)) = &streak {
+            match (&decision, &counted) {
+                // Any approval, automatic or by the user, ends the streak.
+                (EscalationDecision::Approve, _) => shared.escalation_denials.clear(*run_id),
+                (EscalationDecision::Deny { .. }, Some(reason)) => {
+                    shared
+                        .escalation_denials
+                        .record_denial(*run_id, *user_inputs, reason);
+                }
+                // Environment failures, critical handoffs, and approvals voided
+                // by a context change neither count nor reset.
+                (EscalationDecision::Deny { .. }, None) => {}
+            }
+        }
         match &decision {
             EscalationDecision::Approve => self.diagnose(ctx, DiagnosticSeverity::Info, "approved"),
             EscalationDecision::Deny { reason } => self.diagnose(
@@ -256,7 +279,68 @@ impl SandboxEscalationGate {
                 &format!("denied: {reason}"),
             ),
         }
-        decision
+        match decision {
+            EscalationDecision::Approve => EscalationDecision::Approve,
+            EscalationDecision::Deny { reason } => EscalationDecision::Deny {
+                reason: format!("{reason}\n{DENIAL_GUIDANCE}"),
+            },
+        }
+    }
+
+    /// One automatic review: the reviewer's verdict, then the user when the
+    /// model approved a critical action or declined with fallback enabled.
+    /// `counted` receives the reviewer's denial reason.
+    async fn review_automatically<R, RF, H, HF>(
+        &self,
+        ctx: &ToolExecutionContext,
+        review: R,
+        human: H,
+        fallback: bool,
+        reviewed_stamp: &mut Option<EvidenceStamp>,
+        counted: &mut Option<String>,
+    ) -> EscalationDecision
+    where
+        R: FnOnce(Arc<QuickModelReviewer>) -> RF,
+        RF: Future<Output = Result<(ReviewVerdict, Option<EvidenceStamp>), ReviewError>>,
+        H: FnOnce() -> HF,
+        HF: Future<Output = EscalationDecision>,
+    {
+        let verdict = match &self.reviewer {
+            Some(reviewer) => review(Arc::clone(reviewer)).await,
+            None => Err(ReviewError::Model),
+        };
+        let (reason, requires_user) = match verdict {
+            Ok((ReviewVerdict::Approve, stamp)) => {
+                *reviewed_stamp = stamp;
+                (None, false)
+            }
+            Ok((ReviewVerdict::RequiresUser { reason }, _)) => (Some(reason), true),
+            Ok((ReviewVerdict::Deny { reason }, _)) => {
+                *counted = Some(reason.clone());
+                (Some(reason), false)
+            }
+            Err(error) => (Some(error.to_string()), false),
+        };
+        match reason {
+            None => EscalationDecision::Approve,
+            Some(reason) if requires_user => {
+                self.diagnose(
+                    ctx,
+                    DiagnosticSeverity::Info,
+                    &format!("automatic review requires user approval: {reason}"),
+                );
+                human().await
+            }
+            Some(reason) if fallback => {
+                self.diagnose(
+                    ctx,
+                    DiagnosticSeverity::Info,
+                    &format!("automatic review declined; requesting user approval: {reason}"),
+                );
+                human().await
+            }
+            Some(reason) => EscalationDecision::Deny { reason },
+        }
     }
 }
 
@@ -344,6 +428,10 @@ impl ShellEscalationGate for SandboxEscalationGate {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "breaker_tests.rs"]
+mod breaker_tests;
 
 #[cfg(test)]
 mod evidence_tests {
@@ -447,7 +535,7 @@ mod evidence_tests {
         };
         let (decision, ()) = tokio::join!(review, input);
         assert!(
-            matches!(decision, EscalationDecision::Deny { reason } if reason == "review context changed during review")
+            matches!(decision, EscalationDecision::Deny { reason } if reason.starts_with("review context changed during review\n"))
         );
     }
 

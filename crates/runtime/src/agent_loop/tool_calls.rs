@@ -1112,7 +1112,10 @@ impl LoopState {
                                 "auto_review",
                                 &error,
                             );
-                            return NetworkGate::Reject(ToolResult::error(error));
+                            return NetworkGate::Reject(ToolResult::error(format!(
+                                "{error}\n{}",
+                                crate::escalation_review::DENIAL_GUIDANCE
+                            )));
                         }
                         Err(error) => {
                             let error = error.to_string();
@@ -1124,7 +1127,10 @@ impl LoopState {
                                 "auto_review",
                                 &error,
                             );
-                            return NetworkGate::Reject(ToolResult::error(error));
+                            return NetworkGate::Reject(ToolResult::error(format!(
+                                "{error}\n{}",
+                                crate::escalation_review::DENIAL_GUIDANCE
+                            )));
                         }
                     }
                 }
@@ -1171,7 +1177,10 @@ impl LoopState {
                         if self.shared.executor.requires_scope_gate(name) {
                             self.emit_mcp_scope_denial(name, call_id, &reason);
                         }
-                        NetworkGate::Reject(ToolResult::error(error))
+                        NetworkGate::Reject(ToolResult::error(format!(
+                            "{error}\n{}",
+                            crate::escalation_review::DENIAL_GUIDANCE
+                        )))
                     }
                 }
             }

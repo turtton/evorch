@@ -32,6 +32,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: EscalationApproval, verdict: &str) -> Self {
+        Self::with_verdicts(mode, &[verdict])
+    }
+
+    fn with_verdicts(mode: EscalationApproval, verdicts: &[&str]) -> Self {
         let bus = Arc::new(EventBus::new(64));
         let sandbox = Arc::new(ProbeSandbox::default());
         let host = Arc::new(ProbeSandbox::default());
@@ -39,17 +43,17 @@ impl Fixture {
             bus.clone(),
             sandbox.clone(),
         ));
-        let verdict = if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(verdict) {
-            value["risk_level"] = "low".into();
-            value["authorization_level"] = "high".into();
-            value.to_string()
-        } else {
-            verdict.into()
-        };
-        let model = Arc::new(ScriptedModel::new([Ok(text_response(
-            &verdict,
-            providers::FinishReason::Stop,
-        ))]));
+        let model = Arc::new(ScriptedModel::new(verdicts.iter().map(|verdict| {
+            let verdict = if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(verdict)
+            {
+                value["risk_level"] = "low".into();
+                value["authorization_level"] = "high".into();
+                value.to_string()
+            } else {
+                (*verdict).to_owned()
+            };
+            Ok(text_response(&verdict, providers::FinishReason::Stop))
+        })));
         let runtime = AgentRuntime::new(bus.clone(), executor.clone(), model.clone());
         let run = support::review_host_run(&runtime);
         runtime.set_sandbox_escalation(mode, false);
@@ -67,10 +71,14 @@ impl Fixture {
     }
 
     async fn execute(&self) -> tools::ToolResult {
+        self.execute_command("printf approved").await
+    }
+
+    async fn execute_command(&self, command: &str) -> tools::ToolResult {
         self.executor.execute(
             &ToolExecutionContext { run_id: self.run.to_string(), thread_id: None, call_id: None },
             "shell", "call-shell",
-            json!({"command":"printf approved", "sandbox_access":"unsandboxed", "justification":"host inspection"}),
+            json!({"command":command, "sandbox_access":"unsandboxed", "justification":"host inspection"}),
         ).await.expect("execute")
     }
 
@@ -102,7 +110,40 @@ async fn escalated_shell_denied_returns_reason_and_spawn_never_happens() {
     );
     let result = fixture.execute().await;
     assert!(result.is_error);
-    assert_eq!(result.content, "unsafe");
+    assert!(result.content.starts_with("unsafe\n"), "{}", result.content);
+    fixture.assert_wraps(0);
+}
+
+// Given: a reviewer that denies three times / When: a run keeps asking with new commands /
+// Then: the fourth is refused without asking the reviewer, and every denial carries guidance.
+#[tokio::test]
+async fn consecutive_reviewer_denials_suspend_automatic_review_for_the_run() {
+    let deny = r#"{"approve":false,"reason":"not requested"}"#;
+    let fixture = Fixture::with_verdicts(EscalationApproval::Auto, &[deny, deny, deny]);
+    // The fixture cancels the run's agent loop; let it finish first so its
+    // termination cannot clear the streak in the middle of the test.
+    let _ = fixture.runtime.wait(fixture.run).await;
+    for (index, command) in ["printf one", "printf two", "printf three", "printf four"]
+        .into_iter()
+        .enumerate()
+    {
+        let result = fixture.execute_command(command).await;
+        assert!(result.is_error, "{command}");
+        let expected = if index < 3 {
+            "not requested\n"
+        } else {
+            "shell escalation refused without review: the automatic reviewer denied 3 consecutive requests in this run (last: not requested)."
+        };
+        assert!(result.content.starts_with(expected), "{}", result.content);
+        assert!(
+            result
+                .content
+                .ends_with("or report the blocker in your result."),
+            "{}",
+            result.content
+        );
+    }
+    assert_eq!(fixture.model.observed().await.len(), 3);
     fixture.assert_wraps(0);
 }
 

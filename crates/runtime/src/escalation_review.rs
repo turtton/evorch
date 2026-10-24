@@ -13,7 +13,9 @@ use tools::tools::shell_escalation::{FileAccessRequest, ShellAccess};
 
 use crate::{AgentInvocationContext, AgentModel};
 
+mod denial_streak;
 mod gate;
+pub(crate) use denial_streak::{CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, DenialStreaks};
 pub use gate::{EvidenceStamp, SandboxEscalationGate};
 
 pub const DEFAULT_REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
@@ -216,6 +218,18 @@ impl ReviewRunContext {
             revision: shared.evidence_revision,
             synced: shared.synced,
         }
+    }
+
+    /// How many real user inputs this run's lineage can see. Unlike the
+    /// evidence revision, it moves only when the user speaks, not on resyncs.
+    pub(crate) fn visible_request_count(&self) -> usize {
+        self.user_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .requests
+            .iter()
+            .filter(|request| self.lineage_run_ids.contains(&request.target_run_id))
+            .count()
     }
 
     pub(crate) fn requests(&self) -> (Vec<UserRequest>, u64, bool) {

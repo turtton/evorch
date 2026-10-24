@@ -49,6 +49,8 @@ impl AgentRuntime {
         ) {
             return;
         }
+        // A finished run asks for nothing more; drop its denial streak.
+        self.shared.escalation_denials.clear(run_id);
         let mut runs = lock_runs(&self.shared.runs);
         let Some(child) = runs.get_mut(&run_id) else {
             tracing::warn!(%run_id, ?to, "publishing terminal event for run missing from registry");

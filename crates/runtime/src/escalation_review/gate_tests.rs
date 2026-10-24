@@ -60,7 +60,7 @@ async fn auto_deny_without_fallback_denies_with_reason() {
         Some(r#"{"approve":false,"reason":"unsafe"}"#),
     );
     assert!(
-        matches!(gate.decide(&context(), "pwd", "inspect").await, EscalationDecision::Deny { reason } if reason == "unsafe")
+        matches!(gate.decide(&context(), "pwd", "inspect").await, EscalationDecision::Deny { reason } if reason.starts_with("unsafe\n"))
     );
 }
 
@@ -279,7 +279,7 @@ async fn file_access_off_denies_without_calling_reviewer() {
     let (gate, model) = fixture(EscalationApproval::Off, true, Some(LOW_RISK_APPROVAL));
     let decision = gate.decide_file_access(&context(), &file_request()).await;
     assert!(
-        matches!(decision, EscalationDecision::Deny { reason } if reason == "file access escalation is disabled")
+        matches!(decision, EscalationDecision::Deny { reason } if reason.starts_with("file access escalation is disabled\n"))
     );
     assert!(model.observed().await.is_empty());
 }
@@ -391,7 +391,7 @@ async fn file_access_auto_decline_without_fallback_keeps_reason() {
     );
     assert!(matches!(
         gate.decide_file_access(&context(), &file_request()).await,
-        EscalationDecision::Deny { reason } if reason == "unrelated to the task"
+        EscalationDecision::Deny { reason } if reason.starts_with("unrelated to the task\n")
     ));
 }
 
