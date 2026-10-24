@@ -12,6 +12,7 @@ mod escalation;
 mod external_commands;
 mod follow_ups;
 mod frame;
+mod frame_trace;
 mod history;
 mod input;
 mod mentions;

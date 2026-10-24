@@ -67,7 +67,7 @@ pub fn subscription_body(
             }));
         }
         SubscriptionAuthState::Waiting { manual_code } => {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
             ui.label(muted("Waiting for browser sign-in…"));
             if let Some(url) = &editor.authorize_url {
                 ui.hyperlink_to("Open login page", url);
@@ -89,7 +89,7 @@ pub fn subscription_body(
             }
         }
         SubscriptionAuthState::Exchanging => {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
             ui.label(muted("Completing sign-in…"));
         }
         SubscriptionAuthState::SignedIn { expires_at } => {

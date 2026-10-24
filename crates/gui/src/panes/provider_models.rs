@@ -169,7 +169,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
         match &editor.models_fetch_state {
             ModelsFetchState::Idle => {}
             ModelsFetchState::Loading => {
-                ui.spinner();
+                crate::theme::widgets::spinner(ui);
                 ui.label(muted("Loading models…"));
             }
             ModelsFetchState::Loaded => {

@@ -539,7 +539,7 @@ impl UsagePane {
                 .add_enabled(!self.loader.is_loading(), egui::Button::new("Refresh"))
                 .clicked();
             if self.loader.is_loading() {
-                ui.spinner();
+                crate::theme::widgets::spinner(ui);
             }
             refresh
         })
