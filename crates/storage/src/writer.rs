@@ -72,6 +72,7 @@ enum Command {
         Option<String>,
         ReplyTx,
     ),
+    CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
@@ -410,6 +411,30 @@ impl StorageHandle {
                 rows.to_vec(),
                 edges.to_vec(),
                 consumed_reference_id.map(String::from),
+                reply,
+            )
+        })
+    }
+
+    /// Change restore bookkeeping only if the exact reserved descriptor still owns it.
+    /// History, evidence, reference consumption and timestamps are never rolled back.
+    /// Returns false when another snapshot has replaced the reservation.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn compare_and_swap_run_context_restore_state(
+        &self,
+        run_id: &str,
+        expected_config: &str,
+        retry_config: &str,
+        retry_restorable: bool,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| {
+            Command::CompareAndSwapRunContextRestoreState(
+                run_id.into(),
+                expected_config.into(),
+                retry_config.into(),
+                retry_restorable,
                 reply,
             )
         })
