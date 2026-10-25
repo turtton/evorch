@@ -10,7 +10,6 @@ use crate::prompt::{
 };
 use crate::skill::{
     SkillDiagnostic, SkillRegistry, SkillScope, discover_with_builtin, repo_skill_dirs,
-    withheld_skill_names,
 };
 
 const fn is_repo_scope(scope: SkillScope) -> bool {
@@ -116,8 +115,10 @@ impl SkillCatalogSource {
     /// instead of the configured repository, for runs bound to another project.
     ///
     /// Without `repo_skills` (an untrusted project) the repository scopes are not
-    /// discovered; only the names of their skill directories are kept, so a load
-    /// of one can say why it is unavailable. No SKILL.md there is opened.
+    /// discovered. The registry only remembers `repo_root`, so a load of a name
+    /// the project has can say why it is unavailable; that check looks at the one
+    /// requested name when it fails, never here. Without `repo_root` the load
+    /// stays an unknown skill.
     pub fn snapshot_for(&self, repo_root: Option<&Path>, repo_skills: bool) -> SourceSnapshot {
         let (snapshot, diagnostics, error) = {
             let mut state = self
@@ -129,20 +130,15 @@ impl SkillCatalogSource {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let Some(repo_root) = repo_root {
+            if !repo_skills {
+                skill_dirs.retain(|(scope, _)| !is_repo_scope(*scope));
+            } else if let Some(repo_root) = repo_root {
                 replace_repo_dirs(&mut skill_dirs, repo_root);
             }
-            let withheld = if repo_skills {
-                Vec::new()
-            } else {
-                let (withheld, kept) = skill_dirs
-                    .into_iter()
-                    .partition(|(scope, _)| is_repo_scope(*scope));
-                skill_dirs = kept;
-                withheld
-            };
             let mut registry = discover_with_builtin(&skill_dirs);
-            registry.withhold_untrusted(withheld_skill_names(&withheld));
+            if !repo_skills && let Some(repo_root) = repo_root {
+                registry.withhold_untrusted_project(repo_root.to_path_buf());
+            }
             let registry = Arc::new(registry);
             let catalog = build_catalog(&CatalogBuildInput {
                 config: &self.config,

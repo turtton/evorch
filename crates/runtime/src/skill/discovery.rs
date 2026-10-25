@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use event_bus::SkillDiagnosticKind;
 
 use super::builtin::builtin_skill_entries;
-use super::frontmatter::{parse_and_validate, read_frontmatter_prefix, split_frontmatter};
+use super::frontmatter::{
+    is_valid_skill_name, parse_and_validate, read_frontmatter_prefix, split_frontmatter,
+};
 use super::registry::{SkillDiagnostic, SkillEntry, SkillRegistry, SkillScope, SkillSource};
 
 /// 各スコープの skill ディレクトリを走査してレジストリを構築する。
@@ -63,42 +65,47 @@ pub fn default_skill_dirs(repo_root: Option<&Path>) -> Vec<(SkillScope, PathBuf)
     default_skill_dirs_from(repo_root, user_config.as_deref(), home.as_deref())
 }
 
+/// リポジトリスコープの skill ディレクトリを、リポジトリルートからのパス要素で優先度順に並べる。
+const REPO_SKILL_LAYOUT: [(SkillScope, [&str; 2]); 2] = [
+    (SkillScope::Repo, [".evorch", "skills"]),
+    (SkillScope::RepoAgents, [".agents", "skills"]),
+];
+
 /// リポジトリスコープの探索ディレクトリ。[`default_skill_dirs`] の先頭に並ぶ。
 pub(crate) fn repo_skill_dirs(repo_root: &Path) -> [(SkillScope, PathBuf); 2] {
-    [
-        (SkillScope::Repo, repo_root.join(".evorch").join("skills")),
-        (
-            SkillScope::RepoAgents,
-            repo_root.join(".agents").join("skills"),
-        ),
-    ]
+    REPO_SKILL_LAYOUT.map(|(scope, [top, skills])| (scope, repo_root.join(top).join(skills)))
 }
 
-/// 未信頼プロジェクトのため探索しないスコープについて、skill の名前だけを集める。
+/// 未信頼プロジェクト `repo_root` のリポジトリスコープに `name` の skill があれば、
+/// それを含む探索ディレクトリをリポジトリ相対で返す (例: `.agents/skills`)。
 ///
-/// 信頼境界を弱めないよう SKILL.md は開かず、存在だけを確かめる。名前は
-/// ディレクトリ名で、検証を通る skill の frontmatter name と一致する。候補の
-/// 判定と同名の扱いは [`discover_skills`] と同じで、先に現れたスコープが勝つ。
-/// 未登録名のエラーで原因を伝えるためだけの情報なので、読めない場所は黙って飛ばし
-/// 診断も出さない。
-pub(crate) fn withheld_skill_names(dirs: &[(SkillScope, PathBuf)]) -> BTreeMap<String, SkillScope> {
-    let mut names = BTreeMap::new();
-    for (scope, dir) in dirs {
-        let Ok(read_dir) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in read_dir.flatten() {
-            let is_candidate = entry.file_type().is_ok_and(|file_type| file_type.is_dir())
-                && entry.path().join("SKILL.md").is_file();
-            if !is_candidate {
-                continue;
-            }
-            if let Ok(name) = entry.file_name().into_string() {
-                names.entry(name).or_insert(*scope);
+/// 未登録名のエラーで原因を伝えるためだけに、要求された 1 件をその場で確かめる。
+/// 信頼境界を弱めないよう SKILL.md は開かず、列挙もしない。`name` は skill 名規約で
+/// 検証し (区切り文字や `..` は通らない)、`.evorch`/`.agents`・`skills`・`<name>`・
+/// `SKILL.md` の各要素を symlink を辿らずに確認する。どれかが symlink なら `None`
+/// になるので、`repo_root` の外にある skill を報告することはない。`repo_root` は
+/// 呼び出し側が正規化したプロジェクトルートであること。
+pub(crate) fn withheld_repo_skill(repo_root: &Path, name: &str) -> Option<String> {
+    if !is_valid_skill_name(name) {
+        return None;
+    }
+    let file_type = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type())
+            .ok()
+    };
+    REPO_SKILL_LAYOUT.iter().find_map(|(_, components)| {
+        let mut path = repo_root.to_path_buf();
+        for component in components.iter().copied().chain([name]) {
+            path.push(component);
+            if !file_type(&path).is_some_and(|file_type| file_type.is_dir()) {
+                return None;
             }
         }
-    }
-    names
+        file_type(&path.join("SKILL.md"))
+            .is_some_and(|file_type| file_type.is_file())
+            .then(|| components.join("/"))
+    })
 }
 
 fn default_skill_dirs_from(
@@ -804,34 +811,99 @@ mod tests {
         );
     }
 
-    /// Given: 未信頼プロジェクトの repo / repo-agents に、同名・SKILL.md なし・ファイル・
-    ///        frontmatter が壊れた候補が混在する
-    /// When:  withheld_skill_names を呼ぶ
-    /// Then:  SKILL.md を持つディレクトリ名だけを、先に現れたスコープで返す。
-    ///        SKILL.md の内容は解析しないので壊れた候補も名前だけは載る
+    /// Given: 未信頼プロジェクトの repo / repo-agents に実ディレクトリの skill と、同名・
+    ///        frontmatter が壊れた・SKILL.md のない候補
+    /// When:  withheld_repo_skill を名前ごとに呼ぶ
+    /// Then:  SKILL.md を持つものだけを優先度の高い探索ディレクトリで返す。
+    ///        SKILL.md の内容は解析しないので壊れた候補も対象になる
     #[test]
-    fn withheld_skill_names_lists_candidate_directories_without_parsing_them() {
+    fn withheld_repo_skill_checks_the_requested_name_without_parsing_it() {
         let root = tempdir().unwrap();
-        let dirs = repo_skill_dirs(root.path());
-        let [(_, repo), (_, agents)] = &dirs;
-        write_skill(repo, "shared-skill", "Repo", "Repo body.\n");
-        write_skill(agents, "shared-skill", "Agents", "Agents body.\n");
-        write_skill(agents, "agents-skill", "Agents", "Agents body.\n");
+        let [(_, repo), (_, agents)] = repo_skill_dirs(root.path());
+        write_skill(&repo, "shared-skill", "Repo", "Repo body.\n");
+        write_skill(&agents, "shared-skill", "Agents", "Agents body.\n");
+        write_skill(&agents, "agents-skill", "Agents", "Agents body.\n");
         fs::create_dir_all(agents.join("broken-skill")).unwrap();
         fs::write(agents.join("broken-skill/SKILL.md"), "no frontmatter").unwrap();
         fs::create_dir_all(agents.join("no-skill-md")).unwrap();
-        fs::write(agents.join("loose-file"), "not a skill").unwrap();
+        fs::create_dir_all(agents.join("file-skill-md/SKILL.md")).unwrap();
 
-        let names = withheld_skill_names(&dirs);
+        let found = |name| withheld_repo_skill(root.path(), name);
 
+        assert_eq!(found("shared-skill").as_deref(), Some(".evorch/skills"));
+        assert_eq!(found("agents-skill").as_deref(), Some(".agents/skills"));
+        assert_eq!(found("broken-skill").as_deref(), Some(".agents/skills"));
+        assert_eq!(found("no-skill-md"), None);
+        assert_eq!(found("file-skill-md"), None);
+        assert_eq!(found("missing-skill"), None);
         assert_eq!(
-            names,
-            BTreeMap::from([
-                ("agents-skill".to_owned(), SkillScope::RepoAgents),
-                ("broken-skill".to_owned(), SkillScope::RepoAgents),
-                ("shared-skill".to_owned(), SkillScope::Repo),
-            ])
+            withheld_repo_skill(&root.path().join("missing"), "agents-skill"),
+            None
         );
-        assert!(withheld_skill_names(&repo_skill_dirs(&root.path().join("missing"))).is_empty());
+    }
+
+    /// Given: プロジェクト外に skill を置き、両スコープで探索ディレクトリの祖先・
+    ///        探索ディレクトリ・skill ディレクトリ・SKILL.md のいずれかをそこへの symlink にする
+    /// When:  withheld_repo_skill を呼ぶ
+    /// Then:  symlink を辿れば SKILL.md があっても None (プロジェクト外を報告しない)
+    #[test]
+    fn withheld_repo_skill_does_not_follow_symlinks() {
+        let outside = tempdir().unwrap();
+        let outside = outside.path();
+        write_skill(&outside.join("skills"), "demo-skill", "Outside", "Body.\n");
+        let skill_dir = outside.join("skills/demo-skill");
+        for top in [".evorch", ".agents"] {
+            let top = Path::new(top);
+            let skills = top.join("skills");
+            let linked_dir = skills.join("demo-skill");
+            let cases = [
+                ("top", top.to_path_buf(), outside.to_path_buf()),
+                ("skills", skills.clone(), outside.join("skills")),
+                ("skill directory", linked_dir.clone(), skill_dir.clone()),
+                (
+                    "SKILL.md",
+                    linked_dir.join("SKILL.md"),
+                    skill_dir.join("SKILL.md"),
+                ),
+            ];
+            for (linked, relative_link, target) in cases {
+                let root = tempdir().unwrap();
+                let link = root.path().join(relative_link);
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                let followed = root.path().join(&linked_dir).join("SKILL.md");
+                assert!(followed.is_file(), "{}: the link resolves", link.display());
+
+                assert_eq!(
+                    withheld_repo_skill(root.path(), "demo-skill"),
+                    None,
+                    "{}: symlinked {linked}",
+                    top.display()
+                );
+            }
+        }
+    }
+
+    /// Given: 探索ディレクトリから相対パスで届く位置に SKILL.md を持つディレクトリ
+    /// When:  区切り文字・`..`・規約外の文字を含む名前で withheld_repo_skill を呼ぶ
+    /// Then:  ファイルシステムを見る前に名前で拒否し None を返す
+    #[test]
+    fn withheld_repo_skill_rejects_names_that_are_not_one_path_component() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let [(_, skills), _] = repo_skill_dirs(&repo);
+        fs::create_dir_all(&skills).unwrap();
+        write_skill(root.path(), "escaped", "Escaped", "Body.\n");
+        write_skill(&skills, "nested", "Nested", "Body.\n");
+        write_skill(&skills.join("nested"), "inner", "Inner", "Body.\n");
+        assert!(skills.join("../../../escaped/SKILL.md").is_file());
+
+        for name in ["../../../escaped", "nested/inner", "..", ".", "", "Nested"] {
+            assert_eq!(withheld_repo_skill(&repo, name), None, "{name:?}");
+        }
+        assert_eq!(
+            withheld_repo_skill(&repo, "nested").as_deref(),
+            Some(".evorch/skills")
+        );
     }
 }

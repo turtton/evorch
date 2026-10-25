@@ -619,3 +619,89 @@ async fn untrusted_project_delegate_load_skills_explains_the_trust_gate() {
     assert_explains_trust_gate(&text, ".agents/skills");
     assert_eq!(runtime.list_agents().len(), 1, "no child run is registered");
 }
+
+/// `link` becomes a symlink to `target`, creating the directories above it.
+fn symlink(target: &std::path::Path, link: &std::path::Path) {
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+// The trust hint must not report skills outside the project: a symlinked
+// skills directory or one above it, a symlinked skill directory and a
+// symlinked SKILL.md all leave the name unknown, in both repository scopes.
+#[tokio::test]
+async fn untrusted_project_skill_hint_does_not_follow_symlinks_out_of_the_project() {
+    let outside_temp = tempfile::tempdir().unwrap();
+    let outside = outside_temp.path().canonicalize().unwrap();
+    write_withheld_skill(&outside, "evorch-root/skills", "evorch-ancestor");
+    write_withheld_skill(&outside, "agents-skills", "agents-skills-root");
+    write_withheld_skill(&outside, "dirs", "evorch-dir");
+    write_withheld_skill(&outside, "dirs", "agents-dir");
+    write_withheld_skill(&outside, "files", "target");
+    let skill_md = outside.join("files/target/SKILL.md");
+    let (_roots_temp, roots) = canonical_repo();
+    symlink(&outside.join("evorch-root"), &roots.join(".evorch"));
+    symlink(
+        &outside.join("agents-skills"),
+        &roots.join(".agents/skills"),
+    );
+    let (_entries_temp, entries) = canonical_repo();
+    symlink(
+        &outside.join("dirs/evorch-dir"),
+        &entries.join(".evorch/skills/evorch-dir"),
+    );
+    symlink(
+        &outside.join("dirs/agents-dir"),
+        &entries.join(".agents/skills/agents-dir"),
+    );
+    symlink(
+        &skill_md,
+        &entries.join(".evorch/skills/evorch-md/SKILL.md"),
+    );
+    symlink(
+        &skill_md,
+        &entries.join(".agents/skills/agents-md/SKILL.md"),
+    );
+    let cases: [(&std::path::Path, &[&'static str]); 2] = [
+        (&roots, &["evorch-ancestor", "agents-skills-root"]),
+        (
+            &entries,
+            &["evorch-dir", "agents-dir", "evorch-md", "agents-md"],
+        ),
+    ];
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new(cases.iter().flat_map(|(_, names)| {
+        [
+            Ok(support::tool_responses(names.iter().map(|name| {
+                (*name, "skill_load", serde_json::json!({"name": name}))
+            }))),
+            Ok(text_response("done", providers::FinishReason::Stop)),
+        ]
+    })));
+    let (runtime, _mounts) = approving_runtime(&bus, Arc::clone(&model), &roots);
+
+    for (index, (root, names)) in cases.iter().enumerate() {
+        runtime.set_project_trust(root.to_path_buf(), ProjectTrust::Unapproved);
+        let run = runtime.delegate_background(Role::Worker, "go".into(), bound_to(root));
+
+        assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+        let request = model.observed().await[index * 2 + 1].clone();
+        for name in *names {
+            let directory = if name.starts_with("evorch") {
+                ".evorch/skills"
+            } else {
+                ".agents/skills"
+            };
+            let followed = root.join(directory).join(name).join("SKILL.md");
+            assert!(
+                followed.is_file(),
+                "{} resolves outside",
+                followed.display()
+            );
+            let (is_error, text) = tool_result(&request, name);
+            assert!(is_error, "{text}");
+            assert!(text.contains(&format!("unknown skill: {name}")), "{text}");
+            assert!(!text.contains("not trusted"), "{text}");
+        }
+    }
+}
