@@ -178,8 +178,10 @@ The post-edit comment checker is a separate process with its own decision; see
 ## Paths, the sandbox boundary and team workers
 
 Relative paths resolve against the run's workspace, never against the process
-directory. Without a workspace, relative paths are rejected. A path containing
-`..` is always rejected.
+directory. Without a workspace, relative paths are rejected. A workspace given
+as a relative path, such as `evorch run --project .`, is made absolute against
+the process directory once, when it is set. A path containing `..` is always
+rejected.
 
 Every path of a patch goes through the file boundary before anything is read or
 written: added, updated and deleted files, and both the source and the
@@ -215,7 +217,12 @@ guard checks every path of the patch in the same way, including move sources
 and deletions. A single path that the worker does not own, or that is outside
 the workspace, rejects the whole call before any file changes. A patch that
 does not parse is passed to the tool, which rejects it without changing
-anything.
+anything. The guard judges the `path` of team workers' `write` and `edit`
+calls the same way: relative paths resolve against the run's workspace,
+absolute paths must lie inside it, and without a workspace, or with one that
+is still relative, the call is rejected. For both, symlinks are looked for
+between the workspace root and the file, not below the process directory, and
+a path through a symlink is rejected.
 
 ## Concurrency
 
