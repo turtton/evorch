@@ -3,8 +3,10 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use storage::RunLedgerEntry;
+use storage::thread_index::{GuardedReference, GuardedResolution};
 use storage::threads::{RunTerminalSummary, ThreadRow, ThreadSource};
 
+use super::conversation::{Around, parse_around};
 use super::normalize::{Block, BlockKind, NormalizedRun, Ref, UNTRUSTED_NOTE, normalize};
 use super::search::lineage;
 use super::visibility::Target;
@@ -443,7 +445,7 @@ fn messages(
     let around = args
         .around
         .as_deref()
-        .map(str::parse::<Ref>)
+        .map(parse_around)
         .transpose()
         .map_err(|reason| format!("thread_ref_invalid: {reason}"))?;
     let named_run = match Target::parse(&args.thread) {
@@ -451,26 +453,48 @@ fn messages(
         Target::Thread(_) => None,
     };
     let run_id = match (&around, &args.run) {
-        (Some(focus), Some(run)) if &focus.run_id.to_string() != run => {
+        (Some(focus), Some(run)) if &focus.run_id() != run => {
             return Err("thread_read_args_invalid: around names a different run than run".into());
         }
-        (Some(focus), _) => focus.run_id.to_string(),
+        (Some(focus), _) => focus.run_id(),
         (None, Some(run)) => run.clone(),
         (None, None) => named_run
             .filter(|run| members.is_saved_member(run))
             .or_else(|| members.primary.clone())
             .ok_or_else(|| format!("thread_empty: thread {} has no saved runs", row.thread_id))?,
     };
-    if !members.is_saved_member(&run_id) {
+    let is_member = if matches!(around, Some(Around::Guarded(_))) {
+        // Notes and tombstones can outlive a snapshot. Thread membership still
+        // authorizes first; the canonical resolver decides stale/deleted.
+        members.runs.iter().any(|member| member.run_id == run_id)
+    } else {
+        members.is_saved_member(&run_id)
+    };
+    if !is_member {
         return Err(not_in_thread(&run_id, &row.thread_id));
     }
-    let record = scope
-        .store
-        .run_contexts_for(std::slice::from_ref(&run_id))
-        .map_err(|_| STORE_ERROR.to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| not_in_thread(&run_id, &row.thread_id))?;
+    let fetch = || {
+        scope
+            .store
+            .run_contexts_for(std::slice::from_ref(&run_id))
+            .map_err(|_| STORE_ERROR.to_owned())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| not_in_thread(&run_id, &row.thread_id))
+    };
+    let (record, around) = match around {
+        // Authorized above; the guard is checked against the canonical
+        // snapshot or note in the same read that returns it.
+        Some(Around::Guarded(reference)) => {
+            let text = args.around.as_deref().unwrap_or_default();
+            match resolve_guarded(scope, &reference, text)? {
+                Resolved::Message(record, focus) => (*record, Some(focus)),
+                Resolved::Note(note) => return Ok(note_view(scope, row, &note, text, max_bytes)),
+            }
+        }
+        Some(Around::Plain(reference)) => (fetch()?, Some(reference)),
+        None => (fetch()?, None),
+    };
     let run = normalize(&record, &scope.redactor)
         .map_err(|_| format!("thread_history_invalid: {run_id} history could not be decoded"))?;
     let count = run.messages.len();
@@ -602,6 +626,87 @@ fn messages(
     }
     let next = next.map(|position| cursor_text(run.run_id, position));
     Ok(render(&out, next.as_deref()))
+}
+
+enum Resolved {
+    Message(Box<storage::RunContextRecord>, Ref),
+    Note(RunLedgerEntry),
+}
+
+/// Check a guarded ref against the canonical snapshot or latest note. A
+/// changed snapshot, a moved position or a newer or cleared note is
+/// `stale_reference`; it never resolves to whatever now sits there.
+fn resolve_guarded(
+    scope: &Scope<'_>,
+    reference: &GuardedReference,
+    text: &str,
+) -> Result<Resolved, String> {
+    let shown = clip_chars(text, 160);
+    let resolution = scope
+        .store
+        .with_database(|db| Ok(db.resolve_guarded_reference(reference)))
+        .map_err(|_| STORE_ERROR.to_owned())?
+        .map_err(|_| STORE_ERROR.to_owned())?;
+    match resolution {
+        GuardedResolution::Message {
+            bundle,
+            ordinal,
+            block_index,
+        } => Ok(Resolved::Message(
+            Box::new(bundle.record),
+            Ref {
+                run_id: reference
+                    .run_id
+                    .parse()
+                    .map_err(|_| format!("thread_ref_invalid: {shown}"))?,
+                ordinal,
+                block: block_index,
+            },
+        )),
+        GuardedResolution::WorkingNote(note) => Ok(Resolved::Note(note)),
+        GuardedResolution::StaleReference => Err(format!(
+            "stale_reference: {shown} no longer matches the saved conversation or working note; search again for a current ref"
+        )),
+        GuardedResolution::SourceDeleted => Err(format!(
+            "source_deleted: the run behind {shown} was deleted"
+        )),
+        GuardedResolution::UnsupportedVersion => Err(format!(
+            "thread_ref_invalid: {shown} has an unsupported guard version"
+        )),
+    }
+}
+
+/// The latest working note a guarded note ref names, within `max_bytes`.
+fn note_view(
+    scope: &Scope<'_>,
+    row: &ThreadRow,
+    note: &RunLedgerEntry,
+    focus: &str,
+    max_bytes: usize,
+) -> Value {
+    let render = |body: &str, truncated: bool| {
+        scope.output(json!({
+            "note": UNTRUSTED_NOTE,
+            "view": "working_note",
+            "thread_id": row.thread_id,
+            "run_id": note.run_id,
+            "note_seq": note.seq,
+            "focus": clip_chars(focus, 160),
+            "body": body,
+            "truncated": truncated,
+        }))
+    };
+    let body = scope.redact(&note.body);
+    let mut room = body.len();
+    loop {
+        let truncated = room < body.len();
+        let value = render(&clip_bytes(&body, room), truncated);
+        let size = value.to_string().len();
+        if size <= max_bytes || room == 0 {
+            return value;
+        }
+        room = room.saturating_sub(size - max_bytes);
+    }
 }
 
 fn blocks_of(out: &mut [Value]) -> &mut Vec<Value> {

@@ -5,6 +5,8 @@
 //! so a pattern can never probe a secret. Every success response carries
 //! [`normalize::UNTRUSTED_NOTE`] and stays within [`MAX_OUTPUT_BYTES`].
 
+mod conversation;
+mod cursor;
 mod grep;
 pub(super) mod normalize;
 mod read;

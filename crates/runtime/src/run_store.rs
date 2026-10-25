@@ -18,6 +18,19 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    /// One read on the shared connection. Thread search composes its scoped
+    /// queries here; callers authorize before reading anything.
+    pub(crate) fn with_database<T>(
+        &self,
+        read: impl FnOnce(&Database) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        read(&database)
+    }
+
     /// Thread definition by exact ID; no visibility check is performed here.
     pub(crate) fn thread(
         &self,

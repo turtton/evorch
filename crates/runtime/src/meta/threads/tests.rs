@@ -1003,22 +1003,22 @@ fn cursors_cannot_probe_invisible_or_missing_threads_or_runs() {
         None,
         vec![user(vec![text("foreign")])],
     );
-    let token = f
-        .store()
-        .thread_cursor_token(&storage::threads::ThreadCursor {
-            updated_at_ns: 0,
-            thread_id: "foreign".into(),
-        })
-        .unwrap();
-    let missing = format!("v1:0:{}", i64::MAX);
-    assert!(
-        f.store()
-            .thread_cursor_from_token(&missing)
-            .unwrap()
-            .is_none()
+    f.thread("foreign-older", Some(f.other.path()), "run-201", |row| {
+        row.updated_at_ns = 2;
+    });
+    f.run(
+        "run-201",
+        Some("foreign-older"),
+        None,
+        vec![user(vec![text("older")])],
     );
-    // Both an empty visibility set and a caller with its own project must see
-    // exactly the same error for a foreign rowid and a nonexistent rowid.
+    let foreign = ("run-200", Some("foreign"), Some(f.other.path()));
+    let first = f
+        .call(foreign, "thread_search", json!({"limit": 1}))
+        .unwrap();
+    let token = first["next_cursor"].as_str().unwrap();
+    let missing = format!("v1:0:{}", i64::MAX);
+    // Neither an authentic foreign cursor nor an old/missing position grants access.
     for who in [("run-100", None, None), own] {
         let hidden_error = f
             .call(who, "thread_search", json!({"cursor": token}))
@@ -1027,24 +1027,17 @@ fn cursors_cannot_probe_invisible_or_missing_threads_or_runs() {
             .call(who, "thread_search", json!({"cursor": missing}))
             .unwrap_err();
         assert_eq!(hidden_error, missing_error);
-        assert_eq!(
-            hidden_error,
-            "thread_cursor_invalid: pass next_cursor unchanged"
-        );
+        assert!(hidden_error.starts_with("thread_cursor_invalid: pass next_cursor unchanged"));
     }
-    let foreign = ("run-200", Some("foreign"), Some(f.other.path()));
     assert!(
         f.call(foreign, "thread_search", json!({"cursor": token}))
             .is_ok()
     );
-    // Revoking project visibility invalidates a previously usable token too.
+    // Keep the caller identity but revoke the position's project visibility.
+    f.thread("foreign-older", Some(f.project.path()), "run-201", |_| {});
     assert!(
-        f.call(
-            ("run-200", None, None),
-            "thread_search",
-            json!({"cursor": token})
-        )
-        .is_err()
+        f.call(foreign, "thread_search", json!({"cursor": token}))
+            .is_err()
     );
     for cursor in ["run-200#0.0@0", "run-999#0.0@0"] {
         assert_eq!(
@@ -1412,3 +1405,6 @@ fn overlong_thread_arguments_fail_without_echoing_or_probing() {
         denial(&exact)
     );
 }
+
+#[path = "search_tests.rs"]
+mod search_phase_b;

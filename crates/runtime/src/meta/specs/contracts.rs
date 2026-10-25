@@ -116,7 +116,7 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
     contract::<meta::threads::SearchArgs>(
         "thread_search",
         json!({"query":["cache miss","prefix"], "match":"phrase", "include_children":false,
-            "kinds":["title","user","working_note","final_report"], "updated_after":1, "limit":20,
+            "kinds":["title","user","working_note","final_report","conversation","tool_use","tool_result"], "updated_after":1, "limit":20,
             "cursor":"1:thread-1"}),
     );
     contract::<meta::threads::SearchArgs>("thread_search", json!({"query":"cache"}));
@@ -187,10 +187,27 @@ fn thread_tools_follow_history_read_and_reject_unknown_arguments() {
             .description
             .contains("saved-only runs return their phase without a terminal reason")
     );
-    assert!(
-        tool_spec("thread_search")
-            .description
-            .contains("metadata only")
+    let search = tool_spec("thread_search");
+    for contract in [
+        "indexed conversation text",
+        "only with explicit tool_use/tool_result",
+        "partial",
+        "source_revision",
+        "guarded ref",
+    ] {
+        assert!(search.description.contains(contract), "{contract}");
+    }
+    assert_eq!(
+        search.input_schema["properties"]["kinds"]["items"]["enum"],
+        json!([
+            "title",
+            "user",
+            "working_note",
+            "final_report",
+            "conversation",
+            "tool_use",
+            "tool_result"
+        ])
     );
 }
 

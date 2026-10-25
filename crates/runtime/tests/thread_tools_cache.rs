@@ -98,7 +98,7 @@ struct Stored {
     _db: tempfile::TempDir,
 }
 
-fn stored(model: Arc<Recording>, project: &Path) -> Stored {
+fn stored(model: Arc<dyn AgentModel>, project: &Path) -> Stored {
     let db = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: db.path().join("threads.db"),
@@ -150,6 +150,70 @@ fn stored(model: Arc<Recording>, project: &Path) -> Stored {
             updated_at_ns: 2,
         })
         .unwrap();
+    let record = storage::Database::open(&config)
+        .unwrap()
+        .run_context("run-50")
+        .unwrap()
+        .unwrap();
+    use storage::thread_index::{
+        BlockOrigin, BlockProvenance, MessageProvenance, ProvenanceEvidence, ProvenanceMap,
+        ProvenanceStatus, SnapshotWrite,
+    };
+    handle
+        .save_snapshot_bundle(&SnapshotWrite {
+            record,
+            expected_snapshot_revision: None,
+            binding: None,
+            status: ProvenanceStatus::Verified {
+                evidence: ProvenanceEvidence::CompletePositionMap,
+            },
+            map: ProvenanceMap {
+                version: 1,
+                raw_message_count: 2,
+                checkpoint_count: 0,
+                messages: (0..2)
+                    .map(|ordinal| MessageProvenance {
+                        raw_index: ordinal,
+                        ordinal,
+                        blocks: vec![BlockProvenance {
+                            block_index: 0,
+                            origin: BlockOrigin::Native,
+                            excluded_reason: None,
+                        }],
+                    })
+                    .collect(),
+            },
+        })
+        .unwrap();
+    let database = storage::Database::open(&config).unwrap();
+    let bundle = database.snapshot_bundle("run-50").unwrap().unwrap();
+    let input = storage::thread_index::extract_snapshot_bundle(
+        &bundle,
+        &secret_guard::SecretRedactor::from_env(),
+    )
+    .unwrap();
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    for (ordinal, block) in input.blocks.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, \
+             block_index, role, kind, truncated, hash, text) \
+             VALUES ('run-50', 'message', ?1, ?2, 0, ?3, 'text', 0, ?4, ?5)",
+            rusqlite::params![
+                format!("{ordinal}:0"),
+                ordinal,
+                if ordinal == 0 { "user" } else { "assistant" },
+                block.hash,
+                block.text
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE thread_index_runs SET state = 'indexed', \
+        indexed_revision = source_revision WHERE run_id = 'run-50'",
+        [],
+    )
+    .unwrap();
     Stored {
         runtime,
         _storage: storage,
@@ -177,7 +241,11 @@ fn thread_specs(tools: &[ToolSpec]) -> String {
         .filter(|spec| THREAD_TOOLS.contains(&spec.name.as_str()))
         .collect();
     assert_eq!(specs.len(), THREAD_TOOLS.len());
-    serde_json::to_string(&specs).unwrap()
+    let actual = serde_json::to_string(&specs).unwrap();
+    let expected: Vec<ToolSpec> =
+        serde_json::from_str(include_str!("fixtures/thread_tools_phase_b.json")).unwrap();
+    assert_eq!(actual, serde_json::to_string(&expected).unwrap());
+    actual
 }
 
 #[tokio::test]
@@ -185,7 +253,13 @@ async fn thread_tool_calls_keep_tool_specs_fixed_and_the_wire_prefix_append_only
     // Given: a chat run whose project holds another saved thread.
     let project = tempfile::tempdir().unwrap();
     let model = Recording::new(vec![
-        call("c1", "thread_search", json!({})),
+        call(
+            "c1",
+            "thread_search",
+            json!({
+                "query": ["cache", "prefix"], "kinds": ["conversation", "tool_result"]
+            }),
+        ),
         call(
             "c2",
             "thread_grep",
@@ -261,6 +335,7 @@ async fn thread_tool_calls_keep_tool_specs_fixed_and_the_wire_prefix_append_only
         assert!(output.len() <= 16 * 1024);
     }
     assert!(results[1].0.contains("stable prefix"), "{}", results[1].0);
+    assert!(results[0].0.contains("source_revision"), "{}", results[0].0);
     assert!(results[4].1);
     assert!(
         results[4]
@@ -310,5 +385,141 @@ async fn thread_tool_specs_do_not_depend_on_a_store_a_thread_or_the_role() {
     for tools in &offered {
         assert_fixed_position(tools);
         assert_eq!(thread_specs(tools), expected);
+    }
+}
+
+#[tokio::test]
+async fn indexed_search_preserves_http_wire_prefix_and_input_derived_cache() {
+    use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
+    use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
+    const MODEL: &str = "mock-model";
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
+        ScriptedResponse::tool_call(
+            "s1",
+            MODEL,
+            0,
+            "search",
+            "thread_search",
+            [json!({"query":"stable prefix", "kinds":["conversation"]}).to_string()],
+        ),
+        ScriptedResponse::tool_call(
+            "s2",
+            MODEL,
+            0,
+            "grep",
+            "thread_grep",
+            [json!({"thread":"sibling", "pattern":"cache"}).to_string()],
+        ),
+        ScriptedResponse::text_stream("s3", MODEL, ["done"]),
+    ]);
+    let config = config::Config {
+        providers: std::collections::BTreeMap::from([(
+            "local".into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAiCompatible,
+                api_protocol: config::ApiProtocolConfig::OpenAiCompletions,
+                base_url: mock.base_url(),
+                credential: config::CredentialRefConfig::Env {
+                    var: "EVORCH_THREAD_CACHE_TEST_KEY".into(),
+                },
+                models: vec![config::ModelEntryConfig::enabled(MODEL)],
+                default_model: MODEL.into(),
+                excluded_models: vec![],
+                edit_tool: None,
+            },
+        )]),
+        routing: config::RoutingConfig {
+            routes: std::collections::BTreeMap::from([(
+                "worker".into(),
+                vec![config::RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: Some(MODEL.into()),
+                    auto: false,
+                }],
+            )]),
+            ..Default::default()
+        },
+        compaction: config::CompactionConfig {
+            context_window_tokens: 1_000_000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let project = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    let mut events = bus.subscribe();
+    let credentials =
+        sandbox::credential::FileCredentialStore::open(project.path().join("credentials")).unwrap();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(credentials),
+            event_bus: Some(bus),
+            env: Arc::new(routing::MapEnv::from_iter([(
+                "EVORCH_THREAD_CACHE_TEST_KEY",
+                "offline-key",
+            )])),
+            catalog: model::ModelCatalog::new(),
+            factory: Default::default(),
+        },
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
+    let fixture = stored(model, project.path());
+    let run = fixture
+        .runtime
+        .delegate_chat(
+            "caller",
+            Role::Worker,
+            "Find a stable prefix in previous conversations.".into(),
+            RunConfig {
+                project_root: Some(project.path().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(fixture.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let requests: Vec<_> = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .map(|r| r.body)
+        .collect();
+    assert_eq!(requests.len(), 3);
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
+    }
+    let search_output = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["tool_call_id"] == "search")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(search_output.contains("source_revision"), "{search_output}");
+    assert!(search_output.contains("stable prefix"), "{search_output}");
+    let mut usage = Vec::new();
+    while usage.len() < 3 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestCompleted {
+            input_tokens,
+            cache_read_tokens,
+            ..
+        }) = event.kind
+        {
+            usage.push((input_tokens, cache_read_tokens));
+        }
+    }
+    assert_eq!(usage.len(), 3);
+    for pair in usage.windows(2) {
+        assert!(pair[0].0 > 0);
+        assert_eq!(
+            pair[1].1, pair[0].0,
+            "the input-derived mock must reuse the full previous prefix"
+        );
     }
 }
