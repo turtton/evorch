@@ -561,6 +561,28 @@ pub enum LifecycleEvent {
         /// Automatic continuations allowed between user inputs.
         limit: u32,
     },
+    /// A committed run context snapshot now contains this host submission.
+    /// Notification only: the stored receipt is authoritative, and the text
+    /// is never part of the event.
+    HostInputDelivered {
+        run_id: String,
+        /// The GUI submission ID.
+        prompt_id: String,
+    },
+    /// The run ended before reading this accepted host submission.
+    HostInputDropped {
+        run_id: String,
+        prompt_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The runtime cannot tell whether the agent received this submission.
+    HostInputUnknown {
+        run_id: String,
+        prompt_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// メッセージストリームに関するイベント。
@@ -1345,6 +1367,32 @@ mod tests {
     #[test]
     fn serde_round_trip_preserves_every_variant() {
         let cases: Vec<(&'static str, EventKind)> = vec![
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputDelivered {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-1".into(),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputDropped {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-2".into(),
+                    reason: Some("run_ended".into()),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputUnknown {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-3".into(),
+                    reason: None,
+                }
+                .into(),
+            ),
             (
                 "Lifecycle",
                 LifecycleEvent::Started {
