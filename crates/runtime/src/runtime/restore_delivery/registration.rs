@@ -196,6 +196,7 @@ mod review_tests {
                 &mut lock_runs(&runtime.shared.runs),
                 (run, None, Role::Worker, RunConfig::default(), run),
                 RestoredState {
+                    provenance: Default::default(),
                     admission_reservation: None,
                     turn: None,
                     boundary_pending: false,

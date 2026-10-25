@@ -643,11 +643,36 @@ fn load_bundle(conn: &Connection, run_id: &str) -> Result<Option<SnapshotBundle>
     let Some((record, snapshot_revision)) = row else {
         return Ok(None);
     };
+    let mut provenance = read_sidecar(conn, run_id)?;
+    if provenance.is_none() && snapshot_revision == 0 {
+        provenance = Some(
+            crate::thread_index::derive_legacy_provenance(conn, &record)?.unwrap_or_else(|_| {
+                SnapshotProvenance {
+                    run_id: run_id.to_owned(),
+                    snapshot_revision,
+                    snapshot_sha256: snapshot_sha256(
+                        &record.messages_json,
+                        &record.checkpoints_json,
+                    ),
+                    format_version: PROVENANCE_FORMAT_VERSION,
+                    status: ProvenanceStatus::Unknown {
+                        reason: ProvenanceUnknownReason::LegacyUnproven,
+                    },
+                    map: ProvenanceMap {
+                        version: PROVENANCE_FORMAT_VERSION,
+                        raw_message_count: 0,
+                        checkpoint_count: 0,
+                        messages: Vec::new(),
+                    },
+                }
+            }),
+        );
+    }
     Ok(Some(SnapshotBundle {
         record,
         snapshot_revision,
         source_revision: current_source_revision(conn, run_id)?,
-        provenance: read_sidecar(conn, run_id)?,
+        provenance,
         latest_note: run_ledger::latest(conn, run_id)?,
     }))
 }

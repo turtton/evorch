@@ -272,6 +272,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.messages,
                     restored.checkpoints,
                 );
+                context.provenance = restored.provenance;
                 match restored.trigger {
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
                     None if !history_only => {
@@ -615,7 +616,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     state.context.messages.push(providers::Message {
                         role: providers::Role::User,
                         content,
-                    })
+                    });
+                    state
+                        .context
+                        .provenance
+                        .continuity(&state.context.messages, &state.continuity);
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -1450,9 +1455,13 @@ impl LoopState {
     /// Runtime state appended after a complete tool round, right before the next
     /// provider input, so the already-sent prefix is never edited.
     fn append_boundary_context(&mut self) {
+        let raw_start = self.context.messages.len();
         self.append_todo_context();
         self.append_scratch_context();
         self.append_allowed_directories_context();
+        self.context
+            .provenance
+            .generated_since(&self.context.messages, raw_start);
     }
 
     pub(crate) fn publish_message_count(&self) {

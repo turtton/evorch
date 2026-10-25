@@ -221,10 +221,57 @@ impl RunStore {
         &self,
         run_id: RunId,
     ) -> Result<Option<RunContextRecord>, StorageError> {
+        Ok(self.restore_bundle(run_id)?.map(|bundle| bundle.record))
+    }
+
+    pub(crate) fn restore_bundle(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<storage::thread_index::SnapshotBundle>, StorageError> {
         self.database
             .lock()
             .map_err(|error| StorageError::Io(error.to_string()))?
-            .run_context(&run_id.to_string())
+            .snapshot_bundle(&run_id.to_string())
+            .map_err(crate::restore::provenance::storage_error)
+    }
+
+    pub(crate) fn restore_provenance(
+        &self,
+        record: &RunContextRecord,
+    ) -> Result<crate::restore::provenance::ConversationProvenance, StorageError> {
+        let run = record
+            .run_id
+            .parse::<RunId>()
+            .map_err(|error| StorageError::Serialization(error.to_string()))?;
+        Ok(self
+            .restore_bundle(run)?
+            .filter(|bundle| {
+                bundle.record.messages_json == record.messages_json
+                    && bundle.record.checkpoints_json == record.checkpoints_json
+            })
+            .map_or_else(
+                crate::restore::provenance::ConversationProvenance::unknown,
+                |bundle| crate::restore::provenance::ConversationProvenance::from_bundle(&bundle),
+            ))
+    }
+
+    pub(crate) fn restore_conversation(
+        &self,
+        record: &RunContextRecord,
+    ) -> Result<crate::restore::RestoredState, crate::RuntimeError> {
+        let mut restored = crate::restore::RestoredState::for_conversation(record)?;
+        restored.provenance = self.restore_provenance(record).map_err(|error| {
+            crate::RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: crate::RunRestoreFailure::CorruptContext(error.to_string()),
+            }
+        })?;
+        let saved_messages: Vec<serde_json::Value> = serde_json::from_str(&record.messages_json)
+            .expect("conversation restore validated JSON");
+        restored
+            .provenance
+            .generated_since(&restored.messages, saved_messages.len());
+        Ok(restored)
     }
 
     pub(crate) fn restore_parent(

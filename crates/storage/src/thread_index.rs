@@ -8,6 +8,8 @@
 mod accounting;
 mod contracts;
 mod extract;
+mod legacy;
+pub use legacy::{LegacyProvenanceReason, derive_legacy_provenance};
 
 pub use accounting::{
     ACCOUNTING_VERSION, DEFAULT_ACCOUNTING_POLICY, SharedIndexAccountant, account_index_input,

@@ -56,6 +56,7 @@ impl CompactionCheckpoint {
 /// (ownership) によって構成上保証される。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
+    pub(crate) provenance: crate::restore::provenance::ConversationProvenance,
     /// 所有する run の ID。
     pub run_id: RunId,
     /// この run を実行するロール。
@@ -69,7 +70,9 @@ pub struct AgentContext {
 impl AgentContext {
     /// 空の履歴でコンテキストを生成する。
     pub fn new(run_id: RunId, role: Role) -> Self {
-        Self::from_restored(run_id, role, Vec::new(), Vec::new())
+        let mut context = Self::from_restored(run_id, role, Vec::new(), Vec::new());
+        context.provenance = Default::default();
+        context
     }
 
     pub(crate) fn from_restored(
@@ -79,6 +82,7 @@ impl AgentContext {
         checkpoints: Vec<CompactionCheckpoint>,
     ) -> Self {
         Self {
+            provenance: crate::restore::provenance::ConversationProvenance::unknown(),
             run_id,
             role,
             messages,

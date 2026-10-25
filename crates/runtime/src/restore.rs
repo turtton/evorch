@@ -12,6 +12,7 @@ use crate::{CoordinationTopology, ModelPreference, RunId};
 mod diagnostics;
 mod escalation;
 mod fork_seed;
+pub(crate) mod provenance;
 mod recovery;
 pub use diagnostics::RunRestoreDiagnostics;
 pub use escalation::PendingEscalation;
@@ -19,6 +20,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) provenance: provenance::ConversationProvenance,
     /// Admission owns this reservation until registration commits consumption.
     pub(crate) admission_reservation: Option<crate::runtime::SnapshotReservation>,
     pub(crate) turn: Option<providers::RequestTurnContext>,
@@ -81,6 +83,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            provenance: provenance::ConversationProvenance::unknown(),
             admission_reservation: None,
             turn: descriptor.turn,
             continuity: descriptor.continuity,
@@ -535,7 +538,33 @@ fn write_snapshot_with_context(
         restorable: descriptor.restorable,
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
     };
-    let receipt = store.handle.upsert_run_context_receipt(&record)?;
+    let write = context.provenance.write(record)?;
+    let saved = store
+        .handle
+        .save_snapshot_bundle(&write)
+        .map_err(provenance::storage_error)?;
+    // Ownership's existing advisory receipt covers the redacted committed
+    // messages. A concurrent replacement must not be acknowledged as ours.
+    let committed = store
+        .restore_bundle(state.caller_run_id())?
+        .ok_or_else(|| StorageError::Serialization("saved snapshot disappeared".into()))?;
+    if committed.snapshot_revision != saved.snapshot_revision
+        || storage::thread_index::snapshot_sha256(
+            &committed.record.messages_json,
+            &committed.record.checkpoints_json,
+        ) != saved.snapshot_sha256
+    {
+        return Err(StorageError::Serialization("saved snapshot replaced".into()).into());
+    }
+    use sha2::{Digest, Sha256};
+    let receipt = storage::RunContextReceipt {
+        updated_at_ns: committed.record.updated_at_ns,
+        messages_end: end,
+        sha256: format!(
+            "{:x}",
+            Sha256::digest(committed.record.messages_json.as_bytes())
+        ),
+    };
     Ok(crate::ownership::SnapshotReference::RunContext { receipt })
 }
 

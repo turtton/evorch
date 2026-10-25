@@ -5,8 +5,8 @@
 //! storage extractor (`extract_snapshot_bundle`), never a second extractor, and
 //! no conversation text is printed. Output is one JSON document on stdout.
 //!
-//! Legacy stores have no provenance sidecar, so the strict pass reports every
-//! run as `provenance_unknown`. Capacity is therefore sized with two labelled
+//! The strict pass proves legacy positions from structured generation metadata;
+//! unprovable runs remain `provenance_unknown`. Capacity also has two labelled
 //! hypotheses that are NOT an indexable population: `upper_bound` treats every
 //! block as native, and `fork_prefix_excluded` additionally drops the prefix a
 //! fork/rewind root run inherited (`threads.fork_point_context_len`).
@@ -396,6 +396,7 @@ fn kind_key(block: &storage::thread_index::IndexBlock) -> String {
 struct RunSummary {
     run_id: String,
     retention_at_ns: i64,
+    strict: std::result::Result<Footprint, String>,
     upper: std::result::Result<Footprint, String>,
     estimate: std::result::Result<Footprint, String>,
     sampled: bool,
@@ -844,6 +845,7 @@ fn main() -> Result<()> {
     let mut summaries = Vec::new();
     let mut strict_codes: BTreeMap<String, u64> = BTreeMap::new();
     let mut strict_indexable = 0_u64;
+    let mut legacy_reasons: BTreeMap<String, u64> = BTreeMap::new();
     let mut upper_codes: BTreeMap<String, u64> = BTreeMap::new();
     let mut kinds: BTreeMap<String, KindStat> = BTreeMap::new();
     let mut retention_sources: BTreeMap<&str, u64> = BTreeMap::new();
@@ -880,10 +882,26 @@ fn main() -> Result<()> {
                 provenance: None,
                 latest_note: note,
             };
-            match extract_snapshot_bundle(&bundle, &redactor) {
-                Ok(_) => strict_indexable += 1,
-                Err(error) => *strict_codes.entry(error_code(error)).or_default() += 1,
+            match storage::thread_index::derive_legacy_provenance(&store, &bundle.record)? {
+                Ok(provenance) => bundle.provenance = Some(provenance),
+                Err(reason) => {
+                    *legacy_reasons.entry(serde_name(&reason)).or_default() += 1;
+                    let mut sidecar = assumed_provenance(&bundle.record, &json!([]), 0, None);
+                    sidecar.status = ProvenanceStatus::Unknown {
+                        reason: storage::thread_index::ProvenanceUnknownReason::LegacyUnproven,
+                    };
+                    bundle.provenance = Some(sidecar);
+                }
             }
+            let strict = extract_snapshot_bundle(&bundle, &redactor);
+            match &strict {
+                Ok(_) => strict_indexable += 1,
+                Err(error) => *strict_codes.entry(error_code(*error)).or_default() += 1,
+            }
+            let strict_footprint = strict
+                .as_ref()
+                .map(footprint)
+                .map_err(|error| error_code(*error));
             let parsed = parse_index_snapshot(&bundle.record.messages_json).and_then(|messages| {
                 let checkpoints = parse_index_snapshot(&bundle.record.checkpoints_json)?;
                 Ok((messages, checkpoints.as_array().map_or(0, Vec::len)))
@@ -941,6 +959,7 @@ fn main() -> Result<()> {
                 sampled: sampled(&bundle.record.run_id, options.fts_percent),
                 run_id: bundle.record.run_id,
                 retention_at_ns,
+                strict: strict_footprint,
                 upper,
                 estimate,
             });
@@ -1015,7 +1034,8 @@ fn main() -> Result<()> {
             "fork_or_rewind_root_runs_with_prefix": fork_runs,
         },
         "strict": {
-            "rule": "real provenance only (none exists in a pre-v25 store); unknown is never assumed native",
+            "rule": "verified structured generation metadata only; unknown is never assumed native",
+            "legacy_held_by_detail": legacy_reasons,
             "indexable_runs": strict_indexable,
             "held_by_reason": strict_codes,
         },
@@ -1042,11 +1062,7 @@ fn main() -> Result<()> {
         },
         "retention": {
             "order": "retention_at_ns DESC, run_id DESC (newest kept)",
-            "strict": {
-                "runs_total": summaries.len(),
-                "runs_extractable": strict_indexable,
-                "note": "every run is pending (blocked: provenance_unknown) until order 3 writes sidecars",
-            },
+            "strict": retention_json(&summaries, |summary| &summary.strict, coefficients, &options.budgets),
             "upper_bound": retention_json(&summaries, |summary| &summary.upper, coefficients, &options.budgets),
             "fork_prefix_excluded": retention_json(&summaries, |summary| &summary.estimate, coefficients, &options.budgets),
         },

@@ -136,6 +136,24 @@ async fn fork_seed_replays_history_only_up_to_the_completed_turn() {
     assert!(texts.iter().any(|text| text == "first"));
     assert!(texts.iter().any(|text| text == "branch"));
     assert!(!texts.iter().any(|text| text == "second"));
+    let bundle = store.restore_bundle(fork).unwrap().unwrap();
+    let indexed = storage::thread_index::extract_snapshot_bundle(
+        &bundle,
+        &secret_guard::SecretRedactor::from_env(),
+    )
+    .unwrap();
+    assert!(indexed.blocks.iter().any(|block| block.text == "branch"));
+    assert!(!indexed.blocks.iter().any(|block| block.text == "first"));
+    assert!(
+        indexed
+            .blocks
+            .iter()
+            .filter_map(|block| match block.locator {
+                storage::thread_index::BlockLocator::Message { ordinal, .. } => Some(ordinal),
+                _ => None,
+            })
+            .all(|ordinal| ordinal >= first as usize)
+    );
     assert_eq!(
         *fixture.runtime.entry(source).unwrap().phase_rx.borrow(),
         AgentRunPhase::Waiting

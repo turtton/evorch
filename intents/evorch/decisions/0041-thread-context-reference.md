@@ -156,17 +156,17 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 |---|---|
 | コピー | 2026-10-25 12:56:43Z 開始、34.3 s。2,463,387,648 B（page 4096 × 601,413、freelist 907 page、`auto_vacuum=2`、`user_version=24`）。`events` 1,759,113,216 B（71.4%）、`run_contexts` 577,069,056 B（23.4%） |
 | 母集団 | run 1,857（`run_contexts`。note だけの run は 0）。作成時刻の出所: run_id の時刻部 1,170、旧連番 run は最初の note / usage の時刻 608、どちらもない旧 run は snapshot の `updated_at_ns` 79（近似）。fork / rewind の root run（継承 prefix あり）8 |
-| 厳密（実 provenance のみ） | 索引化可能 0 run。`provenance_unknown:missing_sidecar` 1,857（全件。v24 の store には sidecar がない）。全体 1,857 との差は 1,857。不明データは native と仮定しない |
+| 厳密（構造化メタデータによる導出を含む、2026-10-25 再計測） | 索引化可能 **703 / 1,857 run**。保留 1,154 はすべて `provenance_unknown:legacy_unproven`。詳細: `continuity_missing` 944、`continuity_boundary_unverifiable` 14、`fork_boundary_unverifiable` 3、`lineage_unverifiable` 193、`invalid_snapshot` 0。不明データは native と仮定しない |
 | 容量の仮定（索引化可能母集団ではない） | `upper_bound` = 全 block を native とみなした上界。`fork_prefix_excluded` = さらに fork / rewind root run の継承 prefix（`threads.fork_point_context_len`）を除いた推定。continuity のコピーは識別できないため両方に含む。不正 JSON 等の保留は 0 |
 | 切り詰め後の本文（上界、kind 別） | 計 188,372,892 B / 202,506 block。tool_result 108,927,938 B（57.8%、86,123 block、うち切り詰め 39,537）、tool_use 44,210,546 B（23.5%、92,990、切り詰め 1,887）、user text 16,521,379 B（8.8%、8,097）、assistant text 10,769,753 B（5.7%、7,959）、tool_error 7,116,533 B（3.8%、6,867、全文保持）、working note 826,743 B（0.4%、470）。fork 除外推定の本文は 186,456,948 B |
 | FTS（全件） | `conversation_fts_*` 449,568,768 B = 本文の 2.3866 倍（`optimize` 後 442,462,208 B = 2.3489 倍）。内訳 `_data` 448,610,304、`_idx` 954,368、`_config` 4,096。`integrity-check`（rank=1）成功 |
 | 補助テーブル | `conversation_blocks`+UNIQUE 索引 292,671,488 B（本文 188,372,892 と属性 28,161,569 を除くと 376 B/block）。`thread_index_runs`+3 索引（PK を含む）602,112 B（325 B/run）。索引 3 種の合計 742,842,368 B（約 708.4 MiB、本文の 3.94 倍） |
 | 物理（参考値） | 構築中の DB+WAL 最大 767,345,960 B（optimize 前）。WAL ファイル最大 22,721,832 B（`max_wal_bytes` 64 MiB 未満）。1 run の commit による DB+WAL 増加の最大 8,699,120 B（本文 849,724 B の run、約 10.2 倍）。全件構築 75.0 s（再実行 34.5 s）。普遍的な上界ではない |
 | 抽出時間（Rust release、redaction 込み） | 1 run あたり median 0.87 ms、p95 6.83 ms、最大 18.7 ms |
-| 論理会計の係数案 | `AccountingPolicy { per_block_bytes: 376, per_run_bytes: 325, fts_numerator: 2387, fts_denominator: 1000 }`（上の実測から切り上げ）。この係数で全件の課金合計は 742,927,254 B となり、構築直後の物理索引量 742,842,368 B と 0.01% で一致する。共通 `IndexAccountant` は未実装のため、ハーネスは `IndexAccounting` に記載の式を暫定で写している（W1 実装後に置き換える） |
+| 論理会計の係数案 | `AccountingPolicy { per_block_bytes: 376, per_run_bytes: 325, fts_numerator: 2387, fts_denominator: 1000 }`（上の実測から切り上げ）。この係数で全件の課金合計は 742,927,254 B となり、構築直後の物理索引量 742,842,368 B と 0.01% で一致する。再計測では共通 `index_attribute_bytes` / `charge_index_bytes` を使い、既定係数と一致することも確認した |
 | 最大の run | `run-01m5hq577mqemk417aetfsh9f1`、課金 3,812,201 B。どの候補でも oversized は 0 |
 
-上限ごとの保持（保持順は作成時刻の新しい順、同時刻は run_id の大きい方から。最古側から evict する結果と同じ）。厳密な母集団は 0 なので、厳密値はどの上限でも保持 0 / 1,857・保留 1,857 である。以下は容量の仮定（上界、括弧内は fork 除外推定）での値。
+上限ごとの保持（保持順は作成時刻の新しい順、同時刻は run_id の大きい方から。最古側から evict する結果と同じ）。以下は当初の容量の仮定（上界、括弧内は fork 除外推定）での値。構造化メタデータ導出後の厳密値はその下に分けて記録する。
 
 | `max_bytes` | 保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻 | 予算 evict | 保留 | oversized |
 |---|---|---|---|---|---|---|
@@ -176,7 +176,17 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 古い小さい run で隙間を埋めた場合の保持数は 419 / 960 / 1,857 で、上の値とほぼ同じである。
 
-所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。全 run の約 51%（直近約 11 日）を保持でき、oversized は 0、物理索引量も約 512 MiB で、DB 全体の上限 10 GiB と現在の約 2.29 GiB に対して余裕がある。一方、現在の全履歴（約 49 日）は課金約 708.5 MiB で、1 GiB なら全件を保持できる。直近 1.6 日だけで 256 MiB を使っており、負荷の高い期間には 512 MiB の保持期間が数日まで縮む可能性がある。また、旧データは順序 3 以降も provenance 不明のまま保留になるため、実際に索引へ入るのは sidecar を持つ新しい run だけである。既定値を変えるかどうかは利用者が判断する（本計測では変更していない）。
+2026-10-25 再計測（W4、構造化メタデータ導出後の厳密値）: 上と同じ `w6-measure-20261025T215631/store-copy.db` を `--reuse-copy` で read-only 再利用した。共通 `derive_legacy_provenance` → `extract_snapshot_bundle` → 共通会計 API の経路を使う。最終出力は作業領域の `w4-measure-legacy-final.json`、FTS は全件の上界で再構築して同じ係数（376 / 325 / 2387 / 1000）を得た。初回導出計測との厳密数値も一致した。原本は開いていない。
+
+| `max_bytes` | 厳密保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻（UTC） | 予算 evict | 保留 | oversized |
+|---|---|---|---|---|---|---|
+| 256 MiB | **456 / 1,857** | 68,781,749 / 268,371,322 | 2026-10-22T13:04:55Z | 247 | 1,154 | 0 |
+| 512 MiB | **703 / 1,857** | 97,691,227 / 382,060,708 | 2026-10-16T00:55:36Z | 0 | 1,154 | 0 |
+| 1 GiB | **703 / 1,857** | 97,691,227 / 382,060,708 | 2026-10-16T00:55:36Z | 0 | 1,154 | 0 |
+
+厳密最大 run は課金 3,322,132 B。保留 1,154 のうち、continuity 欄なし 944、fork 境界検証不能 3、その他 207（continuity 境界 14 + lineage 193）。0 件から 703 件を確定できたが、未知の出所を native に格上げしてはいない。
+
+所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。確定できた旧 run 703 件（課金約 364.4 MiB）をすべて保持し、oversized は 0。全件 native 上界でも約 51%（直近約 11 日）を保持でき、DB 全体の上限 10 GiB に対して余裕がある。未確定分を含む上界は約 708.5 MiB なので、今後の生成頻度によって保持期間は縮む。既定値は変更していない。
 
 ### Phase B 順序 5 開始ゲートの計測（W2）
 
@@ -430,6 +440,10 @@ Phase B は `thread_search` に本文の全文検索を足す。2026-10-25 に P
 コピー除外は**抽出時のフィルタだけ**であり、保存 messages を削除せず ordinal / block_index を詰めない。同じ文の native な別発言は別位置として必ず残す。
 
 - 旧データを確定扱いできるのは、(a) 対応 revision と完全な位置マップが検証できる、または (b) 当該 snapshot に結び付く構造化された生成記録から、全位置の native / copy と変換履歴を一意に証明できる場合だけとする。検証した証拠を sidecar に記録する。fork metadata があるだけ、ないだけ、本文が一致するだけ、現在の境界値だけでは足りない。
+  - 旧 snapshot（revision 0、sidecar なし）の導出は storage 内で行い、計測も同じ API を使う。descriptor に **明示的な空の continuity**（`inherited_note=null`、`sources=[]`）があり、run の thread binding と root の lineage が整合している場合に限る。continuity 欄なしは今回は確定しない。非空 continuity は挿入位置の生成記録がないため保留する。
+  - 同スレッド followup が新 run に全履歴を引き継ぐ経路もある。root に `review_lineage_edges.child_run_id` があるのに保存済みコピー境界がない run は `lineage_unverifiable` とする。root thread の不在情報だけでは native と判定しない。子 run は全親リンクと thread/depth/root の整合を要求する。
+  - fork / rewind root は保存済み `fork_point_run_id` と `fork_point_context_len` を検証する。境界は raw の non-System 数で数え、正の範囲内かつ completed assistant turn であること、checkpoint の range が raw 内であること、source run が存在することを要求する。raw-preserving compaction なので prefix を fork_copy、suffix を native とできる。source revision は旧形式の 0 と明示し、元 origin を証明できなければ run 全体を保留する。境界欠損・範囲外・途中 tool turn・lineage 不整合は `legacy_unproven`。子 run に root の fork 境界は再適用しない。
+  - 不明理由の計測は `continuity_missing` / `fork_boundary_unverifiable` / `continuity_boundary_unverifiable` / `lineage_unverifiable` / `invalid_snapshot` を分ける（索引の公開 reason_code は `legacy_unproven`）。検証証拠は snapshot hash と構造化レコード ID に結び付け、discovery の writer transaction で sidecar と source_revision を更新する。読み取りだけでは DB を変更しない。
 - 証明不能は sidecar `status=unknown`、索引 `blocked(reason=provenance_unknown)` とする。詳細 reason_code は `missing_sidecar` / `snapshot_mismatch` / `incomplete_map` / `legacy_unproven` / `unsupported_version`。本文を推定で除外せず run の会話索引を保留し、理由別件数を計測する。新 snapshot でも不明な既存位置を native に格上げしない。証拠による sidecar 修正は source_revision を進める。
 - 受け渡し API（順序 1 で型・エラー・fixture を固定）: W1 は `SnapshotProvenance` / `SnapshotWrite` / `SnapshotBundle` と原子的 `save_snapshot_bundle`・`load_snapshot_bundle`、共通 `extract_index_input` を所有する。W4 は全生成・変換経路で対応マップを作り `SnapshotWrite` を渡す。W2 は単一 writer コマンドで W1 を呼び、receipt の snapshot_revision / source_revision を W4 へ返す。W4 の restore と W2 の抽出 job は同じ `SnapshotBundle` を読む。W2 が本文から provenance を再推定する実装は禁止する。
 - この保存形式、変換規則、W1/W2/W4 の API、障害時の振る舞いを順序 1 の完了条件とし、順序 2・3 の開始条件とする。実装前の fixture に fork 後の compaction → 再起動と保存途中の障害を含める。

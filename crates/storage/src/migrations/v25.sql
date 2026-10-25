@@ -2,15 +2,16 @@
 --
 -- Tables, indexes and triggers only: no message body is read or rewritten here.
 -- Existing snapshots get snapshot_revision 0 and no provenance sidecar, so they
--- are never treated as verified (legacy rows block with provenance_unknown).
+-- are not verified by migration; discovery requires structured generation proof.
 ALTER TABLE run_contexts ADD COLUMN snapshot_revision INTEGER NOT NULL DEFAULT 0
     CHECK (snapshot_revision >= 0);
 
 -- One sidecar row describing the current redacted snapshot of a run. Positions
--- and copy origins only; text and secrets are never duplicated here.
+-- and copy origins only; text and secrets are never duplicated here. Revision 0
+-- is reserved for an explicitly derived legacy snapshot, not a new save.
 CREATE TABLE run_context_provenance (
     run_id TEXT PRIMARY KEY NOT NULL,
-    snapshot_revision INTEGER NOT NULL CHECK (snapshot_revision >= 1),
+    snapshot_revision INTEGER NOT NULL CHECK (snapshot_revision >= 0),
     snapshot_sha256 TEXT NOT NULL,
     format_version INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('verified', 'unknown')),

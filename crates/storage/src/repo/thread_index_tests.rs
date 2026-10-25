@@ -961,14 +961,14 @@ fn discovery_scans_headers_newest_first_and_resumes_after_restart() {
             legacy.source.snapshot_revision,
             legacy.source.context_sha256.as_str()
         ),
-        (0, "")
+        (0, snapshot_sha256("[]", "[]").as_str())
     );
     assert_eq!(
         (
             legacy.source.retention_at_ns,
             legacy.source.provenance_version
         ),
-        (10, None)
+        (10, Some(PROVENANCE_FORMAT_VERSION))
     );
 
     // A legacy snapshot has no sidecar and blocks with a reason, never native.
@@ -976,7 +976,7 @@ fn discovery_scans_headers_newest_first_and_resumes_after_restart() {
         .unwrap_err();
     assert_eq!(
         error,
-        ExtractionError::ProvenanceUnknown(ProvenanceUnknownReason::MissingSidecar)
+        ExtractionError::ProvenanceUnknown(ProvenanceUnknownReason::LegacyUnproven)
     );
     let lease = lease(&conn, 1, i64::MAX);
     let guard = guard(&conn, "run-old", &lease);

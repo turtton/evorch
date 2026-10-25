@@ -90,6 +90,8 @@ impl<'c> SqliteThreadIndex<'c> {
                  p.snapshot_sha256, p.format_version \
                  FROM sources s LEFT JOIN run_context_provenance p ON p.run_id = s.run_id \
                  WHERE NOT EXISTS (SELECT 1 FROM thread_index_runs t WHERE t.run_id = s.run_id) \
+                    OR (p.run_id IS NULL AND EXISTS (\
+                        SELECT 1 FROM run_contexts c WHERE c.run_id = s.run_id)) \
                  GROUP BY s.run_id \
                  HAVING ?1 IS NULL OR (MIN(s.at), s.run_id) < (?1, ?2) \
                  ORDER BY MIN(s.at) DESC, s.run_id DESC LIMIT ?3",
@@ -119,6 +121,24 @@ impl<'c> SqliteThreadIndex<'c> {
                 .collect::<Result<Vec<_>, _>>()?;
             for (header, _) in &headers {
                 self.discover_source(header)?;
+                if read_sidecar(conn, &header.target.run_id)?.is_none()
+                    && let Some(bundle) = load_bundle(conn, &header.target.run_id)?
+                    && let Some(sidecar) = bundle.provenance
+                {
+                    write_sidecar(conn, &sidecar)?;
+                    record_source_change(
+                        conn,
+                        &header.target.run_id,
+                        SourceValues {
+                            snapshot_revision: Some(sidecar.snapshot_revision),
+                            sha256: Some(&sidecar.snapshot_sha256),
+                            provenance_version: Some(sidecar.format_version),
+                            updated_at_ns: bundle.record.updated_at_ns,
+                            ..SourceValues::default()
+                        },
+                        None,
+                    )?;
+                }
             }
             let complete = headers.len() < limit;
             // The resume position is the scan key, not the derived retention time.
