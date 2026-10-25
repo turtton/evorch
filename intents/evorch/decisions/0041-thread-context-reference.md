@@ -146,6 +146,38 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 - `project_root` が null の旧 run は 687 件で、確定的に補完できたものは 0 件。Phase B の可視性は Phase A の `threads` / `thread_runs` に従い、索引側で可視性を再定義しない。
 - 上の 3.4165 倍は、切り詰めなしの本文に対する値である。切り詰め後の容量と、`max_bytes` の候補（256 MiB / 512 MiB / 1 GiB）ごとの保持範囲は Phase B の計測項目として残す（決定 B-2）。
 
+### Phase B 順序 2 の計測（切り詰め後、W6）
+
+実 store を `mode=ro`（`is_readonly` で確認）で開き、SQLite online backup API（`sqlite3_backup_step(-1)`、1 つの読み取りスナップショット）で `$TMPDIR` にコピーし、以後はコピーだけを読んだ。原本には書き込んでいない。ハーネスは `crates/storage/examples/thread_index_measure.rs` で、本文は W1 の `extract_snapshot_bundle`（`EXTRACTOR_VERSION=1`）だけで抽出し、出力に本文を含めない。FTS は ADR の v25 形（`conversation_blocks` + fts5 `trigram`・external content・`columnsize=0` + `thread_index_runs` と 2 索引）を `storage::db` と同じ pragma（WAL・`synchronous=NORMAL`・`wal_autocheckpoint=1000`・`auto_vacuum=INCREMENTAL`）の新規 DB に run ごとの transaction で全件（サンプルではなく 100%）作り、`dbstat` で測った。同じコピーへの再実行（`--reuse-copy`）で全数値が一致した（build 時間のみ差）。
+
+再現: `cargo build --release -p storage --example thread_index_measure` の後、`target/release/examples/thread_index_measure --source <store.db> --copy <新規 copy.db> --work-dir <新規 dir>`（既存コピーの再計測は `--reuse-copy --copy <copy.db>`）。
+
+| 項目 | 値 |
+|---|---|
+| コピー | 2026-10-25 12:56:43Z 開始、34.3 s。2,463,387,648 B（page 4096 × 601,413、freelist 907 page、`auto_vacuum=2`、`user_version=24`）。`events` 1,759,113,216 B（71.4%）、`run_contexts` 577,069,056 B（23.4%） |
+| 母集団 | run 1,857（`run_contexts`。note だけの run は 0）。作成時刻の出所: run_id の時刻部 1,170、旧連番 run は最初の note / usage の時刻 608、どちらもない旧 run は snapshot の `updated_at_ns` 79（近似）。fork / rewind の root run（継承 prefix あり）8 |
+| 厳密（実 provenance のみ） | 索引化可能 0 run。`provenance_unknown:missing_sidecar` 1,857（全件。v24 の store には sidecar がない）。全体 1,857 との差は 1,857。不明データは native と仮定しない |
+| 容量の仮定（索引化可能母集団ではない） | `upper_bound` = 全 block を native とみなした上界。`fork_prefix_excluded` = さらに fork / rewind root run の継承 prefix（`threads.fork_point_context_len`）を除いた推定。continuity のコピーは識別できないため両方に含む。不正 JSON 等の保留は 0 |
+| 切り詰め後の本文（上界、kind 別） | 計 188,372,892 B / 202,506 block。tool_result 108,927,938 B（57.8%、86,123 block、うち切り詰め 39,537）、tool_use 44,210,546 B（23.5%、92,990、切り詰め 1,887）、user text 16,521,379 B（8.8%、8,097）、assistant text 10,769,753 B（5.7%、7,959）、tool_error 7,116,533 B（3.8%、6,867、全文保持）、working note 826,743 B（0.4%、470）。fork 除外推定の本文は 186,456,948 B |
+| FTS（全件） | `conversation_fts_*` 449,568,768 B = 本文の 2.3866 倍（`optimize` 後 442,462,208 B = 2.3489 倍）。内訳 `_data` 448,610,304、`_idx` 954,368、`_config` 4,096。`integrity-check`（rank=1）成功 |
+| 補助テーブル | `conversation_blocks`+UNIQUE 索引 292,671,488 B（本文 188,372,892 と属性 28,161,569 を除くと 376 B/block）。`thread_index_runs`+3 索引（PK を含む）602,112 B（325 B/run）。索引 3 種の合計 742,842,368 B（約 708.4 MiB、本文の 3.94 倍） |
+| 物理（参考値） | 構築中の DB+WAL 最大 767,345,960 B（optimize 前）。WAL ファイル最大 22,721,832 B（`max_wal_bytes` 64 MiB 未満）。1 run の commit による DB+WAL 増加の最大 8,699,120 B（本文 849,724 B の run、約 10.2 倍）。全件構築 75.0 s（再実行 34.5 s）。普遍的な上界ではない |
+| 抽出時間（Rust release、redaction 込み） | 1 run あたり median 0.87 ms、p95 6.83 ms、最大 18.7 ms |
+| 論理会計の係数案 | `AccountingPolicy { per_block_bytes: 376, per_run_bytes: 325, fts_numerator: 2387, fts_denominator: 1000 }`（上の実測から切り上げ）。この係数で全件の課金合計は 742,927,254 B となり、構築直後の物理索引量 742,842,368 B と 0.01% で一致する。共通 `IndexAccountant` は未実装のため、ハーネスは `IndexAccounting` に記載の式を暫定で写している（W1 実装後に置き換える） |
+| 最大の run | `run-01m5hq577mqemk417aetfsh9f1`、課金 3,812,201 B。どの候補でも oversized は 0 |
+
+上限ごとの保持（保持順は作成時刻の新しい順、同時刻は run_id の大きい方から。最古側から evict する結果と同じ）。厳密な母集団は 0 なので、厳密値はどの上限でも保持 0 / 1,857・保留 1,857 である。以下は容量の仮定（上界、括弧内は fork 除外推定）での値。
+
+| `max_bytes` | 保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻 | 予算 evict | 保留 | oversized |
+|---|---|---|---|---|---|---|
+| 256 MiB | 416 / 1,857（421） | 68,517,705 / 267,583,740 | 2026-10-23T23:42:24Z（16:54:37Z）。コピー時点から約 1.6 日 | 1,441 | 0 | 0 |
+| 512 MiB | 950 / 1,857（972） | 136,888,956 / 536,523,197 | 2026-10-14T12:35:11Z（11:49:07Z）。約 11.0 日 | 907 | 0 | 0 |
+| 1 GiB | 1,857 / 1,857（1,857） | 188,372,892 / 742,927,254 | 2026-09-06T08:04:46Z（全履歴、約 49 日。旧 run の時刻は近似） | 0 | 0 | 0 |
+
+古い小さい run で隙間を埋めた場合の保持数は 419 / 960 / 1,857 で、上の値とほぼ同じである。
+
+所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。全 run の約 51%（直近約 11 日）を保持でき、oversized は 0、物理索引量も約 512 MiB で、DB 全体の上限 10 GiB と現在の約 2.29 GiB に対して余裕がある。一方、現在の全履歴（約 49 日）は課金約 708.5 MiB で、1 GiB なら全件を保持できる。直近 1.6 日だけで 256 MiB を使っており、負荷の高い期間には 512 MiB の保持期間が数日まで縮む可能性がある。また、旧データは順序 3 以降も provenance 不明のまま保留になるため、実際に索引へ入るのは sidecar を持つ新しい run だけである。既定値を変えるかどうかは利用者が判断する（本計測では変更していない）。
+
 ## Phase A の設計
 
 ### A-1 storage
@@ -700,6 +732,8 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
     - 検証: `cargo nextest run -p config --locked -j 4` 421 件成功（新規 11 件: 型の単体 5 件、読み込み統合 6 件）、storage の `storage_config_default_uses_documented_values` 成功。commit: 本項目更新コミット（`feat(config): add strict [storage.thread_index] settings`、SHA は `git log` で確認）
 - [ ] 順序 2 最小の抽出器で計測 — W1 の抽出 / 会計関数を W6 から呼ぶ。provenance 不明を native と仮定しない。commit:
   - [x] storage の最小抽出器・境界/除外/provenance fixture と runtime normalize の共通比較契約テスト — commit: 本項目追加コミット（`git log` で確認）。計測ハーネス・実 store 計測・共通会計実装/係数は未実施のため順序 2 全体は未完了。
+  - [x] W6 計測ハーネスと実 store コピーの容量計測 — `crates/storage/examples/thread_index_measure.rs`（`mode=ro` + backup API でコピー、W1 の `extract_snapshot_bundle` だけで抽出）。結果は「Phase B 順序 2 の計測」節と下の計測項目。係数案 `per_block=376, per_run=325, fts=2387/1000`。commit: 本項目追加コミット（`feat(storage): add Phase B index capacity measurement harness`、SHA は `git log` で確認）
+  - [ ] 順序 2 の残り — 共通 `IndexAccountant`（W1）実装後にハーネスの暫定式を置き換えて再計測する。順序 5 開始ゲート用の前景正本 transaction の増加量 F、前景書き込み待ちの基準値、確実に hit する dataset は未計測
 - [ ] 順序 3 migration（v25）・抽出・状態遷移 — provenance 原子的保存・復元を含む。commit:
 - [ ] 順序 4 不可分な置換（索引の置換・evict・source 削除の tombstone）— commit:
 - [ ] 順序 5 開始ゲート — reserve の R_floor / safety_factor / F、G の上界係数、再開 J、step 上限、前景待ちの絶対増分・倍率を実測から ADR に数値で固定。結果:
@@ -733,21 +767,21 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 
 計測は実 store のコピー（`mode=ro` で開き backup API でコピー。原本には書き込まない）で行う。
 
-- [ ] 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ — 結果:
-- [ ] `max_bytes` ごとの保持範囲（決定 B-2）— 結果:
+- [ ] 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ — 結果: 「Phase B 順序 2 の計測」節。切り詰め後の本文 188,372,892 B（上界）、FTS 449,568,768 B（本文の 2.3866 倍）、補助テーブル 292,671,488 + 602,112 B、構築中の WAL 最大 22,721,832 B。計測用 DB への構築値であり、writer 経由の WAL ピークと evict 後の回収後サイズは未計測（順序 5 / 8）
+- [x] `max_bytes` ごとの保持範囲（決定 B-2）— 結果: 実 store のコピー（2026-10-25 12:56Z、1,857 run）。厳密な索引化可能母集団は 0 なので、各行は「厳密 / 容量の仮定（全 block native の上界、括弧内は fork prefix 除外推定）」で記す。係数は上の案（暫定会計）。
 
   | `max_bytes` | 保持できる run（N / 全体） | 索引化可能 run 数 | 対象 / 保持本文量（B） | 最古の時刻 | 保留（pending）の数 | oversized の数 |
   |---|---|---|---|---|---|---|
-  | 256 MiB | | | | | | |
-  | 512 MiB | | | | | | |
-  | 1 GiB | | | | | | |
+  | 256 MiB | 厳密 0 / 1,857。上界 416 / 1,857（421） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 68,517,705（課金 267,583,740） | 上界 2026-10-23T23:42:24Z（推定 16:54:37Z） | 厳密 1,857（provenance_unknown）、上界 0 | 0 |
+  | 512 MiB | 厳密 0 / 1,857。上界 950 / 1,857（972） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 136,888,956（課金 536,523,197） | 上界 2026-10-14T12:35:11Z（推定 11:49:07Z） | 厳密 1,857、上界 0 | 0 |
+  | 1 GiB | 厳密 0 / 1,857。上界 1,857 / 1,857（1,857） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 188,372,892（課金 742,927,254） | 上界 2026-09-06T08:04:46Z（全履歴、旧 run の時刻は近似） | 厳密 1,857、上界 0 | 0 |
 
-  512 MiB が明らかに不適切なら、マージ前に報告する。
-- [ ] `provenance_unknown` の数（reason_code 別、全体と索引化可能母集団の差も報告）— 結果:
-- [ ] 同じ抽出器 / 会計 version・係数、短語・regex 含む確実に hit がある dataset / 正解集合 — 結果:
+  512 MiB が明らかに不適切なら、マージ前に報告する。— 所見: 明らかに不適切ではない（直近約 11 日・約 51% を保持、oversized 0、DB 上限 10 GiB に対し物理約 512 MiB）。全履歴は課金約 708.5 MiB で 1 GiB に収まる。直近 1.6 日で 256 MiB を使っており、高負荷時は 512 MiB の保持期間が数日に縮む可能性がある。既定値の変更は利用者判断（未変更）。
+- [x] `provenance_unknown` の数（reason_code 別、全体と索引化可能母集団の差も報告）— 結果: v24 の実 store コピーで `missing_sidecar` 1,857（全 run）、他の reason 0。全体 1,857 に対し索引化可能 0（差 1,857）。不正 JSON 等の保留は 0。v25 migration 後に旧 snapshot に sidecar 行を作る場合は reason が `legacy_unproven` になり得るが、保留であることは変わらない
+- [ ] 同じ抽出器 / 会計 version・係数、短語・regex 含む確実に hit がある dataset / 正解集合 — 結果: 容量計測は `EXTRACTOR_VERSION=1` の共通抽出器を使用。会計は共通 `IndexAccountant` 未実装のため暫定式（accounting_version 未確定）。hit dataset / 正解集合は未作成（順序 6 / 8）
 - [ ] 検索 p95 < 300 ms（release ビルド、warm / cold、backfill あり / なし、語の種類別）— 結果:
 - [ ] 前景の書き込み待ち（索引無効との p50 / p95 / 最大・絶対増分 / 倍率比較、許容値と超過時の再計測・判断）— 結果:
-- [ ] DB+WAL の物理増加上界、reserve・停止/再開閾値と正本余裕の実測 — 結果:
+- [ ] DB+WAL の物理増加上界、reserve・停止/再開閾値と正本余裕の実測 — 結果: 参考値のみ。計測用 DB で索引 1 run commit の DB+WAL 増加最大 8,699,120 B（本文 849,724 B、約 10.2 倍）、WAL 最大 22,721,832 B。前景正本 transaction の F、reserve / J / step 上限は未計測（順序 5 開始前に必要）
 - [ ] 「実装時に確認すること」の全項目の確認結果を記録した — 結果:
 
 ### Phase B の再開手順
