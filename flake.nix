@@ -112,6 +112,14 @@
               path != benchmark && !(pkgs.lib.hasPrefix "${benchmark}/" path);
           };
           cargoCheckCommand = "true";
+          # Trade a little cold-build CPU for smaller cached dependency downloads.
+          zstdCompressionExtraArgs = "-9";
+          # Keep vendored sources in the cache closure independently of how the
+          # cargo artifacts happen to be compressed.
+          postInstall = ''
+            mkdir -p "$out"
+            printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
+          '';
         };
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
         tests = craneLib.cargoTest (commonArgs // {
