@@ -102,6 +102,7 @@ impl AgentRuntime {
             mailbox: Arc::clone(&mailbox),
             handoff: None,
             restored: None,
+            initial_prompt_id: None,
         });
         let completion_relayed = !history_only
             && runs
@@ -207,6 +208,7 @@ mod review_tests {
                     turn_completed: true,
                     allowed_directories: Default::default(),
                     allowed_instructions: Default::default(),
+                    host_inputs: Vec::new(),
                 },
                 &trigger,
                 None,

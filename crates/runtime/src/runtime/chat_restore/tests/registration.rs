@@ -47,7 +47,7 @@ async fn restored_event_observes_registered_entry_before_execution() {
         .runtime
         .continue_goal(run, "continue".into(), RunConfig::default())
         .unwrap();
-    let event = events.recv().await.unwrap();
+    let event = super::next_run_event(&mut events).await;
     // Then: publication observes the new Pending entry, never the old terminal entry.
     assert!(
         matches!(event.kind, event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunRestored {
@@ -75,8 +75,15 @@ async fn restored_event_is_absent_when_admission_fails() {
         .continue_goal(run, "continue".into(), RunConfig::default())
         .unwrap();
     assert!(fixture.runtime.wait_admission(run).await.is_err());
-    // Then: no restore was announced and the old entry remains terminal.
-    assert!(events.drain_pending_snapshot().is_empty());
+    // Then: no restore was announced and the old entry remains terminal. The
+    // prompt is in the kept snapshot, so its commit delivered it.
+    let events = events.drain_pending_snapshot();
+    assert!(events.iter().all(super::is_host_input_notice), "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        event_bus::EventKind::Lifecycle(LifecycleEvent::HostInputDelivered { run_id, .. })
+            if *run_id == run.to_string()
+    )));
     assert_eq!(
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done

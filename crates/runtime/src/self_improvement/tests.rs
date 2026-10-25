@@ -91,6 +91,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("NoProgress", HarnessImprovement),
         ("LearningPipelineFailed", HarnessImprovement),
         ("ContextSnapshotFailed", HarnessImprovement),
+        ("HostInputReceiptFailed", HarnessImprovement),
         ("EscalationHandoffFailed", HarnessImprovement),
         ("CrashRecovered", HarnessImprovement),
         ("AgentRunPanicked", HarnessImprovement),

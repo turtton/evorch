@@ -134,6 +134,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
                 media_type: "image/png".into(),
                 data: "aW1hZ2U=".into(),
             }],
+            None,
         )
         .unwrap();
     review_storage.attach(&runtime);

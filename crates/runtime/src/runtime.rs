@@ -50,6 +50,8 @@ use crate::skill_source::SkillCatalogSource;
 use crate::state::{RunInterrupt, StopScope};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
+#[cfg(test)]
+mod host_input_tests;
 pub(crate) mod user_inbox;
 pub use user_inbox::FollowUpStatus;
 use user_inbox::UserInbox;
@@ -529,6 +531,8 @@ impl AgentRuntime {
         run_id: RunId,
         text: &str,
         reference: Option<&PendingReference>,
+        prompt_id: &str,
+        image_count: u32,
     ) -> Result<(), RuntimeError> {
         let store = self
             .shared
@@ -571,12 +575,26 @@ impl AgentRuntime {
             .user_requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Evidence, approval consumption and the delivery receipt commit together:
+        // a refused send leaves none of them.
+        let now = crate::run_store::review_time_ns();
         store
             .handle
-            .append_review_evidence_with_reference_consumption(
+            .append_host_input_accepted(
                 std::slice::from_ref(&row),
                 &[],
                 reference.map(|pending| pending.reference_id.as_str()),
+                &storage::HostInputReceipt {
+                    prompt_id: prompt_id.into(),
+                    run_id: run_id.to_string(),
+                    root_run_id: review.root_run_id.clone(),
+                    text: text.into(),
+                    image_count,
+                    status: storage::HostInputStatus::Accepted,
+                    reason: None,
+                    accepted_at_ns: now,
+                    status_at_ns: now,
+                },
             )
             .map_err(|error| Self::review_error(run_id, error))?;
         shared.add_request(crate::run_store::request_from_evidence(row));
@@ -1307,13 +1325,24 @@ impl AgentRuntime {
                     .is_some_and(|entry| entry.parent.is_some())
             }),
         );
-        let turn = crate::request_turn::initial(
+        let mut turn = crate::request_turn::initial(
             ancestry,
             !history_only && review_seed.is_some(),
             restored.is_none() && handoff.is_none(),
             history_only,
             restored.as_ref().and_then(|state| state.turn.as_ref()),
         );
+        // A host prompt keeps its submission ID as the request turn's prompt ID.
+        // Taken here, so the stored config never passes it to a delegated child.
+        let initial_prompt_id = config
+            .initial_prompt_id
+            .take()
+            .filter(|id| !id.is_empty() && !history_only);
+        if let Some(id) = &initial_prompt_id
+            && turn.origin.as_deref() == Some("human")
+        {
+            turn.prompt_id.clone_from(id);
+        }
         if config.budget == crate::budget_tracker::BudgetSettings::default()
             && let Some(budget) = self.shared.budget.get()
         {
@@ -1478,6 +1507,7 @@ impl AgentRuntime {
             mailbox: Arc::clone(&mailbox),
             handoff,
             restored: None,
+            initial_prompt_id,
         };
         let mut task = match restored {
             Some(restored) => restored.attach_to(task),
@@ -1589,7 +1619,18 @@ impl AgentRuntime {
                 Some(Ok(slot)) => Some(slot),
                 Some(Err(reason)) => {
                     if let Some(shared) = weak.upgrade() {
-                        AgentRuntime { shared }.publish_terminal(
+                        let runtime = AgentRuntime { shared };
+                        user_inbox::seal_off_thread(Arc::clone(&channels.user_inbox)).await;
+                        runtime.drop_unstarted_host_input(
+                            task.run_id,
+                            task.initial_prompt_id.as_deref(),
+                        );
+                        if let Err(error) = runtime
+                            .mark_unreachable_host_inputs(&task.run_id.to_string(), "spawn_failed")
+                        {
+                            runtime.host_input_diagnostic(task.run_id, &error.to_string());
+                        }
+                        runtime.publish_terminal(
                             task.run_id,
                             LifecycleEvent::AgentRunStateChanged {
                                 run_id: task.run_id.to_string(),
@@ -1747,16 +1788,23 @@ impl AgentRuntime {
 
     /// 対話待機中の run へユーザーメッセージを送る。
     pub fn send_message(&self, run_id: RunId, text: String) -> Result<(), RuntimeError> {
-        self.send_message_with_images(run_id, text, Vec::new())
+        self.send_message_with_images(run_id, text, Vec::new(), None)
     }
 
+    /// Send host input. `submission_id` is the host's ID for it (a UUID); the
+    /// runtime generates one when absent. Its delivery receipt uses that ID.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RunTerminated`] once the run stopped accepting input, or
+    /// a persistence error; a refused message leaves no evidence or receipt.
     pub fn send_message_with_images(
         &self,
         run_id: RunId,
         text: String,
         images: Vec<crate::DelegateImage>,
+        submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, images, true, None)
+        self.send_inbox_message(run_id, text, images, true, None, submission_id)
     }
 
     pub(crate) fn send_internal_message(
@@ -1764,7 +1812,7 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, Vec::new(), false, None)
+        self.send_inbox_message(run_id, text, Vec::new(), false, None, None)
     }
 
     /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
@@ -1836,6 +1884,7 @@ impl AgentRuntime {
         images: Vec<crate::DelegateImage>,
         trusted_user: bool,
         initial_goal: Option<(String, Vec<String>)>,
+        submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
         self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
@@ -1856,14 +1905,28 @@ impl AgentRuntime {
         // observation to avoid a run-map -> status / send -> run-map lock cycle.
         // Nothing in this closure re-enters the trusted-send serializer.
         let send = || {
+            // A sealed incarnation has drained its inbox for good: refuse before
+            // reserving, persisting or creating a goal.
+            if trusted_user && inbox.sealed() {
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
+            }
             let permit = sender
                 .try_reserve()
                 .map_err(|_| RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
                 })?;
-            if trusted_user {
+            inbox.pause_point(user_inbox::SendPausePoint::AfterReserve);
+            let prompt_id = trusted_user.then(|| {
+                submission_id
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| providers::RequestTurnContext::unattributed(false).prompt_id)
+            });
+            if let Some(prompt_id) = &prompt_id {
                 let pending = self.persist_pending_reference(run_id)?;
-                self.record_host_input(run_id, &text, pending.as_ref())?;
+                let image_count = u32::try_from(images.len()).unwrap_or(u32::MAX);
+                self.record_host_input(run_id, &text, pending.as_ref(), prompt_id, image_count)?;
                 if let Some(pending) = pending {
                     match self.take_pending_reference(run_id, pending.token) {
                         Ok(Some(_)) => {}
@@ -1877,27 +1940,35 @@ impl AgentRuntime {
                 }
             }
             if let Some((objective, criteria)) = initial_goal {
-                let thread =
-                    self.goal_thread(run_id)
-                        .ok_or_else(|| RuntimeError::RunRestoreFailed {
-                            run_id: run_id.to_string(),
-                            reason: crate::RunRestoreFailure::CorruptContext(
-                                "missing thread binding".into(),
-                            ),
-                        })?;
-                self.create_thread_goal(&thread, run_id, objective, criteria)
-                    .map_err(|reason| RuntimeError::RunRestoreFailed {
+                let created = self
+                    .goal_thread(run_id)
+                    .ok_or_else(|| "missing thread binding".to_string())
+                    .and_then(|thread| {
+                        self.create_thread_goal(&thread, run_id, objective, criteria)
+                    });
+                if let Err(reason) = created {
+                    // The receipt is already accepted but the input never queues.
+                    if let Some(prompt_id) = &prompt_id {
+                        self.settle_host_inputs(
+                            run_id,
+                            &[storage::HostInputTransition::new(
+                                prompt_id.clone(),
+                                storage::HostInputStatus::Dropped,
+                                Some("goal_rejected"),
+                            )],
+                        );
+                    }
+                    return Err(RuntimeError::RunRestoreFailed {
                         run_id: run_id.to_string(),
                         reason: crate::RunRestoreFailure::CorruptContext(reason),
-                    })?;
+                    });
+                }
             }
             // Invalidate the old check before the model can consume new host input.
             if trusted_user {
                 self.goal_user_input(run_id, &text);
             }
             let enqueue = || {
-                let prompt_id = trusted_user
-                    .then(|| providers::RequestTurnContext::unattributed(false).prompt_id);
                 permit.send((text.clone(), images, trusted_user, prompt_id));
                 Ok::<_, RuntimeError>(())
             };
@@ -1909,11 +1980,119 @@ impl AgentRuntime {
             Ok::<_, RuntimeError>(())
         };
         if trusted_user {
+            inbox.pause_point(user_inbox::SendPausePoint::BeforeLock);
             inbox.serialize_trusted_send(send)?;
         } else {
             send()?;
         }
         Ok(())
+    }
+
+    /// Move receipts out of `Accepted` without a snapshot and notify. A failure
+    /// leaves them accepted for later reconciliation and is reported.
+    pub(crate) fn settle_host_inputs(
+        &self,
+        run_id: RunId,
+        transitions: &[storage::HostInputTransition],
+    ) {
+        if transitions.is_empty() {
+            return;
+        }
+        let Some(store) = self.shared.run_store.get() else {
+            return;
+        };
+        match store.handle.transition_host_inputs(transitions) {
+            Ok(applied) => self.emit_host_input_transitions(run_id, &applied),
+            Err(error) => self.host_input_diagnostic(run_id, &error.to_string()),
+        }
+    }
+
+    /// Notify committed receipt changes; the receipt itself stays authoritative.
+    pub(crate) fn emit_host_input_transitions(
+        &self,
+        run_id: RunId,
+        applied: &[storage::HostInputTransition],
+    ) {
+        for transition in applied {
+            let run_id = run_id.to_string();
+            let prompt_id = transition.prompt_id.clone();
+            let reason = transition.reason.clone();
+            let event = match transition.status {
+                storage::HostInputStatus::Delivered => {
+                    LifecycleEvent::HostInputDelivered { run_id, prompt_id }
+                }
+                storage::HostInputStatus::Dropped => LifecycleEvent::HostInputDropped {
+                    run_id,
+                    prompt_id,
+                    reason,
+                },
+                storage::HostInputStatus::Unknown => LifecycleEvent::HostInputUnknown {
+                    run_id,
+                    prompt_id,
+                    reason,
+                },
+                storage::HostInputStatus::Accepted => continue,
+            };
+            self.shared.bus.emit(Event::new(event));
+        }
+    }
+
+    pub(crate) fn host_input_diagnostic(&self, run_id: RunId, detail: &str) {
+        self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
+            source: "agent_runtime".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: event_bus::event::diagnostic_codes::HOST_INPUT_RECEIPT_FAILED.into(),
+            detail: format!("host input receipts left unsettled: {detail}"),
+            run_id: Some(run_id.to_string()),
+            thread_id: None,
+            call_id: None,
+        }));
+    }
+
+    /// Delivery receipts for the given submission IDs, after every earlier write.
+    /// Without storage there are no receipts.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn host_input_receipts(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<storage::HostInputReceipt>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => store.handle.host_input_receipts(prompt_ids),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Mark a run's accepted receipts `Unknown` when the host has proven that
+    /// no live incarnation can still read them (for example an orphaned run
+    /// found at startup through the owner registry).
+    ///
+    /// # Errors
+    /// Storage that is suspended, closed or failing.
+    pub fn mark_unreachable_host_inputs(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, storage::StorageError> {
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(Vec::new());
+        };
+        let changed = store.handle.mark_host_inputs_unknown(run_id, reason)?;
+        if let Ok(run) = crate::meta::parse_run_id(run_id) {
+            let applied: Vec<_> = changed
+                .iter()
+                .map(|id| {
+                    storage::HostInputTransition::new(
+                        id.clone(),
+                        storage::HostInputStatus::Unknown,
+                        Some(reason),
+                    )
+                })
+                .collect();
+            self.emit_host_input_transitions(run, &applied);
+        }
+        Ok(changed)
     }
 
     /// Observe accepted follow-ups that have not entered the agent's context.

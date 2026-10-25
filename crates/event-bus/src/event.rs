@@ -178,6 +178,9 @@ pub mod diagnostic_codes {
     pub const CONTEXT_CHECKPOINT_SAVED: &str = "ContextCheckpointSaved";
     /// A restoration checkpoint could not be persisted.
     pub const CONTEXT_SNAPSHOT_FAILED: &str = "ContextSnapshotFailed";
+    /// Host input delivery receipts could not be settled; they stay accepted
+    /// and the host shows them as of unknown delivery.
+    pub const HOST_INPUT_RECEIPT_FAILED: &str = "HostInputReceiptFailed";
     /// Direct -> orchestrator ownership or question transfer failed.
     pub const ESCALATION_HANDOFF_FAILED: &str = "EscalationHandoffFailed";
     /// The orchestrator run for an escalation handoff was not admitted.
@@ -225,6 +228,7 @@ pub mod diagnostic_codes {
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
         CONTEXT_SNAPSHOT_FAILED,
+        HOST_INPUT_RECEIPT_FAILED,
         ESCALATION_HANDOFF_FAILED,
         ESCALATION_ADMISSION_FAILED,
         CRASH_RECOVERED,

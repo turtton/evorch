@@ -31,6 +31,17 @@ enum ChatContinuation {
     Wake,
 }
 
+/// A new chat run whose prompt is accepted, waiting to be started.
+struct SeededChat {
+    run_id: RunId,
+    provenance: HostProvenance,
+    review: crate::escalation_review::ReviewRunContext,
+    restored: Option<RestoredState>,
+    restored_source: Option<RunId>,
+    route_pins: Vec<crate::RoutePinRecord>,
+    prompt_id: Option<String>,
+}
+
 impl ChatContinuation {
     fn prompt(&self) -> Option<&str> {
         match self {
@@ -87,9 +98,17 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         continuation: ChatContinuation,
-        authority: RunConfig,
+        mut authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
         let prompt = continuation.prompt();
+        // The host's ID for this prompt, or a fresh one: its receipt is tracked.
+        let prompt_id = prompt.map(|_| {
+            authority
+                .initial_prompt_id
+                .take()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| providers::RequestTurnContext::unattributed(false).prompt_id)
+        });
         let operator_resume = !matches!(continuation, ChatContinuation::Wake);
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: run_id.to_string(),
@@ -133,6 +152,7 @@ impl AgentRuntime {
                 authority.images,
                 true,
                 authority.initial_thread_goal,
+                prompt_id,
             )?;
             return Ok(run_id);
         }
@@ -170,6 +190,10 @@ impl AgentRuntime {
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
         let mut restored = RestoredState::for_conversation(&record)?;
+        let mut host_input = storage::HostInputWrite {
+            reconcile_reason: Some("restored".into()),
+            ..Default::default()
+        };
         self.reserve_restored_shell_handles(run_id, &restored)?;
         self.shared
             .model
@@ -225,6 +249,24 @@ impl AgentRuntime {
             });
             record.messages_json = serde_json::to_string(&history)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+            // The saved history now holds the prompt, so the same commit delivers it.
+            if let Some(prompt_id) = &prompt_id {
+                restored.host_inputs.push(prompt_id.clone());
+                record.host_inputs_json = serde_json::to_string(&restored.host_inputs)
+                    .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+                let now = crate::run_store::review_time_ns();
+                host_input.inserts.push(storage::HostInputReceipt {
+                    prompt_id: prompt_id.clone(),
+                    run_id: run_id.to_string(),
+                    root_run_id: String::new(),
+                    text: prompt.into(),
+                    image_count: u32::try_from(authority.images.len()).unwrap_or(u32::MAX),
+                    status: storage::HostInputStatus::Delivered,
+                    reason: None,
+                    accepted_at_ns: now,
+                    status_at_ns: now,
+                });
+            }
             // Persist atomically with the notices, retaining call diagnostics and
             // disk-delivery restrictions even when admission returns the snapshot.
             descriptor.outcome_notices_persisted = true;
@@ -232,10 +274,9 @@ impl AgentRuntime {
                 pending.trusted_request = pending_request.clone();
                 pending.trusted_request_complete = true;
             }
-            descriptor.turn = Some(crate::request_turn::initial(
+            descriptor.turn = Some(crate::request_turn::human(
+                prompt_id.clone().unwrap_or_default(),
                 Default::default(),
-                true,
-                false,
                 false,
                 restored.turn.as_ref(),
             ));
@@ -253,6 +294,9 @@ impl AgentRuntime {
         record.config_json = serde_json::to_string(&descriptor)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         let review = self.chat_review_context(store, run_id)?;
+        for receipt in &mut host_input.inserts {
+            receipt.root_run_id.clone_from(&review.root_run_id);
+        }
         let pending_reference =
             self.resolve_pending_reference(descriptor.pending_reference_id.as_deref())?;
         let mut evidence = prompt
@@ -278,20 +322,34 @@ impl AgentRuntime {
                 .user_requests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            store
+            let reconciled = store
                 .handle
-                .upsert_run_context_with_evidence_and_reference_consumption(
+                .upsert_run_context_with_evidence_and_host_inputs(
                     &record,
                     &evidence,
                     &[],
                     prompt
                         .and(pending_reference.as_ref())
                         .map(|pending| pending.reference_id.as_str()),
+                    &host_input,
                 )
                 .map_err(|error| Self::review_error(run_id, error))?;
             for row in evidence {
                 shared.add_request(crate::run_store::request_from_evidence(row));
             }
+            self.emit_host_input_transitions(run_id, &reconciled);
+            let delivered: Vec<_> = host_input
+                .inserts
+                .iter()
+                .map(|receipt| {
+                    storage::HostInputTransition::new(
+                        receipt.prompt_id.clone(),
+                        storage::HostInputStatus::Delivered,
+                        None,
+                    )
+                })
+                .collect();
+            self.emit_host_input_transitions(run_id, &delivered);
         }
         restored.admission_reservation =
             reservation.map(|reservation| reservation.arm(&descriptor));
@@ -314,6 +372,7 @@ impl AgentRuntime {
             interactive: true,
             keep_alive: true,
             project_root,
+            initial_prompt_id: prompt_id,
             ..authority
         };
         let handoff = pending_handoff.map(|pending| RunHandoff {
@@ -502,10 +561,17 @@ impl AgentRuntime {
         };
         config.name = Some(name);
         let run_id = self.shared.run_ids.next();
+        let prompt_id = Some(
+            config
+                .initial_prompt_id
+                .take()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| providers::RequestTurnContext::unattributed(false).prompt_id),
+        );
         let provenance = restored_source.map_or(HostProvenance::FreshHostSubmission, |run_id| {
             HostProvenance::PersistedHostSubmission { run_id }
         });
-        let mut review =
+        let review =
             if let (Some(source), Some(store)) = (restored_source, self.shared.run_store.get()) {
                 // Validate the existing ancestry before extending it with a fresh ID.
                 let mut review = self.chat_review_context(store, source)?;
@@ -541,16 +607,92 @@ impl AgentRuntime {
                 parent_run_id: source.to_string(),
                 created_at_ns: crate::run_store::review_time_ns(),
             });
-            store
-                .handle
-                .append_review_evidence_with_reference_consumption(
-                    std::slice::from_ref(&row),
-                    edges.as_slice(),
-                    pending_reference
-                        .as_ref()
-                        .map(|pending| pending.reference_id.as_str()),
-                )
-                .map_err(|error| Self::review_error(run_id, error))?;
+            let consumed = pending_reference
+                .as_ref()
+                .map(|pending| pending.reference_id.as_str());
+            match &prompt_id {
+                // The run ID is fixed before spawning, so the receipt is
+                // accepted with the prompt's evidence.
+                Some(prompt_id) => {
+                    let now = crate::run_store::review_time_ns();
+                    store.handle.append_host_input_accepted(
+                        std::slice::from_ref(&row),
+                        edges.as_slice(),
+                        consumed,
+                        &storage::HostInputReceipt {
+                            prompt_id: prompt_id.clone(),
+                            run_id: run_id.to_string(),
+                            root_run_id: review.root_run_id.clone(),
+                            text: prompt.clone(),
+                            image_count: u32::try_from(config.images.len()).unwrap_or(u32::MAX),
+                            status: storage::HostInputStatus::Accepted,
+                            reason: None,
+                            accepted_at_ns: now,
+                            status_at_ns: now,
+                        },
+                    )
+                }
+                None => store
+                    .handle
+                    .append_review_evidence_with_reference_consumption(
+                        std::slice::from_ref(&row),
+                        edges.as_slice(),
+                        consumed,
+                    ),
+            }
+            .map_err(|error| Self::review_error(run_id, error))?;
+        }
+        // Accepted: a failure before the run starts drops the prompt.
+        let started = self.start_seeded_chat(
+            thread_id,
+            role,
+            prompt,
+            config,
+            seed,
+            SeededChat {
+                run_id,
+                provenance,
+                review,
+                restored,
+                restored_source,
+                route_pins,
+                prompt_id: prompt_id.clone(),
+            },
+        );
+        if started.is_err()
+            && let Some(prompt_id) = prompt_id
+        {
+            self.settle_host_inputs(
+                run_id,
+                &[storage::HostInputTransition::new(
+                    prompt_id,
+                    storage::HostInputStatus::Dropped,
+                    Some("spawn_failed"),
+                )],
+            );
+        }
+        started
+    }
+
+    fn start_seeded_chat(
+        &self,
+        thread_id: &str,
+        role: Role,
+        prompt: String,
+        mut config: RunConfig,
+        seed: Option<crate::restore::ChatForkSeed>,
+        chat: SeededChat,
+    ) -> Result<RunId, RuntimeError> {
+        let SeededChat {
+            run_id,
+            provenance,
+            mut review,
+            restored,
+            restored_source,
+            route_pins,
+            prompt_id,
+        } = chat;
+        if let Some(store) = self.shared.run_store.get() {
             // Materialize the committed graph, including depth/unique-root checks.
             // An invalid graph still fails closed before the run is installed.
             review = self.chat_review_context(store, run_id)?;
@@ -606,6 +748,7 @@ impl AgentRuntime {
                 })?;
         }
         self.goal_user_input(run_id, &prompt);
+        config.initial_prompt_id = prompt_id;
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

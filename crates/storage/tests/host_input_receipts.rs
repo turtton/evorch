@@ -87,6 +87,7 @@ fn accepted_input_commits_evidence_reference_and_receipt_together() {
     handle
         .append_host_input_accepted(
             &[evidence("e-1", "run-1", "yes")],
+            &[],
             Some("reference"),
             &receipt("p-1", "run-1", HostInputStatus::Accepted),
         )
@@ -124,7 +125,12 @@ fn rejected_acceptance_leaves_neither_evidence_nor_receipt() {
     let mut secret_receipt = receipt("p-secret", "run-1", HostInputStatus::Accepted);
     secret_receipt.text = secret.clone();
     let error = handle
-        .append_host_input_accepted(&[evidence("e-1", "run-1", "plain")], None, &secret_receipt)
+        .append_host_input_accepted(
+            &[evidence("e-1", "run-1", "plain")],
+            &[],
+            None,
+            &secret_receipt,
+        )
         .unwrap_err();
     assert!(!error.to_string().contains(&secret));
     // So does oversized text, and a missing or already consumed reference.
@@ -132,13 +138,14 @@ fn rejected_acceptance_leaves_neither_evidence_nor_receipt() {
     oversized.text = "x".repeat(256 * 1024 + 1);
     assert!(
         handle
-            .append_host_input_accepted(&[evidence("e-2", "run-1", "plain")], None, &oversized)
+            .append_host_input_accepted(&[evidence("e-2", "run-1", "plain")], &[], None, &oversized)
             .is_err()
     );
     assert!(
         handle
             .append_host_input_accepted(
                 &[evidence("e-3", "run-1", "plain")],
+                &[],
                 Some("missing-reference"),
                 &receipt("p-ref", "run-1", HostInputStatus::Accepted),
             )
@@ -161,6 +168,7 @@ fn rejected_acceptance_leaves_neither_evidence_nor_receipt() {
     handle
         .append_host_input_accepted(
             &[evidence("e-4", "run-1", "first")],
+            &[],
             None,
             &receipt("p-1", "run-1", HostInputStatus::Accepted),
         )
@@ -169,6 +177,7 @@ fn rejected_acceptance_leaves_neither_evidence_nor_receipt() {
         handle
             .append_host_input_accepted(
                 &[evidence("e-5", "run-1", "second")],
+                &[],
                 None,
                 &receipt("p-1", "run-2", HostInputStatus::Accepted),
             )
@@ -191,6 +200,7 @@ fn closed_writer_rejects_acceptance_without_writing() {
     assert_eq!(
         handle.append_host_input_accepted(
             &[evidence("e-1", "run-1", "plain")],
+            &[],
             None,
             &receipt("p-1", "run-1", HostInputStatus::Accepted),
         ),
@@ -222,6 +232,7 @@ fn suspended_writer_rejects_every_receipt_write_without_mutation() {
         .handle()
         .append_host_input_accepted(
             &[],
+            &[],
             None,
             &receipt("p-1", "run-1", HostInputStatus::Accepted),
         )
@@ -242,6 +253,7 @@ fn suspended_writer_rejects_every_receipt_write_without_mutation() {
         handle
             .append_host_input_accepted(
                 &[evidence("e-1", "run-1", "plain")],
+                &[],
                 None,
                 &receipt("p-2", "run-1", HostInputStatus::Accepted),
             )
@@ -274,7 +286,12 @@ fn snapshot_moves_only_accepted_receipts_and_round_trips_host_inputs() {
     let handle = storage.handle();
     for id in ["p-1", "p-2", "p-3"] {
         handle
-            .append_host_input_accepted(&[], None, &receipt(id, "run-1", HostInputStatus::Accepted))
+            .append_host_input_accepted(
+                &[],
+                &[],
+                None,
+                &receipt(id, "run-1", HostInputStatus::Accepted),
+            )
             .unwrap();
     }
     // An empty list stays empty.
@@ -351,6 +368,7 @@ fn failed_snapshot_rolls_back_its_receipt_changes() {
     handle
         .append_host_input_accepted(
             &[],
+            &[],
             None,
             &receipt("p-1", "run-1", HostInputStatus::Accepted),
         )
@@ -393,7 +411,12 @@ fn restore_reconciles_leftovers_and_inserts_the_new_prompt_as_delivered() {
         ("other", "run-2"),
     ] {
         handle
-            .append_host_input_accepted(&[], None, &receipt(id, run, HostInputStatus::Accepted))
+            .append_host_input_accepted(
+                &[],
+                &[],
+                None,
+                &receipt(id, run, HostInputStatus::Accepted),
+            )
             .unwrap();
     }
     handle
@@ -445,7 +468,12 @@ fn marking_unknown_changes_only_accepted_receipts_of_the_run() {
     let handle = storage.handle();
     for (id, run) in [("a", "run-1"), ("b", "run-1"), ("c", "run-2")] {
         handle
-            .append_host_input_accepted(&[], None, &receipt(id, run, HostInputStatus::Accepted))
+            .append_host_input_accepted(
+                &[],
+                &[],
+                None,
+                &receipt(id, run, HostInputStatus::Accepted),
+            )
             .unwrap();
     }
     handle

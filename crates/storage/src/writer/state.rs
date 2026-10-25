@@ -328,9 +328,10 @@ pub(super) fn run_writer(
                     &host_inputs,
                 ));
             }
-            Ok(Command::AppendHostInputAccepted(rows, reference_id, receipt, reply)) => {
+            Ok(Command::AppendHostInputAccepted(rows, edges, reference_id, receipt, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
+                    crate::repo::review_lineage::insert(conn, &edges)?;
                     crate::repo::review_evidence::insert(conn, &rows)?;
                     crate::repo::host_input_receipt::insert(conn, &receipt)
                 });

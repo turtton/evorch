@@ -85,6 +85,7 @@ enum Command {
     ),
     AppendHostInputAccepted(
         Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
         Option<String>,
         crate::HostInputReceipt,
         ReplyTx,
@@ -482,8 +483,8 @@ impl StorageHandle {
         })
     }
 
-    /// Record that the runtime accepted a host submission: its evidence, the
-    /// approval it consumes and its `Accepted` receipt commit together.
+    /// Record that the runtime accepted a host submission: its evidence and
+    /// lineage, the approval it consumes and its receipt commit together.
     ///
     /// # Errors
     /// Rejects missing or consumed references, oversized or secret-bearing
@@ -491,12 +492,14 @@ impl StorageHandle {
     pub fn append_host_input_accepted(
         &self,
         rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
         consumed_reference_id: Option<&str>,
         receipt: &crate::HostInputReceipt,
     ) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::AppendHostInputAccepted(
                 rows.to_vec(),
+                edges.to_vec(),
                 consumed_reference_id.map(String::from),
                 receipt.clone(),
                 reply,
