@@ -107,8 +107,11 @@ impl AgentRuntime {
             return;
         };
         let parent_phase = *recipient.phase_rx.borrow();
-        let parent_cancelled = matches!(*recipient.cancel_tx.borrow(), RunInterrupt::Cancel)
-            || recipient.terminal_reason.as_deref() == Some(event_bus::CANCELLED_REASON);
+        let parent_cancelled = matches!(
+            *recipient.execution.cancel_tx.borrow(),
+            RunInterrupt::Cancel
+        ) || recipient.terminal_reason.as_deref()
+            == Some(event_bus::CANCELLED_REASON);
         let message = AgentMessage {
             message_id: format!(
                 "msg-{}",

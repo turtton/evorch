@@ -105,6 +105,7 @@ fn fixture_with_model(
         benchmark_checked: false,
         benchmark_replay: false,
         task: RunTask {
+            publication: crate::runtime::ExecutionControl::new(false).publication(),
             ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),
             run_id: parent,

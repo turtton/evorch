@@ -273,8 +273,7 @@ async fn ac15_cancel_after_sync_prevents_publish_overwrite_and_removes_staging()
             }
             let (runtime, run) = saving_runtime();
             let result = save_generated(
-                &runtime,
-                run,
+                &runtime.execution_snapshot(run).unwrap().publication(),
                 &dir,
                 (&path, b"new original"),
                 Some((&variant, b"new variant")),
@@ -325,8 +324,7 @@ async fn ac9_original_staging_failure_preserves_existing_pair_and_cleans_temps()
     let (runtime, run) = saving_runtime();
     let result = crate::artifacts::source_io::with_stage_failure(2, || {
         save_generated(
-            &runtime,
-            run,
+            &runtime.execution_snapshot(run).unwrap().publication(),
             &dir,
             (&path, b"new original"),
             Some((&variant, b"new variant")),
@@ -353,8 +351,7 @@ async fn ac9_original_publish_failure_leaves_no_variant_or_staging() {
         let (runtime, run) = saving_runtime();
         let result = crate::artifacts::source_io::with_publish_failure(1, || {
             save_generated(
-                &runtime,
-                run,
+                &runtime.execution_snapshot(run).unwrap().publication(),
                 &dir,
                 (&path, b"original"),
                 Some((&variant, b"variant")),
@@ -400,8 +397,7 @@ async fn ac9_variant_rename_failure_reports_partial_save_and_preserves_old_varia
         let processed = processing::outputs(&original, args.variant.as_ref()).unwrap();
         let saved = crate::artifacts::source_io::with_publish_failure(2, || {
             save_generated(
-                &runtime,
-                run,
+                &runtime.execution_snapshot(run).unwrap().publication(),
                 &dir,
                 (&path, &original),
                 Some((&variant, processed.variant.as_deref().unwrap())),
@@ -461,7 +457,10 @@ async fn ac9_variant_rename_failure_reports_partial_save_and_preserves_old_varia
 async fn ac15_publication_gate_does_not_hold_global_spawn_or_cancel_locks() {
     let (runtime, run) = saving_runtime();
     runtime
-        .commit_generated_images(run, || {
+        .execution_snapshot(run)
+        .unwrap()
+        .publication()
+        .commit(|| {
             // A different run can spawn and cancel while this run publishes.
             let other = runtime.reserve_run_id();
             runtime.spawn_reserved(other, None, Role::Worker, "idle", RunConfig::default());
@@ -471,7 +470,38 @@ async fn ac15_publication_gate_does_not_hold_global_spawn_or_cancel_locks() {
         })
         .unwrap();
     runtime.cancel(run).unwrap();
-    assert!(runtime.commit_generated_images(run, || Ok(())).is_err());
+    assert!(
+        runtime
+            .execution_snapshot(run)
+            .unwrap()
+            .publication()
+            .commit(|| Ok(()))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn ac15_blocked_publication_does_not_block_unrelated_spawn_or_cancel() {
+    let (runtime, run) = saving_runtime();
+    let token = runtime.execution_snapshot(run).unwrap().publication();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let publish = scope.spawn(move || {
+            token.commit(|| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        started_rx.recv().unwrap();
+        let other = runtime.reserve_run_id();
+        runtime.spawn_reserved(other, None, Role::Worker, "unrelated", RunConfig::default());
+        runtime.cancel(other).unwrap();
+        runtime.cancel_subtree(other).unwrap();
+        release_tx.send(()).unwrap();
+        publish.join().unwrap().unwrap();
+    });
 }
 
 #[tokio::test]
@@ -480,12 +510,24 @@ async fn ac15_cancel_waits_for_publication_that_already_won_the_gate() {
         let (runtime, run) = saving_runtime();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let execution = runtime.execution_snapshot(run).unwrap();
+        runtime.on_execution(
+            if subtree {
+                crate::runtime::HookPoint::SubtreeCollected
+            } else {
+                crate::runtime::HookPoint::CancelSnapshot
+            },
+            &execution,
+            move || started_tx.send(()).unwrap(),
+        );
         std::thread::scope(|scope| {
             runtime
-                .commit_generated_images(run, || {
+                .execution_snapshot(run)
+                .unwrap()
+                .publication()
+                .commit(|| {
                     let runtime = &runtime;
                     scope.spawn(move || {
-                        started_tx.send(()).unwrap();
                         if subtree {
                             runtime.cancel_subtree(run).unwrap();
                         } else {
@@ -503,6 +545,13 @@ async fn ac15_cancel_waits_for_publication_that_already_won_the_gate() {
                 .unwrap();
             finished_rx.recv().unwrap();
         });
-        assert!(runtime.commit_generated_images(run, || Ok(())).is_err());
+        assert!(
+            runtime
+                .execution_snapshot(run)
+                .unwrap()
+                .publication()
+                .commit(|| Ok(()))
+                .is_err()
+        );
     }
 }

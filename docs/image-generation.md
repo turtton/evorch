@@ -110,11 +110,23 @@ containing the failed path and reason; `variant_path` is null. Generation
 metadata and the preview are still included. The original is retained (including
 when overwriting), and any previous variant is unchanged.
 
-Cancellation aborts an in-flight request. Ordinary run cancellation and subtree
-cancellation share a per-run publication gate: cancellation that wins the gate
-prevents both files from being published and removes staged files. If publication
-wins, it finishes before cancellation takes effect; already published files are
-not rolled back. Provider responses are limited to 48 MiB and five minutes.
+Cancellation aborts an in-flight request. Each execution has its own fixed
+cancellation channel and publication gate. Resuming the same run ID creates a
+new execution; its generation is independent of provider turns and team leases.
+Ordinary cancellation rechecks the current execution under the registration
+locks after taking its gate, and retries if a resume replaced it. It therefore
+cancels the execution current at that check, never an old gate paired with a
+new execution's channel. Image publication uses the token captured when its
+execution started, not a fresh lookup by run ID; an old cancelled token cannot
+publish after a resume.
+
+Cancellation that wins the gate prevents both files from being published and
+removes staged files. If publication wins, it finishes before cancellation
+returns; already published files are not rolled back. Subtree cancellation
+targets the executions collected when its inherited fence is established.
+An explicit root resume starts a new execution without lifting old descendants'
+fences; a fenced child cannot be restored even before its cancellation
+notification arrives. Provider responses are limited to 48 MiB and five minutes.
 
 ## Sending, quota, and HTML mocks
 

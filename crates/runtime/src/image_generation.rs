@@ -233,8 +233,7 @@ async fn execute(
         return Err("image generation interrupted; no files saved".into());
     }
     let saved = save_generated(
-        runtime,
-        state.task.run_id,
+        &state.task.publication,
         &directory,
         (&path, &original),
         variant_path.as_deref().zip(processed.variant.as_deref()),
@@ -297,14 +296,13 @@ fn filename(path: &Path) -> Result<&Path, String> {
 }
 
 #[derive(Debug)]
-enum SaveOutcome {
+pub(crate) enum SaveOutcome {
     Complete,
     VariantFailed(String),
 }
 
-fn save_generated(
-    runtime: &AgentRuntime,
-    run: crate::RunId,
+pub(crate) fn save_generated(
+    publication: &crate::runtime::PublicationToken,
     directory: &std::fs::File,
     original: (&Path, &[u8]),
     variant: Option<(&Path, &[u8])>,
@@ -317,7 +315,7 @@ fn save_generated(
     let staged_original = stage_image(directory, original.1)?;
     // Deterministic seam after all writes/syncs, before the cancellation fence.
     before_commit()?;
-    runtime.commit_generated_images(run, || {
+    publication.commit(|| {
         validate_image_destination(directory, filename(original.0)?)?;
         if let Some((path, _)) = variant {
             validate_image_destination(directory, filename(path)?)?;

@@ -50,6 +50,7 @@ pub(crate) use tool_calls::{
 };
 
 pub(crate) struct RunTask {
+    pub(crate) publication: crate::runtime::PublicationToken,
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
     pub(crate) prompt: String,
