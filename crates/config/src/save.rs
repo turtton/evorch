@@ -5,6 +5,7 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
+use crate::save_context::SaveScope;
 use crate::types::provider::{ModelEntryConfig, ModelPricing};
 use crate::{CURRENT_VERSION, Config, ConfigError};
 
@@ -103,8 +104,18 @@ pub fn validate_openai_compatible_provider_input(
             "default_model must be a member of enabled models",
         ));
     }
+    if models.iter().any(|model| {
+        model.id == input.default_model
+            && model.effective_kind() == crate::ModelKind::ImageGeneration
+    }) {
+        return Err(invalid("default_model", DEFAULT_MODEL_KIND_MESSAGE));
+    }
     Ok(())
 }
+
+/// 保存時に `default_model` が画像生成のモデルだったときの説明 (ADR 0038)。
+pub(crate) const DEFAULT_MODEL_KIND_MESSAGE: &str =
+    "default_model must be a chat model; route candidates without a model send conversations to it";
 
 /// 対象プロファイルだけを sugar 形式で全置換し、検証後に原子的に保存する。
 ///
@@ -129,6 +140,33 @@ pub fn save_openai_compatible_provider_edit(
     path: &Path,
     input: &OpenAiCompatibleProviderInput,
     original_name: Option<&str>,
+) -> Result<(), ConfigError> {
+    save_openai_compatible_provider_edit_inner(path, input, original_name, SaveScope::Standalone)
+}
+
+/// Save after validating the candidate file in the caller's layered configuration.
+///
+/// # Errors
+/// Rejects invalid input or effective model kinds before writing anything.
+pub fn save_openai_compatible_provider_edit_with_options(
+    path: &Path,
+    input: &OpenAiCompatibleProviderInput,
+    original_name: Option<&str>,
+    options: &crate::LoadOptions,
+) -> Result<(), ConfigError> {
+    save_openai_compatible_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        SaveScope::Layered(options),
+    )
+}
+
+pub(crate) fn save_openai_compatible_provider_edit_inner(
+    path: &Path,
+    input: &OpenAiCompatibleProviderInput,
+    original_name: Option<&str>,
+    scope: SaveScope<'_>,
 ) -> Result<(), ConfigError> {
     validate_openai_compatible_provider_input(input)?;
     let mut doc = read_document(path)?;
@@ -159,7 +197,7 @@ pub fn save_openai_compatible_provider_edit(
     profile.insert("default_model", value(input.default_model.as_str()));
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
-    write_document(path, &doc)
+    write_document_in_scope(path, &doc, scope)
 }
 
 pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigError> {
@@ -168,6 +206,7 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
         .map(|model| {
             Ok(
                 if model.enabled
+                    && model.kind.is_none()
                     && model.metadata_source.is_none()
                     && model.metadata_ref.is_none()
                     && model.preset.is_none()
@@ -182,6 +221,9 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                     let mut table = InlineTable::new();
                     table.insert("id", model.id.into());
                     table.insert("enabled", model.enabled.into());
+                    if let Some(kind) = model.kind {
+                        table.insert("kind", kind.as_str().into());
+                    }
                     if let Some(source) = model.metadata_source {
                         let source = match source {
                             crate::MetadataSource::Manual => "manual",
@@ -404,27 +446,101 @@ pub(crate) fn insert_profile(
 }
 
 pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), ConfigError> {
-    let text = checked_text(doc)?;
-    let mut temporary_path = path.as_os_str().to_os_string();
-    temporary_path.push(".tmp");
-    let temporary_path = Path::new(&temporary_path);
-    // 既存の一時ファイル (シンボリックリンクを含む) は上書きしない。
-    let mut temporary = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temporary_path)?;
-    temporary.write_all(text.as_bytes())?;
-    #[cfg(unix)]
-    temporary.sync_all()?;
-    drop(temporary);
-    std::fs::rename(temporary_path, path)?;
-    Ok(())
+    write_document_in_scope(path, doc, SaveScope::Standalone)
 }
 
-/// The document's text, validated as [`write_document`] validates it before saving.
-pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
-    let text = doc.to_string();
-    let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
+/// Check the final document in its effective configuration before opening any file.
+pub(crate) fn write_document_in_scope(
+    path: &Path,
+    doc: &DocumentMut,
+    scope: SaveScope<'_>,
+) -> Result<(), ConfigError> {
+    checked_text_for_save(path, doc, scope)?.write()
+}
+
+/// Only this type can write: the checked bytes cannot be rebuilt after validation.
+pub struct ValidatedSave {
+    text: String,
+    path: std::path::PathBuf,
+    config: Config,
+}
+
+impl ValidatedSave {
+    pub(crate) fn into_text(self) -> String {
+        self.text
+    }
+
+    /// Exact checked bytes, suitable for a preview without reserializing the config.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn revalidate(self, scope: SaveScope<'_>) -> Result<Self, ConfigError> {
+        checked_text_for_save_text(&self.path, self.text, scope)
+    }
+
+    /// Effective unresolved configuration composed from these exact bytes.
+    pub const fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// # Errors
+    /// Returns an I/O error without leaving a temporary file created by this write.
+    pub fn write(self) -> Result<(), ConfigError> {
+        let path = &self.path;
+        let mut temporary_path = path.as_os_str().to_os_string();
+        temporary_path.push(".tmp");
+        let temporary_path = Path::new(&temporary_path);
+        // Never overwrite an existing temporary file (including symlinks).
+        let mut temporary = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary_path)?;
+        let result = (|| {
+            temporary.write_all(self.text.as_bytes())?;
+            #[cfg(unix)]
+            temporary.sync_all()?;
+            drop(temporary);
+            std::fs::rename(temporary_path, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary_path);
+        }
+        result.map_err(Into::into)
+    }
+}
+
+pub(crate) fn checked_text_for_save(
+    path: &Path,
+    doc: &DocumentMut,
+    scope: SaveScope<'_>,
+) -> Result<ValidatedSave, ConfigError> {
+    checked_text_for_save_text(path, doc.to_string(), scope)
+}
+
+fn checked_text_for_save_text(
+    path: &Path,
+    text: String,
+    scope: SaveScope<'_>,
+) -> Result<ValidatedSave, ConfigError> {
+    check_file_structure(&text)?;
+    let config = scope.compose(path, &text)?;
+    config
+        .model_kind_problems()
+        .into_iter()
+        .next()
+        .map_or(Ok(()), Err)?;
+    Ok(ValidatedSave {
+        text,
+        path: path.to_owned(),
+        config,
+    })
+}
+
+/// Validate file-local structure only. Cross-layer model registrations and chains
+/// must be checked against the effective configuration at the save boundary.
+fn check_file_structure(text: &str) -> Result<(), ConfigError> {
+    let table = toml::from_str::<toml::value::Table>(text).map_err(|error| {
         ConfigError::Migration(format!("failed to parse config before saving: {error}"))
     })?;
     let checked = crate::migrate::run(toml::Value::Table(table))?;
@@ -434,8 +550,7 @@ pub(crate) fn checked_text(doc: &DocumentMut) -> Result<String, ConfigError> {
             "failed to deserialize config before saving: {error}"
         ))
     })?;
-    config.self_improvement.validate()?;
-    Ok(text)
+    config.self_improvement.validate()
 }
 
 pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {

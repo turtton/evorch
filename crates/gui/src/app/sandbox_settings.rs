@@ -124,7 +124,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
-                config::save_sandbox(path, self.sandbox_settings.draft)
+                config::LayeredSaveContext::new(&self.user_settings_options())
+                    .save_sandbox(path, self.sandbox_settings.draft)
                     .map_err(|error| error.to_string())
             });
         match result {

@@ -165,7 +165,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .find(|record| &record.id == project)
             .map(|record| record.repo_root.clone())
             .ok_or_else(|| "Project no longer exists".to_owned())?;
-        config::save_project_role_profile(&root, Some(profile))
+        let mut options = self.user_settings_options();
+        options.project_dir = Some(root.clone());
+        config::LayeredSaveContext::new(&options)
+            .save_project_role_profile(&root, Some(profile))
             .map_err(|error| error.to_string())?;
         if let ProjectDialog::Settings { role_profile, .. } = &mut self.project_dialog {
             profile.clone_into(role_profile);

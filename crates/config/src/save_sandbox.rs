@@ -7,6 +7,14 @@ use crate::{ConfigError, SandboxConfig};
 /// # Errors
 /// Returns configuration validation or filesystem errors without accepting invalid settings.
 pub fn save_sandbox(path: &Path, sandbox: SandboxConfig) -> Result<(), ConfigError> {
+    save_sandbox_in_scope(path, sandbox, crate::save_context::SaveScope::Standalone)
+}
+
+pub(crate) fn save_sandbox_in_scope(
+    path: &Path,
+    sandbox: SandboxConfig,
+    scope: crate::save_context::SaveScope<'_>,
+) -> Result<(), ConfigError> {
     let mut doc = crate::save::read_document(path)?;
     let mut section = toml_edit::Table::new();
     section.insert(
@@ -24,5 +32,5 @@ pub fn save_sandbox(path: &Path, sandbox: SandboxConfig) -> Result<(), ConfigErr
         toml_edit::value(sandbox.escalate_to_user_on_deny),
     );
     doc.insert("sandbox", toml_edit::Item::Table(section));
-    crate::save::write_document(path, &doc)
+    crate::save::write_document_in_scope(path, &doc, scope)
 }

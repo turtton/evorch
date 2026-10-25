@@ -21,6 +21,7 @@ mod compaction_window;
 mod fallback;
 mod hosted_search;
 mod live;
+mod model_kinds;
 mod official_compaction;
 mod output_limits;
 mod preference;

@@ -253,3 +253,35 @@ fn configured_models_use_natural_height_when_content_exceeds_half_viewport() {
     let add = h.get_by_label("Add model").rect();
     assert!(add.top() > last.bottom());
 }
+
+#[test]
+fn added_image_models_show_their_kind_and_never_become_the_default() {
+    // Given
+    let mut h = harness(false);
+    // When: an image model is typed in.
+    enter(&mut h, "gpt-image-1");
+    // Then: its inferred kind is recorded and shown on its row.
+    let editor = h.state().openai().unwrap();
+    assert_eq!(
+        editor.models.last().unwrap().kind,
+        Some(config::ModelKind::ImageGeneration)
+    );
+    assert_eq!(editor.candidate_models(), ["first", "second"]);
+    assert_eq!(
+        h.get_by_label("Kind gpt-image-1").value().as_deref(),
+        Some("Image generation")
+    );
+    // When: the default model is marked as an image model.
+    h.get_by_label("Kind first").click();
+    h.run();
+    h.get_by_label("Image generation").click();
+    h.run();
+    // Then: the default moves to the remaining chat model.
+    let editor = h.state().openai().unwrap();
+    assert_eq!(
+        editor.models[0].kind,
+        Some(config::ModelKind::ImageGeneration)
+    );
+    assert_eq!(editor.default_model, "second");
+    assert_eq!(editor.candidate_models(), ["second"]);
+}

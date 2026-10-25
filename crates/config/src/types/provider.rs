@@ -51,6 +51,11 @@ impl ProviderTypeConfig {
         }
     }
 
+    /// 画像生成の API を持ち、`agents.roles.image_generator` のチェーンに置けるか (ADR 0038)。
+    pub const fn supports_image_generation(self) -> bool {
+        matches!(self, Self::OpenAi | Self::OpenAiCodex)
+    }
+
     /// Returns models.dev provider slugs to try in order during metadata resolution.
     /// An empty list means no known mapping; callers fall back to profile-name guessing,
     /// uniqueness, or limit-agreement resolution.
@@ -164,6 +169,59 @@ impl Default for CredentialRefConfig {
     }
 }
 
+/// モデルの種別 (ADR 0038)。会話に使うモデルか、画像生成に使うモデルか。
+///
+/// TOML では `chat` / `image_generation` と書く。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelKind {
+    /// 会話用のモデル。通常のロール・カテゴリ・compactor のチェーンに置ける。
+    Chat,
+    /// 画像生成用のモデル。`agents.roles.image_generator` のチェーンにだけ置ける。
+    ImageGeneration,
+}
+
+/// 種別を省略したモデルを画像生成用と推定する ID の接頭辞 (大文字小文字を区別しない)。
+pub const IMAGE_GENERATION_MODEL_PREFIXES: &[&str] = &["gpt-image-", "chatgpt-image-", "dall-e-"];
+
+impl ModelKind {
+    /// すべての種別 (選択肢の表示順)。
+    pub const ALL: [Self; 2] = [Self::Chat, Self::ImageGeneration];
+
+    /// 設定ファイル上の表現。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::ImageGeneration => "image_generation",
+        }
+    }
+
+    /// `kind` を省略したモデルの種別を ID から推定する。
+    ///
+    /// [`IMAGE_GENERATION_MODEL_PREFIXES`] のいずれかで始まる ID は画像生成用、それ以外は
+    /// 会話用とする。種別の推定はこの関数だけが行う。
+    pub fn infer(model_id: &str) -> Self {
+        let id = model_id.trim();
+        let image = IMAGE_GENERATION_MODEL_PREFIXES.iter().any(|prefix| {
+            id.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        });
+        if image {
+            Self::ImageGeneration
+        } else {
+            Self::Chat
+        }
+    }
+}
+
+impl std::fmt::Display for ModelKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// モデル ID と利用可否の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +232,10 @@ pub struct ModelEntryConfig {
     /// 利用可能かどうか。省略時は有効。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// モデルの種別 (ADR 0038)。省略時は ID から推定する: `gpt-image-` / `chatgpt-image-` /
+    /// `dall-e-` で始まれば `image_generation`、それ以外は `chat`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ModelKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<MetadataSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +376,7 @@ impl ModelEntryConfig {
         Self {
             id: id.into(),
             enabled: true,
+            kind: None,
             metadata_source: None,
             metadata_ref: None,
             preset: None,
@@ -326,6 +389,22 @@ impl ModelEntryConfig {
             price_tiers: None,
             effort_levels: None,
         }
+    }
+
+    /// 有効なモデルエントリを、ID から推定した種別を明示して作成する。
+    ///
+    /// GUI でモデルを追加するときに使い、推定した種別を設定に書き込む (ADR 0038)。
+    pub fn enabled_with_inferred_kind(id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            kind: Some(ModelKind::infer(&id)),
+            ..Self::enabled(id)
+        }
+    }
+
+    /// 実効の種別。明示した `kind`、なければ ID からの推定。
+    pub fn effective_kind(&self) -> ModelKind {
+        self.kind.unwrap_or_else(|| ModelKind::infer(&self.id))
     }
 
     /// Resolves each price from static TOML first, then caller-selected catalog data.
@@ -379,6 +458,8 @@ struct ModelEntryDe {
     id: String,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    kind: Option<ModelKind>,
     #[serde(default)]
     metadata_source: Option<MetadataSource>,
     #[serde(default)]
@@ -437,6 +518,7 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                 Ok(ModelEntryConfig {
                     id: entry.id,
                     enabled: entry.enabled,
+                    kind: entry.kind,
                     metadata_source: entry.metadata_source,
                     metadata_ref: entry.metadata_ref,
                     preset: entry.preset,
@@ -511,6 +593,21 @@ impl ProviderProfileConfig {
     pub fn model_ids(&self) -> impl Iterator<Item = &str> {
         self.models.iter().map(|entry| entry.id.as_str())
     }
+
+    /// このプロファイルで `model_id` を使うときの実効の種別 (ADR 0038)。
+    ///
+    /// 同じ ID (なければ fast 版の元の ID) の登録があればその実効の種別、なければ ID からの推定。
+    pub fn model_kind(&self, model_id: &str) -> ModelKind {
+        let (base, _) = parse_model_speed(model_id);
+        self.models
+            .iter()
+            .find(|entry| entry.id == model_id)
+            .or_else(|| self.models.iter().find(|entry| entry.id == base))
+            .map_or_else(
+                || ModelKind::infer(model_id),
+                ModelEntryConfig::effective_kind,
+            )
+    }
 }
 
 /// Codex CLI 同梱カタログの既定モデル一覧 (2026-09)。
@@ -524,6 +621,12 @@ pub const CODEX_DEFAULT_MODELS: &[&str] = &[
 
 /// Codex プロファイルで既定選択するモデル。
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-6-astra";
+
+/// Codex のカタログ (`/codex/models`) に載らない画像生成モデル (ADR 0038)。
+///
+/// Codex 本家と同じ固定値。GUI はこれを Codex プロファイルの追加候補として示す。
+/// 画像生成の実装と共有する一覧なので、名前はここだけで管理する。
+pub const CODEX_IMAGE_MODELS: &[&str] = &["gpt-image-2"];
 
 /// OpenAI API (Responses) の既定ベース URL。
 pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -1350,6 +1453,141 @@ typo_field = true
                     .any(|name| name == "type" || name == "api_key_env"))
                 .unwrap_or(false),
             "sugar property は必須にしない"
+        );
+    }
+
+    // Given: kind を省略した要素・明示した要素・文字列だけの要素 / When: 読み込む
+    // Then: 省略と文字列は None のまま、明示は値を保ち、直列化は明示した kind だけを書く
+    #[test]
+    fn model_entry_kind_is_optional_and_roundtrips() {
+        let profile: ProviderProfileConfig = toml::from_str(
+            r#"models = ["gpt-5", { id = "gpt-image-1" }, { id = "custom-draw", kind = "image_generation" }, { id = "gpt-image-preview", kind = "chat" }]"#,
+        )
+        .expect("models with optional kind parse");
+
+        let kinds: Vec<_> = profile.models.iter().map(|entry| entry.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                None,
+                None,
+                Some(ModelKind::ImageGeneration),
+                Some(ModelKind::Chat)
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["models"],
+            serde_json::json!([
+                {"id": "gpt-5", "enabled": true},
+                {"id": "gpt-image-1", "enabled": true},
+                {"id": "custom-draw", "enabled": true, "kind": "image_generation"},
+                {"id": "gpt-image-preview", "enabled": true, "kind": "chat"},
+            ])
+        );
+        let toml = toml::to_string(&profile).expect("profile serializes to TOML");
+        assert_eq!(
+            toml::from_str::<ProviderProfileConfig>(&toml).expect("TOML roundtrip"),
+            profile
+        );
+        assert!(
+            toml::from_str::<ProviderProfileConfig>(r#"models = [{ id = "a", kind = "video" }]"#)
+                .is_err(),
+            "unknown kinds are rejected"
+        );
+    }
+
+    // Given: 画像生成の接頭辞を持つ ID と境界の例 / When: 種別を推定する
+    // Then: 接頭辞 (大文字小文字を区別しない) で始まる ID だけが image_generation になる
+    #[test]
+    fn model_kind_is_inferred_from_fixed_prefixes() {
+        for (id, kind) in [
+            ("gpt-image-1", ModelKind::ImageGeneration),
+            ("gpt-image-1-mini", ModelKind::ImageGeneration),
+            ("gpt-image-2.5-preview", ModelKind::ImageGeneration),
+            ("GPT-Image-2", ModelKind::ImageGeneration),
+            ("chatgpt-image-latest", ModelKind::ImageGeneration),
+            ("dall-e-3", ModelKind::ImageGeneration),
+            ("DALL-E-2", ModelKind::ImageGeneration),
+            (" gpt-image-1 ", ModelKind::ImageGeneration),
+            ("gpt-image", ModelKind::Chat),
+            ("gpt-4o-image", ModelKind::Chat),
+            ("gpt-5-image-mini", ModelKind::Chat),
+            ("openai/gpt-image-1", ModelKind::Chat),
+            ("chatgpt-4o-latest", ModelKind::Chat),
+            ("dall-e", ModelKind::Chat),
+            ("gpt-6-astra", ModelKind::Chat),
+            ("", ModelKind::Chat),
+            ("画像", ModelKind::Chat),
+        ] {
+            assert_eq!(ModelKind::infer(id), kind, "{id:?}");
+        }
+    }
+
+    // Given: 明示の kind と推定が食い違うエントリ / When: 実効の種別を求める
+    // Then: 明示の kind が推定より優先し、プロファイルは登録のない ID を推定で判定する
+    #[test]
+    fn explicit_kind_wins_and_profiles_fall_back_to_inference() {
+        let profile: ProviderProfileConfig = toml::from_str(
+            r#"
+models = ["gpt-5", { id = "gpt-image-1", enabled = false, kind = "chat" }, { id = "house-painter", kind = "image_generation" }]
+default_model = "gpt-5"
+"#,
+        )
+        .expect("profile parses");
+
+        assert_eq!(profile.model_kind("gpt-5"), ModelKind::Chat);
+        assert_eq!(profile.model_kind("gpt-image-1"), ModelKind::Chat);
+        assert_eq!(
+            profile.model_kind("house-painter"),
+            ModelKind::ImageGeneration
+        );
+        assert_eq!(
+            profile.model_kind("house-painter+fast"),
+            ModelKind::ImageGeneration
+        );
+        assert_eq!(profile.model_kind("dall-e-3"), ModelKind::ImageGeneration);
+        assert_eq!(profile.model_kind("unlisted"), ModelKind::Chat);
+        assert_eq!(
+            ModelEntryConfig::enabled_with_inferred_kind("gpt-image-2").kind,
+            Some(ModelKind::ImageGeneration)
+        );
+        assert_eq!(
+            ModelEntryConfig::enabled_with_inferred_kind("gpt-5").kind,
+            Some(ModelKind::Chat)
+        );
+        assert_eq!(ModelEntryConfig::enabled("gpt-image-2").kind, None);
+        assert_eq!(
+            ModelEntryConfig::enabled("gpt-image-2").effective_kind(),
+            ModelKind::ImageGeneration
+        );
+    }
+
+    #[test]
+    fn only_codex_and_openai_generate_images() {
+        for provider_type in [
+            ProviderTypeConfig::Anthropic,
+            ProviderTypeConfig::AnthropicSubscription,
+            ProviderTypeConfig::OpenAi,
+            ProviderTypeConfig::OpenAiCodex,
+            ProviderTypeConfig::GithubCopilot,
+            ProviderTypeConfig::Openrouter,
+            ProviderTypeConfig::OpenAiCompatible,
+            ProviderTypeConfig::KimiSubscription,
+            ProviderTypeConfig::Cursor,
+        ] {
+            assert_eq!(
+                provider_type.supports_image_generation(),
+                matches!(
+                    provider_type,
+                    ProviderTypeConfig::OpenAi | ProviderTypeConfig::OpenAiCodex
+                ),
+                "{provider_type:?}"
+            );
+        }
+        assert!(
+            CODEX_IMAGE_MODELS
+                .iter()
+                .all(|id| ModelKind::infer(id) == ModelKind::ImageGeneration)
         );
     }
 }

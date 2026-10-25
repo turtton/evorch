@@ -4,6 +4,8 @@ mod chain;
 mod compactor;
 #[path = "role_settings_headless/evidence.rs"]
 mod evidence;
+#[path = "role_settings_headless/image_generator.rs"]
+mod image_generator;
 #[path = "role_settings_headless/implicit.rs"]
 mod implicit;
 #[path = "role_settings_headless/legacy.rs"]

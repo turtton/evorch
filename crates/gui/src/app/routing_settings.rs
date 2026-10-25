@@ -107,8 +107,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Created(name),
-                    Box::new(move |path, current| {
-                        super::role_profiles::create_profile(path, current, &source, &target)
+                    Box::new(move |path, current, context| {
+                        super::role_profiles::create_profile(
+                            path, current, context, &source, &target,
+                        )
                     }),
                 )
             }
@@ -116,7 +118,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let target = name.clone();
                 (
                     RoleProfileJob::Deleted(name),
-                    Box::new(move |path, _| super::role_profiles::delete_profile(path, &target)),
+                    Box::new(move |path, _, context| {
+                        super::role_profiles::delete_profile(path, context, &target)
+                    }),
                 )
             }
         };
@@ -151,20 +155,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         let renames = self.routing_settings.route_renames();
         let profile = self.routing_settings.profiles.selected.clone();
-        let options = self.user_settings_options();
         self.start_routing_job(
             RoleProfileJob::Save,
-            Box::new(move |path, current| {
+            Box::new(move |path, current, context| {
                 if renames.is_empty() {
-                    return config::save_role_profile_bindings(
-                        path,
-                        Some(&profile),
-                        Some(&routing),
-                        None,
-                    )
-                    .map_err(|error| error.to_string());
+                    return context
+                        .save_role_profile_bindings(path, Some(&profile), Some(&routing), None)
+                        .map_err(|error| error.to_string());
                 }
-                save_renamed_routes(path, current, &options, &profile, &routing, &renames)
+                save_renamed_routes(path, current, context, &profile, &routing, &renames)
             }),
         );
     }
@@ -230,7 +229,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 fn save_renamed_routes(
     path: &std::path::Path,
     current: &config::Config,
-    options: &config::LoadOptions,
+    context: &config::LayeredSaveContext<'_>,
     profile: &str,
     routing: &config::RoutingConfig,
     renames: &std::collections::BTreeMap<String, String>,
@@ -270,21 +269,17 @@ fn save_renamed_routes(
                 .ok_or_else(|| format!("Unknown agent binding address: {address}"))? = chain;
         }
     }
-    target.insert(
-        "routing".into(),
-        toml::Value::try_from(routing).map_err(|error| error.to_string())?,
-    );
-    target.insert(
-        "agents".into(),
-        toml::Value::try_from(&file_agents).map_err(|error| error.to_string())?,
-    );
-    let mut candidate_options = options.clone();
-    candidate_options.file_overrides =
-        std::collections::BTreeMap::from([(path.to_path_buf(), toml::Value::Table(candidate))]);
-    let effective = profile_view(
-        &config::Config::load_unresolved(&candidate_options).map_err(|error| error.to_string())?,
-        profile,
-    );
+    let prepared = context
+        .prepare_role_profiles_bindings(
+            path,
+            &[config::RoleProfileBindings {
+                profile: Some(profile),
+                routing: Some(routing),
+                agents: Some(&file_agents),
+            }],
+        )
+        .map_err(|error| error.to_string())?;
+    let effective = profile_view(prepared.config(), profile);
     let before: std::collections::BTreeSet<_> =
         config::types::agents::explicit_refs(&loaded.agents)
             .into_iter()
@@ -305,8 +300,7 @@ fn save_renamed_routes(
             blocked.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    config::save_role_profile_bindings(path, Some(profile), Some(routing), Some(&file_agents))
-        .map_err(|error| error.to_string())
+    prepared.write().map_err(|error| error.to_string())
 }
 
 /// The table holding `profile`'s agents and routing inside a raw config table.

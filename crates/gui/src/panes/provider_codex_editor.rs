@@ -38,12 +38,23 @@ pub(super) fn codex_body(
             ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
         ui.label(badge("Configured models"));
         let mut remove = None;
+        let mut kind_change = None;
+        let kinds: Vec<_> = editor
+            .models
+            .iter()
+            .map(|id| editor.model_kind(id))
+            .collect();
         for (index, id) in editor.models.iter().enumerate() {
             ui.push_id(id, |ui| {
                 ui.horizontal(|ui| {
-                    let label_width = (ui.available_width() * 0.28).max(70.0);
+                    let label_width = (ui.available_width() * 0.22).max(70.0);
                     ui.add_sized([label_width, 20.0], egui::Label::new(id).truncate())
                         .on_hover_text(id);
+                    if let Some(kind) =
+                        crate::panes::provider_models::kind_picker(ui, id, kinds[index])
+                    {
+                        kind_change = Some((id.clone(), kind));
+                    }
                     let current = editor
                         .fetch
                         .context_windows
@@ -82,13 +93,23 @@ pub(super) fn codex_body(
                 });
             });
         }
+        if let Some((id, kind)) = kind_change {
+            editor.set_model_kind(&id, kind);
+        }
         if let Some(index) = remove {
-            let removed = editor.models.remove(index);
-            editor.model_entries.remove(&removed);
-            if editor.default_model == removed {
-                editor.default_model = editor.models.first().cloned().unwrap_or_default();
-            }
+            editor.remove_model(index);
             inputs.error = None;
+        }
+        let candidates = editor.image_model_candidates();
+        if !candidates.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(muted("Image generation models (not in the Codex catalog):"));
+                for id in candidates {
+                    if ui.button(format!("Add {id}")).clicked() {
+                        inputs.error = editor.add_model(id).err();
+                    }
+                }
+            });
         }
         let label = ui.label("Add model");
         ui.horizontal(|ui| {
@@ -99,20 +120,11 @@ pub(super) fn codex_body(
             )
             .labelled_by(label.id);
             if ui.button("Add").clicked() {
-                let id = inputs.add.trim();
                 inputs.error = None;
-                if !id.is_empty() {
-                    if editor.models.iter().any(|model| model == id) {
-                        inputs.error = Some("Model already added".into());
-                    } else {
-                        if editor.default_model.is_empty() {
-                            editor.default_model = id.to_owned();
-                        }
-                        editor.models.push(id.to_owned());
-                        editor
-                            .model_entries
-                            .insert(id.to_owned(), config::ModelEntryConfig::enabled(id));
-                        inputs.add.clear();
+                if !inputs.add.trim().is_empty() {
+                    match editor.add_model(&inputs.add) {
+                        Ok(()) => inputs.add.clear(),
+                        Err(error) => inputs.error = Some(error),
                     }
                 }
             }
@@ -125,12 +137,9 @@ pub(super) fn codex_body(
             .width(ui.available_width())
             .selected_text(model_display_label(&editor.default_model))
             .show_ui(ui, |ui| {
-                for id in &editor.models {
-                    ui.selectable_value(
-                        &mut editor.default_model,
-                        id.clone(),
-                        model_display_label(id),
-                    );
+                for id in editor.default_model_choices() {
+                    let label = model_display_label(&id);
+                    ui.selectable_value(&mut editor.default_model, id, label);
                 }
             })
             .response

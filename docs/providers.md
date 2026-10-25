@@ -282,7 +282,9 @@ Agent role settings edit the whole chain of a role or category. The first
 picker sets the head route; each fallback entry below it picks one of the
 defined routes and its own reasoning effort, and can be moved up, moved down
 or removed. "Add … fallback" appends the first defined route the chain does
-not use yet.
+not use yet. Agent roles, categories and the compactor are offered only routes
+of chat models, and the Image generator only routes of image generation models
+(see [Model kinds and the image generator](#model-kinds-and-the-image-generator)).
 
 ### Output limits
 
@@ -306,7 +308,8 @@ endpoints and Kimi retain `max_tokens`.
 Saving a provider in the GUI adds its models to the pools that serve the same
 model. A model's identity is its models.dev `canonical_model_id` together with
 its tier: `+fast`, or a `fast`, `highspeed`, `flex`, `eco` or `free` segment of
-the provider's model ID. Pools never mix tiers. The catalog entry is found
+the provider's model ID, and its kind (`chat` or `image_generation`). Pools
+never mix tiers or kinds. The catalog entry is found
 through the model's `metadata_ref`, then the provider type's models.dev
 providers, then the profile name, then a unique match across the catalog.
 Models whose metadata is `manual` or `provider-default` are never grouped.
@@ -335,3 +338,136 @@ they can be moved or removed like any other.
 The addition is written once and is not recomputed on load. When models.dev
 later lists an `auto` candidate under another identity than its pool, the GUI
 warns once per session and leaves the configuration unchanged.
+
+## Model kinds and the image generator
+
+Each model of a profile has a kind: `chat` for conversations, or
+`image_generation` for image generation ([ADR 0038](../intents/evorch/decisions/0038-image-generation.md)).
+A model entry may set it explicitly; otherwise it is inferred from the model
+ID. IDs starting with `gpt-image-`, `chatgpt-image-` or `dall-e-` (ignoring
+case) are `image_generation`, and every other ID is `chat`. An explicit `kind`
+always wins, so a model the inference gets wrong can be corrected:
+
+```toml
+[providers.openai]
+type = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = [
+  "gpt-5",                                                   # inferred: chat
+  "gpt-image-1",                                             # inferred: image_generation
+  { id = "house-painter", enabled = true, kind = "image_generation" },
+  { id = "gpt-image-notes", enabled = true, kind = "chat" },
+]
+default_model = "gpt-5"
+```
+
+Existing files need no migration: entries without `kind`, including plain
+strings, keep loading and are inferred. A route candidate's kind is that of the
+model it sends to: an explicit `model` uses that model's entry on the profile
+(or the inference when the profile does not list it), and a candidate without
+`model` uses the profile's `default_model`. A profile's `default_model` must
+therefore be a chat model.
+
+The kinds are checked in both directions:
+
+- Every candidate in the chains of agent roles, categories and
+  `agents.roles.compactor` must be `chat`. This includes a role without
+  `models` that uses the route named after it.
+- Every candidate in the `agents.roles.image_generator` chain must be
+  `image_generation` and belong to an `openai-codex` or `openai` profile.
+- One route never mixes chat and image generation candidates.
+
+Strict loading rejects a violation with the chain or route path, the route and
+the model. A normal load only warns, and the affected chain then fails when it
+is used: before a conversation or summary request is sent, the runtime refuses
+a chain that contains a non-chat member with a typed error, so no prompt
+reaches an image model. The chat model picker never lists image models.
+
+`agents.roles.image_generator` is a chain like `agents.roles.compactor`: it is
+never started as an agent and accepts no category. With no `models`, image
+generation is disabled; there is no fallback to a route named after the role.
+For example, generate with the Codex subscription and move to an OpenAI API key
+profile once its usage limit is reached:
+
+```toml
+[providers.codex]
+type = "openai-codex"
+api_protocol = "openai-codex-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = { type = "keyring", service = "evorch", account = "codex" }
+models = ["gpt-6-astra", { id = "gpt-image-2", enabled = true, kind = "image_generation" }]
+default_model = "gpt-6-astra"
+
+[providers.openai]
+type = "openai"
+api_protocol = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-5", "gpt-image-2"]
+default_model = "gpt-5"
+
+[routing.routes]
+codex-image = [{ profile = "codex", model = "gpt-image-2" }]
+openai-image = [{ profile = "openai", model = "gpt-image-2" }]
+
+[agents.roles.image_generator]
+models = [{ route = "codex-image" }, { route = "openai-image" }]
+```
+
+The image generator only selects models in this release; the `generate_image`
+tool and image provider capabilities that use the chain are described in ADR
+0038 and will be implemented separately. Both `openai-codex` and `openai`
+profiles can be composed by the runtime; composing an `openai` profile for chat
+uses the Responses API, not the image generation endpoint.
+
+In the GUI, models added to a profile, whether typed in or picked from the
+fetched list, are saved with their inferred kind written out, and each model row
+has a kind picker. Models already in the file keep the form they were written
+in. Image models are never offered as the default model. The Codex catalog does
+not list image models, so the Codex editor offers `gpt-image-2` as a separate
+addition. Agent role settings have an Image generator section next to the
+compactor, showing "Disabled (generate_image unavailable)" while its chain is
+empty. Each chain picker offers only routes of the matching kind (routes
+without candidates fit either), a configured route of the other kind stays
+visible and is flagged, and saving role or routing settings is refused while a
+chain or route mixes kinds. In routing settings, a candidate's model override
+offers only models of the kind the route's other candidates share.
+
+Every GUI config save (providers including deletion, role profile creation,
+replacement and deletion, routing and renames, automatic grouping, project
+profile selection, sandbox, and self-improvement) uses an explicit layered save
+context. The final TOML text is prepared once, checked for file-local structure
+and credential safety, then composed by the normal loader at the target's
+original layer position. The raw text follows the same per-file migration,
+merge order and finalization as a disk reload; legacy `logical_model` and
+Oracle/Advisor bindings therefore have the same meaning before and after a
+save. All top-level and named profiles, even unselected ones, are checked for
+model-kind and image-provider constraints. The checked bytes are the bytes
+written atomically (or returned by preview), not a new serialization.
+
+Registrations and chains may live in different files. Deletion, renaming and
+reference updates happen before validation. If the final result is invalid,
+the original file is unchanged and validation creates no temporary file.
+This also means an unrelated save is refused when another, inactive profile
+already has a kind/provider mismatch; repair that profile before saving.
+Undefined routes retain their existing warning policy rather than making all
+saves equivalent to strict loading.
+
+A save target must be a path actually read by the supplied load options. A
+missing main file can be created; a new, undiscovered drop-in or a target masked
+by a current-format `file_overrides` value is rejected explicitly. No neighboring
+configuration directories are inferred from the save path. Non-GUI consumers
+can explicitly choose `StandaloneSaveContext`, which treats the file as the only
+user layer plus built-in defaults and reads no home, drop-in, env or CLI layers.
+The evaluator's preview/apply uses its actual user configuration layers,
+including drop-ins. Preview text, effective override diagnostics and commit all
+come from the same `ValidatedSave`. After user approval it revalidates the exact
+approved bytes against the current layers, so a kind change in a drop-in while
+waiting cannot bypass the save checks.
+
+Codex model intent is separate from layer context: `ExplicitModels` requires an
+enabled chat default, so a GUI edit changing or removing its last chat model
+(including deleting all models) fails before saving. `BuiltinDefaults` explicitly
+requests the built-in Codex models/default and requires both input fields empty;
+this intent is available in both standalone and layered contexts.

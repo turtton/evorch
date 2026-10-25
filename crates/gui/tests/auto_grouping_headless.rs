@@ -146,6 +146,31 @@ async fn saving_a_provider_adds_it_to_the_pool_of_the_same_model() {
         == "Added neuralwatt/kimi-k3 to route moonshotai/kimi-k3 as an automatic fallback path"));
 }
 
+#[tokio::test]
+async fn auto_grouping_gui_save_keeps_split_image_registration_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let document = format!("{PROVIDERS}{ROUTES}").replace(
+        "[routing.routes]",
+        "[routing.routes]\nart=[{profile='codex',model='studio'}]",
+    );
+    write(
+        temp.path(),
+        &format!("{document}\n[agents.roles.image_generator]\nmodels=[{{route='art'}}]\n"),
+    );
+    let user = temp.path().join(config::PROJECT_CONFIG_DIR);
+    std::fs::create_dir(user.join("config.d")).unwrap();
+    let dropin = user.join("config.d/providers.toml");
+    let providers = "[providers.codex]\ntype='openai-codex'\nmodels=['chat',{id='studio',enabled=true,kind='image_generation'}]\ndefault_model='chat'\n";
+    std::fs::write(&dropin, providers).unwrap();
+    let mut harness = workbench(temp.path(), catalog(POOL).await);
+    save(&mut harness, "neuralwatt");
+    assert_eq!(harness.state().provider_settings().error, None);
+    assert_eq!(pool(temp.path()).len(), 2);
+    let loaded = config::Config::load_strict(&options(temp.path())).unwrap();
+    assert_eq!(loaded.agents.roles.image_generator.models[0].route, "art");
+    assert_eq!(std::fs::read_to_string(&dropin).unwrap(), providers);
+}
+
 // Given: multi offers two models of the pool's canonical model
 // When: it is saved and the user picks one
 // Then: nothing is added until the choice, and only the chosen model joins

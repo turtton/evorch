@@ -5,6 +5,8 @@
 mod composer_role;
 #[path = "headless_settings/gpt_metrics.rs"]
 mod gpt_metrics;
+#[path = "headless_settings/model_kinds.rs"]
+mod model_kinds;
 #[path = "headless_settings/provider_profiles.rs"]
 mod provider_profiles;
 #[path = "headless_settings/resolved_model_headless.rs"]

@@ -16,6 +16,10 @@ pub struct RoleSettingsModel {
     pub route_names: BTreeSet<String>,
     /// route ごとに、チェーン要素で選べる推論強度。
     pub route_efforts: BTreeMap<String, Vec<String>>,
+    /// 入力の routing スコープの route 表。チェーンの候補の種別 (ADR 0038) を決める。
+    pub routes: BTreeMap<String, Vec<config::RouteCandidateConfig>>,
+    /// route の候補の種別を決めるプロバイダ設定。
+    pub providers: BTreeMap<String, config::ProviderProfileConfig>,
     pub routes_empty: bool,
     pub resolved_previews: BTreeMap<String, Option<String>>,
     pub error: Option<String>,
@@ -39,6 +43,8 @@ impl RoleSettingsModel {
             .collect();
         Self {
             route_names: config.routing.routes.keys().cloned().collect(),
+            routes: config.routing.routes.clone(),
+            providers: config.providers.clone(),
             route_efforts: config
                 .routing
                 .routes
@@ -59,6 +65,38 @@ impl RoleSettingsModel {
 
     pub const fn is_saving(&self) -> bool {
         self.save_rx.is_some()
+    }
+
+    /// Whether the chains of `purpose` can use `route`: every candidate has the kind the
+    /// purpose needs (ADR 0038). Undefined and empty routes fit every purpose.
+    pub fn route_fits(&self, route: &str, purpose: config::ChainPurpose) -> bool {
+        self.routes
+            .get(route)
+            .is_none_or(|candidates| purpose.accepts_route(candidates, &self.providers))
+    }
+
+    /// The routes a chain of `purpose` offers, and the configured routes it rejects.
+    pub fn chain_routes(&self, purpose: config::ChainPurpose) -> ChainRoutes {
+        ChainRoutes {
+            heads: self
+                .logical_models
+                .iter()
+                .filter(|route| self.route_fits(route, purpose))
+                .cloned()
+                .collect(),
+            existing: self
+                .route_names
+                .iter()
+                .filter(|route| self.route_fits(route, purpose))
+                .cloned()
+                .collect(),
+            misfits: self
+                .routes
+                .keys()
+                .filter(|route| !self.route_fits(route, purpose))
+                .cloned()
+                .collect(),
+        }
     }
 
     pub fn validate(&self) -> Result<(), config::ConfigError> {
@@ -83,6 +121,17 @@ impl RoleSettingsModel {
                 )?;
             }
         }
+        let routing = config::RoutingConfig {
+            routes: self.routes.clone(),
+            ..Default::default()
+        };
+        if let Some(problem) =
+            config::chain_kind_problems("", &self.agents, &routing, &self.providers)
+                .into_iter()
+                .next()
+        {
+            return Err(problem);
+        }
         Ok(())
     }
 
@@ -100,7 +149,19 @@ impl RoleSettingsModel {
     }
 }
 
-pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingConfig); 10] {
+/// The routes one chain editor offers (ADR 0038).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainRoutes {
+    /// Names the head may pick, including routes not created yet.
+    pub heads: Vec<String>,
+    /// Configured routes a fallback entry may pick.
+    pub existing: BTreeSet<String>,
+    /// Configured routes whose candidates do not fit the chain; an entry naming one is
+    /// shown as an error.
+    pub misfits: BTreeSet<String>,
+}
+
+pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingConfig); 11] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
@@ -112,6 +173,7 @@ pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingCo
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
         ("roles.evaluator", &agents.roles.evaluator),
         ("roles.compactor", &agents.roles.compactor),
+        ("roles.image_generator", &agents.roles.image_generator),
     ]
 }
 
