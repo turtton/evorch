@@ -278,6 +278,215 @@ fn candidate_plan(db: &Database, query: &ConversationQuery<'_>) -> Vec<String> {
         .unwrap()
 }
 
+/// Pre-optimization SQL, intentionally independent of the new CTE builder.
+/// Compare candidates before the runtime matcher (including FTS false hits).
+fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<ConversationCandidate> {
+    let mut params = Vec::new();
+    let scope = scope_values(query.runs, &mut params);
+    let kinds = query
+        .kinds
+        .iter()
+        .map(|kind| {
+            params.push(SqlValue::Text(kind_text(*kind).into()));
+            "?"
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (seq, id) = query
+        .after
+        .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
+    params.extend([SqlValue::Integer(seq), SqlValue::Integer(id)]);
+    let filter = filter_sql(query.filter, &mut params);
+    params.push(SqlValue::Integer(to_i64(query.limit)));
+    let sql = format!(
+        "WITH scope(run_id, seq) AS (VALUES {scope}), \
+         current_runs AS MATERIALIZED ( \
+             SELECT scope.seq, r.run_id, r.source_revision, r.snapshot_revision \
+             FROM scope CROSS JOIN thread_index_runs r ON r.run_id = scope.run_id \
+             WHERE r.state = 'indexed' AND r.source_present = 1 \
+               AND r.indexed_revision = r.source_revision \
+         ) \
+         SELECT b.id, r.seq, b.run_id, r.source_revision, r.snapshot_revision, \
+                b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
+                b.tool_name, b.truncated, b.text \
+         FROM current_runs r \
+         CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
+             ON b.run_id = r.run_id \
+         WHERE b.kind IN ({kinds}) AND (r.seq, b.id) > (?, ?) AND ({filter}) \
+         ORDER BY r.seq, b.id LIMIT ?"
+    );
+    db.conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map(params_from_iter(params), candidate)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn ascii_prefilter_is_only_used_when_every_alternative_has_a_proven_fts_term() {
+    for filter in [
+        ConversationFilter::All,
+        literals(&[&["ab"]]),
+        literals(&[&["検索語"]]),
+        literals(&[&["Ä"]]),
+        literals(&[&["needle"], &["検索語"]]),
+        literals(&[&["needle"], &["%"]]),
+        literals(&[&["needle"], &[]]),
+        literals(&[&["sssss"]]),
+    ] {
+        let mut params = vec![SqlValue::Integer(42)];
+        assert_eq!(ascii_fts_prefilter(&filter, &mut params), None);
+        assert_eq!(params, [SqlValue::Integer(42)]);
+    }
+    let mut params = Vec::new();
+    let filter = literals(&[&["SKY", "Ä", "%"], &["abc def"]]);
+    let sql = ascii_fts_prefilter(&filter, &mut params).unwrap();
+    assert!(sql.contains("length(CAST(b.text AS BLOB)) != length(b.text)"));
+    assert_eq!(
+        params,
+        [
+            SqlValue::Text("sky".into()),
+            SqlValue::Text("abc def".into())
+        ]
+    );
+}
+
+#[test]
+fn prefilter_preserves_original_fts_candidates_for_every_ascii_scalar() {
+    let db = db();
+    indexed(&db, "run");
+    // Trigram treats punctuation/control/space as scalars, not word separators.
+    // Exercise every non-NUL ASCII scalar, including quoting and LIKE escapes.
+    let terms: Vec<_> = (1..=127_u8)
+        .flat_map(|c| {
+            let c = char::from(c);
+            // Both a single trigram and a phrase of overlapping trigrams.
+            [format!("A{c}b"), format!("Ab{c}CdE")]
+        })
+        .collect();
+    for (ordinal, term) in terms.iter().enumerate() {
+        block(&db, "run", ordinal, "text", &format!("!{term}?"));
+        block(
+            &db,
+            "run",
+            ordinal + terms.len(),
+            "text",
+            &format!("!{}?", term.to_ascii_lowercase()),
+        );
+    }
+    let runs = ["run".into()];
+    for term in &terms {
+        let filter = literals(&[&[term]]);
+        let query = ConversationQuery {
+            runs: &runs,
+            kinds: TEXT,
+            filter: &filter,
+            after: None,
+            limit: MAX_SEARCH_PAGE_ROWS,
+        };
+        let expected = original_candidates(&db, &query);
+        assert!(!expected.is_empty(), "{term:?}");
+        assert_eq!(
+            db.conversation_candidates(&query).unwrap(),
+            expected,
+            "{term:?}"
+        );
+    }
+}
+
+#[test]
+fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes() {
+    let db = db();
+    for run in ["a", "b", "invisible"] {
+        indexed(&db, run);
+    }
+    run_row(&db, "stale", "indexed", 4, Some(3));
+    let corpus = [
+        "ALPHA beta % _ \\ \"quote\"",
+        "alpha ... beta",
+        "SKY ſky SKY",
+        "ſKY",
+        "SKY",
+        "ſky",
+        "Key",
+        "Ä Ö ä ö",
+        "検索語 データベース",
+        "A\0BC", // FTS abc passes; final literal matcher need not accept it.
+        "ABC\0tail",
+        "alpha\nbeta\tend",
+        "a\"b a%b a_b a\\b",
+        "a\u{301}bc abc",
+        "no match",
+    ];
+    for run in ["a", "b", "invisible", "stale"] {
+        for (ordinal, text) in corpus.iter().enumerate() {
+            block(&db, run, ordinal, "text", text);
+            block(&db, run, ordinal + corpus.len(), "tool_result", text);
+        }
+    }
+    let runs = ["b".into(), "stale".into(), "a".into(), "b".into()];
+    let filters = [
+        literals(&[&["alpha beta"]]),
+        literals(&[&["alpha", "beta"]]),
+        literals(&[&["abc"]]),
+        literals(&[&["sky"]]),
+        literals(&[&["key"]]),
+        literals(&[&["alpha", "%"], &["sky", "Ä"]]),
+        literals(&[&["abc"], &["検索語"]]),
+        literals(&[&["abc"], &["%"]]),
+        literals(&[&["ab"], &["_"], &["\\"]]),
+        literals(&[&["a\"b"], &["a%b"], &["a_b"], &["a\\b"]]),
+        literals(&[&["alpha\nbeta"]]),
+        literals(&[&["abc", "Ä"], &["sky", "検索"]]),
+        literals(&[&["abc"], &["Ä"]]),
+        literals(&[&["abc"], &[]]),
+        ConversationFilter::All,
+    ];
+    for filter in &filters {
+        for kinds in [TEXT, &[IndexBlockKind::Text, IndexBlockKind::ToolResult]] {
+            for limit in [1, 2, 7, MAX_SEARCH_PAGE_ROWS] {
+                let mut query = ConversationQuery {
+                    runs: &runs,
+                    kinds,
+                    filter,
+                    after: None,
+                    limit,
+                };
+                let mut consumed = Vec::new();
+                loop {
+                    let expected = original_candidates(&db, &query);
+                    let actual = db.conversation_candidates(&query).unwrap();
+                    assert_eq!(actual, expected, "{filter:?}, {query:?}");
+                    if actual.is_empty() {
+                        break;
+                    }
+                    query.after = actual.last().map(|row| row.position);
+                    consumed.extend(actual);
+                }
+                let full = original_candidates(
+                    &db,
+                    &ConversationQuery {
+                        after: None,
+                        limit: MAX_SEARCH_PAGE_ROWS,
+                        ..query
+                    },
+                );
+                assert_eq!(consumed, full);
+                // Every possible candidate budget sees the same prefix/cursor.
+                for budget in 1..=full.len() {
+                    assert_eq!(&consumed[..budget], &full[..budget]);
+                    assert_eq!(consumed[budget - 1].position, full[budget - 1].position);
+                }
+                if filter == &literals(&[&["abc"]]) {
+                    assert!(consumed.iter().any(|row| row.text == "A\0BC"));
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn plan_checks_current_scope_before_run_blocks_and_correlated_fts() {
     let db = db();
@@ -311,13 +520,15 @@ fn plan_checks_current_scope_before_run_blocks_and_correlated_fts() {
             let blocks =
                 position("SEARCH b USING INDEX idx_conversation_blocks_kind (kind=? AND run_id=?)");
             assert!(materialize < scope && scope < current && current < blocks);
-            assert!(!plan.iter().any(|step| step.starts_with("SCAN b")));
             if matches!(filter, ConversationFilter::Literals(terms) if terms[0][0] == "needle") {
+                let fence = position("MATERIALIZE scoped_blocks");
+                let scan = position("SCAN b");
                 let fts = position("SCAN conversation_fts");
-                assert!(blocks < fts);
+                assert!(fence < materialize && blocks < scan && scan < fts);
                 // '=' is the rowid constraint, 'M' the MATCH constraint.
                 assert!(plan[fts].contains("VIRTUAL TABLE INDEX 0:=M"));
             } else {
+                assert!(!plan.iter().any(|step| step.starts_with("SCAN b")));
                 assert!(plan.iter().all(|step| !step.contains("conversation_fts")));
             }
             eprintln!("scope={count} filter={filter:?}: {plan:?}");
@@ -335,6 +546,9 @@ fn invisible_and_noncurrent_blocks_do_not_increase_candidate_vm_work() {
             block(&db, run, ordinal, "text", "common needle % _ \\ Ä");
         }
         block(&db, run, 3, "tool_result", "common needle % _ \\ Ä");
+        block(&db, run, 4, "text", "common needle");
+        block(&db, run, 5, "text", "common ... needle");
+        block(&db, run, 6, "text", "unrelated ASCII block");
     }
     run_row(&db, "run-stale", "indexed", 4, Some(3));
     run_row(&db, "run-pending", "pending", 3, Some(3));
@@ -350,6 +564,7 @@ fn invisible_and_noncurrent_blocks_do_not_increase_candidate_vm_work() {
     let filters = [
         ConversationFilter::All,
         literals(&[&["needle"]]),
+        literals(&[&["common needle"]]),
         literals(&[&["%"]]),
         literals(&[&["Ä"]]),
         literals(&[&["needle", "_"], &["absent"]]),

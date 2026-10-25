@@ -289,6 +289,7 @@ fn conversation_candidate_sql(query: &ConversationQuery<'_>) -> (String, Vec<Sql
         .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
     params.push(SqlValue::Integer(after_seq));
     params.push(SqlValue::Integer(after_id));
+    let prefilter = ascii_fts_prefilter(query.filter, &mut params);
     let filter = filter_sql(query.filter, &mut params);
     params.push(SqlValue::Integer(to_i64(query.limit)));
     // MATERIALIZED is an optimization fence for the authorized/current runs.
@@ -302,20 +303,82 @@ fn conversation_candidate_sql(query: &ConversationQuery<'_>) -> (String, Vec<Sql
              FROM scope CROSS JOIN thread_index_runs r ON r.run_id = scope.run_id \
              WHERE r.state = 'indexed' AND r.source_present = 1 \
                AND r.indexed_revision = r.source_revision \
-         ) \
-         SELECT b.id, r.seq, b.run_id, r.source_revision, r.snapshot_revision, \
+         )"
+    );
+    let scoped_blocks = format!(
+        "SELECT b.id, r.seq, b.run_id, r.source_revision, r.snapshot_revision, \
                 b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
                 b.tool_name, b.truncated, b.text \
          FROM current_runs r \
          CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
              ON b.run_id = r.run_id \
          WHERE b.kind IN ({kinds}) \
-           AND (r.seq, b.id) > (?, ?) \
-           AND ({filter}) \
-         ORDER BY r.seq, b.id \
-         LIMIT ?"
+           AND (r.seq, b.id) > (?, ?)"
     );
+    // Fence the cheap necessary condition before the correlated rowid/MATCH
+    // probe, which can otherwise repeat an expensive phrase intersection for
+    // every scoped block. There is deliberately no LIMIT inside this fence.
+    let sql = if let Some(prefilter) = prefilter {
+        format!(
+            "{sql}, scoped_blocks AS MATERIALIZED ( \
+                 {scoped_blocks} AND ({prefilter}) \
+             ) \
+             SELECT b.* FROM scoped_blocks b WHERE ({filter}) \
+             ORDER BY b.seq, b.id LIMIT ?"
+        )
+    } else {
+        format!(
+            "{sql} {scoped_blocks} AND ({filter}) \
+             ORDER BY r.seq, b.id LIMIT ?"
+        )
+    };
     (sql, params)
+}
+
+/// A necessary condition of the *existing FTS predicate*, not just the final
+/// matcher. The bundled trigram tokenizer (fts5TriTokenize) folds each scalar
+/// and emits every overlapping triple, including spaces, quotes and controls.
+/// With default remove_diacritics=0, on NUL-free ASCII a matching phrase thus
+/// implies a contiguous ASCII-folded substring. Every ASCII spelling's k/s
+/// variants fold back to that same spelling (Kelvin sign / long s).
+///
+/// This implication does NOT justify LIKE/lower over arbitrary Unicode: FTS
+/// folds more scalars than SQLite lower, and skips NUL. Byte length differs
+/// from SQLite character length for every non-ASCII or NUL-containing string;
+/// those rows must pass unconditionally. Non-ASCII-only terms, short LIKE
+/// terms and Scan terms add no restriction. An unrestricted OR alternative
+/// disables this optimization entirely. The old filter still runs afterwards,
+/// preserving its exact candidate sequence, budget consumption and keysets.
+fn ascii_fts_prefilter(filter: &ConversationFilter, params: &mut Vec<SqlValue>) -> Option<String> {
+    let ConversationFilter::Literals(alternatives) = filter else {
+        return None;
+    };
+    let mut clauses = Vec::new();
+    let mut clause_params = Vec::new();
+    for terms in alternatives {
+        let mut predicates = Vec::new();
+        for term in terms {
+            if let TermRoute::Trigram(variants) = term_route(term)
+                && let Some(ascii) = variants.iter().find(|variant| variant.is_ascii())
+            {
+                // Unlike LIKE, instr has no pattern-length/escaping limit.
+                predicates.push("instr(lower(b.text), ?) > 0");
+                clause_params.push(SqlValue::Text(ascii.to_ascii_lowercase()));
+            }
+        }
+        if predicates.is_empty() {
+            return None;
+        }
+        clauses.push(format!("({})", predicates.join(" AND ")));
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+    params.extend(clause_params);
+    Some(format!(
+        "length(CAST(b.text AS BLOB)) != length(b.text) OR ({})",
+        clauses.join(" OR ")
+    ))
 }
 
 fn check_batch(runs: &[String]) -> Result<(), StorageError> {
