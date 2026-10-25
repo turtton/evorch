@@ -28,6 +28,7 @@ async fn send(base_url: &str, bus: &EventBus) -> Result<ChatResponse, ProviderEr
     })
     .expect("OpenAI client");
     let request = ChatRequest {
+        responses_replay: None,
         model: "gpt-contract".into(),
         messages: vec![],
         tools: vec![],

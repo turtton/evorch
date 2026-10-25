@@ -88,6 +88,10 @@ fn redact_message(
                 }
                 continue;
             }
+            Some("responses_reasoning") => {
+                reject_secret_bearing_responses_item(redactor, block)?;
+                continue;
+            }
             Some("text" | "reasoning") => "text",
             Some("tool_use") => "input",
             Some("tool_result") => {
@@ -142,6 +146,46 @@ fn redact_anthropic_block(
         ));
     }
     Ok(count)
+}
+
+/// A Responses native item is replayed exactly, so storage never rewrites it.
+/// Only a string `item.encrypted_content` is protected ciphertext. Every other
+/// value, including unknown item fields and the origin, is scanned, and a
+/// credential there refuses the whole snapshot. The diagnostic never quotes the item.
+fn reject_secret_bearing_responses_item(
+    redactor: &secret_guard::SecretRedactor,
+    block: &serde_json::Value,
+) -> Result<(), StorageError> {
+    let mut plaintext = match block.as_object() {
+        Some(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| {
+                    let value = match value.as_object() {
+                        Some(item) if key == "item" => serde_json::Value::Object(
+                            item.iter()
+                                .filter(|(field, content)| {
+                                    !(*field == "encrypted_content" && content.is_string())
+                                })
+                                .map(|(field, content)| (field.clone(), content.clone()))
+                                .collect(),
+                        ),
+                        _ => value.clone(),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        None => block.clone(),
+    };
+    if redactor.redact_json(&mut plaintext) > 0 {
+        return Err(StorageError::Serialization(
+            "Responses reasoning item contains a secret outside its encrypted content; \
+             redaction would invalidate its replay"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Columns decoded by [`from_row`], in order.
@@ -215,4 +259,100 @@ pub fn with_descendants(
     )?;
     let rows = statement.query_map(params![ids], |row| row.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    const SECRET: &str = "sk-test-evorch-9f8e7d6c5b4a3f2e1d";
+    const CIPHERTEXT: &str = "gAAAAB3-log-capture-ciphertext==";
+    const SUMMARY: &str = "log capture reasoning summary";
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<String>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .push_str(&String::from_utf8_lossy(buf));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn record(summary: &str) -> crate::RunContextRecord {
+        let block = json!({
+            "type": "responses_reasoning",
+            "item": {
+                "type": "reasoning", "id": "rs_log_capture",
+                "summary": [{"type": "summary_text", "text": summary}],
+                "encrypted_content": CIPHERTEXT
+            },
+            "origin": {"profile": "log"}
+        });
+        crate::RunContextRecord {
+            run_id: "run-log".into(),
+            role: "worker".into(),
+            name: "chat:Worker:log".into(),
+            parent_run_id: None,
+            config_json: "{}".into(),
+            messages_json: json!([{"role": "assistant", "content": [
+                {"type": "reasoning", "text": format!("legacy {SECRET}")},
+                block
+            ]}])
+            .to_string(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "Checkpoint".into(),
+            restorable: true,
+            updated_at_ns: 1,
+        }
+    }
+
+    #[test]
+    fn saving_or_refusing_native_items_never_logs_their_payloads() {
+        // Given: a migrated database and a subscriber capturing every level.
+        let database = crate::Database::open_in_memory().unwrap();
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+
+        // When: one snapshot is saved with a redaction and one is refused.
+        let (saved, refused) = tracing::subscriber::with_default(subscriber, || {
+            (
+                super::upsert(&database.conn, &record(SUMMARY)),
+                super::upsert(&database.conn, &record(&format!("{SUMMARY} {SECRET}"))),
+            )
+        });
+
+        // Then: both outcomes are observable, yet no item payload reaches the log.
+        saved.expect("clean native item must be saved");
+        assert!(refused.is_err());
+        let logs = logs.0.lock().expect("log buffer lock").clone();
+        assert!(
+            logs.contains("credential redactions"),
+            "capture must be live"
+        );
+        for private in [SECRET, CIPHERTEXT, SUMMARY, "rs_log_capture"] {
+            assert!(!logs.contains(private), "log leaked {private:?}");
+        }
+    }
 }

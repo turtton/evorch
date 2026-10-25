@@ -138,9 +138,13 @@ pub struct MessageRow {
     pub summary: String,
     pub text: String,
     pub tokens: u64,
+    /// Whether the message list shows this row. A message holding only native
+    /// Responses state has nothing displayable, yet its tokens stay in the budget.
+    pub listed: bool,
 }
 
 /// Flatten persisted messages; tool calls and results render inline.
+/// Native Responses state contributes no text, separator or row of its own.
 pub fn message_rows(messages: &[Message]) -> Vec<MessageRow> {
     messages
         .iter()
@@ -148,7 +152,7 @@ pub fn message_rows(messages: &[Message]) -> Vec<MessageRow> {
             let text = message
                 .content
                 .iter()
-                .map(block_text)
+                .filter_map(block_text)
                 .collect::<Vec<_>>()
                 .join("\n\n");
             let summary = text
@@ -158,11 +162,17 @@ pub fn message_rows(messages: &[Message]) -> Vec<MessageRow> {
                 .chars()
                 .take(120)
                 .collect();
+            let native_only = text.is_empty()
+                && message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ResponsesReasoning { .. }));
             MessageRow {
                 role: role_label(message),
                 tokens: estimate_text_tokens(&serde_json::to_string(message).unwrap_or_default()),
                 summary,
                 text,
+                listed: !native_only,
             }
         })
         .collect()
@@ -181,9 +191,11 @@ fn role_label(message: &Message) -> &'static str {
     }
 }
 
-fn block_text(block: &ContentBlock) -> String {
-    match block {
+/// Display text of one block; `None` for state that is replayed but never shown.
+fn block_text(block: &ContentBlock) -> Option<String> {
+    Some(match block {
         ContentBlock::Text { text } | ContentBlock::Reasoning { text } => text.clone(),
+        ContentBlock::ResponsesReasoning { .. } => return None,
         ContentBlock::Anthropic { .. } => block.reasoning_text().unwrap_or_default().to_owned(),
         ContentBlock::Image { media_type, .. } => format!("[image {media_type}]"),
         ContentBlock::ToolUse { name, input, .. } => format!("→ {name} {input}"),
@@ -193,7 +205,25 @@ fn block_text(block: &ContentBlock) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         ContentBlock::Compaction { .. } => "[compaction summary]".into(),
+    })
+}
+
+/// Heading of the message list, plus a note when some saved messages are not listed.
+/// Counts refer to saved messages, as in [`run_summary`]; hidden replay-only
+/// messages are named but never shown, and their tokens stay in the budget.
+pub fn message_list_heading(rows: &[MessageRow]) -> (String, Option<String>) {
+    let listed = rows.iter().filter(|row| row.listed).count();
+    let hidden = rows.len() - listed;
+    if hidden == 0 {
+        return (format!("Messages ({listed})"), None);
     }
+    let noun = if hidden == 1 { "message" } else { "messages" };
+    (
+        format!("Messages ({listed} of {})", rows.len()),
+        Some(format!(
+            "{hidden} replay-only {noun} hidden · counted in the budget"
+        )),
+    )
 }
 
 /// Budget segments of a run's persisted history, by message role.

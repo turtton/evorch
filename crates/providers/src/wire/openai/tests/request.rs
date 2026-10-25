@@ -72,6 +72,7 @@ fn wire_request_maps_reasoning_effort_when_configured() {
 #[test]
 fn canonical_request_maps_to_chat_completions_json() {
     let request = ChatRequest {
+        responses_replay: None,
         model: "gpt-test".to_string(),
         messages: vec![
             Message {
@@ -203,6 +204,7 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
 
 fn image_result_request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "gpt-test".to_string(),
         messages: vec![
             Message {

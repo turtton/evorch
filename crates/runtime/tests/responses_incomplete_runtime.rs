@@ -70,6 +70,7 @@ impl AgentModel for HttpModel {
             .send_streaming(
                 &ProviderAuth::new("offline-key"),
                 &ChatRequest {
+                    responses_replay: None,
                     model: "gpt-contract".into(),
                     messages: messages.to_vec(),
                     tools: tools.to_vec(),

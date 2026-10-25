@@ -128,6 +128,7 @@ fn compat_client(uri: String, label: &str, bus: Option<Arc<EventBus>>) -> OpenAi
 
 fn chat_request(model: &str) -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: model.to_string(),
         messages: vec![Message {
             role: Role::User,

@@ -24,6 +24,8 @@ pub struct RecordedRequest {
     pub method: String,
     pub path: String,
     pub authorization: Option<String>,
+    /// The Codex `chatgpt-account-id` header, identifying the account the request used.
+    pub chatgpt_account_id: Option<String>,
     pub body: Value,
     pub stream: bool,
 }
@@ -86,6 +88,7 @@ pub struct StreamingMockOpenAi {
     address: SocketAddr,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     scripts: Arc<Mutex<VecDeque<ScriptedResponse>>>,
+    oauth_token: Arc<Mutex<Option<Value>>>,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -184,9 +187,11 @@ impl StreamingMockOpenAi {
             .unwrap_or_else(|error| panic!("mock_openai local address failed: {error}"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let scripts = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let oauth_token = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let recorded = Arc::clone(&requests);
         let queued = Arc::clone(&scripts);
+        let token = Arc::clone(&oauth_token);
         let stopping = Arc::clone(&shutdown);
         let accept_thread = thread::spawn(move || {
             let mut connections = Vec::new();
@@ -204,6 +209,7 @@ impl StreamingMockOpenAi {
                 };
                 let recorded = Arc::clone(&recorded);
                 let queued = Arc::clone(&queued);
+                let token = Arc::clone(&token);
                 let models = models.clone();
                 let codex_models = codex_models.clone();
                 let mode = mode.clone();
@@ -223,6 +229,8 @@ impl StreamingMockOpenAi {
                         request.method == "GET" && listed_path == Some("/v1/models");
                     let listing_codex_models = request.method == "GET"
                         && listed_path == Some(&format!("{CODEX_BASE_PATH}/models"));
+                    let refreshing_token = request.method == "POST"
+                        && listed_path.is_some_and(|path| path.ends_with("/oauth/token"));
                     let prompt = (prompt_cache.is_some()
                         && request.method == "POST"
                         && (request.path == "/v1/chat/completions" || responses_api))
@@ -237,6 +245,17 @@ impl StreamingMockOpenAi {
                     }
                     if listing_codex_models {
                         return write_json(&mut stream, "200 OK", &codex_models);
+                    }
+                    if refreshing_token {
+                        let token = token.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        return match token {
+                            Some(token) => write_json(&mut stream, "200 OK", &token),
+                            None => write_json(
+                                &mut stream,
+                                "401 Unauthorized",
+                                &json!({"error": "unscripted token refresh"}),
+                            ),
+                        };
                     }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
                     let response = response.map(|response| {
@@ -287,6 +306,7 @@ impl StreamingMockOpenAi {
             address,
             requests,
             scripts,
+            oauth_token,
             shutdown,
             accept_thread: Some(accept_thread),
         }
@@ -317,6 +337,15 @@ impl StreamingMockOpenAi {
     /// Returns the number of scripts not yet consumed.
     pub fn remaining_scripts(&self) -> usize {
         self.scripts.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Answers every following `POST …/oauth/token` (a Codex token refresh against an
+    /// auth base URL on this fixture) with `body`, until replaced.
+    ///
+    /// Refreshes are recorded but never consume a response script or touch the
+    /// prompt cache. Before the first call, a refresh is answered `401 Unauthorized`.
+    pub fn set_oauth_token_response(&self, body: Value) {
+        *self.oauth_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
     }
 }
 
@@ -349,6 +378,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
         .to_owned();
     let mut content_length = 0;
     let mut authorization = None;
+    let mut chatgpt_account_id = None;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -367,6 +397,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("chatgpt-account-id") {
+            chatgpt_account_id = Some(value.trim().to_owned());
         }
     }
     let mut bytes = vec![0; content_length];
@@ -381,6 +413,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
         method,
         path,
         authorization,
+        chatgpt_account_id,
         stream: body["stream"] == true,
         body,
     })

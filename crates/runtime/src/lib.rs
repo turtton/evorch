@@ -73,7 +73,9 @@ pub use compose::{
     ComposedRuntime, CompositionError, ModelIdentity, ModelSource, RoutedModel, RuntimeComposition,
     WorkspaceSeam, compose_runtime,
 };
-pub use context::{AgentContext, CompactionCheckpoint};
+pub use context::{
+    AgentContext, CompactionCheckpoint, ResponsesReplayBinding, ResponsesReplayState,
+};
 pub use entry_routing::{
     COORDINATION_KEYWORDS, DIRECT_KEYWORDS, EntryRouter, LocalVerdict, RoutingDecision,
     UncertainReason, classify_local,

@@ -2,16 +2,15 @@
 //!
 //! ChatGPT subscription の Codex backend と公式 OpenAI API は同じ Responses 形状を
 //! 共有します。両者の差分は [`ResponsesDialect`] の規則 (`impl ResponsesDialect`) に
-//! 集約し、変換本体は dialect に依存しません。Codex の wire JSON は移行前と byte 同一に
-//! 保ちます (`tests/fixtures/codex/wire_request_golden.json`)。
+//! 集約し、変換本体は dialect に依存しません。Codex の旧 wire bytes から許可する変更は
+//! root include の値だけです (`tests/fixtures/codex/wire_request_pre_b3.json`)。
 //!
 //! # 拡張点
 //!
 //! - freeform tool (`apply_patch`): [`to_wire_tool`] は正本の契約に一致する定義だけを
 //!   custom に変換します。履歴は現在の tools に依存せず [`custom_patch_input`] で判定します。
-//! - encrypted reasoning の再生 (B-3): [`InputItem`] に `Reasoning` variant を追加し、
-//!   `include` に `reasoning.encrypted_content` を載せ、SSE 側で
-//!   `sse::OutputItem::Reasoning` を回収します。
+//! - encrypted reasoning: scope 付き変換で確定 native item を再送し、SSE の raw done と
+//!   output position から canonical 順序を復元します。
 
 mod sse;
 
@@ -29,14 +28,8 @@ pub use sse::ResponsesStreamInterpreter;
 /// Codex backend が reasoning effort 未指定時に要求する既定値。
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 
-/// Responses API の接続先ごとの方言。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResponsesDialect {
-    /// ChatGPT subscription の Codex backend。
-    Codex,
-    /// 公式 OpenAI Responses API (`/v1/responses`)。
-    OpenAi,
-}
+pub use crate::responses_replay::ResponsesDialect;
+use crate::responses_replay::{ResolvedResponsesScope, eligible, validate_request_scope};
 
 /// canonical request 以外に wire 変換が必要とする選択。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +117,19 @@ enum InputItem {
         call_id: String,
         output: String,
     },
+    #[serde(untagged)]
+    Reasoning(OpaqueReasoningItem),
+}
+
+/// A wire-only wrapper: serde must preserve the native item, Debug must not.
+#[derive(Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+struct OpaqueReasoningItem(serde_json::Value);
+
+impl std::fmt::Debug for OpaqueReasoningItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted Responses reasoning item>")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -204,6 +210,10 @@ enum ReasoningSummary {
 
 /// dialect ごとの wire 規則。dialect 差分はこの impl だけに置きます。
 impl ResponsesDialect {
+    fn include(self) -> Vec<String> {
+        vec!["reasoning.encrypted_content".into()]
+    }
+
     /// Codex backend は instructions を必須文字列として扱うため、空でも送ります。
     fn instructions(self, joined: String) -> Option<String> {
         match self {
@@ -289,6 +299,7 @@ impl ResponsesRequest {
 
     /// 公式 compaction を要求するトリガーを入力末尾に追加します。
     pub(crate) fn with_compaction_trigger(mut self) -> Self {
+        self.include.clear();
         self.input.push(InputItem::CompactionTrigger);
         self
     }
@@ -301,6 +312,32 @@ impl ResponsesRequest {
 pub fn to_wire_request(
     request: &ChatRequest,
     options: &ResponsesRequestOptions,
+) -> ResponsesRequest {
+    convert_request(request, options, None)
+}
+
+/// Scope-checked converter shared by generation and official compaction.
+pub fn to_wire_request_with_scope(
+    request: &ChatRequest,
+    options: &ResponsesRequestOptions,
+    scope: &ResolvedResponsesScope,
+) -> Result<ResponsesRequest, crate::ProviderError> {
+    validate_request_scope(request, scope)?;
+    if scope.dialect != options.dialect
+        || scope.wire_model != request.model
+        || scope.service_tier != request.service_tier
+    {
+        return Err(crate::ProviderError::ResponsesScopeChanged {
+            actual: Box::new(scope.clone()),
+        });
+    }
+    Ok(convert_request(request, options, Some(scope)))
+}
+
+fn convert_request(
+    request: &ChatRequest,
+    options: &ResponsesRequestOptions,
+    scope: Option<&ResolvedResponsesScope>,
 ) -> ResponsesRequest {
     let dialect = options.dialect;
     let mut sorted_tools: Vec<_> = request.tools.iter().collect();
@@ -328,10 +365,16 @@ pub fn to_wire_request(
         .iter()
         .flat_map(|message| match message.role {
             Role::System => Vec::new(),
-            Role::User => to_input_items(message, InputRole::User, dialect, &custom_call_ids),
-            Role::Assistant => {
-                to_input_items(message, InputRole::Assistant, dialect, &custom_call_ids)
+            Role::User => {
+                to_input_items(message, InputRole::User, dialect, &custom_call_ids, scope)
             }
+            Role::Assistant => to_input_items(
+                message,
+                InputRole::Assistant,
+                dialect,
+                &custom_call_ids,
+                scope,
+            ),
         })
         .collect();
     ResponsesRequest {
@@ -348,7 +391,7 @@ pub fn to_wire_request(
         temperature: dialect.temperature(request.temperature),
         service_tier: request.service_tier,
         prompt_cache_key: options.prompt_cache_key.clone(),
-        include: Vec::new(),
+        include: dialect.include(),
         text: request.output_schema.as_ref().map(|schema| TextFormat {
             format: JsonSchemaFormat {
                 r#type: "json_schema",
@@ -374,6 +417,7 @@ fn instructions(request: &ChatRequest) -> String {
             }
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::Image { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -427,6 +471,7 @@ fn to_input_items(
     role: InputRole,
     dialect: ResponsesDialect,
     custom_call_ids: &BTreeSet<&str>,
+    scope: Option<&ResolvedResponsesScope>,
 ) -> Vec<InputItem> {
     let mut items = Vec::new();
     let mut content: Vec<InputContent> = Vec::new();
@@ -501,6 +546,12 @@ fn to_input_items(
                     tracing::warn!(
                         "この接続先は compaction block を再生できないためスキップします"
                     );
+                }
+            }
+            ContentBlock::ResponsesReasoning { item, .. } => {
+                if scope.is_some_and(|s| eligible(block, message.role, s)) {
+                    flush_message(&mut items, &mut content, role);
+                    items.push(InputItem::Reasoning(OpaqueReasoningItem(item.clone())));
                 }
             }
             ContentBlock::Reasoning { .. } | ContentBlock::Anthropic { .. } => {}

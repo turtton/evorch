@@ -6,6 +6,9 @@ CACHE_CONTRACT_FILTER='
   package(=mock-openai)
   | (package(=providers) & (
       (kind(lib) & test(observe::cache))
+      | (kind(lib) & test(wire::responses::))
+      | (kind(lib) & test(responses_replay::))
+      | binary(=responses_encrypted_replay)
       | (kind(lib) & test(provider::cursor::tests))
       | (kind(lib) & test(provider::claude::))
       | binary(=cache_prefix_contract)

@@ -15,7 +15,7 @@ pub enum Role {
 }
 
 /// メッセージ本文を構成するコンテンツブロック。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Image {
@@ -31,6 +31,11 @@ pub enum ContentBlock {
     Reasoning {
         /// 思考の本文。
         text: String,
+    },
+    /// Confirmed Responses native state; never a displayable reasoning projection.
+    ResponsesReasoning {
+        item: serde_json::Value,
+        origin: crate::responses_replay::ResponsesReplayOrigin,
     },
     /// Anthropic response data retained verbatim for replay, including signed thinking.
     Anthropic {
@@ -61,6 +66,52 @@ pub enum ContentBlock {
         /// ツール実行がエラー終了したかどうか。
         is_error: bool,
     },
+}
+
+impl std::fmt::Debug for ContentBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Image { media_type, data } => f
+                .debug_struct("Image")
+                .field("media_type", media_type)
+                .field("data", data)
+                .finish(),
+            Self::Text { text } => f.debug_struct("Text").field("text", text).finish(),
+            Self::Reasoning { text } => f.debug_struct("Reasoning").field("text", text).finish(),
+            // The native object is opaque, including future nested payloads.
+            // Keep it out of Debug without changing its public type or serde.
+            Self::ResponsesReasoning { origin, .. } => f
+                .debug_struct("ResponsesReasoning")
+                .field("item", &"<redacted Responses reasoning item>")
+                .field("origin", origin)
+                .finish(),
+            Self::Anthropic { block, prefix_hash } => f
+                .debug_struct("Anthropic")
+                .field("block", block)
+                .field("prefix_hash", prefix_hash)
+                .finish(),
+            Self::Compaction { encrypted_content } => f
+                .debug_struct("Compaction")
+                .field("encrypted_content", encrypted_content)
+                .finish(),
+            Self::ToolUse { id, name, input } => f
+                .debug_struct("ToolUse")
+                .field("id", id)
+                .field("name", name)
+                .field("input", input)
+                .finish(),
+            Self::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } => f
+                .debug_struct("ToolResult")
+                .field("tool_call_id", tool_call_id)
+                .field("content", content)
+                .field("is_error", is_error)
+                .finish(),
+        }
+    }
 }
 
 impl ContentBlock {
@@ -280,6 +331,9 @@ pub struct JsonSchema {
 /// チャット完了リクエスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
+    /// Non-wire route and prepared replay scope.
+    #[serde(default, skip_serializing)]
+    pub responses_replay: Option<crate::responses_replay::ResponsesReplayContext>,
     /// モデル識別子。
     pub model: String,
     /// 会話履歴。
@@ -422,6 +476,7 @@ mod tests {
     #[test]
     fn chat_request_round_trip_uses_canonical_field_names() {
         let request = ChatRequest {
+            responses_replay: None,
             model: "gpt-test".to_string(),
             messages: vec![Message {
                 role: Role::System,

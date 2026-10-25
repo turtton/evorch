@@ -154,8 +154,9 @@ async fn exercise(streaming: bool, oauth: bool) {
             if name == "inspect_run" && input == &json!({"run_id":"run-1","nested":{"file_path":"unchanged"}})
     )));
     // Reconstruct canonical history as a persisted snapshot would.
-    let restored: Message =
+    let mut restored: Message =
         serde_json::from_str(&serde_json::to_string(&response.message).unwrap()).unwrap();
+    restored.content.insert(1, serde_json::from_value(serde_json::json!({"type":"responses_reasoning", "item":{"type":"reasoning","id":"rs_other","summary":[],"encrypted_content":"b3-secret-ciphertext"}, "origin": {"dialect":"open_ai","profile":"work","route_model":"m","wire_model":"m","speed":"standard","service_tier":null,"endpoint_fingerprint":"endpoint","account":{"kind":"unavailable"}}})).unwrap());
     request.messages.push(restored);
     request.messages.push(serde_json::from_value(json!({"role":"user","content":[
         {"type":"tool_result","tool_call_id":"toolu-1","content":[{"type":"text","text":"report contents"}],"is_error":false},

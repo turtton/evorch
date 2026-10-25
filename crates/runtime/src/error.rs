@@ -62,6 +62,13 @@ pub enum RuntimeError {
         resummarize: bool,
     },
 
+    /// Typed control result: prepare a replay boundary before sending.
+    #[error("Responses replay scope changed; context preparation required")]
+    ResponsesScopeChanged {
+        actual: Option<Box<providers::ResolvedResponsesScope>>,
+        selected: String,
+    },
+
     /// モデル呼び出し (境界の実装側) の失敗。
     #[error("モデル呼び出しに失敗しました: {reason}")]
     Model {

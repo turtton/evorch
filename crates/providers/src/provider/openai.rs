@@ -24,7 +24,7 @@ use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::responses::{
-    ResponsesDialect, ResponsesRequestOptions, ResponsesStreamInterpreter, to_wire_request,
+    ResponsesDialect, ResponsesRequestOptions, ResponsesStreamInterpreter,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -68,6 +68,7 @@ impl OpenAiClient {
     /// # Errors
     /// HTTP クライアントを構築できない場合 [`ProviderError`] を返す。
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
+        crate::responses_replay::validate_endpoint(&config.base_url)?;
         Ok(Self {
             http: build_http_client(None)?,
             image_http: build_http_client_with_read_timeout(
@@ -99,7 +100,14 @@ impl OpenAiClient {
         request: &ChatRequest,
         streaming: bool,
     ) -> Result<DeltaStream, ProviderError> {
-        let wire_request = to_wire_request(
+        let scope = crate::ResolvedResponsesScope::resolve(
+            request,
+            ResponsesDialect::OpenAi,
+            self.profile.as_deref(),
+            &self.endpoint,
+            crate::ResponsesAccount::Unavailable,
+        );
+        let wire_request = crate::wire::responses::to_wire_request_with_scope(
             request,
             &ResponsesRequestOptions {
                 dialect: ResponsesDialect::OpenAi,
@@ -108,7 +116,8 @@ impl OpenAiClient {
                     .as_ref()
                     .map(|context| context.run_id.clone()),
             },
-        );
+            &scope,
+        )?;
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             OPENAI_PROVIDER_LABEL,
@@ -146,7 +155,7 @@ impl OpenAiClient {
         }
         Ok(adapt_sse_stream(
             response.bytes_stream(),
-            ResponsesStreamInterpreter::new(),
+            ResponsesStreamInterpreter::with_origin(scope),
             UsageEmitter::new(self.event_bus.clone(), OPENAI_PROVIDER_LABEL),
             request.model.clone(),
             observer,
@@ -158,6 +167,20 @@ impl OpenAiClient {
 impl ProviderClient for OpenAiClient {
     fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
         Some(self)
+    }
+
+    async fn resolve_responses_scope(
+        &self,
+        _: &ProviderAuth,
+        request: &ChatRequest,
+    ) -> Result<Option<crate::ResolvedResponsesScope>, ProviderError> {
+        Ok(Some(crate::ResolvedResponsesScope::resolve(
+            request,
+            ResponsesDialect::OpenAi,
+            self.profile.as_deref(),
+            &self.endpoint,
+            crate::ResponsesAccount::Unavailable,
+        )))
     }
     fn supports_structured_output(&self) -> bool {
         true

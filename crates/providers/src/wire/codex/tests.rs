@@ -28,6 +28,7 @@ fn cache_tools_are_byte_stable_when_registration_order_changes() {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "gpt-5-codex".to_string(),
         messages: vec![
             Message {
@@ -101,7 +102,7 @@ fn wire_request_forces_store_false_stream_true() {
     assert_eq!(value["parallel_tool_calls"], true);
     assert_eq!(value["reasoning"]["effort"], "medium");
     assert_eq!(value["reasoning"]["summary"], "auto");
-    assert_eq!(value["include"], json!([]));
+    assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
     assert!(value["instructions"].is_string());
     assert!(value["input"].is_array());
 }
@@ -227,6 +228,7 @@ fn compaction_blob_round_trip_preserves_bytes_and_message_order() {
 fn compaction_trigger_is_the_only_change_and_is_last() {
     let request = request();
     let mut expected = serde_json::to_value(to_wire_request(&request)).unwrap();
+    expected["include"] = json!([]);
     expected["input"]
         .as_array_mut()
         .unwrap()

@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use super::oauth::DeviceAuthClient;
-use super::session::CodexSessionManager;
+use super::session::{AuthorizedCodexToken, CodexSessionManager};
 use super::tokens::CodexTokenStore;
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
@@ -27,7 +27,7 @@ use crate::http::{
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::stream::{DeltaStream, StreamEvent};
-use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter, to_wire_request};
+use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
@@ -113,6 +113,7 @@ impl CodexClient {
     /// # Errors
     /// HTTP client を構築できない場合に返します。
     pub fn new(config: CodexConfig, session: CodexSessionManager) -> Result<Self, ProviderError> {
+        crate::responses_replay::validate_endpoint(&config.base_url)?;
         Ok(Self {
             http_client: build_http_client(None)?,
             compaction_http_client: build_http_client_with_read_timeout(
@@ -139,6 +140,7 @@ impl CodexClient {
         config: CodexConfig,
         store: Arc<dyn CodexTokenStore>,
     ) -> Result<Self, ProviderError> {
+        crate::responses_replay::validate_endpoint(&config.base_url)?;
         let http_client = build_http_client(None)?;
         let session = CodexSessionManager::new(
             store,
@@ -196,7 +198,9 @@ impl CodexClient {
                 "Kimi full thinking requires an openai-compatible or kimi-subscription provider using openai-completions, not Codex reasoning summaries".into(),
             ));
         }
-        let wire_request = to_wire_request(request);
+        let token = self.session.current().await?;
+        let scope = self.responses_scope(request, &token);
+        let wire_request = self.scoped_wire_request(request, &scope)?;
         let mut observer = self
             .observer(request, streaming)
             .with_reasoning_effort(wire_request.reasoning_effort())
@@ -204,6 +208,7 @@ impl CodexClient {
         let response = self
             .send_response(
                 &wire_request,
+                &token,
                 if streaming {
                     ResponseMode::Streaming
                 } else {
@@ -216,21 +221,55 @@ impl CodexClient {
         // defaulted hooks such as take_message/finalize_message.
         Ok(adapt_sse_stream(
             response.bytes_stream(),
-            CodexStreamInterpreter::new(),
+            CodexStreamInterpreter::with_origin(scope),
             UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL),
             request.model.clone(),
             observer,
         ))
     }
 
+    fn responses_scope(
+        &self,
+        request: &ChatRequest,
+        token: &AuthorizedCodexToken,
+    ) -> crate::ResolvedResponsesScope {
+        crate::ResolvedResponsesScope::resolve(
+            request,
+            crate::ResponsesDialect::Codex,
+            self.profile.as_deref(),
+            &self.endpoint,
+            crate::ResponsesAccount::Codex {
+                identity: token.chatgpt_account_id.clone(),
+            },
+        )
+    }
+
+    fn scoped_wire_request(
+        &self,
+        request: &ChatRequest,
+        scope: &crate::ResolvedResponsesScope,
+    ) -> Result<CodexResponsesRequest, ProviderError> {
+        crate::wire::responses::to_wire_request_with_scope(
+            request,
+            &crate::wire::responses::ResponsesRequestOptions {
+                dialect: crate::ResponsesDialect::Codex,
+                prompt_cache_key: None,
+            },
+            scope,
+        )
+    }
+
     /// 通常生成と公式 compaction の HTTP エラー処理。
     async fn send_response(
         &self,
         wire_request: &CodexResponsesRequest,
+        token: &AuthorizedCodexToken,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
-        let response = self.post_response(wire_request, mode, observer).await?;
+        let response = self
+            .post_response_with_token(wire_request, token, mode, observer)
+            .await?;
         if !response.status().is_success() {
             let error = map_response_error(response).await;
             observer.emit_failed(&error);
@@ -247,13 +286,25 @@ impl CodexClient {
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
+        let token = self.session.current().await?;
+        self.post_response_with_token(wire_request, &token, mode, observer)
+            .await
+    }
+
+    async fn post_response_with_token(
+        &self,
+        wire_request: &impl serde::Serialize,
+        token: &AuthorizedCodexToken,
+        mode: ResponseMode,
+        observer: &mut AttemptObserver,
+    ) -> Result<reqwest::Response, ProviderError> {
         let http_client = match mode {
             ResponseMode::Compaction => &self.compaction_http_client,
             ResponseMode::Streaming | ResponseMode::NonStreaming => &self.http_client,
         };
         let mut builder = self
-            .authenticated_request(http_client, &self.endpoint)
-            .await?
+            .authenticated_request_with_token(http_client, &self.endpoint, token)
+            .await
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&wire_request);
         if matches!(mode, ResponseMode::NonStreaming) {
@@ -276,13 +327,24 @@ impl CodexClient {
         endpoint: &str,
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let token = self.session.current().await?;
+        Ok(self
+            .authenticated_request_with_token(http, endpoint, &token)
+            .await)
+    }
+
+    /// Responses replay must use the exact lease already checked against its scope.
+    async fn authenticated_request_with_token(
+        &self,
+        http: &reqwest::Client,
+        endpoint: &str,
+        token: &AuthorizedCodexToken,
+    ) -> reqwest::RequestBuilder {
         let turn_id = Uuid::new_v4().to_string();
         let client_version = self
             .resolved_client_version
             .get_or_init(|| self.client_version.resolve())
             .await;
-        Ok(http
-            .post(endpoint)
+        http.post(endpoint)
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
@@ -294,13 +356,21 @@ impl CodexClient {
             )
             .header("session-id", &self.session_id)
             .header("thread-id", &turn_id)
-            .header("x-client-request-id", &turn_id))
+            .header("x-client-request-id", &turn_id)
     }
 }
 
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    async fn resolve_responses_scope(
+        &self,
+        _: &ProviderAuth,
+        request: &ChatRequest,
+    ) -> Result<Option<crate::ResolvedResponsesScope>, ProviderError> {
+        let token = self.session.current().await?;
+        Ok(Some(self.responses_scope(request, &token)))
+    }
     /// Discovery goes through the request session so an idle profile refreshes its token,
     /// and uses the catalog version its requests send.
     async fn list_models(&self, _: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {

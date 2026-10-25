@@ -203,6 +203,48 @@ impl AgentModel for SwitchableModel {
             .await
     }
 
+    async fn prepare_replay_context(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<(), RuntimeError> {
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current
+            .prepare_replay_context(invocation, role, messages, &tools, replay)
+            .await
+    }
+
+    async fn resolve_replay_scope(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current.resolve_replay_scope(invocation, role, &tools).await
+    }
+
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &event_bus::EventBus,
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<ChatResponse, RuntimeError> {
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current
+            .complete_streaming_with_replay(invocation, role, messages, &tools, bus, replay)
+            .await
+    }
+
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
         self.current().selected_model(role, category)
     }
