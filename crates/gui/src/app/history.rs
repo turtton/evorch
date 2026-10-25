@@ -340,24 +340,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             return;
         }
+        let running_calls = self.transcripts.running_tool_runs();
         let protected_runs: std::collections::BTreeSet<_> = self
             .phases
             .keys()
+            .chain(&running_calls)
             .filter(|run| {
                 self.thread_for_run(run)
                     .is_none_or(|thread| protected_threads.contains(&thread))
             })
             .cloned()
             .collect();
+        let active = |run: &String| {
+            owners
+                .iter()
+                .chain(&current_owners)
+                .any(|owner| owner.active_runs.contains(run))
+        };
         for (run_id, phase) in &mut self.phases {
             if !matches!(
                 phase,
                 ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
             ) || protected_runs.contains(run_id)
-                || owners
-                    .iter()
-                    .chain(&current_owners)
-                    .any(|owner| owner.active_runs.contains(run_id))
+                || active(run_id)
             {
                 continue;
             }
@@ -381,6 +386,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
             *phase = restored;
             self.transcripts.interrupt_run_tools(run_id);
+        }
+        // No live owner can be executing these runs, so their calls will never
+        // report a result. This includes runs whose phase stays as replayed
+        // because their snapshot or every phase event is missing.
+        for run_id in &running_calls {
+            if !protected_runs.contains(run_id) && !active(run_id) {
+                self.transcripts.interrupt_run_tools(run_id);
+            }
         }
     }
 

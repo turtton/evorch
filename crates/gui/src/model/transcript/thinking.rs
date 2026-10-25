@@ -44,4 +44,15 @@ impl TranscriptModel {
             }
         }
     }
+
+    pub(crate) fn running_tool_runs(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().filter_map(|entry| match entry {
+            super::TranscriptEntry::Tool {
+                run_id: Some(run),
+                status: super::ToolStatus::Running,
+                ..
+            } => Some(run.as_str()),
+            _ => None,
+        })
+    }
 }
