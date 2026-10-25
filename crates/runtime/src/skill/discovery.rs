@@ -74,6 +74,33 @@ pub(crate) fn repo_skill_dirs(repo_root: &Path) -> [(SkillScope, PathBuf); 2] {
     ]
 }
 
+/// 未信頼プロジェクトのため探索しないスコープについて、skill の名前だけを集める。
+///
+/// 信頼境界を弱めないよう SKILL.md は開かず、存在だけを確かめる。名前は
+/// ディレクトリ名で、検証を通る skill の frontmatter name と一致する。候補の
+/// 判定と同名の扱いは [`discover_skills`] と同じで、先に現れたスコープが勝つ。
+/// 未登録名のエラーで原因を伝えるためだけの情報なので、読めない場所は黙って飛ばし
+/// 診断も出さない。
+pub(crate) fn withheld_skill_names(dirs: &[(SkillScope, PathBuf)]) -> BTreeMap<String, SkillScope> {
+    let mut names = BTreeMap::new();
+    for (scope, dir) in dirs {
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let is_candidate = entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                && entry.path().join("SKILL.md").is_file();
+            if !is_candidate {
+                continue;
+            }
+            if let Ok(name) = entry.file_name().into_string() {
+                names.entry(name).or_insert(*scope);
+            }
+        }
+    }
+    names
+}
+
 fn default_skill_dirs_from(
     repo_root: Option<&Path>,
     user_config: Option<&Path>,
@@ -775,5 +802,36 @@ mod tests {
             registry.diagnostics[0].kind,
             SkillDiagnosticKind::DiscoveryError
         );
+    }
+
+    /// Given: 未信頼プロジェクトの repo / repo-agents に、同名・SKILL.md なし・ファイル・
+    ///        frontmatter が壊れた候補が混在する
+    /// When:  withheld_skill_names を呼ぶ
+    /// Then:  SKILL.md を持つディレクトリ名だけを、先に現れたスコープで返す。
+    ///        SKILL.md の内容は解析しないので壊れた候補も名前だけは載る
+    #[test]
+    fn withheld_skill_names_lists_candidate_directories_without_parsing_them() {
+        let root = tempdir().unwrap();
+        let dirs = repo_skill_dirs(root.path());
+        let [(_, repo), (_, agents)] = &dirs;
+        write_skill(repo, "shared-skill", "Repo", "Repo body.\n");
+        write_skill(agents, "shared-skill", "Agents", "Agents body.\n");
+        write_skill(agents, "agents-skill", "Agents", "Agents body.\n");
+        fs::create_dir_all(agents.join("broken-skill")).unwrap();
+        fs::write(agents.join("broken-skill/SKILL.md"), "no frontmatter").unwrap();
+        fs::create_dir_all(agents.join("no-skill-md")).unwrap();
+        fs::write(agents.join("loose-file"), "not a skill").unwrap();
+
+        let names = withheld_skill_names(&dirs);
+
+        assert_eq!(
+            names,
+            BTreeMap::from([
+                ("agents-skill".to_owned(), SkillScope::RepoAgents),
+                ("broken-skill".to_owned(), SkillScope::RepoAgents),
+                ("shared-skill".to_owned(), SkillScope::Repo),
+            ])
+        );
+        assert!(withheld_skill_names(&repo_skill_dirs(&root.path().join("missing"))).is_empty());
     }
 }

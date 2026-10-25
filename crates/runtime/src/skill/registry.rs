@@ -40,6 +40,16 @@ impl SkillScope {
             SkillScope::Builtin => "builtin",
         }
     }
+
+    /// リポジトリスコープの探索ディレクトリをリポジトリルート相対で返す。
+    /// エラー文言用で、ユーザ・builtin スコープは `None`。
+    pub(crate) fn repo_dir(&self) -> Option<&'static str> {
+        match self {
+            SkillScope::Repo => Some(".evorch/skills"),
+            SkillScope::RepoAgents => Some(".agents/skills"),
+            SkillScope::User | SkillScope::UserAgents | SkillScope::Builtin => None,
+        }
+    }
 }
 
 /// skill 本文・リソースの読み込み元。
@@ -115,6 +125,10 @@ pub struct SkillRegistry {
     skills: BTreeMap<String, SkillEntry>,
     /// 発見時に生成された診断 (処理順。重複排除はしない)。
     pub diagnostics: Vec<SkillDiagnostic>,
+    /// プロジェクトが未信頼のため探索しなかったリポジトリ skill の名前と由来スコープ。
+    /// 名前はディレクトリ名だけから得ており、SKILL.md の内容は読んでいない。
+    /// 未登録名のエラーで原因を伝えるためだけに使い、catalog には現れない。
+    untrusted: BTreeMap<String, SkillScope>,
 }
 
 impl SkillRegistry {
@@ -127,7 +141,34 @@ impl SkillRegistry {
         Self {
             skills,
             diagnostics,
+            untrusted: BTreeMap::new(),
         }
+    }
+
+    /// 未信頼プロジェクトのため除外したリポジトリ skill の名前を記録する。
+    /// 登録済み skill・catalog・診断は変えない。
+    pub(crate) fn withhold_untrusted(&mut self, withheld: BTreeMap<String, SkillScope>) {
+        self.untrusted = withheld;
+    }
+
+    /// 未登録の `name` がプロジェクトの未信頼で除外されたものなら、その理由を返す。
+    pub fn untrusted_reason(&self, name: &str) -> Option<SkillLoadError> {
+        let dir = self.untrusted.get(name)?.repo_dir()?;
+        Some(SkillLoadError::UntrustedProject {
+            name: name.to_owned(),
+            dir,
+        })
+    }
+
+    /// 登録されていない `name` を拒否するときのツールエラー文言。
+    ///
+    /// 未信頼プロジェクトで除外された名前なら原因と対処を、それ以外は従来どおり
+    /// `unknown skill: <name>` を返す。
+    pub fn unknown_skill_message(&self, name: &str) -> String {
+        self.untrusted_reason(name).map_or_else(
+            || format!("unknown skill: {name}"),
+            |reason| reason.to_string(),
+        )
     }
 
     /// 後続候補を first-wins でマージする。診断は既存の末尾に追加する。
@@ -196,12 +237,15 @@ impl SkillRegistry {
     /// name とディレクトリ名の一致は再確認しない)。同梱本文はそのまま返す。
     ///
     /// # Errors
-    /// 未登録名なら [`SkillLoadError::UnknownSkill`]、SKILL.md が読めなければ
+    /// 未登録名なら [`SkillLoadError::UnknownSkill`] (未信頼プロジェクトで除外した
+    /// 名前なら [`SkillLoadError::UntrustedProject`])、SKILL.md が読めなければ
     /// [`SkillLoadError::Unreadable`]、frontmatter 構造の分割に失敗すれば
     /// [`SkillLoadError::Corrupt`]。
     pub fn load_body(&self, name: &str) -> Result<String, SkillLoadError> {
         let Some(entry) = self.skills.get(name) else {
-            return Err(SkillLoadError::UnknownSkill(name.to_owned()));
+            return Err(self
+                .untrusted_reason(name)
+                .unwrap_or_else(|| SkillLoadError::UnknownSkill(name.to_owned())));
         };
         match &entry.source {
             SkillSource::Filesystem { dir } => {
@@ -250,6 +294,12 @@ pub enum SkillLoadError {
     /// SKILL.md の frontmatter 構造が崩れている。
     #[error("skill '{name}' の SKILL.md は frontmatter 構造が不正です")]
     Corrupt { name: String },
+    /// プロジェクトが未信頼のため、リポジトリ skill を探索から除外している。
+    /// モデルとユーザに原因と対処を伝えるため、ツールエラーと同じ英語で書く。
+    #[error(
+        "skill '{name}' exists in the project's {dir} but project skills are disabled because the project is not trusted; ask the user to enable \"Trust project instructions\" in Project settings"
+    )]
+    UntrustedProject { name: String, dir: &'static str },
 }
 
 #[cfg(test)]
@@ -289,6 +339,7 @@ mod tests {
                 ("gamma-skill".to_owned(), entry("gamma-skill", root.path())),
             ]),
             diagnostics: Vec::new(),
+            untrusted: BTreeMap::new(),
         };
 
         let first = registry.available_skills();
@@ -330,6 +381,7 @@ mod tests {
         let registry = SkillRegistry {
             skills: BTreeMap::from([("demo-skill".to_owned(), entry("demo-skill", &skill_dir))]),
             diagnostics: Vec::new(),
+            untrusted: BTreeMap::new(),
         };
 
         let body = registry.load_body("demo-skill").unwrap();
@@ -397,6 +449,7 @@ mod tests {
         let registry = SkillRegistry {
             skills: BTreeMap::new(),
             diagnostics: Vec::new(),
+            untrusted: BTreeMap::new(),
         };
 
         let err = registry.load_body("nope").unwrap_err();
@@ -404,6 +457,46 @@ mod tests {
         let message = err.to_string();
         assert!(matches!(err, SkillLoadError::UnknownSkill(name) if name == "nope"));
         assert!(message.contains("nope"));
+    }
+
+    /// Given: 未信頼プロジェクトのため repo / repo-agents で除外した名前を持つレジストリ
+    /// When:  load_body と unknown_skill_message を呼ぶ
+    /// Then:  除外した名前は原因と探索ディレクトリ・対処を返し、それ以外は unknown のまま
+    #[test]
+    fn withheld_untrusted_names_explain_the_trust_gate() {
+        let mut registry = SkillRegistry::new(BTreeMap::new(), Vec::new());
+        registry.withhold_untrusted(BTreeMap::from([
+            ("evorch-skill".to_owned(), SkillScope::Repo),
+            ("agents-skill".to_owned(), SkillScope::RepoAgents),
+        ]));
+
+        let err = registry.load_body("agents-skill").unwrap_err();
+
+        assert!(matches!(
+            &err,
+            SkillLoadError::UntrustedProject { name, dir }
+                if name == "agents-skill" && *dir == ".agents/skills"
+        ));
+        assert_eq!(
+            registry.unknown_skill_message("evorch-skill"),
+            "skill 'evorch-skill' exists in the project's .evorch/skills but project skills are \
+             disabled because the project is not trusted; ask the user to enable \
+             \"Trust project instructions\" in Project settings"
+        );
+        assert_eq!(
+            err.to_string(),
+            registry.unknown_skill_message("agents-skill")
+        );
+        assert!(matches!(
+            registry.load_body("nope").unwrap_err(),
+            SkillLoadError::UnknownSkill(name) if name == "nope"
+        ));
+        assert_eq!(
+            registry.unknown_skill_message("nope"),
+            "unknown skill: nope"
+        );
+        assert!(registry.is_empty());
+        assert!(registry.available_skills().is_empty());
     }
 
     /// Given: SKILL.md を登録後にディスクから削除した skill
@@ -423,6 +516,7 @@ mod tests {
         let registry = SkillRegistry {
             skills: BTreeMap::from([("demo-skill".to_owned(), entry("demo-skill", &skill_dir))]),
             diagnostics: Vec::new(),
+            untrusted: BTreeMap::new(),
         };
 
         fs::remove_file(&skill_md).unwrap();

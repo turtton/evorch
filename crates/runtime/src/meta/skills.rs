@@ -40,7 +40,7 @@ fn skill_load_with_registry(
         return error("skill registry is not configured");
     };
     let Some(entry) = registry.get(&args.name) else {
-        return error(format!("unknown skill: {}", args.name));
+        return error(registry.unknown_skill_message(&args.name));
     };
     let loaded = match &args.resource {
         Some(reference) => entry
@@ -58,6 +58,7 @@ fn skill_load_with_registry(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
 
@@ -153,6 +154,34 @@ mod tests {
             "unknown skill 識別子が欠落: {}",
             dispatch.result.content
         );
+    }
+
+    // Given: 未信頼プロジェクトのため repo-agents の withheld を除外したレジストリ
+    // When:  withheld と未登録名 nope で skill_load を呼ぶ
+    // Then:  withheld は信頼設定の案内、nope は従来どおり unknown skill の error になる
+    #[test]
+    fn skill_load_explains_skill_withheld_from_untrusted_project() {
+        let (registry, _root) = demo_registry();
+        let mut registry = SkillRegistry::clone(&registry);
+        registry.withhold_untrusted(BTreeMap::from([(
+            "withheld".to_owned(),
+            SkillScope::RepoAgents,
+        )]));
+        let registry = Arc::new(registry);
+
+        let withheld = skill_load_with_registry(Some(&registry), json!({ "name": "withheld" }));
+        let unknown = skill_load_with_registry(Some(&registry), json!({ "name": "nope" }));
+
+        assert!(withheld.result.is_error);
+        assert!(
+            withheld.result.content.contains(
+                "skill 'withheld' exists in the project's .agents/skills but project skills are disabled because the project is not trusted"
+            ),
+            "信頼設定の案内が欠落: {}",
+            withheld.result.content
+        );
+        assert!(unknown.result.is_error);
+        assert_eq!(unknown.result.content, "unknown skill: nope");
     }
 
     // Given: レジストリ未接続の state
