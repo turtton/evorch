@@ -1,4 +1,137 @@
 use super::*;
+use crate::benchmark::{BenchmarkCheckpoint, BenchmarkRecorder, BenchmarkSelector};
+
+#[derive(Default)]
+struct EditCheckpoint(Mutex<Option<BenchmarkCheckpoint>>);
+
+#[async_trait]
+impl BenchmarkRecorder for EditCheckpoint {
+    async fn capture(&self, checkpoint: &BenchmarkCheckpoint) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(checkpoint.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn benchmark_instruction_list_is_narrowed_but_checkpoint_keeps_all_edit_tools() {
+    for apply_patch in [false, true] {
+        let (mut model, _) = routed_model(Ok(response()), "mock-model", None);
+        model.agents.orchestrator.models = vec![config::ChainEntryConfig {
+            route: "worker".into(),
+            reasoning_effort: None,
+        }];
+        model
+            .providers
+            .get_mut("local")
+            .unwrap()
+            .profile
+            .edit_tool
+            .profile = Some(if apply_patch {
+            config::EditToolConfig::ApplyPatch
+        } else {
+            config::EditToolConfig::Edit
+        });
+        let mut delegation = response();
+        delegation.message.content = vec![ContentBlock::ToolUse {
+            id: "child".into(),
+            name: "delegate".into(),
+            input: serde_json::json!({"target":{"role":"worker"}, "prompt":"evaluate"}),
+        }];
+        delegation.finish_reason = FinishReason::ToolUse;
+        let requests =
+            super::switch::QueueClient::install(&mut model, "local", vec![Ok(delegation)], false);
+        let bus = Arc::new(EventBus::new(1024));
+        let root = tempfile::tempdir().unwrap();
+        let executor = tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        executor.set_default_cwd(root.path().to_path_buf());
+        let recorder = Arc::new(EditCheckpoint::default());
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), Arc::new(model))
+            .with_project_rules(Arc::new(crate::RulesSource::new(
+                crate::ProjectTrust::Approved,
+                crate::RulesSettings::from(&config::RulesConfig::default()),
+                None,
+                Some(root.path().to_path_buf()),
+                None,
+            )))
+            .with_benchmark_recorder(
+                BenchmarkSelector {
+                    role: Role::Worker,
+                    category: None,
+                    occurrence: 1,
+                },
+                recorder.clone(),
+            )
+            .unwrap();
+        let run = runtime.delegate_background(
+            Role::Orchestrator,
+            "benchmark".into(),
+            crate::RunConfig::default(),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(run))
+            .await
+            .unwrap()
+            .unwrap();
+        let checkpoint = recorder
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("child checkpoint");
+        let names = checkpoint
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        for name in ["apply_patch", "edit", "write"] {
+            assert!(names.contains(&name), "{names:?}");
+        }
+        let instructions = checkpoint
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .find(|text| text.starts_with("Benchmark execution constraints:"))
+            .unwrap();
+        let list = instructions
+            .split("available tools are ")
+            .nth(1)
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap()
+            .split(", ")
+            .collect::<Vec<_>>();
+        assert_eq!(list.contains(&"apply_patch"), apply_patch);
+        for name in ["edit", "write"] {
+            assert_eq!(list.contains(&name), !apply_patch);
+        }
+        let requests = requests.lock().unwrap();
+        let child_requests = requests
+            .iter()
+            .filter(|request| {
+                request.observation.as_ref().is_some_and(|observation| {
+                    observation.run_id == checkpoint.origin_run_id.to_string()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(child_requests.len(), 1);
+        let names = child_requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.contains(&"apply_patch"), apply_patch);
+        for name in ["edit", "write"] {
+            assert_eq!(names.contains(&name), !apply_patch);
+        }
+    }
+}
 
 #[tokio::test]
 async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {

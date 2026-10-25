@@ -20,6 +20,7 @@ fn profile(name: &str) -> ProviderProfile {
         models: vec![config::ModelEntryConfig::enabled(format!("{name}-model"))],
         excluded_models: Vec::new(),
         default_model: format!("{name}-model"),
+        edit_tool: None,
     };
     ProviderProfile::try_from((name, &config)).expect("profile")
 }

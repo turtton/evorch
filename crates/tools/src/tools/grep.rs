@@ -147,6 +147,9 @@ fn grep_command(pattern: &str, path: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // rg runs outside the sandbox but still must not inherit evorch's
+    // terminal or descriptors.
+    sandbox::process::apply_launch_policy(command.as_std_mut());
     command
 }
 
@@ -276,5 +279,56 @@ mod tests {
         super::collect_output(reader)
             .await
             .expect("bounded collection");
+    }
+
+    // Given: evorch holds a descriptor without O_CLOEXEC, and `rg` resolves to a
+    // stand-in that reports how it was started / When: the search command
+    // starts / Then: it leads a session of its own and the descriptor did not
+    // reach it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn rg_starts_in_its_own_session_without_evorch_descriptors() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let held = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let fd = rustix::io::fcntl_dupfd_cloexec(&held, 100).unwrap();
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+        // The Nix build sandbox has no /bin/sh.
+        let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("sh"))
+            .find(|sh| sh.is_file())
+            .expect("sh on PATH");
+        let report = dir.path().join("report");
+        let rg = dir.path().join("rg");
+        std::fs::write(
+            &rg,
+            format!(
+                "#!{}\n{{ echo $$; cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/{} || echo descriptor-closed; }} > '{}' 2>/dev/null\n",
+                sh.display(),
+                fd.as_raw_fd(),
+                report.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+
+        let mut command = super::grep_command("pattern", ".");
+        let status = command.env("PATH", path).status().await.unwrap();
+
+        assert!(status.success());
+        let report = std::fs::read_to_string(report).unwrap();
+        let lines: Vec<&str> = report.lines().collect();
+        let [pid, session, descriptor] = lines[..] else {
+            panic!("{report}");
+        };
+        assert!(pid.parse::<u32>().is_ok(), "{report}");
+        assert_eq!(session, pid, "{report}");
+        assert_eq!(descriptor, "descriptor-closed", "{report}");
     }
 }

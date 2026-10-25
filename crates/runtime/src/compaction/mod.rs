@@ -114,20 +114,71 @@ pub(crate) async fn compact_now(
         }
     }
 
+    // Only model-switch checkpoints replace raw history for future compaction.
+    // Ordinary checkpoints keep their existing cut and summary input byte-for-byte.
+    let indexed = state.context.compaction_view();
+    let compaction_messages: Vec<_> = indexed.iter().map(|(_, message)| message.clone()).collect();
     let protected_prefix = usize::from(
-        state
-            .context
-            .messages
+        compaction_messages
             .first()
             .is_some_and(|message| message.role == Role::System),
     );
-    let plan = select_cut(
-        &state.context.messages,
+    let protected_checkpoint = state
+        .context
+        .latest_checkpoint()
+        .filter(|checkpoint| checkpoint.protects_history);
+    let summary_index = protected_checkpoint.map(|checkpoint| {
+        checkpoint.range.0
+            + state.context.messages[checkpoint.range.0..checkpoint.range.1]
+                .iter()
+                .filter(|message| message.role == Role::System)
+                .count()
+    });
+    let mut plan = select_cut(
+        &compaction_messages,
         settings.keep_recent_tokens,
         protected_prefix,
     )
+    .or_else(|| {
+        // A large protected summary can itself exceed the next window even when
+        // there is no complete later turn. Re-summarize that summary, never raw calls.
+        let start = summary_index?;
+        Some(cut::CutPlan {
+            start,
+            end: start + 1,
+        })
+    })
     .ok_or(CompactionError::NothingToCompact)?;
-    let compacted = &state.context.messages[plan.start..plan.end];
+    if let Some(summary_index) = summary_index {
+        if plan.end <= summary_index {
+            plan = cut::CutPlan {
+                start: summary_index,
+                end: summary_index + 1,
+            };
+        }
+        // Expanding the raw replacement must also carry its existing summary into
+        // the new summarizer input, rather than silently dropping that evidence.
+        plan.start = plan.start.min(summary_index);
+    }
+    let compacted = &compaction_messages[plan.start..plan.end];
+    let mapped_start = indexed[plan.start].0;
+    let mapped_end = indexed
+        .get(plan.end)
+        .map_or(state.context.messages.len(), |(index, _)| *index);
+    plan.start = mapped_start;
+    plan.end = mapped_end;
+    let protects_history = state
+        .context
+        .latest_checkpoint()
+        .is_some_and(|checkpoint| checkpoint.protects_history);
+    if let Some(checkpoint) = state
+        .context
+        .latest_checkpoint()
+        .filter(|checkpoint| checkpoint.protects_history)
+    {
+        plan.start = plan.start.min(checkpoint.range.0);
+        plan.end = plan.end.max(checkpoint.range.1);
+    }
     // cut の protected floor が先頭 User(goal) を保護するため、goal は raw 履歴全体から取得する。
     let goal = first_user_text(&state.context.messages);
 
@@ -173,6 +224,7 @@ pub(crate) async fn compact_now(
             reason,
             model_preference,
             &SummaryInput { goal, compacted },
+            false,
         )
         .await
     };
@@ -224,6 +276,7 @@ pub(crate) async fn compact_now(
         id: checkpoint_id.clone(),
         summary: summary_message,
         range: (plan.start, plan.end),
+        protects_history,
     };
     attach_working_memory(state, &mut checkpoint.summary)?;
     let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))
@@ -285,6 +338,7 @@ async fn summarize_range(
     reason: CompactionReason,
     model_preference: Option<crate::ModelPreference>,
     input: &SummaryInput<'_>,
+    text_tool_history: bool,
 ) -> (
     Result<String, summary::SummarizeError>,
     Option<providers::Usage>,
@@ -303,7 +357,7 @@ async fn summarize_range(
         idle_timeout: std::time::Duration::from_secs(settings.summary_idle_timeout_secs),
         timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
     }
-    .summarize_with_usage(input)
+    .summarize_with_usage_for_switch(input, text_tool_history)
     .await;
     match result {
         Ok(summary) => (Ok(summary), usage),
@@ -320,9 +374,9 @@ async fn summarize_range(
 
 /// Prepares the context before the run's requests move to `selected` (ADR 0030).
 ///
-/// A checkpoint the target cannot replay is re-summarized from the raw messages it
-/// covers, and a history above the target's window × threshold is compacted. Both
-/// replace history at an explicit boundary; the switch already discards the cache.
+/// A requested re-summary replaces the previous editing interface's history, even
+/// without a checkpoint. History above the target's window × threshold is compacted.
+/// Both replace history at an explicit boundary; later requests preserve its prefix.
 pub(crate) async fn prepare_model_switch(
     state: &mut LoopState,
     selected: &str,
@@ -330,7 +384,7 @@ pub(crate) async fn prepare_model_switch(
 ) -> Result<(), CompactionError> {
     let original_checkpoints = state.context.checkpoints().len();
     if resummarize {
-        resummarize_latest_checkpoint(state).await?;
+        resummarize_history(state).await?;
     }
     let settings = state.shared.compaction.clone();
     let (window, _) = policy::resolve_window(
@@ -363,21 +417,49 @@ pub(crate) async fn prepare_model_switch(
     Ok(())
 }
 
-/// Replaces the latest checkpoint's compaction block with a text summary of the raw
-/// messages it covers. The block itself is never read or forwarded.
-async fn resummarize_latest_checkpoint(state: &mut LoopState) -> Result<(), CompactionError> {
-    let Some(latest) = state.context.latest_checkpoint() else {
-        return Ok(());
-    };
-    if !latest
-        .summary
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Compaction { .. }))
-    {
+/// Reuses the text re-summary boundary for both opaque checkpoints and editing
+/// interface switches. Include the completed tool batch at the tail: the ordinary
+/// compaction cut deliberately retains that batch, which would replay old edit calls.
+async fn resummarize_history(state: &mut LoopState) -> Result<(), CompactionError> {
+    let messages = &state.context.messages;
+    let mut start = usize::from(
+        messages
+            .first()
+            .is_some_and(|message| message.role == Role::System),
+    );
+    if messages.get(start).is_some_and(|message| {
+        message.role == Role::User
+            && matches!(message.content.first(), Some(ContentBlock::Text { .. }))
+            && message.content.iter().all(|block| {
+                !matches!(
+                    block,
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                )
+            })
+    }) {
+        start += 1;
+    }
+    // Keep the newest plain user input verbatim, but never keep an old tool batch.
+    let mut end = messages.len();
+    if messages.last().is_some_and(|message| {
+        message.role == Role::User
+            && matches!(message.content.first(), Some(ContentBlock::Text { .. }))
+            && message.content.iter().all(|block| {
+                !matches!(
+                    block,
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                )
+            })
+    }) {
+        end = end.saturating_sub(1);
+    }
+    if let Some(latest) = state.context.latest_checkpoint() {
+        start = start.min(latest.range.0);
+        end = end.max(latest.range.1);
+    }
+    if start >= end {
         return Ok(());
     }
-    let (start, end) = latest.range;
     state.activity(event_bus::RunActivity::Compaction);
     let settings = state.shared.compaction.clone();
     let estimated_before = state.estimated_context_tokens(&state.context.visible_messages());
@@ -392,6 +474,7 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) -> Result<(), Comp
         CompactionReason::ModelSwitch,
         model_preference,
         &SummaryInput { goal, compacted },
+        true,
     )
     .await;
     state.compaction.in_flight = false;
@@ -420,6 +503,7 @@ async fn resummarize_latest_checkpoint(state: &mut LoopState) -> Result<(), Comp
             }],
         },
         range: (start, end),
+        protects_history: true,
     };
     attach_working_memory(state, &mut checkpoint.summary)?;
     let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))

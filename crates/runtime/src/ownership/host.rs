@@ -308,6 +308,7 @@ fn emit(bus: &EventBus, owner: &ThreadOwner, action: OwnershipAction) {
 }
 
 /// What the heartbeat worker needs besides its registry connection.
+#[derive(Clone, Copy)]
 struct Worker<'a> {
     db: &'a Path,
     id: &'a str,
@@ -328,8 +329,8 @@ fn serve(
         id,
         settings,
         bus,
-        release_deferred,
         scratch,
+        ..
     } = worker;
     let mut heartbeat = std::time::Instant::now();
     // Generations this host held at its last scan. One that is gone from a
@@ -356,77 +357,97 @@ fn serve(
             Err(_) => break,
         }
         if heartbeat.elapsed() >= Duration::from_millis(settings.heartbeat_ms.get()) {
-            match registry.list() {
-                Ok(owners) => {
-                    let owned: Vec<_> = owners
-                        .into_iter()
-                        .filter(|owner| {
-                            owner.lease.owner_id == id && owner.state != OwnerState::Released
-                        })
-                        .collect();
-                    for (thread, lease) in &held {
-                        if !owned.iter().any(|owner| {
-                            owner.thread_id == *thread && owner.lease.generation == lease.generation
-                        }) {
-                            authority::record_fenced(db, thread, lease);
-                        }
-                    }
-                    held.clear();
-                    for owner in owned {
-                        let result = registry.update(&owner.thread_id, |state| {
-                            state.validate(&owner.lease)?;
-                            if state.state == OwnerState::Quiescing
-                                && !state.active_turn
-                                && !release_deferred.load(Ordering::SeqCst)
-                            {
-                                state.release(&owner.lease)?;
-                            } else {
-                                state.heartbeat(&owner.lease, now_ms())?;
-                            }
-                            Ok(())
-                        });
-                        match &result {
-                            Ok(changed) if changed.state == OwnerState::Released => {
-                                authority::record_fenced(db, &owner.thread_id, &owner.lease);
-                                scratch.release_thread(&changed.thread_id);
-                            }
-                            Err(error) if error.is_fenced() => {
-                                authority::record_fenced(db, &owner.thread_id, &owner.lease);
-                            }
-                            // Contention keeps the generation: only a fence revokes it.
-                            Ok(_) | Err(_) => {
-                                held.insert(owner.thread_id.clone(), owner.lease.clone());
-                            }
-                        }
-                        match result {
-                            Ok(changed) => emit(
-                                bus,
-                                &changed,
-                                if changed.state == OwnerState::Released {
-                                    OwnershipAction::Released
-                                } else {
-                                    OwnershipAction::Heartbeat
-                                },
-                            ),
-                            Err(error) => tracing::warn!(
-                                thread_id = %owner.thread_id,
-                                owner_id = %owner.lease.owner_id,
-                                generation = owner.lease.generation,
-                                %error,
-                                "owner heartbeat update failed"
-                            ),
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(owner_id = %id, %error, "owner heartbeat registry scan failed")
-                }
-            }
+            heartbeat_tick(&mut registry, &mut held, worker);
             heartbeat = std::time::Instant::now();
         }
         match stop.recv_timeout(Duration::from_millis(10)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+/// One heartbeat tick: detect generations this host lost since the last tick,
+/// then renew or release every held thread that needs it in one transaction.
+/// Threads whose leases have time left are not written at all.
+fn heartbeat_tick(
+    registry: &mut Registry,
+    held: &mut std::collections::BTreeMap<String, Lease>,
+    worker: Worker<'_>,
+) {
+    let Worker {
+        db,
+        id,
+        settings,
+        bus,
+        release_deferred,
+        scratch,
+    } = worker;
+    let owners = match registry.list() {
+        Ok(owners) => owners,
+        Err(error) => {
+            tracing::warn!(owner_id = %id, %error, "owner heartbeat registry scan failed");
+            return;
+        }
+    };
+    let owned: Vec<_> = owners
+        .into_iter()
+        .filter(|owner| owner.lease.owner_id == id && owner.state != OwnerState::Released)
+        .collect();
+    for (thread, lease) in held.iter() {
+        if !owned
+            .iter()
+            .any(|owner| owner.thread_id == *thread && owner.lease.generation == lease.generation)
+        {
+            authority::record_fenced(db, thread, lease);
+        }
+    }
+    // Contention keeps every generation: only an observed fence revokes one.
+    *held = owned
+        .iter()
+        .map(|owner| (owner.thread_id.clone(), owner.lease.clone()))
+        .collect();
+    let now = now_ms();
+    let heartbeat_ms = settings.heartbeat_ms.get();
+    let release = !release_deferred.load(Ordering::SeqCst);
+    if owned
+        .iter()
+        .all(|owner| owner.heartbeat_tick(now, heartbeat_ms, release) == super::HeartbeatTick::Keep)
+    {
+        return;
+    }
+    let outcomes = match registry.heartbeat_owned(id, now, heartbeat_ms, release) {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            tracing::warn!(owner_id = %id, %error, "owner heartbeat update failed");
+            return;
+        }
+    };
+    for super::registry::HeartbeatOutcome { previous, result } in outcomes {
+        match result {
+            Ok((super::registry::HeartbeatChange::Kept, _)) => {}
+            Ok((super::registry::HeartbeatChange::Renewed, owner)) => {
+                emit(bus, &owner, OwnershipAction::Heartbeat);
+            }
+            Ok((super::registry::HeartbeatChange::Released, owner)) => {
+                authority::record_fenced(db, &previous.thread_id, &previous.lease);
+                held.remove(&previous.thread_id);
+                scratch.release_thread(&owner.thread_id);
+                emit(bus, &owner, OwnershipAction::Released);
+            }
+            Err(error) => {
+                if matches!(error, super::OwnershipError::Fenced) {
+                    authority::record_fenced(db, &previous.thread_id, &previous.lease);
+                    held.remove(&previous.thread_id);
+                }
+                tracing::warn!(
+                    thread_id = %previous.thread_id,
+                    owner_id = %previous.lease.owner_id,
+                    generation = previous.lease.generation,
+                    %error,
+                    "owner heartbeat update failed"
+                );
+            }
         }
     }
 }

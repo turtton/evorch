@@ -74,6 +74,7 @@ fn profile(
         credential,
         models: vec![MODEL.to_string()],
         default_model: MODEL.to_string(),
+        edit_tool: Default::default(),
     }
 }
 

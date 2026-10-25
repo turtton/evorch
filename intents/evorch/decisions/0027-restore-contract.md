@@ -8,6 +8,8 @@ Accepted（2026-09-21）。root履歴の明示的な権限更新と終端処理�
 `final-approval` に記録している。
 2026-09-24、利用者の「実行結果が取れなかったものはそういうエラーとして処理して
 会話を継続させる」指示に基づき、第5節のchat継続契約を改訂した。
+2026-10-25、利用者の明示決定により、Done/Error の root も子孫を動かしたまま
+継続でき、同じ thread に複数の live root を許す契約へ改訂した（末尾の追補）。
 
 ## Context
 
@@ -43,16 +45,20 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
 |---|---|---|
 | renewable | `ownership` | 古いpermitを復元せず、呼出元の現在の権限を検証して付与する。既存のownership-only判定を維持する。 |
 | renewable（root限定） | `memory`、`finding_store` | Single/DynamicTeamのrootだけを対象とし、現在の設定を使う。旧MemoryBoundaryや保存先を開かない。履歴中のlessonは過去の参考情報に留める。 |
-| renewable（team root限定） | `topology`（DynamicTeam）、`team`、`team_store`、`delegation_value` | root Orchestratorの履歴を、同一team IDに対する現在のTeamStore・topology・非空の委譲設定で継続する。下記の停止・claim条件を必須とする。 |
+| renewable（team root限定） | `topology`（DynamicTeam）、`team`、`team_store`、`delegation_value` | root Orchestratorの履歴を、同一team IDに対する現在のTeamStore・topology・非空の委譲設定で継続する。下記の実行競合・claim条件を必須とする。 |
 | blocking | `team_task`、non-rootのteam構造、childのmemory/finding、`learning_internal`、`workspace_branch` | 旧workerのlease、実行構造、学習処理、branchをこの入口で再開しない。常に拒否する。 |
 | security/privacy | `skip_secret_redaction`などの配慮設定、およびhard blockerを含む組み合わせ | 保存済み情報から権限を拡張しない。ownershipやrenewable設定が同居してもhard blockerを緩めない。 |
 
 ### 3. root履歴の継続条件
 
 - `continue_goal` / `delegate_chat` は記録のroot識別子、role、parentを検証する。
-  停止済みrootの履歴を再利用するときは、元rootと既知の子孫が停止済みであることを
-  確認する。provider admission待ちの子も対象とし、admissions→runsの同じlock順で
-  登録との隙間を作らない。動作中rootへの通常のメッセージ送信は別経路である。
+  Stopped/Done/Error のroot履歴は、子孫が動作中でも再利用できる。同じroot IDの
+  live incarnationまたはprovider admission待ちは拒否する。Checkpoint記録は、
+  元rootと既知の子孫（provider admission待ちを含む）が動作中なら引き続き拒否する。
+  admissions→runsの同じlock順で登録との隙間を作らない。
+  動作中rootへの通常のメッセージ送信は別経路である。
+- 同じthreadに異なるIDのrootが複数動作することを許す。会話単位の排他制限は加えず、
+  同じroot IDの競合だけを防ぐ（Checkpointの子孫条件は上記のとおり）。
 - DynamicTeamの記録にはteam IDとcoordinator run IDだけを保存し、DB path、writer、
   permit、lease、semaphoreを含めない。記録だけを根拠にTeamStoreを開かない。
 - 現在の呼出元が同一team IDのTeamStore、DynamicTeam topology、非空の委譲設定を
@@ -95,7 +101,7 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
   引数や孤立したToolResultを捏造せず、call ID/nameを含む通知を使う。
   既存履歴・cancelled結果・cache prefixは書き換えない。
 - `restore_and_deliver` は副作用不明の記録を引き続き拒否する。現在の権限・root識別・
-  team/claim・子孫停止・消費済み記録・非対応設定の確認は会話継続でも維持する。
+  team/claim・第3節の実行競合条件・消費済み記録・非対応設定の確認は会話継続でも維持する。
   cleanup失敗で旧shell processが動作中なら継続を拒否する。新規snapshotは未確認結果と
   設定の拒否理由を独立に保持し、既存rootの `unresolved_tool_calls` 記録は現在権限で
   履歴だけを再利用する。escalation先の状態取得・thread間連携はこの変更に含めない。
@@ -128,7 +134,7 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
 
 ## Evidence（実装検証）
 
-- `crates/runtime/tests/restore_expansion.rs`: 現在権限、再起動、team/claim、子孫停止、
+- `crates/runtime/tests/restore_expansion.rs`: 現在権限、再起動、team/claim、
   admission、memory/finding境界。
 - `crates/runtime/tests/restore_tool_intent.rs`: dispatch前保存、未完了tool、取消、保存失敗。
 - `crates/runtime/tests/shell_jobs_integration.rs`: process回収、同一ID即時継続、
@@ -193,3 +199,40 @@ blocking にある `workspace_branch` は、拒否する対象そのものが存
 
 検証: `crates/runtime/tests/held_reports.rs`、`messaging_completion.rs`、
 `crates/gui/tests/headless_conversation/thread_resume_status.rs`。
+
+## Addendum（2026-10-25、子孫を残した Done/Error root の継続）
+
+利用者は「完了またはエラーで終わった親を、子がまだ動いているときに再開してよい」、
+「同じ会話の中で複数の root run が同時に動くことを許してよい」と明示決定した。
+operator Stopped の例外だけでは、Done/Error の親の手動継続や、別の子が動いている
+間の保留報告による自動wakeを拒否していたため、第3節をこの決定に合わせて改訂する。
+
+- Stopped/Done/Error 記録は、生存中またはadmission待ちの子・孫がいても継続できる。
+  同じroot IDの Pending/Running/Waiting incarnationと未完了admissionは引き続き拒否する。
+- `continue_goal` / `resume_chat` / `wake_chat` は同じroot IDで再登録する。
+  生きている子のparent linkは変更せず、その後の報告は新しい親のmailboxへ届く。
+  `list_agents`、`wait`、`run_output` も既存の親子識別を使い、旧delegate/toolを再実行せず
+  子の状態確認・待機・結果回収を行える。
+- 保留メッセージは再登録時に、登録と同じruns lock下でキューから取り除きmailboxへ移す。
+  子の終端報告の一度だけのrelay、operator Stop中の自動wake抑止、
+  `AUTO_WAKE_LIMIT` は変更しない。
+- 自動wakeの受理時にもoperator Stopを検証し、既に発行されたwake要求が後発のStopを
+  越えて再登録しない。Stopとchat復元はrun単位のgateで、Stop確認から同期登録または
+  admission予約までを直列化する。Stopは他のchatのstorage復元gateを待たない。
+  予約後のStopはadmissions→runsのfenceで登録を抑止する。admission成功は登録と同じ
+  fence内で公開し、登録済みrunが結果通知待ちのadmissionとして停止を逃れない。
+  admission待ちのStopも明示resumeまで保持する。拒否・admission取消時はsnapshotと
+  保留報告を残し、利用者の `resume_chat` / `continue_goal` だけが停止を解除できる。
+- `delegate_chat` は従来どおり新しいroot IDで履歴を再利用する。同じthreadの他のlive rootは
+  拒否理由にしない。旧rootの子を新rootへ付け替える変更ではなく、旧parent linkと
+  旧root宛ての報告を維持する。
+- Checkpoint は終端phaseではなく、tool dispatch前や実行途中にも保存される。
+  crash等による中断記録の安全条件をこの依頼で拡張せず、既存の子孫拒否を維持する。
+- 元rootのshell cleanup、ownership・root identity・設定検証、消費済みsnapshotの拒否、
+  未確認結果の `ToolExecutionOutcomeUnknown` 通知と旧tool/jobの非再実行を維持する。
+  拒否はsnapshotを消費しない。DynamicTeamも同一teamの現在権限とclaim照合を維持し、
+  生きているworkerのclaimed task（期限切れを含む）があれば引き続き拒否する。
+
+検証: `crates/runtime/src/runtime/chat_restore/renewal.rs` のphase別競合テスト、
+`crates/runtime/tests/held_reports.rs` のDone/Error再開・子の結果回収・保留分の一度だけの配送。
+関連feature: [durable execution states](../features/orchestration/durable-execution-states.md)。

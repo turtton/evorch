@@ -1,8 +1,10 @@
-//! Shell commands must not share evorch's controlling terminal.
+//! Shell commands must not share evorch's controlling terminal or descriptors.
 //!
 //! A command in a background process group of that terminal is stopped by
 //! SIGTTIN as soon as it reads `/dev/tty` (for example a git credential
 //! prompt), and then never finishes. Detached commands get an error instead.
+//! Descriptors evorch holds without `O_CLOEXEC` (the GUI's browser engine
+//! leaves many) must not reach the command either.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -88,6 +90,73 @@ fn run_probes_with_terminal() {
         .expect("run the job probe");
     assert!(
         job.content.contains("status: completed") && job.content.contains("terminal-detached\n"),
+        "{}",
+        job.content
+    );
+}
+
+// Given: evorch holds a descriptor without O_CLOEXEC / When: the shell tool
+// runs a command synchronously and as a job / Then: neither command sees it,
+// while a child started without the launch policy does.
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_commands_do_not_inherit_evorch_descriptors() {
+    use std::os::fd::AsRawFd;
+    let file = tempfile::NamedTempFile::new().expect("temporary file");
+    // A high number keeps the probe off any descriptor the shell opens itself.
+    let fd = rustix::io::fcntl_dupfd_cloexec(&file, 100).expect("duplicate the descriptor");
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).expect("clear FD_CLOEXEC");
+    let name = file
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("UTF-8 file name")
+        .to_owned();
+    let probe = format!(
+        "readlink /proc/self/fd/{} || echo descriptor-closed",
+        fd.as_raw_fd()
+    );
+    let plain = std::process::Command::new("sh")
+        .args(["-c", &probe])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the probe without the launch policy");
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains(&name),
+        "without the launch policy the child inherits the descriptor, or this probe proves nothing"
+    );
+
+    let state = tempfile::tempdir().expect("shell handle state directory");
+    tools::set_shell_job_handle_dir(state.path().join("shell-job-handles"))
+        .expect("isolate shell job handle state");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build the test runtime");
+    let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    let synchronous = runtime
+        .block_on(shell.execute(json!({ "command": probe })))
+        .expect("run the synchronous probe");
+    assert!(
+        synchronous.content.contains("descriptor-closed") && !synchronous.content.contains(&name),
+        "{}",
+        synchronous.content
+    );
+    let context = ToolExecutionContext {
+        run_id: "run-descriptor-probe".into(),
+        thread_id: None,
+        call_id: None,
+    };
+    let job = runtime
+        .block_on(
+            shell
+                .execute_with_context(&context, json!({ "command": probe, "yield_ms": 1_800_000 })),
+        )
+        .expect("run the job probe");
+    assert!(
+        job.content.contains("status: completed")
+            && job.content.contains("descriptor-closed")
+            && !job.content.contains(&name),
         "{}",
         job.content
     );

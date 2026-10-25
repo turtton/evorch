@@ -1,3 +1,5 @@
+mod custom;
+
 use super::ResponsesStreamInterpreter;
 use crate::error::ProviderError;
 use crate::http::stream::WireStreamInterpreter;

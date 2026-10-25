@@ -90,6 +90,22 @@ impl Frozen {
 
 #[async_trait]
 impl AgentModel for Frozen {
+    fn narrows_edit_tools(&self) -> bool {
+        true
+    }
+
+    fn edit_tool_for_run(
+        &self,
+        _run_id: &str,
+        _role: Role,
+        _category: Option<&str>,
+    ) -> Option<config::EditToolConfig> {
+        self.model.route_edit_tool(
+            &self.settings.preference.profile,
+            self.settings.preference.model.as_deref()?,
+        )
+    }
+
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         format!(
             "{}/{}",

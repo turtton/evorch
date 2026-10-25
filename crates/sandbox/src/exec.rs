@@ -35,6 +35,22 @@ impl WrappedCommand {
         command.envs(self.env.iter().cloned());
     }
 
+    /// The process command that starts this wrapped command: program,
+    /// arguments, environment and working directory under evorch's launch
+    /// policy ([`crate::process::apply_launch_policy`]), so it runs in its own
+    /// session and inherits only its standard streams. Tokio callers convert it
+    /// with `tokio::process::Command::from`.
+    pub fn to_command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        self.apply_environment(&mut command);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        crate::process::apply_launch_policy(&mut command);
+        command
+    }
+
     /// Diagnose deterministic launch failures before entering a model/tool retry
     /// loop. This does not execute a probe or disable sandboxing.
     pub fn preflight(&self) -> Result<(), SandboxError> {

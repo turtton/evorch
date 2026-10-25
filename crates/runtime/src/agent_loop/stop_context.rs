@@ -53,7 +53,8 @@ fn reason_tool_name(name: &str) -> String {
 
 impl LoopState {
     /// Records `result` as the run's last tool result and returns its failure
-    /// class. A typed error keeps its class; an error text is classified by its
+    /// class. A typed error keeps its class; a failed result is classified by
+    /// the class apply_patch records in its detail, or else by the error text's
     /// fixed prefix only.
     pub(super) fn record_tool_outcome(
         &mut self,
@@ -63,7 +64,7 @@ impl LoopState {
     ) -> Option<ToolErrorClass> {
         let error = result
             .is_error
-            .then(|| typed.unwrap_or_else(|| ToolErrorClass::from_content(&result.content)));
+            .then(|| typed.unwrap_or_else(|| ToolErrorClass::from_result(result)));
         self.last_tool = Some(ToolOutcome {
             tool: tool.to_owned(),
             error,

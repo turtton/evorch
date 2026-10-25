@@ -95,6 +95,44 @@ fn current_tool_set_and_cleared() {
     );
 }
 
+#[test]
+fn ending_a_run_clears_its_tool_but_waiting_keeps_it() {
+    for (to, kept) in [
+        (AgentRunPhase::Waiting, true),
+        (AgentRunPhase::Stopped, false),
+        (AgentRunPhase::Done, false),
+        (AgentRunPhase::Error, false),
+    ] {
+        // Given: a run executing a call.
+        let mut overlay = TelemetryOverlay::new();
+        overlay.apply_event(&Event::new(LifecycleEvent::RunProgress {
+            run_id: "run-1".into(),
+            activity: event_bus::RunActivity::Tools,
+            context: None,
+        }));
+        overlay.apply_event(&Event::new(ToolEvent::ToolStarted {
+            input: None,
+            tool_name: "read".into(),
+            call_id: "call-1".into(),
+            run_id: Some("run-1".into()),
+        }));
+        // When: the run changes phase before the call reports a result.
+        overlay.apply_event(&agent_run_changed("run-1", AgentRunPhase::Running, to));
+        // Then: only an ended run stops showing the call.
+        let row = overlay.row("run-1").expect("telemetry row");
+        assert_eq!(
+            row.current_tool.as_deref(),
+            kept.then_some("read"),
+            "{to:?}"
+        );
+        assert_eq!(
+            row.activity_label(),
+            if kept { "read" } else { "idle" },
+            "{to:?}"
+        );
+    }
+}
+
 fn agent_run_started(run_id: &str) -> Event {
     Event::new(LifecycleEvent::AgentRunStarted {
         run_id: run_id.into(),

@@ -15,7 +15,9 @@ use tools::executor::PreparedToolCall;
 use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
 use super::LoopState;
-use crate::escalation::detector::{EscalationDetector, ToolErrorClass, ToolObservation};
+use crate::escalation::detector::{
+    EscalationDetector, ToolErrorClass, ToolObservation, patch_rewrite_paths,
+};
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, InterruptKind, META_OPS, is_meta_op, meta, rules};
 
@@ -410,6 +412,221 @@ mod rework_tests {
     async fn terminal_barrier_skips_tail_preflight_events() {
         let (events, _, _) = scenario("terminal").await;
         assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. } | ToolEvent::ExecutionDenied { call_id, .. } | ToolEvent::ApprovalRequested { call_id, .. }) if call_id.contains("second"))));
+    }
+
+    /// A Worker runtime whose standard tools apply patches inside `root` without
+    /// asking, scripted to make `calls` in one batch each and then stop.
+    fn patch_runtime(
+        root: &std::path::Path,
+        calls: Vec<providers::ChatResponse>,
+        escalation: EscalationSettings,
+    ) -> (AgentRuntime, Arc<ScriptedModel>, event_bus::EventReceiver) {
+        let bus = Arc::new(event_bus::EventBus::new(256));
+        let events = bus.subscribe();
+        let mut executor = tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        executor.set_policy(sandbox::ApprovalPolicy::allow_all());
+        executor.set_default_cwd(root.to_path_buf());
+        let model = Arc::new(ScriptedModel::new(
+            calls
+                .into_iter()
+                .chain([text_response("done", providers::FinishReason::Stop)]),
+        ));
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
+            .with_escalation_settings(escalation);
+        (runtime, model, events)
+    }
+
+    fn patch_call(id: &str, patch: &str) -> providers::ChatResponse {
+        tool_response(id, "apply_patch", json!({ "input": patch }))
+    }
+
+    fn proposals(events: &[Event]) -> Vec<event_bus::EscalationTrigger> {
+        events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Lifecycle(LifecycleEvent::EscalationProposed { trigger, .. }) => {
+                    Some(trigger.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Given: rules in three directories and a patch that moves a file out of the
+    //        first into the second and deletes one in the third
+    // When: the patch succeeds in a Worker run
+    // Then: the rules of all three directories reach the next request, so every
+    //       path the patch names, move source and deletion included, selected rules
+    #[tokio::test]
+    async fn successful_apply_patch_selects_rules_for_every_named_path() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("project");
+        for (directory, marker) in [("a", "RULE-A"), ("b", "RULE-B"), ("c", "RULE-C")] {
+            std::fs::create_dir_all(root.join(directory)).expect("directory");
+            std::fs::write(root.join(directory).join("AGENTS.md"), marker).expect("rules");
+        }
+        std::fs::write(root.join("a/old.rs"), "old\n").expect("source");
+        std::fs::write(root.join("c/gone.rs"), "gone\n").expect("deleted");
+        let (runtime, model, _events) = patch_runtime(
+            &root,
+            vec![patch_call(
+                "patch",
+                "*** Begin Patch\n*** Update File: a/old.rs\n*** Move to: b/new.rs\n@@\n-old\n+new\n*** Delete File: c/gone.rs\n*** End Patch",
+            )],
+            EscalationSettings::default(),
+        );
+        let runtime = runtime.with_project_rules(Arc::new(crate::RulesSource::new(
+            crate::ProjectTrust::Approved,
+            crate::RulesSettings {
+                context_window_tokens: 200_000,
+                response_headroom_tokens: 16_384,
+                max_injection_bytes: 65_536,
+            },
+            None,
+            Some(root.clone()),
+            None,
+        )));
+
+        let run = runtime.delegate_background(Role::Worker, "patch".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await.expect("wait"), AgentRunPhase::Done);
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("b/new.rs")).expect("moved"),
+            "new\n"
+        );
+        let observed = model.observed().await;
+        let texts = |messages: &[providers::Message]| -> String {
+            messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|block| match block {
+                    providers::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let before = texts(&observed[0]);
+        let after = texts(observed.last().expect("request"));
+        for marker in ["RULE-A", "RULE-B", "RULE-C"] {
+            assert!(!before.contains(marker), "{marker} before the patch");
+            assert!(after.contains(marker), "{marker} after the patch: {after}");
+        }
+    }
+
+    // Given: a threshold of two consecutive edit failures
+    // When: a Worker sends a patch that does not parse and then one whose
+    //       context does not match the file
+    // Then: both count as edit failures, and the no-progress evidence names the
+    //       patch's own failure class instead of guessing from its text
+    #[tokio::test]
+    async fn failing_patches_propose_consecutive_edit_failures_with_their_class() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::write(temp.path().join("lib.rs"), "actual\n").expect("file");
+        let (runtime, _model, mut events) = patch_runtime(
+            temp.path(),
+            vec![
+                patch_call("parse", "garbage"),
+                patch_call(
+                    "match",
+                    "*** Begin Patch\n*** Update File: lib.rs\n@@\n-expected\n+new\n*** End Patch",
+                ),
+            ],
+            EscalationSettings {
+                consecutive_edit_failures: 2,
+                same_file_rewrites: 1,
+                tool_call_threshold: 100,
+            },
+        );
+
+        let run = runtime.delegate_background(Role::Worker, "patch".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await.expect("wait"), AgentRunPhase::Done);
+
+        let events = drain_events(&mut events).await;
+        assert_eq!(
+            proposals(&events),
+            [event_bus::EscalationTrigger::ConsecutiveEditFailures { count: 2 }],
+            "{events:?}"
+        );
+        let detail = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Diagnostic(diagnostic)
+                    if diagnostic.code == diagnostic_codes::NO_PROGRESS =>
+                {
+                    Some(diagnostic.detail.clone())
+                }
+                _ => None,
+            })
+            .expect("no-progress diagnostic");
+        assert!(
+            detail.lines().any(|line| line == "tool=apply_patch"),
+            "{detail}"
+        );
+        assert!(
+            detail
+                .lines()
+                .any(|line| line == "error=edit_target_not_found"),
+            "{detail}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("lib.rs")).expect("file"),
+            "actual\n"
+        );
+    }
+
+    // Given: a threshold of two rewrites of one file
+    // When: a Worker patches the same relative path twice, the first time naming
+    //       it twice in one patch
+    // Then: the second call proposes a repeated rewrite of the file resolved in
+    //       the workspace
+    #[tokio::test]
+    async fn patching_one_file_twice_proposes_a_repeated_rewrite() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::write(temp.path().join("lib.rs"), "one\n").expect("file");
+        let (runtime, _model, mut events) = patch_runtime(
+            temp.path(),
+            vec![
+                patch_call(
+                    "first",
+                    "*** Begin Patch\n*** Update File: lib.rs\n@@\n-one\n+two\n*** Update File: ./lib.rs\n@@\n-two\n+three\n*** End Patch",
+                ),
+                patch_call(
+                    "second",
+                    "*** Begin Patch\n*** Update File: lib.rs\n@@\n-three\n+four\n*** End Patch",
+                ),
+            ],
+            EscalationSettings {
+                consecutive_edit_failures: 100,
+                same_file_rewrites: 2,
+                tool_call_threshold: 100,
+            },
+        );
+
+        let run = runtime.delegate_background(Role::Worker, "patch".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await.expect("wait"), AgentRunPhase::Done);
+
+        let events = drain_events(&mut events).await;
+        let completed: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Tool(ToolEvent::ToolCompleted {
+                    call_id, is_error, ..
+                }) => Some((call_id.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, [("first", false), ("second", false)]);
+        assert_eq!(
+            proposals(&events),
+            [event_bus::EscalationTrigger::RepeatedFileRewrite {
+                path: temp.path().join("lib.rs").to_string_lossy().into_owned(),
+                count: 2,
+            }],
+            "{events:?}"
+        );
     }
 }
 
@@ -960,21 +1177,24 @@ impl LoopState {
                             stalled = Some((id.clone(), name.clone(), input.clone(), error_class));
                         }
                     }
-                    let rule_target = matches!(name.as_str(), "read" | "write" | "edit" | "grep")
-                        .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
-                        .flatten();
+                    let rule_targets_for_call = call_rule_targets(&name, &input);
                     // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
                     // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
-                    let observation_path = if matches!(name.as_str(), "edit" | "write") {
-                        rule_target.as_deref().map(PathBuf::from)
-                    } else {
-                        None
+                    let observation_paths = match name.as_str() {
+                        _ if !observed => Vec::new(),
+                        "edit" | "write" => rule_targets_for_call.clone(),
+                        // The tool resolves the patch against the executor's workspace.
+                        "apply_patch" => patch_rewrite_paths(
+                            &input,
+                            self.shared.executor.default_cwd().as_deref(),
+                        ),
+                        _ => Vec::new(),
                     };
                     if observed
                         && let Some(trigger) = self.escalation_detector.observe(
                             &ToolObservation {
                                 tool: name.as_str(),
-                                path: observation_path,
+                                paths: observation_paths,
                                 is_error: result.is_error,
                             },
                             &self.shared.escalation,
@@ -1006,19 +1226,16 @@ impl LoopState {
                     }
                     if observed && !result.is_error {
                         if name == "read"
-                            && let Some(path) = rule_target.as_deref()
+                            && let Some(path) = rule_targets_for_call.first()
                         {
-                            self.budget.read(std::path::Path::new(path));
+                            self.budget.read(path);
                         }
                         if !is_meta_op(&name) {
                             self.budget.mark_progress();
                         }
                     }
-                    if observed
-                        && !result.is_error
-                        && let Some(target) = rule_target
-                    {
-                        rule_targets.push(target);
+                    if observed && !result.is_error {
+                        rule_targets.extend(rule_targets_for_call);
                     }
                     if observed
                         && !result.is_error
@@ -1065,17 +1282,7 @@ impl LoopState {
     }
 
     fn shared_call(&self, call: &BatchCall) -> bool {
-        !is_meta_op(&call.name)
-            && !matches!(
-                call.name.as_str(),
-                "task_claim" | "task_complete" | "finding_append"
-            )
-            && !self
-                .shared
-                .executor
-                .tool_permissions(&call.name)
-                .is_some_and(|permissions| permissions.fs_write)
-            && self.shared.executor.tool_execution_mode(&call.name) == ToolExecutionMode::Shared
+        shares_wave(&self.shared.executor, &call.name)
     }
 
     /// Network tools are gated by role and tool policy. Fetch also reviews the actual input.
@@ -1317,6 +1524,38 @@ impl LoopState {
     }
 }
 
+/// Paths of one call that select project rules once it succeeds: the `path` of
+/// read, write, edit and grep, and every path an apply_patch input names, as
+/// written and including move sources and deleted files.
+fn call_rule_targets(name: &str, input: &Value) -> Vec<PathBuf> {
+    match name {
+        "read" | "write" | "edit" | "grep" => input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .into_iter()
+            .collect(),
+        "apply_patch" => input
+            .get("input")
+            .and_then(Value::as_str)
+            .and_then(|patch| apply_patch::targets_raw(patch).ok())
+            .map(|targets| targets.into_iter().map(|(raw, _)| raw).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a call to `name` may run in one wave with its neighbors. File
+/// writers, apply_patch included, and exclusive tools always run alone.
+fn shares_wave(executor: &tools::ToolExecutor, name: &str) -> bool {
+    !is_meta_op(name)
+        && !matches!(name, "task_claim" | "task_complete" | "finding_append")
+        && !executor
+            .tool_permissions(name)
+            .is_some_and(|permissions| permissions.fs_write)
+        && executor.tool_execution_mode(name) == ToolExecutionMode::Shared
+}
+
 /// 標準ツール定義を返す。
 /// Web tools are filtered by role and the current Web tool switch.
 pub(crate) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
@@ -1409,12 +1648,13 @@ mod tests {
             ("read", tools::Read.schema()),
             ("edit", tools::Edit.schema()),
             ("write", tools::Write.schema()),
+            ("apply_patch", tools::ApplyPatch::new().schema()),
         ];
 
         // When: runtime builds the model-facing definitions.
         let specs = standard_tool_specs();
 
-        // Then: both parameter schemas reach the model unchanged.
+        // Then: every parameter schema reaches the model unchanged.
         for (name, schema) in expected {
             let spec = specs.iter().find(|spec| spec.name == name).unwrap();
             assert_eq!(spec.input_schema, schema);
@@ -1492,7 +1732,15 @@ mod tests {
             let tool_names = names(&specs);
             assert_eq!(tool_names.contains(&"web_search"), enabled);
             assert_eq!(tool_names.contains(&"web_fetch"), enabled);
-            for tool in ["read", "write", "edit", "shell", "grep", "git_diff"] {
+            for tool in [
+                "read",
+                "write",
+                "edit",
+                "apply_patch",
+                "shell",
+                "grep",
+                "git_diff",
+            ] {
                 assert!(tool_names.contains(&tool), "worker baseline keeps {tool}");
             }
             assert!(!tool_names.contains(&"delegate"));
@@ -1546,6 +1794,114 @@ mod tests {
         assert!(!names(&specs).contains(&"skill_load"));
         assert!(names(&specs).contains(&"edit"));
         assert!(names(&specs).contains(&"write"));
+        assert!(names(&specs).contains(&"apply_patch"));
+    }
+
+    // Given: the standard tools and every role's policy
+    // When: visible_tool_specs builds each role's definitions
+    // Then: apply_patch is shown exactly where edit and write are, to the Worker
+    #[test]
+    fn visible_tool_specs_expose_apply_patch_only_with_edit_and_write() {
+        for role in [
+            Role::Orchestrator,
+            Role::Explorer,
+            Role::Worker,
+            Role::Reviewer,
+            Role::WebResearcher,
+            Role::Planner,
+            Role::Advisor,
+            Role::MultimodalLooker,
+            Role::Evaluator,
+        ] {
+            let policy = ExecutionPolicy::for_role(role);
+            let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false, true);
+            let tool_names = names(&specs);
+            assert_eq!(
+                tool_names.contains(&"apply_patch"),
+                tool_names.contains(&"edit") && tool_names.contains(&"write"),
+                "{}",
+                role.name()
+            );
+            assert_eq!(
+                tool_names.contains(&"apply_patch"),
+                role == Role::Worker,
+                "{}",
+                role.name()
+            );
+        }
+    }
+
+    // Given: calls to file tools, an apply_patch that adds, updates, moves and
+    //        deletes, an unparseable patch and a shell command
+    // When: their rule targets are collected
+    // Then: file tools give their path, the patch gives every path as written,
+    //       and the others give none
+    #[test]
+    fn rule_targets_cover_every_path_a_patch_names() {
+        let patch = "\
+*** Begin Patch
+*** Add File: docs/new.md
++x
+*** Update File: src/lib.rs
+@@
+-a
++b
+*** Update File: src/old.rs
+*** Move to: src/new.rs
+@@
+-a
++b
+*** Delete File: ./src/gone.rs
+*** End Patch";
+        assert_eq!(
+            call_rule_targets("apply_patch", &serde_json::json!({ "input": patch })),
+            [
+                "docs/new.md",
+                "src/lib.rs",
+                "src/old.rs",
+                "src/new.rs",
+                "./src/gone.rs",
+            ]
+            .map(PathBuf::from)
+        );
+        for name in ["read", "write", "edit", "grep"] {
+            assert_eq!(
+                call_rule_targets(name, &serde_json::json!({ "path": "src/lib.rs" })),
+                [PathBuf::from("src/lib.rs")],
+                "{name}"
+            );
+        }
+        for (name, input) in [
+            ("apply_patch", serde_json::json!({ "input": "garbage" })),
+            ("apply_patch", serde_json::json!({ "path": "src/lib.rs" })),
+            ("shell", serde_json::json!({ "command": "cat src/lib.rs" })),
+            ("read", serde_json::json!({})),
+        ] {
+            assert!(call_rule_targets(name, &input).is_empty(), "{name} {input}");
+        }
+    }
+
+    // Given: the standard tools
+    // When: deciding which calls may share a parallel wave
+    // Then: read-only shared tools may, while apply_patch, like every file
+    //       writer, runs alone
+    #[test]
+    fn apply_patch_never_shares_a_wave() {
+        let executor = tools::ToolExecutor::with_standard_tools(
+            Arc::new(event_bus::EventBus::new(16)),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        for (name, shared) in [
+            ("read", true),
+            ("grep", true),
+            ("apply_patch", false),
+            ("edit", false),
+            ("write", false),
+            ("shell", false),
+            ("finish", false),
+        ] {
+            assert_eq!(shares_wave(&executor, name), shared, "{name}");
+        }
     }
 
     // Given: Explorer のポリシー (skill_load は capability 外) と skills 設定あり

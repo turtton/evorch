@@ -21,6 +21,7 @@ fn model(urls: &[(&str, String)], bus: Arc<EventBus>) -> Arc<RoutedModel> {
             models: vec![config::types::provider::ModelEntryConfig::enabled("gpt-4o")],
             excluded_models: vec![],
             default_model: "gpt-4o".into(),
+            edit_tool: None,
         };
         config.providers.insert((*name).into(), profile);
     }
@@ -269,6 +270,7 @@ fn codex_model(
             models: vec![config::types::provider::ModelEntryConfig::enabled("gpt-4o")],
             excluded_models: vec![],
             default_model: "gpt-4o".into(),
+            edit_tool: None,
         },
     );
     compose_routed_model(

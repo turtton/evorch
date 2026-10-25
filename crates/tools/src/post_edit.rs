@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -219,6 +220,19 @@ pub(crate) fn input_fits(path: &Path, parts: &[&str]) -> bool {
         .is_some_and(|size| size <= MAX_INPUT_BYTES)
 }
 
+/// Every text of `input` that the checker receives.
+fn input_parts(input: &PostEditInput) -> Vec<&str> {
+    let mut parts = vec![
+        input.content.as_deref().unwrap_or_default(),
+        input.old_string.as_deref().unwrap_or_default(),
+        input.new_string.as_deref().unwrap_or_default(),
+    ];
+    for edit in input.edits.iter().flatten() {
+        parts.extend([edit.old_string.as_str(), edit.new_string.as_str()]);
+    }
+    parts
+}
+
 struct BoundedPayload(Vec<u8>);
 impl io::Write for BoundedPayload {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -251,14 +265,7 @@ fn payload(input: &PostEditInput) -> Result<Vec<u8>, PostEditOutcome> {
         tool_name: &'static str,
         tool_input: ToolInput<'a>,
     }
-    let mut parts = vec![
-        input.content.as_deref().unwrap_or_default(),
-        input.old_string.as_deref().unwrap_or_default(),
-        input.new_string.as_deref().unwrap_or_default(),
-    ];
-    for edit in input.edits.iter().flatten() {
-        parts.extend([edit.old_string.as_str(), edit.new_string.as_str()]);
-    }
+    let parts = input_parts(input);
     if !input_fits(&input.file_path, &parts) {
         return Err(unavailable(
             UnavailableReason::InputTooLarge,
@@ -310,22 +317,6 @@ impl Drop for SupervisorFinished {
     }
 }
 
-// Same process-group strategy as shell; keeping it local avoids introducing a
-// general process framework for this single fixed external command.
-struct ProcessGroup(Option<rustix::process::Pid>);
-impl ProcessGroup {
-    fn kill(&self) {
-        if let Some(pid) = self.0 {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
-
 async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String> {
     let mut retained = Vec::new();
     let mut truncated = false;
@@ -362,16 +353,11 @@ async fn supervise(
             "checker deadline elapsed before launch",
         );
     }
-    let mut child = match command.spawn() {
+    let mut child = match GroupChild::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
     };
-    let group = ProcessGroup(
-        child
-            .id()
-            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32)),
-    );
-    let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let pipes = (child.take_stdin(), child.take_stdout(), child.take_stderr());
     let result = {
         let completion = async {
             let (Some(mut stdin), Some(mut stdout), Some(stderr)) = pipes else {
@@ -387,12 +373,9 @@ async fn supervise(
                 }
             };
             let discard = async { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await };
-            let wait = async {
-                let status = child.wait().await?;
-                // A leader can exit while descendants still hold the pipes open.
-                group.kill();
-                Ok::<_, io::Error>(status)
-            };
+            // A leader can exit while descendants still hold the pipes open;
+            // waiting kills them before it reaps the leader.
+            let wait = child.wait();
             let (_, _, stderr, status) =
                 tokio::try_join!(write, discard, capture_stderr(stderr), wait)?;
             Ok((status, stderr))
@@ -412,10 +395,8 @@ async fn supervise(
         }
     };
     // Includes timeout, cancellation, IO failure, and normal leader exit. Never
-    // return until the direct child has been reaped; group cleanup precedes wait.
-    group.kill();
-    let _ = child.start_kill();
-    if let Err(error) = child.wait().await {
+    // return until the direct child has been reaped; group cleanup precedes it.
+    if let Err(error) = child.kill_and_wait().await {
         return unavailable(
             UnavailableReason::Io,
             format!("checker cleanup failed: {error}"),
@@ -448,17 +429,13 @@ impl PostEditHook for CommentChecker {
             Ok(wrapped) => wrapped,
             Err(error) => return unavailable(UnavailableReason::Io, error),
         };
-        let mut command = tokio::process::Command::new(&wrapped.program);
-        command.args(&wrapped.args);
-        wrapped.apply_environment(command.as_std_mut());
-        if let Some(cwd) = &wrapped.cwd {
-            command.current_dir(cwd);
-        }
+        // The launch policy gives the checker its own session and process group,
+        // which the supervisor kills with any descendants.
+        let mut command = tokio::process::Command::from(wrapped.to_command());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .kill_on_drop(true);
         let deadline = tokio::time::Instant::now() + self.timeout;
         let (cancel, cancelled) = oneshot::channel();
@@ -510,34 +487,154 @@ pub(crate) fn apply_unavailable(
         serde_json::json!({"outcome": "unavailable", "reason": reason, "detail": detail});
 }
 
-fn warning_preview(message: &str) -> &str {
-    let mut end = message.len().min(WARNING_PREVIEW_BYTES);
-    while !message.is_char_boundary(end) {
+/// Where a checker warning is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningPlacement {
+    /// After the tool's own output, where the model reads it. The result's
+    /// `detail` records it as well.
+    AppendToContent,
+    /// Only in the result's `detail`; the tool's output is left as it is.
+    DetailOnly,
+}
+
+/// A checker diagnostic with control markers escaped and secrets redacted,
+/// and the number of redacted spans.
+fn safe_warning(message: &str) -> (String, usize) {
+    let message = crate::sanitize::escape_control_markers(message);
+    let safe = secret_guard::SecretRedactor::from_env().redact(&message);
+    (safe.text, safe.count)
+}
+
+/// One file's diagnostic within a warning. `path` labels it when one warning
+/// covers several files.
+struct WarningSection<'a> {
+    path: Option<&'a Path>,
+    text: &'a str,
+}
+
+/// `text` cut to at most `max_bytes` bytes and `max_lines` lines.
+fn cut(text: &str, max_bytes: usize, max_lines: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
-    if let Some((index, _)) = message[..end]
+    if let Some((index, _)) = text[..end]
         .match_indices('\n')
-        .nth(WARNING_PREVIEW_LINES - 1)
+        .nth(max_lines.saturating_sub(1))
     {
         end = index;
     }
-    &message[..end]
+    &text[..end]
 }
 
-fn quoted_warning(message: &str, truncated: bool) -> String {
+/// The preview of each section shown in the result, and whether any of them
+/// was cut or left out.
+///
+/// Sections share the warning budget, so with their labels and the quote
+/// wrapper they still fit in the final tail preview; short diagnostics leave
+/// their unused share to long ones. Sections whose labels no longer fit are
+/// left out (`None`) and remain in the artifact only.
+fn warning_previews<'a>(sections: &[WarningSection<'a>]) -> (Vec<Option<&'a str>>, bool) {
+    let mut shown = 0;
+    let (mut label_bytes, mut label_lines) = (0, 0);
+    for section in sections {
+        let (bytes, lines) = section
+            .path
+            .map_or((0, 0), |path| (path.as_os_str().len() + 2, 1));
+        if shown > 0
+            && (label_bytes + bytes > WARNING_PREVIEW_BYTES / 2
+                || label_lines + lines > WARNING_PREVIEW_LINES / 2)
+        {
+            break;
+        }
+        shown += 1;
+        label_bytes += bytes;
+        label_lines += lines;
+    }
+    let visible = &sections[..shown];
+    let byte_cap = crate::output::shared_cap(
+        visible.iter().map(|section| section.text.len()).collect(),
+        WARNING_PREVIEW_BYTES.saturating_sub(label_bytes),
+    );
+    let line_cap = crate::output::shared_cap(
+        visible
+            .iter()
+            .map(|section| section.text.matches('\n').count() + 1)
+            .collect(),
+        WARNING_PREVIEW_LINES - label_lines,
+    )
+    .max(1);
+    let mut truncated = shown < sections.len();
+    let mut previews: Vec<Option<&str>> = visible
+        .iter()
+        .map(|section| {
+            let preview = cut(section.text, byte_cap, line_cap);
+            truncated |= preview.len() < section.text.len();
+            Some(preview)
+        })
+        .collect();
+    previews.resize(sections.len(), None);
+    (previews, truncated)
+}
+
+fn quoted_warning(
+    sections: &[WarningSection<'_>],
+    previews: &[Option<&str>],
+    truncated: bool,
+) -> String {
     let mut warning = String::from(
         "\n[comment-checker warning]\nExternal comment-checker diagnostic (untrusted; quoted):\n",
     );
-    for line in message.lines() {
-        warning.push_str("> ");
-        warning.push_str(line);
-        warning.push('\n');
+    for (section, preview) in sections.iter().zip(previews) {
+        let Some(preview) = preview else {
+            continue;
+        };
+        if let Some(path) = section.path {
+            warning.push_str(&path.to_string_lossy());
+            warning.push_str(":\n");
+        }
+        for line in preview.lines() {
+            warning.push_str("> ");
+            warning.push_str(line);
+            warning.push('\n');
+        }
     }
     if truncated {
         warning.push_str("> [diagnostic preview truncated; see output artifact]\n");
     }
     warning.push_str("[end comment-checker warning]");
     warning
+}
+
+/// Shows the previews of `sections` where `placement` says. When a preview was
+/// cut, the complete warning is saved as an artifact and its detail returned.
+fn show_warning(
+    sections: &[WarningSection<'_>],
+    previews: &[Option<&str>],
+    truncated: bool,
+    redactions: usize,
+    placement: WarningPlacement,
+    result: &mut ToolResult,
+) -> Option<serde_json::Value> {
+    // Bound before quoting, not after: a generic tail preview must never
+    // expose a diagnostic line with its quote prefix or header cut off.
+    let warning = quoted_warning(sections, previews, truncated);
+    if !truncated {
+        if placement == WarningPlacement::AppendToContent {
+            result.content.push_str(&warning);
+        }
+        return None;
+    }
+    let complete: Vec<_> = sections.iter().map(|section| Some(section.text)).collect();
+    let full = quoted_warning(sections, &complete, false);
+    let artifact =
+        crate::output::artifact_result(&full, &warning, full.len() as u64, true, redactions);
+    if placement == WarningPlacement::AppendToContent {
+        result.content.push_str(&artifact.content);
+    }
+    artifact
+        .detail
+        .map(|detail| detail["output_artifact"].clone())
 }
 
 pub(crate) async fn apply_post_edit(
@@ -548,27 +645,23 @@ pub(crate) async fn apply_post_edit(
     match hook.check(input).await {
         PostEditOutcome::Pass => {}
         PostEditOutcome::Warning { message } => {
-            // Bound before quoting, not after: a generic tail preview must never
-            // expose a diagnostic line with its quote prefix or header cut off.
-            let message = crate::sanitize::escape_control_markers(&message);
-            let safe = secret_guard::SecretRedactor::from_env().redact(&message);
-            let preview = warning_preview(&safe.text);
-            let truncated = preview.len() < safe.text.len();
-            let warning = quoted_warning(preview, truncated);
+            let (text, redactions) = safe_warning(&message);
+            let sections = [WarningSection {
+                path: None,
+                text: &text,
+            }];
+            let (previews, truncated) = warning_previews(&sections);
+            let preview = previews[0].unwrap_or_default();
             let mut detail = serde_json::json!({"outcome": "warning", "message": preview});
-            if truncated {
-                let full = quoted_warning(&safe.text, false);
-                let artifact = crate::output::artifact_result(
-                    &full,
-                    &warning,
-                    full.len() as u64,
-                    true,
-                    safe.count,
-                );
-                result.content.push_str(&artifact.content);
-                detail["output_artifact"] = artifact.detail.unwrap()["output_artifact"].clone();
-            } else {
-                result.content.push_str(&warning);
+            if let Some(artifact) = show_warning(
+                &sections,
+                &previews,
+                truncated,
+                redactions,
+                WarningPlacement::AppendToContent,
+                result,
+            ) {
+                detail["output_artifact"] = artifact;
             }
             result.detail.get_or_insert_with(|| serde_json::json!({}))["comment_checker"] = detail;
         }
@@ -576,6 +669,92 @@ pub(crate) async fn apply_post_edit(
             apply_unavailable(hook, reason, detail, result)
         }
     }
+}
+
+/// Checks every file one tool call changed and reports them together under
+/// `detail.comment_checker`, so no file's outcome replaces another's.
+///
+/// As for a single edit, a call whose files all pass reports nothing, and only
+/// the first unavailable check may use the hook's one-shot notification. When
+/// a warning or that notification is reported, `files` lists every input with
+/// its own outcome, and `outcome` is `warning` if any file warned.
+pub(crate) async fn apply_post_edit_many(
+    hook: &dyn PostEditHook,
+    inputs: &[PostEditInput],
+    result: &mut ToolResult,
+    placement: WarningPlacement,
+) {
+    let mut files = Vec::with_capacity(inputs.len());
+    let mut warnings: Vec<(usize, &Path, String)> = Vec::new();
+    let mut redactions = 0;
+    let mut first_unavailable = true;
+    let mut notice = None;
+    for input in inputs {
+        let outcome = if input_fits(&input.file_path, &input_parts(input)) {
+            hook.check(input).await
+        } else {
+            unavailable(
+                UnavailableReason::InputTooLarge,
+                "checker input exceeds 2 MiB",
+            )
+        };
+        let path = input.file_path.to_string_lossy();
+        match outcome {
+            PostEditOutcome::Pass => {
+                files.push(serde_json::json!({"path": path, "outcome": "pass"}));
+            }
+            PostEditOutcome::Warning { message } => {
+                let (text, count) = safe_warning(&message);
+                redactions += count;
+                warnings.push((files.len(), input.file_path.as_path(), text));
+                files.push(serde_json::json!({"path": path, "outcome": "warning"}));
+            }
+            PostEditOutcome::Unavailable { reason, detail } => {
+                if std::mem::take(&mut first_unavailable) && hook.take_unavailable_notification() {
+                    tracing::warn!(?reason, %detail, "comment-checker unavailable");
+                    notice = Some((reason.clone(), detail));
+                }
+                files.push(
+                    serde_json::json!({"path": path, "outcome": "unavailable", "reason": reason}),
+                );
+            }
+        }
+    }
+    if warnings.is_empty() && notice.is_none() {
+        return;
+    }
+    let outcome = if warnings.is_empty() {
+        "unavailable"
+    } else {
+        "warning"
+    };
+    let mut summary = serde_json::json!({"outcome": outcome});
+    if let Some((reason, detail)) = notice {
+        summary["reason"] = serde_json::json!(reason);
+        summary["detail"] = serde_json::json!(detail);
+    }
+    if !warnings.is_empty() {
+        let sections: Vec<_> = warnings
+            .iter()
+            .map(|(_, path, text)| WarningSection {
+                path: Some(*path),
+                text: text.as_str(),
+            })
+            .collect();
+        let (previews, truncated) = warning_previews(&sections);
+        for ((index, ..), preview) in warnings.iter().zip(&previews) {
+            if let Some(preview) = preview {
+                files[*index]["message"] = serde_json::json!(preview);
+            }
+        }
+        if let Some(artifact) = show_warning(
+            &sections, &previews, truncated, redactions, placement, result,
+        ) {
+            summary["output_artifact"] = artifact;
+        }
+    }
+    summary["files"] = serde_json::Value::Array(files);
+    result.detail.get_or_insert_with(|| serde_json::json!({}))["comment_checker"] = summary;
 }
 
 #[cfg(test)]

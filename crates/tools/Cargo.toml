@@ -18,6 +18,7 @@ test = false
 bench = false
 
 [dependencies]
+apply-patch = { path = "../apply-patch" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 browser = { path = "../browser" }

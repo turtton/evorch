@@ -38,6 +38,7 @@ pub(super) async fn model(
                 models: vec![config::ModelEntryConfig::enabled(MODEL)],
                 excluded_models: vec![],
                 default_model: MODEL.into(),
+                edit_tool: None,
             },
         )]),
         routing: config::RoutingConfig {

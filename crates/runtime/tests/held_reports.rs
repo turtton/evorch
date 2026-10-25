@@ -7,10 +7,10 @@ use event_bus::{
     EventReceiver, LifecycleEvent,
 };
 use providers::FinishReason;
-use runtime::{AgentRuntime, Role, RunConfig, RunId, RunStore};
+use runtime::{AgentRuntime, Role, RunConfig, RunId, RunRestoreFailure, RunStore, RuntimeError};
 use std::sync::Arc;
 use storage::{Storage, StorageConfig};
-use support::{ScriptedModel, text_response};
+use support::{ScriptedModel, text_response, tool_response, tool_responses};
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
@@ -107,14 +107,15 @@ async fn wake_requested(receiver: &mut EventReceiver, root: RunId) {
 }
 
 #[tokio::test]
-async fn woken_root_receives_the_report_of_a_child_that_outlived_it() {
-    // Given: a root finished while its background child was still working.
+async fn woken_root_receives_held_report_once_while_another_child_is_live() {
+    // Given: a root finished while both background children were still working.
     let fixture = fixture().await;
     fixture
         .script("ROOT", &["root first", "root handled the report"])
         .await;
     fixture.script("CHILD", &["child result"]).await;
     let child_gate = fixture.gate("CHILD").await;
+    let _sibling_gate = fixture.gate("SIBLING").await;
     let mut events = fixture.bus.subscribe();
     let root = fixture.runtime.delegate_background(
         Role::Orchestrator,
@@ -125,6 +126,11 @@ async fn woken_root_receives_the_report_of_a_child_that_outlived_it() {
         .runtime
         .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
         .unwrap();
+    let sibling = fixture
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, "SIBLING", RunConfig::default())
+        .unwrap();
+    fixture.model.wait_for_request(2).await;
     assert_eq!(
         fixture.runtime.wait(root).await.unwrap(),
         AgentRunPhase::Done
@@ -137,14 +143,361 @@ async fn woken_root_receives_the_report_of_a_child_that_outlived_it() {
     );
     wake_requested(&mut events, root).await;
     fixture
+        .model
+        .add_keyed(
+            "ROOT",
+            [
+                Ok(tool_response(
+                    "after-report",
+                    "inbox",
+                    serde_json::json!({}),
+                )),
+                Ok(text_response("handled report", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    fixture
         .runtime
         .wake_chat(root, RunConfig::default())
         .unwrap();
     // Then: the root's next request carries the child's report.
-    let request = fixture.request_text(2).await;
-    assert!(request.contains("child result"), "{request}");
+    let request = fixture.request_text(3).await;
+    assert_eq!(request.matches("child result").count(), 1, "{request}");
+    let next = fixture.model.wait_for_request(4).await;
+    assert_eq!(tool_result(&next, "after-report"), "[]");
     fixture.runtime.cancel(root).unwrap();
+    fixture.runtime.cancel(sibling).unwrap();
     fixture.runtime.wait(root).await.unwrap();
+    fixture.runtime.wait(sibling).await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_root_resumes_with_live_child_and_collects_its_result() {
+    for phase in [AgentRunPhase::Done, AgentRunPhase::Error] {
+        let fixture = fixture().await;
+        let initial = if phase == AgentRunPhase::Done {
+            Ok(text_response("root finished", FinishReason::Stop))
+        } else {
+            Err(RuntimeError::Model {
+                reason: "scripted failure".into(),
+            })
+        };
+        fixture.model.add_keyed("ROOT", [initial]).await;
+        fixture.script("CHILD", &["unique child result"]).await;
+        let root_gate = fixture.gate("ROOT").await;
+        let child_gate = fixture.gate("CHILD").await;
+        let root = fixture.runtime.delegate_background(
+            Role::Orchestrator,
+            "ROOT".into(),
+            RunConfig::default(),
+        );
+        fixture.model.wait_for_request(0).await;
+        let child = fixture
+            .runtime
+            .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
+            .unwrap();
+        fixture.model.wait_for_request(1).await;
+        root_gate.notify_one();
+        assert_eq!(fixture.runtime.wait(root).await.unwrap(), phase);
+        fixture
+            .model
+            .add_keyed(
+                "ROOT",
+                [
+                    Ok(tool_responses([
+                        ("agents", "list_agents", serde_json::json!({})),
+                        ("pending", "run_output", serde_json::json!({"run_id":child})),
+                        (
+                            "poll",
+                            "wait",
+                            serde_json::json!({"run_ids":[child], "timeout_ms":0}),
+                        ),
+                    ])),
+                    Ok(tool_responses([
+                        (
+                            "finished",
+                            "run_output",
+                            serde_json::json!({"run_id":child}),
+                        ),
+                        ("waited", "wait", serde_json::json!({"run_ids":[child]})),
+                        ("report", "inbox", serde_json::json!({})),
+                    ])),
+                    Ok(tool_response("empty", "inbox", serde_json::json!({}))),
+                    Ok(text_response("collected", FinishReason::Stop)),
+                ],
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .runtime
+                .continue_goal(root, "continue".into(), RunConfig::default())
+                .unwrap(),
+            root
+        );
+        fixture.model.wait_for_request(2).await;
+        root_gate.notify_one();
+        let pending = fixture.model.wait_for_request(3).await;
+        let result = tool_result(&pending, "agents");
+        let agents: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(agents.as_array().unwrap().iter().any(|agent| {
+            agent["run_id"] == child.to_string() && agent["parent_run_id"] == root.to_string()
+        }));
+        assert!(tool_result(&pending, "pending").contains("still_running"));
+        assert!(tool_result(&pending, "poll").contains("still_running"));
+        child_gate.notify_one();
+        assert_eq!(
+            fixture.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        root_gate.notify_one();
+        let finished = fixture.model.wait_for_request(4).await;
+        for id in ["finished", "waited", "report"] {
+            let result = tool_result(&finished, id);
+            assert_eq!(result.matches("unique child result").count(), 1, "{result}");
+        }
+        root_gate.notify_one();
+        let empty = fixture.model.wait_for_request(5).await;
+        assert_eq!(tool_result(&empty, "empty"), "[]");
+        fixture.runtime.cancel(root).unwrap();
+        fixture.runtime.wait(root).await.unwrap();
+    }
+}
+
+fn tool_result(messages: &[providers::Message], id: &str) -> String {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } if tool_call_id == id => {
+                assert!(!is_error, "{content:?}");
+                Some(
+                    content
+                        .iter()
+                        .filter_map(|part| match part {
+                            providers::ToolResultContent::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing tool result {id}"))
+}
+
+#[tokio::test]
+async fn wake_with_live_child_releases_held_message_once() {
+    let fixture = fixture().await;
+    let permit = fixture.permit();
+    fixture.script("ROOT", &["root done"]).await;
+    let _child_gate = fixture.gate("CHILD").await;
+    let root_gate = fixture.gate("ROOT").await;
+    let mut events = fixture.bus.subscribe();
+    let root = fixture.runtime.delegate_background(
+        Role::Orchestrator,
+        "ROOT".into(),
+        RunConfig {
+            ownership: Some(permit.clone()),
+            ..Default::default()
+        },
+    );
+    fixture.model.wait_for_request(0).await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
+        .unwrap();
+    fixture.model.wait_for_request(1).await;
+    root_gate.notify_one();
+    assert_eq!(
+        fixture.runtime.wait(root).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let id = fixture
+        .runtime
+        .send_agent_message(
+            child,
+            root,
+            AgentMessageKind::Send,
+            "unique held progress",
+            None,
+        )
+        .unwrap();
+    wake_requested(&mut events, root).await;
+    fixture
+        .model
+        .add_keyed(
+            "ROOT",
+            [
+                Ok(tool_response("after-held", "inbox", serde_json::json!({}))),
+                Ok(text_response("handled", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    fixture
+        .runtime
+        .wake_chat(
+            root,
+            RunConfig {
+                ownership: Some(permit),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let request = fixture.request_text(2).await;
+    assert_eq!(
+        request.matches("unique held progress").count(),
+        1,
+        "{request}"
+    );
+    assert_eq!(request.matches(&id).count(), 1, "{request}");
+    root_gate.notify_one();
+    let next = fixture.model.wait_for_request(3).await;
+    assert_eq!(tool_result(&next, "after-held"), "[]");
+    fixture.runtime.cancel(root).unwrap();
+    fixture.runtime.cancel(child).unwrap();
+    fixture.runtime.wait(root).await.unwrap();
+    fixture.runtime.wait(child).await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
+    for terminal in [AgentRunPhase::Done, AgentRunPhase::Error] {
+        let fixture = fixture().await;
+        let permit = fixture.permit();
+        let first = if terminal == AgentRunPhase::Done {
+            Ok(text_response("root done", FinishReason::Stop))
+        } else {
+            Err(RuntimeError::Model {
+                reason: "scripted failure".into(),
+            })
+        };
+        fixture.model.add_keyed("ROOT", [first]).await;
+        fixture.script("CHILD", &["unique held report"]).await;
+        let root_gate = fixture.gate("ROOT").await;
+        let child_gate = fixture.gate("CHILD").await;
+        let _sibling_gate = fixture.gate("SIBLING").await;
+        let mut events = fixture.bus.subscribe();
+        let root = fixture.runtime.delegate_background(
+            Role::Orchestrator,
+            "ROOT".into(),
+            RunConfig {
+                ownership: Some(permit.clone()),
+                ..Default::default()
+            },
+        );
+        fixture.model.wait_for_request(0).await;
+        let child = fixture
+            .runtime
+            .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
+            .unwrap();
+        fixture.model.wait_for_request(1).await;
+        let sibling = fixture
+            .runtime
+            .delegate_background_as_child(root, Role::Worker, "SIBLING", RunConfig::default())
+            .unwrap();
+        fixture.model.wait_for_request(2).await;
+        root_gate.notify_one();
+        assert_eq!(fixture.runtime.wait(root).await.unwrap(), terminal);
+        child_gate.notify_one();
+        assert_eq!(
+            fixture.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        wake_requested(&mut events, root).await;
+        fixture
+            .runtime
+            .stop(root, runtime::StopScope::SelfOnly)
+            .unwrap();
+        let db = storage::Database::open(&StorageConfig {
+            db_path: fixture._dir.path().join("held.db"),
+            ..Default::default()
+        })
+        .unwrap();
+        let before = db.run_context(&root.to_string()).unwrap().unwrap();
+        // The host is processing an older wake request, not a new user action.
+        for _ in 0..2 {
+            assert!(matches!(
+                fixture.runtime.wake_chat(
+                    root,
+                    RunConfig {
+                        ownership: Some(permit.clone()),
+                        ..Default::default()
+                    }
+                ),
+                Err(RuntimeError::RunRestoreFailed {
+                    reason: RunRestoreFailure::StoppedByOperator,
+                    ..
+                })
+            ));
+            assert_eq!(db.run_context(&root.to_string()).unwrap().unwrap(), before);
+            assert_eq!(fixture.runtime.inspect_agent(root).unwrap().phase, terminal);
+            assert!(fixture.runtime.take_inbox(root).unwrap().is_empty());
+        }
+        assert_eq!(fixture.model.observed().await.len(), 3);
+        fixture
+            .model
+            .add_keyed(
+                "ROOT",
+                [
+                    Ok(tool_response("after-stop", "inbox", serde_json::json!({}))),
+                    Ok(text_response("handled", FinishReason::Stop)),
+                ],
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .runtime
+                .resume_chat(
+                    root,
+                    RunConfig {
+                        ownership: Some(permit),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+            root
+        );
+        // Done waits for held input; an unfinished Error first retries its
+        // saved request. In both cases the report must remain available once.
+        let _ = fixture.request_text(3).await;
+        root_gate.notify_one();
+        let after = fixture.model.wait_for_request(4).await;
+        let serialized = serde_json::to_string(&after).unwrap();
+        assert_eq!(
+            serialized.matches("unique held report").count(),
+            1,
+            "{serialized}"
+        );
+        if terminal == AgentRunPhase::Done {
+            assert_eq!(tool_result(&after, "after-stop"), "[]");
+        } else {
+            assert_eq!(
+                tool_result(&after, "after-stop")
+                    .matches("unique held report")
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            fixture
+                .runtime
+                .list_agents()
+                .iter()
+                .find(|agent| agent.run_id == sibling)
+                .unwrap()
+                .parent_run_id,
+            Some(root)
+        );
+        fixture.runtime.cancel(root).unwrap();
+        fixture.runtime.cancel(sibling).unwrap();
+        fixture.runtime.wait(root).await.unwrap();
+        fixture.runtime.wait(sibling).await.unwrap();
+    }
 }
 
 #[tokio::test]

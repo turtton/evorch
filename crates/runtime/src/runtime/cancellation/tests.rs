@@ -192,7 +192,7 @@ impl AgentModel for AdmissionModel {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ac15_cancel_after_registration_before_admission_result_notifies_same_execution() {
+async fn ac15_cancel_after_registration_notifies_same_execution() {
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(
         bus.clone(),
@@ -202,21 +202,34 @@ async fn ac15_cancel_after_registration_before_admission_result_notifies_same_ex
     let run = runtime.reserve_run_id();
     runtime.reserve_admission(run, None, None);
     let execution = runtime.execution_snapshot(run).unwrap();
+    let token = execution.publication();
     let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
     runtime.spawn_reserved(run, None, Role::Worker, "pending", RunConfig::default());
     reached.recv().unwrap();
     {
         let admissions = runtime.shared.admissions.lock().unwrap();
         let runs = lock_runs(&runtime.shared.runs);
-        assert!(admissions[&run].result.borrow().is_none());
+        assert!(matches!(&*admissions[&run].result.borrow(), Some(Ok(()))));
         assert!(Arc::ptr_eq(&admissions[&run].execution, &execution));
         assert!(Arc::ptr_eq(&runs[&run].execution, &execution));
     }
     runtime.cancel(run).unwrap();
     assert_eq!(*execution.cancel_tx.borrow(), RunInterrupt::Cancel);
-    assert!(execution.publication().commit(|| Ok(())).is_err());
+    assert!(token.commit(|| Ok(())).is_err());
+    assert!(matches!(
+        &*runtime.shared.admissions.lock().unwrap()[&run]
+            .result
+            .borrow(),
+        Some(Ok(()))
+    ));
     release.send(()).unwrap();
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    assert!(matches!(
+        &*runtime.shared.admissions.lock().unwrap()[&run]
+            .result
+            .borrow(),
+        Some(Ok(()))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

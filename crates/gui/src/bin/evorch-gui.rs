@@ -1716,6 +1716,14 @@ mod heap_tests {
 mod storage_shutdown_tests {
     use super::*;
 
+    struct ResumeWriteOnDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for ResumeWriteOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
     #[test]
     fn startup_resource_guard_keeps_the_host_alive_until_fenced_writes_drain() {
         let directory = tempfile::tempdir().unwrap();
@@ -1733,9 +1741,26 @@ mod storage_shutdown_tests {
         let permit = host.start("thread").unwrap();
         let fence = permit.clone();
         let nonblocking_fence = permit.clone();
+        let write_monitor =
+            Arc::new(std::sync::OnceLock::<storage_bridge::StorageBridgeMonitor>::new());
+        let guard_monitor = write_monitor.clone();
+        let (write_entered, write_waiting) = std::sync::mpsc::channel();
+        let (resume_write, resume) = std::sync::mpsc::channel();
+        let resume = std::sync::Mutex::new(Some(resume));
         bus.register_nonblocking_mutation_guard(
             "run".into(),
             Arc::new(move || {
+                // Publishing and receiving precede pending registration. Pause
+                // only the writer's validation, before it locks the registry,
+                // so quiescing can proceed while the delta remains in flight.
+                if guard_monitor
+                    .get()
+                    .is_some_and(|monitor| monitor.snapshot().pending_events > 0)
+                    && let Some(resume) = resume.lock().unwrap().take()
+                {
+                    write_entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                }
                 fence
                     .mutation_guard()
                     .ok()
@@ -1779,6 +1804,7 @@ mod storage_shutdown_tests {
         )
         .unwrap();
         let monitor = bridge.monitor();
+        assert!(write_monitor.set(monitor.clone()).is_ok());
         let weak_host = Arc::downgrade(&host);
         let resources = GuiStorageResources {
             _storage: bridge,
@@ -1786,25 +1812,51 @@ mod storage_shutdown_tests {
             _demo_directory: None,
             _storage_fallback: None,
         };
+        let constructor = move || resources;
+        // Unwinding must resume the writer before the constructor's captured
+        // resources try to flush it, even before the helper thread is started.
+        let resume_write = ResumeWriteOnDrop(resume_write);
         let event = Event::new(event_bus::MessageEvent::MessageDelta {
             run_id: Some("run".into()),
             delta: "tail before a later startup failure".into(),
         });
         bus.emit(event.clone());
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while monitor.snapshot().pending_events == 0 {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::yield_now();
-        }
+        write_waiting.recv().unwrap();
+        assert_eq!(monitor.snapshot().pending_events, 1);
         assert_eq!(monitor.snapshot().persisted_events, 0);
-        host.begin_quiesce().unwrap();
+        let mut shutdown_events = bus.subscribe();
         // Simulate state/command-sink locals unwinding before a retained app
         // constructor is dropped without ever constructing a GUI window.
         drop(host);
         assert!(weak_host.upgrade().is_some());
         permit.validate_generation().unwrap();
-        let constructor = move || resources;
-        drop(constructor);
+        std::thread::scope(|scope| {
+            let draining_host = weak_host.clone();
+            let draining_permit = permit.clone();
+            let release_write = scope.spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        loop {
+                            if matches!(
+                                shutdown_events.recv().await.unwrap().kind,
+                                EventKind::Ownership(owner)
+                                    if owner.action == event_bus::OwnershipAction::Quiescing
+                            ) {
+                                break;
+                            }
+                        }
+                    });
+                // The resource destructor has begun, but must retain the host
+                // and its generation until the blocked write can finish.
+                assert!(draining_host.upgrade().is_some());
+                draining_permit.validate_generation().unwrap();
+                drop(resume_write);
+            });
+            drop(constructor);
+            release_write.join().unwrap();
+        });
         assert!(weak_host.upgrade().is_none());
         let messages: Vec<_> = db
             .events_all_ordered()

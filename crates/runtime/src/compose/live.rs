@@ -17,7 +17,8 @@ impl SwitchableModel {
         Self(Arc::new(RwLock::new(model)))
     }
 
-    /// Swaps in a reconfigured model. Chain pins carry over (ADR 0030); cooldowns do not.
+    /// Swaps in a reconfigured model. Chain pins (ADR 0030) and the editing interfaces
+    /// used by previous requests carry over; cooldowns do not.
     pub fn replace(&self, model: Arc<dyn AgentModel>) {
         let previous = {
             let mut target = self
@@ -27,6 +28,7 @@ impl SwitchableModel {
             for (run_id, pins) in target.route_pins_by_run() {
                 model.restore_route_pins(&run_id, &pins);
             }
+            model.restore_edit_tools(&target.edit_tools_by_run());
             std::mem::replace(&mut *target, model)
         };
         drop(previous);
@@ -44,9 +46,62 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn narrows_edit_tools(&self) -> bool {
+        true
+    }
+
+    fn edit_tool_for_run(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+    ) -> Option<config::EditToolConfig> {
+        self.current().edit_tool_for_run(run_id, role, category)
+    }
+
+    fn edit_tools_by_run(
+        &self,
+    ) -> std::collections::BTreeMap<(String, String), config::EditToolConfig> {
+        self.current().edit_tools_by_run()
+    }
+
+    fn restore_edit_tools(
+        &self,
+        history: &std::collections::BTreeMap<(String, String), config::EditToolConfig>,
+    ) {
+        self.current().restore_edit_tools(history);
+    }
+
+    fn model_switch_prepared(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        selected: &str,
+    ) {
+        self.current()
+            .model_switch_prepared(invocation, role, selected);
+    }
+
     fn invocation_snapshot(&self) -> Option<Arc<dyn AgentModel>> {
         let current = self.current();
-        Some(current.invocation_snapshot().unwrap_or(current))
+        let current = current.invocation_snapshot().unwrap_or(current);
+        if current.narrows_edit_tools() {
+            Some(current)
+        } else {
+            Some(Arc::new(Self::new(current)))
+        }
+    }
+
+    fn web_search_provider(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+        usage_sink: Arc<dyn Fn(providers::Usage) + Send + Sync>,
+    ) -> Result<Option<Arc<dyn tools::search::SearchProvider>>, RuntimeError> {
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current.web_search_provider(invocation, role, &tools, usage_sink)
     }
 
     fn image_generation_enabled(&self) -> bool {
@@ -76,7 +131,12 @@ impl AgentModel for SwitchableModel {
         self: Arc<Self>,
         settings: crate::benchmark::BenchmarkModelSettings,
     ) -> Result<Arc<dyn AgentModel>, RuntimeError> {
-        self.current().freeze_for_benchmark(settings)
+        let frozen = self.current().freeze_for_benchmark(settings)?;
+        if frozen.narrows_edit_tools() {
+            Ok(frozen)
+        } else {
+            Ok(Arc::new(Self::new(frozen)))
+        }
     }
     fn requires_admission(&self) -> bool {
         self.current().requires_admission()
@@ -97,8 +157,10 @@ impl AgentModel for SwitchableModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
-        self.current()
-            .compact_context(invocation, role, messages, tools)
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current
+            .compact_context(invocation, role, messages, &tools)
             .await
     }
 
@@ -109,9 +171,9 @@ impl AgentModel for SwitchableModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.current()
-            .complete(invocation, role, messages, tools)
-            .await
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current.complete(invocation, role, messages, &tools).await
     }
 
     async fn complete_structured(
@@ -134,8 +196,10 @@ impl AgentModel for SwitchableModel {
         tools: &[ToolSpec],
         bus: &event_bus::EventBus,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.current()
-            .complete_streaming(invocation, role, messages, tools, bus)
+        let current = self.current();
+        let tools = crate::edit_tools::for_model(current.as_ref(), tools);
+        current
+            .complete_streaming(invocation, role, messages, &tools, bus)
             .await
     }
 
@@ -150,6 +214,14 @@ impl AgentModel for SwitchableModel {
 
     fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
         self.current().selected_reasoning_effort(role, category)
+    }
+
+    fn binding_preview(
+        &self,
+        role: Role,
+        category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        self.current().binding_preview(role, category)
     }
 
     fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {

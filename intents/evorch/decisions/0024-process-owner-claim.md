@@ -106,6 +106,11 @@ deadline で打ち切っていた。さらに event bus の run fence はイベ�
   まで（heartbeat の次の走査、または run の次の registry 確認まで）は、旧 generation の
   イベントが bus に流れうる。永続書き込みと owner の commit は従来どおり generation を検証する。
 - 負荷そのもの（heartbeat のスレッドごとの書き込み、操作ごとの接続オープン）は別途削減する。
+- 2026-10-24 追記: heartbeat は 1 tick に 1 トランザクションでまとめて書き、lease が次の tick 後も
+  半分以上残るスレッドは書かない（既定 5 s / 1 s で約 2 tick に 1 回）。25 スレッドの tick は
+  個別トランザクションで約 30 ms、まとめると約 1 ms（DELETE journal、ローカル計測）。
+  接続の使い回しは見送った。新規接続の読み取りは約 47 µs と 6 µs の差で、run のイベント fence が
+  registry を開かなくなった後は、操作ごとの接続オープンは負荷の主因でない。
 
 ## Related
 

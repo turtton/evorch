@@ -188,4 +188,40 @@ impl ThreadOwner {
         self.lease.expires_at = now_ms.saturating_add(self.settings.lease_ms.get());
         Ok(())
     }
+
+    /// What the owner's heartbeat worker does to this row on one tick.
+    ///
+    /// A lease is renewed only once less than half of it would remain after
+    /// the next tick, so an idle owner writes about once per half lease
+    /// rather than on every tick. The next on-time tick still finds at least
+    /// half a lease left. A worker that stalls past the lease is covered by
+    /// the run's own renewal of an overdue lease
+    /// (`OwnerPermit::validate_mutation`), and a claim still needs the
+    /// owner's socket to stop answering.
+    pub fn heartbeat_tick(
+        &self,
+        now_ms: u64,
+        heartbeat_ms: u64,
+        release_quiescing: bool,
+    ) -> HeartbeatTick {
+        if self.state == OwnerState::Quiescing && !self.active_turn && release_quiescing {
+            return HeartbeatTick::Release;
+        }
+        let remaining = self.lease.expires_at.saturating_sub(now_ms);
+        if remaining.saturating_sub(heartbeat_ms) >= self.settings.lease_ms.get() / 2 {
+            HeartbeatTick::Keep
+        } else {
+            HeartbeatTick::Renew
+        }
+    }
+}
+
+/// See [`ThreadOwner::heartbeat_tick`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatTick {
+    /// The lease has enough time left; nothing is written.
+    Keep,
+    Renew,
+    /// A drained quiescing owner gives the thread up.
+    Release,
 }

@@ -18,6 +18,13 @@ pub struct CompactionCheckpoint {
     /// 表示窓で `summary` に置換する raw message index の半開区間 `[start, end)`。
     /// 範囲内の System メッセージは要約直前に原文・順序を保って残す。
     pub range: (usize, usize),
+    /// A model-switch replacement must never be undone by a later compaction cut.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub protects_history: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl CompactionCheckpoint {
@@ -81,6 +88,33 @@ impl AgentContext {
 
     pub(crate) fn checkpoints(&self) -> &[CompactionCheckpoint] {
         &self.checkpoints
+    }
+
+    pub(crate) fn compaction_view(&self) -> Vec<(usize, Message)> {
+        let Some(checkpoint) = self
+            .latest_checkpoint()
+            .filter(|checkpoint| checkpoint.protects_history)
+        else {
+            return self.messages.iter().cloned().enumerate().collect();
+        };
+        let (start, end) = checkpoint.range;
+        let mut view: Vec<_> = self.messages[..start].iter().cloned().enumerate().collect();
+        view.extend(
+            self.messages[start..end]
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.role == MessageRole::System)
+                .map(|(index, message)| (start + index, message.clone())),
+        );
+        view.push((end - 1, checkpoint.summary.clone()));
+        view.extend(
+            self.messages[end..]
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, message)| (end + index, message)),
+        );
+        view
     }
 
     /// システムプロンプトを履歴に追加する (Role::System + 単一 Text ブロック)。
@@ -192,7 +226,60 @@ mod tests {
                 }],
             },
             range,
+            protects_history: false,
         }
+    }
+
+    #[test]
+    fn ordinary_checkpoint_storage_bytes_stay_unchanged_and_protection_round_trips() {
+        let original = r#"{"id":"checkpoint","summary":{"role":"user","content":[{"type":"text","text":"summary"}]},"range":[1,3]}"#;
+        let mut checkpoint: CompactionCheckpoint = serde_json::from_str(original).unwrap();
+        assert!(!checkpoint.protects_history);
+        assert_eq!(serde_json::to_string(&checkpoint).unwrap(), original);
+        checkpoint.protects_history = true;
+        let saved = serde_json::to_string(&checkpoint).unwrap();
+        assert!(saved.contains("\"protects_history\":true"));
+        assert_eq!(
+            serde_json::from_str::<CompactionCheckpoint>(&saved).unwrap(),
+            checkpoint
+        );
+    }
+
+    #[test]
+    fn protected_compaction_view_survives_storage_and_preserves_system_instructions() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_system("system");
+        context.push_user("goal");
+        context.push_assistant(assistant_text("old answer"));
+        context.push_system("injected instructions");
+        context.push_user("latest user");
+        let mut checkpoint = summary_checkpoint("boundary", (2, 4), "safe summary");
+        checkpoint.protects_history = true;
+        let checkpoint: CompactionCheckpoint =
+            serde_json::from_str(&serde_json::to_string(&checkpoint).unwrap()).unwrap();
+        context.apply_checkpoint(checkpoint);
+        let view = context.compaction_view();
+        assert_eq!(
+            view.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [0, 1, 3, 3, 4]
+        );
+        assert_eq!(
+            view.into_iter()
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>(),
+            context.visible_messages()
+        );
+        let mut ordinary = context.latest_checkpoint().unwrap().clone();
+        ordinary.protects_history = false;
+        context.apply_checkpoint(ordinary);
+        assert_eq!(
+            context
+                .compaction_view()
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>(),
+            context.messages
+        );
     }
 
     // Given: run-1 の Worker ロール / When: new で生成 / Then: 履歴は空

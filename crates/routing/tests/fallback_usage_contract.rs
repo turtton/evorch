@@ -71,6 +71,7 @@ fn profile(name: &str, default_model: &str, base_url: String) -> ProviderProfile
         )],
         excluded_models: Vec::new(),
         default_model: default_model.to_string(),
+        edit_tool: None,
     };
     ProviderProfile::try_from((name, &profile_config)).expect("有効な設定は変換できる")
 }

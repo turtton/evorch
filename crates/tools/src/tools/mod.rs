@@ -3,6 +3,7 @@
 //! 各ツールは [`crate::Tool`] を実装するスタブであり、実行ボディは wave 2 で
 //! 実装する。スキーマと権限の宣言は最終契約である。
 
+pub mod apply_patch;
 pub mod browser;
 pub mod edit;
 pub mod file_access;
@@ -16,6 +17,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
+pub use self::apply_patch::ApplyPatch;
 pub use browser::{
     BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, GuardPolicy, browser_tools,
 };
@@ -34,18 +36,20 @@ mod tests {
 
     use sandbox::DirectSandbox;
 
-    use super::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
+    use super::{ApplyPatch, Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
     use crate::tool::Tool;
 
-    // Given: 5 つの標準ツールの静的スキーマ / When: jsonschema::validator_for でコンパイル / Then: すべて成功する
+    // Given: 標準ツールの静的スキーマ / When: jsonschema::validator_for でコンパイル / Then: すべて成功する
     #[test]
     fn all_standard_tool_schemas_compile() {
         let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
         let git_diff = GitDiff::new(Arc::new(DirectSandbox::new_unchecked()));
+        let apply_patch = ApplyPatch::new();
         let schemas = [
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
             (Write.name(), Write.schema()),
+            (apply_patch.name(), apply_patch.schema()),
             (Grep.name(), Grep.schema()),
             (
                 shell.name(),

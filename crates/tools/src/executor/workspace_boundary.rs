@@ -46,35 +46,43 @@ impl ToolExecutor {
             reason: "benchmark tool access must stay inside the recorded workspace".into(),
             guidance: None,
         };
-        let keys: &[&str] = match name {
-            "read" => &["path", "file", "file_path", "filename", "target"],
-            "write" | "edit" | "grep" => &["path"],
-            "shell" | "git_diff" => &["cwd"],
+        let paths: Vec<PathBuf> = match name {
+            "shell" | "git_diff" => args
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .into_iter()
+                .collect(),
+            _ if is_file_tool(name) => self
+                .file_targets(name, args)
+                .map_err(|_| deny())?
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect(),
             _ if permissions.fs_read || permissions.fs_write || permissions.process_spawn => {
                 return Err(deny());
             }
             _ => return Ok(()),
         };
-        let mut found = false;
-        for key in keys {
-            if let Some(path) = args.get(*key).and_then(serde_json::Value::as_str) {
-                found = true;
-                let path = Path::new(path);
-                // Avoid resolving a missing path through lexical parent traversal.
-                // Absolute paths are supported only within the frozen workspace.
-                if !path.is_absolute()
-                    || path.components().any(|part| part == Component::ParentDir)
-                    || !path.starts_with(root)
-                    || !existing_ancestor_is_inside(path, root)?
-                    || std::fs::metadata(path)
-                        .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
-                {
-                    return Err(deny());
-                }
-            }
-        }
-        if !found {
+        // An apply_patch input that does not parse names no path; the tool
+        // rejects it with the same parser before touching any file.
+        if paths.is_empty() && name != apply_patch::tool_contract::NAME {
             return Err(deny());
+        }
+        for path in &paths {
+            // Avoid resolving a missing path through lexical parent traversal.
+            // Absolute paths are supported only within the frozen workspace.
+            if !path.is_absolute()
+                || path.components().any(|part| part == Component::ParentDir)
+                || !path.starts_with(root)
+                || !existing_ancestor_is_inside(path, root)?
+                || (is_file_tool(name)
+                    && !canonical_entry_location(path).is_some_and(|entry| entry.starts_with(root)))
+                || std::fs::metadata(path)
+                    .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
+            {
+                return Err(deny());
+            }
         }
         Ok(())
     }
@@ -160,8 +168,7 @@ impl ToolExecutor {
         if name == "browser_upload_file" {
             return self.enforce_upload_boundary(args).map_err(deny);
         }
-        let keys = file_path_keys(name);
-        if keys.is_empty() {
+        if !is_file_tool(name) {
             return Ok(());
         }
         let unsandboxed =
@@ -189,23 +196,16 @@ impl ToolExecutor {
         else {
             return Ok(());
         };
-        let write = matches!(name, "write" | "edit");
+        let targets = self.file_boundary_targets(name, args).map_err(deny)?;
+        let write = targets.iter().any(|(_, write, _)| *write);
         let mut outside = Vec::new();
         let mut violation = None;
-        for path in keys
-            .iter()
-            .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
-        {
-            let path = Path::new(path);
-            if std::fs::metadata(path)
-                .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
-            {
-                return Err(deny(format!(
-                    "{} is not a regular file or directory",
-                    path.display()
-                )));
-            }
-            let location = canonical_location(path);
+        for (path, write, entry) in targets {
+            let location = if entry {
+                canonical_entry_location(&path)
+            } else {
+                canonical_location(&path)
+            };
             let placement = place(&regions, location.as_deref());
             let allowed = match placement {
                 Some(PathAccess::ReadWrite) => true,
@@ -215,11 +215,13 @@ impl ToolExecutor {
             if allowed {
                 continue;
             }
-            let target = location.unwrap_or_else(|| path.to_path_buf());
+            let target = location.unwrap_or(path);
             if violation.is_none() {
                 violation = Some((target.clone(), placement.is_some()));
             }
-            outside.push(target);
+            if !outside.contains(&target) {
+                outside.push(target);
+            }
         }
         // unsandboxed only lifts the path boundary, so a call that stays
         // inside it has nothing to review and runs as if isolated.
@@ -227,7 +229,11 @@ impl ToolExecutor {
             return Ok(());
         };
         if !unsandboxed {
-            return Err(deny(boundary_denial(&path, read_only)));
+            return Err(deny(boundary_denial(
+                &path,
+                read_only,
+                name != apply_patch::tool_contract::NAME,
+            )));
         }
         let justification = args
             .get(JUSTIFICATION)
@@ -317,6 +323,111 @@ fn file_path_keys(name: &str) -> &'static [&'static str] {
     }
 }
 
+/// Tools whose arguments name the files they read or write directly, without
+/// an OS sandbox around them.
+fn is_file_tool(name: &str) -> bool {
+    name == apply_patch::tool_contract::NAME || !file_path_keys(name).is_empty()
+}
+
+impl ToolExecutor {
+    /// Entry writes and referent accesses are distinct: remove_file unlinks the
+    /// final component, whereas apply_patch writes through a final symlink.
+    fn file_boundary_targets(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<Vec<(PathBuf, bool, bool)>, String> {
+        let targets = self.file_targets(name, args)?;
+        if name != apply_patch::tool_contract::NAME {
+            return Ok(targets
+                .into_iter()
+                .flat_map(|(path, write)| {
+                    let mut accesses = vec![(path.clone(), write, false)];
+                    if write {
+                        accesses.push((path, true, true));
+                    }
+                    accesses
+                })
+                .collect());
+        }
+        let input = args
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let kinds = apply_patch::targets_raw(input).unwrap_or_default();
+        Ok(targets
+            .into_iter()
+            .zip(kinds)
+            .flat_map(|((path, _), (_, kind))| {
+                let writes_content = matches!(
+                    kind,
+                    apply_patch::TargetKind::Add
+                        | apply_patch::TargetKind::Update
+                        | apply_patch::TargetKind::MoveDest
+                );
+                [(path.clone(), true, true), (path, writes_content, false)]
+            })
+            .collect())
+    }
+
+    /// Every path a direct file tool names in `args`, with whether the tool
+    /// writes there. Other tools name none.
+    ///
+    /// apply_patch writes to every path of the patch: added, updated and
+    /// deleted files and both ends of a move. Relative paths are resolved
+    /// against this run's workspace and normalized as
+    /// [`apply_patch::targets`] does, so the boundary checks the very paths the
+    /// tool writes; without a workspace they stay relative and no boundary
+    /// admits them. Unlike `targets`, a `..` is kept for [`canonical_location`]
+    /// to refuse. A patch that does not parse names no path, and the tool then
+    /// rejects it with the same parser before touching any file.
+    ///
+    /// # Errors
+    /// A named path that exists but is neither a regular file nor a directory,
+    /// such as a FIFO a host-side read would block on.
+    pub(super) fn file_targets(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<Vec<(PathBuf, bool)>, String> {
+        let targets: Vec<(PathBuf, bool)> = if name == apply_patch::tool_contract::NAME {
+            let input = args
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let Ok(raw) = apply_patch::targets_raw(input) else {
+                return Ok(Vec::new());
+            };
+            let root = self.default_cwd();
+            raw.into_iter()
+                .map(|(path, _)| {
+                    let path = match &root {
+                        Some(root) => root.join(path),
+                        None => path,
+                    };
+                    (path.components().collect(), true)
+                })
+                .collect()
+        } else {
+            let write = matches!(name, "write" | "edit");
+            file_path_keys(name)
+                .iter()
+                .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+                .map(|path| (PathBuf::from(path), write))
+                .collect()
+        };
+        if let Some((path, _)) = targets.iter().find(|(path, _)| {
+            std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
+        }) {
+            return Err(format!(
+                "{} is not a regular file or directory",
+                path.display()
+            ));
+        }
+        Ok(targets)
+    }
+}
+
 /// The canonical host path, or `None` when it cannot be placed safely: a
 /// relative path, any `..`, a dangling link, or an unresolvable ancestor.
 fn canonical_location(path: &Path) -> Option<PathBuf> {
@@ -342,12 +453,23 @@ fn canonical_location(path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Resolve ancestors but not the directory entry changed by unlink/rename.
+fn canonical_entry_location(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    Some(canonical_location(path.parent()?)?.join(path.file_name()?))
+}
+
 /// Like bwrap, the last mounted region covering a path decides its access.
 fn place(regions: &[BoundaryRegion], location: Option<&Path>) -> Option<PathAccess> {
     sandbox::region_access(regions, location?)
 }
 
-fn boundary_denial(path: &Path, read_only: bool) -> String {
+/// Why a direct file tool may not touch `path`, and what to do about it.
+/// `escalation` names the reviewed `sandbox_access` retry only for tools that
+/// accept it; apply_patch does not, so its denial never suggests one.
+fn boundary_denial(path: &Path, read_only: bool, escalation: bool) -> String {
     let problem = if read_only {
         format!(
             "{} is read-only for file tools inside the sandbox boundary",
@@ -359,13 +481,18 @@ fn boundary_denial(path: &Path, read_only: bool) -> String {
             path.display()
         )
     };
+    if !escalation {
+        return format!(
+            "{problem}. Nothing was changed: apply_patch only writes where the sandbox boundary lets file tools write. If the location is needed, ask the user to register it as an allowed directory of the project."
+        );
+    }
     format!(
         "{problem}. To access it once, retry with sandbox_access: \"unsandboxed\" and a justification for review. If the location is needed repeatedly, ask the user to register it as an allowed directory of the project."
     )
 }
 
-/// Bytes of write content, or of an edit call's old/new texts together, shown
-/// to the reviewer.
+/// Bytes of write content, of an edit call's old/new texts together, or of an
+/// apply_patch input, shown to the reviewer.
 const MAX_CHANGE_BYTES: usize = 4000;
 
 fn requested_change(name: &str, args: &serde_json::Value) -> Option<String> {
@@ -375,6 +502,10 @@ fn requested_change(name: &str, args: &serde_json::Value) -> Option<String> {
             .as_str()
             .map(|content| bounded(content, MAX_CHANGE_BYTES)),
         "edit" => edit_change(args),
+        "apply_patch" => args
+            .get("input")?
+            .as_str()
+            .map(|patch| bounded(patch, MAX_CHANGE_BYTES)),
         _ => None,
     }
 }
@@ -392,7 +523,7 @@ fn edit_change(args: &serde_json::Value) -> Option<String> {
         let text = |key: &str| edit.get(key)?.as_str();
         texts.push([text("old_string")?, text("new_string")?]);
     }
-    let cap = shared_cap(
+    let cap = crate::output::shared_cap(
         texts.iter().flatten().map(|text| text.len()).collect(),
         MAX_CHANGE_BYTES,
     );
@@ -415,21 +546,6 @@ fn edit_change(args: &serde_json::Value) -> Option<String> {
         ));
     }
     Some(parts.join("\n"))
-}
-
-/// The largest length per text at which all `lengths` fit in `budget` bytes,
-/// so short texts leave their unused share to long ones.
-fn shared_cap(mut lengths: Vec<usize>, budget: usize) -> usize {
-    lengths.sort_unstable();
-    let mut remaining = budget;
-    for (fitted, &length) in lengths.iter().enumerate() {
-        let share = remaining / (lengths.len() - fitted);
-        if length > share {
-            return share;
-        }
-        remaining -= length;
-    }
-    usize::MAX
 }
 
 fn bounded(text: &str, max: usize) -> String {
@@ -462,6 +578,87 @@ fn existing_ancestor_is_inside(path: &Path, root: &Path) -> Result<bool, ToolErr
 fn io_error(error: std::io::Error) -> ToolError {
     ToolError::Io {
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod apply_patch_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn executor(cwd: Option<&Path>) -> ToolExecutor {
+        let executor = ToolExecutor::new(Arc::new(event_bus::EventBus::new(4)));
+        if let Some(cwd) = cwd {
+            executor.set_default_cwd(cwd.to_path_buf());
+        }
+        executor
+    }
+
+    // The reviewer sees a bounded patch, like a long write content.
+    #[test]
+    fn requested_change_bounds_the_patch_text() {
+        let patch = format!("*** Begin Patch\n*** Add File: a\n+{}", "x".repeat(10_000));
+        let change =
+            requested_change("apply_patch", &serde_json::json!({ "input": patch })).unwrap();
+        assert!(change.starts_with("*** Begin Patch\n*** Add File: a\n+x"));
+        assert!(
+            change.ends_with(&format!("…[{} more bytes]", patch.len() - MAX_CHANGE_BYTES)),
+            "{change}"
+        );
+        let short = "*** Begin Patch\n*** Delete File: a\n*** End Patch";
+        assert_eq!(
+            requested_change("apply_patch", &serde_json::json!({ "input": short })).as_deref(),
+            Some(short)
+        );
+    }
+
+    // Every path is a write target, resolved and normalized like the tool's;
+    // `..` survives for canonical_location to refuse.
+    #[test]
+    fn file_targets_list_every_patch_path_as_a_write() {
+        let root = Path::new("/workspace/root");
+        let patch = "*** Begin Patch\n*** Add File: ./a//b.txt\n+x\n*** Delete File: /abs/c.txt\n*** Update File: src/old.rs\n*** Move to: ../moved.rs\n@@\n-a\n+b\n*** End Patch";
+        let args = serde_json::json!({ "input": patch });
+        assert_eq!(
+            executor(Some(root)).file_targets("apply_patch", &args),
+            Ok(vec![
+                (root.join("a/b.txt"), true),
+                (PathBuf::from("/abs/c.txt"), true),
+                (root.join("src/old.rs"), true),
+                (PathBuf::from("/workspace/root/../moved.rs"), true),
+            ])
+        );
+        let resolved: Vec<_> = apply_patch::targets(
+            "*** Begin Patch\n*** Add File: ./a//b.txt\n+x\n*** End Patch",
+            Some(root),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|target| (target.resolved, true))
+        .collect();
+        assert_eq!(
+            executor(Some(root)).file_targets(
+                "apply_patch",
+                &serde_json::json!({
+                    "input": "*** Begin Patch\n*** Add File: ./a//b.txt\n+x\n*** End Patch"
+                })
+            ),
+            Ok(resolved)
+        );
+        // Without a workspace a relative path stays relative, which no
+        // boundary places.
+        assert_eq!(
+            executor(None).file_targets("apply_patch", &args).unwrap()[0],
+            (PathBuf::from("./a/b.txt"), true)
+        );
+        for input in ["not a patch", ""] {
+            assert_eq!(
+                executor(Some(root))
+                    .file_targets("apply_patch", &serde_json::json!({ "input": input })),
+                Ok(Vec::new())
+            );
+        }
     }
 }
 

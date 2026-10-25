@@ -5,6 +5,7 @@
 
 use crate::ConfigError;
 use crate::agent_categories::{categories_for_role, category_for_role};
+use crate::types::EditToolConfig;
 
 const ROOT_KEYS: &[&str] = &[
     "version",
@@ -40,6 +41,7 @@ const PROVIDER_KEYS: &[&str] = &[
     "models",
     "excluded_models",
     "default_model",
+    "edit_tool",
 ];
 const KEYRING_KEYS: &[&str] = &["type", "service", "account"];
 const MODEL_ENTRY_KEYS: &[&str] = &[
@@ -57,6 +59,7 @@ const MODEL_ENTRY_KEYS: &[&str] = &[
     "fast_price",
     "price_tiers",
     "effort_levels",
+    "edit_tool",
 ];
 const FAST_PRICE_KEYS: &[&str] = &["input", "output", "cache_read", "cache_write"];
 const PRICE_TIER_KEYS: &[&str] = &[
@@ -602,6 +605,7 @@ fn validate_provider(profile: &toml::value::Table, path: &str) -> Result<(), Con
     check_credential_scope_keys(profile, path, PROVIDER_KEYS)?;
     validate_api_key_env(profile, path)?;
     validate_credential(profile, path)?;
+    validate_edit_tool(profile, path)?;
     validate_models(profile, path)
 }
 
@@ -620,6 +624,7 @@ fn validate_models(profile: &toml::value::Table, profile_path: &str) -> Result<(
             toml::Value::Table(table) => {
                 check_keys(table, &path, MODEL_ENTRY_KEYS)?;
                 check_price_tables(table, &path)?;
+                validate_edit_tool(table, &path)?;
                 if !table
                     .get("id")
                     .and_then(toml::Value::as_str)
@@ -665,6 +670,27 @@ fn validate_models(profile: &toml::value::Table, profile_path: &str) -> Result<(
         }
     }
     Ok(())
+}
+
+// 不正な値はデシリアライズでは config path を失うため、生テーブルで検査する。
+fn validate_edit_tool(table: &toml::value::Table, prefix: &str) -> Result<(), ConfigError> {
+    let Some(edit_tool) = table.get("edit_tool") else {
+        return Ok(());
+    };
+    if edit_tool
+        .as_str()
+        .and_then(EditToolConfig::from_config_str)
+        .is_some()
+    {
+        return Ok(());
+    }
+    Err(ConfigError::InvalidField {
+        path: field_path(prefix, "edit_tool"),
+        message: format!(
+            "edit_tool must be one of: {}",
+            EditToolConfig::ALL.map(EditToolConfig::as_str).join(", ")
+        ),
+    })
 }
 
 // api_key_env は credential と併用できず、空でない文字列でなければならない。

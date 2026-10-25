@@ -22,7 +22,7 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
             completion_notified: false,
             artifact: None,
             artifact_notice: None,
-            process_id: None,
+            process: None,
             sandbox: None,
             delivered_cursor: 0,
             last_seen: None,

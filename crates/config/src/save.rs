@@ -195,7 +195,7 @@ pub(crate) fn save_openai_compatible_provider_edit_inner(
         );
     }
     profile.insert("default_model", value(input.default_model.as_str()));
-    insert_profile(&mut doc, &input.name, profile)?;
+    insert_profile(&mut doc, &input.name, original_name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
     write_document_in_scope(path, &doc, scope)
 }
@@ -215,6 +215,7 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                     && model.fast_price.is_none()
                     && model.price_tiers.is_none()
                     && model.effort_levels.is_none()
+                    && model.edit_tool.is_none()
                 {
                     toml_edit::Value::from(model.id)
                 } else {
@@ -281,6 +282,9 @@ pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigEr
                                 .collect::<toml_edit::Array>()
                                 .into(),
                         );
+                    }
+                    if let Some(tool) = model.edit_tool {
+                        table.insert("edit_tool", tool.as_str().into());
                     }
                     table.into()
                 },
@@ -428,11 +432,31 @@ fn upgrade_v2_document(doc: &mut DocumentMut) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// 保存入力に現れないため、置き換え前のプロファイルから引き継ぐ手書きのキー。
+const HAND_WRITTEN_PROFILE_KEYS: &[&str] = &["edit_tool"];
+
+/// `name` のプロファイルを `profile` で置き換える。
+///
+/// 置き換え前のプロファイル (`original_name`、なければ `name`) にある
+/// [`HAND_WRITTEN_PROFILE_KEYS`] は、改名時も含めて `profile` へ引き継ぐ。
 pub(crate) fn insert_profile(
     doc: &mut DocumentMut,
     name: &str,
-    profile: Table,
+    original_name: Option<&str>,
+    mut profile: Table,
 ) -> Result<(), ConfigError> {
+    if let Some(previous) = doc
+        .get("providers")
+        .and_then(Item::as_table_like)
+        .and_then(|providers| providers.get(original_name.unwrap_or(name)))
+        .and_then(Item::as_table_like)
+    {
+        for key in HAND_WRITTEN_PROFILE_KEYS {
+            if let Some(item) = previous.get(key) {
+                profile.insert(key, item.clone());
+            }
+        }
+    }
     let providers = doc.entry("providers").or_insert_with(|| {
         let mut table = Table::new();
         table.set_implicit(true);

@@ -12,7 +12,7 @@ mod state;
 pub use observe::{DbOperation, DbPhase, TARGET as DB_TRACE_TARGET};
 pub use permit::OwnerPermit;
 pub use retry::RetryPolicy;
-pub use state::{OwnershipError, ThreadOwner};
+pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
 mod registry;
 pub use registry::{Registry, RegistryError};
 #[cfg(unix)]

@@ -24,7 +24,12 @@ pub enum ToolStatus {
     Failed,
     AwaitingApproval,
     Approved,
-    Denied { reason: String },
+    Denied {
+        reason: String,
+    },
+    /// The run ended before the call reported a result, for example because
+    /// the process exited mid-call. A late completion still replaces it.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

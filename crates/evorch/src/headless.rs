@@ -71,7 +71,8 @@ pub enum HeadlessError {
 ///
 /// # Errors
 /// サブコマンドが `run` 以外、フラグが未知、必須フラグやその値が欠落、
-/// role が既知名でない場合に [`HeadlessError::Usage`] を返す。
+/// role が既知名でない、`--project` を絶対パスにできない (空など) 場合に
+/// [`HeadlessError::Usage`] を返す。
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, HeadlessError> {
     let mut argv = argv;
     match argv.next() {
@@ -110,9 +111,12 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, He
     let Some(role) = parse_role(&role_text) else {
         return Err(usage_error());
     };
+    // 設定・sandbox・file tool はどれもこのディレクトリにパスを結合するので、
+    // ここで一度だけ現在の作業ディレクトリ基準の絶対パスに固定する。
+    let project_dir = std::path::absolute(&project_dir).map_err(|_| usage_error())?;
 
     Ok(HeadlessArgs {
-        project_dir: PathBuf::from(project_dir),
+        project_dir,
         role,
         prompt,
         user_config_dir: user_config.map(PathBuf::from),

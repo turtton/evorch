@@ -20,8 +20,8 @@ use crate::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::{Permissions, Tool, ToolExecutionMode};
-use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
+use crate::tool::{BuiltinTool, Permissions, Tool, ToolExecutionMode};
+use crate::tools::{ApplyPatch, Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
 
 mod prepared;
 mod specs;
@@ -151,10 +151,24 @@ impl ToolExecutor {
     ///
     /// # Errors
     ///
-    /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`] を返す。
+    /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`]、組み込みツール専用の
+    /// 名前（`apply_patch`）を別の実装が名乗った場合は [`ToolError::ReservedToolName`] を返す。
+    /// MCP ツールや host tool もこの経路で登録されるため、同じ検査を受ける。
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+        let is_apply_patch = std::any::Any::type_id(tool.as_ref())
+            == std::any::TypeId::of::<crate::tools::ApplyPatch>();
+        if BuiltinTool::reserving(tool.name()).is_some() && !is_apply_patch {
+            return Err(ToolError::ReservedToolName {
+                name: tool.name().to_owned(),
+            });
+        }
         let schema = tool.schema();
         let validator = schema::compile(tool.name(), &schema)?;
+        // The file boundary resolves apply_patch paths against this executor's
+        // workspace, so the tool must apply them against the same one.
+        if is_apply_patch && let Some(cwd) = self.default_cwd() {
+            tool.set_default_cwd(cwd);
+        }
         tool.set_event_bus(Arc::clone(&self.event_bus));
         self.tools.insert(
             tool.name().to_owned(),
@@ -167,8 +181,8 @@ impl ToolExecutor {
         Ok(())
     }
 
-    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録した実行器を
-    /// 生成する。
+    /// read / write / edit / apply_patch / grep / shell / git_diff の 7 標準ツールを登録した
+    /// 実行器を生成する。
     ///
     /// 低レベルなサンドボックス注入 API である。渡された `Arc<dyn Sandbox>` は
     /// 検証・変換されずそのまま使われるため、隔離なしの `DirectSandbox` も
@@ -191,17 +205,19 @@ impl ToolExecutor {
         sandbox: Arc<dyn Sandbox>,
         default_cwd: Option<std::path::PathBuf>,
     ) -> Self {
+        let default_cwd = default_cwd.map(absolute_root);
         let mut executor = Self::new(event_bus);
         let shell = Shell::new(Arc::clone(&sandbox));
         let shell = match default_cwd.clone() {
             Some(cwd) => shell.with_default_cwd(cwd),
             None => shell,
         };
-        let (edit, write) = executor.post_edit_tools();
-        let standard: [Arc<dyn Tool>; 6] = [
+        let [edit, write, apply_patch] = executor.post_edit_tools();
+        let standard: [Arc<dyn Tool>; 7] = [
             Arc::new(Read),
             edit,
             write,
+            apply_patch,
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
@@ -218,8 +234,8 @@ impl ToolExecutor {
         executor
     }
 
-    /// Attach a shared hook to registered standard Write/Edit tools. None restores
-    /// their hook-free behavior without changing tool schemas or permissions.
+    /// Attach a shared hook to registered standard Write/Edit/ApplyPatch tools. None
+    /// restores their hook-free behavior without changing tool schemas or permissions.
     pub fn with_post_edit_hook(mut self, hook: Option<Arc<dyn PostEditHook>>) -> Self {
         self.post_edit_hook = hook;
         self.refresh_post_edit_tools();
@@ -227,10 +243,15 @@ impl ToolExecutor {
     }
 
     fn refresh_post_edit_tools(&mut self) {
-        let (edit, write) = self.post_edit_tools();
-        for tool in [edit, write] {
+        let cwd = self.default_cwd();
+        for tool in self.post_edit_tools() {
             if let Some(registered) = self.tools.get_mut(tool.name()) {
-                // Standard Write/Edit schemas do not depend on the hook.
+                // Standard Write/Edit/ApplyPatch schemas do not depend on the hook.
+                // The fresh apply_patch resolves relative paths against the run's
+                // workspace, so it needs the workspace the old instance had.
+                if let Some(cwd) = &cwd {
+                    tool.set_default_cwd(cwd.clone());
+                }
                 registered.tool = tool;
             }
         }
@@ -252,13 +273,14 @@ impl ToolExecutor {
         }
     }
 
-    fn post_edit_tools(&self) -> (Arc<dyn Tool>, Arc<dyn Tool>) {
+    fn post_edit_tools(&self) -> [Arc<dyn Tool>; 3] {
         match &self.policy_checked_hook() {
-            Some(hook) => (
+            Some(hook) => [
                 Arc::new(Edit.with_post_edit_hook(Arc::clone(hook))),
                 Arc::new(Write.with_post_edit_hook(Arc::clone(hook))),
-            ),
-            None => (Arc::new(Edit), Arc::new(Write)),
+                Arc::new(ApplyPatch::new().with_post_edit_hook(Arc::clone(hook))),
+            ],
+            None => [Arc::new(Edit), Arc::new(Write), Arc::new(ApplyPatch::new())],
         }
     }
 
@@ -270,8 +292,11 @@ impl ToolExecutor {
             .clone()
     }
 
-    /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
+    /// 登録済みツール（shell や apply_patch）の既定作業ディレクトリを更新する。
+    /// A relative `cwd` is made absolute against the process directory first,
+    /// so every later resolution, the team guard's included, uses one root.
     pub fn set_default_cwd(&self, cwd: std::path::PathBuf) {
+        let cwd = absolute_root(cwd);
         *self
             .default_cwd
             .write()
@@ -491,7 +516,8 @@ impl ToolExecutor {
     /// [`ToolExecutor::inherit_host_tools`].
     ///
     /// # Errors
-    /// Returns [`ToolError::InvalidSchema`] when a tool's schema does not compile.
+    /// Returns [`ToolError::InvalidSchema`] when a tool's schema does not compile,
+    /// or [`ToolError::ReservedToolName`] when a tool claims a built-in's name.
     pub fn with_host_tools(
         mut self,
         tools: impl IntoIterator<Item = Arc<dyn Tool>>,
@@ -506,9 +532,10 @@ impl ToolExecutor {
     /// Registers the same host tools as `parent`.
     pub fn inherit_host_tools(mut self, parent: &ToolExecutor) -> Self {
         for tool in &parent.host_tools {
-            // SAFE-EXPECT: the parent compiled the same schema when it registered the tool.
+            // SAFE-EXPECT: the parent compiled the same schema and passed the same
+            // reserved-name check when it registered the tool.
             self.register(Arc::clone(tool))
-                .expect("inherited host tool schemas compile");
+                .expect("inherited host tools were accepted by the parent");
             self.host_tools.push(Arc::clone(tool));
         }
         self
@@ -543,8 +570,8 @@ impl ToolExecutor {
         }
     }
 
-    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録し、production 用の
-    /// fail-closed なサンドボックスを注入した実行器を生成する。
+    /// read / write / edit / apply_patch / grep / shell / git_diff の 7 標準ツールを登録し、
+    /// production 用の fail-closed なサンドボックスを注入した実行器を生成する。
     ///
     /// `sandbox::production_sandbox`（composition root）経由で `BwrapSandbox` を
     /// 構築する。bwrap の検出に失敗した場合はフォールバックせずエラーを返す。
@@ -824,7 +851,7 @@ impl ToolExecutor {
             Ok(mut result) => {
                 // Derive origin before output limiting can replace diagnostic detail.
                 // External checker text is never promoted to trusted command output.
-                result.origin = if matches!(tool_name, "write" | "edit")
+                result.origin = if matches!(tool_name, "write" | "edit" | "apply_patch")
                     && result
                         .detail
                         .as_ref()
@@ -927,6 +954,16 @@ fn capabilities_of(permissions: &Permissions) -> Capabilities {
         process_spawn: permissions.process_spawn,
         network: permissions.network,
     }
+}
+
+/// `cwd` made absolute against the process directory, without resolving
+/// symlinks. Arguments are scoped against the root once at validation and again
+/// at execution, which joins an absolute root only once, while a relative root
+/// would be joined twice and name a different place each time. When the path
+/// cannot be made absolute (it is empty or the process directory is gone),
+/// it is kept; the team guard rejects such a root.
+fn absolute_root(cwd: std::path::PathBuf) -> std::path::PathBuf {
+    std::path::absolute(&cwd).unwrap_or(cwd)
 }
 
 /// Rename str_replace-style `old_str`/`new_str` to edit's names, at the top level and in `edits`.
@@ -1178,5 +1215,57 @@ mod tests {
             .expect("テストツールは成功する");
 
         assert_eq!(result.origin, ContentOrigin::WebUntrusted);
+    }
+
+    // Given: an executor whose workspace root is given as a relative path, at
+    //        construction and later through set_default_cwd
+    // When: a call is validated and then executed, each of which scopes its
+    //       arguments against the root
+    // Then: the root is absolute, naming the same place from the process
+    //       directory, and the tool receives its path joined to it exactly once
+    #[tokio::test]
+    async fn relative_workspace_root_is_made_absolute_before_scoping() {
+        let relative = std::path::PathBuf::from("evorch-relative-root-does-not-exist");
+        let expected = std::env::current_dir().unwrap().join(&relative);
+        let bus = Arc::new(EventBus::new(16));
+        let mut events = bus.subscribe();
+        let executor = Arc::new(ToolExecutor::with_standard_tools_in(
+            bus,
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            Some(relative.clone()),
+        ));
+        assert_eq!(executor.default_cwd(), Some(expected.clone()));
+        executor.set_default_cwd(relative);
+        assert_eq!(executor.default_cwd(), Some(expected.clone()));
+
+        let ctx = ToolExecutionContext {
+            run_id: "relative-root".into(),
+            thread_id: None,
+            call_id: None,
+        };
+        // The file does not exist, so the read fails without side effects.
+        let _ = executor
+            .validate_call(
+                ctx,
+                "read".into(),
+                "read-call".into(),
+                serde_json::json!({ "path": "a.txt" }),
+            )
+            .unwrap()
+            .scope_approved()
+            .execute()
+            .await;
+        let input = events
+            .drain_pending_snapshot()
+            .into_iter()
+            .find_map(|event| match event.kind {
+                event_bus::EventKind::Tool(ToolEvent::ToolStarted { input, .. }) => input,
+                _ => None,
+            })
+            .expect("the read started");
+        assert_eq!(
+            input["path"],
+            serde_json::json!(expected.join("a.txt").to_string_lossy())
+        );
     }
 }
