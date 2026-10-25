@@ -107,6 +107,10 @@ async fn ac5_ac7_image_chain_fallback_includes_404_and_shares_auth_quota_cooldow
             retry_after: Some(std::time::Duration::from_secs(1)),
         },
         ProviderError::Timeout,
+        ProviderError::Transport {
+            message: "offline".into(),
+        },
+        ProviderError::Request("connection failed".into()),
         ProviderError::Http {
             status: 503,
             body: String::new(),
@@ -133,18 +137,59 @@ async fn ac5_ac7_image_chain_fallback_includes_404_and_shares_auth_quota_cooldow
         assert_eq!(generated.profile, "profile-1");
         assert_eq!(records[0].lock().unwrap().len(), 1);
         assert_eq!(records[1].lock().unwrap().len(), 1);
-        let record = records[1].lock().unwrap();
-        assert_eq!(record[0].0, "secret-1");
-        assert_eq!(record[0].1.model, "model-1");
+        {
+            let record = records[1].lock().unwrap();
+            assert_eq!(record[0].0, "secret-1");
+            assert_eq!(record[0].1.model, "model-1");
+            assert_eq!(
+                record[0].1.observation.as_ref().unwrap().purpose,
+                event_bus::RequestPurpose::ImageGeneration
+            );
+            assert_eq!(
+                record[0].1.observation.as_ref().unwrap().run_id,
+                "run-image"
+            );
+            assert!(record[0].1.usage_sink.is_none());
+        }
+        model
+            .generate_image(&invocation, ImageGenerationRequest::default())
+            .await
+            .unwrap();
         assert_eq!(
-            record[0].1.observation.as_ref().unwrap().purpose,
-            event_bus::RequestPurpose::ImageGeneration
+            records[0].lock().unwrap().len(),
+            1,
+            "subsequent images skip the cooling candidate"
+        );
+        assert_eq!(records[1].lock().unwrap().len(), 2);
+        let route = routing::ResolvedRoute {
+            profile: "profile-0".into(),
+            model_id: "model-0".into(),
+        };
+        let shared = matches!(
+            &error,
+            ProviderError::Http {
+                status: 401 | 402,
+                ..
+            } | ProviderError::RateLimited { .. }
         );
         assert_eq!(
-            record[0].1.observation.as_ref().unwrap().run_id,
-            "run-image"
+            model.router.is_member_available(&route),
+            !shared,
+            "image-only failures must not block the same chat route"
         );
-        assert!(record[0].1.usage_sink.is_none());
+        if !shared {
+            let now = std::time::Instant::now();
+            assert!(model.image_health.is_cooling_down(
+                "profile-0",
+                "model-0",
+                now + std::time::Duration::from_secs(59)
+            ));
+            assert!(!model.image_health.is_cooling_down(
+                "profile-0",
+                "model-0",
+                now + std::time::Duration::from_secs(60)
+            ));
+        }
         if matches!(
             error,
             ProviderError::Http {
@@ -179,10 +224,51 @@ async fn ac5_rejected_stops_without_fallback_or_cooldown() {
     assert!(records[1].lock().unwrap().is_empty());
     assert!(
         !model
+            .image_health
+            .is_cooling_down("profile-0", "model-0", std::time::Instant::now())
+    );
+    assert!(
+        !model
             .health
             .is_cooling_down("profile-0", "model-0", std::time::Instant::now())
     );
 }
+#[tokio::test]
+async fn ac5_image_quota_retry_after_reaches_shared_health() {
+    let (model, records) = fixture(vec![
+        Err(ImageGenerationError::Quota {
+            retry_after: Some(std::time::Duration::from_secs(17)),
+        }),
+        Ok(()),
+    ]);
+    model
+        .generate_image(
+            &AgentInvocationContext::default(),
+            ImageGenerationRequest::default(),
+        )
+        .await
+        .unwrap();
+    let now = std::time::Instant::now();
+    assert!(model.health.is_cooling_down(
+        "profile-0",
+        "another-model",
+        now + std::time::Duration::from_secs(16)
+    ));
+    assert!(!model.health.is_cooling_down(
+        "profile-0",
+        "another-model",
+        now + std::time::Duration::from_secs(17)
+    ));
+    model
+        .generate_image(
+            &AgentInvocationContext::default(),
+            ImageGenerationRequest::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(records[0].lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn ac7_image_chain_checks_kind_and_capability_before_sending() {
     let (mut model, records) = fixture(vec![Ok(()), Ok(())]);

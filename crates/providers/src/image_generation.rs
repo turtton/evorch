@@ -63,6 +63,8 @@ pub struct ImageGenerationResponse {
 pub enum ImageGenerationError {
     #[error("image generation rejected: {0}")]
     Rejected(String),
+    #[error("image generation quota exceeded")]
+    Quota { retry_after: Option<Duration> },
     #[error(transparent)]
     Provider(#[from] ProviderError),
 }
@@ -183,6 +185,10 @@ pub(crate) async fn execute(
             UsageEmitter::new(bus, provider).emit_usage(&request.model, &response.usage);
             observer.emit_completed(&response.usage, FinishReason::Stop);
         }
+        Err(ImageGenerationError::Quota { .. }) => observer.emit_failed(&ProviderError::Http {
+            status: 402,
+            body: "image generation quota exceeded".into(),
+        }),
         Err(ImageGenerationError::Provider(error)) => observer.emit_failed(error),
         Err(ImageGenerationError::Rejected(_)) => observer.emit_failed(&ProviderError::Http {
             status: 400,

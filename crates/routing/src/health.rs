@@ -65,6 +65,28 @@ impl ProviderHealth {
             ),
             FailureKind::Server | FailureKind::Timeout | FailureKind::Other => return None,
         };
+        Some(self.record(profile, model, duration, now))
+    }
+
+    /// Pause one capability-local candidate; callers attach this registry only
+    /// to that capability's router, leaving chat and other models available.
+    pub fn record_candidate_failure(
+        &self,
+        profile: &str,
+        model: &str,
+        duration: Duration,
+        now: Instant,
+    ) -> Cooldown {
+        self.record(profile, Some(model.to_owned()), Some(duration), now)
+    }
+
+    fn record(
+        &self,
+        profile: &str,
+        model: Option<String>,
+        duration: Option<Duration>,
+        now: Instant,
+    ) -> Cooldown {
         let deadline = duration.map(|duration| now + duration);
         let mut until = self
             .until
@@ -77,11 +99,11 @@ impl ProviderHealth {
             (None, _) | (_, None) => None,
             (Some(current), Some(next)) => Some(current.max(next)),
         };
-        Some(Cooldown {
+        Cooldown {
             profile: profile.to_owned(),
             model,
             duration,
-        })
+        }
     }
 
     /// プロファイル全体、またはその実モデルがクールダウン中かを返します。

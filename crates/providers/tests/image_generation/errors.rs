@@ -100,11 +100,12 @@ async fn ac5_http_errors_classify_auth_quota_rate_limit_unsupported_transient_an
                     "rate_limit_exceeded",
                     ImageGenerationError::Provider(ProviderError::RateLimited { retry_after }),
                 ) => assert_eq!(retry_after, Some(Duration::from_secs(17))),
-                (
+                (402, _, ImageGenerationError::Quota { retry_after })
+                | (
                     _,
                     "insufficient_quota" | "quota_exceeded" | "usage_limit_reached",
-                    ImageGenerationError::Provider(ProviderError::Http { status: 402, .. }),
-                ) => {}
+                    ImageGenerationError::Quota { retry_after },
+                ) => assert_eq!(retry_after, Some(Duration::from_secs(17))),
                 (400 | 422, _, ImageGenerationError::Rejected(_)) => {}
                 (
                     expected,

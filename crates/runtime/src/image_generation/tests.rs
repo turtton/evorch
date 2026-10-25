@@ -61,7 +61,7 @@ fn ac8_ac11_argument_boundaries_and_variant_names() {
         });
         assert!(a.validate().is_ok());
         assert_eq!(
-            a.variant_path().unwrap(),
+            a.variant_path(&a.output_path).unwrap(),
             PathBuf::from(format!("material.{side}.jpg"))
         );
     }
@@ -229,4 +229,122 @@ fn ac13_tool_description_discloses_destination_quota_and_agent_discretion() {
         assert!(spec.description.contains(text));
     }
     jsonschema::validator_for(&spec.input_schema).unwrap();
+}
+
+struct IdleModel;
+#[async_trait::async_trait]
+impl crate::AgentModel for IdleModel {
+    async fn complete(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        _: &[providers::Message],
+        _: &[ToolSpec],
+    ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+        std::future::pending().await
+    }
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "idle".into()
+    }
+}
+fn saving_runtime() -> (AgentRuntime, crate::RunId) {
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(16));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        std::sync::Arc::new(tools::ToolExecutor::new(bus)),
+        std::sync::Arc::new(IdleModel),
+    );
+    let run = crate::RunId::new(2);
+    runtime.seed_spawn_intent(run, &crate::RunId::new(1).to_string());
+    (runtime, run)
+}
+
+#[tokio::test]
+async fn ac15_cancel_after_sync_prevents_publish_overwrite_and_removes_staging() {
+    for overwrite in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let roots = SourceRoots::new(workspace.path(), None).unwrap();
+        let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+        let variant = path.with_file_name("hero.64.png");
+        if overwrite {
+            std::fs::write(&path, b"old original").unwrap();
+            std::fs::write(&variant, b"old variant").unwrap();
+        }
+        let (runtime, run) = saving_runtime();
+        let result = save_generated(
+            &runtime,
+            run,
+            &dir,
+            (&path, b"new original"),
+            Some((&variant, b"new variant")),
+            || {
+                assert_eq!(
+                    std::fs::read_dir(workspace.path()).unwrap().count(),
+                    if overwrite { 4 } else { 2 }
+                );
+                runtime.cancel_subtree(run).unwrap();
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().contains("interrupted"));
+        if overwrite {
+            assert_eq!(std::fs::read(&path).unwrap(), b"old original");
+            assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
+        } else {
+            assert!(!path.exists());
+            assert!(!variant.exists());
+        }
+        assert_eq!(
+            std::fs::read_dir(workspace.path()).unwrap().count(),
+            if overwrite { 2 } else { 0 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac9_original_staging_failure_preserves_existing_pair_and_cleans_temps() {
+    let workspace = tempfile::tempdir().unwrap();
+    let roots = SourceRoots::new(workspace.path(), None).unwrap();
+    let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+    let variant = path.with_file_name("hero.64.png");
+    std::fs::write(&path, b"old original").unwrap();
+    std::fs::write(&variant, b"old variant").unwrap();
+    let (runtime, run) = saving_runtime();
+    let result = crate::artifacts::source_io::with_stage_failure(2, || {
+        save_generated(
+            &runtime,
+            run,
+            &dir,
+            (&path, b"new original"),
+            Some((&variant, b"new variant")),
+            || panic!("must not reach publication"),
+        )
+    });
+    assert!(result.unwrap_err().contains("injected staging failure"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"old original");
+    assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
+    assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn ac9_original_publish_failure_leaves_no_variant_or_staging() {
+    let workspace = tempfile::tempdir().unwrap();
+    let roots = SourceRoots::new(workspace.path(), None).unwrap();
+    let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+    let variant = path.with_file_name("hero.64.png");
+    let (runtime, run) = saving_runtime();
+    let result = save_generated(
+        &runtime,
+        run,
+        &dir,
+        (&path, b"original"),
+        Some((&variant, b"variant")),
+        || {
+            std::fs::create_dir(&path).unwrap();
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!variant.exists());
+    assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
 }

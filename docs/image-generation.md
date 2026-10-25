@@ -60,9 +60,14 @@ requests are supported.
 Authentication, quota, rate limiting, temporary failures and unsupported
 endpoints (404/405) advance the chain. Routing health and Retry-After handling
 are shared with chat: auth pauses the profile until recomposition; quota and
-429 use the existing cooldown policy. Server/timeout/unsupported failures do
-not create a persistent cooldown. A rejected or invalid request stops immediately
-and returns its reason; it never attempts to evade safety decisions by falling
+429 use the existing cooldown policy (including Retry-After for quota).
+Other image failures, including server/timeout/transport errors and unsupported
+404/405 endpoints, pause only the image candidate `(profile, model)` for **60
+seconds**. This additional in-memory health registry uses the existing router
+and fallback scan, expires at the deadline, and resets on runtime recomposition.
+It is never attached to the chat router: even the same profile/model's healthy
+chat path remains available. A rejected or invalid request stops immediately
+and returns its reason; it neither cools down nor attempts to evade safety decisions by falling
 back. Image generation does not change the chat chain's pin. Usage is recorded
 once by the provider under `ImageGeneration`, never again by the runtime.
 

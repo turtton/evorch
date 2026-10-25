@@ -68,15 +68,15 @@ impl Args {
         Ok(())
     }
 
-    fn variant_path(&self) -> Option<PathBuf> {
+    fn variant_path(&self, output_path: &Path) -> Option<PathBuf> {
         let variant = self.variant.as_ref()?;
-        let mut stem = self.output_path.file_stem()?.to_os_string();
+        let mut stem = output_path.file_stem()?.to_os_string();
         let extension = match variant.format {
             VariantFormat::Jpeg => "jpg",
             VariantFormat::Png => "png",
         };
         stem.push(format!(".{}.{extension}", variant.max_side));
-        Some(self.output_path.with_file_name(stem))
+        Some(output_path.with_file_name(stem))
     }
 }
 
@@ -133,10 +133,10 @@ async fn execute(
         &workspace,
         state.scratch_dir(),
     )?);
-    let (path, _) = roots.destination(&args.output_path)?;
-    let variant_path = args.variant_path();
+    let (path, directory) = roots.destination(&args.output_path)?;
+    let variant_path = args.variant_path(&path);
     if let Some(path) = &variant_path {
-        roots.destination(path)?;
+        crate::artifacts::source_io::validate_image_destination(&directory, filename(path)?)?;
     }
     let preparation = args.clone();
     let read_roots = std::sync::Arc::clone(&roots);
@@ -184,11 +184,6 @@ async fn execute(
     }
     // Revalidate ownership after the long provider request and before any mutation.
     runtime.validate_artifact_mutation(state.caller_run_id())?;
-    let (path, directory) = roots.destination(&path)?;
-    let variant_destination = variant_path
-        .as_deref()
-        .map(|p| roots.destination(p))
-        .transpose()?;
     let _ownership = state
         .run_config()
         .ownership
@@ -201,18 +196,25 @@ async fn execute(
     if state.interrupted().is_some() {
         return Err("image generation interrupted; no files saved".into());
     }
-    if let Some(((variant_path, directory), bytes)) =
-        variant_destination.as_ref().zip(processed.variant.as_ref())
-    {
-        save(directory, variant_path, bytes)?;
-    }
-    save(&directory, &path, &original)?;
+    save_generated(
+        runtime,
+        state.task.run_id,
+        &directory,
+        (&path, &original),
+        variant_path.as_deref().zip(processed.variant.as_deref()),
+        || {
+            if state.interrupted().is_some() {
+                return Err("image generation interrupted; no files saved".into());
+            }
+            Ok(())
+        },
+    )?;
     let note = if args.reference_image_paths.is_empty() {
         "No reference images sent. Generation was sent to OpenAI."
     } else {
         "reference images were sent to OpenAI"
     };
-    let result = json!({"path":path,"variant_path":variant_destination.as_ref().map(|(p,_)| p),
+    let result = json!({"path":path,"variant_path":variant_path,
         "width":processed.width,"height":processed.height,"profile":generated.profile,"model":generated.model,
         "reference_images_sent": !args.reference_image_paths.is_empty(),
         "note":format!("{note}. Decide whether to adopt this material or use it as reference; do not substitute it for an HTML UI mock.")});
@@ -225,6 +227,40 @@ async fn execute(
     )
 }
 
+fn filename(path: &Path) -> Result<&Path, String> {
+    Ok(Path::new(path.file_name().ok_or("missing filename")?))
+}
+
+fn save_generated(
+    runtime: &AgentRuntime,
+    run: crate::RunId,
+    directory: &std::fs::File,
+    original: (&Path, &[u8]),
+    variant: Option<(&Path, &[u8])>,
+    before_commit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    use crate::artifacts::source_io::{stage_image, validate_image_destination};
+    let staged_variant = variant
+        .map(|(_, bytes)| stage_image(directory, bytes))
+        .transpose()?;
+    let staged_original = stage_image(directory, original.1)?;
+    // Deterministic seam after all writes/syncs, before the cancellation fence.
+    before_commit()?;
+    runtime.commit_generated_images(run, || {
+        validate_image_destination(directory, filename(original.0)?)?;
+        if let Some((path, _)) = variant {
+            validate_image_destination(directory, filename(path)?)?;
+        }
+        // Publish original first: an original failure cannot leave a variant.
+        staged_original.publish(filename(original.0)?)?;
+        if let Some(staged) = &staged_variant {
+            staged.publish(filename(variant.expect("staged variant").0)?)?;
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
 fn save(directory: &std::fs::File, path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::artifacts::source_io::store_image(
         directory,

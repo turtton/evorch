@@ -531,3 +531,104 @@ fn escalation_review_is_billed_without_replacing_the_live_request() {
     assert_eq!(telemetry.billed["run"].len(), 2);
     assert!(telemetry.side_requests.is_empty());
 }
+
+#[test]
+fn image_success_and_failure_preserve_conversation_metrics_between_turns() {
+    for success in [true, false] {
+        let mut telemetry = TelemetryOverlay::new();
+        telemetry.apply_event(&request_started("run"));
+        telemetry.apply_event(&reuse("run", 900, Some(1_000)));
+        for event in observed("run", 1_000, 900, 40, 200) {
+            telemetry.apply_event(&event);
+        }
+        telemetry.rows.get_mut("run").unwrap().context_window = Some(10_000);
+        let before = telemetry.row("run").unwrap().clone();
+        let image = |mut event: Event| {
+            match &mut event.kind {
+                EventKind::Provider(
+                    ProviderEvent::RequestStarted {
+                        request_id,
+                        model,
+                        purpose,
+                        ..
+                    }
+                    | ProviderEvent::RequestCompleted {
+                        request_id,
+                        model,
+                        purpose,
+                        ..
+                    }
+                    | ProviderEvent::RequestFailed {
+                        request_id,
+                        model,
+                        purpose,
+                        ..
+                    },
+                ) => {
+                    *request_id = "image".into();
+                    *model = "image-model".into();
+                    *purpose = Some(RequestPurpose::ImageGeneration);
+                }
+                EventKind::Provider(
+                    ProviderEvent::FirstTokenObserved { request_id, .. }
+                    | ProviderEvent::CacheReuseObserved { request_id, .. },
+                ) => *request_id = "image".into(),
+                _ => unreachable!(),
+            }
+            event
+        };
+        telemetry.apply_event(&image(request_started("run")));
+        telemetry.apply_event(&image(reuse("run", 0, None)));
+        let [first, completed] = observed("run", 300, 0, 10, 900);
+        telemetry.apply_event(&image(first));
+        if success {
+            telemetry.apply_event(&image(completed));
+        } else {
+            telemetry.apply_event(&image(Event::new(ProviderEvent::RequestFailed {
+                detail: None,
+                request_id: String::new(),
+                provider: "provider".into(),
+                profile: None,
+                protocol: "openai-images".into(),
+                model: String::new(),
+                streaming: false,
+                duration_ms: 9_000,
+                failure: event_bus::ProviderFailureKind::Timeout,
+                run_id: Some("run".into()),
+                purpose: None,
+            })));
+        }
+        let row = telemetry.row("run").unwrap();
+        assert_eq!(row.model, before.model);
+        assert_eq!(row.provider, before.provider);
+        assert_eq!(row.profile, before.profile);
+        assert_eq!(row.in_flight, before.in_flight);
+        assert_eq!(row.requests, before.requests);
+        assert_eq!(row.latest_context, before.latest_context);
+        assert_eq!(row.context_window, before.context_window);
+        assert_eq!(row.latest_ttft_ms(), before.latest_ttft_ms());
+        assert_eq!(row.request_duration, before.request_duration);
+        assert_eq!(row.cache_reuse, before.cache_reuse);
+        assert_eq!(row.rated_output_tokens, before.rated_output_tokens);
+        assert_eq!(row.rated_duration, before.rated_duration);
+        let metrics = telemetry.thread_metrics(&["run".into()]);
+        assert_eq!(metrics.cache_hit_rate, Some(90.0));
+        assert_eq!(metrics.average_cache_hit_rate, Some(90.0));
+        assert_eq!(metrics.average_ttft, Some(Duration::from_millis(200)));
+        assert_eq!(metrics.average_tok_s, Some(20.0));
+        assert_eq!(row.usage.input, 1_000 + if success { 300 } else { 0 });
+        assert_eq!(telemetry.billed["run"].len(), if success { 2 } else { 1 });
+        assert!(telemetry.stale_costs.contains("run"));
+        assert!(telemetry.side_requests.is_empty());
+        telemetry.apply_event(&request_started("run"));
+        telemetry.apply_event(&reuse("run", 1_000, Some(1_000)));
+        for event in observed("run", 2_000, 1_000, 60, 100) {
+            telemetry.apply_event(&event);
+        }
+        let row = telemetry.row("run").unwrap();
+        assert_eq!(row.requests, 2);
+        assert_eq!(row.latest_ttft_ms(), Some(100));
+        assert_eq!(row.rated_output_tokens, 100);
+        assert_eq!(row.cache_reuse.completed_requests, 2);
+    }
+}

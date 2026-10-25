@@ -230,6 +230,7 @@ pub struct RoutedModel {
     affinity: Mutex<SessionAffinity>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
+    image_health: Arc<routing::ProviderHealth>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
     /// フォールバックの一周で Retry-After を待つ上限。
@@ -286,6 +287,7 @@ impl RoutedModel {
                 .with_health(Arc::clone(&health)),
             router: composed.router.with_health(Arc::clone(&health)),
             health,
+            image_health: Arc::new(routing::ProviderHealth::default()),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,

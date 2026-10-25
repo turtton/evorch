@@ -32,6 +32,7 @@ pub struct Router {
     required_capabilities: Vec<Capability>,
     /// クールダウン中の候補を外すための共有状態。未接続なら外さない。
     health: Option<Arc<ProviderHealth>>,
+    additional_health: Vec<Arc<ProviderHealth>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -75,6 +76,9 @@ impl Router {
     pub fn is_member_available(&self, target: &ResolvedRoute) -> bool {
         self.profiles.contains_key(&target.profile)
             && self.is_eligible(&target.model_id)
+            && !self.additional_health.iter().any(|health| {
+                health.is_cooling_down(&target.profile, &target.model_id, std::time::Instant::now())
+            })
             && !self.health.as_ref().is_some_and(|health| {
                 health.is_cooling_down(&target.profile, &target.model_id, std::time::Instant::now())
             })
@@ -127,6 +131,7 @@ impl Router {
             catalog,
             required_capabilities: Vec::new(),
             health: None,
+            additional_health: Vec::new(),
         })
     }
 
@@ -134,6 +139,12 @@ impl Router {
     /// クールダウン中のメンバーとピンを飛ばす。
     pub fn with_health(mut self, health: Arc<ProviderHealth>) -> Self {
         self.health = Some(health);
+        self
+    }
+
+    /// Add capability-local health without replacing the shared profile health.
+    pub fn with_additional_health(mut self, health: Arc<ProviderHealth>) -> Self {
+        self.additional_health.push(health);
         self
     }
 

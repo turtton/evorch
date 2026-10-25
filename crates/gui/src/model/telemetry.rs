@@ -42,6 +42,7 @@ pub struct TelemetryRow {
     pub last_checkpoint: Option<std::time::SystemTime>,
     pub checkpoint_failure: Option<String>,
     pub usage: TokenUsage,
+    conversation_usage: TokenUsage,
     pub cache_reuse: CacheReuseSummary,
     pending_reuse: Option<RequestReuse>,
     latest_context: Option<context_pressure::RequestContext>,
@@ -126,10 +127,12 @@ fn protocol_summarizes_reasoning(protocol: &str) -> bool {
     matches!(protocol, "openai-codex-responses" | "openai-responses")
 }
 
-/// A sandbox escalation review shares the reviewed run's ID but runs another
-/// model: it is billed to the run without replacing the run's live request.
+/// Side requests share the run's bill, not its live conversation metrics.
 fn is_side_request(purpose: Option<RequestPurpose>) -> bool {
-    purpose == Some(RequestPurpose::EscalationReview)
+    matches!(
+        purpose,
+        Some(RequestPurpose::EscalationReview | RequestPurpose::ImageGeneration)
+    )
 }
 
 #[derive(Debug, Default)]
@@ -358,6 +361,12 @@ impl TelemetryOverlay {
                 if self.side_requests.remove(request_id) || is_side_request(*purpose) {
                     return;
                 }
+                row.conversation_usage.input =
+                    row.conversation_usage.input.saturating_add(*input_tokens);
+                row.conversation_usage.cache_read = row
+                    .conversation_usage
+                    .cache_read
+                    .saturating_add(*cache_read_tokens);
                 let reuse = row.pending_reuse.take().unwrap_or(RequestReuse::Unobserved);
                 row.cache_reuse.complete(reuse);
                 self.context_order = self.context_order.saturating_add(1);

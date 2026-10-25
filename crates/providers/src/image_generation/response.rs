@@ -158,12 +158,7 @@ fn http_error(status: u16, body: &[u8], retry_after: Option<Duration>) -> ImageG
         )
     });
     if status == 402 || ((status == 400 || status == 403 || status == 429) && quota) {
-        // Existing routing/observation taxonomy recognizes HTTP 402 as Quota.
-        return ProviderError::Http {
-            status: 402,
-            body: "image generation quota exceeded".into(),
-        }
-        .into();
+        return ImageGenerationError::Quota { retry_after };
     }
     match status {
         429 => ProviderError::RateLimited { retry_after }.into(),

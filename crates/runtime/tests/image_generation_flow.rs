@@ -22,6 +22,7 @@ struct Model {
     forbidden: bool,
     artifact: Mutex<Option<String>>,
     artifact_ready: tokio::sync::Notify,
+    output_path: Mutex<String>,
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
@@ -59,7 +60,7 @@ impl AgentModel for Model {
         let call = match (*step, role) {
             (0, Role::Worker) => Some((
                 "generate_image",
-                json!({"prompt":"material","output_path":"hero.png","reference_image_paths":["reference.png"],"variant":{"max_side":64,"format":"jpeg"}}),
+                json!({"prompt":"material","output_path":self.output_path.lock().unwrap().clone(),"reference_image_paths":["reference.png"],"variant":{"max_side":64,"format":"jpeg"}}),
             )),
             (0, Role::Orchestrator) if self.forbidden => Some((
                 "generate_image",
@@ -224,6 +225,7 @@ async fn harness(
         forbidden,
         artifact: Mutex::default(),
         artifact_ready: Default::default(),
+        output_path: Mutex::new("hero.png".into()),
     });
     let executor = tools::ToolExecutor::new(bus.clone());
     executor.set_default_cwd(workspace.path().into());
@@ -362,6 +364,42 @@ async fn ac12_ac14_root_worker_and_visual_worker_generate_embed_and_present() {
                 .starts_with("data:image/png;base64,")
         );
     }
+}
+
+#[tokio::test]
+async fn ac11_dispatch_pins_original_and_variant_across_symlink_retarget() {
+    let server = MockServer::start().await;
+    let (runtime, model, workspace, _) = harness(&server, false).await;
+    let a = workspace.path().join("A");
+    let b = workspace.path().join("B");
+    let live = workspace.path().join("live");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    std::os::unix::fs::symlink(&a, &live).unwrap();
+    *model.output_path.lock().unwrap() = "live/hero.png".into();
+    Mock::given(method("POST")).and(path("/v1/images/edits"))
+        .respond_with(move |_: &wiremock::Request| {
+            std::fs::remove_file(&live).unwrap();
+            std::os::unix::fs::symlink(&b, &live).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"b64_json":base64::engine::general_purpose::STANDARD.encode(png())}]}))
+        }).expect(1).mount(&server).await;
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "generate".into(),
+        RunConfig {
+            category: Some("visual".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    assert!(a.join("hero.png").is_file());
+    assert!(a.join("hero.64.jpg").is_file());
+    assert_eq!(
+        std::fs::read_dir(workspace.path().join("B"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]

@@ -39,9 +39,12 @@ impl RoutedModel {
                 ));
             }
         }
-        let mut scratch = SessionAffinity::default();
-        let mut position = self
+        let router = self
             .router
+            .clone()
+            .with_additional_health(Arc::clone(&self.image_health));
+        let mut scratch = SessionAffinity::default();
+        let mut position = router
             .resolve_chain(&mut scratch, &invocation.run_id, &chain)
             .map_err(|e| e.to_string())?;
         let mut cycle = None;
@@ -69,26 +72,42 @@ impl RoutedModel {
                     });
                 }
                 Err(ImageGenerationError::Rejected(reason)) => return Err(reason),
-                Err(ImageGenerationError::Provider(error)) => {
-                    let failure =
-                        routing::FailureKind::classify(&error, provider.profile.provider_type);
-                    self.record_cooldown(
-                        route,
+                Err(error) => {
+                    let (failure, retry_after, transient) = match &error {
+                        ImageGenerationError::Quota { retry_after } => {
+                            (routing::FailureKind::Quota, *retry_after, false)
+                        }
+                        ImageGenerationError::Provider(error) => (
+                            routing::FailureKind::classify(error, provider.profile.provider_type),
+                            routing::retry_after(error),
+                            routing::is_transient(error),
+                        ),
+                        ImageGenerationError::Rejected(_) => unreachable!(),
+                    };
+                    self.record_cooldown(route, failure, retry_after, &invocation.run_id, None);
+                    if !matches!(
                         failure,
-                        routing::retry_after(&error),
-                        &invocation.run_id,
-                        None,
-                    );
+                        routing::FailureKind::Auth
+                            | routing::FailureKind::Quota
+                            | routing::FailureKind::RateLimited
+                    ) {
+                        self.image_health.record_candidate_failure(
+                            &route.profile,
+                            &route.model_id,
+                            std::time::Duration::from_secs(60),
+                            std::time::Instant::now(),
+                        );
+                    }
                     // Unlike chat, the image packet explicitly includes unsupported endpoints.
                     let step = FallbackAttempt {
                         failed: position,
                         from: route,
                         failure,
-                        transient: routing::is_transient(&error),
-                        retry_after: routing::retry_after(&error),
+                        transient,
+                        retry_after,
                     };
                     let Some(next) = self
-                        .advance_fallback(&self.router, &chain, &mut cycle, step, invocation, None)
+                        .advance_fallback(&router, &chain, &mut cycle, step, invocation, None)
                         .await
                     else {
                         // Provider bodies may contain credentials or echoed reference images.
