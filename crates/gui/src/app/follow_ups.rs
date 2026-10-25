@@ -5,6 +5,7 @@
 //! consumes them in submission order, so the oldest waiting entries are the
 //! delivered ones whenever the count drops.
 use super::WorkbenchState;
+use super::history::Resolution;
 use crate::model::composer::QueuedFollowUp;
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
@@ -17,14 +18,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .is_some_and(|status| !status.closed)
     }
 
-    pub(super) fn queue_follow_up(&mut self, thread: &str, text: String, prompt: String) {
+    pub(super) fn queue_follow_up(
+        &mut self,
+        thread: &str,
+        submission_id: String,
+        text: String,
+        prompt: String,
+    ) {
         self.follow_up_queues
             .entry(thread.into())
             .or_default()
             .push(QueuedFollowUp {
+                submission_id,
                 text,
                 prompt,
                 undelivered: false,
+                rejection: None,
             });
     }
 
@@ -32,6 +41,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// run dropped, and mirror the active thread's queue into the composer.
     pub(super) fn reconcile_follow_ups(&mut self) {
         let threads: Vec<String> = self.follow_up_queues.keys().cloned().collect();
+        let mut delivered_ids = Vec::new();
         for thread in threads {
             let status = self.sink.follow_up_status(&thread);
             let Some(queue) = self.follow_up_queues.get_mut(&thread) else {
@@ -45,6 +55,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             for mut item in std::mem::take(queue) {
                 if delivered > 0 && !item.undelivered {
                     delivered -= 1;
+                    delivered_ids.push(item.submission_id);
                     self.transcripts.push_to_thread(
                         &thread,
                         TranscriptEntry::UserMessage { text: item.prompt },
@@ -60,6 +71,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.follow_up_queues.insert(thread, kept);
             }
         }
+        if self.mark_delivered(&delivered_ids) {
+            self.save_sidebar();
+        }
+        self.mirror_active_queue();
+    }
+
+    pub(super) fn mirror_active_queue(&mut self) {
         self.composer.queued = self
             .sidebar
             .active_thread
@@ -74,6 +92,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(item) = self.take_undelivered(index) else {
             return;
         };
+        self.resolve_undelivered(&item.submission_id, Resolution::Restored);
         if self.composer.input.trim().is_empty() {
             self.composer.input = item.text;
         } else {
@@ -85,10 +104,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn dismiss_queued_follow_up(&mut self, index: usize) {
-        self.take_undelivered(index);
+        if let Some(item) = self.take_undelivered(index) {
+            self.resolve_undelivered(&item.submission_id, Resolution::Dismissed);
+        }
     }
 
-    /// Only dropped entries leave on request; waiting ones belong to the run.
+    /// Only entries that never reached the agent leave on request; waiting
+    /// ones belong to the run.
     fn take_undelivered(&mut self, index: usize) -> Option<QueuedFollowUp> {
         let thread = self.sidebar.active_thread.as_ref()?.to_string();
         let queue = self.follow_up_queues.get_mut(&thread)?;
@@ -99,11 +121,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if queue.is_empty() {
             self.follow_up_queues.remove(&thread);
         }
-        self.composer.queued = self
-            .follow_up_queues
-            .get(&thread)
-            .cloned()
-            .unwrap_or_default();
+        self.mirror_active_queue();
         Some(item)
     }
 }

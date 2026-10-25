@@ -443,9 +443,14 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
     submit(&mut harness, "hello agent");
     // Then: the typed chat is issued in the thread's project and the user line is visible.
     let project_root = harness.state().sidebar().projects[0].repo_root.clone();
+    let [WorkbenchCommand::SendChat(sent)] = harness.state().issued() else {
+        panic!("expected one chat: {:?}", harness.state().issued());
+    };
+    let submission_id = sent.submission_id.clone();
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id,
             fork_seed: None,
             project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,

@@ -1,4 +1,5 @@
-//! Follow-ups waiting for a busy run, listed above goal and procedures.
+//! Follow-ups waiting for a busy run, and messages that never reached the
+//! agent, listed above goal and procedures.
 //!
 //! Rows read top to bottom in delivery order. Only the next one to send
 //! carries a control, because the runtime delivers the whole queue together.
@@ -58,7 +59,10 @@ fn row(
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Not delivered")
             });
-            response.on_hover_text("Not delivered — the run ended first");
+            response.on_hover_text(match &item.rejection {
+                Some(reason) => format!("Not delivered — {reason}"),
+                None => "Not delivered — the run ended first".into(),
+            });
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if item.undelivered {

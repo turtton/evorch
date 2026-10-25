@@ -1,5 +1,6 @@
 use super::WorkbenchState;
-use crate::model::commands::{ChatContinuation, ChatSubmission, WorkbenchCommand};
+use super::history::DeliveryStatus;
+use crate::model::commands::{ChatContinuation, ChatSubmission, LoopEvent, WorkbenchCommand};
 use crate::model::composer::{ComposerInput, ProviderStatus};
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
@@ -132,6 +133,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             }
                         };
                         let submission = ChatSubmission {
+                            submission_id: uuid::Uuid::new_v4().to_string(),
                             fork_seed: self.fork_seed(thread_id),
                             project_root: self
                                 .thread_project(thread_id)
@@ -186,51 +188,68 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.composer.restore_thread_role(thread);
                         }
                         self.history.push(super::history::UserMessage {
+                            id: submission.submission_id.clone(),
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
+                            prompt: prompt.clone(),
                             at: sent_at,
+                            status: DeliveryStatus::Queued,
+                            resolution: None,
                         });
                         // A busy run reads follow-ups later; they wait above the composer
                         // and join the transcript once delivered.
                         let queued = self
                             .follow_up_would_queue(&submission.thread_id)
                             .then(|| submission.thread_id.clone());
-                        if queued.is_none() {
-                            // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
-                            self.transcripts.push_thread(TranscriptEntry::UserMessage {
-                                text: prompt.clone(),
-                            });
-                        }
                         self.save_sidebar();
+                        let submission_id = submission.submission_id.clone();
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));
                         let events = match permit {
                             Some(permit) => self.sink.submit_chat_with_permit(submission, permit),
                             None => self.sink.submit(WorkbenchCommand::SendChat(submission)),
                         };
-                        let rejected = events.iter().any(|event| {
-                            matches!(
-                                event,
-                                crate::model::commands::LoopEvent::ChatRejected { .. }
-                                    | crate::model::commands::LoopEvent::CommandRejected { .. }
-                            )
+                        let rejection = events.iter().find_map(|event| match event {
+                            LoopEvent::ChatRejected { reason, .. }
+                            | LoopEvent::CommandRejected { reason } => Some(reason.clone()),
+                            _ => None,
                         });
-                        if !rejected && let Some(chat) = title_chat {
-                            self.start_auto_title(chat);
-                        }
-                        if let Some(thread) = queued {
-                            if rejected {
-                                self.transcripts
-                                    .push_thread(TranscriptEntry::UserMessage { text: prompt });
-                            } else {
-                                self.queue_follow_up(&thread, text.into(), prompt);
+                        match rejection {
+                            // The agent never saw it: no bubble, and the composer keeps
+                            // the text and attachments to edit and send again.
+                            Some(reason) => {
+                                self.reject_submission(&submission_id, reason);
+                            }
+                            None => {
+                                if let Some(chat) = title_chat {
+                                    self.start_auto_title(chat);
+                                }
+                                match queued {
+                                    Some(thread) => {
+                                        self.queue_follow_up(
+                                            &thread,
+                                            submission_id,
+                                            text.into(),
+                                            prompt,
+                                        );
+                                    }
+                                    None => {
+                                        // The runtime echoes the expanded prompt; matching it
+                                        // avoids a duplicate bubble.
+                                        self.transcripts.push_thread(
+                                            TranscriptEntry::UserMessage { text: prompt },
+                                        );
+                                        self.mark_delivered(&[submission_id]);
+                                        self.save_sidebar();
+                                    }
+                                }
+                                self.composer.input.clear();
+                                self.composer.attachments.clear();
                             }
                         }
                         for event in events {
                             self.apply_loop_event(event);
                         }
-                        self.composer.input.clear();
-                        self.composer.attachments.clear();
                     }
                 }
             }

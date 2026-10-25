@@ -446,6 +446,7 @@ impl RuntimeCommandSink {
                 );
                 let mut events = self.submit_authorized(
                     WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                        submission_id: String::new(),
                         fork_seed: None,
                         project_root: None,
                         thread_id,
@@ -671,6 +672,7 @@ impl RuntimeCommandSink {
                 initial.initial_thread_goal = Some((objective, criteria));
                 let mut events = self.submit_chat_config(
                     crate::model::commands::ChatSubmission {
+                        submission_id: String::new(),
                         project_root: submission.project_root.clone(),
                         thread_id: thread_id.clone(),
                         text: prompt,
@@ -714,6 +716,7 @@ impl RuntimeCommandSink {
                 self.automatic_resume = continuation.automatic;
                 let events = self.submit_chat(
                     crate::model::commands::ChatSubmission {
+                        submission_id: String::new(),
                         fork_seed: None,
                         project_root: continuation.project_root,
                         thread_id: continuation.thread_id,
@@ -1573,6 +1576,7 @@ mod tests {
 
     fn chat_command(thread: &str) -> WorkbenchCommand {
         WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            submission_id: String::new(),
             project_root: None,
             fork_seed: None,
             composer_role: crate::model::composer::ComposerRole::Orchestrator,
@@ -1934,6 +1938,7 @@ mod tests {
         let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(WorkbenchCommand::SendChat(
             crate::model::commands::ChatSubmission {
+                submission_id: String::new(),
                 project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Orchestrator,
@@ -2489,6 +2494,7 @@ mod tests {
             .unwrap();
         let chat = |project_root| {
             WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                submission_id: String::new(),
                 project_root,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
@@ -2604,6 +2610,7 @@ mod tests {
         // When: an ordinary chat starts in that project.
         sink.submit(WorkbenchCommand::SendChat(
             crate::model::commands::ChatSubmission {
+                submission_id: String::new(),
                 project_root: Some(dir.path().to_path_buf()),
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
