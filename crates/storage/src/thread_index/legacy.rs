@@ -53,6 +53,49 @@ fn derive_inner(
     visiting: &mut Vec<String>,
 ) -> Result<Result<SnapshotProvenance, LegacyProvenanceReason>, StorageError> {
     use LegacyProvenanceReason::*;
+    let has_sidecar_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_context_provenance')",
+        [], |row| row.get(0),
+    )?;
+    if has_sidecar_table {
+        let revision: Option<u64> = conn
+            .query_row(
+                "SELECT snapshot_revision FROM run_contexts WHERE run_id=?1",
+                [&record.run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let has_sidecar: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_context_provenance WHERE run_id=?1)",
+            [&record.run_id],
+            |row| row.get(0),
+        )?;
+        // This proof is only for legacy bytes. In particular, a later unknown
+        // sidecar is not permission to reconstruct its old copy boundaries.
+        if revision != Some(0) {
+            return Ok(Err(LineageUnverifiable));
+        }
+        if has_sidecar {
+            let proof = crate::repo::thread_index::read_sidecar(conn, &record.run_id)?;
+            let Some(proof) = proof.filter(|proof| {
+                proof.snapshot_revision == 0
+                    && proof.snapshot_sha256
+                        == snapshot_sha256(&record.messages_json, &record.checkpoints_json)
+            }) else {
+                return Ok(Err(LineageUnverifiable));
+            };
+            let messages = serde_json::from_str::<Value>(&record.messages_json);
+            let checkpoints = serde_json::from_str::<Vec<Value>>(&record.checkpoints_json);
+            return Ok(match (messages, checkpoints) {
+                (Ok(messages), Ok(checkpoints))
+                    if validate_saved_provenance(&proof, &messages, checkpoints.len()).is_ok() =>
+                {
+                    Ok(proof)
+                }
+                _ => Err(LineageUnverifiable),
+            });
+        }
+    }
     let Ok(config) = serde_json::from_str::<Value>(&record.config_json) else {
         return Ok(Err(InvalidSnapshot));
     };

@@ -25,10 +25,12 @@ impl Default for ConversationProvenance {
 
 impl ConversationProvenance {
     pub(crate) fn unknown() -> Self {
+        Self::unknown_reason(ProvenanceUnknownReason::LegacyUnproven)
+    }
+
+    fn unknown_reason(reason: ProvenanceUnknownReason) -> Self {
         Self {
-            status: ProvenanceStatus::Unknown {
-                reason: ProvenanceUnknownReason::LegacyUnproven,
-            },
+            status: ProvenanceStatus::Unknown { reason },
             messages: Vec::new(),
         }
     }
@@ -36,13 +38,14 @@ impl ConversationProvenance {
     pub(crate) fn from_bundle(bundle: &SnapshotBundle) -> Self {
         // The shared extractor validates hash, revision and all positions even
         // when the snapshot has no indexable native text.
-        if storage::thread_index::extract_snapshot_bundle(
+        if let Err(error) = storage::thread_index::extract_snapshot_bundle(
             bundle,
             &secret_guard::SecretRedactor::from_env(),
-        )
-        .is_err()
-        {
-            return Self::unknown();
+        ) {
+            return Self::unknown_reason(match error {
+                storage::thread_index::ExtractionError::ProvenanceUnknown(reason) => reason,
+                _ => ProvenanceUnknownReason::IncompleteMap,
+            });
         }
         let Some(sidecar) = &bundle.provenance else {
             return Self::unknown();

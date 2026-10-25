@@ -547,7 +547,7 @@ fn write_sidecar(conn: &Connection, sidecar: &SnapshotProvenance) -> Result<(), 
     Ok(())
 }
 
-fn read_sidecar(
+pub(crate) fn read_sidecar(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<SnapshotProvenance>, StorageError> {

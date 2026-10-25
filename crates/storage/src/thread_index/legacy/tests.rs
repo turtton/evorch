@@ -204,3 +204,38 @@ fn discovery_repairs_an_already_blocked_missing_sidecar_run() {
     assert_eq!(status.state, IndexState::Pending);
     assert!(status.source.target.source_revision > 0);
 }
+
+#[test]
+fn newer_unknown_provenance_is_not_promoted_by_legacy_metadata() {
+    let db = crate::Database::open_in_memory().unwrap();
+    let record = seed(
+        &db.conn,
+        "run-1",
+        Some(json!({"inherited_note":null,"sources":[]})),
+    );
+    crate::repo::run_context::upsert(&db.conn, &record).unwrap();
+    assert_eq!(
+        derive_legacy_provenance(&db.conn, &record).unwrap(),
+        Err(LegacyProvenanceReason::LineageUnverifiable)
+    );
+}
+
+#[test]
+fn a_materialized_legacy_source_proof_still_proves_a_later_discovered_fork() {
+    let db = crate::Database::open_in_memory().unwrap();
+    let source = seed(
+        &db.conn,
+        "run-1",
+        Some(json!({"inherited_note":null,"sources":[]})),
+    );
+    let mut index = crate::repo::thread_index::SqliteThreadIndex::new(&db.conn);
+    index.discover_batch(20, 10).unwrap();
+    let fork = seed(
+        &db.conn,
+        "run-2",
+        Some(json!({"inherited_note":null,"sources":[]})),
+    );
+    db.conn.execute("UPDATE threads SET lineage_kind='fork',parent_thread_id='run-1',fork_point_run_id='run-1',fork_point_context_len=2 WHERE thread_id='run-2'", []).unwrap();
+    assert!(derive_legacy_provenance(&db.conn, &source).unwrap().is_ok());
+    assert!(derive_legacy_provenance(&db.conn, &fork).unwrap().is_ok());
+}

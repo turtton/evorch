@@ -137,3 +137,44 @@ fn fork_compaction_restart_and_failed_save_keep_native_duplicate_positions() {
         BlockOrigin::Native
     );
 }
+
+#[test]
+fn restore_preserves_the_unknown_reason_and_never_upgrades_after_append() {
+    let messages = vec![message(Role::User, "native-looking")];
+    let saved_record = record("run-1", &messages, "[]");
+    let hash = storage::thread_index::snapshot_sha256(
+        &saved_record.messages_json,
+        &saved_record.checkpoints_json,
+    );
+    let bundle = SnapshotBundle {
+        record: saved_record,
+        snapshot_revision: 1,
+        source_revision: 1,
+        latest_note: None,
+        provenance: Some(storage::thread_index::SnapshotProvenance {
+            run_id: "run-1".into(),
+            snapshot_revision: 1,
+            snapshot_sha256: hash,
+            format_version: PROVENANCE_FORMAT_VERSION,
+            status: ProvenanceStatus::Unknown {
+                reason: ProvenanceUnknownReason::IncompleteMap,
+            },
+            map: ProvenanceMap {
+                version: PROVENANCE_FORMAT_VERSION,
+                raw_message_count: 1,
+                checkpoint_count: 0,
+                messages: Vec::new(),
+            },
+        }),
+    };
+    let restored = ConversationProvenance::from_bundle(&bundle);
+    let mut appended = messages;
+    appended.push(message(Role::User, "new native"));
+    let write = restored.write(record("run-1", &appended, "[]")).unwrap();
+    assert_eq!(
+        write.status,
+        ProvenanceStatus::Unknown {
+            reason: ProvenanceUnknownReason::IncompleteMap
+        }
+    );
+}

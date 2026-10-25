@@ -176,7 +176,7 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 古い小さい run で隙間を埋めた場合の保持数は 419 / 960 / 1,857 で、上の値とほぼ同じである。
 
-2026-10-25 再計測（W4、構造化メタデータ導出後の厳密値）: 上と同じ `w6-measure-20261025T215631/store-copy.db` を `--reuse-copy` で read-only 再利用した。共通 `derive_legacy_provenance` → `extract_snapshot_bundle` → 共通会計 API の経路を使う。最終出力は作業領域の `w4-measure-legacy-final.json`、FTS は全件の上界で再構築して同じ係数（376 / 325 / 2387 / 1000）を得た。初回導出計測との厳密数値も一致した。原本は開いていない。
+2026-10-25 再計測（W4、構造化メタデータ導出後の厳密値）: 上と同じ `w6-measure-20261025T215631/store-copy.db` を `--reuse-copy` で read-only 再利用した。共通 `derive_legacy_provenance` → `extract_snapshot_bundle` → 共通会計 API の経路を使う。最終出力は作業領域の `w4-measure-current.json`、FTS は全件の上界で再構築して同じ係数（376 / 325 / 2387 / 1000）を得た。`w4-measure-legacy-final.json` および初回導出計測との厳密数値も一致した。原本は開いていない。
 
 | `max_bytes` | 厳密保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻（UTC） | 予算 evict | 保留 | oversized |
 |---|---|---|---|---|---|---|
@@ -185,6 +185,8 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 | 1 GiB | **703 / 1,857** | 97,691,227 / 382,060,708 | 2026-10-16T00:55:36Z | 0 | 1,154 | 0 |
 
 厳密最大 run は課金 3,322,132 B。保留 1,154 のうち、continuity 欄なし 944、fork 境界検証不能 3、その他 207（continuity 境界 14 + lineage 193）。0 件から 703 件を確定できたが、未知の出所を native に格上げしてはいない。
+
+fork 境界検証不能の 3 件は、rewind lineage に source/boundary が保存されていない `thread-160-v161` / `thread-163-v166` の 2 件と、コピー元の thread root と run binding の root が不一致な `thread-182-v210` の 1 件。保存済み境界を持つ残り 7 root は構造検証に通る。continuity 欄なし 944 件はコード履歴から一律 native とする提案も採らない。`8def627d`（2026-09-13、#105）で既に復元時の `[run-ledger]` User 注入があり、`6b6aac67`（2026-10-16、#246）が continuity 形式へ置換したため、旧形式は「continuity 注入以前だからコピーなし」とは証明できない。
 
 所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。確定できた旧 run 703 件（課金約 364.4 MiB）をすべて保持し、oversized は 0。全件 native 上界でも約 51%（直近約 11 日）を保持でき、DB 全体の上限 10 GiB に対して余裕がある。未確定分を含む上界は約 708.5 MiB なので、今後の生成頻度によって保持期間は縮む。既定値は変更していない。
 
@@ -441,6 +443,7 @@ Phase B は `thread_search` に本文の全文検索を足す。2026-10-25 に P
 
 - 旧データを確定扱いできるのは、(a) 対応 revision と完全な位置マップが検証できる、または (b) 当該 snapshot に結び付く構造化された生成記録から、全位置の native / copy と変換履歴を一意に証明できる場合だけとする。検証した証拠を sidecar に記録する。fork metadata があるだけ、ないだけ、本文が一致するだけ、現在の境界値だけでは足りない。
   - 旧 snapshot（revision 0、sidecar なし）の導出は storage 内で行い、計測も同じ API を使う。descriptor に **明示的な空の continuity**（`inherited_note=null`、`sources=[]`）があり、run の thread binding と root の lineage が整合している場合に限る。continuity 欄なしは今回は確定しない。非空 continuity は挿入位置の生成記録がないため保留する。
+  - 導出 API 自体も DB の snapshot_revision を確認し、新形式（revision > 0）や unknown sidecar を旧メタデータで再昇格しない。既に materialize された revision 0 の verified sidecar は hash・完全位置を再検証して再利用し、fork source の先行 discovery によって結果が変わらないようにする。
   - 同スレッド followup が新 run に全履歴を引き継ぐ経路もある。root に `review_lineage_edges.child_run_id` があるのに保存済みコピー境界がない run は `lineage_unverifiable` とする。root thread の不在情報だけでは native と判定しない。子 run は全親リンクと thread/depth/root の整合を要求する。
   - fork / rewind root は保存済み `fork_point_run_id` と `fork_point_context_len` を検証する。境界は raw の non-System 数で数え、正の範囲内かつ completed assistant turn であること、checkpoint の range が raw 内であること、source run が存在することを要求する。raw-preserving compaction なので prefix を fork_copy、suffix を native とできる。source revision は旧形式の 0 と明示し、元 origin を証明できなければ run 全体を保留する。境界欠損・範囲外・途中 tool turn・lineage 不整合は `legacy_unproven`。子 run に root の fork 境界は再適用しない。
   - 不明理由の計測は `continuity_missing` / `fork_boundary_unverifiable` / `continuity_boundary_unverifiable` / `lineage_unverifiable` / `invalid_snapshot` を分ける（索引の公開 reason_code は `legacy_unproven`）。検証証拠は snapshot hash と構造化レコード ID に結び付け、discovery の writer transaction で sidecar と source_revision を更新する。読み取りだけでは DB を変更しない。
