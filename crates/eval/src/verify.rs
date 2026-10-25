@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -43,7 +44,8 @@ impl Verification {
 }
 
 /// Run `command` with `sh -c` in `cwd`. It passes only when it exits with 0
-/// within `timeout`; the whole process group is killed at the timeout.
+/// within `timeout`; the whole process group is killed at the timeout. The
+/// command runs in its own session, without evorch's terminal or descriptors.
 pub async fn run(
     sandbox: &dyn Sandbox,
     command: &str,
@@ -60,48 +62,46 @@ pub async fn run(
         Ok(wrapped) => wrapped,
         Err(error) => return Verification::unstarted(command, error.to_string()),
     };
-    let mut process = tokio::process::Command::new(&wrapped.program);
-    wrapped.apply_environment(process.as_std_mut());
+    let mut process = tokio::process::Command::from(wrapped.to_command());
     process
-        .args(&wrapped.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
-    if let Some(cwd) = &wrapped.cwd {
-        process.current_dir(cwd);
-    }
     let started = Instant::now();
-    let mut child = match process.spawn() {
+    let mut child = match GroupChild::spawn(&mut process) {
         Ok(child) => child,
         Err(error) => return Verification::unstarted(command, error.to_string()),
     };
-    let group = child
-        .id()
-        .and_then(|id| i32::try_from(id).ok())
-        .and_then(rustix::process::Pid::from_raw);
-    let (mut stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
+    let (mut stdout, mut stderr) = (child.take_stdout(), child.take_stderr());
     let mut out = Tail::default();
     let mut err = Tail::default();
+    // The exited command stays unreaped until its output ends, so stopping what
+    // it left running cannot signal a reused group id.
     let finished = tokio::time::timeout(timeout, async {
-        let (status, (), ()) = tokio::join!(
-            child.wait(),
+        let (exited, (), ()) = tokio::join!(
+            child.exited(),
             drain(stdout.as_mut(), &mut out),
             drain(stderr.as_mut(), &mut err)
         );
-        status
+        exited
     })
     .await;
-    let (exit_code, timed_out, error) = match finished {
-        Ok(Ok(status)) => (status.code(), false, None),
-        Ok(Err(error)) => (None, false, Some(error.to_string())),
-        Err(_) => (None, true, None),
+    // Stop what the command left running (after a timeout, the command too)
+    // and reap it.
+    let reaped = tokio::time::timeout(Duration::from_secs(1), child.kill_and_wait()).await;
+    let (exit_code, timed_out, error) = match (finished, reaped) {
+        (Err(_), _) => (None, true, None),
+        (Ok(Err(error)), _) | (Ok(Ok(())), Ok(Err(error))) => {
+            (None, false, Some(error.to_string()))
+        }
+        (Ok(Ok(())), Ok(Ok(status))) => (status.code(), false, None),
+        (Ok(Ok(())), Err(_)) => (
+            None,
+            false,
+            Some("the exited command was not reaped".into()),
+        ),
     };
-    if let Some(group) = group {
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    }
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
     Verification {
         command: command.to_owned(),
         passed: exit_code == Some(0),
@@ -200,6 +200,54 @@ mod tests {
         assert!(!verification.passed);
         assert_eq!(verification.exit_code, None);
         assert!(verification.elapsed_ms < 30_000);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_timeout_also_stops_what_the_command_started_in_the_background() {
+        // Given / When: a command that leaves a background helper and outlives its timeout.
+        let verification = verify("sleep 30 & echo $!; wait", Duration::from_millis(500)).await;
+
+        // Then: the helper stops with the command's process group.
+        assert!(verification.timed_out, "{verification:?}");
+        let helper = verification.stdout_tail.trim().to_owned();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(format!("/proc/{helper}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        }) {
+            assert!(Instant::now() < deadline, "helper {helper} still runs");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_command_runs_in_its_own_session_without_evorch_descriptors() {
+        use std::os::fd::AsRawFd;
+        // Given: evorch holds a descriptor without O_CLOEXEC.
+        let held = tempfile::NamedTempFile::new().unwrap();
+        let fd = rustix::io::fcntl_dupfd_cloexec(&held, 100).unwrap();
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+
+        // When: the verification command reports its pid, its session and that descriptor.
+        let verification = verify(
+            &format!(
+                "echo $$; cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/{} || echo descriptor-closed",
+                fd.as_raw_fd()
+            ),
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+
+        // Then: it leads a session of its own and the descriptor did not reach it.
+        let lines: Vec<&str> = verification.stdout_tail.lines().collect();
+        let [pid, session, descriptor] = lines[..] else {
+            panic!("{verification:?}");
+        };
+        assert!(pid.parse::<u32>().is_ok(), "{verification:?}");
+        assert_eq!(session, pid, "{verification:?}");
+        assert_eq!(descriptor, "descriptor-closed", "{verification:?}");
     }
 
     #[test]

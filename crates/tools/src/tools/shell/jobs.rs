@@ -18,6 +18,8 @@ use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 mod handle_tests;
 mod output;
 mod process;
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests;
 #[cfg(test)]
 mod wait_tests;
 use output::LiveOutput;
@@ -120,7 +122,9 @@ struct State {
     completion_notified: bool,
     artifact: Option<serde_json::Value>,
     artifact_notice: Option<String>,
-    process_id: Option<rustix::process::Pid>,
+    // Stops the job's process group from any thread; it signals nothing once
+    // the job's supervisor has reaped the group leader.
+    process: Option<sandbox::process::ProcessGroup>,
     sandbox: Option<Arc<dyn Sandbox>>,
     // Highest cursor any response returned; omitted control cursors resume here.
     delivered_cursor: u64,
@@ -212,7 +216,7 @@ impl JobRegistry {
                     completion_notified: false,
                     artifact: None,
                     artifact_notice: None,
-                    process_id: None,
+                    process: None,
                     sandbox: Some(sandbox),
                     delivered_cursor: 0,
                     last_seen: None,
@@ -572,15 +576,15 @@ impl Job {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(pid) = state.process_id {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        if let Some(group) = &state.process {
+            group.kill();
         }
     }
-    fn register_process(&self, pid: Option<rustix::process::Pid>) {
+    fn register_process(&self, group: Option<sandbox::process::ProcessGroup>) {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .process_id = pid;
+            .process = group;
         let cancelled = *self.cancel.borrow();
         if cancelled {
             self.cancel_now();
@@ -622,7 +626,7 @@ impl Job {
             crate::output::artifact_reference(&result.content).map(str::to_owned);
         state.artifact = result.detail;
         state.completion = Some(completion);
-        state.process_id = None;
+        state.process = None;
         state.sandbox = None;
         drop(state);
         self.changed

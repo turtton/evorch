@@ -2910,6 +2910,7 @@ dependencies = [
  "routing",
  "runtime",
  "rusqlite",
+ "rustix 1.1.4",
  "sandbox",
  "serde",
  "serde_json",
@@ -5821,6 +5822,8 @@ version = "0.1.0"
 dependencies = [
  "event-bus",
  "keyring",
+ "libc",
+ "portable-pty",
  "rustix 1.1.4",
  "serde",
  "serde_json",
