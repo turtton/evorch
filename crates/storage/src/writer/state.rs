@@ -50,6 +50,25 @@ fn review_transaction(
     Ok(())
 }
 
+/// One SQLite transaction around a bundle save; the receipt leaves the writer
+/// only after commit (ADR 0041 R1).
+fn snapshot_transaction<T>(
+    state: &WriterState,
+    kind: &str,
+    operation: impl FnOnce(&Connection) -> Result<T, crate::thread_index::SnapshotApiError>,
+) -> Result<T, crate::thread_index::SnapshotApiError> {
+    if state.writes_suspended {
+        return Err(StorageError::Serialization(format!(
+            "{kind} writes suspended by storage limit"
+        ))
+        .into());
+    }
+    let transaction = state.conn.unchecked_transaction()?;
+    let value = operation(&transaction)?;
+    transaction.commit()?;
+    Ok(value)
+}
+
 pub(super) fn run_writer(
     conn: Connection,
     rx: Receiver<Command>,
@@ -205,6 +224,42 @@ pub(super) fn run_writer(
                 } else {
                     upsert_run_context(&state.conn, &record)
                 };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AppendIndexedNote(run_id, body, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "run ledger writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now| {
+                        crate::repo::thread_index::append_note(&state.conn, &run_id, &body, now)
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::SaveSnapshotBundle(write, reply)) => {
+                let result = snapshot_transaction(&state, "run context", |conn| {
+                    crate::repo::thread_index::stage_snapshot(conn, &write)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::SaveSnapshotBundleWithEvidence(
+                write,
+                rows,
+                edges,
+                reference_id,
+                reply,
+            )) => {
+                let result = snapshot_transaction(&state, "review", |conn| {
+                    use crate::thread_index::SnapshotTransaction as _;
+                    crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
+                    let receipt = crate::repo::thread_index::StagedSnapshot(conn)
+                        .stage_snapshot_bundle(&write)?;
+                    crate::repo::review_evidence::insert(conn, &rows)?;
+                    crate::repo::review_lineage::insert(conn, &edges)?;
+                    Ok(receipt)
+                });
                 let _ = reply.send(result);
             }
             Ok(Command::LatestRunLedger(run_id, reply)) => {

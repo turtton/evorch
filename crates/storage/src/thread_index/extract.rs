@@ -123,6 +123,27 @@ pub fn extract_index_input(
     })
 }
 
+/// Save-time structural check of runtime-supplied positions against the exact
+/// redacted snapshot; the same rules extraction applies later.
+pub(crate) fn validate_saved_provenance(
+    provenance: &SnapshotProvenance,
+    messages: &Value,
+    checkpoint_count: usize,
+) -> Result<(), ExtractionError> {
+    let array = messages.as_array().ok_or(ExtractionError::InvalidJson)?;
+    let input = IndexInput {
+        run_id: &provenance.run_id,
+        snapshot_revision: provenance.snapshot_revision,
+        source_revision: 0,
+        snapshot_sha256: &provenance.snapshot_sha256,
+        messages,
+        checkpoint_count,
+        provenance: Some(provenance),
+        latest_note: None,
+    };
+    validate_provenance(&input, array).map(drop)
+}
+
 fn unknown(reason: ProvenanceUnknownReason) -> ExtractionError {
     ExtractionError::ProvenanceUnknown(reason)
 }

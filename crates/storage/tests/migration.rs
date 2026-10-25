@@ -7,7 +7,18 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 36] = [
+const EXPECTED_TABLES: [&str; 47] = [
+    "run_context_provenance",
+    "thread_index_runs",
+    "conversation_blocks",
+    "conversation_fts",
+    "conversation_fts_data",
+    "conversation_fts_idx",
+    "conversation_fts_config",
+    "thread_index_state",
+    "thread_index_lease",
+    "thread_index_requests",
+    "thread_index_request_targets",
     "threads",
     "thread_runs",
     "eval_samples",
@@ -46,7 +57,12 @@ const EXPECTED_TABLES: [&str; 36] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 34] = [
+const EXPECTED_INDICES: [&str; 39] = [
+    "idx_thread_index_runs_work",
+    "idx_thread_index_runs_retention",
+    "idx_thread_index_runs_retry",
+    "idx_conversation_blocks_kind",
+    "idx_thread_index_request_targets_run",
     "idx_threads_project_updated",
     "idx_threads_parent",
     "idx_thread_runs_thread",
@@ -116,7 +132,7 @@ fn fresh_open_applies_latest_schema() {
 
     // Then: v24 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -147,7 +163,7 @@ fn reopening_latest_database_is_idempotent() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        24
+        25
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -178,7 +194,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 24,
+            supported: 25,
         }
     );
 }
@@ -223,7 +239,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
 }
 
 #[test]
@@ -260,7 +276,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -293,7 +309,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let database = Database::open(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     let columns: BTreeSet<String> = connection
         .prepare("PRAGMA table_info(tasks)")
         .unwrap()
@@ -355,7 +371,8 @@ fn v16_backfills_candidate_occurrence_tracking() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE threads; DROP TABLE thread_runs;
+            "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -412,7 +429,8 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE threads; DROP TABLE thread_runs;
+        "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -433,7 +451,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     // When: opening applies v17 and reopening is idempotent.
     for _ in 0..2 {
         let database = Database::open(&config_for(&path)).unwrap();
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
         assert_eq!(
             database.run_context("existing").unwrap().unwrap().name,
@@ -458,7 +476,8 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE threads; DROP TABLE thread_runs;
+        "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -473,7 +492,7 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     connection.pragma_update(None, "user_version", 17).unwrap();
     drop(connection);
     let database = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     assert_eq!(
         database
             .latest_run_ledger("existing")
@@ -494,7 +513,8 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE threads; DROP TABLE thread_runs;
+            "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -513,7 +533,7 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: earlier data stays and the thread start schema is complete.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
         assert!(database.thread_start_state("missing").unwrap().is_none());
         let connection = Connection::open(&path).unwrap();
@@ -537,7 +557,8 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE threads; DROP TABLE thread_runs;
+            "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -557,7 +578,7 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: the earlier start reads back with an unknown head ref.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
         let state = database.thread_start_state("old").unwrap().unwrap();
         let storage::thread_start::ThreadStartCapture::Replayable(snapshot) = state.capture else {
             panic!("expected a replayable start");
@@ -576,7 +597,8 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE threads; DROP TABLE thread_runs;
+            "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
              ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -595,7 +617,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
         let database = Database::open(&config_for(&path)).unwrap();
 
         // Then: the start stays and the sample schema is complete.
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
         assert!(database.thread_start_state("old").unwrap().is_some());
         assert!(database.eval_samples().unwrap().is_empty());
         let connection = Connection::open(&path).unwrap();
@@ -614,7 +636,8 @@ fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP TABLE threads; DROP TABLE thread_runs;
+        "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_at_ns;
@@ -629,7 +652,7 @@ fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
     drop(connection);
     for _ in 0..2 {
         let database = Database::open(&config_for(&path)).unwrap();
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
         let candidate = database.improvement_candidate("existing").unwrap().unwrap();
         assert_eq!(candidate.reopened_count, 0);
         assert_eq!(candidate.reopened_at_ns, None);
@@ -671,7 +694,8 @@ fn v24_adds_threads_backfilled_from_v23_runs_and_read_only_needs_the_upgrade() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE threads; DROP TABLE thread_runs;
+            "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+             DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
              INSERT INTO run_contexts VALUES ('run-1', 'worker', 'chat:Worker:t-1', NULL,
                  '{\"project_root\":\"/repo\"}', '[]', '[]', 'Done', 1, 7);
@@ -686,14 +710,14 @@ fn v24_adds_threads_backfilled_from_v23_runs_and_read_only_needs_the_upgrade() {
     let error = Database::open_read_only(&path).unwrap_err();
     // Then: it refuses the older schema without migrating it.
     assert!(
-        matches!(&error, StorageError::Serialization(message) if message.contains("older than 24")),
+        matches!(&error, StorageError::Serialization(message) if message.contains("older than 25")),
         "{error:?}"
     );
 
     // When: the current schema opens it, twice.
     for _ in 0..2 {
         let database = Database::open(&config_for(&path)).unwrap();
-        assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+        assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     }
 
     // Then: the schema is complete, read-only access works and the runs are a thread.

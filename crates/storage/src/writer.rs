@@ -23,6 +23,9 @@ mod stream_tests;
 use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
 
 type ReplyTx<T = ()> = mpsc::Sender<Result<T, StorageError>>;
+type SnapshotReplyTx = mpsc::Sender<
+    Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError>,
+>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
 // AgentRunStarted 追加で Event が大型化。Box 化は append hot path に alloc を
@@ -63,6 +66,15 @@ enum Command {
     AnswerUserQuestion(String, String, ReplyTx),
     AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
     UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
+    AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
+    SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
+    SaveSnapshotBundleWithEvidence(
+        Box<crate::thread_index::SnapshotWrite>,
+        Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
+        Option<String>,
+        SnapshotReplyTx,
+    ),
     RecordReviewEvidenceWithEdges(
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
@@ -331,6 +343,65 @@ impl StorageHandle {
         record: &crate::RunContextRecord,
     ) -> Result<crate::RunContextReceipt, StorageError> {
         self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
+    }
+
+    /// Append a note revision (empty clears) and advance the run's index source
+    /// in the same transaction; the receipt is returned after commit.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bodies, suspended writes, SQLite failure or a closed writer.
+    pub fn append_indexed_note(
+        &self,
+        run_id: &str,
+        body: &str,
+    ) -> Result<crate::thread_index::NoteReceipt, StorageError> {
+        self.request(|reply| Command::AppendIndexedNote(run_id.into(), body.into(), reply))
+    }
+
+    /// Atomically save a redacted snapshot with its binding, provenance sidecar,
+    /// source revision and index state (ADR 0041 R1). The receipt exists only
+    /// after commit; on error nothing was saved.
+    ///
+    /// # Errors
+    /// Rejects revision conflicts, invalid JSON, suspended writes, SQLite failure or a closed writer.
+    pub fn save_snapshot_bundle(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.snapshot_request(|reply| Command::SaveSnapshotBundle(Box::new(write.clone()), reply))
+    }
+
+    /// [`Self::save_snapshot_bundle`] in the same transaction as evidence,
+    /// lineage and an optional one-time reference consumption.
+    ///
+    /// # Errors
+    /// Rejects consumed references, invalid snapshots or evidence, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_evidence_and_reference_consumption(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.snapshot_request(|reply| {
+            Command::SaveSnapshotBundleWithEvidence(
+                Box::new(write.clone()),
+                rows.to_vec(),
+                edges.to_vec(),
+                consumed_reference_id.map(String::from),
+                reply,
+            )
+        })
+    }
+
+    fn snapshot_request(
+        &self,
+        command: impl FnOnce(SnapshotReplyTx) -> Command,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        let closed = || crate::thread_index::SnapshotApiError::Storage(StorageError::WriterClosed);
+        let (reply, result) = mpsc::channel();
+        self.0.send(command(reply)).map_err(|_| closed())?;
+        result.recv().map_err(|_| closed())?
     }
 
     /// Persist an idempotent evidence batch without truncating or redacting user text.

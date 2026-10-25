@@ -9,6 +9,7 @@ mod contracts;
 mod extract;
 
 pub use contracts::*;
+pub(crate) use extract::validate_saved_provenance;
 pub use extract::{
     extract_index_input, extract_snapshot_bundle, parse_index_snapshot, snapshot_sha256,
 };
@@ -23,6 +24,23 @@ pub const GUARDED_REFERENCE_VERSION: u32 = 1;
 pub const DEFAULT_THREAD_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const TOOL_USE_MAX_BYTES: usize = 4096;
 pub const TOOL_RESULT_MAX_BYTES: usize = 2048;
+
+/// Creation time encoded in a time-ordered run ID (`run-` + 26-char ULID): the
+/// top 48 of 128 bits are Unix milliseconds. Legacy numeric IDs return `None`.
+/// Used for `retention_at_ns` (B-4) by storage and the measurement harness.
+pub fn run_id_created_at_ns(run_id: &str) -> Option<i64> {
+    const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let body = run_id.strip_prefix("run-")?;
+    if body.len() != 26 {
+        return None;
+    }
+    let mut value: u128 = 0;
+    for byte in body.bytes() {
+        let digit = CROCKFORD.iter().position(|&candidate| candidate == byte)?;
+        value = value.checked_mul(32)?.checked_add(digit as u128)?;
+    }
+    i64::try_from(value >> 80).ok()?.checked_mul(1_000_000)
+}
 
 /// Sources are identities only: never duplicate text, secrets or image payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

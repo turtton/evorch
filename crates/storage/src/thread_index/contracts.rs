@@ -244,6 +244,18 @@ pub enum SnapshotApiError {
     InvalidProvenance(ExtractionError),
 }
 
+impl From<StorageError> for SnapshotApiError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<rusqlite::Error> for SnapshotApiError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
 /// W3 maps strict user configuration into this storage-facing value. W2 applies
 /// changes at writer-command ordering, not at arbitrary job/read boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

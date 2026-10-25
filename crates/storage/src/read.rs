@@ -541,3 +541,44 @@ impl Database {
         projection::restore_sessions(&self.conn)
     }
 }
+
+/// ADR 0041 Phase B reads. Each call reads in one transaction.
+impl Database {
+    /// The run's snapshot, provenance sidecar, revisions and latest note.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn snapshot_bundle(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::thread_index::SnapshotBundle>, crate::thread_index::SnapshotApiError>
+    {
+        use crate::thread_index::SnapshotRepository as _;
+        crate::repo::thread_index::SqliteSnapshotStore::new(&self.conn).load_snapshot_bundle(run_id)
+    }
+
+    /// Validates a guarded locator against the canonical source. Authorization
+    /// must already have been checked by the caller.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn resolve_guarded_reference(
+        &self,
+        reference: &crate::thread_index::GuardedReference,
+    ) -> Result<crate::thread_index::GuardedResolution, crate::thread_index::SnapshotApiError> {
+        use crate::thread_index::SnapshotRepository as _;
+        crate::repo::thread_index::SqliteSnapshotStore::new(&self.conn)
+            .resolve_guarded_reference(reference)
+    }
+
+    /// The index state of one run, if it has been seen.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn thread_index_run_status(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::thread_index::IndexRunStatus>, StorageError> {
+        crate::repo::thread_index::index_run_status(&self.conn, run_id)
+    }
+}
