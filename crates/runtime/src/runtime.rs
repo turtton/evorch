@@ -1935,6 +1935,15 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
+        // Chat restoration holds this until registration or admission reservation.
+        // Stop either precedes its wake check, cancels its pending admission, or
+        // interrupts the new entry; it must never land on a discarded incarnation.
+        let _restore_guard = self.shared.run_store.get().map(|store| {
+            store
+                .restore_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         self.goal_work_stopped(run_id);
         // Collect before taking admissions: spawning locks intents before admissions.
         let targets = match scope {
@@ -1955,6 +1964,11 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
+        let mut operator_stops = self
+            .shared
+            .operator_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for target in targets {
             if let Some(admission) = admissions.get_mut(&target)
                 && admission.result.borrow().is_none()
@@ -1962,12 +1976,12 @@ impl AgentRuntime {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
                 entry.cancel_tx.send_replace(RunInterrupt::Stop);
-                self.shared
-                    .operator_stops
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(target);
+            } else {
+                continue;
             }
+            // Pending admissions also keep the stop after cancellation releases
+            // their snapshot reservation, until the operator explicitly resumes.
+            operator_stops.insert(target);
         }
         Ok(())
     }

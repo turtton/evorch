@@ -449,7 +449,82 @@ async fn cancelled_admission_releases_only_its_reservation_and_success_commits_c
 }
 
 #[tokio::test]
-async fn rejected_wake_releases_its_reservation_without_acting_as_operator_resume() {
+async fn stop_during_wake_admission_keeps_snapshot_and_held_message_for_operator_resume() {
+    let model = Arc::new(RetryModel::default());
+    let fixture = Fixture::with_model(model.clone());
+    let runtime = &fixture.runtime;
+    let root = fixture.terminal().await;
+    let old_entry = Arc::clone(&runtime.entry(root).unwrap().mailbox);
+    let before = saved(&fixture, root);
+    let report = AgentMessage {
+        message_id: "held-during-admission".into(),
+        sender_run_id: RunId::new(123).to_string(),
+        recipient_run_id: root.to_string(),
+        kind: AgentMessageKind::Send,
+        content: "held during admission".into(),
+        reply_to: None,
+    };
+    {
+        let _runs = lock_runs(&runtime.shared.runs);
+        runtime.hold_message(root, report.clone());
+    }
+    model.hold.store(true, Ordering::Relaxed);
+    runtime.wake_chat(root, RunConfig::default()).unwrap();
+    held(&model).await;
+    runtime.stop(root, StopScope::SelfOnly).unwrap();
+    model.release.notify_one();
+    assert!(matches!(
+        runtime.wait_admission(root).await,
+        Err(RuntimeError::RunTerminated { .. })
+    ));
+    assert_eq!(saved(&fixture, root).restorable, before.restorable);
+    assert_eq!(saved(&fixture, root).messages_json, before.messages_json);
+    assert_eq!(saved(&fixture, root).config_json, before.config_json);
+    assert!(Arc::ptr_eq(
+        &old_entry,
+        &runtime.entry(root).unwrap().mailbox
+    ));
+    assert_eq!(
+        runtime.shared.held_messages.lock().unwrap()[&root],
+        vec![report]
+    );
+    assert!(matches!(
+        runtime.wake_chat(root, RunConfig::default()),
+        Err(RuntimeError::RunRestoreFailed {
+            reason: RunRestoreFailure::StoppedByOperator,
+            ..
+        })
+    ));
+    model.hold.store(false, Ordering::Relaxed);
+    runtime.resume_chat(root, RunConfig::default()).unwrap();
+    runtime.wait_admission(root).await.unwrap();
+    waiting(runtime, root).await;
+    assert!(!runtime.operator_stopped(root));
+    assert!(
+        !runtime
+            .shared
+            .held_messages
+            .lock()
+            .unwrap()
+            .contains_key(&root)
+    );
+    {
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            serde_json::to_string(&requests[1])
+                .unwrap()
+                .matches("held during admission")
+                .count(),
+            1
+        );
+    }
+    runtime.cancel(root).unwrap();
+    runtime.wait(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_wake_preserves_snapshot_and_auto_wake_budget_without_reserving() {
     // Given: a stopped root with a report held for it and part of its wake budget used.
     let model = Arc::new(RetryModel::default());
     let fixture = Fixture::with_model(model.clone());
@@ -479,15 +554,17 @@ async fn rejected_wake_releases_its_reservation_without_acting_as_operator_resum
         .lock()
         .unwrap()
         .insert(run, 3);
-    model.reject.store(true, Ordering::Relaxed);
-    // When: a runtime-requested wake fails provider admission.
-    fixture
-        .runtime
-        .wake_chat(run, RunConfig::default())
-        .unwrap();
-    assert!(fixture.runtime.wait_admission(run).await.is_err());
-    // Then: the snapshot is returned, and the wake still is not an operator resume.
+    let before = saved(&fixture, run);
+    // A runtime-requested wake is refused before it can reserve the snapshot.
+    assert!(matches!(
+        fixture.runtime.wake_chat(run, RunConfig::default()),
+        Err(RuntimeError::RunRestoreFailed {
+            reason: RunRestoreFailure::StoppedByOperator,
+            ..
+        })
+    ));
     let after = saved(&fixture, run);
+    assert_eq!(after, before);
     assert!(after.restorable);
     assert!(descriptor(&after).restorable);
     assert!(descriptor(&after).non_restorable_reason.is_none());
@@ -509,8 +586,7 @@ async fn rejected_wake_releases_its_reservation_without_acting_as_operator_resum
         Some(1)
     );
 
-    // When: the operator resumes once admission recovers.
-    model.reject.store(false, Ordering::Relaxed);
+    // When: the operator explicitly resumes.
     fixture
         .runtime
         .resume_chat(run, RunConfig::default())

@@ -7,7 +7,7 @@ use event_bus::{
     EventReceiver, LifecycleEvent,
 };
 use providers::FinishReason;
-use runtime::{AgentRuntime, Role, RunConfig, RunId, RunStore, RuntimeError};
+use runtime::{AgentRuntime, Role, RunConfig, RunId, RunRestoreFailure, RunStore, RuntimeError};
 use std::sync::Arc;
 use storage::{Storage, StorageConfig};
 use support::{ScriptedModel, text_response, tool_response, tool_responses};
@@ -362,6 +362,142 @@ async fn wake_with_live_child_releases_held_message_once() {
     fixture.runtime.cancel(child).unwrap();
     fixture.runtime.wait(root).await.unwrap();
     fixture.runtime.wait(child).await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_wake_cannot_cross_operator_stop_of_done_or_error_root() {
+    for terminal in [AgentRunPhase::Done, AgentRunPhase::Error] {
+        let fixture = fixture().await;
+        let permit = fixture.permit();
+        let first = if terminal == AgentRunPhase::Done {
+            Ok(text_response("root done", FinishReason::Stop))
+        } else {
+            Err(RuntimeError::Model {
+                reason: "scripted failure".into(),
+            })
+        };
+        fixture.model.add_keyed("ROOT", [first]).await;
+        fixture.script("CHILD", &["unique held report"]).await;
+        let root_gate = fixture.gate("ROOT").await;
+        let child_gate = fixture.gate("CHILD").await;
+        let _sibling_gate = fixture.gate("SIBLING").await;
+        let mut events = fixture.bus.subscribe();
+        let root = fixture.runtime.delegate_background(
+            Role::Orchestrator,
+            "ROOT".into(),
+            RunConfig {
+                ownership: Some(permit.clone()),
+                ..Default::default()
+            },
+        );
+        fixture.model.wait_for_request(0).await;
+        let child = fixture
+            .runtime
+            .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
+            .unwrap();
+        fixture.model.wait_for_request(1).await;
+        let sibling = fixture
+            .runtime
+            .delegate_background_as_child(root, Role::Worker, "SIBLING", RunConfig::default())
+            .unwrap();
+        fixture.model.wait_for_request(2).await;
+        root_gate.notify_one();
+        assert_eq!(fixture.runtime.wait(root).await.unwrap(), terminal);
+        child_gate.notify_one();
+        assert_eq!(
+            fixture.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        wake_requested(&mut events, root).await;
+        fixture
+            .runtime
+            .stop(root, runtime::StopScope::SelfOnly)
+            .unwrap();
+        let db = storage::Database::open(&StorageConfig {
+            db_path: fixture._dir.path().join("held.db"),
+            ..Default::default()
+        })
+        .unwrap();
+        let before = db.run_context(&root.to_string()).unwrap().unwrap();
+        // The host is processing an older wake request, not a new user action.
+        for _ in 0..2 {
+            assert!(matches!(
+                fixture.runtime.wake_chat(
+                    root,
+                    RunConfig {
+                        ownership: Some(permit.clone()),
+                        ..Default::default()
+                    }
+                ),
+                Err(RuntimeError::RunRestoreFailed {
+                    reason: RunRestoreFailure::StoppedByOperator,
+                    ..
+                })
+            ));
+            assert_eq!(db.run_context(&root.to_string()).unwrap().unwrap(), before);
+            assert_eq!(fixture.runtime.inspect_agent(root).unwrap().phase, terminal);
+            assert!(fixture.runtime.take_inbox(root).unwrap().is_empty());
+        }
+        assert_eq!(fixture.model.observed().await.len(), 3);
+        fixture
+            .model
+            .add_keyed(
+                "ROOT",
+                [
+                    Ok(tool_response("after-stop", "inbox", serde_json::json!({}))),
+                    Ok(text_response("handled", FinishReason::Stop)),
+                ],
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .runtime
+                .resume_chat(
+                    root,
+                    RunConfig {
+                        ownership: Some(permit),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+            root
+        );
+        // Done waits for held input; an unfinished Error first retries its
+        // saved request. In both cases the report must remain available once.
+        let _ = fixture.request_text(3).await;
+        root_gate.notify_one();
+        let after = fixture.model.wait_for_request(4).await;
+        let serialized = serde_json::to_string(&after).unwrap();
+        assert_eq!(
+            serialized.matches("unique held report").count(),
+            1,
+            "{serialized}"
+        );
+        if terminal == AgentRunPhase::Done {
+            assert_eq!(tool_result(&after, "after-stop"), "[]");
+        } else {
+            assert_eq!(
+                tool_result(&after, "after-stop")
+                    .matches("unique held report")
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            fixture
+                .runtime
+                .list_agents()
+                .iter()
+                .find(|agent| agent.run_id == sibling)
+                .unwrap()
+                .parent_run_id,
+            Some(root)
+        );
+        fixture.runtime.cancel(root).unwrap();
+        fixture.runtime.cancel(sibling).unwrap();
+        fixture.runtime.wait(root).await.unwrap();
+        fixture.runtime.wait(sibling).await.unwrap();
+    }
 }
 
 #[tokio::test]
