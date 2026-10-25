@@ -266,7 +266,7 @@ fn single_goal_memory_and_finding_store_do_not_prevent_gui_followup() {
     );
 }
 #[test]
-fn team_busy_descendant_and_claim_failures_reach_chat_rejection() {
+fn team_live_unclaimed_descendant_allows_chat_followup() {
     let fixture = Fixture::new();
     let mut world = fixture.world();
     let root = fixture.root(&mut world, true);
@@ -276,8 +276,33 @@ fn team_busy_descendant_and_claim_failures_reach_chat_rejection() {
             .delegate_background_as_child(root, Role::Explorer, "held child", RunConfig::default())
             .unwrap()
     });
-    rejected(&send(&mut world, "continue"), "descendant is still running");
+    accepted(&send(&mut world, "continue"), root);
+    fixture.waiting(&mut world, root);
+    assert_eq!(
+        world
+            .runtime
+            .list_agents()
+            .iter()
+            .find(|agent| agent.run_id == child)
+            .unwrap()
+            .parent_run_id,
+        Some(root)
+    );
+    fixture.stop(&world, root);
     fixture.stop(&world, child);
+}
+
+#[test]
+fn team_claim_failure_with_live_descendant_reaches_chat_rejection() {
+    let fixture = Fixture::new();
+    let mut world = fixture.world();
+    let root = fixture.root(&mut world, true);
+    let child = fixture.rt.block_on(async {
+        world
+            .runtime
+            .delegate_background_as_child(root, Role::Explorer, "held child", RunConfig::default())
+            .unwrap()
+    });
     let board =
         runtime::team::TeamBoard::durable(fixture.storage.handle(), "project:thread".into());
     board
@@ -290,6 +315,7 @@ fn team_busy_descendant_and_claim_failures_reach_chat_rejection() {
         .claim("uncertain", "stopped-worker", u64::MAX - 10_000)
         .unwrap();
     rejected(&send(&mut world, "continue"), "persisted task claims");
+    fixture.stop(&world, child);
 }
 
 fn continue_chat(world: &mut World) -> Vec<LoopEvent> {
