@@ -400,7 +400,12 @@ pub struct ReindexRequest {
 pub enum RequestGapReason {
     Blocked(IndexBlockedReason),
     CapacityPaused,
-    Oversized,
+    /// Index disabled by settings while the request was pending.
+    IndexDisabled,
+    /// One run alone exceeds `max_bytes` (`evicted(oversized)`).
+    OversizedBudget,
+    /// One run exceeds the measured single-step write bound (`evicted(oversized)`).
+    OversizedStep,
     EvictedByBudget,
     Deleted,
     Superseded,

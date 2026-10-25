@@ -22,6 +22,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use storage::thread_index::{
+    ACCOUNTING_VERSION, AccountingPolicy, DEFAULT_ACCOUNTING_POLICY, charge_index_bytes,
+    index_attribute_bytes,
+};
+use storage::thread_index::{
     BlockLocator, BlockOrigin, BlockProvenance, CopySource, ExtractedIndexInput, ExtractionError,
     ForkBoundary, MessageProvenance, PROVENANCE_FORMAT_VERSION, ProvenanceEvidence, ProvenanceMap,
     ProvenanceStatus, SnapshotBundle, SnapshotProvenance, extract_snapshot_bundle,
@@ -335,20 +339,11 @@ struct Footprint {
     blocks: u64,
 }
 
-/// Attribute bytes exactly as `IndexAccounting::attribute_bytes` documents them.
+/// Attribute bytes from the shared accountant (`IndexAccounting::attribute_bytes`).
 fn footprint(input: &ExtractedIndexInput) -> Footprint {
-    let mut attributes = input.run_id.len() as u64;
-    for block in &input.blocks {
-        let locator = serde_json::to_string(&block.locator).map_or(0, |json| json.len());
-        attributes += (locator
-            + serde_name(&block.role).len()
-            + serde_name(&block.kind).len()
-            + block.tool_name.as_ref().map_or(0, String::len)
-            + block.hash.len()) as u64;
-    }
     Footprint {
         text: input.text_bytes,
-        attributes,
+        attributes: index_attribute_bytes(input).unwrap_or(u64::MAX),
         blocks: input.blocks.len() as u64,
     }
 }
@@ -360,18 +355,26 @@ struct Coefficients {
     fts_numerator: u64,
 }
 
-/// PROVISIONAL: W1 owns the shared `IndexAccountant`; it is not implemented yet.
-/// This mirrors the formula documented on `IndexAccounting::charged_bytes` so
-/// the coefficient proposal can be evaluated, and must be replaced by the shared
-/// function once it exists.
+fn policy(coefficients: Coefficients) -> AccountingPolicy {
+    AccountingPolicy {
+        version: ACCOUNTING_VERSION,
+        per_block_bytes: coefficients.per_block,
+        per_run_bytes: coefficients.per_run,
+        fts_numerator: coefficients.fts_numerator,
+        fts_denominator: FTS_DENOMINATOR,
+    }
+}
+
+/// Charges through the shared accountant with the coefficients derived here, so
+/// the proposal is evaluated with the same formula production uses.
 fn charge(footprint: Footprint, coefficients: Coefficients) -> u64 {
-    let fts = (u128::from(footprint.text) * u128::from(coefficients.fts_numerator))
-        .div_ceil(u128::from(FTS_DENOMINATOR));
-    footprint.text
-        + footprint.attributes
-        + coefficients.per_block * footprint.blocks
-        + coefficients.per_run
-        + u64::try_from(fts).unwrap_or(u64::MAX)
+    charge_index_bytes(
+        footprint.text,
+        footprint.attributes,
+        footprint.blocks,
+        policy(coefficients),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 #[derive(Default)]
@@ -1035,6 +1038,7 @@ fn main() -> Result<()> {
             "per_run_bytes": coefficients.per_run,
             "fts_numerator": coefficients.fts_numerator,
             "fts_denominator": FTS_DENOMINATOR,
+            "matches_default_policy": policy(coefficients) == DEFAULT_ACCOUNTING_POLICY,
         },
         "retention": {
             "order": "retention_at_ns DESC, run_id DESC (newest kept)",

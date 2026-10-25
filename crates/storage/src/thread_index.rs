@@ -5,9 +5,14 @@
 //! Revisions are per-run monotonic integers, not timestamps; version 0 snapshots
 //! are legacy and must not acquire native provenance by inference.
 
+mod accounting;
 mod contracts;
 mod extract;
 
+pub use accounting::{
+    ACCOUNTING_VERSION, DEFAULT_ACCOUNTING_POLICY, SharedIndexAccountant, account_index_input,
+    charge_index_bytes, index_attribute_bytes, reaccount_index,
+};
 pub use contracts::*;
 pub(crate) use extract::validate_saved_provenance;
 pub use extract::{
