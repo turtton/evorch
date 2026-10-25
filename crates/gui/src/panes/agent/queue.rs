@@ -60,8 +60,8 @@ fn row(
                 egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Not delivered")
             });
             response.on_hover_text(match &item.rejection {
-                Some(reason) => format!("Not delivered — {reason}"),
-                None => "Not delivered — the run ended first".into(),
+                Some(reason) => reason.clone(),
+                None => "未配送 — run が先に終了しました".into(),
             });
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -109,5 +109,15 @@ fn row(
             response.on_hover_text(&item.text);
         });
     });
+    if item.undelivered {
+        ui.label(
+            egui::RichText::new(
+                item.rejection
+                    .as_deref()
+                    .unwrap_or("未配送 — run が先に終了しました"),
+            )
+            .color(palette().WARNING_FG),
+        );
+    }
     action
 }

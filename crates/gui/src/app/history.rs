@@ -13,6 +13,10 @@ pub(super) struct UserMessage {
     /// The expanded prompt the agent receives; empty in older files.
     #[serde(default)]
     pub prompt: String,
+    #[serde(default)]
+    pub image_count: usize,
+    #[serde(default)]
+    pub resent_from: Option<String>,
     pub at: std::time::SystemTime,
     #[serde(default)]
     pub status: DeliveryStatus,
@@ -35,24 +39,27 @@ pub(super) enum DeliveryStatus {
     Rejected { reason: String },
     /// Accepted, but the run ended before reading it.
     Dropped,
+    /// No durable snapshot proves whether the model read this input.
+    Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Resolution {
     /// Its text went back into the composer.
-    Restored,
+    MovedToComposer {
+        draft_id: String,
+    },
+    Resent {
+        new_id: String,
+    },
     Dismissed,
 }
 
 impl UserMessage {
-    /// Replay draws it as a sent message. A queued one keeps that until the
-    /// runtime can confirm delivery.
+    /// Only a committed context snapshot makes a sent transcript bubble.
     fn shown_as_sent(&self) -> bool {
-        matches!(
-            self.status,
-            DeliveryStatus::Queued | DeliveryStatus::Delivered
-        )
+        self.status == DeliveryStatus::Delivered
     }
 
     /// A message that never reached the agent and that the user has not
@@ -61,7 +68,7 @@ impl UserMessage {
         self.resolution.is_none()
             && matches!(
                 self.status,
-                DeliveryStatus::Rejected { .. } | DeliveryStatus::Dropped
+                DeliveryStatus::Rejected { .. } | DeliveryStatus::Dropped | DeliveryStatus::Unknown
             )
     }
 
@@ -72,11 +79,21 @@ impl UserMessage {
             prompt: self.prompt.clone(),
             undelivered: true,
             rejection: match &self.status {
-                DeliveryStatus::Rejected { reason } => Some(reason.clone()),
+                DeliveryStatus::Rejected { reason } => Some(format!("送信されませんでした: {reason}")),
+                DeliveryStatus::Unknown => Some("配送状況不明 — 再送すると重複する可能性があります。内容を確認してから再送してください".into()),
                 _ => None,
             },
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct ComposerDraft {
+    pub draft_id: String,
+    pub thread_id: String,
+    pub text: String,
+    pub origin: String,
+    pub images_needed: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,6 +102,8 @@ struct HistorySidebar {
     sidebar: workspace_ui::SidebarState,
     #[serde(default)]
     user_messages: Vec<UserMessage>,
+    #[serde(default)]
+    composer_drafts: Vec<ComposerDraft>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -96,8 +115,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let saved = HistorySidebar {
             sidebar: self.sidebar.clone(),
             user_messages: self.history.clone(),
+            composer_drafts: self.composer_drafts.clone(),
         };
-        std::fs::write(path, serde_json::to_vec_pretty(&saved)?)?;
+        // One atomic file holds the original, its resolution, and its draft.
+        // Never expose half a resend transition after a crash.
+        use std::io::Write;
+        let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(&serde_json::to_vec_pretty(&saved)?)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result?;
         Ok(())
     }
 
@@ -176,6 +213,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     let saved: HistorySidebar = serde_json::from_slice(&bytes)
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
                     self.history = saved.user_messages;
+                    self.composer_drafts = saved.composer_drafts;
+                    let ids: Vec<_> = self
+                        .history
+                        .iter()
+                        .map(|message| message.id.clone())
+                        .collect();
+                    let receipts = db.host_input_receipts(&ids)?;
+                    self.apply_receipts(&receipts, true);
                     self.restore_undelivered_rows();
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -329,6 +374,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         })?;
         self.reconcile_restored_phases(db, registry_path);
+        let ids: Vec<_> = self
+            .history
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+        self.apply_receipts(&db.host_input_receipts(&ids)?, true);
+        self.rebuild_delivery_rows();
         for message in messages {
             self.restore_user_message(message);
         }
@@ -339,6 +391,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.transcripts
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         self.refresh_active_thread_workspace();
+        self.refresh_draft_banner();
         Ok(())
     }
 
@@ -453,6 +506,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
             *phase = restored;
             self.transcripts.interrupt_run_tools(run_id);
+            if let Err(error) = self.sink.mark_unreachable_host_inputs(run_id) {
+                tracing::warn!(%run_id, %error, "orphan receipt reconciliation failed");
+            }
         }
         // An owner that exited mid-call leaves the run in its active_runs.
         // Only a probe that proved the owner dead, of a record that did not
@@ -464,6 +520,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         && before.get(&owner.thread_id) == after.get(&owner.thread_id))
             })
         };
+        // Receipt reconciliation also covers runs whose last event already
+        // looked terminal (a failed terminal transaction leaves Accepted rows).
+        for thread in &self.sidebar.threads {
+            if protected_threads.contains(&thread.id.to_string()) {
+                continue;
+            }
+            for run in &thread.run_ids {
+                if !executing(run)
+                    && let Err(error) = self.sink.mark_unreachable_host_inputs(run)
+                {
+                    tracing::warn!(%run, %error, "orphan receipt reconciliation failed");
+                }
+            }
+        }
         // No live owner can be executing these runs, so their calls will never
         // report a result. This includes runs whose phase stays as replayed
         // because their snapshot or every phase event is missing.
@@ -492,6 +562,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         for run_id in &thread.run_ids {
+            let live = run_id
+                .parse::<runtime::RunId>()
+                .ok()
+                .and_then(|run| self.tasks.inspect(run))
+                .is_some();
+            if !live && let Err(error) = self.sink.mark_unreachable_host_inputs(run_id) {
+                tracing::warn!(%run_id, %error, "claimed receipt reconciliation failed");
+            }
             let Some(phase) = self.phases.get_mut(run_id) else {
                 continue;
             };
@@ -526,7 +604,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Messages that never reached the agent come back above the composer,
     /// not as sent bubbles, until the user restores or dismisses them.
-    fn restore_undelivered_rows(&mut self) {
+    pub(super) fn restore_undelivered_rows(&mut self) {
         for message in self.history.iter().filter(|message| message.awaits_user()) {
             let rows = self
                 .follow_up_queues

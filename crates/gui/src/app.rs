@@ -9,6 +9,8 @@ mod branching;
 mod composer;
 mod conversation;
 mod delivery;
+#[cfg(test)]
+mod delivery_tests;
 mod escalation;
 mod external_commands;
 mod follow_ups;

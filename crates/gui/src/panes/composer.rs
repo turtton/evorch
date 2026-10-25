@@ -136,6 +136,9 @@ pub fn composer_strip_within(
                 ui.label(egui::RichText::new(stopped_banner(model.running_children))
                     .color(palette().WARNING_FG));
             }
+            if model.images_needed > 0 {
+                ui.label(egui::RichText::new(format!("画像 {} 枚は再添付が必要です", model.images_needed)).color(palette().WARNING_FG));
+            }
             images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();

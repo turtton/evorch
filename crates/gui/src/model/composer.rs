@@ -234,6 +234,8 @@ pub struct QueuedFollowUp {
 pub struct ComposerModel {
     /// Live descendants of the active conversation root, refreshed before rendering.
     pub running_children: usize,
+    /// Images from a durable resend draft must be attached again.
+    pub images_needed: usize,
     /// Refreshed from runtime receipt state for the active conversation only.
     pub follow_ups: runtime::FollowUpStatus,
     /// The active conversation's queued follow-ups, oldest (next to send) first.
