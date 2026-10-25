@@ -19,7 +19,7 @@ impl ContextInspectorPane {
     pub(super) fn preview_body(&mut self, ui: &mut egui::Ui) {
         let loading = self.preview.is_loading();
         let Some(result) = self.preview.report() else {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
             return;
         };
         let report = match result {
@@ -30,7 +30,7 @@ impl ContextInspectorPane {
             }
         };
         if loading {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
         }
         report_header(ui, &report);
         split(ui, |ui, column| match column {
@@ -137,7 +137,7 @@ impl ContextInspectorPane {
             }
             None if self.run.is_empty() => return,
             None => {
-                ui.spinner();
+                crate::theme::widgets::spinner(ui);
                 return;
             }
         };
@@ -206,7 +206,7 @@ impl ContextInspectorPane {
     pub(super) fn compare_body(&mut self, ui: &mut egui::Ui) {
         let (Some(left), Some(right)) = (self.compare_left.report(), self.compare_right.report())
         else {
-            ui.spinner();
+            crate::theme::widgets::spinner(ui);
             return;
         };
         let (left, right) = match (left, right) {

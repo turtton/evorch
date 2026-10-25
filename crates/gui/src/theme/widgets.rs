@@ -291,6 +291,52 @@ pub fn fill_label(
     response
 }
 
+/// How often a visible spinner moves. egui's `Spinner` asks for a repaint every
+/// frame, which rebuilds the whole workbench at the display rate while anything
+/// is running; this keeps the animation at a fraction of that cost.
+pub const SPINNER_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// A loading spinner the size of the style's interactive height.
+#[track_caller]
+pub fn spinner(ui: &mut Ui) -> Response {
+    let size = ui.style().spacing.interact_size.y;
+    spinner_with(ui, size, None)
+}
+
+/// A spinner of `size` points, in `color` or the strong text color.
+#[track_caller]
+pub fn spinner_with(ui: &mut Ui, size: f32, color: Option<Color32>) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    response.widget_info(|| WidgetInfo::new(WidgetType::ProgressIndicator));
+    paint_spinner(ui, rect, color);
+    response
+}
+
+/// Paints the spinner arc in `rect` and schedules its next step when visible.
+/// The repaint request carries the caller's location for frame diagnostics.
+#[track_caller]
+pub fn paint_spinner(ui: &Ui, rect: egui::Rect, color: Option<Color32>) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    ui.ctx().request_repaint_after(SPINNER_FRAME);
+    let color = color.unwrap_or_else(|| ui.visuals().strong_text_color());
+    let radius = rect.height().min(rect.width()) / 2.0 - 2.0;
+    let points = (radius.round() as u32).clamp(8, 128);
+    let time = ui.input(|input| input.time);
+    let start = time * std::f64::consts::TAU;
+    let end = start + 240f64.to_radians() * time.sin();
+    let arc = (0..points)
+        .map(|index| {
+            let angle = egui::emath::lerp(start..=end, f64::from(index) / f64::from(points));
+            let (sin, cos) = angle.sin_cos();
+            rect.center() + radius * egui::vec2(cos as f32, sin as f32)
+        })
+        .collect();
+    ui.painter()
+        .add(egui::Shape::line(arc, Stroke::new(3.0, color)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::metric_parts;
@@ -338,5 +384,49 @@ mod tests {
         assert!(harness.output().platform_output.commands.iter().any(
             |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "run-42")
         ));
+    }
+
+    fn repaint_delay(ctx: &egui::Context, add: impl FnMut(&mut egui::Ui)) -> std::time::Duration {
+        let mut output = ctx.run_ui(egui::RawInput::default(), add);
+        output.textures_delta.clear();
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+    }
+
+    #[test]
+    fn spinner_schedules_its_next_step_instead_of_repainting_every_frame() {
+        // Given: a context that has settled after its start-up repaints.
+        let ctx = egui::Context::default();
+        assert!(
+            (0..10).any(|_| repaint_delay(&ctx, |_| {}) == std::time::Duration::MAX),
+            "an empty UI never settled"
+        );
+        // When: only a spinner is visible.
+        let delay = repaint_delay(&ctx, |ui| {
+            super::spinner(ui);
+        });
+        // Then: it waits for its next animation step; egui's own spinner would not.
+        assert!(
+            delay > std::time::Duration::ZERO && delay <= super::SPINNER_FRAME,
+            "{delay:?}"
+        );
+        let egui_delay = repaint_delay(&ctx, |ui| {
+            ui.add(egui::Spinner::new());
+        });
+        assert_eq!(egui_delay, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn spinner_paints_an_arc_and_reports_a_progress_indicator() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut harness = Harness::new_ui(|ui| {
+            super::spinner_with(ui, 16.0, Some(egui::Color32::RED));
+        });
+        harness.run_steps(2);
+        harness.get_by_role(egui::accesskit::Role::ProgressIndicator);
+        assert!(harness.output().shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Path(path)
+                if !path.closed && path.stroke.color == egui::epaint::ColorMode::Solid(egui::Color32::RED)
+        )));
     }
 }

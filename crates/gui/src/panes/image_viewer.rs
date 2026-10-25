@@ -226,7 +226,9 @@ fn viewer_contents(ui: &mut Ui, viewer: &mut Viewer) -> bool {
             None => "This path cannot be shown.".to_owned(),
             Some(Err(error)) => format!("Cannot show the image: {error}"),
             Some(Ok(_)) => {
-                ui.put(viewport, egui::Spinner::new());
+                ui.put(viewport, |ui: &mut egui::Ui| {
+                    crate::theme::widgets::spinner(ui)
+                });
                 return close;
             }
         };

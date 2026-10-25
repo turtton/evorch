@@ -153,6 +153,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         let frame_time = frame_started.elapsed();
+        if super::frame_trace::enabled() {
+            self.frame_trace
+                .get_or_insert_with(|| super::frame_trace::FrameTrace::new(frame_started))
+                .record_pass(
+                    &ctx,
+                    frame_time,
+                    super::frame_trace::PassSections {
+                        drain: drain_time,
+                        fold: fold_time,
+                        sink: sink_time,
+                        ownership: ownership_time,
+                        render: render_time,
+                        draft: draft_time,
+                    },
+                );
+        }
         // A slow frame can be diagnosed after it returns without recording user content or
         // emitting an event back into the queue being measured. Bound repeated warnings.
         if frame_time >= Duration::from_millis(200)

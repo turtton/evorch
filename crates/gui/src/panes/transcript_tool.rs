@@ -283,11 +283,7 @@ pub fn tool_card_group(
         }
         let response = title.show(ui, expanded && !running, |ui| {
             if running {
-                ui.add(
-                    egui::Spinner::new()
-                        .size(FONT_SMALL)
-                        .color(palette().RUNNING),
-                );
+                crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(palette().RUNNING));
             }
             let browser_run = run_id.as_deref().filter(|_| {
                 crate::panes::agent_browser::is_browser_tool(tool_name)

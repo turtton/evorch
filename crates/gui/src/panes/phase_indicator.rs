@@ -8,11 +8,9 @@ use crate::theme::widgets::badge;
 
 pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
     let response = match phase {
-        Some(ThreadRunPhase::Running) => ui.add(
-            egui::Spinner::new()
-                .size(FONT_SMALL)
-                .color(palette().RUNNING),
-        ),
+        Some(ThreadRunPhase::Running) => {
+            crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(palette().RUNNING))
+        }
         Some(phase) => crate::theme::widgets::status_dot(ui, phase_color(phase)),
         None => crate::theme::widgets::status_dot(ui, palette().TEXT_MUTED),
     };

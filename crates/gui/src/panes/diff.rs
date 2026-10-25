@@ -120,7 +120,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
         }
         DiffState::Loading => {
             ui.horizontal(|ui| {
-                ui.spinner();
+                crate::theme::widgets::spinner(ui);
                 ui.label(match mode {
                     DiffMode::WorkingTree => "Loading working tree diff…",
                     DiffMode::Branch => "Loading branch diff against main…",

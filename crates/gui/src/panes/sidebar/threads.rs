@@ -737,12 +737,9 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hid
 
 fn running_spinner(ui: &mut Ui, label: &str) {
     // add_sized reserves the whole Archive slot and centers the spinner in it.
-    let response = ui.add_sized(
-        egui::vec2(ACTION_SIZE, ACTION_SIZE),
-        egui::Spinner::new()
-            .size(FONT_SMALL)
-            .color(palette().RUNNING),
-    );
+    let response = ui.add_sized(egui::vec2(ACTION_SIZE, ACTION_SIZE), |ui: &mut Ui| {
+        crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(palette().RUNNING))
+    });
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
     response.on_hover_text(label);

@@ -140,6 +140,10 @@ Events are persisted to <user-config-dir>/evorch-events.db (demo mode uses a
 temporary directory); thread goals and procedures are restored from them on
 startup.
 
+Set RUST_LOG=info,gui::frame_trace=debug to log, every 5 seconds, the frame
+rate, pass times and the call sites whose immediate repaint requests kept the
+GUI painting.
+
 Start:
 
     cargo run -p gui --bin evorch-gui -- --demo
