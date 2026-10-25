@@ -256,7 +256,7 @@ fn measured_candidates(
     db: &Database,
     query: &ConversationQuery<'_>,
 ) -> (Vec<ConversationCandidate>, i32) {
-    let (sql, params) = conversation_candidate_sql(query);
+    let (sql, params) = conversation_candidate_sql(query, &db.conn);
     let mut statement = db.conn.prepare(&sql).unwrap();
     let rows = statement
         .query_map(params_from_iter(params), candidate)
@@ -268,7 +268,7 @@ fn measured_candidates(
 }
 
 fn candidate_plan(db: &Database, query: &ConversationQuery<'_>) -> Vec<String> {
-    let (sql, params) = conversation_candidate_sql(query);
+    let (sql, params) = conversation_candidate_sql(query, &db.conn);
     db.conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .unwrap()
@@ -325,30 +325,26 @@ fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<Conv
 }
 
 #[test]
-fn ascii_prefilter_is_only_used_when_every_alternative_has_a_proven_fts_term() {
+fn tokenizer_prefilter_is_only_used_when_every_alternative_has_an_fts_term() {
     for filter in [
         ConversationFilter::All,
         literals(&[&["ab"]]),
-        literals(&[&["検索語"]]),
         literals(&[&["Ä"]]),
-        literals(&[&["needle"], &["検索語"]]),
+        literals(&[&["needle"], &["検索"]]),
         literals(&[&["needle"], &["%"]]),
         literals(&[&["needle"], &[]]),
         literals(&[&["sssss"]]),
     ] {
-        let mut params = vec![SqlValue::Integer(42)];
-        assert_eq!(ascii_fts_prefilter(&filter, &mut params), None);
-        assert_eq!(params, [SqlValue::Integer(42)]);
+        assert_eq!(fts_prefilter(&filter), None);
     }
-    let mut params = Vec::new();
-    let filter = literals(&[&["SKY", "Ä", "%"], &["abc def"]]);
-    let sql = ascii_fts_prefilter(&filter, &mut params).unwrap();
-    assert!(sql.contains("length(CAST(b.text AS BLOB)) != length(b.text)"));
+    let filter = literals(&[&["SKY", "Ä", "%"], &["abc def", "検索語"]]);
+    let variants: Vec<Vec<Vec<String>>> =
+        serde_json::from_str(&fts_prefilter(&filter).unwrap()).unwrap();
     assert_eq!(
-        params,
-        [
-            SqlValue::Text("sky".into()),
-            SqlValue::Text("abc def".into())
+        variants,
+        vec![
+            vec![vec!["skY", "sKY", "ſkY", "ſKY"]],
+            vec![vec!["abc def"], vec!["検索語"]]
         ]
     );
 }
@@ -397,6 +393,157 @@ fn prefilter_preserves_original_fts_candidates_for_every_ascii_scalar() {
 }
 
 #[test]
+fn unicode_and_nul_prefilter_prunes_without_changing_fts_false_hits() {
+    let db = db();
+    assert!(tokenizer_prefilter::install(&db.conn));
+    for (text, term, expected) in [
+        ("日本語 unrelated", "abc", false),
+        ("日本語 ABC", "abc", true),
+        ("A\0B\0C", "abc", true),
+        ("ABC\0tail", "abc", true),
+        ("日本語\0unrelated", "abc", false),
+        ("ſKY", "sky", true),
+        ("a\u{301}bc", "abc", false),
+        ("a\u{301}bc", "a\u{301}bc", true),
+        ("データベース", "データベース", true),
+        ("aaaaaababaaaa", "aaaaabab", true),
+        ("aaaaaababaaaa", "aaaaabb", false),
+        ("a\"b", "a\"b", true),
+        ("a\nb", "a\nb", true),
+    ] {
+        let json = fts_prefilter(&literals(&[&[term]])).unwrap();
+        let actual: bool = db
+            .conn
+            .query_row(
+                "SELECT evorch_fts5_necessary(?1, ?2)",
+                params![text, json],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "{text:?}, {term:?}");
+    }
+}
+
+#[test]
+fn sqlite_unicode_folds_and_nul_positions_agree_with_original_fts() {
+    let db = db();
+    indexed(&db, "run");
+    // These cased query literals may route to Scan in production. Exercise
+    // the tokenizer primitive as well, against SQLite's independent MATCH.
+    let pairs = [
+        ("ÄBC", "äbc"),
+        ("ſKY", "sky"),
+        ("İbc", "ibc"),
+        ("ＡＢＣ", "ａｂｃ"),
+        ("Σbc", "ςbc"),
+        ("a\u{0345}bc", "aιbc"),
+        ("a\u{301}bc", "abc"),
+        ("ébc", "e\u{301}bc"),
+        ("A\0B\0C", "abc"),
+        ("日本\0語", "日本語"),
+        ("a\"bc", "a\"bc"),
+        ("a\tbc", "a\tbc"),
+    ];
+    assert!(tokenizer_prefilter::install(&db.conn));
+    for (ordinal, (text, term)) in pairs.iter().enumerate() {
+        let id = block(&db, "run", ordinal, "text", text);
+        let phrase = format!("\"{}\"", term.replace('"', "\"\""));
+        let expected: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversation_fts \
+                 WHERE rowid = ?1 AND conversation_fts MATCH ?2)",
+                params![id, phrase],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let json = serde_json::to_string(&vec![vec![vec![term]]]).unwrap();
+        let actual: bool = db
+            .conn
+            .query_row(
+                "SELECT evorch_fts5_necessary(?1, ?2)",
+                params![text, json],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "{text:?}, {term:?}");
+    }
+}
+
+#[test]
+fn tokenizer_api_unavailable_keeps_original_candidate_sql() {
+    let db = db();
+    indexed(&db, "run");
+    block(&db, "run", 0, "text", "日本語 needle");
+    // Simulate API discovery failure, without disabling the actual FTS index.
+    db.conn
+        .create_scalar_function(
+            c"fts5",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(false),
+        )
+        .unwrap();
+    let runs = ["run".into()];
+    let query = ConversationQuery {
+        runs: &runs,
+        kinds: TEXT,
+        filter: &literals(&[&["needle"]]),
+        after: None,
+        limit: 1,
+    };
+    let (sql, _) = conversation_candidate_sql(&query, &db.conn);
+    assert!(!sql.contains("evorch_fts5_necessary"));
+    assert!(!sql.contains("scoped_blocks AS MATERIALIZED"));
+    assert_eq!(
+        db.conversation_candidates(&query).unwrap(),
+        original_candidates(&db, &query)
+    );
+}
+
+#[test]
+fn tokenizer_function_auxdata_rebind_connection_move_and_finalize_are_safe() {
+    let db = db();
+    assert!(tokenizer_prefilter::install(&db.conn));
+    let abc = fts_prefilter(&literals(&[&["abc"]])).unwrap();
+    let xyz = fts_prefilter(&literals(&[&["xyz"]])).unwrap();
+    {
+        let mut statement = db
+            .conn
+            .prepare("SELECT evorch_fts5_necessary(?1, ?2)")
+            .unwrap();
+        for (text, json, expected) in [
+            ("日本語 ABC", &abc, true),
+            ("日本語 xyz", &abc, false),
+            ("日本語 xyz", &xyz, true),
+            ("A\0BC", &abc, true),
+        ] {
+            assert_eq!(
+                statement
+                    .query_row(params![text, json], |row| row.get::<_, bool>(0))
+                    .unwrap(),
+                expected
+            );
+        }
+    } // Finalize clears auxdata before the connection/tokenizer can be dropped.
+    std::thread::spawn(move || {
+        assert!(tokenizer_prefilter::install(&db.conn));
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT evorch_fts5_necessary(?1, ?2)",
+                    params!["A\0BC", abc],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap()
+        );
+        db.conn.close().unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes() {
     let db = db();
     for run in ["a", "b", "invisible"] {
@@ -418,6 +565,14 @@ fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes()
         "alpha\nbeta\tend",
         "a\"b a%b a_b a\\b",
         "a\u{301}bc abc",
+        "ÄBC äbc",
+        "ＡＢＣ ａｂｃ",
+        "a\0\0b\0c",
+        "\0abc\0",
+        "a\u{301}\u{301}bc",
+        "a\u{0345}bc", // Unicode fold of a combining scalar, not Rust lower.
+        "aaaaaababaaaa",
+        "検索語\0データベース",
         "no match",
     ];
     for run in ["a", "b", "invisible", "stale"] {
@@ -440,6 +595,12 @@ fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes()
         literals(&[&["a\"b"], &["a%b"], &["a_b"], &["a\\b"]]),
         literals(&[&["alpha\nbeta"]]),
         literals(&[&["abc", "Ä"], &["sky", "検索"]]),
+        literals(&[&["検索語", "データベース"]]),
+        literals(&[&["abc", "検索語"]]),
+        literals(&[&["a\u{301}bc"], &["a\u{0345}bc"]]),
+        literals(&[&["aaaaabab"]]),
+        literals(&[&["abc"], &["ssssss"]]),
+        literals(&[&["abc", "\0"]]),
         literals(&[&["abc"], &["Ä"]]),
         literals(&[&["abc"], &[]]),
         ConversationFilter::All,
