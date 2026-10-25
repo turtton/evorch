@@ -4,7 +4,7 @@ use workspace_ui::{ProjectId, SidebarState, UiSettings};
 
 use super::*;
 use crate::fixture::DemoSource;
-use crate::model::composer::{CompletionItem, mention_at};
+use crate::model::composer::{CompletionItem, CompletionKind, mention_at, mention_skills};
 
 fn folder(parent: &Path, name: &str, file: &str) -> PathBuf {
     let folder = parent.join(name);
@@ -35,6 +35,12 @@ fn has_entry(state: &WorkbenchState<DemoSource>, suffix: &str) -> bool {
         .entries
         .iter()
         .any(|entry| entry.value.ends_with(suffix))
+}
+
+fn has_skill(state: &WorkbenchState<DemoSource>, name: Option<&str>) -> bool {
+    state.composer.mentions.entries.iter().any(|entry| {
+        entry.kind == CompletionKind::Skill && name.is_none_or(|name| entry.value == name)
+    })
 }
 
 /// A workbench on `root` with `allowed` approved and an `@` mention open.
@@ -82,8 +88,13 @@ fn an_index_built_for_a_previous_scope_is_discarded() {
         std::fs::write(root.join(format!("new-{wait}.rs")), "").expect("new file");
         let (send, result) = mpsc::sync_channel(1);
         let skills = runtime::skill::discover_skills(&[]);
-        send.send(MentionIndex::build(&scope.root, &scope.allowed, &skills))
-            .expect("send index");
+        send.send(MentionIndex::build(
+            &scope.root,
+            &scope.allowed,
+            &skills,
+            scope.repo_skills,
+        ))
+        .expect("send index");
         state.mention_job = Some(Job { scope, result });
         // ...but the directory is removed before that rebuild lands.
         state
@@ -106,6 +117,67 @@ fn an_index_built_for_a_previous_scope_is_discarded() {
         );
         assert_eq!(state.composer.mentions, before, "wait: {wait}");
         assert_eq!(state.composer.mentions.allowed, std::slice::from_ref(&kept));
+    }
+}
+
+#[test]
+fn an_index_built_under_revoked_project_trust_is_discarded() {
+    // Given: a trusted project whose repository skill an open mention offers.
+    let temp = tempfile::tempdir().expect("temp");
+    let root = folder(temp.path(), "project", "lib.rs");
+    let skill = root.join(".evorch/skills/repo-fixture-skill");
+    std::fs::create_dir_all(&skill).expect("skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: repo-fixture-skill\ndescription: fixture\n---\nREPO BODY\n",
+    )
+    .expect("SKILL.md");
+    let (mut state, project) = mention_state(&root, &[]);
+    state
+        .set_project_trust(&project, TrustState::Approved)
+        .expect("trust");
+    let ctx = egui::Context::default();
+    state.refresh_mention_index(&ctx);
+    state.wait_mention_index();
+    assert!(has_skill(&state, Some("repo-fixture-skill")));
+    let trusted = state.mention_scope().expect("trusted scope");
+    assert!(trusted.repo_skills);
+
+    // Given: a rebuild for the trusted scope has finished but not landed yet
+    // when the project's trust is revoked.
+    let (send, result) = mpsc::sync_channel(1);
+    let skills = mention_skills(Some(&root), true);
+    send.send(MentionIndex::build(&root, &[], &skills, true))
+        .expect("send index");
+    state.mention_job = Some(Job {
+        scope: trusted,
+        result,
+    });
+    state
+        .set_project_trust(&project, TrustState::Unapproved)
+        .expect("revoke");
+
+    // When: the next frame runs.
+    state.refresh_mention_index(&ctx);
+
+    // Then: that rebuild is dropped, no skill completes on the frame, and a
+    // rebuild for the untrusted scope starts.
+    assert!(!has_skill(&state, None));
+    assert!(
+        state
+            .mention_job
+            .as_ref()
+            .is_some_and(|job| !job.scope.repo_skills)
+    );
+    // Then: it brings back the builtin skills but not the repository one, and
+    // later frames start no further rebuild.
+    state.wait_mention_index();
+    assert!(has_skill(&state, Some("git-best-practices")));
+    assert!(!has_skill(&state, Some("repo-fixture-skill")));
+    assert!(state.composer.mentions.is_built_for(&root, &[], false));
+    for _ in 0..3 {
+        state.refresh_mention_index(&ctx);
+        assert!(state.mention_job.is_none());
     }
 }
 
@@ -146,8 +218,9 @@ fn a_revoked_directory_makes_room_for_the_rest_without_closing_the_mention() {
     state.refresh_mention_index(&ctx);
     state.wait_mention_index();
     let scope = state.mention_scope().expect("scope");
-    let skills = runtime::skill::build_standard_registry(Some(&root));
-    state.composer.mentions = MentionIndex::build_within(&scope.root, &scope.allowed, &skills, 2);
+    let skills = mention_skills(Some(&root), scope.repo_skills);
+    state.composer.mentions =
+        MentionIndex::build_within(&scope.root, &scope.allowed, &skills, scope.repo_skills, 2);
     assert!(has_entry(&state, "/a/a.md"));
     assert!(!has_entry(&state, "/b/b.md"));
     // An index built for the current scope is kept, budget-limited or not.
@@ -170,7 +243,7 @@ fn a_revoked_directory_makes_room_for_the_rest_without_closing_the_mention() {
         state
             .composer
             .mentions
-            .is_built_for(&root, std::slice::from_ref(&b))
+            .is_built_for(&root, std::slice::from_ref(&b), false)
     );
     // Then: later frames start no further rebuild.
     for _ in 0..3 {
@@ -228,12 +301,11 @@ fn restoring_the_original_scope_rebuilds_dropped_candidates_once() {
     drop(send);
     state.wait_mention_index();
     assert_eq!(offered(&state.composer.mentions, &query), before);
-    assert!(
-        state
-            .composer
-            .mentions
-            .is_built_for(&original.root, &original.allowed)
-    );
+    assert!(state.composer.mentions.is_built_for(
+        &original.root,
+        &original.allowed,
+        original.repo_skills
+    ));
     for _ in 0..3 {
         state.refresh_mention_index(&ctx);
         assert!(state.mention_job.is_none());
@@ -251,8 +323,8 @@ fn revoking_a_parent_offers_what_a_fresh_index_of_the_nested_directory_does() {
     let ctx = egui::Context::default();
     state.refresh_mention_index(&ctx);
     state.wait_mention_index();
-    let skills = runtime::skill::build_standard_registry(Some(&root));
-    let fresh = MentionIndex::build(&root, std::slice::from_ref(&inner), &skills);
+    let skills = mention_skills(Some(&root), false);
+    let fresh = MentionIndex::build(&root, std::slice::from_ref(&inner), &skills, false);
     let queries: Vec<String> = ["@", "@deep", "@inner", "@outer", "@top", "@md"]
         .into_iter()
         .map(str::to_owned)
@@ -335,7 +407,7 @@ fn approving_a_parent_that_ignores_a_nested_directory_keeps_it_completing() {
         state
             .composer
             .mentions
-            .is_built_for(&root, &[inner.clone(), outer.clone()])
+            .is_built_for(&root, &[inner.clone(), outer.clone()], false)
     );
     assert_eq!(first(&state).as_ref(), Some(&deep));
     assert!(has_entry(&state, "/outer/top.md"));

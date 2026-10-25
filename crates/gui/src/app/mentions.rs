@@ -4,16 +4,19 @@ use std::sync::mpsc;
 use workspace_ui::TrustState;
 
 use super::WorkbenchState;
-use crate::model::composer::MentionIndex;
+use crate::model::composer::{MentionIndex, mention_skills};
+use crate::model::project_bridge::repo_skills_admitted;
 use crate::model::tasks::AgentRunSource;
 
 /// What an index covers: the project root and its approved allowed
-/// directories. Missing ones are left out by the index job, not here, so
-/// checking a scope never touches the filesystem.
+/// directories, and whether the project's trust admits its repository skills.
+/// Missing directories are left out by the index job, not here, so checking a
+/// scope never touches the filesystem.
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     root: PathBuf,
     allowed: Vec<PathBuf>,
+    repo_skills: bool,
 }
 
 pub(super) struct Job {
@@ -24,7 +27,7 @@ pub(super) struct Job {
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Rebuilds the `@` index whenever a mention starts, so new files and
     /// skills appear without a filesystem watcher, and keeps it within the
-    /// selected project's current allowed directories.
+    /// selected project's current allowed directories and trust.
     pub(super) fn refresh_mention_index(&mut self, ctx: &egui::Context) {
         let active = self.composer.mention_query().is_some();
         let started = active && !self.mention_active;
@@ -37,11 +40,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_ref()
             .map_or(&[][..], |scope| scope.allowed.as_slice());
         self.composer.mentions.retain_allowed(allowed);
+        // Repository skills of a project that is not trusted would not be
+        // inlined, so they stop completing before the rebuild lands as well.
+        if scope.as_ref().is_some_and(|scope| !scope.repo_skills) {
+            self.composer.mentions.withhold_repo_skills();
+        }
         if let Some(scope) = scope.filter(|_| active) {
-            let stale = !self
-                .composer
-                .mentions
-                .is_built_for(&scope.root, &scope.allowed);
+            let stale = !self.composer.mentions.is_built_for(
+                &scope.root,
+                &scope.allowed,
+                scope.repo_skills,
+            );
             if (started || stale)
                 && self
                     .mention_job
@@ -62,9 +71,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let spawned = std::thread::Builder::new()
             .name("mention-index".into())
             .spawn(move || {
-                let Scope { root, allowed } = worker_scope;
-                let skills = runtime::skill::build_standard_registry(Some(&root));
-                let _ = send.send(MentionIndex::build(&root, &allowed, &skills));
+                let Scope {
+                    root,
+                    allowed,
+                    repo_skills,
+                } = worker_scope;
+                let skills = mention_skills(Some(&root), repo_skills);
+                let _ = send.send(MentionIndex::build(&root, &allowed, &skills, repo_skills));
             });
         match spawned {
             Ok(_) => self.mention_job = Some(Job { scope, result }),
@@ -73,7 +86,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     /// The selected project's root plus its approved allowed directories,
-    /// the ones the runtime declares to the agent when they exist.
+    /// the ones the runtime declares to the agent when they exist, and whether
+    /// the runtime gives its runs the project's repository skills.
     fn mention_scope(&self) -> Option<Scope> {
         let project_id = self.sidebar.selected_project.as_ref()?;
         let project = self
@@ -90,6 +104,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Some(Scope {
             root: project.repo_root.clone(),
             allowed,
+            repo_skills: repo_skills_admitted(Some(project)),
         })
     }
 

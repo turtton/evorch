@@ -6,7 +6,7 @@ mod mention;
 mod role;
 pub use mention::{
     CompletionItem, CompletionKind, MentionIndex, MentionQuery, expand_skill_mentions, mention_at,
-    split_skill_attachments,
+    mention_skills, split_skill_attachments, withheld_skill_mentions,
 };
 pub use role::ComposerRole;
 
