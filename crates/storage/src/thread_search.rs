@@ -3,8 +3,9 @@
 //! The caller authorizes first and passes only runs it may read, at most
 //! [`MAX_SEARCH_BATCH_RUNS`] per query. That is a per-query batch bound, not a
 //! total bound: callers page through any number of runs batch by batch. Every
-//! statement is scoped to the given runs before anything is returned, so the
-//! rows, their order and their keyset positions never depend on other runs.
+//! statement materializes the current indexed subset of those runs before
+//! visiting blocks or FTS, so rows, order and keyset positions never depend on
+//! other runs, nor does the number of block candidates evaluated.
 //!
 //! Text filters are a *superset* prefilter. Callers must verify each candidate
 //! with their own matcher; [`term_route`] only promises that no block a
@@ -219,40 +220,7 @@ impl Database {
                 "conversation search needs 1-500 rows and at least one kind".into(),
             ));
         }
-        let mut params: Vec<SqlValue> = Vec::new();
-        let scope = scope_values(query.runs, &mut params);
-        let kinds = query
-            .kinds
-            .iter()
-            .map(|kind| {
-                params.push(SqlValue::Text(kind_text(*kind).into()));
-                "?"
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let (after_seq, after_id) = query
-            .after
-            .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
-        params.push(SqlValue::Integer(after_seq));
-        params.push(SqlValue::Integer(after_id));
-        let filter = filter_sql(query.filter, &mut params);
-        params.push(SqlValue::Integer(to_i64(query.limit)));
-        let sql = format!(
-            "WITH scope(run_id, seq) AS (VALUES {scope}) \
-             SELECT b.id, scope.seq, b.run_id, r.source_revision, r.snapshot_revision, \
-                    b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
-                    b.tool_name, b.truncated, b.text \
-             FROM scope \
-             JOIN thread_index_runs r ON r.run_id = scope.run_id \
-             JOIN conversation_blocks b ON b.run_id = scope.run_id \
-             WHERE r.state = 'indexed' AND r.source_present = 1 \
-               AND r.indexed_revision = r.source_revision \
-               AND b.kind IN ({kinds}) \
-               AND (scope.seq, b.id) > (?, ?) \
-               AND ({filter}) \
-             ORDER BY scope.seq, b.id \
-             LIMIT ?"
-        );
+        let (sql, params) = conversation_candidate_sql(query);
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(params), candidate)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -301,6 +269,53 @@ impl Database {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// Keep the production statement shared with the plan/work regression tests.
+fn conversation_candidate_sql(query: &ConversationQuery<'_>) -> (String, Vec<SqlValue>) {
+    let mut params = Vec::new();
+    let scope = scope_values(query.runs, &mut params);
+    let kinds = query
+        .kinds
+        .iter()
+        .map(|kind| {
+            params.push(SqlValue::Text(kind_text(*kind).into()));
+            "?"
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (after_seq, after_id) = query
+        .after
+        .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
+    params.push(SqlValue::Integer(after_seq));
+    params.push(SqlValue::Integer(after_id));
+    let filter = filter_sql(query.filter, &mut params);
+    params.push(SqlValue::Integer(to_i64(query.limit)));
+    // MATERIALIZED is an optimization fence for the authorized/current runs.
+    // CROSS JOIN fixes the loop order on both sides of that fence: ordinary
+    // JOIN allowed SQLite to scan the global kind index and probe FTS before
+    // checking scope. The existing (kind, run_id) index now uses BOTH keys.
+    let sql = format!(
+        "WITH scope(run_id, seq) AS (VALUES {scope}), \
+         current_runs AS MATERIALIZED ( \
+             SELECT scope.seq, r.run_id, r.source_revision, r.snapshot_revision \
+             FROM scope CROSS JOIN thread_index_runs r ON r.run_id = scope.run_id \
+             WHERE r.state = 'indexed' AND r.source_present = 1 \
+               AND r.indexed_revision = r.source_revision \
+         ) \
+         SELECT b.id, r.seq, b.run_id, r.source_revision, r.snapshot_revision, \
+                b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
+                b.tool_name, b.truncated, b.text \
+         FROM current_runs r \
+         CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
+             ON b.run_id = r.run_id \
+         WHERE b.kind IN ({kinds}) \
+           AND (r.seq, b.id) > (?, ?) \
+           AND ({filter}) \
+         ORDER BY r.seq, b.id \
+         LIMIT ?"
+    );
+    (sql, params)
 }
 
 fn check_batch(runs: &[String]) -> Result<(), StorageError> {

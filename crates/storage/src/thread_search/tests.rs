@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{StatementStatus, params};
 
 use super::*;
 
@@ -252,6 +252,208 @@ fn runs_outside_the_batch_never_change_rows_or_positions() {
     );
 }
 
+fn measured_candidates(
+    db: &Database,
+    query: &ConversationQuery<'_>,
+) -> (Vec<ConversationCandidate>, i32) {
+    let (sql, params) = conversation_candidate_sql(query);
+    let mut statement = db.conn.prepare(&sql).unwrap();
+    let rows = statement
+        .query_map(params_from_iter(params), candidate)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, db.conversation_candidates(query).unwrap());
+    (rows, statement.get_status(StatementStatus::VmStep))
+}
+
+fn candidate_plan(db: &Database, query: &ConversationQuery<'_>) -> Vec<String> {
+    let (sql, params) = conversation_candidate_sql(query);
+    db.conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(params_from_iter(params), |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn plan_checks_current_scope_before_run_blocks_and_correlated_fts() {
+    let db = db();
+    let filters = [
+        ConversationFilter::All,
+        literals(&[&["needle"]]),
+        literals(&[&["%"]]),
+        literals(&[&["Ä"]]),
+    ];
+    for count in [1, MAX_SEARCH_BATCH_RUNS] {
+        let runs: Vec<_> = (0..count).map(|i| format!("run-{i}")).collect();
+        for filter in &filters {
+            let plan = candidate_plan(
+                &db,
+                &ConversationQuery {
+                    runs: &runs,
+                    kinds: TEXT,
+                    filter,
+                    after: None,
+                    limit: MAX_SEARCH_PAGE_ROWS,
+                },
+            );
+            let position = |text: &str| {
+                plan.iter()
+                    .position(|step| step.contains(text))
+                    .unwrap_or_else(|| panic!("missing {text}: {plan:#?}"))
+            };
+            let materialize = position("MATERIALIZE current_runs");
+            let scope = position("SCAN scope");
+            let current = position("SEARCH r USING INDEX sqlite_autoindex_thread_index_runs_1");
+            let blocks =
+                position("SEARCH b USING INDEX idx_conversation_blocks_kind (kind=? AND run_id=?)");
+            assert!(materialize < scope && scope < current && current < blocks);
+            assert!(!plan.iter().any(|step| step.starts_with("SCAN b")));
+            if matches!(filter, ConversationFilter::Literals(terms) if terms[0][0] == "needle") {
+                let fts = position("SCAN conversation_fts");
+                assert!(blocks < fts);
+                // '=' is the rowid constraint, 'M' the MATCH constraint.
+                assert!(plan[fts].contains("VIRTUAL TABLE INDEX 0:=M"));
+            } else {
+                assert!(plan.iter().all(|step| !step.contains("conversation_fts")));
+            }
+            eprintln!("scope={count} filter={filter:?}: {plan:?}");
+        }
+    }
+}
+
+#[test]
+fn invisible_and_noncurrent_blocks_do_not_increase_candidate_vm_work() {
+    let db = db();
+    let runs: Vec<_> = (0..96).map(|i| format!("run-visible-{i}")).collect();
+    for run in &runs {
+        indexed(&db, run);
+        for ordinal in 0..3 {
+            block(&db, run, ordinal, "text", "common needle % _ \\ Ä");
+        }
+        block(&db, run, 3, "tool_result", "common needle % _ \\ Ä");
+    }
+    run_row(&db, "run-stale", "indexed", 4, Some(3));
+    run_row(&db, "run-pending", "pending", 3, Some(3));
+    run_row(&db, "run-deleted", "deleted", 3, Some(3));
+    let mut scope = vec![
+        "run-stale".to_owned(),
+        "run-pending".to_owned(),
+        "run-deleted".to_owned(),
+        "run-missing".to_owned(),
+    ];
+    scope.extend(runs.iter().rev().cloned());
+    assert_eq!(scope.len(), MAX_SEARCH_BATCH_RUNS);
+    let filters = [
+        ConversationFilter::All,
+        literals(&[&["needle"]]),
+        literals(&[&["%"]]),
+        literals(&[&["Ä"]]),
+        literals(&[&["needle", "_"], &["absent"]]),
+        literals(&[&["absent"]]),
+    ];
+    let queries: Vec<_> = [&runs[..1], &scope[..4], &scope[..]]
+        .into_iter()
+        .flat_map(|runs| {
+            filters.iter().flat_map(move |filter| {
+                [1, 7, MAX_SEARCH_PAGE_ROWS]
+                    .into_iter()
+                    .flat_map(move |limit| {
+                        [
+                            None,
+                            Some(CandidatePosition {
+                                seq: 0,
+                                block_id: 1,
+                            }),
+                        ]
+                        .into_iter()
+                        .map(move |after| ConversationQuery {
+                            runs,
+                            kinds: &[IndexBlockKind::Text, IndexBlockKind::ToolResult],
+                            filter,
+                            after,
+                            limit,
+                        })
+                    })
+            })
+        })
+        .collect();
+    let before: Vec<_> = queries
+        .iter()
+        .map(|query| measured_candidates(&db, query))
+        .collect();
+    let tx = db.conn.unchecked_transaction().unwrap();
+    for i in 0..256 {
+        let run = format!("run-hidden-{i}");
+        indexed(&db, &run);
+        for extra in [&run, "run-stale", "run-pending", "run-deleted"] {
+            for ordinal in 0..8 {
+                block(
+                    &db,
+                    extra,
+                    i * 8 + ordinal,
+                    "text",
+                    "common needle % _ \\ Ä",
+                );
+            }
+        }
+    }
+    tx.commit().unwrap();
+    for (query, expected) in queries.iter().zip(before) {
+        let actual = measured_candidates(&db, query);
+        assert_eq!(actual.0, expected.0, "{query:?}");
+        assert_eq!(actual.1, expected.1, "VM steps changed: {query:?}");
+        eprintln!(
+            "scope={} filter={:?} limit={} after={:?}: rows={} VM={}->{}",
+            query.runs.len(),
+            query.filter,
+            query.limit,
+            query.after,
+            actual.0.len(),
+            expected.1,
+            actual.1
+        );
+    }
+}
+
+#[test]
+fn duplicate_scoped_runs_keep_distinct_keyset_positions() {
+    let db = db();
+    indexed(&db, "run-visible");
+    let id = block(&db, "run-visible", 0, "text", "needle");
+    let runs = vec!["run-visible".to_owned(); MAX_SEARCH_BATCH_RUNS];
+    let filter = literals(&[&["needle"]]);
+    let mut after = None;
+    for seq in 0..MAX_SEARCH_BATCH_RUNS {
+        let rows = db
+            .conversation_candidates(&ConversationQuery {
+                runs: &runs,
+                kinds: TEXT,
+                filter: &filter,
+                after,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].position, CandidatePosition { seq, block_id: id });
+        after = Some(rows[0].position);
+    }
+    assert!(
+        db.conversation_candidates(&ConversationQuery {
+            runs: &runs,
+            kinds: TEXT,
+            filter: &filter,
+            after,
+            limit: 1,
+        })
+        .unwrap()
+        .is_empty()
+    );
+}
+
 #[test]
 fn tool_results_include_errors_only_when_requested() {
     let db = db();
@@ -354,4 +556,16 @@ fn batches_are_bounded_and_nonempty() {
             .len(),
         MAX_SEARCH_BATCH_RUNS
     );
+    for (limit, kinds) in [(0, TEXT), (MAX_SEARCH_PAGE_ROWS + 1, TEXT), (1, &[][..])] {
+        assert!(
+            db.conversation_candidates(&ConversationQuery {
+                runs: &too_many[..1],
+                kinds,
+                filter: &filter,
+                after: None,
+                limit,
+            })
+            .is_err()
+        );
+    }
 }
