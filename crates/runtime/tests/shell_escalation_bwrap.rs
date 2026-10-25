@@ -79,7 +79,7 @@ async fn scenario(approved: bool) {
     if approved {
         assert_eq!(result.content, "exit_code: 0\nhost-escalation-marker");
     } else {
-        assert_eq!(result.content, "denied");
+        assert!(result.content.starts_with("denied\n"), "{}", result.content);
     }
 }
 

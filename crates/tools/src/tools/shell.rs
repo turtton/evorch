@@ -442,7 +442,10 @@ impl Tool for Shell {
                     });
                     network_sandbox.unwrap_or(escalation.unsandboxed)
                 }
-                EscalationDecision::Deny { reason } => return Ok(ToolResult::error(reason)),
+                decision => {
+                    let (reason, guidance) = decision.denial().expect("non-approval");
+                    return Ok(ToolResult::error(format!("{reason}\n{guidance}")));
+                }
             }
         } else {
             Arc::clone(&self.sandbox)

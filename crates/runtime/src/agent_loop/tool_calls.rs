@@ -24,6 +24,8 @@ mod mcp_scope;
 
 #[cfg(test)]
 mod finish_tests;
+#[cfg(test)]
+mod network_review_tests;
 
 #[cfg(test)]
 mod rework_tests {
@@ -306,6 +308,102 @@ mod rework_tests {
             })
             .collect();
         assert_eq!(results, [("first", false), ("second", true)]);
+    }
+
+    #[tokio::test]
+    async fn file_escalation_denial_reaches_agent_once_without_polluting_events() {
+        struct Deny;
+        #[async_trait::async_trait]
+        impl tools::tools::shell_escalation::ShellEscalationGate for Deny {
+            async fn decide(
+                &self,
+                _: &ToolExecutionContext,
+                _: &str,
+                _: &str,
+            ) -> tools::tools::shell_escalation::EscalationDecision {
+                unreachable!("only file access")
+            }
+            async fn decide_file_access(
+                &self,
+                _: &ToolExecutionContext,
+                _: &tools::tools::shell_escalation::FileAccessRequest,
+            ) -> tools::tools::shell_escalation::EscalationDecision {
+                tools::tools::shell_escalation::EscalationDecision::Deny {
+                    reason: "policy denial".into(),
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let bus = Arc::new(event_bus::EventBus::new(128));
+        let mut events = bus.subscribe();
+        let executor = tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        executor.set_file_boundary(&sandbox::SandboxBoundary::new(project));
+        executor.set_shell_escalation(
+            Arc::new(Deny),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        let model = Arc::new(ScriptedModel::new([
+            tool_response(
+                "denied",
+                "read",
+                json!({"path":temp.path().join("outside"), "sandbox_access":"unsandboxed", "justification":"inspect"}),
+            ),
+            text_response("done", providers::FinishReason::Stop),
+        ]));
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone());
+        let run = runtime.delegate_background(Role::Worker, "inspect".into(), RunConfig::default());
+        assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+        let observed = model.observed().await;
+        let results: Vec<_> = observed
+            .last()
+            .unwrap()
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|block| match block {
+                providers::ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert!(*is_error);
+                    Some(
+                        content
+                            .iter()
+                            .map(|part| part.text_or_image_note())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("file access escalation denied: policy denial"));
+        assert_eq!(
+            results[0]
+                .matches(crate::escalation_review::DENIAL_GUIDANCE)
+                .count(),
+            1
+        );
+        let mut denied = 0;
+        for event in events.drain_pending_snapshot() {
+            match event.kind {
+                EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) => {
+                    denied += 1;
+                    assert_eq!(reason, "file access escalation denied: policy denial");
+                }
+                EventKind::Diagnostic(diagnostic) => assert!(
+                    !diagnostic
+                        .detail
+                        .contains(crate::escalation_review::DENIAL_GUIDANCE)
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(denied, 1);
     }
 
     #[tokio::test]
@@ -806,7 +904,7 @@ impl LoopState {
                         if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
                             result
                         } else if let ReadyCall::Failed(error) = ready {
-                            ToolResult::error(error.to_string())
+                            ToolResult::error(error.agent_message())
                         } else if let ReadyCall::Invalid(error) = ready {
                             self.shared.executor.report_invalid_call(
                                 &ctx,
@@ -815,7 +913,7 @@ impl LoopState {
                                 input.clone(),
                                 &error,
                             );
-                            ToolResult::error(error.to_string())
+                            ToolResult::error(error.agent_message())
                         } else if matches!(
                             name.as_str(),
                             "task_claim" | "task_complete" | "finding_append"
@@ -1011,13 +1109,12 @@ impl LoopState {
                 NetworkGate::Proceed
             }
             NetworkAccessDecision::Deny { reason } => {
-                self.audit_network_call(name, call_id, input, "deny", "tool_policy", &reason);
                 if self.shared.executor.requires_scope_gate(name) {
                     self.emit_mcp_scope_denial(name, call_id, &reason);
                 }
-                NetworkGate::Reject(ToolResult::error(reason))
+                self.reject_network_call(name, call_id, input, "tool_policy", &reason)
             }
-            NetworkAccessDecision::Ask { reason } => {
+            NetworkAccessDecision::Ask { mut reason } => {
                 if crate::network::reviews_each_call(name) && per_tool == PolicyDecision::AutoAllow
                 {
                     let context = self
@@ -1034,8 +1131,6 @@ impl LoopState {
                             crate::escalation_review::review_context(
                                 run,
                                 self.shared.rules.as_deref(),
-                                None,
-                                "",
                             )
                             .ok()
                         });
@@ -1072,11 +1167,11 @@ impl LoopState {
                                 self.finish_interrupted(kind);
                                 return NetworkGate::Cancelled;
                             }
-                            return NetworkGate::Reject(ToolResult::error("review was interrupted"));
+                            return self.reject_network_call(name, call_id, input, "auto_review", "review was interrupted");
                         }
                         verdict = review => verdict,
                     };
-                    return match verdict {
+                    match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {
                             let current = self.runtime().and_then(|runtime| {
                                 runtime.shared.review_runs.lock().ok().and_then(|runs| {
@@ -1086,9 +1181,13 @@ impl LoopState {
                             if !matches!((stamp, current), (Some(expected), Some(current))
                                 if current.synced && current == expected)
                             {
-                                return NetworkGate::Reject(ToolResult::error(
+                                return self.reject_network_call(
+                                    name,
+                                    call_id,
+                                    input,
+                                    "auto_review",
                                     "review context changed during review",
-                                ));
+                                );
                             }
                             self.audit_network_call(
                                 name,
@@ -1098,30 +1197,33 @@ impl LoopState {
                                 "auto_review",
                                 "approved",
                             );
-                            NetworkGate::Proceed
+                            return NetworkGate::Proceed;
                         }
-                        outcome => {
-                            let error = match outcome {
-                                Ok(
-                                    crate::escalation_review::ReviewVerdict::Deny { reason }
-                                    | crate::escalation_review::ReviewVerdict::RequiresUser {
-                                        reason,
-                                    },
-                                ) => reason,
-                                Err(error) => error.to_string(),
-                                _ => unreachable!(),
-                            };
-                            self.audit_network_call(
+                        // A critical-risk approval is the user's decision: fall
+                        // through to the human approval below.
+                        Ok(crate::escalation_review::ReviewVerdict::RequiresUser {
+                            reason: critical,
+                        }) => reason = critical,
+                        Ok(crate::escalation_review::ReviewVerdict::Deny { reason: error }) => {
+                            return self.reject_network_call(
                                 name,
                                 call_id,
                                 input,
-                                "deny",
                                 "auto_review",
                                 &error,
                             );
-                            NetworkGate::Reject(ToolResult::error(error))
                         }
-                    };
+                        Err(error) => {
+                            let error = error.to_string();
+                            return self.reject_network_call(
+                                name,
+                                call_id,
+                                input,
+                                "auto_review",
+                                &error,
+                            );
+                        }
+                    }
                 }
                 let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
                 // Model call IDs are run-local. Scope approval IDs to the run.
@@ -1133,7 +1235,7 @@ impl LoopState {
                             self.finish_interrupted(kind);
                             return NetworkGate::Cancelled;
                         }
-                        return NetworkGate::Reject(ToolResult::error("approval wait was interrupted"));
+                        return self.reject_network_call(name, call_id, input, "user_review", "approval wait was interrupted");
                     }
                     outcome = gate.request_with_input(name, &correlation_id, Some(input.clone())) => outcome,
                 };
@@ -1155,22 +1257,31 @@ impl LoopState {
                         } else {
                             format!("approval denied: {reason}")
                         };
-                        self.audit_network_call(
-                            name,
-                            call_id,
-                            input,
-                            "deny",
-                            "user_review",
-                            &error,
-                        );
                         if self.shared.executor.requires_scope_gate(name) {
                             self.emit_mcp_scope_denial(name, call_id, &reason);
                         }
-                        NetworkGate::Reject(ToolResult::error(error))
+                        self.reject_network_call(name, call_id, input, "user_review", &error)
                     }
                 }
             }
         }
+    }
+
+    /// Keep audit/diagnostic reasons bare and add agent guidance only at the
+    /// rejection boundary, including policy and stale-context denials.
+    fn reject_network_call(
+        &self,
+        name: &str,
+        call_id: &str,
+        input: &Value,
+        reviewer: &str,
+        reason: &str,
+    ) -> NetworkGate {
+        self.audit_network_call(name, call_id, input, "deny", reviewer, reason);
+        NetworkGate::Reject(ToolResult::error(format!(
+            "{reason}\n{}",
+            crate::escalation_review::DENIAL_GUIDANCE
+        )))
     }
 
     fn audit_network_call(

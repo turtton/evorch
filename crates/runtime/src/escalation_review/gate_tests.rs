@@ -290,10 +290,6 @@ async fn file_access_auto_review_receives_request_and_applies_verdict() {
     for (verdict, approved) in [
         (LOW_RISK_APPROVAL, true),
         (
-            r#"{"approve":true,"reason":"credentials","risk_level":"critical","authorization_level":"high"}"#,
-            false,
-        ),
-        (
             r#"{"approve":true,"reason":"broad","risk_level":"high","authorization_level":"low"}"#,
             false,
         ),
@@ -397,4 +393,27 @@ async fn file_access_auto_decline_without_fallback_keeps_reason() {
         gate.decide_file_access(&context(), &file_request()).await,
         EscalationDecision::Deny { reason } if reason == "unrelated to the task"
     ));
+}
+
+const CRITICAL_APPROVAL: &str = r#"{"approve":true,"reason":"irreversible","risk_level":"critical","authorization_level":"high"}"#;
+
+// Given: auto mode without deny fallback / When: the model approves a critical-risk
+// shell or file request / Then: the user decides, and the reviewer runs once.
+#[tokio::test]
+async fn critical_approvals_ask_the_user_even_without_deny_fallback() {
+    for approved in [false, true] {
+        let (gate, model) = fixture(EscalationApproval::Auto, false, Some(CRITICAL_APPROVAL));
+        let responder = respond(&gate, approved).await;
+        let decision = gate.decide(&context(), "pwd", "inspect").await;
+        assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
+        responder.await.expect("responder");
+        assert_eq!(model.observed().await.len(), 1);
+
+        let (gate, model) = fixture(EscalationApproval::Auto, false, Some(CRITICAL_APPROVAL));
+        let responder = respond_file_access(&gate, approved).await;
+        let decision = gate.decide_file_access(&context(), &file_request()).await;
+        assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
+        responder.await.expect("responder");
+        assert_eq!(model.observed().await.len(), 1);
+    }
 }

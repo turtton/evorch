@@ -4,7 +4,7 @@ use sandbox::{BoundaryRegion, PathAccess, SandboxBoundary};
 
 use super::ToolExecutor;
 use crate::tools::file_access::{JUSTIFICATION, SANDBOX_ACCESS};
-use crate::tools::shell_escalation::{EscalationDecision, FileAccessRequest};
+use crate::tools::shell_escalation::FileAccessRequest;
 use crate::{Permissions, ToolError, ToolExecutionContext, ToolResult};
 
 impl ToolExecutor {
@@ -44,6 +44,7 @@ impl ToolExecutor {
         let deny = || ToolError::ExecutionDenied {
             tool_name: name.into(),
             reason: "benchmark tool access must stay inside the recorded workspace".into(),
+            guidance: None,
         };
         let keys: &[&str] = match name {
             "read" => &["path", "file", "file_path", "filename", "target"],
@@ -150,9 +151,14 @@ impl ToolExecutor {
         ctx: &ToolExecutionContext,
         name: &str,
         args: &serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), ToolError> {
+        let deny = |reason: String| ToolError::ExecutionDenied {
+            tool_name: name.into(),
+            reason,
+            guidance: None,
+        };
         if name == "browser_upload_file" {
-            return self.enforce_upload_boundary(args);
+            return self.enforce_upload_boundary(args).map_err(deny);
         }
         let keys = file_path_keys(name);
         if keys.is_empty() {
@@ -167,7 +173,9 @@ impl ToolExecutor {
             .is_some()
         {
             return if unsandboxed {
-                Err("benchmark file tools cannot leave the recorded workspace".into())
+                Err(deny(
+                    "benchmark file tools cannot leave the recorded workspace".into(),
+                ))
             } else {
                 Ok(())
             };
@@ -192,10 +200,10 @@ impl ToolExecutor {
             if std::fs::metadata(path)
                 .is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir())
             {
-                return Err(format!(
+                return Err(deny(format!(
                     "{} is not a regular file or directory",
                     path.display()
-                ));
+                )));
             }
             let location = canonical_location(path);
             let placement = place(&regions, location.as_deref());
@@ -219,14 +227,16 @@ impl ToolExecutor {
             return Ok(());
         };
         if !unsandboxed {
-            return Err(boundary_denial(&path, read_only));
+            return Err(deny(boundary_denial(&path, read_only)));
         }
         let justification = args
             .get(JUSTIFICATION)
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         if justification.trim().is_empty() {
-            return Err("file access escalation denied: justification is required".into());
+            return Err(deny(
+                "file access escalation denied: justification is required".into(),
+            ));
         }
         let gate = self
             .file_escalation
@@ -234,7 +244,9 @@ impl ToolExecutor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let Some(gate) = gate else {
-            return Err("file access escalation denied: no escalation gate configured".into());
+            return Err(deny(
+                "file access escalation denied: no escalation gate configured".into(),
+            ));
         };
         let request = FileAccessRequest {
             tool: name.to_owned(),
@@ -243,14 +255,20 @@ impl ToolExecutor {
             justification: justification.to_owned(),
             change: requested_change(name, args),
         };
-        match gate.decide_file_access(ctx, &request).await {
-            EscalationDecision::Approve => Ok(()),
-            EscalationDecision::Deny { reason } if reason.starts_with("file access escalation") => {
-                Err(reason)
-            }
-            EscalationDecision::Deny { reason } => {
-                Err(format!("file access escalation denied: {reason}"))
-            }
+        let decision = gate.decide_file_access(ctx, &request).await;
+        if let Some((reason, guidance)) = decision.denial() {
+            let reason = if reason.starts_with("file access escalation") {
+                reason.to_owned()
+            } else {
+                format!("file access escalation denied: {reason}")
+            };
+            Err(ToolError::ExecutionDenied {
+                tool_name: name.into(),
+                reason,
+                guidance: Some(guidance),
+            })
+        } else {
+            Ok(())
         }
     }
 }

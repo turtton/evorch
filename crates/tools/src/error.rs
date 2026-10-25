@@ -86,8 +86,10 @@ pub enum ToolError {
     ExecutionDenied {
         /// 拒否されたツール名。
         tool_name: String,
-        /// 拒否理由。
+        /// 拒否理由。監査用のため、エージェント向けガイダンスは含めない。
         reason: String,
+        /// エージェントへ返すテキストだけに付ける補足。
+        guidance: Option<&'static str>,
     },
     /// コマンドを実行するサンドボックスを準備できない。
     #[error("サンドボックスを利用できません: {detail}")]
@@ -107,6 +109,21 @@ pub enum ToolError {
         /// 失敗の詳細。
         detail: String,
     },
+}
+
+impl ToolError {
+    /// Render agent-facing text without changing Display or audit/event reasons.
+    pub fn agent_message(&self) -> String {
+        match self {
+            Self::ExecutionDenied {
+                guidance: Some(guidance),
+                ..
+            } => {
+                format!("{self}\n{guidance}")
+            }
+            _ => self.to_string(),
+        }
+    }
 }
 
 /// `edits` 形式の要素を示す接尾辞。単一置換では空文字列。
@@ -220,6 +237,7 @@ mod tests {
                 ToolError::ExecutionDenied {
                     tool_name: "shell".to_string(),
                     reason: "方針".to_string(),
+                    guidance: None,
                 },
                 "ツールの実行が拒否されました: shell: 方針",
             ),

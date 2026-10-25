@@ -151,8 +151,7 @@ async fn clean_stop_reference_reaches_evidence_materialization_and_recording_rev
     let materialized = crate::run_store::materialize_review_context(store, run).unwrap();
     let live = fixture.runtime.shared.review_runs.lock().unwrap()[&run].clone();
     for review in [live, materialized] {
-        let (context, _) =
-            crate::escalation_review::review_context(review, None, None, "").unwrap();
+        let (context, _) = crate::escalation_review::review_context(review, None).unwrap();
         let reviewer = crate::escalation_review::QuickModelReviewer::new(model.clone());
         let id = run.to_string();
         let task = tokio::spawn(async move {

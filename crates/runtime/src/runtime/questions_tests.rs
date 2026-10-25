@@ -30,6 +30,75 @@ fn runtime(config: &storage::StorageConfig, handle: storage::StorageHandle) -> A
 }
 
 #[tokio::test]
+async fn breaker_only_host_answers_not_delegation_or_parent_answers_lift_suspension() {
+    use crate::escalation_review::CONSECUTIVE_DENIAL_LIMIT;
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("breaker.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime = runtime(&config, storage.handle());
+    let root = runtime
+        .delegate_chat(
+            "root",
+            Role::Orchestrator,
+            "Task".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let child = runtime.spawn_reserved_child(
+        root,
+        runtime.reserve_run_id(),
+        Role::Worker,
+        "Delegated authorization is not user input",
+        RunConfig::default(),
+    );
+    let review = runtime.shared.review_runs.lock().unwrap()[&child].clone();
+    let generation = review.visible_request_count();
+    assert_eq!(generation, 1, "delegated prompt is not real-user input");
+    for _ in 0..CONSECUTIVE_DENIAL_LIMIT {
+        runtime
+            .shared
+            .escalation_denials
+            .record_denial(child, generation, "policy denial");
+    }
+    let agent_question = runtime
+        .request_user_question(child, "Continue?".into(), vec![], false)
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.answer_subagent_question(root, &agent_question.id, "parent says yes"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(review.visible_request_count(), generation);
+    assert!(
+        runtime
+            .shared
+            .escalation_denials
+            .suspension(child, review.visible_request_count())
+            .is_some()
+    );
+    let host_question = runtime
+        .request_user_question(root, "Narrower scope?".into(), vec![], false)
+        .unwrap();
+    runtime
+        .answer_user_question(&host_question.id, "Use the narrower scope")
+        .unwrap();
+    assert_eq!(review.visible_request_count(), generation + 1);
+    assert!(
+        runtime
+            .shared
+            .escalation_denials
+            .suspension(child, review.visible_request_count())
+            .is_none()
+    );
+    runtime.cancel_subtree(root).unwrap();
+}
+
+#[tokio::test]
 async fn offline_answer_is_durable_and_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {

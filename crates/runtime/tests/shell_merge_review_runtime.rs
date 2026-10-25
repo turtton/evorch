@@ -184,13 +184,11 @@ async fn delegated_merge_uses_real_user_context_and_executes_only_on_review_appr
                 _ => {}
             }
         }
-        assert_eq!(
-            output.as_deref(),
-            Some(if approve {
-                "exit_code: 0\nfake merge completed"
-            } else {
-                "reviewed merge"
-            })
-        );
+        let output = output.expect("merge result");
+        if approve {
+            assert_eq!(output, "exit_code: 0\nfake merge completed");
+        } else {
+            assert!(output.starts_with("reviewed merge\n"), "{output}");
+        }
     }
 }
