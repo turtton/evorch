@@ -2,14 +2,24 @@ use egui::{Event, Key, Modifiers};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
-use gui::model::commands::WorkbenchCommand;
-use gui::model::composer::ProviderStatus;
+use gui::model::commands::{CommandSink, LoopEvent, WorkbenchCommand};
+use gui::model::composer::{CompletionKind, ProviderStatus};
+use gui::model::transcript::TranscriptEntry;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 fn workbench(
     root: &std::path::Path,
     allowed: &[&std::path::Path],
+    trust: TrustState,
 ) -> HeadlessWorkbench<DemoSource> {
+    HeadlessWorkbench::new(workbench_state(root, allowed, trust), [1200.0, 900.0])
+}
+
+fn workbench_state(
+    root: &std::path::Path,
+    allowed: &[&std::path::Path],
+    trust: TrustState,
+) -> WorkbenchState<DemoSource> {
     for (path, content) in [
         ("src/lib.rs", ""),
         (
@@ -26,6 +36,7 @@ fn workbench(
     sidebar
         .add_project(project.clone(), "mention-test", root)
         .expect("project");
+    sidebar.set_project_trust(&project, trust).expect("trust");
     for directory in allowed {
         sidebar
             .add_allowed_directory(&project, directory, TrustState::Approved)
@@ -37,11 +48,25 @@ fn workbench(
         .create_thread(thread.clone(), project, "thread")
         .expect("thread");
     sidebar.switch_thread(&thread).expect("switch");
-    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+    WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("state")
         .with_sidebar(sidebar)
-        .with_provider_status(ProviderStatus::Configured);
-    HeadlessWorkbench::new(state, [1200.0, 900.0])
+        .with_provider_status(ProviderStatus::Configured)
+}
+
+/// A runtime that refuses every chat, as one that cannot take the message does.
+struct RefusingRuntime;
+
+impl CommandSink for RefusingRuntime {
+    fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        match command {
+            WorkbenchCommand::SendChat(chat) => vec![LoopEvent::ChatRejected {
+                thread_id: chat.thread_id,
+                reason: "provider unavailable".into(),
+            }],
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
@@ -66,11 +91,66 @@ fn completion_labels(harness: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
         .collect()
 }
 
+/// The skills offered for the mention being typed.
+fn skill_labels(harness: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
+    harness
+        .state()
+        .composer()
+        .completion_items()
+        .into_iter()
+        .filter(|item| item.kind == CompletionKind::Skill)
+        .map(|item| item.label)
+        .collect()
+}
+
+/// Writes skill `name` into the skills directory `dir` of `root`.
+fn write_skill(root: &std::path::Path, dir: &str, name: &str, body: &str) {
+    let skill = root.join(dir).join(name);
+    std::fs::create_dir_all(&skill).expect("skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {name} fixture\n---\n{body}\n"),
+    )
+    .expect("SKILL.md");
+}
+
+/// A skill in each repository scope, named so no user skill can stand in for it.
+fn write_untrusted_fixture_skills(root: &std::path::Path) {
+    write_skill(
+        root,
+        ".evorch/skills",
+        "evorch-fixture-skill",
+        "EVORCH FIXTURE BODY",
+    );
+    write_skill(
+        root,
+        ".agents/skills",
+        "agents-fixture-skill",
+        "AGENTS FIXTURE BODY",
+    );
+}
+
+/// `notice` follows the sent message in the transcript and is rendered.
+fn assert_notice_below_message(harness: &HeadlessWorkbench<DemoSource>, notice: &str) {
+    let entries = harness.state().transcript().entries();
+    let message = entries
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+        .expect("user message");
+    assert!(
+        entries[message..]
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Notice { text } if text == notice)),
+        "{entries:?}"
+    );
+    assert!(harness.has_label(notice), "{notice}");
+}
+
 #[test]
 fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
-    // Given: a project with a source file and a repo skill, composer focused.
+    // Given: a trusted project with a source file and a repo skill, composer focused.
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path(), &[]);
+    let mut harness = workbench(temp.path(), &[], TrustState::Approved);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
@@ -121,6 +201,202 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
 }
 
 #[test]
+fn untrusted_projects_offer_builtin_skills_but_not_their_repo_skills() {
+    // Given: an untrusted project with a skill in each repository scope, composer focused.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let mut harness = workbench(temp.path(), &[], TrustState::Unapproved);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a builtin skill is searched for.
+    type_text(&mut harness, "use @git-best");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    // Then: it is still offered.
+    assert!(skill_labels(&harness).contains(&"@git-best-practices".to_owned()));
+
+    // When: each repository skill is searched for.
+    for (typed, name) in [
+        ("-practices with @evorch-fixture", "@evorch-fixture-skill"),
+        ("-skill and @agents-fixture", "@agents-fixture-skill"),
+    ] {
+        type_text(&mut harness, typed);
+        harness.state_mut().wait_mention_index();
+        harness.run();
+        // Then: neither is offered, since sending would not inline it.
+        assert!(!skill_labels(&harness).contains(&name.to_owned()), "{name}");
+    }
+}
+
+#[test]
+fn untrusted_projects_send_repo_skill_mentions_as_plain_text_with_a_notice() {
+    // Given: an untrusted project with a skill in each repository scope, composer focused.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let mut harness = workbench(temp.path(), &[], TrustState::Unapproved);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a message naming a builtin skill and both repository skills is sent.
+    let typed =
+        "use @git-best-practices with @evorch-fixture-skill and @agents-fixture-skill please";
+    type_text(&mut harness, typed);
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: it is sent with only the builtin skill inlined; the repository
+    // skills stay plain text.
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("one chat is sent: {:?}", harness.state().issued());
+    };
+    assert!(chat.text.starts_with(typed), "{}", chat.text);
+    assert!(chat.text.contains("<skill name=\"git-best-practices\">"));
+    for leaked in ["fixture-skill\">", "FIXTURE BODY"] {
+        assert!(!chat.text.contains(leaked), "{leaked}: {}", chat.text);
+    }
+    // Then: a notice below the message names them, says why and how to enable them.
+    assert_notice_below_message(
+        &harness,
+        "Sent @evorch-fixture-skill, @agents-fixture-skill as plain text — this project is not \
+         trusted, so its own skills are not expanded. Enable \"Trust project instructions\" in \
+         Project settings to use them.",
+    );
+}
+
+#[test]
+fn revoking_trust_right_before_a_send_keeps_repo_skills_out_of_it() {
+    // Given: a trusted project whose `@` index, built while trusted, offers
+    // its repository skill, and a draft naming that skill.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let mut harness = workbench(temp.path(), &[], TrustState::Approved);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    type_text(&mut harness, "use @evorch-fixture");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    assert!(skill_labels(&harness).contains(&"@evorch-fixture-skill".to_owned()));
+    type_text(&mut harness, "-skill please");
+    let typed = "use @evorch-fixture-skill please";
+    assert_eq!(harness.state().composer().input, typed);
+
+    // When: trust is revoked and the draft is sent at once, with no frame or
+    // index rebuild in between.
+    let project = ProjectId::new("mention-test");
+    let state = harness.state_mut();
+    state
+        .set_project_trust(&project, TrustState::Unapproved)
+        .expect("revoke");
+    // The index still holds the repository skill: only a frame would drop it.
+    assert!(state.composer().mentions.entries.iter().any(|entry| {
+        entry.kind == CompletionKind::Skill && entry.value == "evorch-fixture-skill"
+    }));
+    state.submit_composer();
+
+    // Then: the send goes ahead with the skill left as plain text.
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("one chat is sent: {:?}", harness.state().issued());
+    };
+    assert_eq!(chat.text, typed);
+    assert!(!chat.text.contains("EVORCH FIXTURE BODY"));
+    assert!(harness.state().composer().input.is_empty());
+    // Then: the notice explains why it was not expanded.
+    harness.run();
+    assert_notice_below_message(
+        &harness,
+        "Sent @evorch-fixture-skill as plain text — this project is not trusted, so its own \
+         skills are not expanded. Enable \"Trust project instructions\" in Project settings to \
+         use them.",
+    );
+}
+
+#[test]
+fn a_refused_send_gets_no_untrusted_skill_notice() {
+    // Given: an untrusted project with a repository skill, and a runtime that
+    // refuses chats.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let state = workbench_state(temp.path(), &[], TrustState::Unapproved)
+        .with_command_sink(Box::new(RefusingRuntime));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a message naming the repository skill is sent and refused.
+    let typed = "use @evorch-fixture-skill please";
+    type_text(&mut harness, typed);
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: it was offered as plain text, but the agent never got it: the
+    // text is back in the composer, with no bubble and no skill notice.
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("one chat is sent: {:?}", harness.state().issued());
+    };
+    assert_eq!(chat.text, typed);
+    assert_eq!(harness.state().composer().input, typed);
+    let entries = harness.state().transcript().entries();
+    assert!(
+        !entries.iter().any(|entry| match entry {
+            TranscriptEntry::UserMessage { .. } => true,
+            TranscriptEntry::Notice { text } => text.contains("as plain text"),
+            _ => false,
+        }),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn granting_or_revoking_trust_updates_offered_repo_skills_at_once() {
+    // Given: a trusted project whose repository skill completes in an open mention.
+    let temp = tempfile::tempdir().expect("root");
+    write_skill(
+        temp.path(),
+        ".evorch/skills",
+        "evorch-fixture-skill",
+        "EVORCH FIXTURE BODY",
+    );
+    let mut harness = workbench(temp.path(), &[], TrustState::Approved);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    type_text(&mut harness, "@evorch-fixture");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    let skill = "@evorch-fixture-skill".to_owned();
+    assert!(skill_labels(&harness).contains(&skill));
+    let project = ProjectId::new("mention-test");
+
+    // When: the project's trust is revoked while the mention stays open.
+    harness
+        .state_mut()
+        .set_project_trust(&project, TrustState::Unapproved)
+        .expect("revoke");
+    harness.step();
+    // Then: the very next frame no longer offers it, nor does the rebuild.
+    assert!(!skill_labels(&harness).contains(&skill));
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    assert!(!skill_labels(&harness).contains(&skill));
+
+    // When: trust is granted again.
+    harness
+        .state_mut()
+        .set_project_trust(&project, TrustState::Approved)
+        .expect("grant");
+    harness.step();
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    // Then: the rebuilt index offers it again.
+    assert!(skill_labels(&harness).contains(&skill));
+}
+
+#[test]
 fn at_mentions_complete_files_in_allowed_directories_as_absolute_paths() {
     // Given: a project with an approved allowed directory outside its root.
     let temp = tempfile::tempdir().expect("root");
@@ -128,7 +404,7 @@ fn at_mentions_complete_files_in_allowed_directories_as_absolute_paths() {
     let shared_root = shared.path().canonicalize().expect("canonical shared");
     std::fs::create_dir_all(shared_root.join("notes")).expect("notes");
     std::fs::write(shared_root.join("notes/plan.md"), "").expect("plan");
-    let mut harness = workbench(temp.path(), &[&shared_root]);
+    let mut harness = workbench(temp.path(), &[&shared_root], TrustState::Approved);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
@@ -171,7 +447,7 @@ fn revoked_or_removed_allowed_directories_stop_completing_at_once() {
     };
     let kept = allowed_dir("kept", "keep.md");
     let revoked = allowed_dir("revoked", "drop.md");
-    let mut harness = workbench(temp.path(), &[&kept, &revoked]);
+    let mut harness = workbench(temp.path(), &[&kept, &revoked], TrustState::Approved);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
@@ -213,7 +489,7 @@ fn revoked_or_removed_allowed_directories_stop_completing_at_once() {
 #[ignore = "writes native offscreen mention completion evidence"]
 fn capture_mention_completion() {
     let temp = tempfile::tempdir().expect("root");
-    let mut harness = workbench(temp.path(), &[]);
+    let mut harness = workbench(temp.path(), &[], TrustState::Approved);
     harness.run();
     harness.click_label("Message or /command");
     harness.run();

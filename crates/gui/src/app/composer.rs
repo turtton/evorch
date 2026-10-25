@@ -1,9 +1,27 @@
 use super::WorkbenchState;
 use super::history::DeliveryStatus;
 use crate::model::commands::{ChatContinuation, ChatSubmission, LoopEvent, WorkbenchCommand};
-use crate::model::composer::{ComposerInput, ProviderStatus};
+use crate::model::composer::{
+    ComposerInput, ProviderStatus, mention_skills, withheld_skill_mentions,
+};
+use crate::model::project_bridge::repo_skills_admitted;
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
+use crate::panes::project_dialog::TRUST_LABEL;
+
+/// Tells why the mentioned repository skills `names` went out as plain text
+/// and where to trust the project so they are inlined.
+fn untrusted_skills_notice(names: &[&str]) -> String {
+    let mentions = names
+        .iter()
+        .map(|name| format!("@{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Sent {mentions} as plain text — this project is not trusted, so its own skills are \
+         not expanded. Enable \"{TRUST_LABEL}\" in Project settings to use them."
+    )
+}
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Continue a thread's saved conversation, as `/continue` does. `automatic`
@@ -125,8 +143,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.push_notice(guidance.clone());
                     }
                     ProviderStatus::Configured => {
-                        let prompt = match self.expand_skill_mentions(text) {
-                            Ok(prompt) => prompt,
+                        let (prompt, withheld_notice) = match self.expand_skill_mentions(text) {
+                            Ok(expansion) => expansion,
                             Err(notice) => {
                                 self.push_notice(notice);
                                 return;
@@ -242,6 +260,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                         self.mark_delivered(&[submission_id]);
                                         self.save_sidebar();
                                     }
+                                }
+                                // Only an accepted message says its repository skills went
+                                // out as plain text; a refused one goes back to the composer.
+                                if let Some(notice) = withheld_notice {
+                                    self.push_notice(notice);
                                 }
                                 self.composer.input.clear();
                                 self.composer.attachments.clear();
@@ -380,14 +403,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     /// Inlines skills written as `@name`, read fresh so edits apply on the next send.
-    fn expand_skill_mentions(&self, text: &str) -> Result<String, String> {
+    ///
+    /// Like the runtime, an untrusted project's own skills stay out: their
+    /// mentions are sent as plain text, and the notice returned beside the
+    /// prompt names them and says how to let them in.
+    fn expand_skill_mentions(&self, text: &str) -> Result<(String, Option<String>), String> {
         if !text.contains('@') {
-            return Ok(text.into());
+            return Ok((text.into(), None));
         }
-        let root = self.active_repo_root();
-        let skills = runtime::skill::build_standard_registry(root.as_deref());
-        crate::model::composer::expand_skill_mentions(text, root.as_deref(), &skills)
-            .map_err(|name| format!("Could not load skill @{name}"))
+        let project = self.active_project();
+        let root = project.map(|project| project.repo_root.as_path());
+        let repo_skills = repo_skills_admitted(project);
+        let skills = mention_skills(root, repo_skills);
+        let prompt = crate::model::composer::expand_skill_mentions(text, root, &skills)
+            .map_err(|name| format!("Could not load skill @{name}"))?;
+        let notice = root.filter(|_| !repo_skills).and_then(|root| {
+            let trusted = mention_skills(Some(root), true);
+            let withheld = withheld_skill_mentions(text, Some(root), &skills, &trusted);
+            (!withheld.is_empty()).then(|| untrusted_skills_notice(&withheld))
+        });
+        Ok((prompt, notice))
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {
