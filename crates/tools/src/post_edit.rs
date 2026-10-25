@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
+use sandbox::process::ProcessGroupGuard;
 use sandbox::{CommandSpec, Sandbox};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -316,22 +317,6 @@ impl Drop for SupervisorFinished {
     }
 }
 
-// Same process-group strategy as shell; keeping it local avoids introducing a
-// general process framework for this single fixed external command.
-struct ProcessGroup(Option<rustix::process::Pid>);
-impl ProcessGroup {
-    fn kill(&self) {
-        if let Some(pid) = self.0 {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
-
 async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String> {
     let mut retained = Vec::new();
     let mut truncated = false;
@@ -372,11 +357,7 @@ async fn supervise(
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
     };
-    let group = ProcessGroup(
-        child
-            .id()
-            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32)),
-    );
+    let group = ProcessGroupGuard::new(child.id());
     let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let result = {
         let completion = async {
@@ -454,17 +435,13 @@ impl PostEditHook for CommentChecker {
             Ok(wrapped) => wrapped,
             Err(error) => return unavailable(UnavailableReason::Io, error),
         };
-        let mut command = tokio::process::Command::new(&wrapped.program);
-        command.args(&wrapped.args);
-        wrapped.apply_environment(command.as_std_mut());
-        if let Some(cwd) = &wrapped.cwd {
-            command.current_dir(cwd);
-        }
+        // The launch policy gives the checker its own session and process group,
+        // which the supervisor kills with any descendants.
+        let mut command = tokio::process::Command::from(wrapped.to_command());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .kill_on_drop(true);
         let deadline = tokio::time::Instant::now() + self.timeout;
         let (cancel, cancelled) = oneshot::channel();

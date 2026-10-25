@@ -11,6 +11,7 @@ pub mod exec;
 pub mod keychain;
 pub mod network;
 pub mod policy;
+pub mod process;
 pub mod scratch;
 pub mod session;
 

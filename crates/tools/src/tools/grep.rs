@@ -147,6 +147,9 @@ fn grep_command(pattern: &str, path: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // rg runs outside the sandbox but still must not inherit evorch's
+    // terminal or descriptors.
+    sandbox::process::apply_launch_policy(command.as_std_mut());
     command
 }
 

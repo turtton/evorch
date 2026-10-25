@@ -1,8 +1,9 @@
 //! Process and PTY supervision for shell jobs.
-use super::super::{ProcessGroup, PtyKiller, detach_from_terminal, io_failed, spawn_failed};
+use super::super::{PtyKiller, io_failed, spawn_failed};
 use super::{Completion, Input, Job};
 use crate::ToolError;
 use sandbox::WrappedCommand;
+use sandbox::process::ProcessGroupGuard;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,27 +24,17 @@ pub(super) async fn run_pipe(
             error: None,
         });
     }
-    let mut command = tokio::process::Command::new(&wrapped.program);
-    wrapped.apply_environment(command.as_std_mut());
+    let mut command = tokio::process::Command::from(wrapped.to_command());
     command
-        .args(&wrapped.args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped());
-    detach_from_terminal(&mut command);
-    if let Some(cwd) = &wrapped.cwd {
-        command.current_dir(cwd);
-    }
     let mut child = command
         .spawn()
         .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let group = ProcessGroup(
-        child
-            .id()
-            .and_then(|id| rustix::process::Pid::from_raw(id as i32)),
-    );
-    job.register_process(group.0);
+    let group = ProcessGroupGuard::new(child.id());
+    job.register_process(group.leader());
     let result = async {
         let mut stdout = child
             .stdout
@@ -147,12 +138,8 @@ pub(super) async fn run_pty(
         .spawn_command(command)
         .map_err(|error| spawn_failed(&wrapped.program, error))?;
     drop(pair.slave);
-    let group = ProcessGroup(
-        child
-            .process_id()
-            .and_then(|id| rustix::process::Pid::from_raw(id as i32)),
-    );
-    job.register_process(group.0);
+    let group = ProcessGroupGuard::new(child.process_id());
+    job.register_process(group.leader());
     let mut killer = PtyKiller(child.clone_killer());
     let output_job = Arc::clone(job);
     let reader_task = tokio::task::spawn_blocking(move || -> Result<(), ToolError> {

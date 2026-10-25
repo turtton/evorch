@@ -41,6 +41,20 @@ fn main() {
     )
     .unwrap();
     let mode = args[2].as_str();
+    if mode == "launch-policy" {
+        // Report what the supervisor let the checker inherit: whether it leads
+        // its own session, and where each open descriptor points.
+        let leader = rustix::process::getsid(None).ok() == Some(rustix::process::getpid());
+        let mut report = format!("session-leader: {leader}\n");
+        for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+            let entry = entry.unwrap();
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                let fd = entry.file_name();
+                report.push_str(&format!("{}: {}\n", fd.display(), target.display()));
+            }
+        }
+        std::fs::write("checker.launch", report).unwrap();
+    }
     if matches!(mode, "timeout" | "unread-input" | "descendant-pipe") {
         // This fixture deliberately exits without reaping its descendant: the
         // checker supervisor must stop a pipe-holding child after leader exit.

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use sandbox::process::ProcessGroupGuard;
 use sandbox::{CommandSpec, Sandbox, WrappedCommand};
 use serde::Deserialize;
 
@@ -518,50 +519,25 @@ fn io_failed(error: impl std::fmt::Display) -> ToolError {
     }
 }
 
-/// Start the command in its own session, which is also its own process group.
-///
-/// A command left in evorch's session sits in a background process group of
-/// evorch's controlling terminal: reading `/dev/tty` (a git credential or ssh
-/// password prompt) stops it with SIGTTIN, and it never finishes. Without a
-/// controlling terminal, opening `/dev/tty` fails and the command reports the
-/// error instead. The group id equals the child pid, as with `process_group(0)`,
-/// so killing the group keeps working.
-fn detach_from_terminal(command: &mut tokio::process::Command) {
-    // SAFETY: between fork and exec the closure makes one async-signal-safe
-    // system call and allocates nothing.
-    unsafe {
-        command.pre_exec(|| {
-            rustix::process::setsid()?;
-            Ok(())
-        });
-    }
-}
-
 /// 非対話モード: tokio::process で子プロセスを実行する。
+///
+/// The command runs under the sandbox launch policy (its own session, no
+/// inherited descriptors), so killing its process group stops it with its
+/// descendants.
 async fn run_process(
     wrapped: &WrappedCommand,
     timeout_ms: Option<u64>,
 ) -> Result<ToolResult, ToolError> {
-    let mut command = tokio::process::Command::new(&wrapped.program);
-    wrapped.apply_environment(command.as_std_mut());
-    command.args(&wrapped.args).kill_on_drop(true);
-    if let Some(cwd) = &wrapped.cwd {
-        command.current_dir(cwd);
-    }
-
+    let mut command = tokio::process::Command::from(wrapped.to_command());
     command
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-    detach_from_terminal(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let group = ProcessGroup(
-        child
-            .id()
-            .and_then(|id| rustix::process::Pid::from_raw(id as i32)),
-    );
+    let group = ProcessGroupGuard::new(child.id());
     let mut stdout = child
         .stdout
         .take()
@@ -602,20 +578,6 @@ async fn run_process(
         exit_code,
         if timed_out { timeout_ms } else { None },
     ))
-}
-
-struct ProcessGroup(Option<rustix::process::Pid>);
-impl ProcessGroup {
-    fn kill(&self) {
-        if let Some(pid) = self.0 {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
 }
 
 async fn drain(

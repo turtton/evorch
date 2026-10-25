@@ -423,6 +423,37 @@ async fn leader_exit_cleans_descendants_holding_output_pipes_without_waiting_for
     assert_closed(descendant).await;
 }
 
+// The checker leads its own session (no terminal of evorch's to stop it) and
+// inherits none of evorch's descriptors beyond its pipes.
+#[tokio::test]
+async fn checker_runs_in_its_own_session_without_evorch_descriptors() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    let held = tempfile::NamedTempFile::new_in(f.dir.path()).unwrap();
+    let fd = rustix::io::fcntl_dupfd_cloexec(&held, 100).unwrap();
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+    let name = held
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let plain = std::process::Command::new("readlink")
+        .arg(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains(&name),
+        "without the launch policy a child inherits the descriptor, or this test proves nothing"
+    );
+    let checker = f.checker(Some("launch-policy"));
+    assert_eq!(checker.check(&f.input()).await, PostEditOutcome::Pass);
+    let report = f.read("checker.launch");
+    assert!(report.starts_with("session-leader: true\n"), "{report}");
+    assert!(!report.contains(&name), "{report}");
+}
+
 // T6: every failed editing path bypasses the subprocess entirely.
 #[tokio::test]
 async fn unsuccessful_edits_never_invoke_the_hook() {

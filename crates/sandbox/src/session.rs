@@ -2,10 +2,10 @@
 
 use std::{
     io,
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio},
 };
 
-use crate::{CommandSpec, Sandbox, SandboxError};
+use crate::{CommandSpec, Sandbox, SandboxError, process::ProcessGroupGuard};
 
 /// Failure to wrap or start a stdio session; wrapping never falls back to direct execution.
 #[derive(Debug, thiserror::Error)]
@@ -25,8 +25,10 @@ pub enum SessionError {
 /// request buffers, and do not read the entire stream to EOF for a response.
 /// Async consumers must move blocking I/O off executor threads or adapt the handles.
 ///
-/// Drop sends a kill and waits synchronously, independent of runtime shutdown. It
-/// manages the immediate child, not arbitrary descendants. Bubblewrap's existing
+/// The child starts under the launch policy of [`crate::process`]: its own session
+/// (and process group), without evorch's terminal or descriptors. Drop kills that
+/// process group, the child and the descendants that stayed in it, and reaps the
+/// child synchronously, independent of runtime shutdown. Bubblewrap's existing
 /// `--die-with-parent` and filesystem/network policy are preserved by `wrap`.
 #[derive(Debug)]
 pub struct StdioSession {
@@ -40,16 +42,11 @@ impl StdioSession {
     /// Returns the original wrapping error or the OS process-spawn error.
     pub fn spawn(sandbox: &dyn Sandbox, spec: CommandSpec) -> Result<Self, SessionError> {
         let wrapped = sandbox.wrap(spec)?;
-        let mut command = Command::new(&wrapped.program);
-        wrapped.apply_environment(&mut command);
+        let mut command = wrapped.to_command();
         command
-            .args(wrapped.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(cwd) = wrapped.cwd {
-            command.current_dir(cwd);
-        }
         Ok(Self {
             child: command.spawn()?,
         })
@@ -81,6 +78,8 @@ impl Drop for StdioSession {
     fn drop(&mut self) {
         // Drop cannot return errors. Still wait if kill reports an already-exited
         // child, and retry interrupted waits so a signal cannot leave a zombie.
+        // Kill the group first: until the leader is reaped its id cannot be reused.
+        ProcessGroupGuard::new(Some(self.child.id())).kill();
         let _ = self.child.kill();
         loop {
             match self.child.wait() {

@@ -186,3 +186,112 @@ async fn git_diff_outside_repo_is_not_a_git_repository() {
         }
     );
 }
+
+/// Wait until `path` holds a complete line, written by the external diff fixture.
+async fn wait_for_line(path: &Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+        {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} was not written",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Wait until `pid` no longer runs; a zombie waiting for its reaper counts as stopped.
+async fn assert_stops(pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let running = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        });
+        if !running {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {pid} still runs after git_diff was cancelled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// Given: evorch holds a descriptor without O_CLOEXEC, and the repository runs
+// an external diff program that reports how it was started and then waits on
+// a background helper / When: git_diff runs and is cancelled / Then: git and
+// its diff program ran in a session of their own without that descriptor, and
+// cancelling stops the helper too, not only git.
+#[tokio::test]
+async fn git_diff_runs_detached_without_evorch_descriptors_and_stops_its_helpers() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    let repo = init_repo();
+    let file = repo.path().join("sample.txt");
+    std::fs::write(&file, "original\n").unwrap();
+    run_git(repo.path(), &["add", "sample.txt"]);
+    std::fs::write(&file, "modified\n").unwrap();
+    let probe = tempfile::tempdir().unwrap();
+    let held = tempfile::NamedTempFile::new_in(probe.path()).unwrap();
+    let fd = rustix::io::fcntl_dupfd_cloexec(&held, 100).unwrap();
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+    let name = held
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    // The Nix build sandbox has no /bin/sh.
+    let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("sh"))
+        .find(|sh| sh.is_file())
+        .expect("sh on PATH");
+    let out = probe.path().display();
+    let script = probe.path().join("external-diff");
+    std::fs::write(
+        &script,
+        format!(
+            "#!{sh}\n\
+             cut -d' ' -f6 /proc/$$/stat > '{out}/session'\n\
+             {{ readlink /proc/$$/fd/{fd} || echo descriptor-closed; }} > '{out}/descriptor' 2>/dev/null\n\
+             sleep 60 &\n\
+             echo $! > '{out}/helper.tmp' && mv '{out}/helper.tmp' '{out}/helper.pid'\n\
+             wait\n",
+            sh = sh.display(),
+            fd = fd.as_raw_fd(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    run_git(
+        repo.path(),
+        &["config", "diff.external", script.to_str().unwrap()],
+    );
+
+    let cwd = repo.path().to_string_lossy().into_owned();
+    let call =
+        tokio::spawn(async move { git_diff().execute(serde_json::json!({ "cwd": cwd })).await });
+    let helper = wait_for_line(&probe.path().join("helper.pid")).await;
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+
+    let session = wait_for_line(&probe.path().join("session")).await;
+    let own_session = rustix::process::getsid(None).unwrap().to_string();
+    assert!(session.trim().parse::<u32>().is_ok(), "{session}");
+    assert_ne!(
+        session.trim(),
+        own_session,
+        "git diff shares evorch's session"
+    );
+    let descriptor = wait_for_line(&probe.path().join("descriptor")).await;
+    assert_eq!(descriptor, "descriptor-closed\n", "{name} leaked");
+    assert_stops(helper.trim()).await;
+}

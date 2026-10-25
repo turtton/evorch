@@ -68,6 +68,8 @@ workspace-ui = { path = "../workspace-ui" }
 notify-rust = "4"
 
 [dev-dependencies]
+# Leaves a descriptor without O_CLOEXEC open to check child launches.
+rustix = "1"
 test-support = { path = "../test-support" }
 wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }

@@ -6,6 +6,7 @@
 use std::process::Stdio;
 use std::sync::Arc;
 
+use sandbox::process::ProcessGroupGuard;
 use sandbox::{CommandSpec, Sandbox};
 use tokio::process::Command;
 
@@ -89,23 +90,25 @@ impl Tool for GitDiff {
                 detail: error.to_string(),
             })?;
 
-        let mut command = Command::new(&wrapped.program);
-        wrapped.apply_environment(command.as_std_mut());
+        // The launch policy keeps git (and any external diff tool or textconv
+        // filter it runs) off evorch's terminal and descriptors. Cancelling the
+        // call kills the whole process group.
+        let mut command = Command::from(wrapped.to_command());
         command
-            .args(&wrapped.args)
             // git diff は標準入力を読まない。フック等が読んでも即時 EOF にする。
-            .stdin(Stdio::null());
-        if let Some(cwd) = wrapped.cwd {
-            command.current_dir(cwd);
-        }
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
-        let output = command
-            .output()
-            .await
-            .map_err(|error| ToolError::SpawnFailed {
-                command: wrapped.program,
-                detail: error.to_string(),
-            })?;
+        let spawn_failed = |error: std::io::Error| ToolError::SpawnFailed {
+            command: wrapped.program.clone(),
+            detail: error.to_string(),
+        };
+        let child = command.spawn().map_err(spawn_failed)?;
+        let group = ProcessGroupGuard::new(child.id());
+        let output = child.wait_with_output().await.map_err(spawn_failed)?;
+        drop(group);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

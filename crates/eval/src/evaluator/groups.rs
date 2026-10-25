@@ -230,6 +230,9 @@ fn spawn(cli: &Path, args: &[OsString], member: &Member) -> std::io::Result<toki
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&member.stdout)?)
         .stderr(std::fs::File::create(&member.stderr)?);
+    // A background evaluation must not be stopped by the terminal the GUI was
+    // started from, nor hold the GUI's descriptors.
+    sandbox::process::apply_launch_policy(command.as_std_mut());
     end_with_parent(&mut command);
     command.spawn()
 }
@@ -601,4 +604,52 @@ pub(super) fn detail(shared: &Shared, root: &Path, id: &str) -> Result<Value, St
         value["table"] = Value::String(report::cross_thread_table(&reports));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use std::os::fd::AsRawFd;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_evaluation_starts_in_its_own_session_without_the_launchers_descriptors() {
+        // Given: the launcher (the GUI) holds a descriptor without O_CLOEXEC.
+        let dir = tempfile::tempdir().unwrap();
+        let held = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let fd = rustix::io::fcntl_dupfd_cloexec(&held, 100).unwrap();
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty()).unwrap();
+        let member = Member {
+            thread_id: "thread-launch".into(),
+            purpose: Purpose::Target,
+            repeat: 1,
+            dir: dir.path().join("evaluation"),
+            pid: None,
+            stdout: dir.path().join("stdout.log"),
+            stderr: dir.path().join("stderr.log"),
+            exit: None,
+        };
+        let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("sh"))
+            .find(|sh| sh.is_file())
+            .expect("sh on PATH");
+        let probe = format!(
+            "echo $$; cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/{} || echo descriptor-closed",
+            fd.as_raw_fd()
+        );
+
+        // When: the evaluation process reports its pid, session and that descriptor.
+        let mut child = spawn(&sh, &["-c".into(), probe.into()], &member).unwrap();
+        assert!(child.wait().await.unwrap().success());
+
+        // Then: it leads a session of its own and the descriptor did not reach it.
+        let stdout = std::fs::read_to_string(&member.stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        let [pid, session, descriptor] = lines[..] else {
+            panic!("{stdout}");
+        };
+        assert!(pid.parse::<u32>().is_ok(), "{stdout}");
+        assert_eq!(session, pid, "{stdout}");
+        assert_eq!(descriptor, "descriptor-closed", "{stdout}");
+    }
 }
