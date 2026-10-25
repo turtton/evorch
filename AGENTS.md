@@ -145,11 +145,12 @@ mismatch. Revisit this policy before cutting a v1 release.
   `target/`, Cargo's default (gitignored). Do not point `CARGO_TARGET_DIR` at
   one directory from several checkouts: their same-named workspace crates
   overwrite each other's artifacts there and cause spurious compile errors.
-- The Nix dev shell sets `RUSTC_WRAPPER=sccache`, so compiled dependency crates
-  (and C code built through `cc`) are reused across checkouts. Workspace crates
-  build incrementally in the dev profile, which sccache does not cache, and
-  proc-macros and build scripts are not cached either; these rebuild per
-  checkout. `sccache --show-stats` reports hits and misses.
+- The Nix dev shell sets `RUSTC_WRAPPER=sccache`, so most compiled dependency
+  crates are reused across checkouts. sccache does not cache workspace crates
+  (incremental in the dev profile), proc-macros or build scripts, and
+  dependencies that compile checkout-specific paths, such as build-script
+  output in `OUT_DIR`, miss once in each checkout. `sccache --show-stats`
+  reports hits and misses.
 - The cache uses sccache's defaults: `~/.cache/sccache` on Linux
   (`~/Library/Caches/Mozilla.sccache` on macOS), capped at 10 GiB. Override
   them with `SCCACHE_DIR` and `SCCACHE_CACHE_SIZE` (for example `20G`).
