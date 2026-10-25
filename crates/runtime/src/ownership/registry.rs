@@ -109,6 +109,21 @@ impl RegistryError {
     }
 }
 
+/// What one heartbeat tick did to a thread the owner held at its start.
+#[derive(Debug)]
+pub(super) struct HeartbeatOutcome {
+    pub previous: ThreadOwner,
+    /// The change and the row after it, or why the transition was rejected.
+    pub result: Result<(HeartbeatChange, ThreadOwner), OwnershipError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeartbeatChange {
+    Kept,
+    Renewed,
+    Released,
+}
+
 pub struct Registry {
     connection: Connection,
     attempt: u32,
@@ -488,6 +503,93 @@ impl Registry {
             .commit()
             .map_err(|error| site.sql(DbPhase::Commit, error))?;
         Ok(owner)
+    }
+
+    /// One heartbeat tick for every thread `owner_id` holds, in a single
+    /// IMMEDIATE transaction. A transaction per thread made an owner of many
+    /// threads take the registry's write lock (and pay a commit) once per
+    /// thread every tick. Each row is re-read and its transition decided
+    /// inside this transaction, as [`Self::update`] does for one thread. A
+    /// row whose transition is rejected is reported and left unchanged; it
+    /// never rolls back the other rows. Nothing is committed when no row
+    /// changes.
+    pub(super) fn heartbeat_owned(
+        &mut self,
+        owner_id: &str,
+        now_ms: u64,
+        heartbeat_ms: u64,
+        release_quiescing: bool,
+    ) -> Result<Vec<HeartbeatOutcome>, RegistryError> {
+        let started = Instant::now();
+        let db = self.connection.path().unwrap_or("").to_owned();
+        let site = Site {
+            db: &db,
+            operation: DbOperation::Heartbeat,
+            thread_id: "",
+            attempt: self.attempt,
+            started,
+            payload_bytes: None,
+            quiet_contention: false,
+        };
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| site.sql(DbPhase::Begin, error))?;
+        let states = (|| {
+            let mut statement =
+                transaction.prepare_cached("SELECT state FROM thread_owners ORDER BY thread_id")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })()
+        .map_err(|error| site.sql(DbPhase::Read, error))?;
+        let mut outcomes = Vec::new();
+        let mut changed = false;
+        for state in states {
+            let previous: ThreadOwner = serde_json::from_str(&state)?;
+            if previous.lease.owner_id != owner_id || previous.state == super::OwnerState::Released
+            {
+                continue;
+            }
+            let mut owner = previous.clone();
+            let change = match previous.heartbeat_tick(now_ms, heartbeat_ms, release_quiescing) {
+                super::HeartbeatTick::Keep => Ok(HeartbeatChange::Kept),
+                super::HeartbeatTick::Renew => owner
+                    .heartbeat(&previous.lease, now_ms)
+                    .map(|()| HeartbeatChange::Renewed),
+                super::HeartbeatTick::Release => owner
+                    .release(&previous.lease)
+                    .map(|()| HeartbeatChange::Released),
+            };
+            if let Ok(change) = change
+                && change != HeartbeatChange::Kept
+            {
+                if change == HeartbeatChange::Released {
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO owner_checkpoints VALUES (?1, ?2, '[]')",
+                            params![owner.thread_id, previous.lease.generation.to_string()],
+                        )
+                        .map_err(|error| site.sql(DbPhase::Upsert, error))?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE thread_owners SET state = ?2 WHERE thread_id = ?1",
+                        params![owner.thread_id, serde_json::to_string(&owner)?],
+                    )
+                    .map_err(|error| site.sql(DbPhase::Upsert, error))?;
+                changed = true;
+            }
+            outcomes.push(HeartbeatOutcome {
+                previous,
+                result: change.map(|change| (change, owner)),
+            });
+        }
+        if changed {
+            transaction
+                .commit()
+                .map_err(|error| site.sql(DbPhase::Commit, error))?;
+        }
+        Ok(outcomes)
     }
 
     pub fn checkpoint_permit(
