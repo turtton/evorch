@@ -28,7 +28,7 @@ pub struct Sample {
     pub boundary_us: Vec<(u64, u64, u64)>,
     boundaries: Vec<std::time::Duration>,
     pub page_shapes: Vec<Value>,
-    pub page_threads: Vec<Vec<String>>,
+    pub page_cursors: Vec<Option<String>>,
 }
 
 struct Session {
@@ -45,7 +45,7 @@ struct Session {
     trigger: Option<mpsc::Sender<Instant>>,
     boundaries: Vec<std::time::Duration>,
     page_shapes: Vec<Value>,
-    page_threads: Vec<Vec<String>>,
+    page_cursors: Vec<Option<String>>,
 }
 
 #[derive(Default)]
@@ -132,18 +132,15 @@ fn consume(
     let value: Value = serde_json::from_str(&text).map_err(|_| "invalid_tool_json")?;
     require(value["note"].is_string(), "missing_untrusted_note")?;
     let threads = value["threads"].as_array().ok_or("missing_threads")?;
+    session
+        .page_cursors
+        .push(session.args["cursor"].as_str().map(str::to_owned));
     session.page_shapes.push(serde_json::json!({
         "threads_returned":threads.len(),"hits_returned":threads.iter()
             .filter_map(|thread|thread["hit_count"].as_u64()).sum::<u64>(),
         "index":value["index"],"partial":value["partial"],
         "has_cursor":value["next_cursor"].is_string(),"output_bytes":text.len(),
     }));
-    session.page_threads.push(
-        threads
-            .iter()
-            .filter_map(|thread| thread["thread_id"].as_str().map(str::to_owned))
-            .collect(),
-    );
     for thread in threads {
         let id = thread["thread_id"].as_str().ok_or("missing_thread_id")?;
         let count = thread["hit_count"].as_u64().ok_or("missing_hit_count")?;
@@ -173,7 +170,7 @@ fn consume(
         boundary_us: Vec::new(),
         boundaries: std::mem::take(&mut session.boundaries),
         page_shapes: std::mem::take(&mut session.page_shapes),
-        page_threads: std::mem::take(&mut session.page_threads),
+        page_cursors: std::mem::take(&mut session.page_cursors),
     }))
 }
 
@@ -260,7 +257,7 @@ impl Harness {
             trigger: self.script.trigger.lock().unwrap().take(),
             boundaries: Vec::new(),
             page_shapes: Vec::new(),
-            page_threads: Vec::new(),
+            page_cursors: Vec::new(),
         });
         // A normal unbound Worker root has trusted project authority but is not
         // a conversation thread, so its saved benchmark history is never a hit.
@@ -354,7 +351,7 @@ mod tests {
             trigger: None,
             boundaries: vec![EventMeta::now().monotonic],
             page_shapes: Vec::new(),
-            page_threads: Vec::new(),
+            page_cursors: Vec::new(),
         }
     }
 

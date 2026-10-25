@@ -188,6 +188,56 @@ unrelated host IO before proposing an optimization.
 CPU PSI is a stall/pressure measure, **not CPU utilization**; a zero value does
 not rule out CPU work such as matching or redaction.
 
+After the separate scope-first SQL fix (`9d741ac`), a new binary/conditions
+manifest and independent copy of the **same prepared seed** repeated the same
+100-drain warm/off ASCII cell without changing scope, query or threshold:
+
+| Metric | p95 after scope-first SQL |
+| --- | ---: |
+| All pages (800 pages) | **385.323 ms — still FAIL** |
+| First page (100 samples) | 391.572 ms |
+| Full cursor drain (100 samples) | 1418.988 ms |
+
+The complete canonical map remained identical (95 threads / 1166 hits) for
+all 100 drains. Partial pages remained zero; maximum output remained 16,312
+bytes. This is a substantial improvement, **not a passing S8 result**. The
+other 27 cells remain unmeasured. The off-cell still made zero index
+steps/commits, capacity stayed normal, and WAL ended at 4,268,352 bytes.
+IO PSI `some avg10` was 82.16% → 80.10%, `full avg10` 79.33% → 76.55%.
+
+After the separate narrow-header/lazy-summary optimization (`8471343`), another
+new binary/conditions manifest repeated that same seed/scope/query cell:
+
+| Metric | p95 after SQL and metadata changes |
+| --- | ---: |
+| All pages (800 pages) | **177.771 ms — this cell passes** |
+| First page (100 samples) | 180.859 ms |
+| Full cursor drain (100 samples, separately reported) | 661.612 ms |
+
+All 100 drains retained the exact same canonical 95-thread / 1166-hit map,
+zero partial pages and the 16,312-byte maximum output. The five same-connection
+warmups and 100 repetitions were unchanged. Capacity was normal; index
+steps/commits remained zero; WAL ended at 4,243,632 bytes. IO PSI `some avg10`
+was 76.80% → 77.77%, `full avg10` 75.30% → 75.47%. This **does not establish an
+S8 pass**: the other 27 cells must still complete under the same binary manifest.
+The full drain is not subject to the individual-request 300 ms threshold.
+
+Resuming that manifest completed warm/off short and Unicode cells, but stopped
+automatically at the warm/off phrase cell:
+
+| Warm/off class | Pages / 100 drains | Canonical threads / hits | All-page p95 |
+| --- | ---: | ---: | ---: |
+| Short | 900 | 110 / 2221 | 85.735 ms |
+| Unicode | 700 | 68 / 962 | 87.109 ms |
+| Phrase | 200 | 8 / 10 | **737.732 ms — FAIL** |
+
+Every complete map matched the oracle for every drain. Short searches produced
+100 partial pages with valid continuations, all drained successfully. Phrase
+first-page p95 was 740.006 ms; full-drain p95 was 760.821 ms, with zero partial
+pages and an 8,276-byte maximum output. The aggregate therefore remains
+**3 passing cells, 1 failing cell, 24 missing**, not an S8 pass. No cold or
+backfill-on cell has been measured yet.
+
 `--diagnose` performs three same-connection passes over the same visible
 project's public read APIs and one supplementary real-loop drain. It emits only
 counts, canonical source byte sizes and timings. Existing meta tool lifecycle
@@ -195,11 +245,21 @@ timestamps split the inclusive page time into before dispatch / dispatch /
 after dispatch; event input/output payloads are never written to the report.
 This attribution is explicitly **not an acceptance measurement** and cannot
 replace the 100-drain E2E cells.
+`--diagnose-class phrase` selects the frozen phrase query for attribution;
+plain `--diagnose` retains the ASCII default. Unknown classes fail closed.
+Phrase filters keep the entire phrase as one literal, as production does;
+word queries split terms, and regex candidate replay uses the unfiltered route.
+The supplementary plan reproduces the current scoped storage SQL only for a
+single trigram alternative, Text kind, first replay batch, `after=None` and
+limit 200; it records no bound values and is not an internal production trace.
 
 The extended diagnostic also captures each real page's returned thread/hit
-counts, index coverage, partial/cursor flags and bounded output size (identities
-remain memory-only). It replays the public candidate API over each actual
-cursor's 100-thread preload window, recording batch/scope hashes, keyset
+counts, index coverage, partial/cursor flags and bounded output size. It keeps
+the actual input cursor memory-only, inspecting its payload to recover the
+scanned thread position and optional resumed run/block. This does **not** verify
+the token signature or grant authorization; production still authenticates and
+re-authorizes every call. It replays the public candidate API over that
+100-thread preload window (plus an optional resumed thread), recording batch/scope hashes, keyset
 positions, SQL calls/rows/bytes, route classification and duplicate candidates
 across pages. Redaction uses the production `SecretRedactor` settings; the
 private runtime matcher cannot be reused, so its RegexBuilder flags and 1 MiB
@@ -207,6 +267,11 @@ limits are reproduced and explicitly marked as a diagnostic approximation.
 The replay does not emulate early hit/output-byte stops; its counts are
 overfetch upper bounds, **not a trace of production's internal SQL calls**.
 Do not subtract unrelated percentiles or equate replay time with E2E time.
+Earlier diagnostic versions inferred cursor starts from the last returned hit.
+This is not exact for rare queries that scan more threads than they return;
+their non-first-page replay windows must be treated as estimates. The current
+replay uses the emitted scanned-position payload, not the last hit. This
+correction does not affect actual runtime timings or canonical equality checks.
 
 Supplementary attribution on the same prepared seed found:
 
@@ -230,3 +295,34 @@ Supplementary attribution on the same prepared seed found:
   This is not a captured production call trace; the synthetic scope is stated
   explicitly. Production SQL/API changes belong to a separate implementation
   task, with the 300 ms gate still unmet.
+
+A second supplementary diagnostic after the scope-first SQL fix observed a
+384.910 ms first-page dispatch. Public reads over its same 100-thread window
+loaded 288.545 MB of canonical snapshot JSON: `terminal_summaries` took
+248.995 ms and membership reads 37.122 ms in one of three read passes.
+Candidate SQL replay took 158.886 ms for that window (its candidate counts are
+overfetch upper bounds, not a latency bound); redaction was 11.007 ms. The final
+three windows had no indexed candidates: membership plus summary reads took
+87.202 / 49.771 / 14.210 ms,
+close to their real dispatch times 88.702 / 50.964 / 15.589 ms, while candidate
+SQL was only 1.432 / 0.721 / 0.205 ms. This isolates repeated giant-JSON summary
+reads as the remaining large baseline cost. The timings are separate public
+read passes, not an internal trace, so their sums are not an exact decomposition
+of a production page. A narrower metadata projection or request-local reuse
+requires a separate production change and fresh E2E validation.
+
+Supplementary phrase attribution after both production changes observed
+741.363 ms first-page dispatch and 18.970 ms continuation dispatch, retaining
+the canonical 8-thread / 10-hit map. The phrase is **one whole trigram-routed
+literal**, not multiple word terms. Over the exact first 100-thread preload
+window, literal candidate SQL took 666.438 ms / 12 calls / 4 rows / 7,098 bytes;
+full-scan SQL took 19.713 ms / 25 calls / 3,302 rows / 7.086 MB. Both yielded
+the same four matching conversation candidates; the other canonical hits are
+metadata. Header/membership reads were 60.344 ms; literal redaction/matcher
+took 24 / 11 µs. The plan retained scope-first materialization and the
+`(kind, run_id)` block lookup, but still evaluated the FTS EXISTS per scoped
+block, followed by a temporary ORDER BY B-tree. The phrase diagnostic's old
+continuation replay inferred the start from a last hit and was not exact;
+only its first-window SQL comparison is used as evidence. A subsequent
+algorithm change needs separate production ownership and fresh measurements;
+global FTS evaluation before authorization scope is not an acceptable shortcut.

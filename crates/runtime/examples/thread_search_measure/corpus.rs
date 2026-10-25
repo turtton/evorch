@@ -31,9 +31,45 @@ pub struct Case {
 
 impl Case {
     pub fn literal_filter(&self) -> storage::thread_search::ConversationFilter {
-        storage::thread_search::ConversationFilter::Literals(vec![
-            self.query.split_whitespace().map(str::to_owned).collect(),
-        ])
+        use storage::thread_search::ConversationFilter;
+        match self.mode {
+            "words" => ConversationFilter::Literals(vec![
+                self.query.split_whitespace().map(str::to_owned).collect(),
+            ]),
+            "phrase" => ConversationFilter::Literals(vec![vec![self.query.clone()]]),
+            _ => ConversationFilter::All,
+        }
+    }
+
+    pub fn diagnostic_patterns(&self) -> Result<Vec<Regex>> {
+        let patterns = match self.mode {
+            "words" => self.query.split_whitespace().map(regex::escape).collect(),
+            "phrase" => vec![regex::escape(&self.query)],
+            _ => vec![self.query.clone()],
+        };
+        patterns
+            .iter()
+            .map(|pattern| {
+                regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .size_limit(1 << 20)
+                    .dfa_size_limit(1 << 20)
+                    .build()
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn diagnostic_kinds(&self) -> Vec<IndexBlockKind> {
+        let mut kinds = vec![IndexBlockKind::Text];
+        if self.tool {
+            kinds.extend([
+                IndexBlockKind::ToolUse,
+                IndexBlockKind::ToolResult,
+                IndexBlockKind::ToolError,
+            ]);
+        }
+        kinds
     }
 
     #[cfg(test)]
@@ -385,6 +421,28 @@ impl Corpus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_filters_keep_phrase_whole_and_regex_unfiltered() {
+        use storage::thread_search::ConversationFilter;
+        let phrase = super::Case::fixture("one two", "phrase");
+        assert!(matches!(phrase.literal_filter(),
+            ConversationFilter::Literals(terms) if terms == vec![vec!["one two"]]));
+        let words = super::Case::fixture("one two", "words");
+        assert!(matches!(words.literal_filter(),
+            ConversationFilter::Literals(terms) if terms == vec![vec!["one", "two"]]));
+        assert!(matches!(
+            super::Case::fixture("one.*two", "regex").literal_filter(),
+            ConversationFilter::All
+        ));
+        let patterns = phrase.diagnostic_patterns().unwrap();
+        assert!(patterns.iter().all(|pattern| pattern.is_match("ONE TWO")));
+        assert!(
+            !patterns
+                .iter()
+                .all(|pattern| pattern.is_match("one gap two"))
+        );
+    }
+
     use super::*;
 
     #[test]

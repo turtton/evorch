@@ -60,6 +60,7 @@ struct Options {
     import: Option<PathBuf>,
     aggregate: bool,
     diagnose: bool,
+    diagnose_class: Option<String>,
 }
 
 fn options() -> Result<Options> {
@@ -73,6 +74,7 @@ fn options() -> Result<Options> {
     let mut import = None;
     let mut aggregate = false;
     let mut diagnose = false;
+    let mut diagnose_class = None;
     while let Some(flag) = args.next() {
         match flag.to_str() {
             Some("--prepared-seed") => {
@@ -92,6 +94,16 @@ fn options() -> Result<Options> {
             }
             Some("--aggregate") => aggregate = true,
             Some("--diagnose") => diagnose = true,
+            Some("--diagnose-class") => {
+                diagnose = true;
+                diagnose_class = Some(
+                    args.next()
+                        .ok_or("missing_diagnostic_class")?
+                        .to_str()
+                        .ok_or("non_utf8_diagnostic_class")?
+                        .to_owned(),
+                );
+            }
             _ => return Err("unexpected_argument".into()),
         }
     }
@@ -122,6 +134,7 @@ fn options() -> Result<Options> {
         import,
         aggregate,
         diagnose,
+        diagnose_class,
     })
 }
 
@@ -313,6 +326,15 @@ async fn run() -> Result<()> {
     }
     let cases = corpus.cases()?;
     if options.diagnose {
+        let case = cases
+            .iter()
+            .find(|case| {
+                options
+                    .diagnose_class
+                    .as_deref()
+                    .is_none_or(|class| case.class == class)
+            })
+            .ok_or("unknown_diagnostic_class")?;
         let value = diagnose::reads(&database, &reading.db_path, &corpus)?;
         println!("{value}");
         let diagnostic_database = database;
@@ -322,9 +344,8 @@ async fn run() -> Result<()> {
         let cfg = config(&path);
         let storage = Storage::open(cfg.clone())?;
         let harness = driver::Harness::new(&cfg, storage.handle())?;
-        let sample = harness
-            .search(project, &cases[0], &corpus.expected(&cases[0])?)
-            .await?;
+        let expected = corpus.expected(case)?;
+        let sample = harness.search(project, case, &expected).await?;
         require(
             sample.boundary_us.len() == sample.pages_us.len(),
             "diagnostic_lifecycle_timestamp_missing",
@@ -333,11 +354,20 @@ async fn run() -> Result<()> {
             "{}",
             json!({"stage":"diagnostic_loop","pages_us":sample.pages_us,
             "before_dispatch_dispatch_after_us":sample.boundary_us,
+            "class":case.class,"query_sha256":case.hash(),
+            "canonical_threads":expected.len(),"canonical_hits":expected.values().sum::<u64>(),
+            "canonical_sha256":corpus::set_hash(&expected),
             "drain_us":sample.drain_us,"page_shapes":sample.page_shapes,"not_acceptance_measurement":true})
         );
         println!(
             "{}",
-            diagnose::candidates(&diagnostic_database, &corpus, &cases[0], &sample)?
+            diagnose::candidates(
+                &diagnostic_database,
+                &reading.db_path,
+                &corpus,
+                case,
+                &sample
+            )?
         );
         drop(diagnostic_probe);
         return Ok(());
