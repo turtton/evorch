@@ -252,7 +252,7 @@ struct OwnerState {
 
 struct Extractor {
     jobs: Sender<work::Work>,
-    handle: JoinHandle<()>,
+    _handle: JoinHandle<()>,
 }
 
 /// Background owner state kept by the writer thread.
@@ -464,7 +464,10 @@ fn spawn_extractor(db_path: &Path, sender: SyncSender<super::Command>) -> Option
         })
         .map_err(|error| tracing::warn!(error = %error, "thread index extractor spawn failed"))
         .ok()?;
-    Some(Extractor { jobs, handle })
+    Some(Extractor {
+        jobs,
+        _handle: handle,
+    })
 }
 
 /// Runs at most one index step when one is due.
@@ -681,11 +684,8 @@ pub(super) fn handle(
 
 fn stop_owner(job: &mut IndexJob, conn: &Connection) -> Result<(), StorageError> {
     job.rt.ready = None;
-    job.in_flight = false;
-    if let Some(extractor) = job.extractor.take() {
-        drop(extractor.jobs);
-        let _ = extractor.handle.join();
-    }
+    // Keep the single worker across owner restarts. Joining here can deadlock:
+    // its completion sender may be waiting on this writer's full queue.
     match job.owner.take().and_then(|owner| owner.lease) {
         Some(lease) => lease::release(conn, &lease),
         None => Ok(()),
@@ -697,4 +697,7 @@ pub(super) fn shutdown(job: &mut IndexJob, conn: &Connection) {
     if let Err(error) = stop_owner(job, conn) {
         tracing::warn!(error = %error, "thread index lease release failed");
     }
+    // Closing the jobs channel ends the worker after its outstanding result.
+    // Dropping its join handle never waits on a full completion queue.
+    job.extractor = None;
 }

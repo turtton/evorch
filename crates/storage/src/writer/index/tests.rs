@@ -1401,3 +1401,31 @@ fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
     }
     panic!("request did not finish");
 }
+
+#[test]
+fn stopping_an_owner_never_joins_a_worker_blocked_on_a_full_writer_queue() {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender.send(Command::Usage(Vec::new())).unwrap();
+    let (ready, started) = mpsc::channel();
+    let (jobs, _work) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        let _ = sender.send(Command::Usage(Vec::new()));
+    });
+    started.recv_timeout(Duration::from_secs(30)).unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    let mut job = super::IndexJob::inert();
+    job.extractor = Some(super::Extractor {
+        jobs,
+        _handle: worker,
+    });
+    job.in_flight = true;
+    super::stop_owner(&mut job, &conn).unwrap();
+    assert!(
+        job.in_flight,
+        "restart must retain the single outstanding worker"
+    );
+    let extractor = job.extractor.take().unwrap();
+    drop(receiver);
+    extractor._handle.join().unwrap();
+}
