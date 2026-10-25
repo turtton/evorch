@@ -325,6 +325,8 @@
             pkgs.perl
             pkgs.git
             pkgs.wayland-protocols
+            # worktree ごとの target/ をまたいで依存 crate のコンパイル結果を再利用する
+            pkgs.sccache
           ] ++ devShellGuiLibraries ++ runtimeLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)
             pkgs.mold
@@ -334,6 +336,11 @@
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
+            # 各 worktree は自分の target/ を使い、コンパイル結果は sccache で共有する
+            # (場所と容量は sccache の既定値: Linux は ~/.cache/sccache、10 GiB)。
+            # incremental な workspace crate はキャッシュされず、依存 crate が再利用される。
+            # 呼び出し元の RUSTC_WRAPPER を優先し、空文字(RUSTC_WRAPPER=)なら無効のままにする。
+            export RUSTC_WRAPPER="''${RUSTC_WRAPPER-sccache}"
             if [ -e .git ]; then
               lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
             fi

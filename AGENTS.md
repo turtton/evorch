@@ -139,6 +139,25 @@ schemas may change freely (e.g. new `PanelKind` variants) without downgrade
 tolerance or migration layers. Old persistence may simply fail to load on a
 mismatch. Revisit this policy before cutting a v1 release.
 
+## Development environment
+
+- Every checkout (the main clone and each git worktree) builds into its own
+  `target/`, Cargo's default (gitignored). Do not point `CARGO_TARGET_DIR` at
+  one directory from several checkouts: their same-named workspace crates
+  overwrite each other's artifacts there and cause spurious compile errors.
+- The Nix dev shell sets `RUSTC_WRAPPER=sccache`, so compiled dependency crates
+  (and C code built through `cc`) are reused across checkouts. Workspace crates
+  build incrementally in the dev profile, which sccache does not cache, and
+  proc-macros and build scripts are not cached either; these rebuild per
+  checkout. `sccache --show-stats` reports hits and misses.
+- The cache uses sccache's defaults: `~/.cache/sccache` on Linux
+  (`~/Library/Caches/Mozilla.sccache` on macOS), capped at 10 GiB. Override
+  them with `SCCACHE_DIR` and `SCCACHE_CACHE_SIZE` (for example `20G`).
+- A `RUSTC_WRAPPER` that is already set when the shell starts is kept. To
+  disable sccache, set it to the empty string: `RUSTC_WRAPPER= nix develop`,
+  or `RUSTC_WRAPPER= cargo build` for one command. The empty value also
+  overrides a `build.rustc-wrapper` in Cargo config.
+
 ## Wrong-host detection (G301)
 
 `.intent-cli/host-binding.toml` records the canonical host repo for this
