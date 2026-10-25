@@ -1,0 +1,1192 @@
+//! ADR 0041 順序 5 acceptance: settings, budget eviction order, oversize,
+//! retry backoff, physical admission / reclaim, leases and requests, and the
+//! background schedule. Time is passed explicitly or observed through
+//! channels; nothing sleeps.
+
+use std::sync::mpsc;
+use std::time::Duration;
+
+use rusqlite::Connection;
+use secret_guard::SecretRedactor;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+use super::capacity::{self, MEASURED_POLICY, Measurement};
+use super::work::{self, Env, IndexRuntime};
+use super::{Control, ThreadIndexCounters, should_step};
+use crate::db::{FileSizes, file_sizes};
+use crate::repo::thread_index::{SqliteSnapshotStore, SqliteThreadIndex};
+use crate::thread_index::*;
+use crate::writer::Command;
+use crate::{Database, HardLimits, RunContextRecord, Storage, StorageConfig};
+
+const S: i64 = 1_000_000_000;
+const HOUR: i64 = 3_600 * S;
+const MIB: u64 = 1 << 20;
+
+fn gui() -> IndexOwner {
+    IndexOwner {
+        id: "gui-1".into(),
+        kind: IndexOwnerKind::Gui,
+    }
+}
+
+fn cli() -> IndexOwner {
+    IndexOwner {
+        id: "cli-1".into(),
+        kind: IndexOwnerKind::Cli,
+    }
+}
+
+fn enabled(max_bytes: u64) -> ThreadIndexSettings {
+    ThreadIndexSettings {
+        enabled: true,
+        max_bytes,
+    }
+}
+
+fn messages(body: &str) -> Value {
+    json!([{"role": "user", "content": [{"type": "text", "text": body}]}])
+}
+
+fn write(run_id: &str, body: &str, at: i64, status: ProvenanceStatus) -> SnapshotWrite {
+    let messages = messages(body);
+    SnapshotWrite {
+        record: RunContextRecord {
+            run_id: run_id.into(),
+            role: "worker".into(),
+            name: "worker".into(),
+            parent_run_id: None,
+            config_json: "{}".into(),
+            messages_json: messages.to_string(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "Done".into(),
+            restorable: true,
+            updated_at_ns: at,
+        },
+        expected_snapshot_revision: None,
+        binding: None,
+        status,
+        map: ProvenanceMap {
+            version: PROVENANCE_FORMAT_VERSION,
+            raw_message_count: 1,
+            checkpoint_count: 0,
+            messages: vec![MessageProvenance {
+                raw_index: 0,
+                ordinal: 0,
+                blocks: vec![BlockProvenance {
+                    block_index: 0,
+                    origin: BlockOrigin::Native,
+                    excluded_reason: None,
+                }],
+            }],
+        },
+    }
+}
+
+fn verified(run_id: &str, body: &str, at: i64) -> SnapshotWrite {
+    write(
+        run_id,
+        body,
+        at,
+        ProvenanceStatus::Verified {
+            evidence: ProvenanceEvidence::CompletePositionMap,
+        },
+    )
+}
+
+#[derive(Debug)]
+struct Row {
+    state: String,
+    evicted_reason: Option<String>,
+    last_error_code: Option<String>,
+    attempts: u32,
+    next_attempt_at_ns: Option<i64>,
+    charged: u64,
+    indexed_at_ns: Option<i64>,
+    blocks: u64,
+}
+
+fn row(conn: &Connection, run_id: &str) -> Row {
+    conn.query_row(
+        "SELECT state, evicted_reason, last_error_code, attempt_count, next_attempt_at_ns, \
+         charged_bytes, indexed_at_ns, \
+         (SELECT COUNT(*) FROM conversation_blocks b WHERE b.run_id = r.run_id) \
+         FROM thread_index_runs r WHERE run_id = ?1",
+        [run_id],
+        |row| {
+            Ok(Row {
+                state: row.get(0)?,
+                evicted_reason: row.get(1)?,
+                last_error_code: row.get(2)?,
+                attempts: row.get(3)?,
+                next_attempt_at_ns: row.get(4)?,
+                charged: row.get(5)?,
+                indexed_at_ns: row.get(6)?,
+                blocks: row.get(7)?,
+            })
+        },
+    )
+    .unwrap()
+}
+
+struct Fixture {
+    _dir: Option<TempDir>,
+    db: Database,
+    config: StorageConfig,
+    rt: IndexRuntime,
+    redactor: SecretRedactor,
+    source_suspended: bool,
+}
+
+impl Fixture {
+    fn new(max_bytes: u64) -> Self {
+        Self::at(TempDir::new().unwrap(), max_bytes)
+    }
+
+    fn at(dir: TempDir, max_bytes: u64) -> Self {
+        let config = StorageConfig {
+            db_path: dir.path().join("index.db"),
+            thread_index: enabled(max_bytes),
+            ..StorageConfig::default()
+        };
+        let db = Database::open(&config).unwrap();
+        let mut rt = IndexRuntime::new(config.thread_index);
+        work::configure_fts(&db.conn).unwrap();
+        let env = Env {
+            conn: &db.conn,
+            db_path: &config.db_path,
+            limits: &config.hard_limits,
+            source_suspended: false,
+        };
+        work::apply_settings(env, &mut rt, config.thread_index).unwrap();
+        Self {
+            _dir: Some(dir),
+            db,
+            config,
+            rt,
+            redactor: SecretRedactor::from_env(),
+            source_suspended: false,
+        }
+    }
+
+    /// Another process on the same database (own connection and runtime).
+    fn peer(&self) -> Self {
+        let db = Database::open(&self.config).unwrap();
+        let mut rt = IndexRuntime::new(self.config.thread_index);
+        let env = Env {
+            conn: &db.conn,
+            db_path: &self.config.db_path,
+            limits: &self.config.hard_limits,
+            source_suspended: false,
+        };
+        work::apply_settings(env, &mut rt, self.config.thread_index).unwrap();
+        Self {
+            _dir: None,
+            db,
+            config: self.config.clone(),
+            rt,
+            redactor: SecretRedactor::from_env(),
+            source_suspended: false,
+        }
+    }
+
+    fn conn(&self) -> &Connection {
+        &self.db.conn
+    }
+
+    fn control(&mut self, now_ns: i64) -> Control<'_> {
+        Control {
+            env: Env {
+                conn: &self.db.conn,
+                db_path: &self.config.db_path,
+                limits: &self.config.hard_limits,
+                source_suspended: self.source_suspended,
+            },
+            rt: &mut self.rt,
+            redactor: &self.redactor,
+            now_ns,
+        }
+    }
+
+    fn save(&self, write: &SnapshotWrite) -> SnapshotReceipt {
+        SqliteSnapshotStore::new(self.conn())
+            .save_snapshot_bundle(write)
+            .unwrap()
+    }
+
+    fn lease(&mut self, owner: &IndexOwner, now_ns: i64) -> IndexLease {
+        match self
+            .control(now_ns)
+            .acquire_lease(owner, now_ns, HOUR)
+            .unwrap()
+        {
+            LeaseResult::Acquired(lease) => lease,
+            other => panic!("lease not acquired: {other:?}"),
+        }
+    }
+
+    /// Steps until the job reports anything but progress.
+    fn drive(&mut self, lease: &IndexLease, now_ns: i64) -> IndexStepResult {
+        for _ in 0..10_000 {
+            let result = self.control(now_ns).step(lease, now_ns).unwrap();
+            if result != IndexStepResult::Progress {
+                return result;
+            }
+        }
+        panic!("index did not settle");
+    }
+
+    fn charge(&self, run_id: &str) -> u64 {
+        let bundle = SqliteSnapshotStore::new(self.conn())
+            .load_snapshot_bundle(run_id)
+            .unwrap()
+            .unwrap();
+        let input = extract_snapshot_bundle(&bundle, &self.redactor).unwrap();
+        account_index_input(&input, DEFAULT_ACCOUNTING_POLICY)
+            .unwrap()
+            .charged_bytes
+    }
+
+    fn row(&self, run_id: &str) -> Row {
+        row(self.conn(), run_id)
+    }
+
+    fn sizes(&self) -> FileSizes {
+        file_sizes(&self.config.db_path).unwrap()
+    }
+}
+
+fn idle() -> IndexStepResult {
+    IndexStepResult::Idle {
+        next_wake_at_ns: None,
+    }
+}
+
+#[test]
+fn step_scheduling_prefers_idle_but_never_starves() {
+    assert!(should_step(true, 0, Duration::ZERO));
+    assert!(!should_step(false, 31, Duration::from_millis(99)));
+    assert!(should_step(false, 32, Duration::ZERO));
+    assert!(should_step(false, 0, Duration::from_millis(100)));
+}
+
+#[test]
+fn startup_applies_accounting_version_and_indexes_newest_first() {
+    let mut fx = Fixture::new(512 * MIB);
+    let versions: (u32, u32) = fx
+        .conn()
+        .query_row(
+            "SELECT extractor_version, accounting_version FROM thread_index_state",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(versions, (EXTRACTOR_VERSION, ACCOUNTING_VERSION));
+    fx.save(&verified("run-old", "older conversation", 10 * S));
+    fx.save(&verified("run-new", "newer conversation", 20 * S));
+    let lease = fx.lease(&gui(), 100 * S);
+    let mut now = 100 * S;
+    loop {
+        now += 1;
+        match fx.control(now).step(&lease, now).unwrap() {
+            IndexStepResult::Progress => {}
+            result => {
+                assert_eq!(result, idle());
+                break;
+            }
+        }
+    }
+    let (old, new) = (fx.row("run-old"), fx.row("run-new"));
+    assert_eq!(
+        (old.state.as_str(), new.state.as_str()),
+        ("indexed", "indexed")
+    );
+    assert!(
+        new.indexed_at_ns < old.indexed_at_ns,
+        "newer run must be indexed first"
+    );
+    assert_eq!(fx.rt.counters.commits, 2);
+}
+
+#[test]
+fn logical_budget_evicts_only_older_runs_one_per_step() {
+    let mut fx = Fixture::new(512 * MIB);
+    for (run, at) in [("run-a", 30), ("run-b", 20), ("run-c", 10)] {
+        fx.save(&verified(
+            run,
+            &format!("{run} body {}", "x".repeat(2_000)),
+            at * S,
+        ));
+    }
+    let charge = fx.charge("run-a");
+    // Room for exactly two runs.
+    let budget = enabled(2 * charge + charge / 2);
+    fx.control(S).apply_index_settings(budget).unwrap();
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    assert_eq!(fx.row("run-a").state, "indexed");
+    assert_eq!(fx.row("run-b").state, "indexed");
+    // Nothing older than run-c holds bytes: it evicts itself, never a newer run.
+    let c = fx.row("run-c");
+    assert_eq!(
+        (c.state.as_str(), c.evicted_reason.as_deref()),
+        ("evicted", Some("logical_budget"))
+    );
+    fx.save(&verified(
+        "run-d",
+        &format!("run-d body {}", "x".repeat(2_000)),
+        40 * S,
+    ));
+    let before = fx.rt.counters.evictions;
+    assert_eq!(fx.drive(&lease, 3 * S), idle());
+    assert_eq!(
+        fx.rt.counters.evictions,
+        before + 1,
+        "one older run per step"
+    );
+    assert_eq!(fx.row("run-b").state, "evicted");
+    assert_eq!(fx.row("run-a").state, "indexed");
+    assert_eq!(fx.row("run-d").state, "indexed");
+    let total: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT SUM(charged_bytes) FROM thread_index_runs",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(total <= budget.max_bytes);
+}
+
+#[test]
+fn raising_the_limit_keeps_evicted_runs_until_include_evicted() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-new", &"n".repeat(3_000), 20 * S));
+    fx.save(&verified("run-old", &"o".repeat(3_000), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let charge = fx.row("run-new").charged;
+    fx.control(3 * S)
+        .apply_index_settings(enabled(charge + 10))
+        .unwrap();
+    assert_eq!(fx.row("run-old").state, "evicted");
+    let receipt = fx
+        .control(4 * S)
+        .apply_index_settings(enabled(512 * MIB))
+        .unwrap();
+    assert_eq!(receipt.settings.max_bytes, 512 * MIB);
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    assert_eq!(
+        fx.row("run-old").state,
+        "evicted",
+        "a raised limit revives nothing"
+    );
+    let request = ReindexRequest {
+        canonical_project: None,
+        since_ns: None,
+        include_evicted: true,
+    };
+    let submitted = fx
+        .control(6 * S)
+        .submit_request(&request, &gui(), 6 * S, HOUR)
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    assert_eq!(fx.row("run-old").state, "indexed");
+    let status = fx
+        .control(8 * S)
+        .request_status(&submitted.request_id, 8 * S)
+        .unwrap();
+    assert!(matches!(
+        status.progress,
+        RequestProgress::Terminal(ReindexResult::Completed { .. })
+    ));
+}
+
+#[test]
+fn oversize_reasons_are_distinguished_in_runs_and_request_gaps() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified(
+        "run-huge",
+        &"h".repeat(MEASURED_POLICY.step_max_text_bytes as usize + 1),
+        20 * S,
+    ));
+    fx.save(&verified("run-small", "small", 10 * S));
+    let small = fx.charge("run-small");
+    let lease = fx.lease(&gui(), S);
+    let request = ReindexRequest {
+        canonical_project: None,
+        since_ns: None,
+        include_evicted: false,
+    };
+    fx.control(S)
+        .apply_index_settings(enabled(small - 1))
+        .unwrap();
+    let submitted = fx
+        .control(S)
+        .submit_request(&request, &gui(), S, HOUR)
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let huge = fx.row("run-huge");
+    assert_eq!(huge.state, "evicted");
+    assert_eq!(huge.evicted_reason.as_deref(), Some("oversized"));
+    assert_eq!(huge.last_error_code.as_deref(), Some("oversized_step"));
+    assert_eq!(huge.blocks, 0);
+    let small_row = fx.row("run-small");
+    assert_eq!(
+        small_row.last_error_code.as_deref(),
+        Some("oversized_budget")
+    );
+    let status = fx
+        .control(3 * S)
+        .request_status(&submitted.request_id, 3 * S)
+        .unwrap();
+    let RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. }) =
+        status.progress
+    else {
+        panic!("expected gaps: {status:?}");
+    };
+    let mut reasons: Vec<_> = summary
+        .gaps
+        .iter()
+        .map(|gap| (gap.reason, gap.count))
+        .collect();
+    reasons.sort_by_key(|(reason, _)| format!("{reason:?}"));
+    assert_eq!(
+        reasons,
+        vec![
+            (RequestGapReason::OversizedBudget, 1),
+            (RequestGapReason::OversizedStep, 1)
+        ]
+    );
+}
+
+fn ghost(fx: &Fixture, run_id: &str) {
+    let mut index = SqliteThreadIndex::new(fx.conn());
+    index
+        .discover_source(&IndexSourceHeader {
+            target: IndexTarget {
+                run_id: run_id.into(),
+                source_revision: 1,
+                extractor_version: EXTRACTOR_VERSION,
+                accounting_version: ACCOUNTING_VERSION,
+            },
+            snapshot_revision: 1,
+            context_sha256: String::new(),
+            note_seq: None,
+            provenance_version: None,
+            source_updated_at_ns: S,
+            retention_at_ns: S,
+            source_present: true,
+        })
+        .unwrap();
+}
+
+#[test]
+fn transient_failures_back_off_and_idle_until_the_retry_time() {
+    let mut fx = Fixture::new(512 * MIB);
+    ghost(&fx, "run-ghost");
+    let lease = fx.lease(&gui(), S);
+    let mut now = 10 * S;
+    let mut delays = Vec::new();
+    for attempt in 1..=4 {
+        let result = fx.drive(&lease, now);
+        let ghost = fx.row("run-ghost");
+        assert_eq!(
+            (ghost.state.as_str(), ghost.attempts),
+            ("retry_wait", attempt)
+        );
+        let due = ghost.next_attempt_at_ns.unwrap();
+        assert_eq!(
+            result,
+            IndexStepResult::Idle {
+                next_wake_at_ns: Some(due)
+            }
+        );
+        delays.push((due - now) / S);
+        // Just before the due time nothing is promoted.
+        assert_eq!(
+            fx.drive(&lease, due - 1),
+            IndexStepResult::Idle {
+                next_wake_at_ns: Some(due)
+            }
+        );
+        now = due;
+    }
+    assert_eq!(delays, vec![1, 2, 4, 8]);
+    assert_eq!(fx.drive(&lease, now), idle());
+    let ghost = fx.row("run-ghost");
+    assert_eq!((ghost.state.as_str(), ghost.attempts), ("blocked", 5));
+}
+
+#[test]
+fn capacity_boundaries_stop_on_equality_and_resume_with_hysteresis() {
+    let policy = MEASURED_POLICY;
+    let reserve = policy.reserve_bytes();
+    assert_eq!(reserve, 64 * MIB);
+    let growth = PlannedGrowth::Bounded {
+        db: 1_000,
+        wal: 2_000,
+        shm: 0,
+    };
+    let limits = |max_db_bytes, max_wal_bytes| HardLimits {
+        max_db_bytes,
+        max_wal_bytes,
+        ..HardLimits::default()
+    };
+    let measured = |db, wal| Measurement {
+        sizes: FileSizes { db, wal, shm: 0 },
+        source_suspended: false,
+    };
+    let state = |limits: &HardLimits, measured, growth, paused| {
+        capacity::evaluate(&policy, limits, true, measured, growth, paused).state
+    };
+    let h = 10 * reserve;
+    let p = h - reserve - 3_000;
+    let paused = CapacityState::IndexPaused(IndexPauseReason::ReserveInsufficient);
+    let wide = limits(h, u64::MAX / 4);
+    assert_eq!(
+        state(&wide, measured(p - 1, 0), growth, false),
+        CapacityState::Normal
+    );
+    assert_eq!(
+        state(&wide, measured(p, 0), growth, false),
+        paused,
+        "P+G+R = H stops"
+    );
+    assert_eq!(state(&wide, measured(p + 1, 0), growth, false), paused);
+    let j = policy.hysteresis_bytes;
+    assert_eq!(
+        state(&wide, measured(p - 1, 0), growth, true),
+        paused,
+        "resume needs +J"
+    );
+    assert_eq!(
+        state(&wide, measured(p - j, 0), growth, true),
+        paused,
+        "+J equality stays"
+    );
+    assert_eq!(
+        state(&wide, measured(p - j - 1, 0), growth, true),
+        CapacityState::Normal
+    );
+    let wal = limits(h, 10_000);
+    assert_eq!(
+        state(&wal, measured(0, 7_999), growth, false),
+        CapacityState::Normal
+    );
+    assert_eq!(
+        state(&wal, measured(0, 8_000), growth, false),
+        CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    );
+    assert_eq!(
+        state(&wide, measured(0, 0), PlannedGrowth::Unbounded, false),
+        CapacityState::IndexPaused(IndexPauseReason::GrowthUnbounded)
+    );
+    assert_eq!(
+        state(
+            &limits(reserve, u64::MAX / 4),
+            measured(0, 0),
+            growth,
+            false
+        ),
+        paused,
+        "H that cannot hold the reserve disables indexing"
+    );
+    let suspended = Measurement {
+        source_suspended: true,
+        ..measured(0, 0)
+    };
+    assert_eq!(
+        state(&wide, suspended, growth, false),
+        CapacityState::SourceSuspended(crate::LimitKind::DbSize)
+    );
+    assert_eq!(
+        capacity::evaluate(&policy, &wide, false, measured(0, 0), growth, false).state,
+        CapacityState::IndexPaused(IndexPauseReason::Disabled)
+    );
+    // The commit bound covers every measured commit (largest charged run).
+    let PlannedGrowth::Bounded { db, wal, .. } = policy.planned_growth(3_812_201, 4096, 0, false)
+    else {
+        panic!("bounded");
+    };
+    assert!(wal >= 1_310 * 4_120 && db >= 4_161_536);
+}
+
+/// `H` such that `P + R + margin = H` at the current file sizes.
+fn tight_limits(sizes: FileSizes, margin: u64) -> HardLimits {
+    HardLimits {
+        max_db_bytes: sizes.total() + MEASURED_POLICY.reserve_bytes() + margin,
+        ..HardLimits::default()
+    }
+}
+
+#[test]
+fn logical_room_without_physical_reserve_pauses_without_attempts() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "fits the logical budget easily", 10 * S));
+    let lease = fx.lease(&gui(), S);
+    fx.config.hard_limits = tight_limits(fx.sizes(), 64 * 1024);
+    let result = fx.drive(&lease, 2 * S);
+    let IndexStepResult::Paused(status) = result else {
+        panic!("expected a pause: {result:?}");
+    };
+    assert!(matches!(
+        status.state,
+        CapacityState::IndexPaused(
+            IndexPauseReason::ReserveInsufficient | IndexPauseReason::ReclaimExhausted
+        )
+    ));
+    let a = fx.row("run-a");
+    assert_eq!((a.state.as_str(), a.attempts, a.blocks), ("pending", 0, 0));
+    // The foreground keeps writing inside the reserve while the index pauses.
+    fx.save(&verified(
+        "run-b",
+        "canonical write after the pause",
+        20 * S,
+    ));
+    assert!(fx.sizes().total() < fx.config.hard_limits.max_db_bytes);
+}
+
+#[test]
+fn reclaim_gives_up_after_two_cycles_without_full_vacuum_on_auto_vacuum_none() {
+    let dir = TempDir::new().unwrap();
+    {
+        let conn = Connection::open(dir.path().join("index.db")).unwrap();
+        conn.execute_batch("PRAGMA auto_vacuum = 0; CREATE TABLE keep_none(x);")
+            .unwrap();
+    }
+    let mut fx = Fixture::at(dir, 512 * MIB);
+    assert!(!capacity::incremental_vacuum_enabled(fx.conn()).unwrap());
+    for index in 0..6 {
+        fx.save(&verified(
+            &format!("run-{index}"),
+            &"z".repeat(20_000),
+            (10 + index) * S,
+        ));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.save(&verified("run-late", "one more run", 100 * S));
+    let pages_before: i64 = fx
+        .conn()
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap();
+    // `R < H < P + R`: no amount of index deletion can make room.
+    let sizes = fx.sizes();
+    fx.config.hard_limits = HardLimits {
+        max_db_bytes: MEASURED_POLICY.reserve_bytes() + sizes.total() / 2,
+        ..HardLimits::default()
+    };
+    let before = fx.rt.counters.reclaim_cycles;
+    let IndexStepResult::Paused(status) = fx.drive(&lease, 3 * S) else {
+        panic!("expected a pause");
+    };
+    assert_eq!(
+        status.state,
+        CapacityState::IndexPaused(IndexPauseReason::ReclaimExhausted)
+    );
+    assert_eq!(fx.rt.counters.reclaim_cycles - before, 2);
+    let pages_after: i64 = fx
+        .conn()
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        pages_after >= pages_before,
+        "no full VACUUM shrinks the file"
+    );
+    // Sticky: re-judged only after a measured decrease or a settings change.
+    let IndexStepResult::Paused(again) = fx.drive(&lease, 4 * S) else {
+        panic!("still paused");
+    };
+    assert_eq!(again.state, status.state);
+    fx.config.hard_limits = HardLimits::default();
+    fx.control(5 * S)
+        .apply_index_settings(enabled(512 * MIB))
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 6 * S), idle());
+    assert_eq!(fx.row("run-late").state, "indexed");
+}
+
+#[test]
+fn a_reader_pinning_the_wal_stops_reclaim_and_stays_sticky() {
+    let mut fx = Fixture::new(512 * MIB);
+    for index in 0..4 {
+        fx.save(&verified(
+            &format!("run-{index}"),
+            &"w".repeat(20_000),
+            (10 + index) * S,
+        ));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let reader = Connection::open(&fx.config.db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM run_contexts", [], |row| row.get(0))
+        .unwrap();
+    fx.save(&verified(
+        "run-late",
+        "written after the reader began",
+        100 * S,
+    ));
+    fx.config.hard_limits = tight_limits(fx.sizes(), 64 * 1024);
+    let IndexStepResult::Paused(status) = fx.drive(&lease, 3 * S) else {
+        panic!("expected a pause");
+    };
+    assert_eq!(
+        status.state,
+        CapacityState::IndexPaused(IndexPauseReason::WalReaderPinned)
+    );
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(
+        !work::recheck_pause(env, &mut fx.rt).unwrap(),
+        "no short-cycle retry"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    fx.config.hard_limits = HardLimits::default();
+    fx.control(4 * S)
+        .apply_index_settings(enabled(512 * MIB))
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    assert_eq!(fx.row("run-late").state, "indexed");
+}
+
+#[test]
+fn an_owner_whose_lease_was_taken_cannot_commit_its_late_result() {
+    let mut gui_fx = Fixture::new(512 * MIB);
+    let mut cli_fx = gui_fx.peer();
+    gui_fx.save(&verified("run-a", "shared work", 10 * S));
+    let gui_lease = match gui_fx.control(S).acquire_lease(&gui(), S, 10 * S).unwrap() {
+        LeaseResult::Acquired(lease) => lease,
+        other => panic!("{other:?}"),
+    };
+    let held = cli_fx
+        .control(2 * S)
+        .acquire_lease(&cli(), 2 * S, 10 * S)
+        .unwrap();
+    assert!(matches!(held, LeaseResult::HeldByOther(ref lease) if lease.epoch == gui_lease.epoch));
+    // The GUI extracts (result kept in memory), then stalls past its expiry.
+    let mut extracted = false;
+    for _ in 0..20 {
+        gui_fx.control(3 * S).step(&gui_lease, 3 * S).unwrap();
+        if gui_fx
+            .rt
+            .ready
+            .as_ref()
+            .is_some_and(|(_, result)| result.is_ok())
+        {
+            extracted = true;
+            break;
+        }
+    }
+    assert!(extracted);
+    let LeaseResult::Acquired(cli_lease) = cli_fx
+        .control(12 * S)
+        .acquire_lease(&cli(), 12 * S, HOUR)
+        .unwrap()
+    else {
+        panic!("expired lease is taken over");
+    };
+    assert_eq!(cli_lease.epoch, gui_lease.epoch + 1);
+    assert_eq!(
+        gui_fx.control(12 * S).step(&gui_lease, 12 * S).unwrap(),
+        IndexStepResult::LeaseLost
+    );
+    assert_eq!(gui_fx.row("run-a").state, "pending");
+    assert_eq!(gui_fx.row("run-a").blocks, 0);
+    assert_eq!(
+        gui_fx
+            .control(13 * S)
+            .heartbeat(&gui_lease, 13 * S, HOUR)
+            .unwrap(),
+        LeaseResult::Lost
+    );
+    // The stale owner's guard is rejected by the repository as well.
+    let input = {
+        let bundle = SqliteSnapshotStore::new(gui_fx.conn())
+            .load_snapshot_bundle("run-a")
+            .unwrap()
+            .unwrap();
+        extract_snapshot_bundle(&bundle, &gui_fx.redactor).unwrap()
+    };
+    let generation: u64 = gui_fx
+        .conn()
+        .query_row(
+            "SELECT work_generation FROM thread_index_runs WHERE run_id = 'run-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let guard = IndexCommitGuard {
+        lease: gui_lease.clone(),
+        target: IndexTarget {
+            run_id: "run-a".into(),
+            source_revision: input.source_revision,
+            extractor_version: EXTRACTOR_VERSION,
+            accounting_version: ACCOUNTING_VERSION,
+        },
+        work_generation: generation,
+        expected_state: IndexState::Pending,
+        source_present: true,
+        request: None,
+    };
+    let accounting = account_index_input(&input, DEFAULT_ACCOUNTING_POLICY).unwrap();
+    assert_eq!(
+        SqliteThreadIndex::new(gui_fx.conn())
+            .commit_index_input(&guard, &input, accounting, 14 * S)
+            .unwrap(),
+        IndexCommitResult::Discarded(CommitRejection::LeaseLost)
+    );
+    for _ in 0..100 {
+        if cli_fx.control(15 * S).step(&cli_lease, 15 * S).unwrap() != IndexStepResult::Progress {
+            break;
+        }
+    }
+    assert_eq!(cli_fx.row("run-a").state, "indexed");
+    cli_fx.control(16 * S).release_lease(&cli_lease).unwrap();
+    assert!(super::lease::current(cli_fx.conn()).unwrap().is_none());
+}
+
+#[test]
+fn concurrent_elections_have_exactly_one_winner() {
+    let fx = Fixture::new(512 * MIB);
+    let config = fx.config.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = [gui(), cli()]
+        .into_iter()
+        .map(|owner| {
+            let config = config.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let db = Database::open(&config).unwrap();
+                barrier.wait();
+                super::lease::acquire(&db.conn, &owner, S, HOUR).unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let winners = results
+        .iter()
+        .filter(|result| matches!(result, LeaseResult::Acquired(_)))
+        .count();
+    assert_eq!(winners, 1, "{results:?}");
+    drop(fx);
+}
+
+fn all() -> ReindexRequest {
+    ReindexRequest {
+        canonical_project: None,
+        since_ns: None,
+        include_evicted: false,
+    }
+}
+
+fn terminal(fx: &mut Fixture, request_id: &str, now: i64) -> ReindexResult {
+    match fx
+        .control(now)
+        .request_status(request_id, now)
+        .unwrap()
+        .progress
+    {
+        RequestProgress::Terminal(result) => result,
+        other => panic!("not terminal: {other:?}"),
+    }
+}
+
+#[test]
+fn accepted_request_survives_owner_crash_and_completes_after_takeover() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "alpha", 10 * S));
+    fx.save(&verified("run-b", "beta", 20 * S));
+    let gui_lease = fx.lease(&gui(), S);
+    let submitted = fx
+        .control(2 * S)
+        .submit_request(&all(), &cli(), 2 * S, 10 * S)
+        .unwrap();
+    // A live GUI owner: the CLI's answer would be `accepted`.
+    assert!(matches!(submitted.lease, LeaseResult::HeldByOther(ref lease) if *lease == gui_lease));
+    assert!(
+        matches!(submitted.progress, RequestProgress::Pending(ref summary) if summary.target_count == 2)
+    );
+    // The GUI dies without releasing; its lease expires at 1 h + 1 s.
+    let status = fx
+        .control(2 * S)
+        .request_status(&submitted.request_id, HOUR + 2 * S)
+        .unwrap();
+    assert_eq!(status.owner, None, "owner absence is diagnosable");
+    let LeaseResult::Acquired(cli_lease) = fx
+        .control(HOUR + 2 * S)
+        .acquire_lease(&cli(), HOUR + 2 * S, HOUR)
+        .unwrap()
+    else {
+        panic!("takeover");
+    };
+    assert!(cli_lease.epoch > gui_lease.epoch);
+    assert_eq!(fx.drive(&cli_lease, HOUR + 3 * S), idle());
+    let ReindexResult::Completed { summary, .. } =
+        terminal(&mut fx, &submitted.request_id, HOUR + 4 * S)
+    else {
+        panic!("completed");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}
+
+#[test]
+fn request_results_cover_zero_targets_gaps_cancel_and_late_changes() {
+    let mut fx = Fixture::new(512 * MIB);
+    let lease = fx.lease(&cli(), S);
+    let none = ReindexRequest {
+        canonical_project: Some("/no/such/project".into()),
+        ..all()
+    };
+    let empty = fx
+        .control(S)
+        .submit_request(&none, &cli(), S, HOUR)
+        .unwrap();
+    assert!(matches!(
+        empty.progress,
+        RequestProgress::Terminal(ReindexResult::Completed { ref summary, .. }) if summary.target_count == 0
+    ));
+    assert_eq!(
+        fx.control(S).submit_request(
+            &ReindexRequest {
+                since_ns: Some(-1),
+                ..all()
+            },
+            &cli(),
+            S,
+            HOUR
+        ),
+        Err(RequestFailure::InvalidArguments)
+    );
+    fx.save(&write(
+        "run-unknown",
+        "provenance unknown",
+        10 * S,
+        ProvenanceStatus::Unknown {
+            reason: ProvenanceUnknownReason::LegacyUnproven,
+        },
+    ));
+    let blocked = fx
+        .control(2 * S)
+        .submit_request(&all(), &cli(), 2 * S, HOUR)
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 3 * S), idle());
+    let ReindexResult::CompletedWithGaps { summary, .. } =
+        terminal(&mut fx, &blocked.request_id, 3 * S)
+    else {
+        panic!("all-gap is completed_with_gaps, never failed");
+    };
+    assert_eq!(summary.succeeded, 0);
+    assert!(matches!(
+        summary.gaps[0].reason,
+        RequestGapReason::Blocked(_)
+    ));
+    // Late source update and deletion after submission.
+    fx.save(&verified("run-x", "x one", 20 * S));
+    fx.save(&verified("run-y", "y one", 21 * S));
+    fx.save(&verified("run-z", "z one", 22 * S));
+    let late = fx
+        .control(4 * S)
+        .submit_request(&all(), &cli(), 4 * S, HOUR)
+        .unwrap();
+    let shared = fx
+        .control(4 * S)
+        .submit_request(&all(), &cli(), 4 * S, HOUR)
+        .unwrap();
+    fx.control(4 * S)
+        .cancel_request(&shared.request_id)
+        .unwrap();
+    fx.save(&verified("run-x", "x two", 30 * S));
+    SqliteThreadIndex::new(fx.conn())
+        .delete_index_source("run-y")
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    let ReindexResult::CompletedWithGaps { summary, .. } =
+        terminal(&mut fx, &late.request_id, 5 * S)
+    else {
+        panic!("late changes are gaps");
+    };
+    let reasons: Vec<_> = summary.gaps.iter().map(|gap| gap.reason).collect();
+    assert!(
+        reasons.contains(&RequestGapReason::Superseded),
+        "{reasons:?}"
+    );
+    assert!(reasons.contains(&RequestGapReason::Deleted), "{reasons:?}");
+    assert!(summary.succeeded >= 1);
+    let cancelled = fx
+        .control(6 * S)
+        .request_status(&shared.request_id, 6 * S)
+        .unwrap();
+    assert_eq!(cancelled.progress, RequestProgress::Cancelled);
+    assert_eq!(
+        fx.row("run-z").state,
+        "indexed",
+        "a cancel does not cancel shared work"
+    );
+    // Disabled index: pending targets become index_disabled gaps.
+    fx.save(&verified("run-w", "w", 40 * S));
+    let disabled = fx
+        .control(7 * S)
+        .submit_request(&all(), &cli(), 7 * S, HOUR)
+        .unwrap();
+    fx.control(7 * S)
+        .apply_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    assert!(matches!(
+        fx.drive(&lease, 8 * S),
+        IndexStepResult::Paused(_)
+    ));
+    let ReindexResult::CompletedWithGaps { summary, .. } =
+        terminal(&mut fx, &disabled.request_id, 8 * S)
+    else {
+        panic!("disabled gaps");
+    };
+    assert!(
+        summary
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == RequestGapReason::IndexDisabled)
+    );
+}
+
+fn storage(dir: &TempDir, limits: HardLimits) -> Storage {
+    Storage::open(StorageConfig {
+        db_path: dir.path().join("writer.db"),
+        hard_limits: limits,
+        ..StorageConfig::default()
+    })
+    .unwrap()
+}
+
+fn wait_for(
+    observer: &mpsc::Receiver<ThreadIndexCounters>,
+    done: impl Fn(&ThreadIndexCounters) -> bool,
+) -> ThreadIndexCounters {
+    loop {
+        let counters = observer
+            .recv_timeout(Duration::from_secs(30))
+            .expect("background index step");
+        if done(&counters) {
+            return counters;
+        }
+    }
+}
+
+#[test]
+fn background_job_steps_while_commands_keep_arriving_and_then_sleeps() {
+    let dir = TempDir::new().unwrap();
+    let storage = storage(&dir, HardLimits::default());
+    let handle = storage.handle();
+    for (run, at) in [("run-a", 10), ("run-b", 20), ("run-c", 30)] {
+        handle
+            .save_snapshot_bundle(&verified(run, &format!("{run} text"), at * S))
+            .unwrap();
+    }
+    let (observe, observer) = mpsc::channel();
+    handle
+        .0
+        .send(Command::Index(super::IndexCommand::Observe(observe)))
+        .unwrap();
+    let (release, blocked) = mpsc::channel();
+    handle.block_writer(blocked).unwrap();
+    // While the writer is blocked, queue the owner start and then more than 32
+    // ordinary commands: they run back to back, so the step taken among them
+    // is a forced (non-idle) one.
+    let (reply, started) = mpsc::channel();
+    handle
+        .0
+        .send(Command::Index(super::IndexCommand::StartOwner(
+            gui(),
+            handle.0.clone(),
+            reply,
+        )))
+        .unwrap();
+    for _ in 0..40 {
+        handle.0.try_send(Command::Usage(Vec::new())).unwrap();
+    }
+    release.send(()).unwrap();
+    assert!(matches!(
+        started.recv().unwrap(),
+        Ok(LeaseResult::Acquired(_))
+    ));
+    wait_for(&observer, |counters| counters.commits >= 3);
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.forced_steps >= 1, "{status:?}");
+    assert!(status.owner_lease.is_some());
+    // Drained: nothing schedules a wake-up until a new command arrives.
+    let mut status = handle.thread_index_job_status().unwrap();
+    for _ in 0..100_000 {
+        if !status.wake_scheduled {
+            break;
+        }
+        status = handle.thread_index_job_status().unwrap();
+    }
+    assert!(!status.wake_scheduled, "{status:?}");
+    assert_eq!(status.retry_wake_in, None);
+    assert_eq!(status.paused, None);
+    handle.stop_thread_index_owner().unwrap();
+}
+
+#[test]
+fn paused_and_disabled_jobs_do_not_wake_and_canonical_writes_continue() {
+    let dir = TempDir::new().unwrap();
+    {
+        drop(storage(&dir, HardLimits::default()));
+    }
+    let sizes = file_sizes(&dir.path().join("writer.db")).unwrap();
+    let storage = storage(&dir, tight_limits(sizes, MIB));
+    let handle = storage.handle();
+    let (observe, observer) = mpsc::channel();
+    handle
+        .0
+        .send(Command::Index(super::IndexCommand::Observe(observe)))
+        .unwrap();
+    handle
+        .save_snapshot_bundle(&verified("run-a", &"p".repeat(4_000), 10 * S))
+        .unwrap();
+    assert!(matches!(
+        handle.start_thread_index_owner(gui()),
+        Ok(LeaseResult::Acquired(_))
+    ));
+    wait_for(&observer, |counters| counters.pauses >= 1);
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.paused.is_some());
+    assert!(
+        !status.wake_scheduled,
+        "a paused index never wakes the writer"
+    );
+    // Canonical snapshots and notes still fit inside the reserve.
+    handle
+        .save_snapshot_bundle(&verified("run-b", "after pause", 20 * S))
+        .unwrap();
+    handle
+        .append_indexed_note("run-b", "note after pause")
+        .unwrap();
+    let capacity = handle.thread_index_capacity().unwrap();
+    assert!(matches!(capacity.state, CapacityState::IndexPaused(_)));
+    handle
+        .apply_thread_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(
+        !status.wake_scheduled,
+        "a disabled index never wakes the writer"
+    );
+}

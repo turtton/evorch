@@ -32,6 +32,7 @@ struct WriterState {
     next_checkpoint_at: Instant,
     diagnostic_cursor: Option<event::diagnostic::Cursor>,
     reclaim_wal_pending: bool,
+    index: super::index::IndexJob,
 }
 
 /// All review mutations share the same suspension gate and rollback boundary.
@@ -69,6 +70,16 @@ fn snapshot_transaction<T>(
     Ok(value)
 }
 
+/// Size-state flags measured by `Storage::open` before the writer starts.
+pub(super) struct StartState {
+    pub writes_suspended: bool,
+    pub soft_warned: bool,
+    pub suspend_logged: bool,
+    pub temp_warned: bool,
+}
+
+/// Writer without a thread index job (writer unit-test fixtures).
+#[cfg(test)]
 pub(super) fn run_writer(
     conn: Connection,
     rx: Receiver<Command>,
@@ -78,6 +89,33 @@ pub(super) fn run_writer(
     suspend_logged: bool,
     temp_warned: bool,
 ) {
+    run_writer_with_index(
+        conn,
+        rx,
+        config,
+        super::index::IndexJob::inert(),
+        StartState {
+            writes_suspended,
+            soft_warned,
+            suspend_logged,
+            temp_warned,
+        },
+    );
+}
+
+pub(super) fn run_writer_with_index(
+    conn: Connection,
+    rx: Receiver<Command>,
+    config: StorageConfig,
+    index: super::index::IndexJob,
+    start: StartState,
+) {
+    let StartState {
+        writes_suspended,
+        soft_warned,
+        suspend_logged,
+        temp_warned,
+    } = start;
     let now = Instant::now();
     let mut state = WriterState {
         conn,
@@ -93,10 +131,25 @@ pub(super) fn run_writer(
         temp_warned,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
+        index,
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let deadline = state
+            .index
+            .deadline(Instant::now())
+            .map_or(deadline, |index| index.min(deadline));
+        let received = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let idle = matches!(received, Err(RecvTimeoutError::Timeout));
+        let ordinary = matches!(&received, Ok(command) if !matches!(command, Command::Index(_)));
+        match received {
+            Ok(Command::Index(command)) => super::index::handle(
+                &mut state.index,
+                &state.conn,
+                &state.config,
+                state.writes_suspended,
+                command,
+            ),
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
             Ok(Command::RecordUsageRequests(records, reply)) => {
                 let result = if state.writes_suspended {
@@ -436,8 +489,10 @@ pub(super) fn run_writer(
             }
             Ok(Command::ReclaimDiagnosticSpace(pages, reply)) => {
                 let _ = reply.send(diagnostic::reclaim_step(&mut state, pages));
+                notify_index_capacity(&mut state);
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                super::index::shutdown(&mut state.index, &state.conn);
                 if let Err(error) = flush_usage(&mut state) {
                     tracing::warn!(error = %error, "storage final usage flush failed");
                 }
@@ -448,8 +503,20 @@ pub(super) fn run_writer(
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
-        run_due_work(&mut state);
+        if ordinary {
+            state.index.note_command();
+        }
+        run_due_work(&mut state, idle);
     }
+}
+
+fn notify_index_capacity(state: &mut WriterState) {
+    super::index::on_capacity_change(
+        &mut state.index,
+        &state.conn,
+        &state.config,
+        state.writes_suspended,
+    );
 }
 
 fn save_thread_start(
@@ -495,7 +562,7 @@ fn merge_usage(pending: &mut HashMap<BucketKey, UsageBucket>, buckets: Vec<Usage
     }
 }
 
-fn run_due_work(state: &mut WriterState) {
+fn run_due_work(state: &mut WriterState, idle: bool) {
     let now = Instant::now();
     if (state.pending.len() >= state.config.flush_max_pending
         || (now >= state.next_flush_at && !state.pending.is_empty()))
@@ -512,6 +579,13 @@ fn run_due_work(state: &mut WriterState) {
         }
         state.next_checkpoint_at = now + state.config.checkpoint_interval;
     }
+    super::index::run_due(
+        &mut state.index,
+        &state.conn,
+        &state.config,
+        state.writes_suspended,
+        idle,
+    );
 }
 
 /// Maintenance scans one bounded diagnostic batch, then reclaims a bounded
@@ -529,6 +603,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         diagnostic::reclaim_wal(state)?;
     }
     checkpoint(state)?;
+    notify_index_capacity(state);
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
@@ -934,6 +1009,7 @@ mod tests {
             suspend_logged: false,
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
+            index: crate::writer::index::IndexJob::inert(),
         }
     }
 

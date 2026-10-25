@@ -86,4 +86,7 @@ pub use read::StoredAgentMessage;
 pub use repo::event::StoredEvent;
 pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
-pub use writer::{Storage, StorageHandle, StorageStatistics};
+pub use writer::{
+    Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
+    ThreadIndexJobStatus,
+};
