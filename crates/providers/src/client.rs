@@ -28,6 +28,11 @@ pub trait ProviderClient: Send + Sync {
         None
     }
 
+    /// Image generation/editing, separate from chat and its cache state.
+    fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
+        None
+    }
+
     /// 公式 compaction が利用可能な場合に専用境界を返します。
     fn compactor(&self) -> Option<&dyn crate::Compactor> {
         None

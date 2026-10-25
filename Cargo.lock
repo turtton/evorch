@@ -5145,6 +5145,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
+ "image",
  "mock-openai",
  "rcgen",
  "reqwest 0.12.28",

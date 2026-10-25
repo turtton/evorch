@@ -1,6 +1,7 @@
 //! Codex subscription backend の provider client を提供します。
 
 mod compaction;
+mod images;
 mod web_search;
 
 use std::sync::Arc;
@@ -246,31 +247,14 @@ impl CodexClient {
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
-        let token = self.session.current().await?;
-        let turn_id = Uuid::new_v4().to_string();
-        let client_version = self
-            .resolved_client_version
-            .get_or_init(|| self.client_version.resolve())
-            .await;
         let http_client = match mode {
             ResponseMode::Compaction => &self.compaction_http_client,
             ResponseMode::Streaming | ResponseMode::NonStreaming => &self.http_client,
         };
-        let mut builder = http_client
-            .post(&self.endpoint)
-            .bearer_auth(&token.access_token)
-            .header("chatgpt-account-id", &token.chatgpt_account_id)
-            .header("originator", ORIGINATOR)
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("version", &client_version.version)
-            .header(
-                reqwest::header::USER_AGENT,
-                format!("codex_cli_rs/{}", client_version.version),
-            )
+        let mut builder = self
+            .authenticated_request(http_client, &self.endpoint)
+            .await?
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header("session-id", &self.session_id)
-            .header("thread-id", &turn_id)
-            .header("x-client-request-id", &turn_id)
             .json(&wire_request);
         if matches!(mode, ResponseMode::NonStreaming) {
             builder = builder.timeout(self.timeout);
@@ -283,6 +267,34 @@ impl CodexClient {
             .map_err(map_request_error)
             .inspect_err(|error| observer.emit_failed(error))?;
         Ok(response)
+    }
+
+    /// Share refreshed credentials and Codex session headers across endpoint families.
+    async fn authenticated_request(
+        &self,
+        http: &reqwest::Client,
+        endpoint: &str,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let token = self.session.current().await?;
+        let turn_id = Uuid::new_v4().to_string();
+        let client_version = self
+            .resolved_client_version
+            .get_or_init(|| self.client_version.resolve())
+            .await;
+        Ok(http
+            .post(endpoint)
+            .bearer_auth(&token.access_token)
+            .header("chatgpt-account-id", &token.chatgpt_account_id)
+            .header("originator", ORIGINATOR)
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("version", &client_version.version)
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("codex_cli_rs/{}", client_version.version),
+            )
+            .header("session-id", &self.session_id)
+            .header("thread-id", &turn_id)
+            .header("x-client-request-id", &turn_id))
     }
 }
 
@@ -315,6 +327,10 @@ impl ProviderClient for CodexClient {
     }
 
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
+        Some(self)
+    }
+
+    fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
         Some(self)
     }
 
