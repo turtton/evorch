@@ -5,6 +5,9 @@ mod artifacts;
 mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
+#[cfg(test)]
+pub(crate) use cancellation::HookPoint;
+pub(crate) use cancellation::{ExecutionControl, PublicationToken};
 mod chat_restore;
 mod child_renewal;
 mod completion_relay;
@@ -90,6 +93,8 @@ pub(crate) struct Shared {
     #[cfg(test)]
     admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
+    #[cfg(test)]
+    execution_hooks: cancellation::TestHooks,
     /// Stop and chat renewal serialize per run, not behind other chats' storage work.
     stop_restore_gates: Mutex<HashMap<RunId, Weak<Mutex<()>>>>,
     /// Runs the operator stopped. Neither agent messages nor answers continue them
@@ -270,7 +275,7 @@ pub(crate) struct RunEntry {
     inbox_tx: mpsc::Sender<crate::runtime::user_inbox::UserInput>,
     user_inbox: Arc<UserInbox>,
     pending_reference: Arc<Mutex<Option<PendingReference>>>,
-    cancel_tx: watch::Sender<RunInterrupt>,
+    execution: Arc<ExecutionControl>,
     compact_tx: watch::Sender<u64>,
     model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
     /// run の最終 assistant テキスト (loop 側 result_tx と対になる観測口)。
@@ -667,6 +672,8 @@ impl AgentRuntime {
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 held_messages: Mutex::new(HashMap::new()),
@@ -983,6 +990,8 @@ impl AgentRuntime {
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 held_messages: Mutex::new(HashMap::new()),
@@ -1218,13 +1227,12 @@ impl AgentRuntime {
         // An explicitly validated conversation restore starts a new generation of
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
-        if parent.is_none()
+        let resets_cancellation = parent.is_none()
             && (matches!(
                 &continuation,
                 RunContinuation::Restored(_) | RunContinuation::Resume { .. }
-            ) || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()))
-            && let Some(intent) = intents.get_mut(&run_id)
-        {
+            ) || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()));
+        if resets_cancellation && let Some(intent) = intents.get_mut(&run_id) {
             intent.cancelled = false;
         }
         let cancelled = intents.get(&run_id).is_some_and(|intent| intent.cancelled)
@@ -1235,11 +1243,26 @@ impl AgentRuntime {
             .get(&run_id)
             .and_then(|intent| intent.parent)
             .or(parent);
+        // Pre-admission reservations and registration share a single execution.
+        // An explicit resume or replacement of a registered run starts a new one.
+        let execution =
+            if !resets_cancellation && !lock_runs(&self.shared.runs).contains_key(&run_id) {
+                intents.get(&run_id).and_then(|i| i.execution.clone())
+            } else {
+                None
+            }
+            .unwrap_or_else(|| ExecutionControl::new(cancelled));
+        let execution = if cancelled && !execution.cancelled() {
+            ExecutionControl::new(true)
+        } else {
+            execution
+        };
         intents.insert(
             run_id,
             cancellation::SpawnIntent {
                 parent: owner,
                 cancelled,
+                execution: Some(Arc::clone(&execution)),
             },
         );
         let run = if self.shared.model_for(&config).requires_admission() {
@@ -1251,6 +1274,8 @@ impl AgentRuntime {
                 config,
                 continuation,
                 review_seed,
+                Arc::clone(&execution),
+                &intents,
             )
         } else {
             self.register_without_admission(
@@ -1261,11 +1286,12 @@ impl AgentRuntime {
                 config,
                 continuation,
                 review_seed,
+                Arc::clone(&execution),
+                &intents,
             )
         };
-        if cancelled {
-            let _ = self.cancel(run);
-        }
+        drop(intents);
+
         run
     }
 
@@ -1280,7 +1306,20 @@ impl AgentRuntime {
         mut config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
+        execution: Arc<ExecutionControl>,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
     ) -> RunId {
+        // I and A are held by the registration caller. Observing cancellation
+        // is nonblocking: only G may change this flag, monotonically.
+        if intents.get(&run_id).is_none_or(|intent| {
+            intent
+                .execution
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, &execution))
+        }) {
+            return run_id;
+        }
+        debug_assert!(!intents.get(&run_id).is_some_and(|i| i.cancelled) || execution.cancelled());
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
         let history_only = matches!(continuation, RunContinuation::Resume { .. });
         let original_prompt = prompt.clone();
@@ -1438,7 +1477,7 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
-        let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
+        let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
             watch::channel(config.model_preference.clone());
@@ -1463,6 +1502,7 @@ impl AgentRuntime {
             }
         };
         let task = RunTask {
+            publication: execution.publication(),
             ancestry,
             turn,
             run_id,
@@ -1514,7 +1554,7 @@ impl AgentRuntime {
                     inbox_tx,
                     user_inbox,
                     pending_reference: Arc::new(Mutex::new(pending_reference)),
-                    cancel_tx,
+                    execution,
                     compact_tx,
                     model_preference_tx,
                     result_rx,
@@ -1698,12 +1738,24 @@ impl AgentRuntime {
             pending_reference_id.clone(),
         )
         .map_err(|error| error.to_string())?;
-        config.ownership = self.handoff_thread_goal(
+        // Reserve before Q: the handoff callback may publish terminal under R,
+        // but must never acquire I or wait for a gate while Q is held.
+        #[cfg(test)]
+        {
+            let source_execution = lock_runs(&self.shared.runs)
+                .get(&source_run_id)
+                .map(|entry| Arc::clone(&entry.execution));
+            if let Some(source) = source_execution {
+                self.execution_hook(cancellation::HookPoint::HandoffBeforeReserve, &source);
+            }
+        }
+        let execution = self.reserve_admission(run_id, None, None);
+        let handoff = self.handoff_thread_goal(
             source_run_id,
             run_id,
             source_config.ownership.as_ref(),
             |owner| {
-                self.reserve_admission(run_id, None, owner.clone());
+                self.update_admission_owner(run_id, &execution, owner.clone());
                 before_spawn();
                 self.shared
                     .bus
@@ -1713,7 +1765,14 @@ impl AgentRuntime {
                         summary,
                     }));
             },
-        )?;
+        );
+        config.ownership = match handoff {
+            Ok(owner) => owner,
+            Err(reason) => {
+                self.fail_reserved_admission(run_id, &execution, reason.clone());
+                return Err(reason);
+            }
+        };
         crate::thread_lineage::record_escalation(
             self,
             run_id,
@@ -1990,7 +2049,7 @@ impl AgentRuntime {
             {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
-                entry.cancel_tx.send_replace(RunInterrupt::Stop);
+                entry.execution.cancel_tx.send_replace(RunInterrupt::Stop);
             } else {
                 continue;
             }
@@ -2041,8 +2100,8 @@ impl AgentRuntime {
     /// # Errors
     /// Returns [`RuntimeError::UnknownRun`] if the root has no run or spawn intent.
     pub fn cancel_subtree(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        // Keep intents locked from collection through cancellation. Spawning uses
-        // the same intents -> admissions -> runs order and inherits this fence.
+        // Collection and the inherited fence use I -> A -> R. Cancellation of
+        // the collected executions happens only after releasing these locks.
         let mut intents = self
             .shared
             .spawn_intents
@@ -2060,15 +2119,27 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
+        let mut cancellations = Vec::new();
         for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
-            intents.entry(target).or_default().cancelled = true;
-            if let Some(admission) = admissions.get_mut(&target)
-                && admission.result.borrow().is_none()
+            if let Some(execution) =
+                cancellation::current_execution(target, &intents, &admissions, &runs)
             {
-                admission.cancelled = true;
-            } else if let Some(entry) = runs.get(&target) {
-                entry.cancel_tx.send_replace(RunInterrupt::Cancel);
+                if let Some(admission) = admissions.get_mut(&target)
+                    && Arc::ptr_eq(&admission.execution, &execution)
+                {
+                    admission.cancelled = true;
+                }
+                cancellations.push(execution);
             }
+            intents.entry(target).or_default().cancelled = true;
+        }
+        drop(runs);
+        drop(admissions);
+        drop(intents);
+        for execution in cancellations {
+            #[cfg(test)]
+            self.execution_hook(cancellation::HookPoint::SubtreeCollected, &execution);
+            self.cancel_execution(&execution);
         }
         Ok(())
     }
@@ -3437,7 +3508,12 @@ mod stop_cancel_tests {
         }
         assert!(!runtime.spawn_cancelled(unrelated));
         assert_eq!(
-            *runtime.entry(unrelated).unwrap().cancel_tx.borrow(),
+            *runtime
+                .entry(unrelated)
+                .unwrap()
+                .execution
+                .cancel_tx
+                .borrow(),
             RunInterrupt::None
         );
         // Both pre-recorded intents and children spawned after cancellation are fenced.
@@ -3612,18 +3688,27 @@ mod review_registration_tests {
         let context = crate::escalation_review::ReviewRunContext::empty(&run.to_string());
         context.add_user_request(&run.to_string(), "prepared evidence");
         drop(storage);
-        runtime.register_run(
-            run,
-            None,
-            Role::Worker,
-            "not evidence".into(),
-            RunConfig::default(),
-            RunContinuation::Fresh,
-            Some(ReviewSeed {
-                provenance: HostProvenance::FreshHostSubmission,
-                context,
-            }),
-        );
+        runtime.reserve_admission(run, None, None);
+        let execution = runtime.execution_snapshot(run).unwrap();
+        {
+            let intents = runtime.shared.spawn_intents.lock().unwrap();
+            let admissions = runtime.shared.admissions.lock().unwrap();
+            runtime.register_run(
+                run,
+                None,
+                Role::Worker,
+                "not evidence".into(),
+                RunConfig::default(),
+                RunContinuation::Fresh,
+                Some(ReviewSeed {
+                    provenance: HostProvenance::FreshHostSubmission,
+                    context,
+                }),
+                execution,
+                &intents,
+            );
+            drop(admissions);
+        }
         assert_eq!(
             runtime.shared.review_runs.lock().unwrap()[&run]
                 .requests()

@@ -548,7 +548,7 @@ async fn stop_at_post_registration_admission_boundary_interrupts_new_root() {
         &runtime.entry(root).unwrap().mailbox
     ));
     assert_eq!(
-        *runtime.entry(root).unwrap().cancel_tx.borrow(),
+        *runtime.entry(root).unwrap().execution.cancel_tx.borrow(),
         RunInterrupt::Stop
     );
     assert_eq!(

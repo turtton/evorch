@@ -4,6 +4,7 @@
 mod apply_patch_cache;
 #[path = "hosted_search_cache/mod.rs"]
 mod hosted_search_cache;
+mod image_generation_cache;
 mod support;
 use std::sync::Arc;
 

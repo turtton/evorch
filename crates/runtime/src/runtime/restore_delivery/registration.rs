@@ -1,15 +1,33 @@
 use super::*;
 
 impl AgentRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime) fn register_restored(
         &self,
         runs: &mut HashMap<RunId, RunEntry>,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
+        execution: Arc<ExecutionControl>,
         identity: (RunId, Option<RunId>, Role, RunConfig, RunId),
         restored: RestoredState,
         trigger: &AgentMessage,
         durable_parent: Option<(RunId, bool)>,
-    ) {
+    ) -> Result<(), RuntimeError> {
         let (run_id, parent, role, mut config, sender) = identity;
+        if execution.cancelled()
+            || intents.get(&run_id).is_none_or(|i| {
+                i.cancelled
+                    || i.execution
+                        .as_ref()
+                        .is_none_or(|e| !Arc::ptr_eq(e, &execution))
+            })
+            || parent
+                .and_then(|p| intents.get(&p))
+                .is_some_and(|i| i.cancelled)
+        {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
+        }
         self.install_run_ownership_guard(run_id, &mut config);
         // Durable question answers are flushed by the loop. They need neither
         // a synthetic message nor a rewrite of the saved provider prefix.
@@ -31,7 +49,7 @@ impl AgentRuntime {
             watch::channel(restored.messages.len() + usize::from(!history_only));
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
-        let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
+        let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
             watch::channel(config.model_preference.clone());
@@ -87,6 +105,7 @@ impl AgentRuntime {
             restored.turn.as_ref(),
         );
         let task = restored.attach_to(RunTask {
+            publication: execution.publication(),
             ancestry,
             turn,
             run_id,
@@ -124,7 +143,7 @@ impl AgentRuntime {
                 inbox_tx,
                 user_inbox,
                 pending_reference: Arc::new(Mutex::new(pending_reference)),
-                cancel_tx,
+                execution,
                 compact_tx,
                 model_preference_tx,
                 result_rx,
@@ -149,6 +168,7 @@ impl AgentRuntime {
         if let Some(entry) = runs.get_mut(&run_id) {
             entry._join = Some(join);
         }
+        Ok(())
     }
 }
 
@@ -192,25 +212,41 @@ mod review_tests {
                 content: "internal".into(),
                 reply_to: None,
             };
-            runtime.register_restored(
-                &mut lock_runs(&runtime.shared.runs),
-                (run, None, Role::Worker, RunConfig::default(), run),
-                RestoredState {
-                    admission_reservation: None,
-                    turn: None,
-                    boundary_pending: false,
-                    continuity: Default::default(),
-                    pending_reference_id: None,
-                    messages: vec![],
-                    checkpoints: vec![],
-                    trigger: None,
-                    turn_completed: true,
-                    allowed_directories: Default::default(),
-                    allowed_instructions: Default::default(),
-                },
-                &trigger,
+            let mut intents = runtime.shared.spawn_intents.lock().unwrap();
+            let mut admissions = runtime.shared.admissions.lock().unwrap();
+            let execution = AgentRuntime::prepare_restored_execution(run, None, &intents).unwrap();
+            AgentRuntime::install_restored_execution(
+                run,
                 None,
+                &mut intents,
+                &mut admissions,
+                &execution,
             );
+            runtime
+                .register_restored(
+                    &mut lock_runs(&runtime.shared.runs),
+                    &intents,
+                    execution,
+                    (run, None, Role::Worker, RunConfig::default(), run),
+                    RestoredState {
+                        admission_reservation: None,
+                        turn: None,
+                        boundary_pending: false,
+                        continuity: Default::default(),
+                        pending_reference_id: None,
+                        messages: vec![],
+                        checkpoints: vec![],
+                        trigger: None,
+                        turn_completed: true,
+                        allowed_directories: Default::default(),
+                        allowed_instructions: Default::default(),
+                    },
+                    &trigger,
+                    None,
+                )
+                .unwrap();
+            drop(admissions);
+            drop(intents);
             assert!(
                 !runtime
                     .shared

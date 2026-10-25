@@ -7,6 +7,8 @@ UI・見た目に関わる作業向けの指示です。
 - アクセシビリティ (コントラスト・キーボード操作) を崩さない
 - レスポンシブの崩れを最低 2 サイズで確認する
 - UI の相談でモックを見せる場合は、画像 (png / jpg / gif / webp) か HTML を作り、render_artifact で保存する。HTML の CSS とスクリプトはファイル内に書く。画像は `<img src>` や CSS の `url()` から HTML ファイルからの相対パスで参照すれば、取り込み時に埋め込まれる (埋め込めない参照があると取り込みは失敗し、その参照が示される)
+- 素材が必要で generate_image が使える場合は、生成・編集して variant（縮小版）を保存し、HTML から相対パスで参照して render_artifact で取り込む。シリーズの素材は前の画像を reference_image_paths に渡して画風をそろえる
+- generate_image は OpenAI に生成・編集を送り、参照画像も追加の承認なしで送信する。利用枠の消費が多い。生成画像を採用するか参考にとどめるかは自分で判断してよいが、UI 本体は HTML で作り、生成画像を UI モックの代わりにしない
 - 参考の素材や試作は repo を汚さないよう $TMPDIR に置いてよい。render_artifact は workspace と $TMPDIR のファイルを取り込める
 - 改訂するたびに render_artifact で保存し直す。比較したい案は別々に保存する
 - render_artifact はユーザーに表示しない。返された artifact_id と各案の違いを結果に含め、会話の持ち主が present で見せる

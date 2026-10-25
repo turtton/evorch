@@ -17,6 +17,7 @@ event-bus = { path = "../event-bus" }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
+image = { workspace = true }
 reqwest = { workspace = true }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }

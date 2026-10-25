@@ -200,11 +200,23 @@ impl AgentRuntime {
                 ownership,
                 ..RunConfig::default()
             };
+            let mut intents = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut runs = lock_runs(&self.shared.runs);
             // A complete intervening restore may already be terminal: phase alone is not a generation check.
             match (previous.as_ref(), runs.get(&recipient)) {
                 (_, Some(entry)) if is_live(entry) => {
                     drop(runs);
+                    drop(admissions);
+                    drop(intents);
                     self.validate_run_mutation(recipient)?;
                     let result = self.try_live_delivery(
                         sender,
@@ -230,10 +242,18 @@ impl AgentRuntime {
             if let Some(reason) = self.continuation_refusal(recipient, runs.get(&recipient)) {
                 return Err(fail(reason));
             }
+            let execution = Self::prepare_restored_execution(recipient, parent, &intents)?;
             // The writer only upserts the already-read record; no storage read holds runs.
             store.handle.upsert_run_context(&record).map_err(|error| {
                 fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
             })?;
+            Self::install_restored_execution(
+                recipient,
+                parent,
+                &mut intents,
+                &mut admissions,
+                &execution,
+            );
             self.shared.run_ids.observe(recipient);
             message.message_id = format!(
                 "msg-{}",
@@ -242,11 +262,13 @@ impl AgentRuntime {
             restored.trigger = Some(message.clone());
             self.register_restored(
                 &mut runs,
+                &intents,
+                execution,
                 (recipient, parent, role, config, sender),
                 restored,
                 &message,
                 durable_parent,
-            );
+            )?;
             return Ok((
                 message.message_id.clone(),
                 message,

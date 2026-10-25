@@ -162,6 +162,9 @@ define_meta_ops! {
             runtime.submit_lesson_review(state.caller_run_id(), state.run_config(), args)
         }))
     },
+    GenerateImage => "generate_image" => crate::image_generation::spec => |state, runtime, input| {
+        crate::image_generation::dispatch(state, runtime, input).await
+    },
     RenderArtifact => "render_artifact" => crate::artifacts::render_spec => |state, runtime, input| {
         crate::artifacts::render(state, runtime, input)
     },

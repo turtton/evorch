@@ -3,6 +3,8 @@
 //! 公式 OpenAI API へは Responses API (`POST {base_url}/responses`) で接続します。
 //! wire 変換と SSE 解釈は Codex と共有する [`crate::wire::responses`] が担います。
 
+mod images;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +16,10 @@ use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
 use crate::http::stream::adapt_sse_stream;
-use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
+use crate::http::{
+    UsageEmitter, build_http_client, build_http_client_with_read_timeout, map_request_error,
+    map_response_error,
+};
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::stream::{DeltaStream, StreamEvent};
@@ -50,6 +55,7 @@ impl Default for OpenAiConfig {
 /// OpenAI Responses API を呼び出す provider クライアント。
 pub struct OpenAiClient {
     http: reqwest::Client,
+    image_http: reqwest::Client,
     endpoint: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
@@ -64,6 +70,10 @@ impl OpenAiClient {
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
         Ok(Self {
             http: build_http_client(None)?,
+            image_http: build_http_client_with_read_timeout(
+                Some(crate::image_generation::IMAGE_TIMEOUT),
+                crate::image_generation::IMAGE_TIMEOUT,
+            )?,
             endpoint: format!("{}/responses", config.base_url.trim_end_matches('/')),
             timeout: config.timeout,
             event_bus: config.event_bus,
@@ -146,6 +156,9 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ProviderClient for OpenAiClient {
+    fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
+        Some(self)
+    }
     fn supports_structured_output(&self) -> bool {
         true
     }

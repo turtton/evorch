@@ -1,5 +1,9 @@
 # Claude and Cursor providers
 
+For Codex (ChatGPT login) and OpenAI API image generation and editing, see
+[Image generation](image-generation.md). Only `openai-codex` and `openai` expose
+this optional capability; it uses a separate image-model chain, not chat tools.
+
 Open **Provider settings** to add a Claude API, Claude subscription, or Cursor
 profile. Claude API keys can be read from an environment variable or saved in
 the credential store. Subscription profiles support browser sign-in; Cursor also

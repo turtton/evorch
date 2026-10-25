@@ -55,7 +55,7 @@ impl AgentRuntime {
             let runs = super::super::lock_runs(&self.shared.runs);
             let entry = &runs[&child];
             let parent = &runs[&caller];
-            if parent.cancel_tx.borrow().is_interrupted() {
+            if parent.execution.cancel_tx.borrow().is_interrupted() {
                 return Err("answer saved, but the parent was interrupted; retry after explicitly resuming the parent".into());
             }
             let terminal = *entry.phase_rx.borrow();
@@ -65,7 +65,7 @@ impl AgentRuntime {
             ) {
                 // An interruption of a live child is the operator's or parent's
                 // decision; the answer must not undo it.
-                match *entry.cancel_tx.borrow() {
+                match *entry.execution.cancel_tx.borrow() {
                     crate::state::RunInterrupt::Stop => {
                         return Err(refused(&RunRestoreFailure::StoppedByOperator));
                     }
@@ -78,7 +78,7 @@ impl AgentRuntime {
                 // its public phase remains live until the snapshot is safe.
                 return Ok(entry.mailbox.is_closed().then(|| FinalizingChild {
                     phase: entry.phase_rx.clone(),
-                    caller_cancel: parent.cancel_tx.subscribe(),
+                    caller_cancel: parent.execution.cancel_tx.subscribe(),
                 }));
             }
             if let Some(reason) = self.continuation_refusal(child, Some(entry)) {
@@ -152,18 +152,30 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())?;
         self.reserve_restored_shell_handles(child, &restored)
             .map_err(|error| error.to_string())?;
+        let mut intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut runs = super::super::lock_runs(&self.shared.runs);
         if !matches!(
             *runs[&caller].phase_rx.borrow(),
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
         ) || *runs[&child].phase_rx.borrow() != terminal
-            || runs[&caller].cancel_tx.borrow().is_interrupted()
+            || runs[&caller].execution.cancel_tx.borrow().is_interrupted()
             || self.continuation_refusal(child, runs.get(&child)).is_some()
         {
             return Err(
                 "answer saved, but the parent or child changed state before continuation".into(),
             );
         }
+        let execution = Self::prepare_restored_execution(child, Some(caller), &intents)
+            .map_err(|e| e.to_string())?;
         descriptor.restorable = false;
         descriptor.non_restorable_reason = Some("snapshot_consumed".into());
         record.restorable = false;
@@ -173,6 +185,13 @@ impl AgentRuntime {
             .handle
             .upsert_run_context(&record)
             .map_err(|error| error.to_string())?;
+        Self::install_restored_execution(
+            child,
+            Some(caller),
+            &mut intents,
+            &mut admissions,
+            &execution,
+        );
         self.shared
             .model
             .restore_route_pins(&child.to_string(), &descriptor.route_pins);
@@ -186,11 +205,14 @@ impl AgentRuntime {
         };
         self.register_restored(
             &mut runs,
+            &intents,
+            execution,
             (child, Some(caller), role, config, caller),
             restored,
             &trigger,
             None,
-        );
+        )
+        .map_err(|e| e.to_string())?;
         Ok(None)
     }
 }

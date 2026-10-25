@@ -8,6 +8,7 @@ pub(crate) mod dedup;
 pub mod error;
 mod hosted_web_search;
 pub mod http;
+mod image_generation;
 pub mod message;
 mod models;
 pub(crate) mod observe;
@@ -28,6 +29,10 @@ pub use error::ProviderError;
 pub use hosted_web_search::{
     HostedWebSearch, HostedWebSearchCitation, HostedWebSearchError, HostedWebSearchRequest,
     HostedWebSearchResponse,
+};
+pub use image_generation::{
+    ImageBackground, ImageGeneration, ImageGenerationError, ImageGenerationRequest,
+    ImageGenerationResponse, InlineImage,
 };
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,

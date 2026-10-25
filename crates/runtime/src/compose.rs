@@ -21,6 +21,7 @@ use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod hosted_search;
+mod image_generation;
 mod images;
 mod output_limits;
 
@@ -229,6 +230,7 @@ pub struct RoutedModel {
     affinity: Mutex<SessionAffinity>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
+    image_health: Arc<routing::ProviderHealth>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
     /// フォールバックの一周で Retry-After を待つ上限。
@@ -287,6 +289,7 @@ impl RoutedModel {
                 .with_health(Arc::clone(&health)),
             router: composed.router.with_health(Arc::clone(&health)),
             health,
+            image_health: Arc::new(routing::ProviderHealth::default()),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
@@ -973,6 +976,18 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn image_generation_enabled(&self) -> bool {
+        !self.agents.image_generator_chain().is_empty()
+    }
+
+    async fn generate_image(
+        &self,
+        invocation: &AgentInvocationContext,
+        request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        self.generate_image_request(invocation, request).await
+    }
+
     fn edit_tools_by_run(&self) -> BTreeMap<(String, String), config::EditToolConfig> {
         self.edit_tools_by_run
             .lock()

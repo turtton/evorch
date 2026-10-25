@@ -7,6 +7,10 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use tools::ToolResult;
 
+#[cfg(test)]
+#[path = "team/image_tests.rs"]
+mod image_tests;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaimArgs {
@@ -138,7 +142,7 @@ impl LoopState {
         }
     }
 
-    pub(super) fn guard_team_artifact(
+    pub(crate) fn guard_team_artifact(
         &self,
         name: &str,
         input: &serde_json::Value,
@@ -167,6 +171,7 @@ impl LoopState {
                 input,
                 team.now(),
             ),
+            "generate_image" => crate::image_generation::guard_team_claims(self, input),
             _ => Ok(()),
         }
     }
