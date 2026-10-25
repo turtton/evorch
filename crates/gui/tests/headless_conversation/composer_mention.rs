@@ -108,6 +108,22 @@ fn write_untrusted_fixture_skills(root: &std::path::Path) {
     );
 }
 
+/// `notice` follows the sent message in the transcript and is rendered.
+fn assert_notice_below_message(harness: &HeadlessWorkbench<DemoSource>, notice: &str) {
+    let entries = harness.state().transcript().entries();
+    let message = entries
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+        .expect("user message");
+    assert!(
+        entries[message..]
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Notice { text } if text == notice)),
+        "{entries:?}"
+    );
+    assert!(harness.has_label(notice), "{notice}");
+}
+
 #[test]
 fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
     // Given: a trusted project with a source file and a repo skill, composer focused.
@@ -220,21 +236,60 @@ fn untrusted_projects_send_repo_skill_mentions_as_plain_text_with_a_notice() {
         assert!(!chat.text.contains(leaked), "{leaked}: {}", chat.text);
     }
     // Then: a notice below the message names them, says why and how to enable them.
-    let notice = "Sent @evorch-fixture-skill, @agents-fixture-skill as plain text — this project \
-                  is not trusted, so its own skills are not expanded. Enable \"Trust project \
-                  instructions\" in Project settings to use them.";
-    let entries = harness.state().transcript().entries();
-    let message = entries
-        .iter()
-        .position(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
-        .expect("user message");
-    assert!(
-        entries[message..]
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::Notice { text } if text == notice)),
-        "{entries:?}"
+    assert_notice_below_message(
+        &harness,
+        "Sent @evorch-fixture-skill, @agents-fixture-skill as plain text — this project is not \
+         trusted, so its own skills are not expanded. Enable \"Trust project instructions\" in \
+         Project settings to use them.",
     );
-    assert!(harness.has_label(notice));
+}
+
+#[test]
+fn revoking_trust_right_before_a_send_keeps_repo_skills_out_of_it() {
+    // Given: a trusted project whose `@` index, built while trusted, offers
+    // its repository skill, and a draft naming that skill.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let mut harness = workbench(temp.path(), &[], TrustState::Approved);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+    type_text(&mut harness, "use @evorch-fixture");
+    harness.state_mut().wait_mention_index();
+    harness.run();
+    assert!(skill_labels(&harness).contains(&"@evorch-fixture-skill".to_owned()));
+    type_text(&mut harness, "-skill please");
+    let typed = "use @evorch-fixture-skill please";
+    assert_eq!(harness.state().composer().input, typed);
+
+    // When: trust is revoked and the draft is sent at once, with no frame or
+    // index rebuild in between.
+    let project = ProjectId::new("mention-test");
+    let state = harness.state_mut();
+    state
+        .set_project_trust(&project, TrustState::Unapproved)
+        .expect("revoke");
+    // The index still holds the repository skill: only a frame would drop it.
+    assert!(state.composer().mentions.entries.iter().any(|entry| {
+        entry.kind == CompletionKind::Skill && entry.value == "evorch-fixture-skill"
+    }));
+    state.submit_composer();
+
+    // Then: the send goes ahead with the skill left as plain text.
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("one chat is sent: {:?}", harness.state().issued());
+    };
+    assert_eq!(chat.text, typed);
+    assert!(!chat.text.contains("EVORCH FIXTURE BODY"));
+    assert!(harness.state().composer().input.is_empty());
+    // Then: the notice explains why it was not expanded.
+    harness.run();
+    assert_notice_below_message(
+        &harness,
+        "Sent @evorch-fixture-skill as plain text — this project is not trusted, so its own \
+         skills are not expanded. Enable \"Trust project instructions\" in Project settings to \
+         use them.",
+    );
 }
 
 #[test]
