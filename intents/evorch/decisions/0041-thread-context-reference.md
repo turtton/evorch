@@ -178,6 +178,29 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。全 run の約 51%（直近約 11 日）を保持でき、oversized は 0、物理索引量も約 512 MiB で、DB 全体の上限 10 GiB と現在の約 2.29 GiB に対して余裕がある。一方、現在の全履歴（約 49 日）は課金約 708.5 MiB で、1 GiB なら全件を保持できる。直近 1.6 日だけで 256 MiB を使っており、負荷の高い期間には 512 MiB の保持期間が数日まで縮む可能性がある。また、旧データは順序 3 以降も provenance 不明のまま保留になるため、実際に索引へ入るのは sidecar を持つ新しい run だけである。既定値を変えるかどうかは利用者が判断する（本計測では変更していない）。
 
+### Phase B 順序 5 開始ゲートの計測（W2）
+
+手法: W6 の store コピー（`store-copy.db`、原本ではない）を新しい作業ディレクトリへ複製し、`storage::db` で v25 へ移行したコピーだけを読み書きした。ハーネスは `crates/storage/src/writer/index/gate_measure.rs`（`#[ignore]`。release で `EVORCH_INDEX_GATE_SOURCE` / `EVORCH_INDEX_GATE_WORK`、任意で `EVORCH_INDEX_GATE_MERGE_PAGES` を与えて `cargo test --release -p storage --lib gate_measure -- --ignored --nocapture`）。出力に本文は含めない。各書き込みの直前に `wal_checkpoint(TRUNCATE)` で WAL を空にし、書き込み直後の WAL（frame 数）と checkpoint 後の DB 増加を測った。`worst = WAL + DB 増加 + SHM` は、WAL が新しい frame をすべて抱えたまま DB も伸びる場合の P の増分で、admission が上から抑えるべき値である。索引 commit は全 1,858 run を全 block native とみなした上界（W6 の `upper_bound` と同じ仮定）で、job と同じ順（作成時刻の新しい順）に `SqliteThreadIndex::commit_index_input` で 1 run 1 transaction として入れた。計測中は同じマシンで並行担当のビルドも動いていたため、時間の外れ値（数百 ms）には CPU / I/O の干渉が含まれる。
+
+| 項目 | 値 |
+|---|---|
+| 前景の正本 transaction（F の根拠） | 最大 snapshot（JSON 9,684,989 B）の再保存: WAL 9,986,912 + DB 9,846,784 + SHM 32,768 = **19,866,464 B**（同じ内容の新規 run の保存は 16,274,464 B）。所要 129–140 ms。最大 note（8,141 B）の追記は 78,120 B。event は `max_event_bytes`（262,144 B、保存済みの最大 255,956 B）で上限があり snapshot より小さい |
+| 索引 commit（FTS 既定 = automerge 4、run 1） | p50 18 ms / p95 164 ms / p99 347 ms / 最大 1,192 ms。FTS5 の自動 merge が commit の中で走り、1,855 件中 614 件で WAL が入力の 3 倍を超えた（最大 11,696 frame = 48.2 MB、本文 966 KB の run）。小さい run でも課金の 337 倍の増加があり、`max_wal_bytes`（64 MiB）に対して G の上界を置けない |
+| 索引 commit（`automerge=0`・`crisismerge=64`、merge は commit 後の別 transaction で `merge` 64 page を no-op まで、run 2） | p50 10.5 ms / p95 80.6 ms / p99 211 ms / 最大 501 ms。本文の大きさ別の p95: 16 KB 未満 8.5 ms、16–64 KB 23 ms、64–128 KB 37 ms、128–256 KB 77 ms、256–512 KB 147 ms、512 KB–1 MB 241 ms（最大 252 ms）。WAL 最大 1,310 frame（5.4 MB）、DB 増加最大 4.16 MB、worst 最大 9.31 MB。merge step は 11,711 回（commit 1 回あたり約 6.3 回）で p50 2.8 ms / p95 11.7 ms / 最大 515 ms、最大 1,115 frame。全件後の FTS は 451,768,320 B（W6 の全件構築 449,568,768 B と同程度） |
+| evict（課金の大きい 40 run） | 最大 3,064 frame、WAL / 課金は最大 6.55 倍、最大 338 ms |
+| 規模 | 本文 > 256 KiB は 179 run、> 512 KiB は 27 run、> 1 MiB は 0 run。block は最大 1,169（> 2,000 は 0） |
+
+決めた値（`crates/storage/src/writer/index/capacity.rs` の `MEASURED_POLICY` と merge 定数）:
+
+- FTS: 索引 job の開始時に `automerge=0`・`crisismerge=64` を設定し、merge は job の別 step（`merge` 64 page）で行う。commit の transaction では merge しない。run 1 のとおり、既定のままでは G の上界も前景待ちも保証できないためである。
+- `F = 19,866,464 B`、`safety_factor = 2`、`R_floor = 64 MiB`。よって `R = max(64 MiB, 39,732,928 B) = 67,108,864 B`。safety 2 は最大 snapshot の約 2 倍までの成長を見込む。R_floor は `max_wal_bytes` と同じ 64 MiB とし、event / note の連続にも余裕を残す。
+- G（commit）: `pages = ceil(1.5 × charged / page_size) + 256`、`G_wal = pages × (page_size + 24) + 32`、`G_db = max(0, pages × page_size − freelist)`、`G_shm = 32 KiB × (⌊pages / 4096⌋ + 1)`。run 2 の全 1,858 commit が上界内だった（最大使用率は WAL 88.5%、DB 67.5%、合計 75.4%）。freelist は実測済みの空きとして G_db から引くが、削除予定の論理 bytes は引かない。
+- G（evict）: `pages = ceil(7 × charged / page_size) + 256`（実測は最大 6.55 倍）。G（merge step）: 2,048 page 固定（実測は最大 1,115 frame）。
+- `J = 16 MiB`。最大 step の worst（9.31 MB）を上回り、WAL 側も約 40 MB 以下の WAL なら再開できる。
+- step 上限: 本文 1 MiB かつ 2,048 block。実測で超える run は 0（oversized_step 0 件）。超えた run は `evicted(oversized)` とし、`last_error_code` を `oversized_step` にする（max_bytes 超えは `oversized_budget`）。request の gap 理由も `oversized_step` / `oversized_budget` で分ける。
+- 論理予算の evict は commit とは別の step で 1 run ずつ行い、1 step の前景待ちを commit 1 回分か evict 1 回分に抑える。
+- 前景の書き込み待ちの許容値（索引無効・同じ workload を基準とし、E2E 計測の前に固定）: Δp50 ≤ 5 ms、Δp95 ≤ 50 ms、Δmax ≤ 250 ms。step 上限 1 MiB の commit は p95 241 ms で、Δmax の許容内に収まる見込みである。順序 5 実装後の E2E 計測で超えた場合は step 上限を 512 KiB に下げて（27 run が oversized_step になる。256–512 KB の p95 は 147 ms）再計測し、それでも超える場合は実装を止めて報告する。
+
 ## Phase A の設計
 
 ### A-1 storage
@@ -743,7 +766,7 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
   - `repo/thread_index/index.rs` の `SqliteThreadIndex`（`ThreadIndexRepository`）: ヘッダだけの keyset discovery（索引行のない run を新しい順、`discover_batch`）、lease epoch・期限・revision・generation・state・version・request target を確認してからの差分 commit（`ON CONFLICT DO UPDATE`、消えた key の削除、FTS・集計・state・request target を同一 transaction）、同じ guard 付きの失敗 commit（1 s から 2 倍・上限 5 分、同 revision 5 回目で `blocked(attempts_exhausted)`）、`promote_due_retries`（試行数は維持）、`evict_index`（block・FTS・集計を削除、generation を進める）、`eviction_candidates`（`retention_at_ns ASC, run_id ASC`）、`delete_index_source`（tombstone、pending の request target を `deleted` gap）。
   - writer: `SaveSnapshotBundle` / `SaveSnapshotBundleWithEvidence` / `AppendIndexedNote` コマンドと `StorageHandle::{save_snapshot_bundle, save_snapshot_bundle_with_evidence_and_reference_consumption, append_indexed_note}`。receipt は commit 後にだけ返す。reader に `Database::{snapshot_bundle, resolve_guarded_reference, thread_index_run_status}`。
   - source を更新する全経路の棚卸し: snapshot は `run_context::upsert`（writer の `UpsertRunContext` と `UpsertRunContextWithEvidence`）と新しい bundle コマンド、note は `run_ledger::append`（`AppendRunLedger`）と `AppendIndexedNote`。いずれも bundle / note の保存関数を通るようにした。`compare_and_swap_restore_state` と `invalidate` は `config_json` / `restorable` だけを変え、索引の入力（messages / checkpoints / note）を変えない。本番コードに `run_contexts` / `run_ledger` を削除する経路はない（`run_ledger` は v7 の trigger で置換も拒否）。そのため `delete_index_source` の呼び出し元は現時点でなく、正本削除を追加するときは同じ transaction で呼ぶ。
-- [ ] 順序 5 開始ゲート — reserve の R_floor / safety_factor / F、G の上界係数、再開 J、step 上限、前景待ちの絶対増分・倍率を実測から ADR に数値で固定。結果:
+- [x] 順序 5 開始ゲート — reserve の R_floor / safety_factor / F、G の上界係数、再開 J、step 上限、前景待ちの絶対増分・倍率を実測から ADR に数値で固定。結果: 「Phase B 順序 5 開始ゲートの計測（W2）」節に記録（F 19,866,464 B、R 64 MiB、J 16 MiB、G 係数、step 1 MiB / 2,048 block、許容 Δp50 5 ms / Δp95 50 ms / Δmax 250 ms）。E2E の前景待ちの検証は順序 5 の項目で行う。commit: 本項目更新コミット（`git log` で確認）
 - [ ] 順序 5 job・lease・上限 — commit:
 - [ ] 順序 6 検索・cursor・ref — commit:
 - [ ] 順序 7 CLI（`reindex-threads`）・設定・spec — commit:

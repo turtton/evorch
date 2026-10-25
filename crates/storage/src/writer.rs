@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod cleanup;
+mod index;
 #[cfg(test)]
 mod manual_cleanup_tests;
 mod state;
