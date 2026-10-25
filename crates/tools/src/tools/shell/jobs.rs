@@ -18,6 +18,8 @@ use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 mod handle_tests;
 mod output;
 mod process;
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests;
 #[cfg(test)]
 mod wait_tests;
 use output::LiveOutput;

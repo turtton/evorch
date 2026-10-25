@@ -449,10 +449,13 @@ mod linux {
         handle.kill();
     }
 
-    // Given: a running child with a background helper / When: the child is
-    // dropped without being awaited / Then: its whole group stops.
+    // Given: a running child with a background helper, and a clone of its
+    // group handle kept elsewhere (as a shell job keeps one for stop) / When:
+    // the child is dropped without being awaited / Then: its whole group
+    // stops, and the clone is retired before Tokio reaps the leader, so a
+    // later kill or guard drop through it cannot reach a reused id.
     #[tokio::test]
-    async fn dropping_a_group_child_stops_its_group() {
+    async fn dropping_a_group_child_stops_its_group_and_retires_every_clone() {
         let mut child =
             GroupChild::spawn(&mut detached("sleep 60 & echo $!; wait")).expect("spawn");
         let mut stdout = tokio::io::BufReader::new(child.take_stdout().expect("stdout"));
@@ -462,10 +465,15 @@ mod linux {
             .await
             .expect("read the helper pid");
         let helper = parse_pid(&line);
-        let leader = child.group().leader().expect("the leader's pid");
+        let kept = child.group().clone();
+        let leader = kept.leader().expect("the leader's pid");
         drop(child);
+        assert_eq!(kept.leader(), None, "the kept clone outlived the drop");
         assert_stops(helper);
         assert_stops(leader);
+        kept.kill();
+        drop(ProcessGroupGuard::new(kept.clone()));
+        assert_eq!(kept.leader(), None);
     }
 
     // Given: a stdio server that started a background helper / When: the session

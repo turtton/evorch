@@ -109,7 +109,9 @@ pub fn apply_launch_policy(command: &mut Command) {
 /// is reaped and its descendants are gone, the id can belong to an unrelated
 /// group. So the group is only ever killed before its leader is reaped: reaping
 /// goes through [`kill_and_reap`](Self::kill_and_reap), which kills what is
-/// left of the group, reaps, and retires the handle under one lock. After that,
+/// left of the group, reaps, and retires the handle under one lock, and a
+/// leader left to another reaper is first stopped and retired with
+/// [`kill_and_release`](Self::kill_and_release). After that,
 /// [`kill`](Self::kill) on any clone sends nothing.
 #[derive(Debug, Clone)]
 pub struct ProcessGroup {
@@ -167,6 +169,16 @@ impl ProcessGroup {
         *self.lock() = None;
     }
 
+    /// Kill the whole group a last time and retire the handle, before the
+    /// leader is handed to a reaper that cannot retire it. Once SIGKILL has
+    /// reached the group, nothing in it needs another signal.
+    pub fn kill_and_release(&self) {
+        let mut leader = self.lock();
+        if let Some(pid) = leader.take() {
+            let _ = rustix::process::kill_process_group(pid, Signal::KILL);
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Pid>> {
         self.leader.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -216,40 +228,70 @@ pub fn wait_for_exit(leader: Pid) -> io::Result<()> {
 /// Waiting notices the leader's exit without reaping it (Linux: a pidfd), kills
 /// the group while the exited leader still reserves its id, which also stops
 /// descendants holding the leader's pipes, and only then reaps the leader.
-/// Dropping a child that was not reaped kills its group.
+/// Dropping a child that was not reaped kills its group and retires every
+/// clone of the group handle before Tokio reaps the child in the background.
 #[derive(Debug)]
 pub struct GroupChild {
     child: tokio::process::Child,
     group: ProcessGroup,
     #[cfg(target_os = "linux")]
-    exit: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+    exit: ExitNotifier,
 }
+
+/// Turns readable once the watched process has exited.
+#[cfg(target_os = "linux")]
+type ExitNotifier = tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>;
 
 impl GroupChild {
     /// Spawn `command`, which must already carry the launch policy
     /// ([`apply_launch_policy`] or [`crate::WrappedCommand::to_command`]).
     ///
+    /// On Linux the exit is watched through a pidfd (`pidfd_open`, Linux 5.3
+    /// or later). There is no fallback: where `pidfd_open` is refused, for
+    /// example by a seccomp filter that still allows `close_range`, the started
+    /// child's group is killed and the spawn fails.
+    ///
     /// # Errors
     /// Returns the spawn error, or the error of watching the started child,
-    /// after its group was killed.
+    /// naming the child and stating that its group was killed.
     pub fn spawn(command: &mut tokio::process::Command) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        return Self::spawn_watched(command, exit_notifier);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let child = command.spawn()?;
+            let group = ProcessGroup::new(child.id());
+            Ok(Self { child, group })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_watched(
+        command: &mut tokio::process::Command,
+        watch: impl FnOnce(&ProcessGroup) -> io::Result<ExitNotifier>,
+    ) -> io::Result<Self> {
         let mut child = command.spawn()?;
         let group = ProcessGroup::new(child.id());
-        #[cfg(target_os = "linux")]
-        let exit = match exit_notifier(&group) {
+        let exit = match watch(&group) {
             Ok(exit) => exit,
             Err(error) => {
-                group.kill();
+                // Nothing else holds the group yet; the unreaped child keeps
+                // its id reserved, and Tokio reaps it after the drop.
+                group.kill_and_release();
                 let _ = child.start_kill();
-                return Err(error);
+                let pid = child
+                    .id()
+                    .map_or_else(|| "?".to_owned(), |pid| pid.to_string());
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot watch child {pid} for its exit ({error}); its process group was \
+                         killed. pidfd_open (Linux 5.3+) must be permitted; there is no fallback"
+                    ),
+                ));
             }
         };
-        Ok(Self {
-            child,
-            group,
-            #[cfg(target_os = "linux")]
-            exit,
-        })
+        Ok(Self { child, group, exit })
     }
 
     pub const fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
@@ -337,15 +379,15 @@ impl GroupChild {
 
 impl Drop for GroupChild {
     fn drop(&mut self) {
-        // Tokio reaps a dropped child in the background; its group goes first.
-        self.group.kill();
+        // Tokio reaps a dropped child in the background, when no handle can
+        // tell any more. So the group is killed one last time and every clone
+        // retired before the child is handed over.
+        self.group.kill_and_release();
     }
 }
 
 #[cfg(target_os = "linux")]
-fn exit_notifier(
-    group: &ProcessGroup,
-) -> io::Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>> {
+fn exit_notifier(group: &ProcessGroup) -> io::Result<ExitNotifier> {
     let leader = group
         .leader()
         .ok_or_else(|| io::Error::other("the started child has no pid"))?;
@@ -353,4 +395,71 @@ fn exit_notifier(
     // wait, observing it does not reap the process.
     let pidfd = rustix::process::pidfd_open(leader, rustix::process::PidfdFlags::empty())?;
     tokio::io::unix::AsyncFd::with_interest(pidfd, tokio::io::Interest::READABLE)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_child_whose_exit_cannot_be_watched_is_stopped_and_reported() {
+        // Given: a started child with a background helper whose exit cannot be
+        // watched, as where a seccomp filter refuses pidfd_open.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("helper.pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "sleep 60 & echo $! > '{0}.tmp' && mv '{0}.tmp' '{0}'; wait",
+                pid_file.display()
+            ),
+        ]);
+        apply_launch_policy(&mut command);
+        let mut command = tokio::process::Command::from(command);
+        command.kill_on_drop(true);
+
+        // When: watching it fails once the helper runs.
+        let error = GroupChild::spawn_watched(&mut command, |_| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !pid_file.exists() {
+                assert!(Instant::now() < deadline, "the helper did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("watching the child fails");
+
+        // Then: the spawn fails closed, the error names the child and says its
+        // group was killed, and the child and the helper only a group kill
+        // reaches both stop.
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(
+            message.contains("its process group was killed"),
+            "{message}"
+        );
+        assert!(message.contains("there is no fallback"), "{message}");
+        let child = message
+            .strip_prefix("cannot watch child ")
+            .and_then(|rest| rest.split_once(' '))
+            .map(|(pid, _)| pid.to_owned())
+            .expect("the child's pid");
+        let helper = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        for pid in [child, helper] {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+            }) {
+                assert!(Instant::now() < deadline, "process {pid} still runs");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
 }
