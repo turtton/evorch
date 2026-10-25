@@ -83,7 +83,7 @@ pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, Diagnost
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
 pub use projection::{ReconcileSummary, SessionSnapshot};
-pub use read::StoredAgentMessage;
+pub use read::{RunContextHeader, StoredAgentMessage};
 pub use repo::event::StoredEvent;
 pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};

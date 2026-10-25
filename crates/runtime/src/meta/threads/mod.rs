@@ -186,23 +186,53 @@ impl<'a> Scope<'a> {
 
     /// Runs of an authorized thread with their saved terminal state.
     fn members(&self, row: &ThreadRow) -> Result<Members, String> {
+        self.load_members(row, true)
+    }
+
+    /// Search chooses roots and displays phases using only narrow headers.
+    /// Full final reports are loaded later, only for examined metadata.
+    fn search_members(&self, row: &ThreadRow) -> Result<Members, String> {
+        self.load_members(row, false)
+    }
+
+    fn load_members(&self, row: &ThreadRow, with_summaries: bool) -> Result<Members, String> {
         let runs = self
             .store
             .runs_of_thread(&row.thread_id)
             .map_err(|_| STORE_ERROR.to_owned())?;
         let ids: Vec<String> = runs.iter().map(|run| run.run_id.clone()).collect();
-        let summaries: HashMap<String, RunTerminalSummary> = self
-            .store
-            .terminal_summaries(&ids)
-            .map_err(|_| STORE_ERROR.to_owned())?
-            .into_iter()
-            .map(|summary| (summary.run_id.clone(), summary))
-            .collect();
+        let summaries: HashMap<String, RunTerminalSummary> = if with_summaries {
+            self.store
+                .terminal_summaries(&ids)
+                .map_err(|_| STORE_ERROR.to_owned())?
+        } else {
+            Vec::new()
+        }
+        .into_iter()
+        .map(|summary| (summary.run_id.clone(), summary))
+        .collect();
+        let headers: HashMap<String, storage::RunContextHeader> = if with_summaries {
+            summaries
+                .values()
+                .map(|summary| storage::RunContextHeader {
+                    run_id: summary.run_id.clone(),
+                    terminal_phase: summary.terminal_phase.clone(),
+                    updated_at_ns: summary.updated_at_ns,
+                })
+                .collect()
+        } else {
+            self.store
+                .run_context_headers(&ids)
+                .map_err(|_| STORE_ERROR.to_owned())?
+        }
+        .into_iter()
+        .map(|header| (header.run_id.clone(), header))
+        .collect();
         // Each chat turn saves a new root whose history extends the previous one.
         let primary = runs
             .iter()
             .filter(|run| run.depth == 0)
-            .filter_map(|run| summaries.get(&run.run_id))
+            .filter_map(|run| headers.get(&run.run_id))
             .max_by(|left, right| {
                 (left.updated_at_ns, &left.run_id).cmp(&(right.updated_at_ns, &right.run_id))
             })
@@ -210,17 +240,14 @@ impl<'a> Scope<'a> {
             .or_else(|| row.root_run_id.clone());
         Ok(Members {
             runs,
+            headers,
             summaries,
             primary,
         })
     }
 
     /// Live phase and reason when registered, else the saved terminal phase.
-    fn status(
-        &self,
-        run_id: &str,
-        saved: Option<&RunTerminalSummary>,
-    ) -> (Option<String>, Option<String>) {
+    fn status(&self, run_id: &str, saved_phase: Option<&str>) -> (Option<String>, Option<String>) {
         if let Some((phase, reason)) = run_id
             .parse()
             .ok()
@@ -231,13 +258,14 @@ impl<'a> Scope<'a> {
                 reason.map(|reason| self.redact(&reason)),
             );
         }
-        (saved.map(|summary| summary.terminal_phase.clone()), None)
+        (saved_phase.map(str::to_owned), None)
     }
 }
 
 /// A thread's runs: conversation roots (depth 0) and delegated descendants.
 pub(crate) struct Members {
     runs: Vec<ThreadRunRow>,
+    headers: HashMap<String, storage::RunContextHeader>,
     summaries: HashMap<String, RunTerminalSummary>,
     /// The latest saved root, whose history contains the earlier turns.
     primary: Option<String>,
@@ -245,7 +273,7 @@ pub(crate) struct Members {
 
 impl Members {
     fn is_saved_member(&self, run_id: &str) -> bool {
-        self.summaries.contains_key(run_id) && self.runs.iter().any(|run| run.run_id == run_id)
+        self.headers.contains_key(run_id) && self.runs.iter().any(|run| run.run_id == run_id)
     }
 
     /// The current root and every delegated run; earlier roots are prefixes of it.

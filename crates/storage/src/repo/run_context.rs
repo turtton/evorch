@@ -195,6 +195,29 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, 
         .optional()?)
 }
 
+pub(crate) fn headers(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<Vec<crate::RunContextHeader>, StorageError> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<_> = run_ids.iter().filter(|id| seen.insert(*id)).collect();
+    let ids = serde_json::to_string(&ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "SELECT c.run_id, c.terminal_phase, c.updated_at_ns \
+         FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
+         ORDER BY requested.key",
+    )?;
+    let rows = statement.query_map([ids], |row| {
+        Ok(crate::RunContextHeader {
+            run_id: row.get(0)?,
+            terminal_phase: row.get(1)?,
+            updated_at_ns: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRecord> {
     Ok(RunContextRecord {
         run_id: row.get(0)?,

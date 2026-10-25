@@ -163,7 +163,7 @@ fn overview(
     }
     let root = members.primary.as_deref().map(|id| {
         let saved = members.summaries.get(id);
-        let (phase, reason) = scope.status(id, saved);
+        let (phase, reason) = scope.status(id, saved.map(|saved| saved.terminal_phase.as_str()));
         (id.to_owned(), saved.cloned(), phase, reason)
     });
     let ids: Vec<String> = members.runs.iter().map(|run| run.run_id.clone()).collect();
@@ -196,7 +196,7 @@ fn overview(
     let children: Vec<Child> = children
         .into_iter()
         .map(|summary| {
-            let (phase, reason) = scope.status(&summary.run_id, Some(summary));
+            let (phase, reason) = scope.status(&summary.run_id, Some(&summary.terminal_phase));
             let last_error = records
                 .iter()
                 .find(|record| record.run_id == summary.run_id)

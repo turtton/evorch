@@ -106,6 +106,213 @@ fn count(value: &Value) -> u64 {
 }
 
 #[test]
+fn header_only_search_does_not_decode_saved_payloads() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("headers", Some(f.project.path()), "run-201", |_| {});
+    f.run(
+        "run-201",
+        Some("headers"),
+        None,
+        vec![assistant(vec![text("report")])],
+    );
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute(
+        "UPDATE run_contexts SET messages_json = x'ff', config_json = x'ff', \
+         checkpoints_json = x'ff' WHERE run_id = 'run-201'",
+        [],
+    )
+    .unwrap();
+    for args in [json!({"query": "headers", "kinds": ["title"]}), json!({})] {
+        let result = f.call(own, "thread_search", args).unwrap();
+        assert!(result["threads"].as_array().unwrap().iter().any(|thread| {
+            thread["thread_id"] == "headers"
+                && thread["status"]["root_run_id"] == "run-201"
+                && thread["status"]["phase"] == "Done"
+        }));
+    }
+}
+
+#[test]
+fn cursor_drain_across_one_hundred_one_runs_matches_canonical_counts() {
+    let f = Fixture::new();
+    let own = f.own();
+    let mut expected = 0;
+    for i in 0..101 {
+        let run = format!("run-{}", 200 + i);
+        let mut messages = vec![user(vec![text("cursorneedle")]); 21];
+        messages.insert(
+            0,
+            Message {
+                role: MessageRole::System,
+                content: vec![text("cursorneedle hidden")],
+            },
+        );
+        f.native_run(&run, None, Some("run-100"), messages);
+        let record = f
+            .store()
+            .with_database(|db| db.run_context(&run))
+            .unwrap()
+            .unwrap();
+        // The oracle reads canonical snapshots, not index candidates.
+        let normalized = super::super::normalize::normalize(
+            &record,
+            &SecretRedactor::with_known_values([SECRET.into()]),
+        )
+        .unwrap();
+        expected += normalized
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| block.text.contains("cursorneedle"))
+            .count() as u64;
+        f.index(&run);
+    }
+    assert_eq!(expected, 101 * 21);
+    let mut args = json!({"query": "cursorneedle", "kinds": ["conversation"]});
+    let mut actual = 0;
+    let mut pages = 0;
+    let mut cursors = std::collections::HashSet::new();
+    loop {
+        let result = f.call(own, "thread_search", args.clone()).unwrap();
+        actual += count(&result);
+        pages += 1;
+        if result["next_cursor"].is_null() {
+            break;
+        }
+        assert_eq!(result["partial"], true);
+        assert!(cursors.insert(result["next_cursor"].as_str().unwrap().to_owned()));
+        assert!(pages < 10);
+        args["cursor"] = result["next_cursor"].clone();
+    }
+    assert!(pages > 1);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn narrow_search_members_preserve_primary_and_saved_state() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("headers", Some(f.project.path()), "run-201", |_| {});
+    for (run, thread, parent) in [
+        ("run-201", Some("headers"), None),
+        ("run-202", Some("headers"), None),
+        ("run-203", None, Some("run-201")),
+    ] {
+        f.run(run, thread, parent, vec![assistant(vec![text("result")])]);
+    }
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    // A tie uses the same run-ID ordering as full summaries. A newer child
+    // never replaces the latest root; a missing recorded root remains fallback.
+    conn.execute(
+        "UPDATE run_contexts SET updated_at_ns = CASE WHEN run_id = 'run-203' \
+         THEN 99 ELSE 10 END, terminal_phase = 'Checkpoint' \
+         WHERE run_id IN ('run-201', 'run-202', 'run-203')",
+        [],
+    )
+    .unwrap();
+    let scope = Scope::new(
+        f.store(),
+        &f.runtime,
+        Caller::new(own.0.parse().unwrap(), own.1.map(Into::into), own.2),
+        SecretRedactor::with_known_values([SECRET.into()]),
+    );
+    let row = scope.resolve("headers").unwrap();
+    let narrow = scope.search_members(&row).unwrap();
+    let full = scope.members(&row).unwrap();
+    assert_eq!(narrow.primary.as_deref(), Some("run-202"));
+    assert_eq!(narrow.primary, full.primary);
+    assert_eq!(narrow.headers, full.headers);
+    assert!(narrow.summaries.is_empty());
+    for run in &narrow.runs {
+        assert_eq!(
+            narrow.is_saved_member(&run.run_id),
+            full.is_saved_member(&run.run_id)
+        );
+    }
+    let output = f
+        .call(
+            own,
+            "thread_search",
+            json!({"query": "headers", "kinds": ["title"]}),
+        )
+        .unwrap();
+    assert_eq!(output["threads"][0]["status"]["root_run_id"], "run-202");
+    assert_eq!(output["threads"][0]["status"]["phase"], "Checkpoint");
+
+    f.thread("unsaved", Some(f.project.path()), "run-299", |_| {});
+    let row = scope.resolve("unsaved").unwrap();
+    let narrow = scope.search_members(&row).unwrap();
+    assert_eq!(narrow.primary.as_deref(), Some("run-299"));
+    assert!(narrow.headers.is_empty());
+}
+
+#[test]
+fn lazy_final_reports_keep_full_text_all_roots_and_child_filtering() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("reports", Some(f.project.path()), "run-201", |_| {});
+    let long = format!("{} tailneedle", "padding ".repeat(2048));
+    f.run(
+        "run-201",
+        Some("reports"),
+        None,
+        vec![assistant(vec![text(&long)])],
+    );
+    f.run(
+        "run-202",
+        Some("reports"),
+        None,
+        vec![assistant(vec![text("latest root")])],
+    );
+    f.run(
+        "run-203",
+        None,
+        Some("run-201"),
+        vec![assistant(vec![text("childneedle")])],
+    );
+    for (query, children, run) in [
+        ("tailneedle", false, Some("run-201")),
+        ("childneedle", false, None),
+        ("childneedle", true, Some("run-203")),
+    ] {
+        let result = f
+            .call(
+                own,
+                "thread_search",
+                json!({
+                    "query": query, "kinds": ["final_report"],
+                    "include_children": children
+                }),
+            )
+            .unwrap();
+        if let Some(run) = run {
+            assert_eq!(result["threads"][0]["matched_runs"], json!([run]));
+            assert_eq!(result["threads"][0]["hit_count"], 1);
+            assert_eq!(result["threads"][0]["snippets"][0]["kind"], "final_report");
+        } else {
+            assert_eq!(result["threads"], json!([]));
+        }
+    }
+    // A later request must see the new phase and payload: no cross-page cache.
+    let mut record = f
+        .store()
+        .with_database(|db| db.run_context("run-201"))
+        .unwrap()
+        .unwrap();
+    record.terminal_phase = "Error".into();
+    f.store().handle.upsert_run_context(&record).unwrap();
+    let result = f
+        .call(
+            own,
+            "thread_search",
+            json!({"query": "tailneedle", "kinds": ["final_report"]}),
+        )
+        .unwrap();
+    assert_eq!(result["threads"], json!([]));
+}
+
+#[test]
 fn default_conversation_explicit_tools_and_position_dedup() {
     let f = Fixture::new();
     let own = f.own();

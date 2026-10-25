@@ -18,6 +18,14 @@ pub struct StoredAgentMessage {
     pub disposition: DeliveryDisposition,
 }
 
+/// Saved identity and state, without reading configuration or conversation JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContextHeader {
+    pub run_id: String,
+    pub terminal_phase: String,
+    pub updated_at_ns: i64,
+}
+
 impl Database {
     pub fn user_question(&self, id: &str) -> Result<Option<event_bus::UserQuestion>, StorageError> {
         crate::repo::user_questions::get(&self.conn, id)
@@ -216,6 +224,18 @@ impl Database {
     /// Returns an error if SQLite access or row decoding fails.
     pub fn run_context(&self, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
         run_context::get(&self.conn, run_id)
+    }
+
+    /// Saved headers in requested order, once per ID, skipping unsaved runs.
+    /// This does not parse or return any configuration or conversation payload.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_context_headers(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<RunContextHeader>, StorageError> {
+        run_context::headers(&self.conn, run_ids)
     }
 
     /// Read one consistent, bounded snapshot of a root and its persisted descendants.

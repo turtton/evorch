@@ -141,6 +141,17 @@ impl RunStore {
             .terminal_summaries(ids)
     }
 
+    /// Saved state without parsing configuration or conversation JSON.
+    pub(crate) fn run_context_headers(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<storage::RunContextHeader>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .run_context_headers(ids)
+    }
+
     /// Questions delivered to these runs, deduplicated by durable question ID.
     pub(crate) fn user_questions_for_runs(
         &self,

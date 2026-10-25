@@ -309,7 +309,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         if conversation.is_none() {
             return Err(CURSOR_INVALID.into());
         }
-        let members = scope.members(resumed)?;
+        let members = scope.search_members(resumed)?;
         let runs = scan_runs(&members, args.include_children);
         if !runs.contains(&resume.run) {
             return Err(CURSOR_STALE.into());
@@ -328,7 +328,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         let visible = match scope.resolve(&candidate.thread_id) {
             // Gathered candidates are re-checked by the single visibility gate.
             Ok(row) => Some({
-                let members = scope.members(&row)?;
+                let members = scope.search_members(&row)?;
                 (row, members)
             }),
             Err(_) => None,
@@ -740,14 +740,26 @@ fn metadata(
         }
     }
     if wanted(SearchKind::FinalReport) {
-        for id in &ids {
-            if let Some(summary) = members.summaries.get(id)
-                && summary.terminal_phase == "Done"
+        // Keep all requested runs and the entire final report, but do not parse
+        // histories merely to select a root or for threads beyond this page's
+        // result limit. These summaries are local to this metadata examination.
+        let done: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                members
+                    .headers
+                    .get(*id)
+                    .is_some_and(|header| header.terminal_phase == "Done")
+            })
+            .cloned()
+            .collect();
+        for summary in scope.store.terminal_summaries(&done).map_err(fail)? {
+            if summary.terminal_phase == "Done"
                 && let Some(text) = &summary.final_text
             {
                 items.push(Item {
                     kind: SearchKind::FinalReport,
-                    run_id: Some(id.clone()),
+                    run_id: Some(summary.run_id),
                     text: scope.redact(text),
                     note_seq: None,
                 });
@@ -849,7 +861,15 @@ fn entry(
 ) -> Result<Value, String> {
     let root = members.primary.as_deref();
     let (phase, _) = root
-        .map(|root| scope.status(root, members.summaries.get(root)))
+        .map(|root| {
+            scope.status(
+                root,
+                members
+                    .headers
+                    .get(root)
+                    .map(|saved| saved.terminal_phase.as_str()),
+            )
+        })
         .unwrap_or_default();
     let mut runs: Vec<&str> = Vec::new();
     for hit in hits {
