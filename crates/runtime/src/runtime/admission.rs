@@ -2,6 +2,8 @@ use super::*;
 use event_bus::event::diagnostic_codes;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
+#[cfg(test)]
+pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
 pub(super) struct Admission {
     parent: Option<RunId>,
@@ -206,8 +208,25 @@ impl AgentRuntime {
                 // Release before notifying waiters; retries must observe the durable seed.
                 drop(continuation);
             }
+            // Stop must never see a registered entry as a pending admission:
+            // publish success before releasing the registration/cancellation fence.
+            if admitted.is_ok() {
+                result.send_replace(Some(Ok(())));
+            }
             let failure = handoff.then(|| admitted.as_ref().err()).flatten();
             drop(admissions);
+            #[cfg(test)]
+            if admitted.is_ok() {
+                let hook = runtime
+                    .shared
+                    .admission_registration_hook
+                    .lock()
+                    .unwrap()
+                    .clone();
+                if let Some(hook) = hook {
+                    hook(run_id);
+                }
+            }
             if failure.is_some() {
                 runtime.goal_work_stopped(run_id);
             }
@@ -228,7 +247,9 @@ impl AgentRuntime {
                         call_id: None,
                     }));
             }
-            result.send_replace(Some(admitted));
+            if admitted.is_err() {
+                result.send_replace(Some(admitted));
+            }
         });
         run_id
     }

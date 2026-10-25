@@ -524,6 +524,52 @@ async fn stop_during_wake_admission_keeps_snapshot_and_held_message_for_operator
 }
 
 #[tokio::test]
+async fn stop_at_post_registration_admission_boundary_interrupts_new_root() {
+    let model = Arc::new(RetryModel::default());
+    let fixture = Fixture::with_model(model.clone());
+    let runtime = &fixture.runtime;
+    let root = fixture.terminal().await;
+    let old_mailbox = Arc::clone(&runtime.entry(root).unwrap().mailbox);
+    let boundary = Arc::new(tokio::sync::Notify::new());
+    let stopped = Arc::clone(&boundary);
+    let weak = Arc::downgrade(&runtime.shared);
+    *runtime.shared.admission_registration_hook.lock().unwrap() = Some(Arc::new(move |run| {
+        assert_eq!(run, root);
+        let runtime = AgentRuntime::from_weak(&weak).unwrap();
+        // This is after register_run released admissions, but before the old
+        // success-notification site. Stop must address the newly installed run.
+        runtime.stop(root, StopScope::SelfOnly).unwrap();
+        stopped.notify_one();
+    }));
+    runtime.wake_chat(root, RunConfig::default()).unwrap();
+    boundary.notified().await;
+    assert!(!Arc::ptr_eq(
+        &old_mailbox,
+        &runtime.entry(root).unwrap().mailbox
+    ));
+    assert_eq!(
+        *runtime.entry(root).unwrap().cancel_tx.borrow(),
+        RunInterrupt::Stop
+    );
+    assert_eq!(
+        runtime.admission_snapshot(root).unwrap().result,
+        Some(Ok(()))
+    );
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Stopped);
+    assert_eq!(
+        model.requests.lock().unwrap().len(),
+        1,
+        "the stopped root must not call its provider"
+    );
+    runtime
+        .shared
+        .admission_registration_hook
+        .lock()
+        .unwrap()
+        .take();
+}
+
+#[tokio::test]
 async fn stopped_wake_preserves_snapshot_and_auto_wake_budget_without_reserving() {
     // Given: a stopped root with a report held for it and part of its wake budget used.
     let model = Arc::new(RetryModel::default());

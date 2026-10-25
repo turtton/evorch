@@ -102,7 +102,11 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
-        // Stop shares this gate through registration/admission reservation:
+        let stop_gate = self.stop_restore_gate(run_id);
+        let _stop_guard = stop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Stop shares the run-local gate through registration/admission reservation:
         // a delayed automatic wake cannot replace an operator-stopped entry.
         if !operator_resume && self.operator_stopped(run_id) {
             return Err(fail(RunRestoreFailure::StoppedByOperator));

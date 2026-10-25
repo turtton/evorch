@@ -87,7 +87,11 @@ pub(crate) struct Shared {
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
+    #[cfg(test)]
+    admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
+    /// Stop and chat renewal serialize per run, not behind other chats' storage work.
+    stop_restore_gates: Mutex<HashMap<RunId, Weak<Mutex<()>>>>,
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
@@ -660,7 +664,10 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
+                stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
@@ -973,7 +980,10 @@ impl AgentRuntime {
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
+                stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
@@ -1935,21 +1945,26 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
-        // Chat restoration holds this until registration or admission reservation.
-        // Stop either precedes its wake check, cancels its pending admission, or
-        // interrupts the new entry; it must never land on a discarded incarnation.
-        let _restore_guard = self.shared.run_store.get().map(|store| {
-            store
-                .restore_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        });
-        self.goal_work_stopped(run_id);
         // Collect before taking admissions: spawning locks intents before admissions.
-        let targets = match scope {
-            StopScope::SelfOnly => HashSet::from([run_id]),
-            StopScope::Subtree => self.run_subtree_ids(run_id),
+        let mut targets = match scope {
+            StopScope::SelfOnly => vec![run_id],
+            StopScope::Subtree => self.run_subtree_ids(run_id).into_iter().collect(),
         };
+        targets.sort_unstable();
+        let gates = targets
+            .iter()
+            .map(|run| self.stop_restore_gate(*run))
+            .collect::<Vec<_>>();
+        // Renewals take only their own gate. Sort subtree stops so overlapping
+        // stops agree on lock order, without waiting for unrelated chat storage.
+        let _restore_guards = gates
+            .iter()
+            .map(|gate| {
+                gate.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
+            .collect::<Vec<_>>();
+        self.goal_work_stopped(run_id);
         let mut admissions = self
             .shared
             .admissions
@@ -1984,6 +1999,21 @@ impl AgentRuntime {
             operator_stops.insert(target);
         }
         Ok(())
+    }
+
+    fn stop_restore_gate(&self, run: RunId) -> Arc<Mutex<()>> {
+        let mut gates = self
+            .shared
+            .stop_restore_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(gate) = gates.get(&run).and_then(Weak::upgrade) {
+            return gate;
+        }
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(run, Arc::downgrade(&gate));
+        gate
     }
 
     /// Whether the operator stopped this run and has not resumed its thread root since.

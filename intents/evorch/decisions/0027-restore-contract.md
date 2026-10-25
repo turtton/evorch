@@ -217,8 +217,10 @@ operator Stopped の例外だけでは、Done/Error の親の手動継続や、�
   子の終端報告の一度だけのrelay、operator Stop中の自動wake抑止、
   `AUTO_WAKE_LIMIT` は変更しない。
 - 自動wakeの受理時にもoperator Stopを検証し、既に発行されたwake要求が後発のStopを
-  越えて再登録しない。Stopとchat復元は同じrestore gateで、Stop確認から同期登録または
-  admission予約までを直列化する。予約後のStopはadmissions→runsのfenceで登録を抑止する。
+  越えて再登録しない。Stopとchat復元はrun単位のgateで、Stop確認から同期登録または
+  admission予約までを直列化する。Stopは他のchatのstorage復元gateを待たない。
+  予約後のStopはadmissions→runsのfenceで登録を抑止する。admission成功は登録と同じ
+  fence内で公開し、登録済みrunが結果通知待ちのadmissionとして停止を逃れない。
   admission待ちのStopも明示resumeまで保持する。拒否・admission取消時はsnapshotと
   保留報告を残し、利用者の `resume_chat` / `continue_goal` だけが停止を解除できる。
 - `delegate_chat` は従来どおり新しいroot IDで履歴を再利用する。同じthreadの他のlive rootは
