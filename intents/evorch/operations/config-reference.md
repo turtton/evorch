@@ -27,6 +27,7 @@ version = 2          # スキーマバージョン（現在 2。ADR 0014。大�
 [permissions]
 [metrics]
 [self_improvement]           # 既定で無効。候補とローカル下書きのみ
+[storage.thread_index]       # 会話全文索引（既定で有効、論理予算 512 MiB）
 ```
 
 通常の `Config::load` は未知キー・typo キーだけを無視し、`diagnotics`（ルート直下の typo）、`diagnostics.log_lvl`、`providers.foo.timeout` のような config path を警告ログへ出す。値はログに出さない。有効な provider・routing などの設定はそのまま読み込む。`Config::load_strict` と保存前の検証では未知キーも拒否する。いずれも deep merge と version migration の後のマージ済み値を検証する。
@@ -150,6 +151,17 @@ Phase A は evidence に基づく改善候補とローカルの packet / issue �
 | `collect_lessons` | bool | `true` | 承認済み lesson からの収集（`enabled = false` なら無効） |
 
 範囲外の値は無効時も読み込み・保存で拒否し、丸めない。スキーマ再生成コマンドは後述の [JSON Schema](#json-schema) を参照。
+
+## storage.thread_index（`ThreadIndexConfig`）
+
+会話全文索引（`thread_grep` の索引、ADR 0041 Phase B）の設定。user / env / CLI 層で設定でき、project 層の値は無視する（DB はユーザー単位で共有するため）。
+
+| キー | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `enabled` | bool | `true` | 索引の作成・更新。`false` でも会話と note の正本は保存する |
+| `max_bytes` | u64 | `536_870_912`（512 MiB） | 索引の論理予算（1_048_576..=10_737_418_240）。物理ファイルサイズではなく、本文・属性・FTS 係数の論理会計に対する上限。超過時は作成時刻の古い run から索引を外す |
+
+範囲外・負・型違いの値は無効時も読み込み・保存で拒否し、丸めない（`0` で無効化する書き方は不可。`enabled = false` を使う）。現時点では型・検証・既定値だけで、writer へは未配線。ADR 0041 順序 7 で、GUI 起動時に `Storage::open` へ渡す `StorageConfig.thread_index` へ写して反映し、実行中の変更は writer の `apply_index_settings` で writer コマンド順に取り込む。
 
 ## Web ツールのネットワーク設定
 

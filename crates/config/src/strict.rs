@@ -30,6 +30,7 @@ const ROOT_KEYS: &[&str] = &[
     "comment_checker",
     "tools",
     "eval",
+    "storage",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -86,6 +87,8 @@ const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir", "persistence"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
+const STORAGE_KEYS: &[&str] = &["thread_index"];
+const THREAD_INDEX_KEYS: &[&str] = &["enabled", "max_bytes"];
 const SELF_IMPROVEMENT_KEYS: &[&str] = &[
     "enabled",
     "draft_dir",
@@ -242,6 +245,12 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         check_keys(browser, "tools.browser", BROWSER_TOOLS_KEYS)?;
     }
     validate_eval(root)?;
+    validate_section(root, "storage", STORAGE_KEYS)?;
+    if let Some(storage) = root.get("storage").and_then(toml::Value::as_table)
+        && let Some(thread_index) = storage.get("thread_index").and_then(toml::Value::as_table)
+    {
+        check_keys(thread_index, "storage.thread_index", THREAD_INDEX_KEYS)?;
+    }
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
 }
 
@@ -380,6 +389,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("orchestration", ORCHESTRATION_KEYS),
         ("tools", TOOLS_KEYS),
         ("eval", EVAL_KEYS),
+        ("storage", STORAGE_KEYS),
     ];
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
@@ -393,6 +403,19 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         .and_then(toml::Value::as_table_mut)
     {
         retain_known(browser, "tools.browser", BROWSER_TOOLS_KEYS, &mut ignored);
+    }
+    if let Some(thread_index) = root
+        .get_mut("storage")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|storage| storage.get_mut("thread_index"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            thread_index,
+            "storage.thread_index",
+            THREAD_INDEX_KEYS,
+            &mut ignored,
+        );
     }
     if let Some(eval) = root.get_mut("eval").and_then(toml::Value::as_table_mut) {
         strip_eval(eval, &mut ignored);

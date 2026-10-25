@@ -574,7 +574,8 @@ fn check_file_structure(text: &str) -> Result<(), ConfigError> {
             "failed to deserialize config before saving: {error}"
         ))
     })?;
-    config.self_improvement.validate()
+    config.self_improvement.validate()?;
+    config.storage.validate()
 }
 
 pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {

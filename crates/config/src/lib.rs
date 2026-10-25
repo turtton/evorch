@@ -72,3 +72,7 @@ pub use types::{
 pub use types::{BrowserToolsConfig, ToolsConfig};
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
+pub use types::{
+    DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES, MIN_THREAD_INDEX_MAX_BYTES,
+    StorageConfig, ThreadIndexConfig,
+};
