@@ -240,6 +240,10 @@ pub(crate) fn collapse_repeats(run: &mut NormalizedRun) {
 }
 
 #[cfg(test)]
+#[path = "normalize/index_contract_tests.rs"]
+mod index_contract_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use providers::ToolResultContent;

@@ -379,6 +379,21 @@ Phase B は `thread_search` に本文の全文検索を足す。2026-10-25 に P
 - 受け渡し API（順序 1 で型・エラー・fixture を固定）: W1 は `SnapshotProvenance` / `SnapshotWrite` / `SnapshotBundle` と原子的 `save_snapshot_bundle`・`load_snapshot_bundle`、共通 `extract_index_input` を所有する。W4 は全生成・変換経路で対応マップを作り `SnapshotWrite` を渡す。W2 は単一 writer コマンドで W1 を呼び、receipt の snapshot_revision / source_revision を W4 へ返す。W4 の restore と W2 の抽出 job は同じ `SnapshotBundle` を読む。W2 が本文から provenance を再推定する実装は禁止する。
 - この保存形式、変換規則、W1/W2/W4 の API、障害時の振る舞いを順序 1 の完了条件とし、順序 2・3 の開始条件とする。実装前の fixture に fork 後の compaction → 再起動と保存途中の障害を含める。
 
+#### 順序 1 の Rust 共有境界（storage 担当分）
+
+型は公開 `storage::thread_index` に置く。以下は契約の定義であり、migration / writer / job / 検索を実装済みとは扱わない。
+
+- `SnapshotProvenance` は run / snapshot_revision / snapshot_sha256 / format_version / status / map を持つ。`ProvenanceMap.version=1`、raw メッセージ数・checkpoint 数、全 non-System メッセージと全 block の位置を保持する。`BlockOrigin` は native / continuity_copy / fork_copy（元 origin と `ForkBoundary` を含む）、`CopySource` は message / working_note / frozen_history の tagged enum。本文は複製しない。SQL sidecar の status / reason_code / map_json はこれらから W1 が分解保存し、unknown の理由は `ProvenanceUnknownReason` を使う。
+- hash の framing は **u64 big-endian の messages_json バイト長 → messages_json の保存バイト列 → u64 big-endian の checkpoints_json バイト長 → checkpoints_json の保存バイト列** と固定する（SHA-256、小文字 hex）。再シリアライズ前後の同一性を仮定しない。`snapshot_sha256` を W1 の保存側・抽出器で共有する。
+- `SnapshotWrite` は runtime が作る map / status、従来 record、thread binding、期待する旧 snapshot_revision を渡す。storage が redaction 後に revision / hash を割り当てる。`SnapshotRepository::{save_snapshot_bundle,load_snapshot_bundle,append_indexed_note}` が原子的保存・同一 read transaction・note append/clear の境界、`SnapshotTransaction::stage_snapshot_bundle` が evidence / reference-consumption の既存 transaction 内で使う境界。`SnapshotReceipt` は commit 後のみ公開し、障害時は prepared context を設置しない。
+- `IndexInput` は Value と別入力の provenance / 最新 `RunLedgerEntry`、同一 transaction の revision / hash / checkpoint 数を受ける。Value を取得しただけでは出所の証明にならない。`extract_snapshot_bundle` は正本 JSON の parse と保存バイト hash を検証する便宜入口、`extract_index_input` が共通抽出 API。全文を持つ `IndexBlock` / `ExtractedIndexInput` と固定理由だけの `ExtractionError` を返す。不正 JSON / 既知 block の壊れた shape は run 全体を保留し、未知 block は除外する。画像のみの tool_result は block を作らない。
+- `BlockLocator` / version 付き `GuardedReference`・`GuardedSource` は message と working_note を別 variant にする。`SnapshotRepository::resolve_guarded_reference` は認可後に正本を読み、`GuardedResolution::{Message,WorkingNote,StaleReference,SourceDeleted,UnsupportedVersion}` を返す契約。Message は FTS text ではなく bundle と元位置、note は最新の非空 seq だけを返す。
+- `IndexState` / `IndexEvent` / `IndexRunStatus` は R2 の状態と入力を表す。`ThreadIndexRepository` はヘッダ discovery・成功/失敗 commit・evict・正本削除を所有する。`IndexCommitGuard` は lease / epoch / 有効期限・source revision / version・generation・Pending・source_present・request target の全照合を固定する。SQL 遷移表の実装・各セルの受け入れは順序 3 以降。
+- `ThreadIndexControl::{submit_request,request_status,cancel_request,acquire_lease,heartbeat,release_lease,step}` が W2/W5 共通入口。`IndexTarget` / `RequestGuard` で revision・version・generation を固定し、`ReindexResult` / `RequestGapReason` / `RequestSummary` / `RequestSubmission` / `LeaseResult` で R5 の受付・終端・理由別件数と owner 動作を区別する。時計は明示的に渡す。取消・待機中断・target 処理不能を制御系 failed と混同しない。
+- `IndexCapacity::capacity_status(PlannedGrowth)` と `apply_index_settings(ThreadIndexSettings)` が W2 の取り込み境界。後者の receipt は適用世代を返し、writer のコマンド順に有効になる。`IndexCapacityStatus` は Normal / IndexPaused / SourceSuspended と DB/WAL/SHM・reserve・J を返す。W3 の strict 設定型・検証は別途合流が必要。
+- `AccountingPolicy` / `IndexAccountant::account_index_input` は共通会計のシグネチャ（実装・係数選定は後続）。`text_bytes` は抽出後の厳密な UTF-8 バイト数。論理 `charged_bytes = text + attribute + per_block × count + per_run + ceil(text × fts_numerator / fts_denominator)`、attribute の集計対象は型コメントに固定する。分母ゼロ・overflow は `AccountingError`。これは物理 G の見積りではない。
+- fixture は抽出器の `fork_compaction_restart_fixture_keeps_native_duplicate_and_original_positions` と `snapshot_save_fault_fixture_accepts_only_complete_old_or_new_bundle` に置く。後者は各保存境界の **旧/新 bundle と混在拒否の契約 oracle** であり、DB への障害注入・rollback 検証そのものは順序 3 の担当が追加する。
+
 ### スキーマ（v25）と原子性（M3）
 
 v25 は origin/main（`870a969b`）の時点で空いている（最新は v24）。この時点の open PR（#354 / #358 / #361 / #362）は migration を変更していない。実装時に再確認する。
@@ -678,7 +693,10 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 - [x] plan review 指摘 R1–R5 反映 — provenance の保存・変換 API、状態遷移表、物理 reserve / admission、normalize / guarded note、CLI request / owner の契約と受け入れケースを追加。S1 の単独ファイル owner と S2 の計測条件も反映。commit: 本項目を追加した `docs(adr): address Phase B plan review contracts`（SHA は `git log` で確認）。コード変更なし。差分範囲・B-1〜B-4 不変・必須契約の記載を確認（実装テストは未実施）。
 - [ ] 計画の独立レビュー（plan review）— M1〜M6 と R1〜R5 / S1〜S2 を反映済み。改訂後の計画に対する独立 Reviewer の合格判定は未取得。判定:
 - [ ] 順序 1 契約の固定 — R1 の保存形式・全変換・W1/W2/W4 API / fixture、R2–R5、設定型・API とファイル所有表を固定。順序 2 / 3 の開始ゲート。storage 共有契約は `crates/storage/src/thread_index.rs` / `thread_index/contracts.rs` に型・trait として定義（SQL / writer / job の実装ではない）。`read.rs` は W1 単独所有。**W3 の strict 設定型・検証の合流が全体の残ゲート**（ユーザー確認済み。本担当は設定取り込み API のシグネチャまでで W3 の実装に触れない）。commit: 本項目更新コミット（`git log` で確認）
+  - [x] storage 共有型・API・所有表 — `6f632712`（`feat(storage): define Phase B conversation index contracts`、GitHub Verified）。抽出/commit 補助契約と fixture は後続の最小抽出器コミットに含む。
+  - [ ] W3 strict 設定型・検証の合流（順序 1 全体の残ゲート）
 - [ ] 順序 2 最小の抽出器で計測 — W1 の抽出 / 会計関数を W6 から呼ぶ。provenance 不明を native と仮定しない。commit:
+  - [x] storage の最小抽出器・境界/除外/provenance fixture と runtime normalize の共通比較契約テスト — commit: 本項目追加コミット（`git log` で確認）。計測ハーネス・実 store 計測・共通会計実装/係数は未実施のため順序 2 全体は未完了。
 - [ ] 順序 3 migration（v25）・抽出・状態遷移 — provenance 原子的保存・復元を含む。commit:
 - [ ] 順序 4 不可分な置換（索引の置換・evict・source 削除の tombstone）— commit:
 - [ ] 順序 5 開始ゲート — reserve の R_floor / safety_factor / F、G の上界係数、再開 J、step 上限、前景待ちの絶対増分・倍率を実測から ADR に数値で固定。結果:
@@ -691,11 +709,16 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 ### 検証・レビュー・公開
 
 - [ ] 検証（`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo nextest run`、`scripts/check-cache-contracts.sh`）— 対象 HEAD と結果:
+  - 契約・最小抽出器の担当範囲（`6f632712` + 最小抽出器コミットの変更内容）: `CARGO_BUILD_JOBS=4 cargo nextest run -p storage -p runtime --locked -j 4` は **2,115 件成功、8 件 skip**（抽出器 14 件、normalize 共通比較 2 件、型の契約 3 件を含む）。`cargo test -p storage -p runtime --doc --locked -j 4` は storage 8 件成功、runtime 0 件。`cargo clippy --workspace --all-targets --locked -- -D warnings` は警告なしで成功、`cargo fmt --all --check` / `git diff --check` も成功。
+  - すべて指定 worktree の target・権限昇格・並列度 4 で実施。SUN_LEN 等の環境起因失敗なし。実装中の test assertion（`context_len` と本文キーの誤判定）・helper の borrow 型注釈・provider image fixture の `source` 不足は修正後に再検証済み。固定 sleep の追加なし。
+  - `scripts/check-cache-contracts.sh` はこの区切りでは未実施（runtime の production normalize / provider 入力は変更せず、テスト module の追加だけ）。Phase B 全体の cache 契約検証・受け入れ・検索/CLI/FTS は後続のため本項目全体は未完了。
 - [ ] FTS の `integrity-check`（rank=1）が受け入れテストで成功する — 結果:
 - [ ] R1: fork → compaction → 再起動 / 保存途中障害で native な別発言を誤って除外しない。snapshot / sidecar / revision の原子性と未知理由 — 結果:
+  - 最小抽出器の synthetic fixture で copy/native 同文の別位置・生成境界・serialized sidecar 再読込・不明理由の保留・snapshot/sidecar 混在拒否を確認済み。実際の生成経路・SQLite 保存障害/rollback/再起動の統合検証は未実施。
 - [ ] R2: evict → 上限引き上げ → snapshot/note 更新 → 再起動で復活しない。blocked の試行数保持・全遷移・tombstone / 遅延 commit — 結果:
 - [ ] R3: 論理空きあり / 物理 reserve 不足で索引停止、正本書き込み余裕維持、2 サイクル失敗 / WAL reader / 再開境界 — 結果:
 - [ ] R4: 画像+text、2048 B 超 error、明示 tool_result、note 更新・clear 後の guarded reference — 結果:
+  - 抽出と normalize 比較では画像+text・画像 note と同文の本物の text・2048 B 超 error の全文保持を確認済み。note の最新入力・空 clear の block なしと型上の locator 分離も確認。検索の kinds 和集合・guarded ref の正本解決/認可/stale は未実装。
 - [ ] R5: owner × wait の動作表、対象 revision 固定、各 gap / failed、owner 異常終了・lease 引き継ぎ — 結果:
 - [ ] 受け入れレビュー（実装者とは別の独立した Reviewer）— 対象 HEAD と判定:
 - [ ] PR 作成 — PR:、head:

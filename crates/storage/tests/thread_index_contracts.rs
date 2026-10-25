@@ -75,5 +75,5 @@ fn request_target_gaps_are_not_control_failures_and_settings_match_adr() {
         serde_json::from_value::<ReindexResult>(json).unwrap(),
         result
     );
-    assert_eq!(ThreadIndexSettings::default().max_bytes, 536_870_912);
+    assert_eq!(DEFAULT_THREAD_INDEX_MAX_BYTES, 536_870_912);
 }

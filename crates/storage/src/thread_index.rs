@@ -6,8 +6,12 @@
 //! are legacy and must not acquire native provenance by inference.
 
 mod contracts;
+mod extract;
 
 pub use contracts::*;
+pub use extract::{
+    extract_index_input, extract_snapshot_bundle, parse_index_snapshot, snapshot_sha256,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +19,8 @@ use crate::{RunContextRecord, RunLedgerEntry, threads::ThreadRunRow};
 
 pub const PROVENANCE_FORMAT_VERSION: u32 = 1;
 pub const EXTRACTOR_VERSION: u32 = 1;
+pub const GUARDED_REFERENCE_VERSION: u32 = 1;
+pub const DEFAULT_THREAD_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const TOOL_USE_MAX_BYTES: usize = 4096;
 pub const TOOL_RESULT_MAX_BYTES: usize = 2048;
 
@@ -164,7 +170,7 @@ pub struct SnapshotReceipt {
 
 /// The input identity comes from the same read transaction as the JSON and map.
 /// `snapshot_sha256` is computed over the exact saved redacted JSON bytes using
-/// `snapshot_sha256`, not a reserialization of a parsed legacy value.
+/// [`snapshot_sha256`], not a reserialization of a parsed legacy value.
 #[derive(Debug, Clone, Copy)]
 pub struct IndexInput<'a> {
     pub run_id: &'a str,
