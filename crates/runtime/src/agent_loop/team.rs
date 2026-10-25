@@ -151,21 +151,15 @@ impl LoopState {
             "shell" => {
                 Err("team workers use owned write/edit paths, not unrestricted shell writes".into())
             }
-            "edit" | "write" => {
-                let path = input
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("write/edit path missing")?;
-                team.board
-                    .authorize_path(
-                        &self.task.run_id.to_string(),
-                        std::path::Path::new(path),
-                        team.now(),
-                    )
-                    .map_err(|e| e.to_string())
-            }
-            // The tool resolves relative patch paths against the executor's
+            // The executor resolves relative file and patch paths against its
             // workspace, so ownership is judged against the same root.
+            "edit" | "write" => authorize_file(
+                &team.board,
+                &self.task.run_id.to_string(),
+                self.shared.executor.default_cwd().as_deref(),
+                input,
+                team.now(),
+            ),
             "apply_patch" => authorize_patch(
                 &team.board,
                 &self.task.run_id.to_string(),
@@ -176,6 +170,37 @@ impl LoopState {
             _ => Ok(()),
         }
     }
+}
+
+/// Admits an edit or write call only when the worker's live claims own its
+/// path. A relative path resolves against `root`, as `ToolExecutor` scopes it
+/// before the tool runs; an absolute one must lie below `root`. Without a root
+/// the guard cannot tell where the tool writes, so the call is rejected.
+fn authorize_file(
+    board: &TeamBoard,
+    worker: &str,
+    root: Option<&Path>,
+    input: &serde_json::Value,
+    now: u64,
+) -> Result<(), String> {
+    let raw = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(Path::new)
+        .ok_or("write/edit path missing")?;
+    let denied = |reason: String| {
+        format!("team workers may only write or edit paths their claimed task owns: {reason}")
+    };
+    let Some(root) = root else {
+        return Err(denied("the workspace root is unknown".into()));
+    };
+    let root = without_dots(root);
+    let resolved = if raw.is_relative() {
+        without_dots(&root.join(raw))
+    } else {
+        without_dots(raw)
+    };
+    authorize_below_root(board, worker, &root, raw, &resolved, now).map_err(denied)
 }
 
 /// Admits an apply_patch call only when the worker's live claims own every
@@ -207,21 +232,40 @@ fn authorize_patch(
     let Some(root) = root else {
         return Err(denied("the workspace root is unknown".into()));
     };
-    // `targets` drops `.` components the same way, so a lexical prefix check
-    // matches how the tool resolves each path.
-    let root: PathBuf = root.components().collect();
+    // `targets` rebuilds each resolved path the same way.
+    let root = without_dots(root);
     for target in targets {
-        let Ok(relative) = target.resolved.strip_prefix(&root) else {
-            return Err(denied(format!(
-                "{} is outside the workspace",
-                target.raw.display()
-            )));
-        };
-        board
-            .authorize_path_under(worker, &root, relative, now)
-            .map_err(|error| denied(format!("{}: {error}", target.raw.display())))?;
+        authorize_below_root(board, worker, &root, &target.raw, &target.resolved, now)
+            .map_err(denied)?;
     }
     Ok(())
+}
+
+/// Admits one path a file tool touches. `resolved` is where the tool writes,
+/// rebuilt by [`without_dots`] like `root`, so a lexical prefix check tells
+/// whether it lies below `root`. Symlinks are looked for from `root` down to
+/// the file, never below the process working directory. Errors name the path
+/// as the model wrote it.
+fn authorize_below_root(
+    board: &TeamBoard,
+    worker: &str,
+    root: &Path,
+    raw: &Path,
+    resolved: &Path,
+    now: u64,
+) -> Result<(), String> {
+    let Ok(relative) = resolved.strip_prefix(root) else {
+        return Err(format!("{} is outside the workspace", raw.display()));
+    };
+    board
+        .authorize_path_under(worker, root, relative, now)
+        .map_err(|error| format!("{}: {error}", raw.display()))
+}
+
+/// `path` rebuilt from its components, which drops `.` components and repeated
+/// separators but keeps `..` for the ownership check to reject.
+fn without_dots(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 #[cfg(test)]
@@ -428,6 +472,167 @@ mod tests {
         );
     }
 
+    /// A time the board treats as live for every claim taken at it, whatever the
+    /// wall clock reads while a test runs, since `TeamContext::now` is real time.
+    const FAR_FUTURE: u64 = u64::MAX / 2;
+
+    /// A team Worker run whose executor resolves tool paths below `root`, with
+    /// [`board`]'s tasks except that the run itself owns `owned`. `root` is a
+    /// temporary directory in every caller, never the process working directory.
+    fn team_worker(
+        root: Option<&Path>,
+    ) -> (
+        tokio::sync::watch::Sender<crate::RunInterrupt>,
+        crate::AgentRuntime,
+        super::LoopState,
+    ) {
+        let (cancel, cancel_rx) = tokio::sync::watch::channel(crate::RunInterrupt::None);
+        let (runtime, mut state) = super::super::delegate_cleanup_tests::fixture(cancel_rx);
+        let executor = tools::ToolExecutor::with_standard_tools(
+            Arc::clone(&state.shared.bus),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        )
+        .with_policy(sandbox::ApprovalPolicy::allow_all());
+        if let Some(root) = root {
+            executor.set_default_cwd(root.to_path_buf());
+        }
+        state.shared.executor = Arc::new(executor);
+        state.task.role = agents::Role::Worker;
+        state.policy = crate::ExecutionPolicy::for_role(agents::Role::Worker);
+        state.task.config.topology = crate::CoordinationTopology::DynamicTeam { max_workers: 3 };
+        let team = crate::team_context::TeamContext::new(state.task.run_id, 3);
+        let worker = state.task.run_id.to_string();
+        for (id, path, owner) in [
+            ("mine", "owned", Some(worker.as_str())),
+            ("theirs", "theirs", Some("worker-2")),
+            ("free", "free", None),
+        ] {
+            team.board
+                .enqueue(TaskSpec {
+                    id: id.into(),
+                    paths: vec![path.into()],
+                })
+                .unwrap();
+            if let Some(owner) = owner {
+                team.board.claim(id, owner, FAR_FUTURE).unwrap();
+            }
+        }
+        state.task.config.team = Some(team);
+        assert!(state.team_worker());
+        (cancel, runtime, state)
+    }
+
+    /// What the team guard decides for `edit` and for `write` naming `path`.
+    fn guard_file(state: &super::LoopState, path: &str) -> [Result<(), String>; 2] {
+        ["edit", "write"].map(|name| state.guard_team_artifact(name, &json!({ "path": path })))
+    }
+
+    fn display(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    // Given: a team Worker whose workspace root is a temporary directory
+    // When: edit or write names an owned path relative, `./`-prefixed or
+    //       absolute, including under a root spelled with `.`
+    // Then: the guard admits it
+    #[tokio::test]
+    async fn edit_and_write_inside_owned_paths_are_admitted() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        let (_cancel, _runtime, state) = team_worker(Some(root));
+        for path in [
+            "owned/a.rs".to_string(),
+            "./owned/nested/a.rs".into(),
+            display(&root.join("owned/a.rs")),
+            display(&root.join("./owned/b.rs")),
+        ] {
+            assert_eq!(guard_file(&state, &path), [Ok(()), Ok(())], "{path}");
+        }
+        let (_cancel, _runtime, dotted) = team_worker(Some(&root.join(".")));
+        assert_eq!(
+            guard_file(&dotted, &display(&root.join("owned/a.rs"))),
+            [Ok(()), Ok(())]
+        );
+    }
+
+    // Given: a team Worker whose workspace root is a temporary directory
+    // When: edit or write names a path outside the workspace, the workspace
+    //       itself, a parent-directory escape, another worker's path, an
+    //       unclaimed task's path, a path no task names, or no path at all
+    // Then: the guard rejects each
+    #[tokio::test]
+    async fn edit_and_write_outside_owned_paths_are_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let (_cancel, _runtime, state) = team_worker(Some(root));
+        for path in [
+            display(&elsewhere.path().join("owned/a.rs")),
+            display(root),
+            String::new(),
+            "../owned/a.rs".into(),
+            "owned/../theirs/a.rs".into(),
+            display(&root.join("owned/../theirs/a.rs")),
+            "theirs/a.rs".into(),
+            "free/a.rs".into(),
+            "unlisted.rs".into(),
+        ] {
+            for decision in guard_file(&state, &path) {
+                assert!(decision.is_err(), "{path}");
+            }
+        }
+        for name in ["edit", "write"] {
+            assert!(state.guard_team_artifact(name, &json!({})).is_err());
+        }
+    }
+
+    // Given: a team Worker whose executor has no workspace root
+    // When: edit or write names an owned path, relative or absolute
+    // Then: the guard rejects it, because it cannot tell where the tool writes
+    #[tokio::test]
+    async fn edit_and_write_without_a_workspace_root_are_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (_cancel, _runtime, state) = team_worker(None);
+        for path in [
+            "owned/a.rs".to_string(),
+            display(&workspace.path().join("owned/a.rs")),
+        ] {
+            for decision in guard_file(&state, &path) {
+                assert!(decision.is_err(), "{path}");
+            }
+        }
+    }
+
+    // Given: a team Worker whose workspace root is a temporary directory, not
+    //        the process working directory, holding an owned directory with a
+    //        symlink to another worker's directory
+    // When: edit or write names a path through the symlink, relative or absolute,
+    //       or the symlink itself
+    // Then: the guard rejects it, because it looks for symlinks below the
+    //       workspace root where the tool writes; a real owned directory next to
+    //       the symlink is still admitted
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_and_write_through_symlinks_below_the_workspace_root_are_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("owned/real")).unwrap();
+        std::fs::create_dir_all(root.join("theirs")).unwrap();
+        std::os::unix::fs::symlink(root.join("theirs"), root.join("owned/link")).unwrap();
+        let (_cancel, _runtime, state) = team_worker(Some(root));
+        for path in [
+            "owned/link/a.rs".to_string(),
+            "./owned/link/a.rs".into(),
+            display(&root.join("owned/link/a.rs")),
+            "owned/link".into(),
+        ] {
+            for decision in guard_file(&state, &path) {
+                assert!(decision.is_err(), "{path}");
+            }
+        }
+        assert_eq!(guard_file(&state, "owned/real/a.rs"), [Ok(()), Ok(())]);
+    }
+
     fn tool_results(state: &super::LoopState) -> Vec<(String, bool, String)> {
         state
             .context
@@ -464,32 +669,9 @@ mod tests {
     //       reaches the tool and fails in Codex's words
     #[tokio::test]
     async fn team_worker_batch_applies_only_owned_patches() {
-        let (_cancel, cancel_rx) = tokio::sync::watch::channel(crate::RunInterrupt::None);
-        let (_runtime, mut state) = super::super::delegate_cleanup_tests::fixture(cancel_rx);
         let workspace = tempfile::tempdir().unwrap();
         let root = workspace.path();
-        let executor = tools::ToolExecutor::with_standard_tools(
-            Arc::clone(&state.shared.bus),
-            Arc::new(sandbox::DirectSandbox::new_unchecked()),
-        )
-        .with_policy(sandbox::ApprovalPolicy::allow_all());
-        executor.set_default_cwd(root.to_path_buf());
-        state.shared.executor = Arc::new(executor);
-        state.task.role = agents::Role::Worker;
-        state.policy = crate::ExecutionPolicy::for_role(agents::Role::Worker);
-        state.task.config.topology = crate::CoordinationTopology::DynamicTeam { max_workers: 3 };
-        let team = crate::team_context::TeamContext::new(state.task.run_id, 3);
-        team.board
-            .enqueue(TaskSpec {
-                id: "mine".into(),
-                paths: vec!["owned".into()],
-            })
-            .unwrap();
-        team.board
-            .claim("mine", &state.task.run_id.to_string(), team.now())
-            .unwrap();
-        state.task.config.team = Some(team);
-        assert!(state.team_worker());
+        let (_cancel, _runtime, mut state) = team_worker(Some(root));
         state
             .transition(event_bus::AgentRunPhase::Running, None)
             .unwrap();
@@ -541,5 +723,91 @@ mod tests {
         );
         assert!(!root.join("owned/b.rs").exists());
         assert!(!root.join("other").exists());
+    }
+
+    // Given: a team Worker run whose workspace root is a temporary directory,
+    //        not the process working directory, holding an owned directory with
+    //        a symlink to another worker's directory
+    // When: one batch writes owned paths relative and absolute, and writes and
+    //       edits through the symlink
+    // Then: the owned writes land below the workspace root; the team guard
+    //       rejects the symlinked calls, so the other directory is untouched
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn team_worker_batch_writes_only_owned_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("owned")).unwrap();
+        std::fs::create_dir_all(root.join("theirs")).unwrap();
+        std::fs::write(root.join("theirs/kept.rs"), "a\n").unwrap();
+        std::os::unix::fs::symlink(root.join("theirs"), root.join("owned/link")).unwrap();
+        let (_cancel, _runtime, mut state) = team_worker(Some(root));
+        state
+            .transition(event_bus::AgentRunPhase::Running, None)
+            .unwrap();
+        let model = Arc::clone(&state.shared.model);
+
+        assert!(
+            state
+                .execute_tools(
+                    vec![
+                        (
+                            "relative".into(),
+                            "write".into(),
+                            json!({ "path": "owned/a.rs", "content": "a\n" }),
+                        ),
+                        (
+                            "absolute".into(),
+                            "write".into(),
+                            json!({ "path": display(&root.join("owned/b.rs")), "content": "b\n" }),
+                        ),
+                        (
+                            "linked-write".into(),
+                            "write".into(),
+                            json!({ "path": "owned/link/c.rs", "content": "c\n" }),
+                        ),
+                        (
+                            "linked-edit".into(),
+                            "edit".into(),
+                            json!({
+                                "path": "owned/link/kept.rs",
+                                "old_string": "a",
+                                "new_string": "b",
+                            }),
+                        ),
+                    ],
+                    &crate::AgentInvocationContext::default(),
+                    model.as_ref(),
+                )
+                .await
+        );
+
+        let results = tool_results(&state);
+        assert_eq!(
+            results
+                .iter()
+                .map(|(id, is_error, _)| (id.as_str(), *is_error))
+                .collect::<Vec<_>>(),
+            [
+                ("relative", false),
+                ("absolute", false),
+                ("linked-write", true),
+                ("linked-edit", true),
+            ],
+            "{results:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("owned/a.rs")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("owned/b.rs")).unwrap(),
+            "b\n"
+        );
+        assert!(!root.join("theirs/c.rs").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("theirs/kept.rs")).unwrap(),
+            "a\n"
+        );
     }
 }

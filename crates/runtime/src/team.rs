@@ -149,13 +149,10 @@ impl TeamBoard {
             .collect())
     }
 
-    pub fn authorize_path(&self, worker: &str, path: &Path, now: u64) -> Result<(), TeamError> {
-        self.authorize_path_under(worker, Path::new(""), path, now)
-    }
-
-    /// [`Self::authorize_path`] for a `path` relative to `root`. Symlinks are
-    /// looked for where the file lives, below `root`, rather than below the
-    /// process working directory; `root` itself is trusted.
+    /// Admits `worker` to write `path`, relative to `root`, when one of its live
+    /// claims owns it. Symlinks are looked for where the file lives, from `root`
+    /// down, never below the process working directory; `root` itself is
+    /// trusted. Callers pass the workspace the tool resolves paths against.
     pub(crate) fn authorize_path_under(
         &self,
         worker: &str,
