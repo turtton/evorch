@@ -100,7 +100,7 @@ impl AgentRuntime {
         })?;
         // Fence pending admission and registered runs together, in the same
         // lock order as spawning: admissions, then runs.
-        let stopped = record.terminal_phase == "Stopped";
+        let terminal = matches!(record.terminal_phase.as_str(), "Stopped" | "Done" | "Error");
         {
             let admissions = self
                 .shared
@@ -119,11 +119,12 @@ impl AgentRuntime {
                 .iter()
                 .filter_map(|(id, admission)| admission.snapshot().result.is_none().then_some(*id));
             for id in active.chain(pending) {
-                // An operator stop deliberately leaves descendants running, so
-                // only a live incarnation of the root itself conflicts. Other
-                // terminal snapshots keep the strict descendant gate. Runs
-                // outside this tree never share its history and never block.
-                let conflicts = if stopped {
+                // A terminal root can leave background descendants running.
+                // Their parent links still address its stable run ID, so only
+                // another incarnation of that root conflicts. Checkpoints can
+                // describe interrupted execution and retain the subtree gate.
+                // Runs outside this tree never block history reuse.
+                let conflicts = if terminal {
                     id == root
                 } else {
                     belongs_to_subtree(id, root, |candidate| {
@@ -304,123 +305,184 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_record_allows_live_direct_child() {
-        let fixture = Fixture::new("Stopped").await;
-        fixture.spawn(Some(fixture.root));
-        fixture.validate().unwrap();
-    }
-
-    #[tokio::test]
-    async fn stopped_record_allows_live_descendants_and_unrelated_runs() {
-        // Given: an operator-stopped root whose grandchild (via an unregistered
-        // intermediate) and an unrelated thread's run are both still live.
-        let fixture = Fixture::new("Stopped").await;
-        let intermediate = fixture.runtime.reserve_run_id();
-        fixture
-            .runtime
-            .seed_spawn_intent(intermediate, &fixture.root.to_string());
-        fixture.spawn(Some(intermediate));
-        fixture.spawn(None);
-        let foreign = fixture.runtime.reserve_run_id();
-        fixture.spawn(Some(foreign));
-        // When/Then: resuming the stopped conversation is not blocked by them.
-        fixture.validate().unwrap();
-    }
-
-    #[tokio::test]
-    async fn stopped_record_rejects_a_live_incarnation_of_its_root() {
-        let fixture = Fixture::new("Stopped").await;
-        fixture
-            .runtime
-            .entry(fixture.root)
-            .unwrap()
-            .phase_tx
-            .send_replace(AgentRunPhase::Running);
-        fixture.assert_reconciliation();
-    }
-
-    #[tokio::test]
-    async fn rejected_stopped_restore_keeps_snapshot_while_its_root_awaits_admission() {
-        // Given: an earlier start of the stopped root still awaits provider
-        // admission under the same run ID.
-        let fixture = Fixture::new("Stopped").await;
-        fixture
-            .runtime
-            .entry(fixture.root)
-            .unwrap()
-            .phase_tx
-            .send_replace(AgentRunPhase::Stopped);
-        fixture
-            .model
-            .admission_pending
-            .store(true, Ordering::Relaxed);
-        fixture.runtime.spawn_reserved(
-            fixture.root,
-            None,
-            Role::Orchestrator,
-            "root",
-            RunConfig::default(),
-        );
-        assert!(
-            fixture
-                .runtime
-                .admission_snapshot(fixture.root)
-                .unwrap()
-                .result
-                .is_none()
-        );
-        // When: the operator continues the same conversation again.
-        let error = fixture
-            .runtime
-            .continue_goal(fixture.root, "continue".into(), RunConfig::default())
-            .unwrap_err();
-        // Then: the second start is refused without consuming the snapshot.
-        assert!(
-            matches!(&error, RuntimeError::RunRestoreFailed {
-                reason: RunRestoreFailure::UnsupportedConfig(reason), ..
-            } if reason.starts_with("root_reconciliation_required")),
-            "{error}"
-        );
-        assert_eq!(
-            fixture
-                .runtime
-                .shared
-                .run_store
-                .get()
-                .unwrap()
-                .restore_record(fixture.root)
-                .unwrap(),
-            Some(fixture.record)
-        );
-    }
-
-    #[tokio::test]
-    async fn non_stopped_record_still_rejects_live_child() {
-        for phase in ["Done", "Error", "Checkpoint"] {
+    async fn terminal_record_allows_live_direct_child() {
+        for phase in ["Stopped", "Done", "Error"] {
             let fixture = Fixture::new(phase).await;
             fixture.spawn(Some(fixture.root));
-            fixture.assert_reconciliation();
+            fixture.validate().unwrap();
         }
     }
 
     #[tokio::test]
-    async fn stopped_record_allows_admission_pending_child() {
-        let fixture = Fixture::new("Stopped").await;
-        fixture
-            .model
-            .admission_pending
-            .store(true, Ordering::Relaxed);
-        let child = fixture.spawn(Some(fixture.root));
-        assert!(!lock_runs(&fixture.runtime.shared.runs).contains_key(&child));
-        assert!(
+    async fn terminal_record_allows_live_descendants_and_unrelated_runs() {
+        // Given: a terminal root whose grandchild (via an unregistered
+        // intermediate) and an unrelated thread's run are both still live.
+        for phase in ["Stopped", "Done", "Error"] {
+            let fixture = Fixture::new(phase).await;
+            let child = fixture.spawn(Some(fixture.root));
+            fixture.spawn(Some(child));
+            let intermediate = fixture.runtime.reserve_run_id();
             fixture
                 .runtime
-                .admission_snapshot(child)
+                .seed_spawn_intent(intermediate, &fixture.root.to_string());
+            fixture.spawn(Some(intermediate));
+            fixture.spawn(None);
+            let foreign = fixture.runtime.reserve_run_id();
+            fixture.spawn(Some(foreign));
+            // When/Then: resuming the conversation is not blocked by them.
+            fixture.validate().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn every_record_rejects_a_live_incarnation_of_its_root() {
+        for saved_phase in ["Stopped", "Done", "Error", "Checkpoint"] {
+            for live_phase in [
+                AgentRunPhase::Pending,
+                AgentRunPhase::Running,
+                AgentRunPhase::Waiting,
+            ] {
+                let fixture = Fixture::new(saved_phase).await;
+                fixture
+                    .runtime
+                    .entry(fixture.root)
+                    .unwrap()
+                    .phase_tx
+                    .send_replace(live_phase);
+                fixture.assert_reconciliation();
+                assert_eq!(
+                    fixture
+                        .runtime
+                        .shared
+                        .run_store
+                        .get()
+                        .unwrap()
+                        .restore_record(fixture.root)
+                        .unwrap(),
+                    Some(fixture.record),
+                    "rejection must preserve the {saved_phase} snapshot"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_restore_keeps_snapshot_while_its_root_awaits_admission() {
+        for phase in ["Stopped", "Done", "Error", "Checkpoint"] {
+            // Given: an earlier start of the root still awaits provider
+            // admission under the same run ID.
+            let fixture = Fixture::new(phase).await;
+            fixture
+                .runtime
+                .entry(fixture.root)
                 .unwrap()
-                .result
-                .is_none()
-        );
-        fixture.validate().unwrap();
+                .phase_tx
+                .send_replace(AgentRunPhase::Stopped);
+            fixture
+                .model
+                .admission_pending
+                .store(true, Ordering::Relaxed);
+            fixture.runtime.spawn_reserved(
+                fixture.root,
+                None,
+                Role::Orchestrator,
+                "root",
+                RunConfig::default(),
+            );
+            assert!(
+                fixture
+                    .runtime
+                    .admission_snapshot(fixture.root)
+                    .unwrap()
+                    .result
+                    .is_none()
+            );
+            // When: the operator continues the same conversation again.
+            let error = fixture
+                .runtime
+                .continue_goal(fixture.root, "continue".into(), RunConfig::default())
+                .unwrap_err();
+            // Then: the second start is refused without consuming the snapshot.
+            assert!(
+                matches!(&error, RuntimeError::RunRestoreFailed {
+                reason: RunRestoreFailure::UnsupportedConfig(reason), ..
+            } if reason.starts_with("root_reconciliation_required")),
+                "{error}"
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .shared
+                    .run_store
+                    .get()
+                    .unwrap()
+                    .restore_record(fixture.root)
+                    .unwrap(),
+                Some(fixture.record)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_still_rejects_live_descendants_without_consuming_snapshot() {
+        for grandchild in [false, true] {
+            let fixture = Fixture::new("Checkpoint").await;
+            let mut parent = fixture.root;
+            if grandchild {
+                parent = fixture.spawn(Some(fixture.root));
+                fixture
+                    .runtime
+                    .entry(parent)
+                    .unwrap()
+                    .phase_tx
+                    .send_replace(AgentRunPhase::Done);
+            }
+            fixture.spawn(Some(parent));
+            fixture.assert_reconciliation();
+            assert!(
+                fixture
+                    .runtime
+                    .continue_goal(fixture.root, "continue".into(), RunConfig::default())
+                    .is_err()
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .shared
+                    .run_store
+                    .get()
+                    .unwrap()
+                    .restore_record(fixture.root)
+                    .unwrap(),
+                Some(fixture.record)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_record_allows_admission_pending_child_but_checkpoint_does_not() {
+        for phase in ["Stopped", "Done", "Error", "Checkpoint"] {
+            let fixture = Fixture::new(phase).await;
+            fixture
+                .model
+                .admission_pending
+                .store(true, Ordering::Relaxed);
+            let child = fixture.spawn(Some(fixture.root));
+            assert!(!lock_runs(&fixture.runtime.shared.runs).contains_key(&child));
+            assert!(
+                fixture
+                    .runtime
+                    .admission_snapshot(child)
+                    .unwrap()
+                    .result
+                    .is_none()
+            );
+            if phase == "Checkpoint" {
+                fixture.assert_reconciliation();
+            } else {
+                fixture.validate().unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -431,55 +493,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_goal_restores_in_place_with_live_child_and_current_authority() {
-        let fixture = Fixture::new("Stopped").await;
-        fixture
-            .runtime
-            .entry(fixture.root)
-            .unwrap()
-            .phase_tx
-            .send_replace(AgentRunPhase::Stopped);
-        let child = fixture.spawn(Some(fixture.root));
-        assert_eq!(
+    async fn terminal_goal_restores_in_place_with_live_child_and_current_authority() {
+        for phase in ["Stopped", "Done", "Error"] {
+            let fixture = Fixture::new(phase).await;
             fixture
                 .runtime
-                .continue_goal(
-                    fixture.root,
-                    "continue".into(),
-                    RunConfig {
-                        delegation_value: Some("current authority".into()),
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            fixture.root
-        );
-        let entry = fixture.runtime.entry(fixture.root).unwrap();
-        assert_eq!(*entry.phase_rx.borrow(), AgentRunPhase::Pending);
-        assert_eq!(
-            entry.config.delegation_value.as_deref(),
-            Some("current authority")
-        );
-        drop(entry);
-        assert_eq!(
-            fixture.runtime.entry(child).unwrap().parent,
-            Some(fixture.root)
-        );
-        let record = fixture
-            .runtime
-            .shared
-            .run_store
-            .get()
-            .unwrap()
-            .restore_record(fixture.root)
-            .unwrap()
-            .unwrap();
-        let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
-        assert!(!record.restorable && !descriptor.restorable);
-        assert_eq!(
-            descriptor.non_restorable_reason.as_deref(),
-            Some("snapshot_consumed")
-        );
+                .entry(fixture.root)
+                .unwrap()
+                .phase_tx
+                .send_replace(AgentRunPhase::Stopped);
+            let child = fixture.spawn(Some(fixture.root));
+            assert_eq!(
+                fixture
+                    .runtime
+                    .continue_goal(
+                        fixture.root,
+                        "continue".into(),
+                        RunConfig {
+                            delegation_value: Some("current authority".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                fixture.root
+            );
+            let entry = fixture.runtime.entry(fixture.root).unwrap();
+            assert_eq!(*entry.phase_rx.borrow(), AgentRunPhase::Pending);
+            assert_eq!(
+                entry.config.delegation_value.as_deref(),
+                Some("current authority")
+            );
+            drop(entry);
+            assert_eq!(
+                fixture.runtime.entry(child).unwrap().parent,
+                Some(fixture.root)
+            );
+            let record = fixture
+                .runtime
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .restore_record(fixture.root)
+                .unwrap()
+                .unwrap();
+            let descriptor: RunRestoreDescriptor =
+                serde_json::from_str(&record.config_json).unwrap();
+            assert!(!record.restorable && !descriptor.restorable);
+            assert_eq!(
+                descriptor.non_restorable_reason.as_deref(),
+                Some("snapshot_consumed")
+            );
+        }
     }
 
     #[tokio::test]
