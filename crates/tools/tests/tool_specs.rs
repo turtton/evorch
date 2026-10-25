@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use event_bus::EventBus;
 use sandbox::DirectSandbox;
-use tools::{Edit, GitDiff, Grep, Read, Shell, Tool, ToolExecutor, WebFetch, WebSearch, Write};
+use tools::{
+    ApplyPatch, Edit, GitDiff, Grep, Read, Shell, Tool, ToolExecutor, WebFetch, WebSearch, Write,
+};
 
 #[test]
 fn tool_specs_preserve_registered_schemas_and_descriptions() {
-    // Given: all seven standard tools registered through the public API.
+    // Given: the seven standard tools and the web tools registered through the public API.
     let sandbox = Arc::new(DirectSandbox::new_unchecked());
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(Read),
         Arc::new(Edit),
         Arc::new(Write),
+        Arc::new(ApplyPatch::new()),
         Arc::new(Grep),
         Arc::new(Shell::new(sandbox.clone())),
         Arc::new(GitDiff::new(sandbox)),
@@ -40,5 +43,13 @@ fn tool_specs_preserve_registered_schemas_and_descriptions() {
             .as_object()
             .unwrap()
             .is_empty()
+    );
+    let patch_spec = specs
+        .iter()
+        .find(|spec| spec.name == "apply_patch")
+        .unwrap();
+    assert_eq!(
+        patch_spec.description,
+        apply_patch::tool_contract::JSON_DESCRIPTION
     );
 }

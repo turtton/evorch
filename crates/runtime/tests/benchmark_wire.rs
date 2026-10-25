@@ -34,6 +34,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
         },
         models: vec!["model-a".into(), "model-b".into()],
         default_model: "model-a".into(),
+        edit_tool: Default::default(),
     };
     let alternate = ProviderProfile {
         name: "alternate".into(),

@@ -30,6 +30,7 @@ fn router(models: &[&str]) -> Router {
             },
             models: vec![(*id).into()],
             default_model: (*id).into(),
+            edit_tool: Default::default(),
         })
         .collect();
     Router::new(

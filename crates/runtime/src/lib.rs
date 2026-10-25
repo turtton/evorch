@@ -23,6 +23,7 @@ pub mod budget_tracker;
 pub(crate) mod compaction;
 pub mod compose;
 pub mod context;
+mod edit_tools;
 pub mod entry_routing;
 pub mod error;
 pub mod escalation;

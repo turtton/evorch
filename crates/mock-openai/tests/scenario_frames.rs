@@ -167,3 +167,39 @@ fn non_streaming_json_roundtrip() {
     );
     assert_eq!(responses[1]["choices"][0]["finish_reason"], "tool_calls");
 }
+
+#[test]
+fn compaction_renders_one_item_for_responses_and_empty_text_for_chat() {
+    // Given
+    let compaction = ScriptedResponse::compaction("resp-1", "m", "opaque").with_usage(13, 9);
+    // When
+    let events: Vec<Value> = compaction
+        .responses_frames()
+        .iter()
+        .map(|frame| {
+            let data = frame.lines().find_map(|line| line.strip_prefix("data: "));
+            serde_json::from_str(data.expect("data line")).unwrap()
+        })
+        .collect();
+    let chat = compaction.to_non_streaming_json();
+    // Then
+    let item = json!({"type": "compaction", "id": "cmp_resp-1", "encrypted_content": "opaque"});
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "response.created",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.completed"
+        ]
+    );
+    assert_eq!(events[1]["item"], item);
+    assert_eq!(events[2]["item"], item);
+    assert_eq!(events[3]["response"]["usage"]["input_tokens"], 13);
+    assert_eq!(chat["choices"][0]["message"]["content"], "");
+    assert_eq!(chat["choices"][0]["finish_reason"], "stop");
+    assert!(!compaction.body().contains("opaque"));
+}

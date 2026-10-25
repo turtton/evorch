@@ -20,8 +20,8 @@ use crate::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::{Permissions, Tool, ToolExecutionMode};
-use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
+use crate::tool::{BuiltinTool, Permissions, Tool, ToolExecutionMode};
+use crate::tools::{ApplyPatch, Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
 
 mod prepared;
 mod specs;
@@ -151,10 +151,24 @@ impl ToolExecutor {
     ///
     /// # Errors
     ///
-    /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`] を返す。
+    /// スキーマのコンパイルに失敗した場合は [`ToolError::InvalidSchema`]、組み込みツール専用の
+    /// 名前（`apply_patch`）を別の実装が名乗った場合は [`ToolError::ReservedToolName`] を返す。
+    /// MCP ツールや host tool もこの経路で登録されるため、同じ検査を受ける。
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+        let is_apply_patch = std::any::Any::type_id(tool.as_ref())
+            == std::any::TypeId::of::<crate::tools::ApplyPatch>();
+        if BuiltinTool::reserving(tool.name()).is_some() && !is_apply_patch {
+            return Err(ToolError::ReservedToolName {
+                name: tool.name().to_owned(),
+            });
+        }
         let schema = tool.schema();
         let validator = schema::compile(tool.name(), &schema)?;
+        // The file boundary resolves apply_patch paths against this executor's
+        // workspace, so the tool must apply them against the same one.
+        if is_apply_patch && let Some(cwd) = self.default_cwd() {
+            tool.set_default_cwd(cwd);
+        }
         tool.set_event_bus(Arc::clone(&self.event_bus));
         self.tools.insert(
             tool.name().to_owned(),
@@ -167,8 +181,8 @@ impl ToolExecutor {
         Ok(())
     }
 
-    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録した実行器を
-    /// 生成する。
+    /// read / write / edit / apply_patch / grep / shell / git_diff の 7 標準ツールを登録した
+    /// 実行器を生成する。
     ///
     /// 低レベルなサンドボックス注入 API である。渡された `Arc<dyn Sandbox>` は
     /// 検証・変換されずそのまま使われるため、隔離なしの `DirectSandbox` も
@@ -197,11 +211,12 @@ impl ToolExecutor {
             Some(cwd) => shell.with_default_cwd(cwd),
             None => shell,
         };
-        let (edit, write) = executor.post_edit_tools();
-        let standard: [Arc<dyn Tool>; 6] = [
+        let [edit, write, apply_patch] = executor.post_edit_tools();
+        let standard: [Arc<dyn Tool>; 7] = [
             Arc::new(Read),
             edit,
             write,
+            apply_patch,
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
@@ -218,8 +233,8 @@ impl ToolExecutor {
         executor
     }
 
-    /// Attach a shared hook to registered standard Write/Edit tools. None restores
-    /// their hook-free behavior without changing tool schemas or permissions.
+    /// Attach a shared hook to registered standard Write/Edit/ApplyPatch tools. None
+    /// restores their hook-free behavior without changing tool schemas or permissions.
     pub fn with_post_edit_hook(mut self, hook: Option<Arc<dyn PostEditHook>>) -> Self {
         self.post_edit_hook = hook;
         self.refresh_post_edit_tools();
@@ -227,10 +242,15 @@ impl ToolExecutor {
     }
 
     fn refresh_post_edit_tools(&mut self) {
-        let (edit, write) = self.post_edit_tools();
-        for tool in [edit, write] {
+        let cwd = self.default_cwd();
+        for tool in self.post_edit_tools() {
             if let Some(registered) = self.tools.get_mut(tool.name()) {
-                // Standard Write/Edit schemas do not depend on the hook.
+                // Standard Write/Edit/ApplyPatch schemas do not depend on the hook.
+                // The fresh apply_patch resolves relative paths against the run's
+                // workspace, so it needs the workspace the old instance had.
+                if let Some(cwd) = &cwd {
+                    tool.set_default_cwd(cwd.clone());
+                }
                 registered.tool = tool;
             }
         }
@@ -252,13 +272,14 @@ impl ToolExecutor {
         }
     }
 
-    fn post_edit_tools(&self) -> (Arc<dyn Tool>, Arc<dyn Tool>) {
+    fn post_edit_tools(&self) -> [Arc<dyn Tool>; 3] {
         match &self.policy_checked_hook() {
-            Some(hook) => (
+            Some(hook) => [
                 Arc::new(Edit.with_post_edit_hook(Arc::clone(hook))),
                 Arc::new(Write.with_post_edit_hook(Arc::clone(hook))),
-            ),
-            None => (Arc::new(Edit), Arc::new(Write)),
+                Arc::new(ApplyPatch::new().with_post_edit_hook(Arc::clone(hook))),
+            ],
+            None => [Arc::new(Edit), Arc::new(Write), Arc::new(ApplyPatch::new())],
         }
     }
 
@@ -270,7 +291,7 @@ impl ToolExecutor {
             .clone()
     }
 
-    /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
+    /// 登録済みツール（shell や apply_patch）の既定作業ディレクトリを更新する。
     pub fn set_default_cwd(&self, cwd: std::path::PathBuf) {
         *self
             .default_cwd
@@ -491,7 +512,8 @@ impl ToolExecutor {
     /// [`ToolExecutor::inherit_host_tools`].
     ///
     /// # Errors
-    /// Returns [`ToolError::InvalidSchema`] when a tool's schema does not compile.
+    /// Returns [`ToolError::InvalidSchema`] when a tool's schema does not compile,
+    /// or [`ToolError::ReservedToolName`] when a tool claims a built-in's name.
     pub fn with_host_tools(
         mut self,
         tools: impl IntoIterator<Item = Arc<dyn Tool>>,
@@ -506,9 +528,10 @@ impl ToolExecutor {
     /// Registers the same host tools as `parent`.
     pub fn inherit_host_tools(mut self, parent: &ToolExecutor) -> Self {
         for tool in &parent.host_tools {
-            // SAFE-EXPECT: the parent compiled the same schema when it registered the tool.
+            // SAFE-EXPECT: the parent compiled the same schema and passed the same
+            // reserved-name check when it registered the tool.
             self.register(Arc::clone(tool))
-                .expect("inherited host tool schemas compile");
+                .expect("inherited host tools were accepted by the parent");
             self.host_tools.push(Arc::clone(tool));
         }
         self
@@ -543,8 +566,8 @@ impl ToolExecutor {
         }
     }
 
-    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録し、production 用の
-    /// fail-closed なサンドボックスを注入した実行器を生成する。
+    /// read / write / edit / apply_patch / grep / shell / git_diff の 7 標準ツールを登録し、
+    /// production 用の fail-closed なサンドボックスを注入した実行器を生成する。
     ///
     /// `sandbox::production_sandbox`（composition root）経由で `BwrapSandbox` を
     /// 構築する。bwrap の検出に失敗した場合はフォールバックせずエラーを返す。
@@ -824,7 +847,7 @@ impl ToolExecutor {
             Ok(mut result) => {
                 // Derive origin before output limiting can replace diagnostic detail.
                 // External checker text is never promoted to trusted command output.
-                result.origin = if matches!(tool_name, "write" | "edit")
+                result.origin = if matches!(tool_name, "write" | "edit" | "apply_patch")
                     && result
                         .detail
                         .as_ref()

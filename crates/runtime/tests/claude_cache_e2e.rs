@@ -219,6 +219,7 @@ async fn exercise(oauth: bool) {
             models: vec![config::ModelEntryConfig::enabled("claude-sonnet-4-6")],
             default_model: "claude-sonnet-4-6".into(),
             excluded_models: vec![],
+            edit_tool: None,
         },
     );
     config.providers.get_mut("claude").unwrap().models[0].preset = Some("output-limit".into());

@@ -7,6 +7,14 @@ const CREATED: u64 = 1_700_000_000;
 #[derive(Debug, Clone)]
 enum ResponseKind {
     Text,
+    Compaction {
+        encrypted_content: String,
+    },
+    CustomToolCall {
+        index: usize,
+        id: String,
+        name: String,
+    },
     ToolCall {
         index: usize,
         id: String,
@@ -83,6 +91,67 @@ impl ScriptedResponse {
         }
     }
 
+    /// Builds a freeform call from raw input fragments (not JSON).
+    ///
+    /// `call_id` is the canonical tool-use ID; `index` is the Responses output
+    /// index / Chat tool-call index. Responses emits `output_item.added`, one
+    /// `custom_tool_call_input.delta` per fragment, `custom_tool_call_input.done`,
+    /// then `output_item.done` with the complete input. Input events identify the
+    /// item by `item_id` / `output_index`, without a `call_id`.
+    /// Chat Completions (SSE and non-streaming JSON) instead wraps the concatenated
+    /// input in a function call's `{"input": "..."}` arguments.
+    ///
+    /// To exercise apply_patch, pass `apply_patch::tool_contract::NAME` and the raw
+    /// patch fragments, and put a ToolSpec with the matching canonical schema in
+    /// the provider request. No JSON escaping of fragments is needed.
+    pub fn custom_tool_call(
+        id: &str,
+        model: &str,
+        index: usize,
+        call_id: &str,
+        name: &str,
+        input: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        Self {
+            kind: ResponseKind::CustomToolCall {
+                index,
+                id: call_id.to_owned(),
+                name: name.to_owned(),
+            },
+            ..Self::text_stream(id, model, input)
+        }
+    }
+
+    /// Builds a Codex official compaction reply carrying an opaque `encrypted_content`.
+    ///
+    /// Responses emits one `compaction` output item (`output_item.added`, then
+    /// `output_item.done`) before `response.completed`, as the Codex backend answers
+    /// a request ending with a `compaction_trigger` item. Chat Completions has no
+    /// compaction item, so it renders an empty assistant text instead.
+    pub fn compaction(id: &str, model: &str, encrypted_content: &str) -> Self {
+        Self {
+            kind: ResponseKind::Compaction {
+                encrypted_content: encrypted_content.to_owned(),
+            },
+            ..Self::text_stream(id, model, std::iter::empty::<&str>())
+        }
+    }
+
+    fn as_chat_function(&self) -> Option<Self> {
+        let ResponseKind::CustomToolCall { index, id, name } = &self.kind else {
+            return None;
+        };
+        Some(Self {
+            kind: ResponseKind::ToolCall {
+                index: *index,
+                id: id.clone(),
+                name: name.clone(),
+            },
+            fragments: vec![json!({"input": self.fragments.concat()}).to_string()],
+            ..self.clone()
+        })
+    }
+
     /// Overrides token counts in both encodings; total is their lossless sum.
     #[must_use]
     pub const fn with_usage(mut self, prompt_tokens: u32, completion_tokens: u32) -> Self {
@@ -104,12 +173,18 @@ impl ScriptedResponse {
     /// Renders complete SSE frames, including usage and the final `[DONE]` frame.
     /// Empty scripts emit one empty delta carrying the role and finish reason.
     pub fn frames(&self) -> Vec<String> {
+        if let Some(function) = self.as_chat_function() {
+            return function.frames();
+        }
         let count = self.fragments.len().max(1);
         let mut frames = Vec::with_capacity(count + 2);
         for position in 0..count {
             let fragment = self.fragments.get(position).map_or("", String::as_str);
             let mut delta = match &self.kind {
-                ResponseKind::Text => json!({"content": fragment}),
+                ResponseKind::CustomToolCall { .. } => unreachable!("custom call normalized above"),
+                ResponseKind::Text | ResponseKind::Compaction { .. } => {
+                    json!({"content": fragment})
+                }
                 ResponseKind::ToolCall { index, id, name } => {
                     let call = if position == 0 {
                         json!({
@@ -171,6 +246,40 @@ impl ScriptedResponse {
                     })));
                 }
             }
+            ResponseKind::Compaction { encrypted_content } => {
+                let item = json!({"type": "compaction", "id": format!("cmp_{}", self.id),
+                    "encrypted_content": encrypted_content});
+                for event in ["response.output_item.added", "response.output_item.done"] {
+                    frames.push(frame(json!({
+                        "type": event, "output_index": 0, "item": item,
+                    })));
+                }
+            }
+            ResponseKind::CustomToolCall { index, id, name } => {
+                let item_id = format!("ctc_{id}");
+                let item = |input: String| {
+                    json!({"type": "custom_tool_call", "id": item_id, "call_id": id,
+                        "name": name, "input": input})
+                };
+                frames.push(frame(json!({
+                    "type": "response.output_item.added", "output_index": index,
+                    "item": item(String::new()),
+                })));
+                for fragment in &self.fragments {
+                    frames.push(frame(json!({
+                        "type": "response.custom_tool_call_input.delta",
+                        "item_id": item_id, "output_index": index, "delta": fragment,
+                    })));
+                }
+                frames.push(frame(json!({
+                    "type": "response.custom_tool_call_input.done",
+                    "item_id": item_id, "output_index": index, "input": self.fragments.concat(),
+                })));
+                frames.push(frame(json!({
+                    "type": "response.output_item.done", "output_index": index,
+                    "item": item(self.fragments.concat()),
+                })));
+            }
             ResponseKind::ToolCall { index, id, name } => {
                 let item_id = format!("fc_{id}");
                 let item = |arguments: String| {
@@ -211,9 +320,15 @@ impl ScriptedResponse {
 
     /// Renders a non-streaming completion with all fragments reassembled.
     pub fn to_non_streaming_json(&self) -> Value {
+        if let Some(function) = self.as_chat_function() {
+            return function.to_non_streaming_json();
+        }
         let content = self.fragments.concat();
         let message = match &self.kind {
-            ResponseKind::Text => json!({"role": "assistant", "content": content}),
+            ResponseKind::CustomToolCall { .. } => unreachable!("custom call normalized above"),
+            ResponseKind::Text | ResponseKind::Compaction { .. } => {
+                json!({"role": "assistant", "content": content})
+            }
             ResponseKind::ToolCall { id, name, .. } => json!({
                 "role": "assistant", "content": null,
                 "tool_calls": [{
@@ -232,8 +347,8 @@ impl ScriptedResponse {
 
     const fn finish_reason(&self) -> &'static str {
         match &self.kind {
-            ResponseKind::Text => "stop",
-            ResponseKind::ToolCall { .. } => "tool_calls",
+            ResponseKind::Text | ResponseKind::Compaction { .. } => "stop",
+            ResponseKind::ToolCall { .. } | ResponseKind::CustomToolCall { .. } => "tool_calls",
         }
     }
 

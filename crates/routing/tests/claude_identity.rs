@@ -22,6 +22,7 @@ fn profile(base_url: String) -> ProviderProfile {
         },
         models: vec!["claude-test".into()],
         default_model: "claude-test".into(),
+        edit_tool: Default::default(),
     }
 }
 

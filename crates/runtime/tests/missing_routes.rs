@@ -24,6 +24,7 @@ fn configured(mock: &StreamingMockOpenAi) -> Config {
                 models: vec![config::ModelEntryConfig::enabled("gpt-4o")],
                 excluded_models: vec![],
                 default_model: "gpt-4o".into(),
+                edit_tool: None,
             },
         )]),
         ..Config::default()

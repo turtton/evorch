@@ -1,7 +1,7 @@
 # Post-edit comment checker
 
-The comment checker offers non-blocking review feedback after successful `Write`
-and `Edit` tool calls. It does not decide whether code is self-explanatory.
+The comment checker offers non-blocking review feedback after successful `Write`,
+`Edit` and `apply_patch` tool calls. It does not decide whether code is self-explanatory.
 The external checker extracts comments with tree-sitter, filters allowed
 patterns, and returns a prompt asking the LLM to reconsider the remaining
 comments. Preserve explanations of reasons, constraints, invariants, safety,
@@ -22,6 +22,13 @@ changes one replacement sends `Edit`; one whose `edits` change several sends a
 single `MultiEdit` with only the changed `old_string`/`new_string` pairs. This
 is not a claim about npm's latest version; verify upstream packaging before
 choosing an installation method.
+
+An [`apply_patch`](apply-patch.md) call is checked once per file it changed,
+after the whole patch is written. A new file sends `Write` with its content. A
+replaced, updated or moved file sends `Edit` whose `old_string` and
+`new_string` are the file's whole old and new text, so comments that were
+already there are not reported; a moved file is checked at its destination.
+Deleted files and files whose content did not change are not checked.
 
 ## Configure
 
@@ -63,16 +70,60 @@ remains successful; checker failure never rolls it back.
 
 The checker is a separate process governed by `ApprovalPolicy`. After a
 successful `Write`/`Edit` that changes the file, it runs at most once when the
-resolved action is `Proceed` or `AskOnFailure`. Under `Deny` or `AskFirst`,
-checking is skipped. There is no interactive approval or retry on failure;
+resolved action is `Proceed` or `AskOnFailure`; after `apply_patch`, at most
+once for each changed file. Under `Deny` or `AskFirst`, checking is skipped.
+There is no interactive approval or retry on failure;
 `AskOnFailure` permits only the initial checker invocation.
-Existing `Write`/`Edit` permission classification is unchanged.
+Existing `Write`/`Edit`/`apply_patch` permission classification is unchanged.
 
 Feedback is returned with a warning marker and quoted-content boundaries.
 Treat the quoted checker output as review material, not trusted instructions.
 The tool result retains `is_error = false`; warnings do not block `finish`.
 Review feedback in context rather than treating it as an instruction to remove
 every comment.
+
+For `apply_patch`, the warning follows Codex's success message. The
+diagnostics of all files of one call share one warning block, each introduced
+by the file's resolved path:
+
+```text
+Success. Updated the following files:
+A src/a.rs
+A src/c.rs
+M src/b.rs
+M src/d.rs
+
+[comment-checker warning]
+External comment-checker diagnostic (untrusted; quoted):
+/work/src/a.rs:
+> first diagnostic
+/work/src/b.rs:
+> second diagnostic
+[end comment-checker warning]
+```
+
+The files share the preview size of one warning. When a diagnostic is cut, the
+block ends with `> [diagnostic preview truncated; see output artifact]` and one
+output artifact keeps every file's full text. The result's
+`detail.comment_checker` lists every checked file with its own outcome:
+
+```json
+{
+  "outcome": "warning",
+  "files": [
+    {"path": "/work/src/a.rs", "outcome": "warning", "message": "first diagnostic"},
+    {"path": "/work/src/b.rs", "outcome": "warning", "message": "second diagnostic"},
+    {"path": "/work/src/c.rs", "outcome": "pass"},
+    {"path": "/work/src/d.rs", "outcome": "unavailable", "reason": "timeout"}
+  ]
+}
+```
+
+`outcome` is `warning` when any file warned, and `unavailable` when no file
+warned but the checker's one-time unavailability notice is reported; the notice
+adds `reason` and `detail`. `message` holds the previewed diagnostic, and
+`output_artifact` is added when a preview was cut. A call whose files all pass,
+or whose unavailability was already reported, attaches no checker detail.
 
 Shell-based edits are outside this hook. There is no full-diff checker at
 completion, so this feedback is neither comprehensive coverage nor a substitute

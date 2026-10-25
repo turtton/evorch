@@ -45,6 +45,25 @@ version 管理 migration は起動時に適用（`migrate.rs`。古い version �
 | `credential` | enum | **参照のみ。平文値は書かない**（ADR 0008） |
 | `models` | string[] | この profile が提供するモデル id |
 | `default_model` | string | 省略時の既定モデル |
+| `edit_tool` | enum | モデルへ提示する編集ツール（`apply-patch` / `edit`）。省略可 |
+
+### edit_tool（編集ツールの選択）
+
+`edit_tool` は profile 直下とモデルエントリ（table 形式）の両方に書ける。値は `apply-patch`（Codex 準拠の `apply_patch`）か `edit`（文字列置換）で、それ以外の値は通常の読み込みでも `providers.<profile>.edit_tool` / `providers.<profile>.models[<i>].edit_tool` の config path 付きで拒否される。
+
+```toml
+[providers.openai]
+type = "openai"
+edit_tool = "edit"                      # profile 全体の指定
+models = [
+  { id = "gpt-5.5", enabled = true, edit_tool = "apply-patch" },  # モデル単位の指定が優先
+  "gpt-6-astra",
+]
+```
+
+解決順は model entry > profile > 既定判定。`+fast` 付きの ID は、完全一致するエントリがなければ `+fast` を除いた ID のエントリを使う。既定判定は、provider type が `openai` または `openai-codex` で、モデル ID が `gpt-<N>`（`gpt-` 直後の数字列で N≥5。例: `gpt-5`・`gpt-5.1-codex`・`gpt-6-astra`）のときだけ `apply-patch`、それ以外（`gpt-4.1`・`o3`・`gpt-oss-120b`、openai-compatible など他の type）は `edit`。モデル ID の `gpt-` 判定は大文字小文字を区別しない（runtime の model family 判定と同じく `GPT-5` も対象）。model entry の `id` との照合は従来どおり完全一致。
+
+GUI からの profile 保存・改名では、手書きの profile 直下の `edit_tool` は引き継がれる。モデルに見せるツール、履歴の再生、承認ポリシー、境界とチームの扱いは `docs/apply-patch.md` を参照。
 
 ### credential (`CredentialRefConfig`、`type` タグ付き、kebab-case)
 

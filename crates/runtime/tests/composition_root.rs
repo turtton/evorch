@@ -62,6 +62,7 @@ fn configured() -> Config {
                 models: vec![config::ModelEntryConfig::enabled(MODEL)],
                 excluded_models: Vec::new(),
                 default_model: MODEL.to_string(),
+                edit_tool: None,
             },
         )]),
         routing: config::RoutingConfig {

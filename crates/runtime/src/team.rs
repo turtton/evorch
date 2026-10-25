@@ -150,8 +150,21 @@ impl TeamBoard {
     }
 
     pub fn authorize_path(&self, worker: &str, path: &Path, now: u64) -> Result<(), TeamError> {
+        self.authorize_path_under(worker, Path::new(""), path, now)
+    }
+
+    /// [`Self::authorize_path`] for a `path` relative to `root`. Symlinks are
+    /// looked for where the file lives, below `root`, rather than below the
+    /// process working directory; `root` itself is trusted.
+    pub(crate) fn authorize_path_under(
+        &self,
+        worker: &str,
+        root: &Path,
+        path: &Path,
+        now: u64,
+    ) -> Result<(), TeamError> {
         validate_path(path)?;
-        let mut prefix = PathBuf::new();
+        let mut prefix = root.to_path_buf();
         for component in path.components() {
             prefix.push(component);
             match std::fs::symlink_metadata(&prefix) {

@@ -188,6 +188,7 @@ async fn rejected_followups_with_unknown_outcomes(failures: usize) {
             }],
         },
         range: (0, 1),
+        protects_history: false,
     }];
     before.checkpoints_json = serde_json::to_string(&checkpoints).unwrap();
     fixture

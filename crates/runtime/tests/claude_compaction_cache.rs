@@ -213,6 +213,7 @@ async fn claude_subscription_compaction_replaces_history_once_then_reuses_the_pr
             models: vec![config::ModelEntryConfig::enabled(MODEL)],
             default_model: MODEL.into(),
             excluded_models: vec![],
+            edit_tool: None,
         },
     );
     config.routing.routes.insert(

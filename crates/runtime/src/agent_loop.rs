@@ -339,6 +339,13 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         allowed_instructions,
         allowed_skill_origins: Default::default(),
     };
+    // One boundary covers legacy completion, streaming and official compaction without
+    // changing the authorized tools persisted in checkpoints.
+    if !state.shared.model.narrows_edit_tools() {
+        state.shared.model = Arc::new(crate::compose::SwitchableModel::new(Arc::clone(
+            &state.shared.model,
+        )));
+    }
     // Every setup/execute return flows through one finalization boundary.
     async {
         if state.cancelled()
@@ -977,6 +984,7 @@ impl LoopState {
                         self.finish_error(error.to_string());
                         return;
                     }
+                    invocation_model.model_switch_prepared(&invocation, self.task.role, &selected);
                     continue;
                 }
                 Err(error) => {
@@ -1832,6 +1840,7 @@ mod workspace_tests {
             id: "checkpoint".to_string(),
             summary: text_message(MessageRole::User, "summary"),
             range: (0, 2),
+            protects_history: false,
         });
         let mut expected = context.clone();
         let mut expected_visible = context.visible_messages();

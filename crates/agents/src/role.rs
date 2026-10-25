@@ -47,7 +47,7 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// |---|---|---|
 /// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系 + web_fetch (mutation tool なし) | 可 |
 /// | Explorer | read / grep | 不可 |
-/// | Worker | read / write / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | 不可 |
+/// | Worker | read / write / edit / apply_patch / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | 不可 |
 /// | Reviewer | read / grep / git_diff | 不可 |
 /// | Advisor | read / grep / git_diff | 不可 |
 /// | WebResearcher | read / grep / web_search / web_fetch / browser_* | 不可 |
@@ -57,6 +57,7 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 ///
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
 /// - web_search は WebResearcher 専用であり、Orchestrator は web_fetch のみを持つ。
+/// - apply_patch はファイルを書き換えるため、edit / write と同じく Worker だけが持つ。
 ///
 /// # ロール追加時の配線
 ///
@@ -168,6 +169,7 @@ impl Role {
                     "read",
                     "edit",
                     "write",
+                    "apply_patch",
                     "grep",
                     "shell",
                     "skill_load",

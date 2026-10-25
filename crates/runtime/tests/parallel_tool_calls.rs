@@ -141,6 +141,70 @@ async fn two_shared_half_second_calls_take_one_half_second_wave() {
 }
 
 #[tokio::test]
+async fn apply_patch_runs_alone_between_shared_reads() {
+    // Given: a patch between two shared reads, which could otherwise share a wave.
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let (mut executor, trace, _receiver) = executor(bus.clone());
+    executor
+        .register(Arc::new(tools::ApplyPatch::new()))
+        .expect("register apply_patch");
+    executor.set_policy(ApprovalPolicy::allow_all());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let file = workspace.path().join("patched.txt");
+    let patch = ContentBlock::ToolUse {
+        id: "patch".into(),
+        name: "apply_patch".into(),
+        input: json!({
+            "input": format!("*** Begin Patch\n*** Add File: {}\n+patched\n*** End Patch", file.display())
+        }),
+    };
+    let runtime = AgentRuntime::new(
+        bus,
+        Arc::new(executor),
+        model(vec![call("a", "read", 0), patch, call("c", "read", 0)]),
+    );
+    // When: execute the batch through the real agent loop.
+    let run = runtime.delegate_background(Role::Worker, "batch".into(), RunConfig::default());
+    runtime.wait(run).await.expect("wait");
+    // Then: each call starts only after the previous one completed.
+    let mut order = Vec::new();
+    for event in events.drain_pending_snapshot() {
+        match event.kind {
+            EventKind::Tool(ToolEvent::ToolStarted { call_id, .. }) => {
+                order.push(format!("start:{call_id}"));
+            }
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                call_id, is_error, ..
+            }) => {
+                assert!(!is_error, "{call_id} failed");
+                order.push(format!("end:{call_id}"));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        order,
+        [
+            "start:a",
+            "end:a",
+            "start:patch",
+            "end:patch",
+            "start:c",
+            "end:c"
+        ]
+    );
+    assert_eq!(
+        *trace.lock().expect("trace"),
+        ["start:a", "end:a", "start:c", "end:c"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("patched"),
+        "patched\n"
+    );
+}
+
+#[tokio::test]
 async fn results_returned_in_original_call_order() {
     // Given: later call completes first.
     let bus = Arc::new(EventBus::new(256));

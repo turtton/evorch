@@ -21,6 +21,7 @@ fn tool_router(catalog: ModelCatalog, models: [&str; 2]) -> Router {
         },
         models: vec![model.into()],
         default_model: model.into(),
+        edit_tool: Default::default(),
     });
     Router::new(
         profiles.into(),

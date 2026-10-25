@@ -16,6 +16,8 @@ mod prompt_cache;
 
 use prompt_cache::PromptCache;
 
+const CODEX_BASE_PATH: &str = "/backend-api/codex";
+
 /// A parsed request, retained even when the response queue is exhausted.
 #[derive(Clone, Debug)]
 pub struct RecordedRequest {
@@ -99,8 +101,9 @@ impl StreamingMockOpenAi {
 
     /// Starts a fixture with deterministic prefix-cache usage in JSON and SSE.
     ///
-    /// Both `/v1/chat/completions` and `/v1/responses` participate; the latter is
-    /// answered as Responses SSE with the usage in `response.completed`.
+    /// `/v1/chat/completions`, `/v1/responses` and the Codex backend's
+    /// `/backend-api/codex/responses` participate; the latter two are answered as
+    /// Responses SSE with the usage in `response.completed`.
     /// One UTF-8 byte of canonical request settings and messages (Responses:
     /// `instructions`/`tools` settings and `input` items) is one synthetic
     /// token. The longest input prefix among the last 64 requests with the same
@@ -164,9 +167,16 @@ impl StreamingMockOpenAi {
             simulate_prompt_cache.then(|| Arc::new(Mutex::new(PromptCache::default())));
         let models: Vec<_> = models
             .into_iter()
-            .map(|id| json!({"id": id, "object": "model", "created": 0, "owned_by": "mock-openai"}))
+            .map(|id| {
+                (
+                    json!({"id": id, "object": "model", "created": 0, "owned_by": "mock-openai"}),
+                    json!({"slug": id}),
+                )
+            })
             .collect();
+        let (models, codex_models): (Vec<_>, Vec<_>) = models.into_iter().unzip();
         let models = json!({"object": "list", "data": models});
+        let codex_models = json!({"models": codex_models});
         let listener = TcpListener::bind("127.0.0.1:0")
             .unwrap_or_else(|error| panic!("mock_openai bind failed: {error}"));
         let address = listener
@@ -195,6 +205,7 @@ impl StreamingMockOpenAi {
                 let recorded = Arc::clone(&recorded);
                 let queued = Arc::clone(&queued);
                 let models = models.clone();
+                let codex_models = codex_models.clone();
                 let mode = mode.clone();
                 let prompt_cache = prompt_cache.clone();
                 connections.push(thread::spawn(move || {
@@ -202,12 +213,16 @@ impl StreamingMockOpenAi {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
                     let request = read_request(&mut stream)?;
-                    let responses_api =
-                        request.method == "POST" && request.path == "/v1/responses";
+                    let responses_api = request.method == "POST"
+                        && (request.path == "/v1/responses"
+                            || request.path == format!("{CODEX_BASE_PATH}/responses"));
                     // The Responses API answers with SSE regardless of the request flag.
                     let streaming = request.stream || responses_api;
-                    let listing_models = request.method == "GET"
-                        && request.path.split('?').next() == Some("/v1/models");
+                    let listed_path = request.path.split('?').next();
+                    let listing_models =
+                        request.method == "GET" && listed_path == Some("/v1/models");
+                    let listing_codex_models = request.method == "GET"
+                        && listed_path == Some(&format!("{CODEX_BASE_PATH}/models"));
                     let prompt = (prompt_cache.is_some()
                         && request.method == "POST"
                         && (request.path == "/v1/chat/completions" || responses_api))
@@ -219,6 +234,9 @@ impl StreamingMockOpenAi {
                         .push(request);
                     if listing_models {
                         return write_json(&mut stream, "200 OK", &models);
+                    }
+                    if listing_codex_models {
+                        return write_json(&mut stream, "200 OK", &codex_models);
                     }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
                     let response = response.map(|response| {
@@ -277,6 +295,15 @@ impl StreamingMockOpenAi {
     /// Returns the API base URL, including `/v1`.
     pub fn base_url(&self) -> String {
         self.base_url.clone()
+    }
+
+    /// Returns a Codex subscription backend base URL on this fixture.
+    ///
+    /// `{base}/responses` is served like `/v1/responses`, and `GET {base}/models`
+    /// lists the fixture's models as the Codex catalog (`{"models": [{"slug"}]}`).
+    /// Credentials and Codex headers are recorded but not checked.
+    pub fn codex_base_url(&self) -> String {
+        format!("http://{}{CODEX_BASE_PATH}", self.address)
     }
 
     /// Returns an owned snapshot of requests in arrival order.

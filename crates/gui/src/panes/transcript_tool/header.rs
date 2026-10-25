@@ -95,6 +95,27 @@ pub fn tool_header(
             header.meta = result.and_then(diff_stat);
             header
         }
+        "apply_patch" => {
+            let mut header = header(icons::PENCIL_SIMPLE, "Apply patch");
+            let files = input
+                .and_then(patch_text)
+                .map(patch_files)
+                .unwrap_or_default();
+            if let Some(first) = files.first() {
+                (header.subject, header.location) = patch_subject(first, repo_root);
+            }
+            let others = match files.len().saturating_sub(1) {
+                0 => None,
+                1 => Some("+1 file".to_owned()),
+                count => Some(format!("+{count} files")),
+            };
+            header.location = match (header.location, others) {
+                (Some(location), Some(others)) => Some(format!("{location} {others}")),
+                (location, others) => location.or(others),
+            };
+            header.meta = result.and_then(applied_files);
+            header
+        }
         "grep" => {
             let mut header = header(icons::MAGNIFYING_GLASS, "Grep");
             if let Some(pattern) = str_arg("pattern") {
@@ -234,6 +255,102 @@ fn diff_stat(output: &str) -> Option<String> {
         }
     }
     Some(format!("+{added} −{removed}"))
+}
+
+/// The patch an `apply_patch` call carries in its `input` argument.
+pub(super) fn patch_text(input: &serde_json::Value) -> Option<&str> {
+    input.get("input")?.as_str()
+}
+
+/// A file a patch adds, updates or deletes, and where an update moves it.
+struct PatchFile<'a> {
+    path: &'a str,
+    move_to: Option<&'a str>,
+}
+
+/// The files named by the patch's `*** Add/Update/Delete File:` lines, in
+/// order and without repeats, read by line start as the apply-patch parser
+/// does: between hunks a header may be padded, but inside an update hunk a
+/// padded header is a context line, and `*** Move to:` only renames when it
+/// directly follows its `*** Update File:` line.
+fn patch_files(patch: &str) -> Vec<PatchFile<'_>> {
+    let mut files: Vec<PatchFile<'_>> = Vec::new();
+    // The file an update hunk is about, while a `*** Move to:` may follow.
+    let mut movable: Option<usize> = None;
+    let mut in_update = false;
+    for line in patch.lines() {
+        let line = line.trim_end();
+        let candidate = if in_update { line } else { line.trim_start() };
+        if candidate == "*** End Patch" {
+            break;
+        }
+        if let Some((update, path)) = [
+            (false, "*** Add File: "),
+            (true, "*** Update File: "),
+            (false, "*** Delete File: "),
+        ]
+        .iter()
+        .find_map(|(update, marker)| Some((*update, candidate.strip_prefix(marker)?.trim())))
+        {
+            in_update = update;
+            let index = (!path.is_empty()).then(|| {
+                files
+                    .iter()
+                    .position(|file| file.path == path)
+                    .unwrap_or_else(|| {
+                        files.push(PatchFile {
+                            path,
+                            move_to: None,
+                        });
+                        files.len() - 1
+                    })
+            });
+            movable = index.filter(|_| in_update);
+            continue;
+        }
+        if let Some(index) = movable.take()
+            && let Some(destination) = line
+                .strip_prefix("*** Move to: ")
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+        {
+            files[index].move_to = Some(destination);
+        }
+    }
+    files
+}
+
+/// The file name and directory, or `src → dst` for a move: just the names
+/// when both stay in one directory, the full display paths otherwise.
+fn patch_subject(file: &PatchFile<'_>, repo_root: Option<&Path>) -> (String, Option<String>) {
+    let (name, location) = split_path(file.path, repo_root);
+    let Some(destination) = file.move_to else {
+        return (one_line(&name), location);
+    };
+    let (destination_name, destination_location) = split_path(destination, repo_root);
+    if destination_location == location {
+        (one_line(&format!("{name} → {destination_name}")), location)
+    } else {
+        let source = display_path(file.path, repo_root);
+        let destination = display_path(destination, repo_root);
+        (one_line(&format!("{source} → {destination}")), None)
+    }
+}
+
+/// How many files Codex's success summary lists (`A`/`M`/`D` lines); `None`
+/// for any other output. Warnings appended after the list are not counted.
+fn applied_files(output: &str) -> Option<String> {
+    let mut lines = output.lines();
+    if lines.next()? != "Success. Updated the following files:" {
+        return None;
+    }
+    let count = lines
+        .take_while(|line| ["A ", "M ", "D "].iter().any(|kind| line.starts_with(kind)))
+        .count();
+    Some(match count {
+        1 => "1 file".to_owned(),
+        count => format!("{count} files"),
+    })
 }
 
 fn grep_matches(output: &str) -> Option<String> {
@@ -437,6 +554,114 @@ mod tests {
             header("write", json!({"path": "x"}), Some("No changes to x")).meta,
             None
         );
+    }
+
+    fn patch(body: &str) -> serde_json::Value {
+        json!({"input": format!("*** Begin Patch\n{body}*** End Patch\n")})
+    }
+
+    #[test]
+    fn apply_patch_names_the_patched_file_and_counts_applied_files() {
+        // Given: a one-file patch with an absolute path inside the repository.
+        let input = patch("*** Update File: /repo/crates/gui/src/lib.rs\n@@ fn main\n-old\n+new\n");
+        let output = "Success. Updated the following files:\nM /repo/crates/gui/src/lib.rs\n";
+        // When
+        let header = header("apply_patch", input, Some(output));
+        // Then
+        assert_eq!(header.icon, icons::PENCIL_SIMPLE);
+        assert_eq!(header.verb, "Apply patch");
+        assert_eq!(header.subject, "lib.rs");
+        assert_eq!(header.location.as_deref(), Some("crates/gui/src"));
+        assert_eq!(header.meta.as_deref(), Some("1 file"));
+        assert_eq!(header.text(), "Apply patch lib.rs crates/gui/src · 1 file");
+    }
+
+    #[test]
+    fn apply_patch_with_several_files_counts_the_others_in_the_location() {
+        // Given: three files, and a comment-checker warning after the list.
+        let input = patch(
+            "*** Add File: a.txt\n+hello\n*** Update File: src/b.rs\n@@\n-old\n+new\n\
+             *** Delete File: d.txt\n",
+        );
+        let output = "Success. Updated the following files:\nA a.txt\nM src/b.rs\nD d.txt\n\
+                      \n[comment-checker warning]\nExternal comment-checker diagnostic \
+                      (untrusted; quoted):\n> M ignored\n[end comment-checker warning]";
+        // When
+        let several = header("apply_patch", input, Some(output));
+        // Then
+        assert_eq!(several.subject, "a.txt");
+        assert_eq!(several.location.as_deref(), Some("+2 files"));
+        assert_eq!(several.meta.as_deref(), Some("3 files"));
+        assert_eq!(several.text(), "Apply patch a.txt +2 files · 3 files");
+        // A nested first file keeps its directory before the count.
+        let nested = patch("*** Update File: crates/x/y.rs\n@@\n-a\n+b\n*** Add File: z\n+z\n");
+        assert_eq!(
+            header("apply_patch", nested, None).text(),
+            "Apply patch y.rs crates/x +1 file"
+        );
+    }
+
+    #[test]
+    fn apply_patch_shows_a_move_from_source_to_destination() {
+        // Given: a rename within one directory and one across directories.
+        let same_dir = patch("*** Update File: src/b.rs\n*** Move to: src/c.rs\n@@\n-a\n+b\n");
+        let across = patch(
+            "*** Update File: /repo/src/b.rs\n*** Move to: /repo/lib/c.rs\n@@\n-a\n+b\n\
+             *** Delete File: d.txt\n",
+        );
+        // When / Then
+        assert_eq!(
+            header(
+                "apply_patch",
+                same_dir,
+                Some("Success. Updated the following files:\nM src/c.rs\n")
+            )
+            .text(),
+            "Apply patch b.rs → c.rs src · 1 file"
+        );
+        assert_eq!(
+            header("apply_patch", across, None).text(),
+            "Apply patch src/b.rs → lib/c.rs +1 file"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reads_file_headers_the_way_the_parser_does() {
+        // Given: padded headers between hunks, which the parser accepts, and
+        // padded header text inside an update hunk, which is a context line.
+        let input = patch(
+            "  *** Update File: src/b.rs\n@@\n *** Add File: context.txt\n-old\n+new\n\
+             *** Move to: src/late.rs\n*** Add File: a.txt\n+a\n \t*** Delete File: d.txt\n",
+        );
+        // When
+        let padded = header("apply_patch", input, None);
+        // Then: three files; a Move after the hunk body is not a rename.
+        assert_eq!(padded.text(), "Apply patch b.rs src +2 files");
+        // Nothing after the end of the patch counts.
+        let trailing = json!({
+            "input": "*** Begin Patch\n*** Delete File: d.txt\n*** End Patch\n\
+                      *** Add File: after.txt\n"
+        });
+        assert_eq!(
+            header("apply_patch", trailing, None).text(),
+            "Apply patch d.txt"
+        );
+    }
+
+    #[test]
+    fn apply_patch_failure_has_no_file_count() {
+        // Given: a rejected patch.
+        let input = patch("*** Update File: src/b.rs\n@@\n-missing\n+new\n");
+        let output = "apply_patch verification failed: Failed to find expected lines in \
+                      src/b.rs:\nmissing";
+        // When
+        let failed = tool_header("apply_patch", Some(&input), Some(output), true, None, &[]);
+        // Then
+        assert_eq!(failed.meta, None);
+        assert_eq!(failed.text(), "Apply patch b.rs src");
+        // Output that is not Codex's success summary is not counted either.
+        let header = header("apply_patch", input, Some("M src/b.rs\n"));
+        assert_eq!(header.meta, None);
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn config() -> Config {
                 models: vec![config::ModelEntryConfig::enabled("local-model")],
                 excluded_models: Vec::new(),
                 default_model: "local-model".to_string(),
+                edit_tool: None,
             },
         )]),
         ..Config::default()

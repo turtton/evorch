@@ -71,7 +71,7 @@ fn orchestrator_denies_mutation_tools() {
     // When: edit / shell の使用可否を問い合わせる
     // Then: 両方とも role_name / tool 入りの Denied になる
     let caps = Role::Orchestrator.capabilities();
-    for tool in ["write", "edit", "shell"] {
+    for tool in ["write", "edit", "apply_patch", "shell"] {
         assert_denied(caps.check_tool("Orchestrator", tool), "Orchestrator", tool);
     }
 }
@@ -118,6 +118,7 @@ fn explorer_denies_mutation_delegation_and_messaging_tools() {
     for tool in [
         "write",
         "edit",
+        "apply_patch",
         "shell",
         "delegate",
         "send",
@@ -160,10 +161,10 @@ fn worker_allows_exactly_adr_0002_tools() {
 #[test]
 fn worker_allows_mutation_tools() {
     // Given: Worker ロール (mutation を担う唯一のロール)
-    // When: edit / shell の使用可否を問い合わせる
-    // Then: 両方とも Allowed になる
+    // When: write / edit / apply_patch / shell の使用可否を問い合わせる
+    // Then: すべて Allowed になる
     let caps = Role::Worker.capabilities();
-    for tool in ["write", "edit", "shell"] {
+    for tool in ["write", "edit", "apply_patch", "shell"] {
         assert_eq!(caps.check_tool("Worker", tool), CapabilityDecision::Allowed);
     }
 }
@@ -237,7 +238,14 @@ fn reviewer_denies_mutation_and_messaging_tools() {
     // When: edit / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Reviewer.capabilities();
-    for tool in ["write", "edit", "send", "wait_reply", "inbox"] {
+    for tool in [
+        "write",
+        "edit",
+        "apply_patch",
+        "send",
+        "wait_reply",
+        "inbox",
+    ] {
         assert_denied(caps.check_tool("Reviewer", tool), "Reviewer", tool);
     }
 }
@@ -278,12 +286,52 @@ fn web_researcher_denies_mutation_and_delegation_tools() {
     // When: edit / shell / delegate / send の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::WebResearcher.capabilities();
-    for tool in ["write", "edit", "shell", "delegate", "send"] {
+    for tool in ["write", "edit", "apply_patch", "shell", "delegate", "send"] {
         assert_denied(
             caps.check_tool("WebResearcher", tool),
             "WebResearcher",
             tool,
         );
+    }
+}
+
+#[test]
+fn apply_patch_is_allowed_exactly_where_edit_and_write_are() {
+    // Given: 追加ロールを含む全ロール
+    // When: apply_patch / edit / write の使用可否を問い合わせる
+    // Then: apply_patch は edit と write の両方が許可されるロール (Worker) でだけ許可される
+    for role in [
+        Role::Orchestrator,
+        Role::Explorer,
+        Role::Worker,
+        Role::Reviewer,
+        Role::WebResearcher,
+        Role::Planner,
+        Role::Advisor,
+        Role::MultimodalLooker,
+        Role::Evaluator,
+    ] {
+        let caps = role.capabilities();
+        let allowed = |tool| caps.check_tool(role.name(), tool) == CapabilityDecision::Allowed;
+        assert_eq!(
+            allowed("apply_patch"),
+            allowed("edit") && allowed("write"),
+            "{}",
+            role.name()
+        );
+        assert_eq!(
+            allowed("apply_patch"),
+            role == Role::Worker,
+            "{}",
+            role.name()
+        );
+        if !allowed("apply_patch") {
+            assert_denied(
+                caps.check_tool(role.name(), "apply_patch"),
+                role.name(),
+                "apply_patch",
+            );
+        }
     }
 }
 

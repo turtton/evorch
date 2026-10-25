@@ -1,0 +1,8 @@
+This crate includes code derived from OpenAI Codex
+(https://github.com/openai/codex), licensed under the Apache License,
+Version 2.0. See LICENSE-APACHE and UPSTREAM.md.
+
+The NOTICE file of OpenAI Codex reads, in the part that pertains to this crate:
+
+    OpenAI Codex
+    Copyright 2025 OpenAI

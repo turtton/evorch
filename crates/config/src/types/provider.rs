@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::edit_tool::{EditToolConfig, EditToolSelection, resolve_edit_tool};
+
 /// プロバイダの種別 (設定ファイル上の表現)。
 ///
 /// シリアライズ識別子はケバブケース (例: `anthropic-subscription`) です。
@@ -262,6 +264,11 @@ pub struct ModelEntryConfig {
     /// このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_levels: Option<Vec<String>>,
+    /// このモデルへ提示するファイル編集ツール。省略時はプロファイルの `edit_tool`、
+    /// それもなければ既定判定 (OpenAI / OpenAI Codex の `gpt-<N>` (N≥5) は
+    /// apply-patch、それ以外は edit) に従う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_tool: Option<EditToolConfig>,
 }
 
 /// USD per million tokens. Each `None` is unknown, not zero/free.
@@ -388,6 +395,7 @@ impl ModelEntryConfig {
             fast_price: None,
             price_tiers: None,
             effort_levels: None,
+            edit_tool: None,
         }
     }
 
@@ -482,6 +490,8 @@ struct ModelEntryDe {
     price_tiers: Option<Vec<PriceTier>>,
     #[serde(default)]
     effort_levels: Option<Vec<String>>,
+    #[serde(default)]
+    edit_tool: Option<EditToolConfig>,
 }
 
 impl<'de> Deserialize<'de> for ModelEntryConfig {
@@ -530,6 +540,7 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                     fast_price: entry.fast_price,
                     price_tiers: entry.price_tiers,
                     effort_levels: entry.effort_levels,
+                    edit_tool: entry.edit_tool,
                 })
             }
         }
@@ -569,6 +580,11 @@ pub struct ProviderProfileConfig {
     pub excluded_models: Vec<String>,
     /// 既定で使用するモデル ID。
     pub default_model: String,
+    /// このプロファイルのモデルへ提示するファイル編集ツール。モデルエントリの
+    /// `edit_tool` が優先する。省略時は既定判定 (OpenAI / OpenAI Codex の
+    /// `gpt-<N>` (N≥5) は apply-patch、それ以外は edit) に従う。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_tool: Option<EditToolConfig>,
 }
 
 impl ProviderProfileConfig {
@@ -607,6 +623,33 @@ impl ProviderProfileConfig {
                 || ModelKind::infer(model_id),
                 ModelEntryConfig::effective_kind,
             )
+    }
+
+    /// `model_id` (プロファイル名を除いたモデル ID) に提示する編集ツールを返す。
+    ///
+    /// model entry > プロファイル > 既定判定の順に解決する。`+fast` 付きの ID は、
+    /// 完全一致する entry がなければ base ID の entry を使う。
+    pub fn edit_tool_for(&self, model_id: &str) -> EditToolConfig {
+        resolve_edit_tool(self.provider_type, self.edit_tool, model_id, |id| {
+            self.models
+                .iter()
+                .filter(|entry| entry.id == id)
+                .find_map(|entry| entry.edit_tool)
+        })
+    }
+
+    /// routing へ渡す編集ツールの上書き (プロファイルと model entry の指定) を返す。
+    pub fn edit_tool_selection(&self) -> EditToolSelection {
+        let mut models = std::collections::BTreeMap::new();
+        for entry in &self.models {
+            if let Some(tool) = entry.edit_tool {
+                models.entry(entry.id.clone()).or_insert(tool);
+            }
+        }
+        EditToolSelection {
+            profile: self.edit_tool,
+            models,
+        }
     }
 }
 
@@ -687,6 +730,7 @@ impl Default for ProviderProfileConfig {
             models: vec![ModelEntryConfig::enabled("claude-sonnet-4-5")],
             excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
+            edit_tool: None,
         }
     }
 }
@@ -706,6 +750,7 @@ struct ProviderProfileDe {
     models: Vec<ModelEntryConfig>,
     excluded_models: Vec<String>,
     default_model: String,
+    edit_tool: Option<EditToolConfig>,
 }
 
 // 省略フィールドは公開構造体の既定値で補完する (コンテナ serde(default) の契約)。
@@ -722,6 +767,7 @@ impl Default for ProviderProfileDe {
             models: Vec::new(),
             excluded_models: Vec::new(),
             default_model: String::new(),
+            edit_tool: None,
         }
     }
 }
@@ -803,6 +849,7 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             models,
             excluded_models: value.excluded_models,
             default_model,
+            edit_tool: value.edit_tool,
         })
     }
 }
@@ -998,10 +1045,13 @@ mod tests {
             serde_json::json!({"id": "b", "enabled": false}),
             serde_json::json!({"id": "c"}),
             serde_json::json!({"id": "d", "metadata_source": "models-dev", "metadata_ref": "deepseek/d", "preset": "deepseek-v4", "context_window": 128000}),
+            serde_json::json!({"id": "e", "edit_tool": "apply-patch"}),
+            serde_json::json!({"id": "f", "edit_tool": "edit"}),
         ] {
             assert!(validator.is_valid(&value), "{value}");
         }
         assert!(!validator.is_valid(&serde_json::json!({"id": "a", "enabld": false})));
+        assert!(!validator.is_valid(&serde_json::json!({"id": "a", "edit_tool": "patch"})));
     }
 
     // Given: keyring 参照と env 参照の 2 変異 / When: TOML に直列化して読み戻す

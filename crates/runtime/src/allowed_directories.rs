@@ -1259,6 +1259,7 @@ mod tests {
                 }],
             },
             range: (2, 4),
+            protects_history: false,
         });
         assert!(!updated.visible_messages().iter().any(|message| {
             message.content.iter().any(|block| {

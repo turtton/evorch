@@ -207,6 +207,22 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
     }
     if protocol == CacheProtocol::Codex {
         match item["type"].as_str() {
+            Some("custom_tool_call") => {
+                for field in ["call_id", "name"] {
+                    required_string(item, field)?;
+                }
+                if !item["input"].is_string() {
+                    return Err("custom_tool_call must contain a string input".to_owned());
+                }
+                return Ok(());
+            }
+            Some("custom_tool_call_output") => {
+                required_string(item, "call_id")?;
+                if !item["output"].is_string() {
+                    return Err("custom_tool_call_output must contain a string output".to_owned());
+                }
+                return Ok(());
+            }
             Some("function_call") => {
                 for field in ["call_id", "name", "arguments"] {
                     required_string(item, field)?;

@@ -5,6 +5,49 @@ use crate::message::{
 };
 use serde_json::json;
 
+#[test]
+fn apply_patch_history_keeps_anthropic_tool_use_and_result_pair() {
+    let request: ChatRequest = serde_json::from_value(json!({
+        "model": "m", "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "patch", "name": "apply_patch", "input": {"input": "patch\n日本語"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_call_id": "patch", "is_error": false, "content": [{"type": "text", "text": "ok"}]}]}
+        ], "tools": [{"name": "apply_patch", "description": "patch", "input_schema": apply_patch::tool_contract::json_schema()}]
+    })).unwrap();
+    for tools_present in [true, false] {
+        let mut request = request.clone();
+        if !tools_present {
+            request.tools.clear();
+        }
+        for input in [json!({"input": "patch\n日本語"}), serde_json::Value::Null] {
+            let ContentBlock::ToolUse {
+                input: tool_input, ..
+            } = &mut request.messages[0].content[0]
+            else {
+                unreachable!()
+            };
+            *tool_input = input.clone();
+            let wire = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+            if tools_present {
+                assert_eq!(
+                    wire["tools"][0]["input_schema"],
+                    apply_patch::tool_contract::json_schema()
+                );
+                assert!(wire["tools"][0].get("type").is_none());
+            }
+            assert_eq!(
+                wire["messages"][0]["content"][0],
+                json!({
+                    "type": "tool_use", "id": "patch", "name": "apply_patch", "input": input
+                })
+            );
+            let result = &wire["messages"][1]["content"][0];
+            assert_eq!(result["type"], "tool_result");
+            assert_eq!(result["tool_use_id"], "patch");
+            assert_eq!(result["content"], json!([{"type": "text", "text": "ok"}]));
+        }
+    }
+}
+
 // Given: system・thinking・tool result・tool 定義を含む canonical request / When: wire request に変換 / Then: Anthropic の実フィールド形状になる
 #[test]
 fn canonical_request_converts_to_anthropic_wire_shape() {

@@ -7,16 +7,17 @@
 //!
 //! # 拡張点
 //!
-//! - freeform tool (B-1 の `apply_patch`): [`Tool`] に `Custom` variant を、入力再生に
-//!   [`InputItem`] の `CustomToolCall` / `CustomToolCallOutput` を、SSE 側に
-//!   `sse::OutputItem::CustomToolCall` を追加します。tool 変換は [`to_wire_tool`]、
-//!   入力変換は [`to_input_items`] の一箇所だけで分岐します。
+//! - freeform tool (`apply_patch`): [`to_wire_tool`] は正本の契約に一致する定義だけを
+//!   custom に変換します。履歴は現在の tools に依存せず [`custom_patch_input`] で判定します。
 //! - encrypted reasoning の再生 (B-3): [`InputItem`] に `Reasoning` variant を追加し、
 //!   `include` に `reasoning.encrypted_content` を載せ、SSE 側で
 //!   `sse::OutputItem::Reasoning` を回収します。
 
 mod sse;
 
+use std::collections::BTreeSet;
+
+use apply_patch::tool_contract::{FREEFORM_DESCRIPTION, LARK_GRAMMAR, NAME, json_schema};
 use serde::Serialize;
 
 use crate::message::{
@@ -90,9 +91,9 @@ struct JsonSchemaFormat {
 }
 
 /// Responses API の入力項目。ツール往復の再生には message 以外に
-/// function_call / function_call_output が必要です。
+/// function/custom の call と output を対にして再生します。
 ///
-/// 新しい項目種別 (B-1 の custom tool call、B-3 の reasoning) は variant を追加し、
+/// 新しい項目種別 (B-3 の reasoning) は variant を追加し、
 /// [`to_input_items`] で canonical block から選びます。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -105,6 +106,15 @@ enum InputItem {
         encrypted_content: String,
     },
     CompactionTrigger,
+    CustomToolCall {
+        call_id: String,
+        name: String,
+        input: String,
+    },
+    CustomToolCallOutput {
+        call_id: String,
+        output: String,
+    },
     FunctionCall {
         call_id: String,
         name: String,
@@ -143,11 +153,26 @@ enum InputContent {
 
 /// Responses API の tool 定義。
 ///
-/// B-1 の freeform tool は `Custom` variant を追加し、[`to_wire_tool`] で選びます。
+/// freeform は正本の apply_patch 契約に一致する定義だけで使用します。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Tool {
     Function(FunctionTool),
+    Custom(CustomTool),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct CustomTool {
+    name: &'static str,
+    description: &'static str,
+    format: GrammarFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct GrammarFormat {
+    r#type: &'static str,
+    syntax: &'static str,
+    definition: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -285,13 +310,28 @@ pub fn to_wire_request(
         .map(|tool| to_wire_tool(tool, dialect))
         .collect();
     let (tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty());
+    // 現在の tools でなく履歴全体から判定し、不正な call も output と同じ種別に保つ。
+    let custom_call_ids: BTreeSet<_> = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| {
+            custom_patch_input(block)?;
+            match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            }
+        })
+        .collect();
     let input = request
         .messages
         .iter()
         .flat_map(|message| match message.role {
             Role::System => Vec::new(),
-            Role::User => to_input_items(message, InputRole::User, dialect),
-            Role::Assistant => to_input_items(message, InputRole::Assistant, dialect),
+            Role::User => to_input_items(message, InputRole::User, dialect, &custom_call_ids),
+            Role::Assistant => {
+                to_input_items(message, InputRole::Assistant, dialect, &custom_call_ids)
+            }
         })
         .collect();
     ResponsesRequest {
@@ -345,6 +385,17 @@ fn instructions(request: &ChatRequest) -> String {
 
 /// canonical tool を wire tool へ変換する唯一の地点。
 fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
+    if tool.name == NAME && tool.input_schema == json_schema() {
+        return Tool::Custom(CustomTool {
+            name: NAME,
+            description: FREEFORM_DESCRIPTION,
+            format: GrammarFormat {
+                r#type: "grammar",
+                syntax: "lark",
+                definition: LARK_GRAMMAR,
+            },
+        });
+    }
     Tool::Function(FunctionTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
@@ -359,11 +410,24 @@ fn image_url(media_type: &str, data: &str) -> InputContent {
     }
 }
 
+/// 履歴を custom として再生する唯一の判定。現在の tools 定義には依存しません。
+fn custom_patch_input(block: &ContentBlock) -> Option<&str> {
+    match block {
+        ContentBlock::ToolUse { name, input, .. } if name == NAME => input.get("input")?.as_str(),
+        _ => None,
+    }
+}
+
 /// canonical message を Responses 入力項目列へ変換します。
 ///
-/// tool result の画像は function_call_output に載らないため、メッセージ末尾に
+/// tool result の画像は function/custom の output に載らないため、メッセージ末尾に
 /// 同じ role の message として後置します。
-fn to_input_items(message: &Message, role: InputRole, dialect: ResponsesDialect) -> Vec<InputItem> {
+fn to_input_items(
+    message: &Message,
+    role: InputRole,
+    dialect: ResponsesDialect,
+    custom_call_ids: &BTreeSet<&str>,
+) -> Vec<InputItem> {
     let mut items = Vec::new();
     let mut content: Vec<InputContent> = Vec::new();
     let mut result_images: Vec<InputContent> = Vec::new();
@@ -373,10 +437,18 @@ fn to_input_items(message: &Message, role: InputRole, dialect: ResponsesDialect)
             ContentBlock::Text { text } => content.push(role.text(text.clone())),
             ContentBlock::ToolUse { id, name, input } => {
                 flush_message(&mut items, &mut content, role);
-                items.push(InputItem::FunctionCall {
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    arguments: input.to_string(),
+                items.push(if let Some(patch) = custom_patch_input(block) {
+                    InputItem::CustomToolCall {
+                        call_id: id.clone(),
+                        name: name.clone(),
+                        input: patch.to_owned(),
+                    }
+                } else {
+                    InputItem::FunctionCall {
+                        call_id: id.clone(),
+                        name: name.clone(),
+                        arguments: input.to_string(),
+                    }
                 });
             }
             ContentBlock::ToolResult {
@@ -407,9 +479,16 @@ fn to_input_items(message: &Message, role: InputRole, dialect: ResponsesDialect)
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                items.push(InputItem::FunctionCallOutput {
-                    call_id: tool_call_id.clone(),
-                    output,
+                items.push(if custom_call_ids.contains(tool_call_id.as_str()) {
+                    InputItem::CustomToolCallOutput {
+                        call_id: tool_call_id.clone(),
+                        output,
+                    }
+                } else {
+                    InputItem::FunctionCallOutput {
+                        call_id: tool_call_id.clone(),
+                        output,
+                    }
                 });
             }
             ContentBlock::Compaction { encrypted_content } => {

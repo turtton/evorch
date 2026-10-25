@@ -327,6 +327,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apply-patch"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4018,6 +4028,7 @@ dependencies = [
 name = "mock-openai"
 version = "0.1.0"
 dependencies = [
+ "apply-patch",
  "event-bus",
  "futures-util",
  "providers",
@@ -5137,6 +5148,7 @@ dependencies = [
 name = "providers"
 version = "0.1.0"
 dependencies = [
+ "apply-patch",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -5619,6 +5631,7 @@ name = "runtime"
 version = "0.1.0"
 dependencies = [
  "agents",
+ "apply-patch",
  "async-trait",
  "base64 0.22.1",
  "browser",
@@ -6875,6 +6888,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 name = "tools"
 version = "0.1.0"
 dependencies = [
+ "apply-patch",
  "async-trait",
  "base64 0.22.1",
  "browser",

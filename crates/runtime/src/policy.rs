@@ -149,9 +149,10 @@ impl ExecutionPolicy {
     }
 
     /// This role's access to the project's allowed directories (ADR 0032): read-write
-    /// when it may change files through `write`, `edit` or `shell`, read-only otherwise.
+    /// when it may change files through `write`, `edit`, `apply_patch` or `shell`,
+    /// read-only otherwise.
     pub fn allowed_access(&self) -> sandbox::PathAccess {
-        if ["write", "edit", "shell"]
+        if ["write", "edit", "apply_patch", "shell"]
             .iter()
             .any(|tool| self.capabilities.allowed_tools.contains(*tool))
         {
@@ -207,6 +208,109 @@ mod tests {
                 role.name()
             );
         }
+    }
+
+    #[test]
+    fn apply_patch_alone_grants_read_write_allowed_directories() {
+        // Given: a boundary whose only file-changing tool is apply_patch.
+        let mut policy = ExecutionPolicy::for_role(Role::Reviewer);
+        policy.capabilities = RoleCapabilities::new(["read", "apply_patch"], false);
+
+        // When / Then: apply_patch changes files like write and edit, so the
+        // allowed directories become writable.
+        assert_eq!(policy.allowed_access(), sandbox::PathAccess::ReadWrite);
+    }
+
+    #[test]
+    fn only_worker_authorizes_apply_patch() {
+        for role in [
+            Role::Orchestrator,
+            Role::Explorer,
+            Role::Worker,
+            Role::Reviewer,
+            Role::WebResearcher,
+            Role::Planner,
+            Role::Advisor,
+            Role::MultimodalLooker,
+            Role::Evaluator,
+        ] {
+            let policy = ExecutionPolicy::for_role(role);
+            let result = policy.authorize("apply_patch");
+            if role == Role::Worker {
+                assert_eq!(result, Ok(()));
+                assert_eq!(
+                    names(&policy.filter_tool_specs(vec![spec("apply_patch")])),
+                    ["apply_patch"]
+                );
+            } else {
+                let Err(RuntimeError::CapabilityDenied {
+                    role: denied,
+                    tool,
+                    reason,
+                }) = result
+                else {
+                    panic!("{} must not apply patches", role.name());
+                };
+                assert_eq!(denied, role.name());
+                assert_eq!(tool, "apply_patch");
+                assert!(!reason.is_empty());
+                assert!(
+                    policy
+                        .filter_tool_specs(vec![spec("apply_patch")])
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    fn names(specs: &[ToolSpec]) -> Vec<&str> {
+        specs.iter().map(|spec| spec.name.as_str()).collect()
+    }
+
+    fn standard_executor(policy: sandbox::ApprovalPolicy) -> tools::ToolExecutor {
+        tools::ToolExecutor::with_standard_tools(
+            std::sync::Arc::new(event_bus::EventBus::new(16)),
+            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        )
+        .with_policy(policy)
+    }
+
+    #[test]
+    fn apply_patch_approval_is_its_own_fs_write_decision() {
+        use sandbox::{ApprovalMode, ApprovalPolicy, PolicyDecision};
+        // Given / When / Then: by default apply_patch writes files, so it asks.
+        assert_eq!(
+            standard_executor(ApprovalPolicy::standard(ApprovalMode::OnRequest))
+                .classify_tool("apply_patch"),
+            Some(PolicyDecision::Ask)
+        );
+
+        // Given: edit and write are allowed without asking.
+        let edits_allowed = ApprovalPolicy::standard(ApprovalMode::OnRequest)
+            .with_override("edit", PolicyDecision::AutoAllow)
+            .with_override("write", PolicyDecision::AutoAllow);
+        // When / Then: apply_patch does not inherit their overrides.
+        let executor = standard_executor(edits_allowed.clone());
+        assert_eq!(
+            executor.classify_tool("edit"),
+            Some(PolicyDecision::AutoAllow)
+        );
+        assert_eq!(
+            executor.classify_tool("apply_patch"),
+            Some(PolicyDecision::Ask)
+        );
+
+        // Given / When / Then: only an override naming apply_patch changes it.
+        let executor =
+            standard_executor(edits_allowed.with_override("apply_patch", PolicyDecision::Deny));
+        assert_eq!(
+            executor.classify_tool("apply_patch"),
+            Some(PolicyDecision::Deny)
+        );
+        assert_eq!(
+            executor.classify_tool("write"),
+            Some(PolicyDecision::AutoAllow)
+        );
     }
 
     #[test]
@@ -526,6 +630,7 @@ mod tests {
 
         assert_eq!(policy.authorize("edit"), Ok(()));
         assert_eq!(policy.authorize("write"), Ok(()));
+        assert_eq!(policy.authorize("apply_patch"), Ok(()));
     }
 
     // Given: Explorer のポリシー (read/grep のみ)

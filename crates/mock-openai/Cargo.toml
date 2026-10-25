@@ -13,6 +13,7 @@ sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+apply-patch = { path = "../apply-patch" }
 event-bus = { path = "../event-bus" }
 futures-util = { workspace = true }
 providers = { path = "../providers" }

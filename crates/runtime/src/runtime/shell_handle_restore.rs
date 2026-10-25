@@ -102,6 +102,7 @@ mod tests {
                 id: "checkpoint".into(),
                 summary: history("summary job-999; quoted job-18446744073709551614").remove(0),
                 range: (0, 1),
+                protects_history: false,
             }],
             trigger: None,
             turn_completed: true,

@@ -77,6 +77,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
                 models: vec![config::ModelEntryConfig::enabled("live")],
                 excluded_models: vec![],
                 default_model: "live".into(),
+                edit_tool: None,
             },
         )]),
         routing: RoutingConfig {

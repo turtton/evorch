@@ -28,6 +28,7 @@ fn provider_config(provider_type: ProviderTypeConfig) -> ProviderProfileConfig {
         models: vec![config::types::provider::ModelEntryConfig::enabled(MODEL)],
         excluded_models: Vec::new(),
         default_model: MODEL.to_string(),
+        edit_tool: None,
     }
 }
 

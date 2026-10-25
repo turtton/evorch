@@ -269,17 +269,38 @@ impl AgentRuntime {
         );
         retain_backed_tools(&mut visible, self.artifact_pages().is_some());
         append_subagent_context_note(&mut visible, classify(selected_model));
+        let choice = shared
+            .model
+            .edit_tool_for_run(
+                "runtime-selected-model",
+                request.role,
+                request.category.as_deref(),
+            )
+            .unwrap_or(config::EditToolConfig::Edit);
+        let narrowed = crate::edit_tools::narrow(&visible, choice);
+        let model_excluded = visible
+            .iter()
+            .filter(|spec| !narrowed.iter().any(|shown| shown.name == spec.name))
+            .map(|spec| spec.name.clone())
+            .collect::<Vec<_>>();
+        visible = narrowed;
         let excluded = all
             .iter()
             .filter(|spec| !visible.iter().any(|shown| shown.name == spec.name))
             .map(|spec| ContextExclusion {
                 item: spec.name.clone(),
-                reason: tool_exclusion_reason(
-                    spec,
-                    policy,
-                    shared.skills.is_some(),
-                    web_tools_enabled,
-                )
+                reason: if model_excluded.contains(&spec.name) {
+                    match choice {
+                        config::EditToolConfig::ApplyPatch => {
+                            "Replaced by apply_patch for this model"
+                        }
+                        config::EditToolConfig::Edit => {
+                            "This model uses edit and write instead of apply_patch"
+                        }
+                    }
+                } else {
+                    tool_exclusion_reason(spec, policy, shared.skills.is_some(), web_tools_enabled)
+                }
                 .into(),
             })
             .collect();

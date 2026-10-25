@@ -18,6 +18,7 @@ mod capabilities;
 mod category;
 mod chains;
 mod compaction_window;
+mod edit_tools;
 mod fallback;
 mod hosted_search;
 mod live;
@@ -90,6 +91,7 @@ fn profile(default_model: &str, models: &[&str]) -> ProviderProfile {
         },
         models: models.iter().map(ToString::to_string).collect(),
         default_model: default_model.to_string(),
+        edit_tool: Default::default(),
     }
 }
 

@@ -3,6 +3,120 @@ use serde_json::{Value, json};
 use super::{ResponsesDialect, ResponsesRequestOptions, to_wire_request};
 use crate::message::ChatRequest;
 
+#[test]
+fn apply_patch_definition_is_freeform_only_for_the_exact_contract() {
+    use apply_patch::tool_contract::{FREEFORM_DESCRIPTION, LARK_GRAMMAR, NAME, json_schema};
+    let mut request = minimal_request();
+    request.tools = serde_json::from_value(json!([{
+        "name": NAME, "description": "canonical description is not the freeform contract",
+        "input_schema": json_schema()
+    }]))
+    .unwrap();
+    for dialect in [ResponsesDialect::Codex, ResponsesDialect::OpenAi] {
+        assert_eq!(
+            wire(&request, dialect, None)["tools"],
+            json!([{
+                "type": "custom", "name": NAME, "description": FREEFORM_DESCRIPTION,
+                "format": {"type": "grammar", "syntax": "lark", "definition": LARK_GRAMMAR}
+            }])
+        );
+        let mut collision = request.clone();
+        collision.tools[0].input_schema = json!({"type": "object"});
+        assert_eq!(
+            wire(&collision, dialect, None)["tools"][0]["type"],
+            "function"
+        );
+        let mut other_name = request.clone();
+        other_name.tools[0].name = "another_tool".into();
+        assert_eq!(
+            wire(&other_name, dialect, None)["tools"][0]["type"],
+            "function"
+        );
+    }
+}
+
+#[test]
+fn apply_patch_history_pairs_custom_calls_even_without_current_tools() {
+    for tools_present in [false, true] {
+        let mut request: ChatRequest = serde_json::from_value(json!({
+            "model": "m", "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "valid", "name": "apply_patch", "input": {"input": "patch\n日本語"}},
+                    {"type": "tool_use", "id": "invalid", "name": "apply_patch", "input": null}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_call_id": "valid", "is_error": false, "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "media_type": "image/png", "data": "AAAA"}
+                    ]},
+                    {"type": "tool_result", "tool_call_id": "invalid", "is_error": true, "content": [{"type": "text", "text": "bad"}]}
+                ]}
+            ]
+        })).unwrap();
+        if tools_present {
+            request.tools = serde_json::from_value(json!([{"name": "apply_patch", "description": "patch", "input_schema": apply_patch::tool_contract::json_schema()}])).unwrap();
+        }
+        for dialect in [ResponsesDialect::Codex, ResponsesDialect::OpenAi] {
+            assert_eq!(
+                wire(&request, dialect, None)["input"],
+                json!([
+                    {"type": "custom_tool_call", "call_id": "valid", "name": "apply_patch", "input": "patch\n日本語"},
+                    {"type": "function_call", "call_id": "invalid", "name": "apply_patch", "arguments": "null"},
+                    {"type": "custom_tool_call_output", "call_id": "valid", "output": "ok\n[image image/png attached in the next user message]"},
+                    {"type": "function_call_output", "call_id": "invalid", "output": "bad"},
+                    {"type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": "Images returned by tool call valid:"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+                    ]}
+                ])
+            );
+        }
+    }
+}
+
+#[test]
+fn custom_history_uses_only_the_name_and_string_input_even_when_result_precedes_call() {
+    for (name, input, call_type, output_type) in [
+        (
+            "apply_patch",
+            json!({"input": ""}),
+            "custom_tool_call",
+            "custom_tool_call_output",
+        ),
+        (
+            "apply_patch",
+            json!({"input": 42}),
+            "function_call",
+            "function_call_output",
+        ),
+        (
+            "apply_patch",
+            json!({}),
+            "function_call",
+            "function_call_output",
+        ),
+        (
+            "other",
+            json!({"input": "patch"}),
+            "function_call",
+            "function_call_output",
+        ),
+    ] {
+        let request: ChatRequest = serde_json::from_value(json!({
+            "model": "m", "messages": [
+                {"role": "user", "content": [{"type": "tool_result", "tool_call_id": "call", "is_error": false, "content": []}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call", "name": name, "input": input}]}
+            ]
+        })).unwrap();
+        for dialect in [ResponsesDialect::Codex, ResponsesDialect::OpenAi] {
+            let value = wire(&request, dialect, None);
+            assert_eq!(value["input"][0]["type"], output_type);
+            assert_eq!(value["input"][0]["output"], "");
+            assert_eq!(value["input"][1]["type"], call_type);
+        }
+    }
+}
+
 /// system 連結・画像・tool 往復・tool result 画像・compaction・tool 並べ替え・
 /// 生成設定をすべて含む canonical request。
 fn rich_request() -> ChatRequest {

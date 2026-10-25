@@ -25,6 +25,7 @@ fn entry() -> ModelEntryConfig {
         fast_price: None,
         price_tiers: None,
         effort_levels: None,
+        edit_tool: None,
     }
 }
 

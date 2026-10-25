@@ -106,7 +106,15 @@ impl ModelSummarizer {
         &self,
         input: &SummaryInput<'_>,
     ) -> (Result<String, SummarizeError>, Option<Usage>) {
-        match self.complete_summary(input).await {
+        self.summarize_with_usage_for_switch(input, false).await
+    }
+
+    pub(crate) async fn summarize_with_usage_for_switch(
+        &self,
+        input: &SummaryInput<'_>,
+        text_tool_history: bool,
+    ) -> (Result<String, SummarizeError>, Option<Usage>) {
+        match self.complete_summary(input, text_tool_history).await {
             Ok(response) => (summary_text(&response), Some(response.usage)),
             Err(error) => (Err(error), None),
         }
@@ -115,6 +123,7 @@ impl ModelSummarizer {
     async fn complete_summary(
         &self,
         input: &SummaryInput<'_>,
+        text_tool_history: bool,
     ) -> Result<ChatResponse, SummarizeError> {
         let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
         messages.push(Message {
@@ -127,8 +136,15 @@ impl ModelSummarizer {
             let content = message
                 .content
                 .iter()
-                .filter(|block| !matches!(block, ContentBlock::Anthropic { .. }))
-                .cloned()
+                .filter_map(|block| {
+                    if text_tool_history {
+                        summary_block(block)
+                    } else if matches!(block, ContentBlock::Anthropic { .. }) {
+                        None
+                    } else {
+                        Some(block.clone())
+                    }
+                })
                 .collect::<Vec<_>>();
             (!content.is_empty()).then_some(Message {
                 role: message.role,
@@ -182,6 +198,32 @@ impl ModelSummarizer {
         };
         Ok(response)
     }
+}
+
+// Model-switch re-summaries advertise no tools, regardless of their chain. Keep
+// tool evidence as text rather than executable wire items only at that boundary.
+// Ordinary compaction, agent replay and persisted raw history stay unchanged.
+fn summary_block(block: &ContentBlock) -> Option<ContentBlock> {
+    let text = match block {
+        ContentBlock::Anthropic { .. } => return None,
+        ContentBlock::ToolUse { id, name, input } => {
+            format!("[tool call {name} id={id}]\n{input}")
+        }
+        ContentBlock::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } => {
+            let output = content
+                .iter()
+                .map(|part| part.text_or_image_note())
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("[tool result id={tool_call_id} is_error={is_error}]\n{output}")
+        }
+        _ => return Some(block.clone()),
+    };
+    Some(ContentBlock::Text { text })
 }
 
 fn summary_text(response: &ChatResponse) -> Result<String, SummarizeError> {
@@ -296,6 +338,19 @@ fn changed_files(messages: &[Message]) -> Vec<String> {
         };
         match name.as_str() {
             "read" | "edit" | "write" => collect_path_values(input, &mut seen, &mut files),
+            // Every path as written in the patch, including move sources and deletions.
+            "apply_patch" => {
+                if let Some(patch) = input.get("input").and_then(Value::as_str)
+                    && let Ok(targets) = apply_patch::targets_raw(patch)
+                {
+                    for (raw, _) in targets {
+                        let raw = raw.to_string_lossy().into_owned();
+                        if seen.insert(raw.clone()) {
+                            files.push(raw);
+                        }
+                    }
+                }
+            }
             "shell" => {
                 if let Some(command) = input.get("command").and_then(Value::as_str) {
                     for token in command.split_whitespace() {
@@ -429,7 +484,8 @@ mod tests {
     };
 
     use super::{
-        ModelSummarizer, StructuralSummarizer, Summarizer, SummaryInput, enforce_max_bytes,
+        ModelSummarizer, StructuralSummarizer, Summarizer, SummaryInput, changed_files,
+        enforce_max_bytes,
     };
     use crate::compaction::cut::select_cut;
     use crate::compaction::estimator::estimate_tokens;
@@ -668,6 +724,85 @@ mod tests {
         }
         assert!(!unfinished.contains("- TODO task-8"));
         assert!(!unfinished.contains("- TODO task-9"));
+    }
+
+    struct OrdinarySummaryInput {
+        expected: Vec<Message>,
+    }
+
+    #[async_trait]
+    impl AgentModel for OrdinarySummaryInput {
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            messages: &[Message],
+            tools: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            assert!(tools.is_empty());
+            assert_eq!(
+                serde_json::to_vec(&messages[1..messages.len() - 1]).unwrap(),
+                serde_json::to_vec(&self.expected).unwrap(),
+                "ordinary compaction keeps the historical summary input byte-identical"
+            );
+            Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "summary".into(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "summary-model".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_model_summary_keeps_tool_history_byte_identical() {
+        let messages = vec![
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call".into(),
+                    name: "apply_patch".into(),
+                    input: serde_json::json!({"input":"*** Begin Patch\n*** End Patch"}),
+                }],
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "call".into(),
+                    content: vec![providers::ToolResultContent::Text {
+                        text: "unchanged result".into(),
+                    }],
+                    is_error: true,
+                }],
+            },
+        ];
+        let summarizer = ModelSummarizer {
+            turn: None,
+            model: Arc::new(OrdinarySummaryInput {
+                expected: messages.clone(),
+            }),
+            role: Role::Worker,
+            run_id: "ordinary-summary".into(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
+        };
+        summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &messages,
+            })
+            .await
+            .unwrap();
     }
 
     // Given: a successful model stub and a compacted message
@@ -1034,6 +1169,65 @@ mod tests {
         assert!(truncated.ends_with("\n[truncated]"));
         assert!(truncated.len() <= 15);
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    fn tool_use(id: &str, name: &str, input: serde_json::Value) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+            }],
+        }
+    }
+
+    // Given: an apply_patch call that adds, updates, moves and deletes files,
+    //        next to an edit of a path the patch also touches
+    // When: the changed files are collected
+    // Then: every path as written in the patch is listed once, in patch order,
+    //       including move sources and deleted files
+    #[test]
+    fn changed_files_list_every_raw_apply_patch_path() {
+        let patch = "\
+*** Begin Patch
+*** Add File: docs/new.md
++x
+*** Update File: src/lib.rs
+@@
+-a
++b
+*** Update File: src/old_name.rs
+*** Move to: src/new_name.rs
+@@
+-a
++b
+*** Delete File: ./src/gone.rs
+*** End Patch";
+        let messages = [
+            tool_use("edit", "edit", serde_json::json!({ "path": "src/lib.rs" })),
+            tool_use(
+                "patch",
+                "apply_patch",
+                serde_json::json!({ "input": patch }),
+            ),
+            tool_use(
+                "broken",
+                "apply_patch",
+                serde_json::json!({ "input": "*** Begin Patch\n*** Add File: broken.rs" }),
+            ),
+        ];
+
+        assert_eq!(
+            changed_files(&messages),
+            [
+                "src/lib.rs",
+                "docs/new.md",
+                "src/old_name.rs",
+                "src/new_name.rs",
+                "./src/gone.rs",
+            ]
+        );
     }
 }
 

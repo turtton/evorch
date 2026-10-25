@@ -17,6 +17,35 @@ pub struct ProviderProfile {
     pub models: Vec<String>,
     /// 既定で使用するモデル ID。
     pub default_model: String,
+    /// 設定で明示された編集ツールの上書き。解決は [`ProviderProfile::edit_tool_for`] を使う。
+    pub edit_tool: config::EditToolSelection,
+}
+
+impl ProviderProfile {
+    /// `model_id` (プロファイル名を除いたモデル ID) に提示する編集ツールを返します。
+    ///
+    /// model entry > プロファイル > 既定判定の順で、既定判定にはこのプロファイルの
+    /// `provider_type` を使います。
+    pub fn edit_tool_for(&self, model_id: &str) -> config::EditToolConfig {
+        self.edit_tool
+            .for_model(provider_type_config(self.provider_type), model_id)
+    }
+}
+
+fn provider_type_config(provider_type: model::ProviderType) -> config::ProviderTypeConfig {
+    match provider_type {
+        model::ProviderType::Cursor => config::ProviderTypeConfig::Cursor,
+        model::ProviderType::Anthropic => config::ProviderTypeConfig::Anthropic,
+        model::ProviderType::AnthropicSubscription => {
+            config::ProviderTypeConfig::AnthropicSubscription
+        }
+        model::ProviderType::OpenAi => config::ProviderTypeConfig::OpenAi,
+        model::ProviderType::OpenAiCodex => config::ProviderTypeConfig::OpenAiCodex,
+        model::ProviderType::GithubCopilot => config::ProviderTypeConfig::GithubCopilot,
+        model::ProviderType::Openrouter => config::ProviderTypeConfig::Openrouter,
+        model::ProviderType::OpenAiCompatible => config::ProviderTypeConfig::OpenAiCompatible,
+        model::ProviderType::KimiSubscription => config::ProviderTypeConfig::KimiSubscription,
+    }
 }
 
 impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
@@ -78,6 +107,7 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
             credential: CredentialRef::from(&config.credential),
             models,
             default_model: config.default_model.clone(),
+            edit_tool: config.edit_tool_selection(),
         })
     }
 }
@@ -101,6 +131,7 @@ mod tests {
             ],
             excluded_models: Vec::new(),
             default_model: "model-b".to_string(),
+            edit_tool: None,
         }
     }
 
@@ -218,6 +249,69 @@ mod tests {
         let profile = ProviderProfile::try_from(("primary", &config)).expect("enabled models");
 
         assert_eq!(profile.models, ["model-z", "model-b", "model-a"]);
+    }
+
+    // Given: profile と model entry に edit_tool を書いた設定 / When: ProviderProfile に変換する
+    // Then: 上書きが受け渡され、model > profile の順に解決される
+    #[test]
+    fn provider_profile_carries_edit_tool_overrides() {
+        let mut config = valid_config();
+        config.edit_tool = Some(config::EditToolConfig::Edit);
+        config.models[0].edit_tool = Some(config::EditToolConfig::ApplyPatch);
+
+        let profile = ProviderProfile::try_from(("primary", &config)).expect("edit tool");
+
+        assert_eq!(
+            profile.edit_tool,
+            config::EditToolSelection {
+                profile: Some(config::EditToolConfig::Edit),
+                models: [("model-a".to_owned(), config::EditToolConfig::ApplyPatch)].into(),
+            }
+        );
+        assert_eq!(
+            profile.edit_tool_for("model-a"),
+            config::EditToolConfig::ApplyPatch
+        );
+        assert_eq!(
+            profile.edit_tool_for("model-a+fast"),
+            config::EditToolConfig::ApplyPatch
+        );
+        assert_eq!(
+            profile.edit_tool_for("model-b"),
+            config::EditToolConfig::Edit
+        );
+    }
+
+    // Given: edit_tool を書かない Codex / OpenAI 互換の設定 / When: 変換して解決する
+    // Then: 各プロファイルの provider_type で既定判定する
+    #[test]
+    fn provider_profile_defaults_edit_tool_by_provider_type() {
+        let codex = config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::OpenAiCodex,
+            api_protocol: config::ApiProtocolConfig::OpenAiCodexResponses,
+            models: vec![config::types::provider::ModelEntryConfig::enabled(
+                "gpt-6-astra",
+            )],
+            default_model: "gpt-6-astra".to_string(),
+            ..valid_config()
+        };
+        let compatible = config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::OpenAiCompatible,
+            ..codex.clone()
+        };
+
+        let codex = ProviderProfile::try_from(("codex", &codex)).expect("codex");
+        let compatible = ProviderProfile::try_from(("compat", &compatible)).expect("compatible");
+
+        assert_eq!(codex.edit_tool, config::EditToolSelection::default());
+        assert_eq!(
+            codex.edit_tool_for("gpt-6-astra"),
+            config::EditToolConfig::ApplyPatch
+        );
+        assert_eq!(
+            compatible.edit_tool_for("gpt-6-astra"),
+            config::EditToolConfig::Edit
+        );
     }
 
     // Given: モデル一覧が空の設定 / When: ProviderProfile に変換する / Then: InvalidProfile を返す
