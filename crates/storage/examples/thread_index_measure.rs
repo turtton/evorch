@@ -189,7 +189,10 @@ fn pragma(conn: &Connection, name: &str) -> Result<i64> {
 fn dbstat(conn: &Connection, limit: Option<usize>) -> Result<Vec<(String, u64)>> {
     let mut statement = conn
         .prepare("SELECT name, pgsize FROM dbstat WHERE aggregate = TRUE ORDER BY pgsize DESC")?;
-    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let rows = statement.query_map([], |row| {
+        let bytes: i64 = row.get(1)?;
+        Ok((row.get(0)?, u64::try_from(bytes).unwrap_or(0)))
+    })?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
