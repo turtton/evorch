@@ -351,18 +351,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .cloned()
             .collect();
-        let active = |run: &String| {
-            owners
-                .iter()
-                .chain(&current_owners)
-                .any(|owner| owner.active_runs.contains(run))
-        };
         for (run_id, phase) in &mut self.phases {
             if !matches!(
                 phase,
                 ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
             ) || protected_runs.contains(run_id)
-                || active(run_id)
+                || owners
+                    .iter()
+                    .chain(&current_owners)
+                    .any(|owner| owner.active_runs.contains(run_id))
             {
                 continue;
             }
@@ -387,11 +384,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             *phase = restored;
             self.transcripts.interrupt_run_tools(run_id);
         }
+        // An owner that exited mid-call leaves the run in its active_runs.
+        // Only a probe that proved the owner dead, of a record that did not
+        // change during the probes, shows the run is no longer executing.
+        let executing = |run: &String| {
+            owners.iter().chain(&current_owners).any(|owner| {
+                owner.active_runs.contains(run)
+                    && !(liveness.get(&owner.lease.owner_id) == Some(&false)
+                        && before.get(&owner.thread_id) == after.get(&owner.thread_id))
+            })
+        };
         // No live owner can be executing these runs, so their calls will never
         // report a result. This includes runs whose phase stays as replayed
         // because their snapshot or every phase event is missing.
         for run_id in &running_calls {
-            if !protected_runs.contains(run_id) && !active(run_id) {
+            if !protected_runs.contains(run_id) && !executing(run_id) {
                 self.transcripts.interrupt_run_tools(run_id);
             }
         }
