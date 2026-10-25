@@ -1716,6 +1716,14 @@ mod heap_tests {
 mod storage_shutdown_tests {
     use super::*;
 
+    struct ResumeWriteOnDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for ResumeWriteOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
     #[test]
     fn startup_resource_guard_keeps_the_host_alive_until_fenced_writes_drain() {
         let directory = tempfile::tempdir().unwrap();
@@ -1804,6 +1812,10 @@ mod storage_shutdown_tests {
             _demo_directory: None,
             _storage_fallback: None,
         };
+        let constructor = move || resources;
+        // Unwinding must resume the writer before the constructor's captured
+        // resources try to flush it, even before the helper thread is started.
+        let resume_write = ResumeWriteOnDrop(resume_write);
         let event = Event::new(event_bus::MessageEvent::MessageDelta {
             run_id: Some("run".into()),
             delta: "tail before a later startup failure".into(),
@@ -1818,7 +1830,6 @@ mod storage_shutdown_tests {
         drop(host);
         assert!(weak_host.upgrade().is_some());
         permit.validate_generation().unwrap();
-        let constructor = move || resources;
         std::thread::scope(|scope| {
             let draining_host = weak_host.clone();
             let draining_permit = permit.clone();
@@ -1841,7 +1852,7 @@ mod storage_shutdown_tests {
                 // and its generation until the blocked write can finish.
                 assert!(draining_host.upgrade().is_some());
                 draining_permit.validate_generation().unwrap();
-                resume_write.send(()).unwrap();
+                drop(resume_write);
             });
             drop(constructor);
             release_write.join().unwrap();
