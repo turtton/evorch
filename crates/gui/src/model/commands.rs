@@ -28,6 +28,10 @@ pub struct GoalSubmission {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatSubmission {
+    /// UUID v4 naming a composer message across its delivery states. Empty for
+    /// chats the host builds itself, such as goal prompts, resumes and answers.
+    #[serde(default)]
+    pub submission_id: String,
     /// Root of the project the thread belongs to; its runs work there.
     #[serde(default)]
     pub project_root: Option<std::path::PathBuf>,
@@ -328,6 +332,7 @@ mod tests {
         // When: both chats are submitted in order.
         let events = ["t1", "t2"].map(|thread_id| {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                submission_id: String::new(),
                 project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,

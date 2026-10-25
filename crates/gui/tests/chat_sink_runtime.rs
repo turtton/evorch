@@ -178,6 +178,7 @@ impl Fixture {
         model_preference: Option<runtime::ModelPreference>,
     ) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id: String::new(),
             project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
@@ -270,6 +271,7 @@ fn composer_chats_offer_procedures_with_worker_only_conversation_category() {
             let events = fixture
                 .sink
                 .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    submission_id: String::new(),
                     project_root: None,
                     fork_seed: None,
                     composer_role,
@@ -356,6 +358,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
             let events = fixture
                 .sink
                 .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    submission_id: String::new(),
                     project_root: None,
                     fork_seed: None,
                     composer_role: saved_composer,
@@ -402,6 +405,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                 })
             } else {
                 WorkbenchCommand::SendChat(ChatSubmission {
+                    submission_id: String::new(),
                     project_root: None,
                     fork_seed: None,
                     composer_role: next_composer,

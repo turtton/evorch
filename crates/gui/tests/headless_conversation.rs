@@ -17,6 +17,8 @@ mod interrupted_tools;
 mod ledger;
 #[path = "headless_conversation/message_completion.rs"]
 mod message_completion;
+#[path = "headless_conversation/rejected_send.rs"]
+mod rejected_send;
 #[path = "headless_conversation/resume_ledger_routing.rs"]
 mod resume_ledger_routing;
 #[path = "headless_conversation/thinking_block.rs"]

@@ -120,10 +120,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 && !self.manually_titled.contains(&thread.id)
                 && (thread.title == "New thread" || thread.title == thread.id.to_string())
                 && thread.run_ids.is_empty()
-        }) && !self
-            .history
-            .iter()
-            .any(|message| message.thread_id == chat.thread_id)
+        }) && !self.history.iter().any(|message| {
+            // A refused message never started the conversation.
+            message.thread_id == chat.thread_id
+                && !matches!(
+                    message.status,
+                    super::history::DeliveryStatus::Rejected { .. }
+                )
+        })
     }
 
     pub(super) fn start_auto_title(&mut self, chat: ChatSubmission) {

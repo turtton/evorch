@@ -39,9 +39,19 @@ fn send_button_round_trip_issues_send_chat() {
     harness.run();
     // Then: one chat is issued in the thread's project, rendered, and the composer remains available.
     let project_root = harness.state().sidebar().projects[0].repo_root.clone();
+    let [WorkbenchCommand::SendChat(sent)] = harness.state().issued() else {
+        panic!("expected one chat: {:?}", harness.state().issued());
+    };
+    let submission_id = sent.submission_id.clone();
+    assert_eq!(
+        uuid::Uuid::parse_str(&submission_id).map(|id| id.get_version()),
+        Ok(Some(uuid::Version::Random)),
+        "{submission_id}"
+    );
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id,
             fork_seed: None,
             project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,

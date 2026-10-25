@@ -8,6 +8,7 @@ pub mod auto_title;
 mod branching;
 mod composer;
 mod conversation;
+mod delivery;
 mod escalation;
 mod external_commands;
 mod follow_ups;
