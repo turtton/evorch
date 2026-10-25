@@ -6,8 +6,8 @@ Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a�
 
 この ADR は、evorch の再起動で作業が失われても、次の担当がこの ADR だけを読んで再開できるように、承認済みの仕様をすべて書く。
 
-- 着手順は Phase 0（ADR と計測）→ Phase A（storage / runtime / GUI）である。Phase B（本文の全文索引）は Phase 0 の計測を見て別途決める。Phase C（ポインタ注入・GUI 添付）は今回の範囲外である。
-- Phase 0 の計測結果は、以下の「Phase 0 計測」節に記録する。計測は完了している。Phase B の採否は別途判断する。
+- 着手順は Phase 0（ADR と計測）→ Phase A（storage / runtime / GUI）である。Phase A は PR #351 として squash マージ済み（merge commit `5d23cab4`、2026-10-25）。Phase B（本文の全文索引）は、Phase 0 の計測と利用者との相談を経て着手が決まり、設計を下の「Phase B の設計」に記録した。Phase C（ポインタ注入・GUI 添付）は今回の範囲外である。
+- Phase 0 の計測結果は、以下の「Phase 0 計測」節に記録する。計測は完了している。Phase B の実装の進捗は末尾の「Phase B 実装状況チェックリスト」に記録する。
 
 ## Context
 
@@ -76,8 +76,8 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 #### 決定 d: 検索方式
 
-- 本文検索（Phase B）は FTS5 の trigram を使う。2 文字以下の語は trigram で引けないため、`LIKE` で代用する。
-- Phase A では FTS を使わない。
+- 本文検索（Phase B）は FTS5 の trigram を使う。2 文字以下の語は trigram で引けないため、`LIKE` で代用する（Phase B の設計では「3 scalar 未満の語」と定義する）。
+- Phase A では FTS を使わない。Phase B の詳細は「Phase B の設計」を参照。
 - `thread_grep` はスレッド内の正規化したテキストを線形に走査する。
 - `thread_search` はメタデータ（title、人間の発話、working note、最終報告）だけを対象にする。
 
@@ -113,7 +113,7 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 |---|---|
 | Phase 0 | ADR と計測 |
 | Phase A | storage / runtime / GUI。FTS なし。thread_search はメタデータのみ |
-| Phase B | 本文の全文索引（FTS5 trigram）。Phase 0 の計測を見て別途決める |
+| Phase B | 本文の全文索引（FTS5 trigram）。設計は「Phase B の設計」、進捗は「Phase B 実装状況チェックリスト」 |
 | Phase C | ポインタ注入、GUI 添付による ID 指定。今回の範囲外 |
 
 ## Phase 0 計測
@@ -133,6 +133,18 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 ### 手法・注記
 
 実 store は Python `sqlite3`（SQLite 3.53.3）の読み取り専用接続で調査した。本文は `messages_json` から thinking / reasoning / 画像 / 非表示・opaque block を除いて正規化した。FTS5 trigram は seed=410 で無作為抽出した 164 run の一時 SQLite DB ファイルのサイズ（DB 管理 overhead を含む）を測定し、全量値はその単純 10 倍である。正規化時間は Python の JSON parse・除外・テキスト化を `perf_counter` で測った参考値。補完は確定的な根拠のみを採用した。
+
+### Phase 0 計測の要約（Phase B 向け）
+
+出所は上の表と手法・注記のみである。計測用スクリプトや別の計測記録はリポジトリ内に見つからなかった（`Phase 0` / `phase0` / `phase_0` を grep したところ、この ADR だけが該当した）。そのため、以下はこの ADR の数値から導いた要約であり、新しい計測ではない。
+
+- 除外後の本文量は 294,648,246 bytes（1,638 run、135,511 messages）で、DB 全体（約 1.99 GiB）の約 14% にあたる。
+- 本文の大半は tool 由来である。tool_result が 229,295,607 bytes（約 77.8%）、tool_use が 39,031,050 bytes（約 13.2%）で、合わせて約 91.0%。user（10,062,617 bytes）と assistant text（8,556,912 bytes）は合計 18,619,529 bytes（約 6.3%）、system は 7,702,060 bytes（約 2.6%）である。
+- そのため、tool_use と tool_result を切り詰める（Phase B の抽出契約）だけで索引対象の本文は大きく減る。切り詰め後の kind 別バイト数と索引サイズは、Phase B の計測で改めて測る（現時点の数値は未取得）。
+- FTS5 trigram の索引サイズは、10% サンプル（164 run）で本文量の 3.4165 倍だった。全量（切り詰めなし）に単純外挿すると約 834 MiB になる。サンプルの DB ファイル実測値であり、管理 overhead を含む。
+- 1 run の正規化は Python 参考値で median 0.72 ms、p95 8.5 ms、最大 59 ms。最大の run は本文 約 1.49 MB / 666 messages。Rust 実装の性能ではない。
+- `project_root` が null の旧 run は 687 件で、確定的に補完できたものは 0 件。Phase B の可視性は Phase A の `threads` / `thread_runs` に従い、索引側で可視性を再定義しない。
+- 上の 3.4165 倍は、切り詰めなしの本文に対する値である。切り詰め後の容量と、`max_bytes` の候補（256 MiB / 512 MiB / 1 GiB）ごとの保持範囲は Phase B の計測項目として残す（決定 B-2）。
 
 ## Phase A の設計
 
@@ -300,6 +312,147 @@ Phase A の検索対象はメタデータ（title、人間の発話、working no
 
 `evorch inspect thread <id>` と `inspect_e2e.rs` のテスト。
 
+## Phase B の設計
+
+Phase B は `thread_search` に本文の全文検索を足す。2026-10-25 に Phase A が `5d23cab4`（PR #351）としてマージされた後に、計画を作った。計画は独立した plan review を受け、must 6 件（M1〜M6）を反映した改訂版が下の内容である。以降、この節を Phase B の正本とする。実装の途中で前提が変わった場合は、この節を更新してから実装を変える。
+
+### 確定した決定
+
+利用者に確認した決定は次の 4 つである。
+
+1. **B-1 既定の kinds**: `thread_search` の既定 `kinds` は、従来のメタデータ（title / user / working_note / final_report）に `conversation`（user と assistant の text）を加えたものにする。`tool_use` と `tool_result` は明示的に指定したときだけ検索する。
+2. **B-2 容量の上限**: `[storage.thread_index] max_bytes` は暫定で 512 MiB とする。切り詰め後の容量を計測し、256 MiB / 512 MiB / 1 GiB のそれぞれについて、次を ADR に記録する: 保持できる run の数（N / 全体）、最古の時刻、保留（pending）の数、oversized の数。512 MiB が明らかに不適切なら、マージ前に報告する。
+3. **B-3 evicted の扱い**: 上限を引き上げても、evicted の索引を自動で作り直さない。作り直すのは `reindex-threads --include-evicted` を実行したときだけである。新しい上限は、writer が設定を取り込んだ時点で有効になる。
+4. **B-4 「古い」の基準**: run の作成時刻とする。同時刻なら `run_id` の辞書順とする。
+
+### 抽出の契約（M1）
+
+- 抽出器は storage に新設し、入力は `serde_json::Value` とする。storage は providers に依存しないためである。
+- runtime の normalize との一致は、runtime 側の契約テストで確認する。対象は ordinal、block_index、kind、text の先頭である。
+- 種類ごとの扱い:
+
+| 種類 | 索引に入れる内容 |
+|---|---|
+| user / assistant の text | 全文 |
+| working note | 正本は `run_ledger`。各 run の最新 `seq` を全文で入れる。空本文は block を作らない。位置は `note_seq` |
+| tool_use の input | redaction してから JSON 化し、先頭 4096 B |
+| 成功した tool_result | 既知の text 部分の先頭 2048 B |
+| エラーの tool_result | 全文（kind は `tool_error`） |
+| System、reasoning、thinking、画像、anthropic の生ブロック、compaction、未知の block | 入れない |
+| 不正な JSON | その run を保留する |
+
+- 除外した block の番号は詰めない（`block_index` は元の位置のまま）。
+- 処理の順序: 構造化入力を redaction → text 化 → 全文を再度 redaction → UTF-8 境界で切り詰め → hash → 保存。`truncated` は実際に切ったときだけ true にする。診断やイベントに secret を含めない。
+- continuity は User メッセージとして追加されている。continuity と fork による複製は、文の一致では判定しない。保存した出所情報で判定する。出所情報は version 付きの provenance sidecar で、値は `native` / `continuity_copy` / `fork_copy`、コピー元、境界を持つ。
+- 古いデータで出所を確定できない run は `provenance_unknown` として保留にし、件数を計測する。fork の境界は `fork_point_run_id` と `fork_point_context_len`（System 以外のメッセージ数）とする。
+
+### スキーマ（v25）と原子性（M3）
+
+v25 は origin/main（`870a969b`）の時点で空いている（最新は v24）。この時点の open PR（#354 / #358 / #361 / #362）は migration を変更していない。実装時に再確認する。
+
+- migration はテーブル・索引・トリガーだけを作る。本文は処理しない。
+- `thread_index_runs`: `run_id` PK、`state`、`source_revision`、`indexed_revision`、`source_context_sha256`、`source_note_seq`、`source_provenance_version`、`extractor_version`、`accounting_version`、`source_updated_at_ns`、`retention_at_ns`（run の作成時刻）、`indexed_at_ns`、`text_bytes`、`block_count`、`charged_bytes`、`priority`、`attempt_count`、`next_attempt_at_ns`、`blocked_reason`、`last_error_code`、`source_present`。`state` は `pending` / `indexed` / `retry_wait` / `blocked` / `evicted` / `deleted`。
+- `conversation_blocks`: `id` INTEGER PK、`run_id`、`source_kind`（`message` / `working_note`）、`source_key`、`ordinal`?、`block_index`?、`note_seq`?、`role`、`kind`（`text` / `working_note` / `tool_use` / `tool_result` / `tool_error`）、`tool_name`?、`truncated`、`hash`、`text`。`UNIQUE(run_id, source_kind, source_key)`。書き込みは `ON CONFLICT DO UPDATE` で行い、`INSERT OR REPLACE` は使わない。消えた key は削除する。
+- `conversation_fts`: fts5、external content、trigram、`columnsize=0`。`memory_fts`（`crates/storage/src/migrations/v3.sql` の 52〜62 行付近）と同様に、トリガーで同期する。
+- 制御用に `thread_index_lease`（owner、期限、fencing epoch）、`thread_index_requests`、discovery の再開位置を持つ。
+- 正本の保存時（snapshot、note の append と clear を含む）は、`source_revision` の更新と pending 化を同一トランザクションで行う。snapshot は `repo/run_context.rs:39–60` と `writer/state.rs:410–418`。note は writer の `run_ledger` 分岐をトランザクション化する。
+- 索引の置換は、lease の epoch と revision を確認してから、差分・FTS・集計・state を 1 つのトランザクションで更新する。evict も同様に行う。
+- source の削除は、共通 API で block・FTS・集計を消して tombstone を残す。discovery では復活させない。
+- hash が一致しても、位置（ordinal、block_index、note_seq など）の更新は省かない。
+- 受け入れ条件に FTS の `integrity-check`（rank=1）を含める。
+
+### job（M2）
+
+- 起動時の discovery: `run_contexts` などのヘッダを keyset で走査し、本文は読まない。missing か revision が不一致の run を pending にする。evicted は戻さない。新しい run から処理する。
+- アイドル時を優先する。ただし、通常コマンドが 32 件、または 100 ms 経過したら、必ず 1 step を実行する（`writer/state.rs:390–396` の `run_due_work` に組み込む）。
+- 抽出は writer の外で 1 並列で行う。commit 時に revision を再確認する。
+- pending がない、無効、容量不足、retry 待ちのときは、10 ms ごとに writer を起こさない。
+- retry: 1 秒から始め、最大 5 分の指数 backoff とする。同じ revision で 5 回失敗したら blocked にし、後続の run は進める。
+- 巨大な run が前景の書き込みを待たせる時間を計測する。
+
+### 上限と容量（M4）
+
+- `max_bytes` は論理会計に対する予算である。論理会計は、text のバイト数に、属性と索引のコスト、FTS の係数を加えたものとする。`accounting_version` を持たせ、係数は計測で決める。
+- 物理サイズ（dbstat、freelist、DB と WAL）は別途計測する。
+- 超過したら `retention_at_ns ASC, run_id ASC` の順に evict する。古い run の backfill のために、新しい索引を evict しない。
+- 1 つの run だけで上限を超えるときは `evicted(oversized)` とする。
+- 索引の回収は `LimitKind::DbSize` のときだけ行う。1 回の発生につき最大 2 サイクルとする（予算付きの削除 → checkpoint と incremental vacuum → 再計測）。
+- reader が WAL を妨げるときは、回収を保留する。`auto_vacuum` が NONE でも、full VACUUM は勝手に実行しない。
+- DB 全体の上限（`writer/state.rs:648–689`、`hard_limits.max_db_bytes`、`file_sizes().total()`）に対して、正本の書き込み用の余裕を残す。
+
+### runtime の検索（M5）
+
+- kinds は、既存の title / user / working_note / final_report に、`conversation` / `tool_use` / `tool_result` を加える。既定は決定 B-1 のとおり。同じ位置の複数の一致は 1 つにまとめる。
+- 既存の意味を保つ: query 配列は OR、`words` / `phrase` / `regex`、`include_children`、`updated_after`。
+- visibility を先に確定し、scoped relation か keyset batch で storage の API に問い合わせる。100 はバッチの上限であり、総数の上限ではない。「FTS を先に引いてから可視性で絞る」方式（S2）は使わない。
+- 3 scalar 未満の語や、Unicode で一致が保証されない場合は、`LIKE`（エスケープしてバインド）か scan を使う。regex は可視範囲を走査する。予算を超えたら `partial` と続きの情報を返す。
+- cursor は version 付きで、caller、scope、正規化した条件、keyset の位置、regex の位置、revision、改ざん検出を含む。毎回、再認可する。run が 101 件以上あるスレッドでも続きを取れる。
+- `source_revision` が一致しない古い索引は、hit にも件数にも出さない。
+- hit に `truncated` と revision を付ける。参照は revision 付きの guarded reference とし、`thread_read` で revision が一致しなければ `stale_reference` を返す。従来の ref も使える。
+- 統計は可視範囲だけを対象にする: indexed / pending（retry と blocked を含む）/ evicted / missing。`unindexed = pending + evicted + missing`。`backfill_in_progress` も返す。
+- `thread_grep` は正本の走査のままにする（索引に依存しない）。
+- tool description を更新し、`crates/runtime/tests/thread_tools_cache.rs` のフィクスチャを更新する。
+
+### CLI と所有権（M6）
+
+- `evorch reindex-threads [--db] [--project] [--since] [--include-evicted] [--wait]`
+- GUI と CLI は、共通の request / lease / step API を使う。CLI 専用の更新処理は作らない。
+- DB 単位の lease と fencing epoch、heartbeat、期限切れ lease の引き継ぎを持つ。
+- GUI が owner なら、CLI は request を記録して終わる。
+- 結果は `accepted` / `completed` / `completed_with_gaps` / `failed` を区別する。
+- `--include-evicted` でも、上限は守る（決定 B-3）。
+
+### 担当（ファイル所有）と順序
+
+| 担当 | 範囲 |
+|---|---|
+| W1 storage-core | migrations、`repo/thread_index.rs` と `thread_index.rs`（新規）、`repo/run_context.rs`、`repo/run_ledger.rs`、`repo/mod.rs`、lib。状態の SQL はここに集約する |
+| W2 writer | `writer.rs`、`writer/state.rs`、job module |
+| W3 config | 設定型、strict、既定値、wiring（storage 内なら W2 と調整する） |
+| W4 runtime | `meta/threads/*`、`specs.rs`、provenance を出す側（continuity / fork / compaction / snapshot の保存） |
+| W5 CLI | `evorch/src/main.rs`、`reindex_threads.rs` |
+| W6 | 計測ハーネスと ADR |
+
+順序（チェックリストの 1〜9 に対応）:
+
+1. 契約の固定
+2. 最小の抽出器で計測
+3. migration・抽出・pending 化
+4. 不可分な置換
+5. job・lease・上限
+6. 検索・cursor・ref
+7. CLI・設定・spec
+8. 実 store のコピーで検証
+9. ADR の仕上げ
+
+### テスト方針
+
+固定の sleep は使わない。時計を注入し、step を明示的に進め、commit 通知・barrier・channel で待つ。
+
+- 抽出: 境界値（4096 B と 2048 B の手前・ちょうど・超え）、UTF-8、切り詰め境界をまたぐ secret、古いデータの secret。除外、同じ文の別発言、note の変更と clear。
+- 索引: 差分（追加・更新・削除、compaction）、障害注入と rollback、再起動、FTS の integrity-check、source の削除と tombstone。
+- job と容量: コマンドが続く間の進行、busy-loop しないこと、retry、容量の境界、巨大な run、逆転しないこと、reader が WAL を回収できない場合。
+- 検索: run が 101 件以上のスレッド、短い語、`LIKE` のエスケープ、Unicode、regex の続き、16 KiB での打ち切り。
+- cursor: 改ざんと条件の変更。不可視の run を大量に足しても、応答（件数・統計・partial・cursor）が変わらないこと。guarded ref が stale になること。
+- 所有権: GUI と CLI の同時起動、二重起動、異常終了、lease を奪った後に古い owner の結果が commit されないこと。
+- CLI: `--project` / `--since` / `--include-evicted`、accepted と completed の区別。
+- 回帰: Phase A の回帰、grep が索引に依存しないこと、spec のバイト一致。
+
+### 計測計画
+
+実 store `/home/turtton/.config/evorch/evorch-events.db` は `mode=ro` で開き、backup API でコピーしたものを使う。原本には書き込まない。
+
+- 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ、上限ごとの保持範囲、`provenance_unknown` の数。
+- 検索 p95 < 300 ms: release ビルド、warm / cold、backfill あり / なし、語の種類別。
+- 前景の書き込み待ち: p50 / p95 / 最大。
+- 結果は「Phase B 実装状況チェックリスト」の計測の項目に記録する。
+
+### 実装時に確認すること
+
+v25 の空き、source を更新・削除するすべての経路、note しかない run の binding、continuity の保存方法、fork の境界が compaction の後も有効か、sidecar の保存先、既存の排他の再利用可否、bundled SQLite に trigram と dbstat があるか、DB 全体の上限の設定の出所、設定の反映方法（reload か再起動か）、cursor の互換性。
+
+確認済みの項目: v25 は空き（上記）。ほかは未確認である。
+
 ## Alternatives
 
 - ID の形式が正しければ許可する: 推測可能な ID による越境閲覧を招く。
@@ -354,7 +507,7 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 環境起因の失敗: rebase した結果での最初の実行（sandbox の長い `TMPDIR`）では、上の 4 crate のうち 4 件が失敗し 1 件がタイムアウトした。3 件は `path must be shorter than SUN_LEN`（Unix ソケットのパスが長すぎる）で失敗した。残りの 2 件（ownership IPC を使う `headless_layout` の 1 件と、端末の `terminal_headless` の 1 件）も `TMPDIR=/tmp/evt` では成功したため、同じソケットパス長の問題と判断した。
   - コード起因の失敗はなかった。
 - [x] 受け入れレビュー — 独立 Reviewer 合格（対象 HEAD: `51c6ba50`、must / should / nit なし）
-- [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: [#351](https://github.com/turtton/evorch/pull/351)、PR 作成時 head: `e7b79534`
+- [x] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: [#351](https://github.com/turtton/evorch/pull/351)、PR 作成時 head: `e7b79534`。squash マージ済み。merge commit: `5d23cab4`（`feat: reference other threads' conversations with thread_search, thread_grep and thread_read (ADR 0041) (#351)`、2026-10-25 04:51:57 +09:00）。
 
 ### 受け入れレビュー 1 回目の指摘への対応
 
@@ -403,3 +556,61 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 3. `git log --oneline -- intents/evorch/decisions/0041-thread-context-reference.md crates/storage crates/runtime/src/meta crates/gui/src/app` などで、チェック済みでもコミットが残っているか確かめる。
 4. マイグレーション番号、`HistoryRead` の位置、`capabilities()` の形などは、実装前に現行のコードで確認する（この ADR の番号は 2026-10-24 時点）。
 5. コミットは署名つきで、`type(scope): subject` 形式にする。マージは「実装状況」の PR の行の条件（CI 成功と独立レビュー合格）を満たしてから squash で行う。
+
+## Phase B 実装状況チェックリスト
+
+Phase B の進捗を記録する。各項目の完了時に `[x]` にして、commit SHA と検証結果を記入する。設計は「Phase B の設計」に従う。
+
+- 作業場所: worktree `/home/turtton/.ghr/github.com/turtton/evorch/.worktrees/thread-conversation-search`、ブランチ `feat/thread-conversation-search`（起点は origin/main の `870a969b`）。メインのチェックアウトと他の worktree の `target` には触らない。
+- コミットは署名つきで、`type(scope): subject` 形式にする。force push はしない。区切りごとに commit と push を行う。
+- ユーザー許可（原文）:「推奨で、マージまでOK」。worktree で作業 → 計画の独立レビュー → 実装 → 別の Reviewer による受け入れ → push と PR → CI 成功で squash マージ（`--match-head-commit`）。
+
+### 計画と契約
+
+- [x] ADR に計画記載 — commit: この節を書いたコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）。Phase A の merge commit（`5d23cab4`）と Phase 0 計測の要約も同じコミットで記録した。
+- [ ] 計画の独立レビュー（plan review）— 初回レビューの must 6 件（M1〜M6）は「Phase B の設計」に反映済み。反映後の計画に対する合格判定は未取得。判定:
+- [ ] 順序 1 契約の固定 — commit:
+- [ ] 順序 2 最小の抽出器で計測 — commit:
+- [ ] 順序 3 migration（v25）・抽出・pending 化 — commit:
+- [ ] 順序 4 不可分な置換（索引の置換・evict・source 削除の tombstone）— commit:
+- [ ] 順序 5 job・lease・上限 — commit:
+- [ ] 順序 6 検索・cursor・ref — commit:
+- [ ] 順序 7 CLI（`reindex-threads`）・設定・spec — commit:
+- [ ] 順序 8 実 store のコピーで検証 — commit:
+- [ ] 順序 9 ADR の仕上げ — commit:
+
+### 検証・レビュー・公開
+
+- [ ] 検証（`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo nextest run`、`scripts/check-cache-contracts.sh`）— 対象 HEAD と結果:
+- [ ] FTS の `integrity-check`（rank=1）が受け入れテストで成功する — 結果:
+- [ ] 受け入れレビュー（実装者とは別の独立した Reviewer）— 対象 HEAD と判定:
+- [ ] PR 作成 — PR:、head:
+- [ ] CI 成功（PR の最新 head SHA に対する必須 check）— head と結果:
+- [ ] マージ（squash、`--match-head-commit`）— merge commit:
+- [ ] 後片付け（マージ確認後の worktree とブランチの削除）— 結果:
+
+### 計測
+
+計測は実 store のコピー（`mode=ro` で開き backup API でコピー。原本には書き込まない）で行う。
+
+- [ ] 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ — 結果:
+- [ ] `max_bytes` ごとの保持範囲（決定 B-2）— 結果:
+
+  | `max_bytes` | 保持できる run（N / 全体） | 最古の時刻 | 保留（pending）の数 | oversized の数 |
+  |---|---|---|---|---|
+  | 256 MiB | | | | |
+  | 512 MiB | | | | |
+  | 1 GiB | | | | |
+
+  512 MiB が明らかに不適切なら、マージ前に報告する。
+- [ ] `provenance_unknown` の数 — 結果:
+- [ ] 検索 p95 < 300 ms（release ビルド、warm / cold、backfill あり / なし、語の種類別）— 結果:
+- [ ] 前景の書き込み待ち（p50 / p95 / 最大）— 結果:
+- [ ] 「実装時に確認すること」の全項目の確認結果を記録した — 結果:
+
+### Phase B の再開手順
+
+1. 上の worktree に移動する。メインのチェックアウトには触らない。
+2. 「Phase B の設計」と、このチェックリストの最初の未チェック項目から再開する。
+3. マイグレーション番号（v25）、`writer/state.rs` の行番号などは、実装前に現行のコードで確認する（この ADR の番号は `870a969b` の時点）。
+4. 実 store を使う作業は、原本を `mode=ro` で開いて backup API でコピーしたものだけに行う。
