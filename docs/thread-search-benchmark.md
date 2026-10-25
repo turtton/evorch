@@ -185,6 +185,8 @@ pressure (`some avg10` 82.78% → 80.62%, `full avg10` 79.37% → 77.11%).
 The off-cell made zero index steps/commits; capacity remained normal.
 Attribution must distinguish actual search reads from runtime persistence and
 unrelated host IO before proposing an optimization.
+CPU PSI is a stall/pressure measure, **not CPU utilization**; a zero value does
+not rule out CPU work such as matching or redaction.
 
 `--diagnose` performs three same-connection passes over the same visible
 project's public read APIs and one supplementary real-loop drain. It emits only
@@ -193,3 +195,38 @@ timestamps split the inclusive page time into before dispatch / dispatch /
 after dispatch; event input/output payloads are never written to the report.
 This attribution is explicitly **not an acceptance measurement** and cannot
 replace the 100-drain E2E cells.
+
+The extended diagnostic also captures each real page's returned thread/hit
+counts, index coverage, partial/cursor flags and bounded output size (identities
+remain memory-only). It replays the public candidate API over each actual
+cursor's 100-thread preload window, recording batch/scope hashes, keyset
+positions, SQL calls/rows/bytes, route classification and duplicate candidates
+across pages. Redaction uses the production `SecretRedactor` settings; the
+private runtime matcher cannot be reused, so its RegexBuilder flags and 1 MiB
+limits are reproduced and explicitly marked as a diagnostic approximation.
+The replay does not emulate early hit/output-byte stops; its counts are
+overfetch upper bounds, **not a trace of production's internal SQL calls**.
+Do not subtract unrelated percentiles or equate replay time with E2E time.
+
+Supplementary attribution on the same prepared seed found:
+
+- A representative real drain took 6.545 s; lifecycle timestamps place over
+  99% of each page inside dispatch. Before/after dispatch together were only
+  a few milliseconds, so snapshot persistence did not explain the failure.
+- The query was classified by the shared router as **trigram**.
+- Over the replayed actual cursor windows, literal candidate SQL took
+  8.876 s / 61 calls, versus full-scan SQL 52.069 ms / 92 calls. Both produced
+  the same 2019 matching candidates including repeats; the literal replay
+  had 1113 cross-page duplicate candidates. Redaction took 20.202 ms, and the
+  reproduced matcher took 46 µs. These replay totals are not E2E percentiles.
+- The final three windows returned **zero** indexed candidates but literal SQL
+  still took 875.958 / 431.600 / 143.103 ms; full scans took only
+  1.390 / 0.700 / 0.203 ms. This discriminates SQL routing/plan amplification
+  from output formatting or matcher cost.
+- A read-only `EXPLAIN QUERY PLAN` with the same bound SQL shape and query,
+  over a supplementary 71-run unindexed scope, selected the global
+  `conversation_blocks(kind)` index and FTS EXISTS before scanning scope and
+  looking up current run coverage, then used a temporary ORDER BY B-tree.
+  This is not a captured production call trace; the synthetic scope is stated
+  explicitly. Production SQL/API changes belong to a separate implementation
+  task, with the 300 ms gate still unmet.

@@ -315,8 +315,8 @@ async fn run() -> Result<()> {
     if options.diagnose {
         let value = diagnose::reads(&database, &reading.db_path, &corpus)?;
         println!("{value}");
-        drop(database);
-        drop(probe);
+        let diagnostic_database = database;
+        let diagnostic_probe = probe;
         let path = work.join("diagnostic-cell.db");
         copy::backup(&seed, &path)?;
         let cfg = config(&path);
@@ -333,8 +333,13 @@ async fn run() -> Result<()> {
             "{}",
             json!({"stage":"diagnostic_loop","pages_us":sample.pages_us,
             "before_dispatch_dispatch_after_us":sample.boundary_us,
-            "drain_us":sample.drain_us,"not_acceptance_measurement":true})
+            "drain_us":sample.drain_us,"page_shapes":sample.page_shapes,"not_acceptance_measurement":true})
         );
+        println!(
+            "{}",
+            diagnose::candidates(&diagnostic_database, &corpus, &cases[0], &sample)?
+        );
+        drop(diagnostic_probe);
         return Ok(());
     }
     drop(database);

@@ -30,6 +30,12 @@ pub struct Case {
 }
 
 impl Case {
+    pub fn literal_filter(&self) -> storage::thread_search::ConversationFilter {
+        storage::thread_search::ConversationFilter::Literals(vec![
+            self.query.split_whitespace().map(str::to_owned).collect(),
+        ])
+    }
+
     #[cfg(test)]
     pub fn fixture(query: &str, mode: &'static str) -> Self {
         Self {

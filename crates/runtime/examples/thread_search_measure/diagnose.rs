@@ -65,3 +65,137 @@ pub fn reads(db: &Database, path: &Path, corpus: &Corpus) -> Result<Value> {
         "same_connection_passes":3,"thread_samples":threads,"total_us":totals}),
     )
 }
+
+pub fn candidates(
+    db: &Database,
+    corpus: &Corpus,
+    case: &super::corpus::Case,
+    actual: &super::driver::Sample,
+) -> Result<Value> {
+    use storage::thread_index::IndexBlockKind;
+    use storage::thread_search::{ConversationFilter, ConversationQuery, term_route};
+    let query = case.args()["query"]
+        .as_str()
+        .ok_or("diagnostic_query_missing")?
+        .to_owned();
+    let route = match term_route(&query) {
+        storage::thread_search::TermRoute::Trigram(_) => "trigram",
+        storage::thread_search::TermRoute::Like(_) => "like",
+        storage::thread_search::TermRoute::Scan => "scan",
+    };
+    let redactor = secret_guard::SecretRedactor::from_env();
+    let regex = regex::RegexBuilder::new(&regex::escape(&query))
+        .case_insensitive(true)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
+        .build()?;
+    let mut scans = Vec::new();
+    let mut calls = Vec::new();
+    for (label, filter) in [
+        ("literal", case.literal_filter()),
+        ("full_scan", ConversationFilter::All),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cursor = 0;
+        for (page, returned) in actual.page_threads.iter().enumerate() {
+            let end = (cursor + 100).min(corpus.threads.len());
+            let mut slots = Vec::new();
+            let started = Instant::now();
+            for thread in &corpus.threads[cursor..end] {
+                let runs = db.runs_of_thread(&thread.thread_id)?;
+                let ids = runs
+                    .iter()
+                    .map(|run| run.run_id.clone())
+                    .collect::<Vec<_>>();
+                let summaries = db.terminal_summaries(&ids)?;
+                let primary = runs
+                    .iter()
+                    .filter(|run| run.depth == 0)
+                    .filter_map(|run| summaries.iter().find(|s| s.run_id == run.run_id))
+                    .max_by_key(|s| (s.updated_at_ns, &s.run_id))
+                    .map(|s| s.run_id.as_str())
+                    .or(thread.root_run_id.as_deref());
+                let mut selected = runs
+                    .iter()
+                    .filter(|run| run.depth > 0 || Some(run.run_id.as_str()) == primary)
+                    .filter(|run| summaries.iter().any(|s| s.run_id == run.run_id))
+                    .map(|run| run.run_id.clone())
+                    .collect::<Vec<_>>();
+                selected.sort();
+                selected.dedup();
+                slots.extend(selected);
+            }
+            let members_us = started.elapsed().as_micros();
+            let (
+                mut sql_us,
+                mut redact_us,
+                mut matcher_us,
+                mut rows,
+                mut bytes,
+                mut hits,
+                mut duplicate,
+            ) = (0, 0, 0, 0, 0, 0, 0);
+            let mut statements = 0;
+            for (batch_number, batch) in slots.chunks(MAX_SEARCH_BATCH_RUNS).enumerate() {
+                let mut after = None;
+                loop {
+                    let start = Instant::now();
+                    let candidates = db.conversation_candidates(&ConversationQuery {
+                        runs: batch,
+                        kinds: &[IndexBlockKind::Text],
+                        filter: &filter,
+                        after,
+                        limit: 200,
+                    })?;
+                    let elapsed = start.elapsed().as_micros();
+                    sql_us += elapsed;
+                    statements += 1;
+                    let count = candidates.len();
+                    let call_bytes = candidates.iter().map(|c| c.text.len()).sum::<usize>();
+                    calls.push(json!({"label":label,"actual_route":route,"page":page,
+                        "thread_start":cursor,"thread_end":end,"batch":batch_number,
+                        "scope_sha256":super::corpus::hash(&serde_json::to_vec(batch)?),
+                        "after":after.map(|p:storage::thread_search::CandidatePosition|(p.seq,p.block_id)),
+                        "rows":count,"bytes":call_bytes,"sql_us":elapsed}));
+                    for candidate in &candidates {
+                        rows += 1;
+                        bytes += candidate.text.len();
+                        let identity = super::corpus::hash(
+                            format!("{}:{}", candidate.run_id, candidate.position.block_id)
+                                .as_bytes(),
+                        );
+                        duplicate += usize::from(!seen.insert(identity));
+                        let start = Instant::now();
+                        let text = redactor.redact(&candidate.text).text;
+                        redact_us += start.elapsed().as_micros();
+                        let start = Instant::now();
+                        hits += usize::from(regex.find(&text).is_some());
+                        matcher_us += start.elapsed().as_micros();
+                    }
+                    if candidates.len() < 200 {
+                        break;
+                    }
+                    after = candidates.last().map(|candidate| candidate.position);
+                }
+            }
+            scans.push(json!({"label":label,"actual_route":route,"page":page,
+                "threads_preloaded":end-cursor,"slots":slots.len(),"members_summary_us":members_us,
+                "statements":statements,"rows":rows,"bytes":bytes,"hits":hits,
+                "duplicate_candidates_prior_pages":duplicate,"sql_us":sql_us,
+                "redact_us":redact_us,"matcher_us":matcher_us}));
+            if let Some(last) = returned.last() {
+                cursor = corpus
+                    .threads
+                    .iter()
+                    .position(|thread| &thread.thread_id == last)
+                    .ok_or("diagnostic_page_thread_missing")?
+                    + 1;
+            }
+        }
+    }
+    Ok(
+        json!({"stage":"diagnostic_candidates","not_acceptance_measurement":true,
+        "query_sha256":case.hash(),"actual_route":route,"samples":scans,"calls":calls,
+        "limits":"public API replay of each actual cursor 100-thread preload window, not internal call trace; no hit-limit/byte-fit early stop, counts are overfetch upper bounds; production matcher private, same RegexBuilder flags/limits reproduced, not reused"}),
+    )
+}
