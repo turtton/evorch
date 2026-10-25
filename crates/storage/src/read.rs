@@ -447,6 +447,19 @@ impl Database {
         event::list_for_runs(&self.conn, run_ids, from_ns, limit)
     }
 
+    /// Hands every event to `visit` in ID order, one at a time, so that a
+    /// replay never holds the whole history in memory. Events that no longer
+    /// decode are skipped, as in [`Self::events_all_ordered`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn for_each_event_ordered(
+        &self,
+        visit: impl FnMut(StoredEvent),
+    ) -> Result<(), StorageError> {
+        event::for_each_ordered(&self.conn, visit)
+    }
+
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。
     ///
     /// # Errors

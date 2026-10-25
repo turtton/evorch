@@ -255,6 +255,12 @@ impl AgentRunSource for AgentRuntime {
     }
 }
 
+/// Delegated runs collected by [`TasksModel::restore_event`] during a replay.
+#[derive(Debug, Default)]
+pub struct TaskRestore {
+    rows: std::collections::BTreeMap<RunId, TaskRow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
     pub run_id: RunId,
@@ -395,40 +401,48 @@ impl<S: AgentRunSource> TasksModel<S> {
 
     /// Rebuild the delegated-run index from durable events on startup.
     pub fn restore_events<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) {
-        let mut restored = std::collections::BTreeMap::<RunId, TaskRow>::new();
+        let mut restored = TaskRestore::default();
         for event in events {
-            self.touch(event);
-            match &event.kind {
-                EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
-                    run_id,
-                    parent_run_id: Some(_),
-                    agent_name,
-                    role,
-                }) => {
-                    let Some(id) = parse_run_id(run_id) else {
-                        continue;
-                    };
-                    restored.entry(id).or_insert_with(|| TaskRow {
-                        run_id: id,
-                        name: agent_name.clone(),
-                        role: role.clone(),
-                        status: AgentRunPhase::Pending,
-                        model: String::new(),
-                        category: None,
-                        cancelled: false,
-                    });
-                }
-                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                    run_id, to, ..
-                }) => {
-                    if let Some(row) = parse_run_id(run_id).and_then(|id| restored.get_mut(&id)) {
-                        row.status = *to;
-                    }
-                }
-                _ => {}
-            }
+            self.restore_event(&mut restored, event);
         }
-        self.history_rows = restored.into_values().collect();
+        self.finish_restore(restored);
+    }
+
+    /// Folds one durable event into `restored`, for replays that stream the
+    /// history instead of holding it; [`Self::finish_restore`] applies it.
+    pub fn restore_event(&mut self, restored: &mut TaskRestore, event: &Event) {
+        self.touch(event);
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id,
+                parent_run_id: Some(_),
+                agent_name,
+                role,
+            }) => {
+                let Some(id) = parse_run_id(run_id) else {
+                    return;
+                };
+                restored.rows.entry(id).or_insert_with(|| TaskRow {
+                    run_id: id,
+                    name: agent_name.clone(),
+                    role: role.clone(),
+                    status: AgentRunPhase::Pending,
+                    model: String::new(),
+                    category: None,
+                    cancelled: false,
+                });
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+                if let Some(row) = parse_run_id(run_id).and_then(|id| restored.rows.get_mut(&id)) {
+                    row.status = *to;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn finish_restore(&mut self, restored: TaskRestore) {
+        self.history_rows = restored.rows.into_values().collect();
         self.refresh();
     }
 

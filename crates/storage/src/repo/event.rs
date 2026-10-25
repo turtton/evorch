@@ -281,13 +281,38 @@ fn list_events<P: rusqlite::Params>(
     sql: &str,
     params: P,
 ) -> Result<Vec<StoredEvent>, StorageError> {
+    let mut events = Vec::new();
+    visit_events(conn, sql, params, |event| events.push(event))?;
+    Ok(events)
+}
+
+/// Every event in ID order, handed to `visit` one at a time so that a long
+/// history is never held in memory at once.
+pub fn for_each_ordered(
+    conn: &Connection,
+    visit: impl FnMut(StoredEvent),
+) -> Result<(), StorageError> {
+    visit_events(
+        conn,
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
+         FROM events ORDER BY id ASC",
+        [],
+        visit,
+    )
+}
+
+fn visit_events<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mut visit: impl FnMut(StoredEvent),
+) -> Result<(), StorageError> {
     let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query(params)?;
-    let mut events = Vec::new();
     let mut skipped = 0_usize;
     while let Some(row) = rows.next()? {
         match row_to_event(row) {
-            Ok(event) => events.push(event),
+            Ok(event) => visit(event),
             // 削除済みの variant など、現行の型で復元できない保存イベントは読み飛ばします。
             Err(StorageError::Serialization(_)) => skipped += 1,
             Err(error) => return Err(error),
@@ -296,7 +321,7 @@ fn list_events<P: rusqlite::Params>(
     if skipped > 0 {
         tracing::warn!(skipped, "skipped stored events that no longer decode");
     }
-    Ok(events)
+    Ok(())
 }
 
 pub(crate) fn row_to_event(row: &Row<'_>) -> Result<StoredEvent, StorageError> {
