@@ -4,6 +4,7 @@ pub mod agents;
 pub mod budget;
 pub mod comment_checker;
 pub mod compaction;
+pub mod edit_tool;
 pub mod eval;
 pub mod misc;
 pub mod model_preset;
@@ -30,6 +31,7 @@ pub use agents::{
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
+pub use edit_tool::{EditToolConfig, EditToolSelection, gpt_generation};
 pub use eval::{EvalBudgetConfig, EvalConfig};
 pub use misc::{
     DiagnosticPersistence, DiagnosticsConfig, MetricsConfig, PermissionConfig,

@@ -105,6 +105,7 @@ async fn quoted_huge_handles_restore_without_replaying_shell_or_rewriting_histor
                     }],
                 },
                 range: (0, 1),
+                protects_history: false,
             }])
             .unwrap();
             fixture

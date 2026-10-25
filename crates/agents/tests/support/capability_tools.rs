@@ -45,6 +45,7 @@ pub const WORKER_TOOLS: &[&str] = &[
     "read",
     "edit",
     "write",
+    "apply_patch",
     "grep",
     "shell",
     "skill_load",

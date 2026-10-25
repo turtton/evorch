@@ -73,6 +73,7 @@ fn compatible(credential: CredentialRefConfig) -> ProviderProfileConfig {
         ],
         default_model: "model-a".into(),
         excluded_models: vec!["excluded-b".into(), "excluded-a".into()],
+        edit_tool: None,
     }
 }
 

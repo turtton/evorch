@@ -157,6 +157,11 @@ A `base_url` without `/v1` has it appended, so `https://host` and
 `api_protocol` values are rejected; use `openai-compatible` for Chat
 Completions endpoints.
 
+GPT-5 and later models of `openai` and `openai-codex` profiles edit files with
+the Codex-compatible `apply_patch` tool instead of `edit` and `write`. The
+`edit_tool` key of a profile or model entry changes this for any provider; see
+[apply_patch](apply-patch.md).
+
 ## Failures and cooldowns
 
 Each failed request records its failure kind and a short error detail in the
@@ -251,13 +256,34 @@ switch is also where the history is prepared for the new member. Before the
 first request is sent there:
 
 - A checkpoint made by official compaction (an opaque Codex blob) is
-  re-summarized from the raw messages it covers when the new member cannot
-  replay it. The blob itself is never read or forwarded.
+  re-summarized from raw history when the new member cannot replay it. The
+  blob itself is never read or forwarded.
+- A change of editing interface (`apply_patch` versus `edit` and `write`)
+  always summarizes the old history as text, **even without a checkpoint**.
+  This includes editing calls after an existing checkpoint, so the next
+  agent request never replays the old interface's calls raw. It applies to
+  fallback, explicit model changes, and settings reloads that change the
+  override for the same profile/model. Each such fallback adds one summary
+  invocation (and a model call when using the model summarizer). Same-interface
+  fallback does not add this summary, and a first request without earlier
+  history does not summarize. See
+  [apply_patch](apply-patch.md#history-and-model-switches).
 - The history is compacted when it is above the new member's context window
   × `[compaction].threshold`.
 
-Both happen once per switch, then the request is sent again; a restored run
-whose pinned member is unavailable goes through the same steps.
+These use the existing `ModelSwitch` compaction boundary before the next agent
+request. Later requests preserve and reuse the new prefix; a restored run
+whose pinned member is unavailable goes through the same steps. Settings
+reloads retain the prior editing interface. If that record is absent after a
+restart/resume, an opaque checkpoint triggers a conservative re-summary; with
+no checkpoint, only an earlier incompatible `apply_patch`/`edit`/`write`
+`ToolUse` triggers one. Incompatible visible editing calls are checked even
+when a prior-interface record exists, so a failed re-summary remains a required
+boundary on resume. Model-switch checkpoints and compactions derived from them
+persist an optional `protects_history` marker: later compaction operates on
+the projected history and cannot re-expose the replaced raw calls/results.
+Ordinary checkpoints omit this marker and retain their existing serialized
+bytes and compaction input.
 
 Summaries use official compaction when the run's member supports it, then the
 chain, then the structural summary, which needs no model and always completes.

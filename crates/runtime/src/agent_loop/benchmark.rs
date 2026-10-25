@@ -63,8 +63,17 @@ impl LoopState {
     }
 
     pub(super) fn append_benchmark_instructions(&mut self) {
-        let tools = self
-            .tool_specs
+        let choice = self
+            .shared
+            .model
+            .edit_tool_for_run(
+                &self.task.run_id.to_string(),
+                self.task.role,
+                self.task.config.category.as_deref(),
+            )
+            .unwrap_or(config::EditToolConfig::Edit);
+        let visible_tools = crate::edit_tools::narrow(&self.tool_specs, choice);
+        let tools = visible_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()

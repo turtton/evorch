@@ -3,6 +3,53 @@ use crate::message::{ChatRequest, ContentBlock, Message, Role, ToolResultContent
 use serde_json::json;
 
 #[test]
+fn apply_patch_history_stays_a_function_pair() {
+    let request: ChatRequest = serde_json::from_value(json!({
+        "model": "m", "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "patch", "name": "apply_patch", "input": {"input": "patch\n日本語"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_call_id": "patch", "is_error": false, "content": [{"type": "text", "text": "ok"}]}]}
+        ], "tools": [{"name": "apply_patch", "description": "patch", "input_schema": apply_patch::tool_contract::json_schema()}]
+    })).unwrap();
+    for tools_present in [true, false] {
+        let mut request = request.clone();
+        if !tools_present {
+            request.tools.clear();
+        }
+        for input in [json!({"input": "patch\n日本語"}), serde_json::Value::Null] {
+            let ContentBlock::ToolUse {
+                input: tool_input, ..
+            } = &mut request.messages[0].content[0]
+            else {
+                unreachable!()
+            };
+            *tool_input = input.clone();
+            let wire = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+            if tools_present {
+                assert_eq!(wire["tools"][0]["type"], "function");
+                assert_eq!(
+                    wire["tools"][0]["function"]["parameters"],
+                    apply_patch::tool_contract::json_schema()
+                );
+            }
+            let call = &wire["messages"][0]["tool_calls"][0];
+            assert_eq!(call["type"], "function");
+            assert_eq!(call["id"], "patch");
+            assert_eq!(call["function"]["name"], "apply_patch");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    call["function"]["arguments"].as_str().unwrap()
+                )
+                .unwrap(),
+                input
+            );
+            assert_eq!(wire["messages"][1]["role"], "tool");
+            assert_eq!(wire["messages"][1]["tool_call_id"], "patch");
+            assert_eq!(wire["messages"][1]["content"], "ok");
+        }
+    }
+}
+
+#[test]
 fn wire_request_maps_reasoning_effort_when_configured() {
     for effort in [Some("medium"), None] {
         // Given: 推論強度を指定または省略した canonical request。

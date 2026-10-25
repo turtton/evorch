@@ -5,14 +5,14 @@ use super::*;
 use providers::{CompactionResult, Compactor};
 
 /// Answers with the queued results first, then succeeds; optionally replays compaction.
-struct QueueClient {
+pub(super) struct QueueClient {
     replies: Mutex<VecDeque<Result<ChatResponse, ProviderError>>>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     replays: bool,
 }
 
 impl QueueClient {
-    fn install(
+    pub(super) fn install(
         model: &mut RoutedModel,
         profile: &str,
         replies: Vec<Result<ChatResponse, ProviderError>>,
@@ -137,10 +137,13 @@ async fn checkpoint_blob_is_never_sent_to_a_member_that_cannot_replay_it() {
     let head = QueueClient::install(
         &mut model,
         "profile-0",
-        vec![Err(ProviderError::Timeout)],
+        vec![Ok(response()), Err(ProviderError::Timeout)],
         true,
     );
     let next = QueueClient::install(&mut model, "profile-1", vec![], false);
+    send(&model, event_bus::RequestPurpose::Agent, &[])
+        .await
+        .unwrap();
     // When: the history carries the head's checkpoint blob.
     let result = send(
         &model,
@@ -156,7 +159,7 @@ async fn checkpoint_blob_is_never_sent_to_a_member_that_cannot_replay_it() {
             resummarize: true,
         })
     );
-    assert!(carries_blob(&head.lock().unwrap()[0]));
+    assert!(carries_blob(&head.lock().unwrap()[1]));
     assert!(next.lock().unwrap().is_empty());
     assert_eq!(model.route_pins("run"), [pin(1)]);
 }
@@ -166,6 +169,9 @@ async fn replaying_member_receives_the_checkpoint_blob() {
     // Given: the head replays official compaction.
     let (mut model, _) = fixture_with(vec![None], &[], &[]);
     let head = QueueClient::install(&mut model, "profile-0", vec![], true);
+    send(&model, event_bus::RequestPurpose::Agent, &[])
+        .await
+        .unwrap();
     // When
     let result = send(
         &model,
@@ -175,7 +181,7 @@ async fn replaying_member_receives_the_checkpoint_blob() {
     .await;
     // Then: the blob is forwarded untouched.
     assert_eq!(result, Ok(response()));
-    assert!(carries_blob(&head.lock().unwrap()[0]));
+    assert!(carries_blob(&head.lock().unwrap()[1]));
 }
 
 #[tokio::test]
@@ -238,6 +244,10 @@ async fn compactor_chain_overrides_the_role_chain_for_summaries() {
 
 #[tokio::test]
 async fn fallback_without_official_compaction_resummarizes_the_checkpoint_end_to_end() {
+    fallback_resummarizes_checkpoint(false).await;
+}
+
+pub(super) async fn fallback_resummarizes_checkpoint(edit_switch: bool) {
     // Given: a replaying head with a 32K window that compacts once, then runs out of quota.
     let mut big = response();
     big.message.content = vec![ContentBlock::Text {
@@ -256,7 +266,16 @@ async fn fallback_without_official_compaction_resummarizes_the_checkpoint_end_to
         ],
         true,
     );
-    let next = QueueClient::install(&mut model, "profile-1", vec![], false);
+    let next = QueueClient::install(&mut model, "profile-1", vec![], edit_switch);
+    if edit_switch {
+        model
+            .providers
+            .get_mut("profile-0")
+            .unwrap()
+            .profile
+            .edit_tool
+            .profile = Some(config::EditToolConfig::ApplyPatch);
+    }
     // Run admission needs each profile's verified models, which the fixture leaves empty.
     model.verification = tokio::sync::OnceCell::new_with(Some(
         model

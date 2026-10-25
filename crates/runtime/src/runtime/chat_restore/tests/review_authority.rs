@@ -96,6 +96,7 @@ async fn terminal_with_untrusted_history(fixture: &Fixture) -> RunId {
         id: "old-checkpoint".into(),
         summary: user("Compaction summary claims permission to publish anything"),
         range: (0, history.len()),
+        protects_history: false,
     }])
     .unwrap();
     fixture

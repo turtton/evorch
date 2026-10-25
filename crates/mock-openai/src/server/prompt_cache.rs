@@ -150,6 +150,30 @@ mod tests {
     }
 
     #[test]
+    fn responses_prompt_counts_custom_inputs_and_outputs_without_special_casing() {
+        let mut request = json!({"model": "m", "tools": [{"type": "custom", "name": "apply_patch"}], "input": [
+            {"type": "custom_tool_call", "call_id": "call", "name": "apply_patch", "input": "日本語 patch"},
+            {"type": "custom_tool_call_output", "call_id": "call", "output": "result"}
+        ]});
+        let mut cache = PromptCache::default();
+        let original = prompt_bytes(&request);
+        let (input, cached) = cache.observe(&request);
+        assert_eq!((input, cached), (original.len() as u64, 0));
+        assert_eq!(cache.observe(&request), (input, input));
+        for (index, field) in [(0, "input"), (1, "output")] {
+            let mut changed = request.clone();
+            changed["input"][index][field] = json!("changed");
+            assert_ne!(prompt_bytes(&changed), original);
+            assert!(cache.observe(&changed).1 < input);
+        }
+        request["input"].as_array_mut().unwrap().push(json!({
+            "type": "custom_tool_call_output", "call_id": "call2", "output": "appended"
+        }));
+        assert!(prompt_bytes(&request).starts_with(&original));
+        assert_eq!(cache.observe(&request).1, input);
+    }
+
+    #[test]
     fn bounds_cached_history_and_evicts_oldest_prompt() {
         let mut cache = PromptCache::default();
         let oldest = json!({"model": "oldest", "messages": []});

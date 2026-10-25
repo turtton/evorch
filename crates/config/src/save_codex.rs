@@ -160,7 +160,7 @@ pub(crate) fn save_codex_provider_edit_inner(
     if !input.default_model.is_empty() {
         profile.insert("default_model", value(input.default_model.as_str()));
     }
-    insert_profile(&mut doc, &input.name, profile)?;
+    insert_profile(&mut doc, &input.name, original_name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
     crate::save::write_document_in_scope(path, &doc, scope)
 }

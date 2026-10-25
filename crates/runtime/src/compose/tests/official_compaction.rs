@@ -1,9 +1,9 @@
 use super::*;
 use providers::{CompactionResult, Compactor};
 
-struct OfficialClient {
-    requests: Arc<Mutex<Vec<ChatRequest>>>,
-    fail: bool,
+pub(super) struct OfficialClient {
+    pub(super) requests: Arc<Mutex<Vec<ChatRequest>>>,
+    pub(super) fail: bool,
 }
 
 #[async_trait]

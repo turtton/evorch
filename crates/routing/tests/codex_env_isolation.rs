@@ -90,6 +90,7 @@ async fn codex_tokens_never_reach_sandbox_child_env() {
         },
         models: vec![MODEL.to_owned()],
         default_model: MODEL.to_owned(),
+        edit_tool: Default::default(),
     };
     let client = build_provider_client(
         &profile,

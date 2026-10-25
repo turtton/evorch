@@ -37,6 +37,7 @@ fn profile(api_protocol: model::ApiProtocol, credential: CredentialRef) -> Provi
         credential,
         models: vec![MODEL.to_string()],
         default_model: MODEL.to_string(),
+        edit_tool: Default::default(),
     }
 }
 

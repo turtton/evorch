@@ -1,4 +1,8 @@
+mod custom;
+
 use std::collections::BTreeMap;
+
+use custom::CustomToolState;
 
 use serde::Deserialize;
 
@@ -15,6 +19,7 @@ use crate::stream::StreamEvent;
 pub struct ResponsesStreamInterpreter {
     tool_indices: BTreeMap<String, usize>,
     tool_arguments: BTreeMap<usize, String>,
+    custom_tools: BTreeMap<String, CustomToolState>,
     saw_tool_call: bool,
     discard_tool_calls: bool,
     done: bool,
@@ -25,6 +30,21 @@ impl ResponsesStreamInterpreter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn tool_index(&mut self, item_id: &str, output_index: usize) -> usize {
+        *self
+            .tool_indices
+            .entry(item_id.to_owned())
+            .or_insert(output_index)
+    }
+
+    fn custom_tool(&mut self, item_id: &str, output_index: usize) -> &mut CustomToolState {
+        self.saw_tool_call = true;
+        let index = self.tool_index(item_id, output_index);
+        self.custom_tools
+            .entry(item_id.to_owned())
+            .or_insert_with(|| CustomToolState::new(index))
     }
 
     fn final_arguments_delta(
@@ -109,6 +129,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 })
             }
             "response.output_item.added" | "response.output_item.done" => {
+                let done = event_type == "response.output_item.done";
                 let event: OutputItemEvent = parse(value)?;
                 match event.item {
                     OutputItem::FunctionCall {
@@ -118,7 +139,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                         arguments,
                     } => {
                         self.saw_tool_call = true;
-                        let index = *self.tool_indices.entry(id).or_insert(event.output_index);
+                        let index = self.tool_index(&id, event.output_index);
                         let arguments_delta = self.final_arguments_delta(index, &arguments)?;
                         Ok(FrameInterpretation {
                             events: vec![StreamEvent::ToolCallDelta {
@@ -130,16 +151,26 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                             completion: None,
                         })
                     }
+                    OutputItem::CustomToolCall {
+                        id,
+                        call_id,
+                        name,
+                        input,
+                    } => {
+                        let event = self
+                            .custom_tool(&id, event.output_index)
+                            .item(call_id, name, &input, done)?;
+                        Ok(FrameInterpretation {
+                            events: vec![event],
+                            completion: None,
+                        })
+                    }
                     OutputItem::Other => Ok(FrameInterpretation::default()),
                 }
             }
             "response.function_call_arguments.delta" => {
                 let event: FunctionArgumentsDelta = parse(value)?;
-                let index = self
-                    .tool_indices
-                    .get(&event.item_id)
-                    .copied()
-                    .unwrap_or(event.output_index);
+                let index = self.tool_index(&event.item_id, event.output_index);
                 self.tool_arguments
                     .entry(index)
                     .or_default()
@@ -156,11 +187,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
             }
             "response.function_call_arguments.done" => {
                 let event: FunctionArgumentsDone = parse(value)?;
-                let index = self
-                    .tool_indices
-                    .get(&event.item_id)
-                    .copied()
-                    .unwrap_or(event.output_index);
+                let index = self.tool_index(&event.item_id, event.output_index);
                 let arguments_delta = self.final_arguments_delta(index, &event.arguments)?;
                 Ok(FrameInterpretation {
                     events: vec![StreamEvent::ToolCallDelta {
@@ -172,7 +199,33 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                     completion: None,
                 })
             }
+            "response.custom_tool_call_input.delta" => {
+                let event: FunctionArgumentsDelta = parse(value)?;
+                let event = self
+                    .custom_tool(&event.item_id, event.output_index)
+                    .delta(&event.delta)?;
+                Ok(FrameInterpretation {
+                    events: vec![event],
+                    completion: None,
+                })
+            }
+            "response.custom_tool_call_input.done" => {
+                let event: CustomInputDone = parse(value)?;
+                let event = self
+                    .custom_tool(&event.item_id, event.output_index)
+                    .done(&event.input)?;
+                Ok(FrameInterpretation {
+                    events: event.into_iter().collect(),
+                    completion: None,
+                })
+            }
             "response.completed" => {
+                for (item_id, state) in &self.custom_tools {
+                    if state.is_open() {
+                        tracing::warn!(%item_id, output_index = state.index,
+                            "Responses custom tool input が未完了のため JSON を閉じません");
+                    }
+                }
                 let event: ResponseCompleted = parse(value)?;
                 self.done = true;
                 Ok(FrameInterpretation {
@@ -231,6 +284,9 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
     }
 
     fn finalize_message(&mut self, message: &mut Message) {
+        message
+            .content
+            .retain(|block| !matches!(block, ContentBlock::ToolUse { id, .. } if id.is_empty()));
         if self.discard_tool_calls {
             // Deltas already left this interpreter, so filter the assembled message,
             // not just the local maps. Text/reasoning and completion metadata survive.
@@ -293,11 +349,17 @@ struct OutputItemEvent {
 
 /// 回収する出力項目。それ以外 (message、hosted tool、未知の種別) は無視します。
 ///
-/// B-1 の freeform tool は `CustomToolCall`、B-3 の encrypted reasoning は
-/// `Reasoning` variant を追加して回収します。
+/// B-3 の encrypted reasoning は `Reasoning` variant を追加して回収します。
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutputItem {
+    CustomToolCall {
+        id: String,
+        call_id: String,
+        name: String,
+        #[serde(default)]
+        input: String,
+    },
     FunctionCall {
         id: String,
         call_id: String,
@@ -321,6 +383,13 @@ struct FunctionArgumentsDone {
     item_id: String,
     output_index: usize,
     arguments: String,
+}
+
+#[derive(Deserialize)]
+struct CustomInputDone {
+    item_id: String,
+    output_index: usize,
+    input: String,
 }
 
 #[derive(Deserialize)]

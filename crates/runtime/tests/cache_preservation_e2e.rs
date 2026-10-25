@@ -1,5 +1,7 @@
 //! Offline cost-regression contract through runtime, routing, HTTP/SSE and usage.
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
+#[path = "apply_patch_cache/mod.rs"]
+mod apply_patch_cache;
 #[path = "hosted_search_cache/mod.rs"]
 mod hosted_search_cache;
 mod support;
@@ -95,6 +97,8 @@ enum Wire {
     ChatCompletions,
     /// `type = "openai"`: the official Responses API.
     Responses,
+    /// `type = "openai-codex"`: the Codex subscription backend's Responses API.
+    Codex,
 }
 
 impl Wire {
@@ -102,6 +106,7 @@ impl Wire {
         match self {
             Self::ChatCompletions => "openai-compatible",
             Self::Responses => "openai",
+            Self::Codex => "openai-codex",
         }
     }
 
@@ -109,13 +114,14 @@ impl Wire {
         match self {
             Self::ChatCompletions => "/v1/chat/completions",
             Self::Responses => "/v1/responses",
+            Self::Codex => "/backend-api/codex/responses",
         }
     }
 
     const fn protocol(self) -> CacheProtocol {
         match self {
             Self::ChatCompletions => CacheProtocol::OpenAi,
-            Self::Responses => CacheProtocol::Codex,
+            Self::Responses | Self::Codex => CacheProtocol::Codex,
         }
     }
 }
@@ -198,8 +204,46 @@ fn harness_with_wire(
     threshold: f64,
     configure: impl FnOnce(&mut Config),
 ) -> Harness {
+    harness_with_model(
+        wire,
+        MODEL,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+    )
+}
+
+/// Like [`harness_with_wire`], serving and configuring `model` instead of [`MODEL`].
+#[allow(clippy::too_many_arguments)]
+fn harness_with_model(
+    wire: Wire,
+    model: &str,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
-    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
+    let (base_url, credential) = match wire {
+        Wire::Codex => (
+            mock.codex_base_url(),
+            format!(
+                r#"api_protocol = "openai-codex-responses"
+credential = {{ type = "keyring", service = "evorch", account = "{CODEX_ACCOUNT}" }}"#
+            ),
+        ),
+        Wire::ChatCompletions | Wire::Responses => {
+            (mock.base_url(), format!(r#"api_key_env = "{KEY_ENV}""#))
+        }
+    };
     std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
         .expect("config directory");
     std::fs::write(
@@ -208,10 +252,10 @@ fn harness_with_wire(
             r#"
 [providers.local]
 type = "{provider_type}"
-base_url = "{}"
-api_key_env = "{KEY_ENV}"
-models = ["{MODEL}"]
-default_model = "{MODEL}"
+base_url = "{base_url}"
+{credential}
+models = ["{model}"]
+default_model = "{model}"
 [[routing.routes.orchestrator]]
 profile = "local"
 [[routing.routes.worker]]
@@ -227,7 +271,6 @@ keep_recent_tokens = 1
 max_summary_bytes = 256
 summarizer = "structural"
 "#,
-            mock.base_url(),
             provider_type = wire.provider_type(),
         ),
     )
@@ -250,17 +293,27 @@ summarizer = "structural"
     if checker.is_some() {
         executor = executor.with_post_edit_hook(checker);
     }
+    let credential_store: Arc<FileCredentialStore> =
+        Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
+    let env = Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")]));
+    let model_source = match wire {
+        Wire::Codex => ModelSource::Fixed(codex_model(
+            &config,
+            &credential_store,
+            &bus,
+            &mock.codex_base_url(),
+        )),
+        Wire::ChatCompletions | Wire::Responses => ModelSource::Configured,
+    };
     let runtime = compose_runtime(RuntimeComposition {
         model_catalog_dir: Some(test_support::model_catalog_dir()),
         user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,
         executor: Arc::new(executor),
-        credential_store: Arc::new(
-            FileCredentialStore::open(directory.path().join("credentials")).unwrap(),
-        ),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
+        credential_store,
+        env,
+        model_source,
         workspace: None,
     })
     .unwrap()
@@ -275,6 +328,52 @@ summarizer = "structural"
         mock,
         wire,
     }
+}
+
+const CODEX_ACCOUNT: &str = "codex-cache-e2e";
+
+/// Routes `config` like production, pinning the Codex client version and keeping
+/// OAuth refreshes on `base_url`, so Codex runs never reach the network. Stores an
+/// unexpired (2100-01-01) token bundle under [`CODEX_ACCOUNT`] in `store`.
+fn codex_model(
+    config: &Config,
+    store: &Arc<FileCredentialStore>,
+    bus: &Arc<EventBus>,
+    base_url: &str,
+) -> Arc<dyn runtime::AgentModel> {
+    use sandbox::credential::{CredentialStore, Secret};
+
+    store
+        .set(
+            CODEX_ACCOUNT,
+            &Secret::from(json!({
+                "access_token": "offline-access", "refresh_token": "offline-refresh",
+                "id_token": "e30.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2MifX0.signature"
+            }).to_string()),
+        )
+        .unwrap();
+    let model = runtime::compose::compose_routed_model(
+        config,
+        routing::ComposeDeps {
+            credential_store: store.clone(),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::default()),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions {
+                auth_base_url_override: Some(base_url.into()),
+                codex_client_version: Some(providers::CodexClientVersion::Fixed(
+                    providers::CodexCatalogVersion {
+                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                        warning: None,
+                    },
+                )),
+                ..Default::default()
+            },
+        },
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
+    Arc::new(runtime::compose::SwitchableModel::new(model))
 }
 
 fn contract_prompts() -> Arc<SystemPromptCatalog> {

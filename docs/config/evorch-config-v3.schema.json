@@ -770,6 +770,21 @@
       },
       "additionalProperties": false
     },
+    "EditToolConfig": {
+      "description": "モデルへ提示するファイル編集ツール (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (`apply-patch` / `edit`) です。",
+      "oneOf": [
+        {
+          "description": "Codex 準拠の `apply_patch` (patch 形式でファイルを追加・更新・削除する)。",
+          "type": "string",
+          "const": "apply-patch"
+        },
+        {
+          "description": "文字列置換によるファイル編集 (`edit`)。",
+          "type": "string",
+          "const": "edit"
+        }
+      ]
+    },
     "EscalationApproval": {
       "oneOf": [
         {
@@ -975,6 +990,17 @@
               ],
               "format": "uint64",
               "minimum": 0
+            },
+            "edit_tool": {
+              "description": "このモデルへ提示するファイル編集ツール。省略時はプロファイルの `edit_tool`、\nそれもなければ既定判定 (OpenAI / OpenAI Codex の `gpt-<N>` (N≥5) は\napply-patch、それ以外は edit) に従う。",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EditToolConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "effort_levels": {
               "description": "このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。",
@@ -1306,6 +1332,17 @@
           "description": "既定で使用するモデル ID。",
           "type": "string",
           "default": "claude-sonnet-4-5"
+        },
+        "edit_tool": {
+          "description": "このプロファイルのモデルへ提示するファイル編集ツール。モデルエントリの\n`edit_tool` が優先する。省略時は既定判定 (OpenAI / OpenAI Codex の\n`gpt-<N>` (N≥5) は apply-patch、それ以外は edit) に従う。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EditToolConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "excluded_models": {
           "description": "除外するモデル ID の一覧。",

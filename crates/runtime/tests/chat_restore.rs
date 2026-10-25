@@ -156,6 +156,7 @@ async fn latest_terminal_chat_preserves_checkpoints_and_ignores_other_threads() 
         id: "checkpoint-1".into(),
         summary: user("summary"),
         range: (0, 2),
+        protects_history: false,
     };
     record.checkpoints_json = serde_json::to_string(&vec![checkpoint.clone()]).unwrap();
     storage.handle().upsert_run_context(&record).unwrap();

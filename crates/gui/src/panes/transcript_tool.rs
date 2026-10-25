@@ -250,7 +250,16 @@ pub fn tool_card_group(
                 palette().TEXT,
             );
         } else if expanded && !running {
-            if let Some(input) = input {
+            // The patch is what the model asked for; its result stays plain
+            // code below, so a rejected patch never reads as applied.
+            let patch = input
+                .as_ref()
+                .filter(|_| tool_name == "apply_patch")
+                .and_then(header::patch_text);
+            if let Some(patch) = patch {
+                ui.label("Patch");
+                diff_code(ui, patch);
+            } else if let Some(input) = input {
                 ui.label("Input");
                 let content = focused_input(tool_name, Some(input))
                     .map(Cow::Borrowed)

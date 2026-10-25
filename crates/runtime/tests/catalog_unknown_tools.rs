@@ -31,6 +31,7 @@ async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
         },
         models: vec!["custom-tool-model".into()],
         default_model: "custom-tool-model".into(),
+        edit_tool: Default::default(),
     };
     let router = Router::new(
         vec![profile.clone()],

@@ -143,6 +143,22 @@ pub(crate) fn artifact_result(
     }))
 }
 
+/// The largest length per text at which all `lengths` fit in `budget`, so
+/// short texts leave their unused share to long ones. `usize::MAX` when all of
+/// them fit uncut.
+pub(crate) fn shared_cap(mut lengths: Vec<usize>, budget: usize) -> usize {
+    lengths.sort_unstable();
+    let mut remaining = budget;
+    for (fitted, &length) in lengths.iter().enumerate() {
+        let share = remaining / (lengths.len() - fitted);
+        if length > share {
+            return share;
+        }
+        remaining -= length;
+    }
+    usize::MAX
+}
+
 fn tail_preview(text: &str) -> &str {
     let mut start = text.len().saturating_sub(PREVIEW_BYTES);
     while !text.is_char_boundary(start) {

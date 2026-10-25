@@ -109,6 +109,7 @@ async fn restore_blob_checkpoint(
             }],
         },
         range: (0, 2),
+        protects_history: false,
     };
     record.checkpoints_json = serde_json::to_string(&vec![blob]).unwrap();
     storage.handle().upsert_run_context(&record).unwrap();

@@ -109,6 +109,12 @@ pub enum ToolError {
         /// 失敗の詳細。
         detail: String,
     },
+    /// 組み込みツール専用の名前で、別の実装を登録しようとした。
+    #[error("ツール名 {name} は組み込みツール専用のため登録できません")]
+    ReservedToolName {
+        /// 予約されているツール名。
+        name: String,
+    },
 }
 
 impl ToolError {
@@ -258,6 +264,12 @@ mod tests {
                     detail: "permission denied".to_string(),
                 },
                 "入出力エラー: permission denied",
+            ),
+            (
+                ToolError::ReservedToolName {
+                    name: "apply_patch".to_string(),
+                },
+                "ツール名 apply_patch は組み込みツール専用のため登録できません",
             ),
         ];
 

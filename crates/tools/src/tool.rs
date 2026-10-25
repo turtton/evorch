@@ -62,6 +62,24 @@ impl Permissions {
     }
 }
 
+/// A tool name reserved for one implementation in this crate.
+///
+/// Models are trained on the exact behavior of these tools, so
+/// [`crate::ToolExecutor::register`] refuses any other tool that claims the
+/// name, such as an MCP or host tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinTool {
+    /// `apply_patch`, implemented by [`crate::tools::ApplyPatch`].
+    ApplyPatch,
+}
+
+impl BuiltinTool {
+    /// The built-in that owns `name`, if the name is reserved.
+    pub fn reserving(name: &str) -> Option<Self> {
+        (name == apply_patch::tool_contract::NAME).then_some(Self::ApplyPatch)
+    }
+}
+
 /// ツールを並行実行するときの排他性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionMode {
@@ -77,13 +95,20 @@ pub enum ToolExecutionMode {
 /// が引数のスキーマ検証と結果の正規化を担うため、`execute` を直接呼び出した場合の
 /// 戻り値は検証前の生の内容になる。
 #[async_trait::async_trait]
-pub trait Tool: Send + Sync {
+pub trait Tool: Send + Sync + std::any::Any {
     /// ツールの一意な名前。
     fn name(&self) -> &str;
 
     /// モデルに提示する説明。独自ツールは名前を既定の説明として使う。
     fn description(&self) -> &str {
         self.name()
+    }
+
+    /// Advisory identity for callers inspecting tool metadata. Registration
+    /// verifies the concrete type instead; external implementations can spoof
+    /// this method and must never gain reserved-name privileges from it.
+    fn builtin_identity(&self) -> Option<BuiltinTool> {
+        None
     }
 
     /// MCP communication must pass the runtime scope gate before execution.

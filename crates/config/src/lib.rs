@@ -62,12 +62,12 @@ pub use types::OwnershipConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategorizedRoleBindingConfig,
     CategoryBindingConfig, ChainEntryConfig, CommentCheckerConfig, CompactionConfig, Config,
-    CooldownConfig, CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig,
-    EscalationApproval, EvalBudgetConfig, EvalConfig, FallbackConfig, GenerationOverridesConfig,
-    MetadataSource, MetricsConfig, ModelEntryConfig, ModelKind, ModelPresetConfig, PanelConfig,
-    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
-    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
-    SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
+    CooldownConfig, CredentialRefConfig, DiagnosticPersistence, DiagnosticsConfig, EditToolConfig,
+    EditToolSelection, EscalationApproval, EvalBudgetConfig, EvalConfig, FallbackConfig,
+    GenerationOverridesConfig, MetadataSource, MetricsConfig, ModelEntryConfig, ModelKind,
+    ModelPresetConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
+    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
+    SandboxConfig, SelfImprovementConfig, SummarizerKind, WorkerBindingConfig, gpt_generation,
 };
 pub use types::{BrowserToolsConfig, ToolsConfig};
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};

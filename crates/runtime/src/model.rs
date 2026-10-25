@@ -58,6 +58,47 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Whether request assembly selects editing tools separately for each candidate.
+    /// Legacy/fixed implementations keep edit/write via the runtime call boundary.
+    fn narrows_edit_tools(&self) -> bool {
+        false
+    }
+
+    /// Editing interface of the run's selected route, for context/UI inspection.
+    /// Models without routing information use the legacy edit/write interface.
+    fn edit_tool_for_run(
+        &self,
+        _run_id: &str,
+        _role: Role,
+        _category: Option<&str>,
+    ) -> Option<config::EditToolConfig> {
+        None
+    }
+
+    /// Transient editing interfaces used by agent requests, keyed by (run, chain).
+    /// Reconfiguration carries these over; they are not part of persisted snapshots.
+    fn edit_tools_by_run(
+        &self,
+    ) -> std::collections::BTreeMap<(String, String), config::EditToolConfig> {
+        std::collections::BTreeMap::new()
+    }
+
+    /// Restores request history, not edit-tool choices inferred from new settings.
+    fn restore_edit_tools(
+        &self,
+        _history: &std::collections::BTreeMap<(String, String), config::EditToolConfig>,
+    ) {
+    }
+
+    /// Commits an editing-interface boundary only after context preparation succeeds.
+    fn model_switch_prepared(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _selected: &str,
+    ) {
+    }
+
     /// Mutable composition wrappers expose the model to retain for a whole
     /// invocation, including tool capabilities used after its response arrives.
     fn invocation_snapshot(&self) -> Option<std::sync::Arc<dyn AgentModel>> {
@@ -250,6 +291,113 @@ pub trait AgentModel: Send + Sync {
 mod tests {
     use super::*;
     use providers::{ContentBlock, FinishReason, Role as MessageRole, Usage};
+
+    #[derive(Default)]
+    struct ToolObserver(std::sync::Mutex<Vec<Vec<ToolSpec>>>);
+
+    #[async_trait]
+    impl AgentModel for ToolObserver {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "fixed-model".into()
+        }
+
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            tools: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            self.0.lock().unwrap().push(tools.to_vec());
+            Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn compact_context(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            tools: &[ToolSpec],
+        ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
+            self.0.lock().unwrap().push(tools.to_vec());
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_model_boundary_narrows_complete_streaming_and_compaction() {
+        let observer = std::sync::Arc::new(ToolObserver::default());
+        assert!(!observer.narrows_edit_tools());
+        assert_eq!(observer.edit_tool_for_run("run", Role::Worker, None), None);
+        let model = crate::compose::SwitchableModel::new(observer.clone());
+        let specs = ["edit", "apply_patch", "write"]
+            .into_iter()
+            .map(|name| ToolSpec {
+                name: name.into(),
+                description: name.into(),
+                input_schema: serde_json::json!({}),
+            })
+            .collect::<Vec<_>>();
+        let invocation = AgentInvocationContext::default();
+        model
+            .complete(&invocation, Role::Worker, &[], &specs)
+            .await
+            .unwrap();
+        model
+            .invocation_snapshot()
+            .unwrap()
+            .complete_streaming(
+                &invocation,
+                Role::Worker,
+                &[],
+                &specs,
+                &event_bus::EventBus::new(8),
+            )
+            .await
+            .unwrap();
+        model
+            .compact_context(&invocation, Role::Worker, &[], &specs)
+            .await
+            .unwrap();
+        let observed = observer.0.lock().unwrap();
+        assert_eq!(observed.len(), 3);
+        for tools in observed.iter() {
+            assert_eq!(tools, &[specs[0].clone(), specs[2].clone()]);
+        }
+        assert_eq!(specs.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fixed_runtime_keeps_apply_patch_out_of_stub_requests() {
+        let observer = std::sync::Arc::new(ToolObserver::default());
+        let bus = std::sync::Arc::new(event_bus::EventBus::new(128));
+        let executor = std::sync::Arc::new(tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        ));
+        let runtime = crate::AgentRuntime::new(bus, executor, observer.clone());
+        let run =
+            runtime.delegate_background(Role::Worker, "task".into(), crate::RunConfig::default());
+        assert_eq!(runtime.wait(run).await.unwrap(), crate::AgentRunPhase::Done);
+        let observed = observer.0.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        let names = observed[0]
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"edit"));
+        assert!(names.contains(&"write"));
+        assert!(!names.contains(&"apply_patch"));
+    }
 
     /// 履歴長を本文へエコーする stub 実装。
     struct EchoModel;

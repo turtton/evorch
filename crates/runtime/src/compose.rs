@@ -248,6 +248,8 @@ pub struct RoutedModel {
     /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
     metadata_catalog_dir: Option<PathBuf>,
     model_presets: BTreeMap<String, config::ModelPresetConfig>,
+    /// Last sent (or prepared switch boundary) editing interface, per run/role chain.
+    edit_tools_by_run: Mutex<BTreeMap<(String, String), config::EditToolConfig>>,
 }
 
 impl RoutedModel {
@@ -302,6 +304,7 @@ impl RoutedModel {
             metadata_catalog: tokio::sync::OnceCell::new(),
             metadata_catalog_dir: None,
             model_presets: BTreeMap::new(),
+            edit_tools_by_run: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -502,6 +505,12 @@ impl RoutedModel {
 }
 
 impl RoutedModel {
+    fn route_edit_tool(&self, profile: &str, model: &str) -> Option<config::EditToolConfig> {
+        let provider = self.providers.get(profile)?;
+        // Keep the configured ID: an exact +fast entry overrides its base model.
+        Some(provider.profile.edit_tool_for(model))
+    }
+
     // 通常生成と公式 compaction で override / role / category の解決を揃える。
     fn resolve_invocation(
         &self,
@@ -655,6 +664,10 @@ impl RoutedModel {
         let router = self.router_for(!tools.is_empty());
         let mut cycle: Option<routing::FallbackCycle> = None;
         let mut failures = Vec::new();
+        let edit_key = (
+            invocation.run_id.clone(),
+            chain_key(role, invocation.category.as_deref()),
+        );
         loop {
             let (base_model_id, speed) =
                 config::types::provider::parse_model_speed(&route.model_id);
@@ -733,8 +746,9 @@ impl RoutedModel {
                 CapabilitySupport::Unsupported => false,
                 CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
             };
+            let edit_tool = provider.profile.edit_tool_for(&route.model_id);
             let tools = if model_allows_tools && provider.client.capabilities().tool_use {
-                tools.to_vec()
+                crate::edit_tools::narrow(tools, edit_tool)
             } else {
                 Vec::new()
             };
@@ -747,10 +761,38 @@ impl RoutedModel {
                 // A switch is a cache boundary (ADR 0030): the agent loop re-summarizes a
                 // checkpoint the target cannot replay and, knowing every configured window,
                 // compacts for a smaller one before the request is sent again.
-                let resummarize = carries_compaction && !provider.client.replays_compaction();
-                let switching = pinned_before.as_ref().is_some_and(|(profile, model)| {
-                    *profile != route.profile || *model != route.model_id
-                });
+                let previous_edit_tool = self
+                    .edit_tools_by_run
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&edit_key)
+                    .copied();
+                // A restored opaque checkpoint cannot reveal its editing interface.
+                // New settings are not evidence of the interface that produced it.
+                let unknown_checkpoint = previous_edit_tool.is_none() && carries_compaction;
+                let incompatible_history = messages.iter().flat_map(|message| &message.content).any(|block| {
+                        matches!((edit_tool, block),
+                            (config::EditToolConfig::Edit, providers::ContentBlock::ToolUse { name, .. }) if name == "apply_patch")
+                            || matches!((edit_tool, block),
+                                (config::EditToolConfig::ApplyPatch, providers::ContentBlock::ToolUse { name, .. }) if matches!(name.as_str(), "edit" | "write"))
+                    });
+                let edit_switch = previous_edit_tool.is_some_and(|previous| previous != edit_tool);
+                let resummarize = unknown_checkpoint
+                    || incompatible_history
+                    || edit_switch
+                    || (carries_compaction && !provider.client.replays_compaction());
+                let switching = edit_switch
+                    || pinned_before.as_ref().is_some_and(|(profile, model)| {
+                        *profile != route.profile || *model != route.model_id
+                    });
+                // Keep the old interface until preparation commits: failed or cancelled
+                // opaque re-summaries must request the same boundary again on resume.
+                if !resummarize {
+                    self.edit_tools_by_run
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(edit_key.clone(), edit_tool);
+                }
                 if resummarize || switching {
                     if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
                         routing::pin(
@@ -931,6 +973,58 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn edit_tools_by_run(&self) -> BTreeMap<(String, String), config::EditToolConfig> {
+        self.edit_tools_by_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn restore_edit_tools(&self, history: &BTreeMap<(String, String), config::EditToolConfig>) {
+        self.edit_tools_by_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(history.clone());
+    }
+
+    fn model_switch_prepared(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        selected: &str,
+    ) {
+        if let Some(edit_tool) = selected
+            .split_once('/')
+            .and_then(|(profile, model)| self.route_edit_tool(profile, model))
+        {
+            self.edit_tools_by_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    (
+                        invocation.run_id.clone(),
+                        chain_key(role, invocation.category.as_deref()),
+                    ),
+                    edit_tool,
+                );
+        }
+    }
+
+    fn narrows_edit_tools(&self) -> bool {
+        true
+    }
+
+    fn edit_tool_for_run(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+    ) -> Option<config::EditToolConfig> {
+        let selected = self.selected_model_for_run(run_id, role, category);
+        let (profile, model) = selected.split_once('/')?;
+        self.route_edit_tool(profile, model)
+    }
+
     fn web_search_provider(
         &self,
         invocation: &AgentInvocationContext,
@@ -1029,7 +1123,7 @@ impl AgentModel for RoutedModel {
             CapabilitySupport::Unsupported
         );
         let tools = if model_allows_tools && provider.client.capabilities().tool_use {
-            tools.to_vec()
+            crate::edit_tools::narrow(tools, provider.profile.edit_tool_for(&route.model_id))
         } else {
             Vec::new()
         };
