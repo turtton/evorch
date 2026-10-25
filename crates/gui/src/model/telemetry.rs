@@ -460,6 +460,14 @@ impl TelemetryOverlay {
                             *self.accumulated_running.entry(run_id.clone()).or_default() +=
                                 now.saturating_duration_since(start);
                         }
+                        // An ended run executes no tool, even if a call of it
+                        // never reported a result.
+                        if *to != AgentRunPhase::Waiting
+                            && let Some(row) = self.rows.get_mut(run_id)
+                        {
+                            row.current_tool = None;
+                            row.activity = None;
+                        }
                     }
                     AgentRunPhase::Pending => {}
                 }

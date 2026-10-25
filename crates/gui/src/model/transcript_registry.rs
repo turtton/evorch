@@ -56,6 +56,15 @@ impl TranscriptRegistry {
         }
     }
 
+    pub(crate) fn running_tool_runs(&self) -> BTreeSet<String> {
+        std::iter::once(&self.thread)
+            .chain(self.threads.values())
+            .chain(self.runs.values())
+            .flat_map(TranscriptModel::running_tool_runs)
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             thread: TranscriptModel::new(),
