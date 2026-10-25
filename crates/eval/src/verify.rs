@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use sandbox::process::ProcessGroupGuard;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -69,32 +69,39 @@ pub async fn run(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let started = Instant::now();
-    let mut child = match process.spawn() {
+    let mut child = match GroupChild::spawn(&mut process) {
         Ok(child) => child,
         Err(error) => return Verification::unstarted(command, error.to_string()),
     };
-    let group = ProcessGroupGuard::new(child.id());
-    let (mut stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
+    let (mut stdout, mut stderr) = (child.take_stdout(), child.take_stderr());
     let mut out = Tail::default();
     let mut err = Tail::default();
+    // The exited command stays unreaped until its output ends, so stopping what
+    // it left running cannot signal a reused group id.
     let finished = tokio::time::timeout(timeout, async {
-        let (status, (), ()) = tokio::join!(
-            child.wait(),
+        let (exited, (), ()) = tokio::join!(
+            child.exited(),
             drain(stdout.as_mut(), &mut out),
             drain(stderr.as_mut(), &mut err)
         );
-        status
+        exited
     })
     .await;
-    let (exit_code, timed_out, error) = match finished {
-        Ok(Ok(status)) => (status.code(), false, None),
-        Ok(Err(error)) => (None, false, Some(error.to_string())),
-        Err(_) => (None, true, None),
+    // Stop what the command left running (after a timeout, the command too)
+    // and reap it.
+    let reaped = tokio::time::timeout(Duration::from_secs(1), child.kill_and_wait()).await;
+    let (exit_code, timed_out, error) = match (finished, reaped) {
+        (Err(_), _) => (None, true, None),
+        (Ok(Err(error)), _) | (Ok(Ok(())), Ok(Err(error))) => {
+            (None, false, Some(error.to_string()))
+        }
+        (Ok(Ok(())), Ok(Ok(status))) => (status.code(), false, None),
+        (Ok(Ok(())), Err(_)) => (
+            None,
+            false,
+            Some("the exited command was not reaped".into()),
+        ),
     };
-    // Stop what the command left running; after a timeout this also stops the
-    // command itself before it is reaped.
-    drop(group);
-    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
     Verification {
         command: command.to_owned(),
         passed: exit_code == Some(0),
@@ -195,6 +202,7 @@ mod tests {
         assert!(verification.elapsed_ms < 30_000);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_timeout_also_stops_what_the_command_started_in_the_background() {
         // Given / When: a command that leaves a background helper and outlives its timeout.
@@ -213,6 +221,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_command_runs_in_its_own_session_without_evorch_descriptors() {
         use std::os::fd::AsRawFd;

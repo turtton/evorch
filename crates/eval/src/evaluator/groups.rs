@@ -606,7 +606,7 @@ pub(super) fn detail(shared: &Shared, root: &Path, id: &str) -> Result<Value, St
     Ok(value)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod launch_tests {
     use std::os::fd::AsRawFd;
 

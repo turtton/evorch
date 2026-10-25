@@ -7,7 +7,6 @@
 //! leaves many) must not reach the command either.
 
 use std::io::Read;
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -99,8 +98,10 @@ fn run_probes_with_terminal() {
 // Given: evorch holds a descriptor without O_CLOEXEC / When: the shell tool
 // runs a command synchronously and as a job / Then: neither command sees it,
 // while a child started without the launch policy does.
+#[cfg(target_os = "linux")]
 #[test]
 fn shell_commands_do_not_inherit_evorch_descriptors() {
+    use std::os::fd::AsRawFd;
     let file = tempfile::NamedTempFile::new().expect("temporary file");
     // A high number keeps the probe off any descriptor the shell opens itself.
     let fd = rustix::io::fcntl_dupfd_cloexec(&file, 100).expect("duplicate the descriptor");

@@ -6,8 +6,9 @@
 use std::process::Stdio;
 use std::sync::Arc;
 
-use sandbox::process::ProcessGroupGuard;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::error::ToolError;
@@ -105,14 +106,16 @@ impl Tool for GitDiff {
             command: wrapped.program.clone(),
             detail: error.to_string(),
         };
-        let child = command.spawn().map_err(spawn_failed)?;
-        let group = ProcessGroupGuard::new(child.id());
-        let output = child.wait_with_output().await.map_err(spawn_failed)?;
-        drop(group);
+        let mut child = GroupChild::spawn(&mut command).map_err(spawn_failed)?;
+        let (stdout, stderr) = (child.take_stdout(), child.take_stderr());
+        // Once git exits, waiting kills helpers that still hold its output, so
+        // the reads end and no reaped group id is signalled later.
+        let (status, stdout, stderr) =
+            tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr))
+                .map_err(spawn_failed)?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let status = output.status;
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
 
         // リポジトリ外での実行は git のバージョンでメッセージが異なる
         // （古: "fatal: not a git repository" / 新: "warning: Not a git repository.
@@ -129,4 +132,12 @@ impl Tool for GitDiff {
         }
         Ok(ToolResult::success(stdout))
     }
+}
+
+async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
 }

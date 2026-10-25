@@ -425,6 +425,7 @@ async fn leader_exit_cleans_descendants_holding_output_pipes_without_waiting_for
 
 // The checker leads its own session (no terminal of evorch's to stop it) and
 // inherits none of evorch's descriptors beyond its pipes.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn checker_runs_in_its_own_session_without_evorch_descriptors() {
     use std::os::fd::AsRawFd;

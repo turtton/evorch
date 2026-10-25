@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use sandbox::process::ProcessGroupGuard;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox, WrappedCommand};
 use serde::Deserialize;
 
@@ -522,8 +522,8 @@ fn io_failed(error: impl std::fmt::Display) -> ToolError {
 /// 非対話モード: tokio::process で子プロセスを実行する。
 ///
 /// The command runs under the sandbox launch policy (its own session, no
-/// inherited descriptors), so killing its process group stops it with its
-/// descendants.
+/// inherited descriptors). The exited command stays unreaped until its output
+/// ends, so killing what is left of its process group cannot reach a reused id.
 async fn run_process(
     wrapped: &WrappedCommand,
     timeout_ms: Option<u64>,
@@ -534,23 +534,19 @@ async fn run_process(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let group = ProcessGroupGuard::new(child.id());
+    let mut child =
+        GroupChild::spawn(&mut command).map_err(|error| spawn_failed(&wrapped.program, error))?;
     let mut stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| io_failed("missing stdout"))?;
     let mut stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| io_failed("missing stderr"))?;
     let mut out = Capture::default();
     let mut err = Capture::default();
     let completion = async {
         tokio::join!(
-            child.wait(),
+            child.exited(),
             drain(&mut stdout, &mut out),
             drain(&mut stderr, &mut err)
         )
@@ -560,18 +556,18 @@ async fn run_process(
         None => Ok(completion.await),
     };
     let (exit_code, timed_out) = match waited {
-        Ok((status, stdout, stderr)) => {
+        Ok((exited, stdout, stderr)) => {
             stdout?;
             stderr?;
-            (status.map_err(io_failed)?.code().unwrap_or(-1), false)
+            exited.map_err(io_failed)?;
+            let status = child.wait().await.map_err(io_failed)?;
+            (status.code().unwrap_or(-1), false)
         }
         Err(_) => {
-            group.kill();
-            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.kill_and_wait()).await;
             (-1, true)
         }
     };
-    drop(group);
     out.append(&err);
     Ok(shell_result(
         out,

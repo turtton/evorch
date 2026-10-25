@@ -1,9 +1,9 @@
 //! Process and PTY supervision for shell jobs.
-use super::super::{PtyKiller, io_failed, spawn_failed};
+use super::super::{io_failed, spawn_failed};
 use super::{Completion, Input, Job};
 use crate::ToolError;
 use sandbox::WrappedCommand;
-use sandbox::process::ProcessGroupGuard;
+use sandbox::process::{GroupChild, ProcessGroup, ProcessGroupGuard};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,21 +30,17 @@ pub(super) async fn run_pipe(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let group = ProcessGroupGuard::new(child.id());
-    job.register_process(group.leader());
+    let mut child =
+        GroupChild::spawn(&mut command).map_err(|error| spawn_failed(&wrapped.program, error))?;
+    job.register_process(Some(child.group().clone()));
     let result = async {
         let mut stdout = child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or_else(|| io_failed("missing stdout"))?;
         let mut stderr = child
-            .stderr
-            .take()
+            .take_stderr()
             .ok_or_else(|| io_failed("missing stderr"))?;
-        let mut stdin = child.stdin.take();
+        let mut stdin = child.take_stdin();
         let timer = tokio::time::sleep(timeout);
         tokio::pin!(timer);
         let mut out = [0u8; 8192];
@@ -58,13 +54,13 @@ pub(super) async fn run_pipe(
             }
             tokio::select! {
                 biased;
-                _ = async { let _ = cancel.wait_for(|value| *value).await; } => { group.kill(); let _ = child.wait().await; return Ok(Completion { status: "cancelled", exit_code: None, error: None }); }
-                _ = &mut timer => { group.kill(); let _ = child.wait().await; return Ok(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.as_millis())) }); }
+                _ = async { let _ = cancel.wait_for(|value| *value).await; } => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "cancelled", exit_code: None, error: None }); }
+                _ = &mut timer => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.as_millis())) }); }
+                // A shell exiting must not leave detached descendants holding the
+                // output pipes or mutating the workspace after completion: waiting
+                // kills them before it reaps the shell.
                 status = child.wait(), if exit.is_none() => {
                     exit = Some(status.map_err(io_failed)?.code().unwrap_or(-1));
-                    // A shell exiting must not leave detached descendants holding the
-                    // output pipes or mutating the workspace after completion.
-                    group.kill();
                     stdin = None;
                 }
                 request = input.recv() => if let Some(request) = request {
@@ -86,8 +82,7 @@ pub(super) async fn run_pipe(
             error: None,
         })
     }.await;
-    group.kill();
-    let _ = child.wait().await;
+    let _ = child.kill_and_wait().await;
     result
 }
 
@@ -138,9 +133,11 @@ pub(super) async fn run_pty(
         .spawn_command(command)
         .map_err(|error| spawn_failed(&wrapped.program, error))?;
     drop(pair.slave);
-    let group = ProcessGroupGuard::new(child.process_id());
-    job.register_process(group.leader());
-    let mut killer = PtyKiller(child.clone_killer());
+    let group = ProcessGroup::new(child.process_id());
+    // Cancelling the job future stops the PTY session's group; once the waiter
+    // has reaped the shell, nothing is signalled.
+    let _stop_on_drop = ProcessGroupGuard::new(group.clone());
+    job.register_process(Some(group.clone()));
     let output_job = Arc::clone(job);
     let reader_task = tokio::task::spawn_blocking(move || -> Result<(), ToolError> {
         let mut buffer = [0u8; 8192];
@@ -154,7 +151,21 @@ pub(super) async fn run_pty(
         }
         Ok(())
     });
-    let mut waiting = tokio::task::spawn_blocking(move || child.wait());
+    let reaper = group.clone();
+    let mut waiting = tokio::task::spawn_blocking(move || {
+        // The exited shell stays unreaped until what is left of its group is
+        // killed, so the group id cannot have been reused by then.
+        let Some(leader) = reaper.leader() else {
+            return child.wait();
+        };
+        if sandbox::process::wait_for_exit(leader).is_err() {
+            reaper.release();
+            return child.wait();
+        }
+        reaper
+            .kill_and_reap(|| child.wait().map(Some))?
+            .ok_or_else(|| std::io::Error::other("the shell was not reaped"))
+    });
     let mut writing: Option<tokio::task::JoinHandle<()>> = None;
     let timer = tokio::time::sleep(timeout);
     tokio::pin!(timer);
@@ -192,7 +203,6 @@ pub(super) async fn run_pty(
         }
     };
     group.kill();
-    let _ = killer.0.kill();
     drop(pair.master);
     // The group is dead before the job reports completion, even when a
     // portable-pty reader/waiter takes a moment to observe EOF.

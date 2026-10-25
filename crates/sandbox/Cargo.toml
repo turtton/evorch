@@ -18,7 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["net", "process", "time"] }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -28,4 +28,4 @@ libc = "0.2"
 [dev-dependencies]
 # The launch policy tests run themselves on a pseudo-terminal.
 portable-pty = { workspace = true }
-tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }

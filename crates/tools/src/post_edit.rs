@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
-use sandbox::process::ProcessGroupGuard;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -353,12 +353,11 @@ async fn supervise(
             "checker deadline elapsed before launch",
         );
     }
-    let mut child = match command.spawn() {
+    let mut child = match GroupChild::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
     };
-    let group = ProcessGroupGuard::new(child.id());
-    let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let pipes = (child.take_stdin(), child.take_stdout(), child.take_stderr());
     let result = {
         let completion = async {
             let (Some(mut stdin), Some(mut stdout), Some(stderr)) = pipes else {
@@ -374,12 +373,9 @@ async fn supervise(
                 }
             };
             let discard = async { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await };
-            let wait = async {
-                let status = child.wait().await?;
-                // A leader can exit while descendants still hold the pipes open.
-                group.kill();
-                Ok::<_, io::Error>(status)
-            };
+            // A leader can exit while descendants still hold the pipes open;
+            // waiting kills them before it reaps the leader.
+            let wait = child.wait();
             let (_, _, stderr, status) =
                 tokio::try_join!(write, discard, capture_stderr(stderr), wait)?;
             Ok((status, stderr))
@@ -399,10 +395,8 @@ async fn supervise(
         }
     };
     // Includes timeout, cancellation, IO failure, and normal leader exit. Never
-    // return until the direct child has been reaped; group cleanup precedes wait.
-    group.kill();
-    let _ = child.start_kill();
-    if let Err(error) = child.wait().await {
+    // return until the direct child has been reaped; group cleanup precedes it.
+    if let Err(error) = child.kill_and_wait().await {
         return unavailable(
             UnavailableReason::Io,
             format!("checker cleanup failed: {error}"),
