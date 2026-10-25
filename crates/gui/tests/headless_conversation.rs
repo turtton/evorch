@@ -11,6 +11,8 @@ mod composer_tab;
 mod conversation_replay;
 #[path = "headless_conversation/escalation_threads.rs"]
 mod escalation_threads;
+#[path = "headless_conversation/interrupted_tools.rs"]
+mod interrupted_tools;
 #[path = "headless_conversation/ledger.rs"]
 mod ledger;
 #[path = "headless_conversation/message_completion.rs"]

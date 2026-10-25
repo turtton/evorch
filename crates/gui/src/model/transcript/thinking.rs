@@ -25,6 +25,23 @@ impl TranscriptModel {
             self.thinking.remove(&Some(run_id.clone()));
             // A resumed response must not replace partial output from before stop.
             self.streaming_messages.remove(&Some(run_id.clone()));
+            self.interrupt_running_tools(run_id);
+        }
+    }
+
+    /// Marks `run_id`'s calls that are still running as interrupted. The run
+    /// has ended, so no result will arrive and a spinner would never stop.
+    pub(crate) fn interrupt_running_tools(&mut self, run_id: &str) {
+        for entry in &mut self.entries {
+            if let super::TranscriptEntry::Tool {
+                run_id: Some(run),
+                status: status @ super::ToolStatus::Running,
+                ..
+            } = entry
+                && run == run_id
+            {
+                *status = super::ToolStatus::Interrupted;
+            }
         }
     }
 }

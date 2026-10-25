@@ -156,3 +156,93 @@ fn legacy_tool_events_keep_absent_payloads() {
         ));
     }
 }
+
+fn started_in(run_id: &str, call_id: &str) -> Event {
+    Event::new(ToolEvent::ToolStarted {
+        tool_name: "shell".into(),
+        call_id: call_id.into(),
+        input: None,
+        run_id: Some(run_id.into()),
+    })
+}
+
+fn run_state(run_id: &str, to: event_bus::AgentRunPhase) -> Event {
+    Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+        run_id: run_id.into(),
+        from: event_bus::AgentRunPhase::Running,
+        to,
+        reason: None,
+    })
+}
+
+fn statuses(model: &TranscriptModel) -> Vec<(&str, &ToolStatus)> {
+    model
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Tool {
+                call_id, status, ..
+            } => Some((call_id.as_str(), status)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn ending_a_run_interrupts_only_its_calls_that_are_still_running() {
+    for phase in [
+        event_bus::AgentRunPhase::Stopped,
+        event_bus::AgentRunPhase::Done,
+        event_bus::AgentRunPhase::Error,
+    ] {
+        // Given: a finished and a running call of run-1, and a running call of run-2.
+        let mut model = TranscriptModel::new();
+        model.apply(&started_in("run-1", "done"));
+        model.apply(&Event::new(ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: "done".into(),
+            output: None,
+            detail: None,
+            is_error: false,
+            run_id: Some("run-1".into()),
+        }));
+        model.apply(&started_in("run-1", "lost"));
+        model.apply(&started_in("run-2", "other"));
+        // When: run-1 ends without completing its second call.
+        model.apply(&run_state("run-1", phase));
+        // Then: only that call stops running.
+        assert_eq!(
+            statuses(&model),
+            vec![
+                ("done", &ToolStatus::Succeeded),
+                ("lost", &ToolStatus::Interrupted),
+                ("other", &ToolStatus::Running),
+            ],
+            "{phase:?}"
+        );
+    }
+}
+
+#[test]
+fn waiting_keeps_running_calls_and_a_late_result_replaces_interrupted() {
+    // Given: a running call.
+    let mut model = TranscriptModel::new();
+    model.apply(&started_in("run-1", "c1"));
+    // When: the run only waits for input.
+    model.apply(&run_state("run-1", event_bus::AgentRunPhase::Waiting));
+    // Then: the call keeps running.
+    assert_eq!(statuses(&model), vec![("c1", &ToolStatus::Running)]);
+    // When: the run stops, and the call's result arrives afterwards.
+    model.apply(&run_state("run-1", event_bus::AgentRunPhase::Stopped));
+    assert_eq!(statuses(&model), vec![("c1", &ToolStatus::Interrupted)]);
+    model.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "shell".into(),
+        call_id: "c1".into(),
+        output: Some("late".into()),
+        detail: None,
+        is_error: true,
+        run_id: Some("run-1".into()),
+    }));
+    // Then: the reported outcome wins.
+    assert_eq!(statuses(&model), vec![("c1", &ToolStatus::Failed)]);
+}
