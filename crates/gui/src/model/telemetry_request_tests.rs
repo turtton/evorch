@@ -609,6 +609,7 @@ fn image_success_and_failure_preserve_conversation_metrics_between_turns() {
         assert_eq!(row.latest_ttft_ms(), before.latest_ttft_ms());
         assert_eq!(row.request_duration, before.request_duration);
         assert_eq!(row.cache_reuse, before.cache_reuse);
+        assert_eq!(row.cache_tooltip(), before.cache_tooltip());
         assert_eq!(row.rated_output_tokens, before.rated_output_tokens);
         assert_eq!(row.rated_duration, before.rated_duration);
         let metrics = telemetry.thread_metrics(&["run".into()]);

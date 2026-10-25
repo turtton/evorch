@@ -43,13 +43,26 @@ pub(crate) struct StagedImage<'a> {
 
 impl StagedImage<'_> {
     pub(crate) fn publish(&self, name: &Path) -> Result<(), String> {
+        #[cfg(test)]
+        PUBLISH_FAILURE.with(|count| {
+            if let Some(remaining) = count.get() {
+                count.set(remaining.checked_sub(1));
+                if remaining == 1 {
+                    return Err(format!(
+                        "cannot publish generated image {}: injected renameat failure",
+                        name.display()
+                    ));
+                }
+            }
+            Ok(())
+        })?;
         rustix::fs::renameat(
             self.directory,
             self.temporary.as_str(),
             self.directory,
             name,
         )
-        .map_err(|e| format!("cannot publish generated image: {e}"))
+        .map_err(|e| format!("cannot publish generated image {}: {e}", name.display()))
     }
 }
 
@@ -113,6 +126,23 @@ pub(crate) fn stage_image<'a>(
 #[cfg(test)]
 thread_local! {
     static STAGE_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static PUBLISH_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_publish_failure<T>(nth: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PUBLISH_FAILURE.with(|count| count.set(None));
+        }
+    }
+    PUBLISH_FAILURE.with(|count| {
+        assert!(count.get().is_none());
+        count.set(Some(nth));
+    });
+    let _reset = Reset;
+    run()
 }
 
 #[cfg(test)]

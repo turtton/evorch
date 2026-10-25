@@ -1208,13 +1208,12 @@ impl AgentRuntime {
         // An explicitly validated conversation restore starts a new generation of
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
-        if parent.is_none()
+        let resets_cancellation = parent.is_none()
             && (matches!(
                 &continuation,
                 RunContinuation::Restored(_) | RunContinuation::Resume { .. }
-            ) || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()))
-            && let Some(intent) = intents.get_mut(&run_id)
-        {
+            ) || matches!(&continuation, RunContinuation::Handoff(handoff) if handoff.restored.is_some()));
+        if resets_cancellation && let Some(intent) = intents.get_mut(&run_id) {
             intent.cancelled = false;
         }
         let cancelled = intents.get(&run_id).is_some_and(|intent| intent.cancelled)
@@ -1225,11 +1224,19 @@ impl AgentRuntime {
             .get(&run_id)
             .and_then(|intent| intent.parent)
             .or(parent);
+        let commit_gate = intents
+            .get(&run_id)
+            // Inherited cancellation must be effective before registration can
+            // start the run, even if a prior reservation has an unfenced gate.
+            .filter(|_| !resets_cancellation && !cancelled)
+            .map(|intent| Arc::clone(&intent.commit_gate))
+            .unwrap_or_else(|| Arc::new(Mutex::new(cancelled)));
         intents.insert(
             run_id,
             cancellation::SpawnIntent {
                 parent: owner,
                 cancelled,
+                commit_gate,
             },
         );
         let run = if self.shared.model_for(&config).requires_admission() {
@@ -1253,6 +1260,7 @@ impl AgentRuntime {
                 review_seed,
             )
         };
+        drop(intents);
         if cancelled {
             let _ = self.cancel(run);
         }
@@ -2016,14 +2024,33 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
+        let mut cancellations = Vec::new();
         for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
-            intents.entry(target).or_default().cancelled = true;
+            let intent = intents.entry(target).or_default();
+            intent.cancelled = true;
+            let mut sender = None;
             if let Some(admission) = admissions.get_mut(&target)
                 && admission.result.borrow().is_none()
             {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
-                entry.cancel_tx.send_replace(RunInterrupt::Cancel);
+                sender = Some(entry.cancel_tx.clone());
+            }
+            cancellations.push((Arc::clone(&intent.commit_gate), sender));
+        }
+        // Never wait for publication with intents/admissions/runs held. The
+        // inherited fence above prevents new descendants from escaping; each
+        // existing run linearizes cancellation on its own commit gate below.
+        drop(runs);
+        drop(admissions);
+        drop(intents);
+        for (gate, sender) in cancellations {
+            let mut cancelled = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *cancelled = true;
+            if let Some(sender) = sender {
+                sender.send_replace(RunInterrupt::Cancel);
             }
         }
         Ok(())

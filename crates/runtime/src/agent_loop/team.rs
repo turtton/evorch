@@ -2,6 +2,10 @@ use super::LoopState;
 use crate::ownership::Lease;
 use providers::ToolSpec;
 use serde::Deserialize;
+
+#[cfg(test)]
+#[path = "team/image_tests.rs"]
+mod image_tests;
 use tools::ToolResult;
 
 #[derive(Deserialize)]
@@ -135,7 +139,7 @@ impl LoopState {
         }
     }
 
-    pub(super) fn guard_team_artifact(
+    pub(crate) fn guard_team_artifact(
         &self,
         name: &str,
         input: &serde_json::Value,
@@ -161,6 +165,7 @@ impl LoopState {
                     )
                     .map_err(|e| e.to_string())
             }
+            "generate_image" => crate::image_generation::guard_team_claims(self, input),
             _ => Ok(()),
         }
     }

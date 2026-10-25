@@ -254,50 +254,63 @@ fn saving_runtime() -> (AgentRuntime, crate::RunId) {
         std::sync::Arc::new(tools::ToolExecutor::new(bus)),
         std::sync::Arc::new(IdleModel),
     );
-    let run = crate::RunId::new(2);
-    runtime.seed_spawn_intent(run, &crate::RunId::new(1).to_string());
+    let run = runtime.reserve_run_id();
+    runtime.spawn_reserved(run, None, Role::Worker, "idle", RunConfig::default());
     (runtime, run)
 }
 
 #[tokio::test]
 async fn ac15_cancel_after_sync_prevents_publish_overwrite_and_removes_staging() {
-    for overwrite in [false, true] {
-        let workspace = tempfile::tempdir().unwrap();
-        let roots = SourceRoots::new(workspace.path(), None).unwrap();
-        let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
-        let variant = path.with_file_name("hero.64.png");
-        if overwrite {
-            std::fs::write(&path, b"old original").unwrap();
-            std::fs::write(&variant, b"old variant").unwrap();
+    for subtree in [false, true] {
+        for overwrite in [false, true] {
+            let workspace = tempfile::tempdir().unwrap();
+            let roots = SourceRoots::new(workspace.path(), None).unwrap();
+            let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+            let variant = path.with_file_name("hero.64.png");
+            if overwrite {
+                std::fs::write(&path, b"old original").unwrap();
+                std::fs::write(&variant, b"old variant").unwrap();
+            }
+            let (runtime, run) = saving_runtime();
+            let result = save_generated(
+                &runtime,
+                run,
+                &dir,
+                (&path, b"new original"),
+                Some((&variant, b"new variant")),
+                || {
+                    assert_eq!(
+                        std::fs::read_dir(workspace.path()).unwrap().count(),
+                        if overwrite { 4 } else { 2 }
+                    );
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                if subtree {
+                                    runtime.cancel_subtree(run).unwrap();
+                                } else {
+                                    runtime.cancel(run).unwrap();
+                                }
+                            })
+                            .join()
+                            .unwrap();
+                    });
+                    Ok(())
+                },
+            );
+            assert!(result.unwrap_err().contains("interrupted"));
+            if overwrite {
+                assert_eq!(std::fs::read(&path).unwrap(), b"old original");
+                assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
+            } else {
+                assert!(!path.exists());
+                assert!(!variant.exists());
+            }
+            assert_eq!(
+                std::fs::read_dir(workspace.path()).unwrap().count(),
+                if overwrite { 2 } else { 0 }
+            );
         }
-        let (runtime, run) = saving_runtime();
-        let result = save_generated(
-            &runtime,
-            run,
-            &dir,
-            (&path, b"new original"),
-            Some((&variant, b"new variant")),
-            || {
-                assert_eq!(
-                    std::fs::read_dir(workspace.path()).unwrap().count(),
-                    if overwrite { 4 } else { 2 }
-                );
-                runtime.cancel_subtree(run).unwrap();
-                Ok(())
-            },
-        );
-        assert!(result.unwrap_err().contains("interrupted"));
-        if overwrite {
-            assert_eq!(std::fs::read(&path).unwrap(), b"old original");
-            assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
-        } else {
-            assert!(!path.exists());
-            assert!(!variant.exists());
-        }
-        assert_eq!(
-            std::fs::read_dir(workspace.path()).unwrap().count(),
-            if overwrite { 2 } else { 0 }
-        );
     }
 }
 
@@ -328,23 +341,168 @@ async fn ac9_original_staging_failure_preserves_existing_pair_and_cleans_temps()
 
 #[tokio::test]
 async fn ac9_original_publish_failure_leaves_no_variant_or_staging() {
-    let workspace = tempfile::tempdir().unwrap();
-    let roots = SourceRoots::new(workspace.path(), None).unwrap();
-    let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
-    let variant = path.with_file_name("hero.64.png");
+    for overwrite in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let roots = SourceRoots::new(workspace.path(), None).unwrap();
+        let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+        let variant = path.with_file_name("hero.64.png");
+        if overwrite {
+            std::fs::write(&path, b"old original").unwrap();
+            std::fs::write(&variant, b"old variant").unwrap();
+        }
+        let (runtime, run) = saving_runtime();
+        let result = crate::artifacts::source_io::with_publish_failure(1, || {
+            save_generated(
+                &runtime,
+                run,
+                &dir,
+                (&path, b"original"),
+                Some((&variant, b"variant")),
+                || Ok(()),
+            )
+        });
+        let error = result.unwrap_err();
+        assert!(error.contains("injected renameat failure"));
+        assert!(error.contains("hero.png"));
+        if overwrite {
+            assert_eq!(std::fs::read(&path).unwrap(), b"old original");
+            assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
+        } else {
+            assert!(!path.exists());
+            assert!(!variant.exists());
+        }
+        assert_eq!(
+            std::fs::read_dir(workspace.path()).unwrap().count(),
+            if overwrite { 2 } else { 0 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac9_variant_rename_failure_reports_partial_save_and_preserves_old_variant() {
+    for overwrite in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let roots = SourceRoots::new(workspace.path(), None).unwrap();
+        let (path, dir) = roots.destination(Path::new("hero.png")).unwrap();
+        let variant = path.with_file_name("hero.64.png");
+        if overwrite {
+            std::fs::write(&path, b"old original").unwrap();
+            std::fs::write(&variant, b"old variant").unwrap();
+        }
+        let (runtime, run) = saving_runtime();
+        let original = png(128, 64);
+        let mut args = args();
+        args.variant = Some(Variant {
+            max_side: 64,
+            format: VariantFormat::Png,
+        });
+        args.reference_image_paths.push("reference.png".into());
+        let processed = processing::outputs(&original, args.variant.as_ref()).unwrap();
+        let saved = crate::artifacts::source_io::with_publish_failure(2, || {
+            save_generated(
+                &runtime,
+                run,
+                &dir,
+                (&path, &original),
+                Some((&variant, processed.variant.as_deref().unwrap())),
+                || Ok(()),
+            )
+        })
+        .unwrap();
+        assert!(matches!(saved, SaveOutcome::VariantFailed(_)));
+        let result = generation_result(
+            &args,
+            &path,
+            Some(&variant),
+            &processed,
+            "images",
+            "gpt-image-2",
+            &saved,
+        );
+        assert!(result.is_error);
+        let text: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(text["status"], "partial_save");
+        assert_eq!(text["path"], json!(path));
+        assert!(text["variant_path"].is_null());
+        assert_eq!(text["variant_failure"]["path"], json!(variant));
+        assert!(
+            text["variant_failure"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("injected renameat failure")
+        );
+        assert_eq!(text["profile"], "images");
+        assert_eq!(text["model"], "gpt-image-2");
+        assert_eq!(text["width"], 128);
+        assert_eq!(text["height"], 64);
+        assert_eq!(text["reference_images_sent"], true);
+        assert!(
+            text["note"]
+                .as_str()
+                .unwrap()
+                .contains("reference images were sent to OpenAI")
+        );
+        assert_eq!(result.images[0].data, processed.preview);
+        assert_eq!(result.images[0].path.as_ref(), Some(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        if overwrite {
+            assert_eq!(std::fs::read(&variant).unwrap(), b"old variant");
+        } else {
+            assert!(!variant.exists());
+        }
+        assert_eq!(
+            std::fs::read_dir(workspace.path()).unwrap().count(),
+            if overwrite { 2 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac15_publication_gate_does_not_hold_global_spawn_or_cancel_locks() {
     let (runtime, run) = saving_runtime();
-    let result = save_generated(
-        &runtime,
-        run,
-        &dir,
-        (&path, b"original"),
-        Some((&variant, b"variant")),
-        || {
-            std::fs::create_dir(&path).unwrap();
+    runtime
+        .commit_generated_images(run, || {
+            // A different run can spawn and cancel while this run publishes.
+            let other = runtime.reserve_run_id();
+            runtime.spawn_reserved(other, None, Role::Worker, "idle", RunConfig::default());
+            runtime.cancel(other).unwrap();
+            runtime.cancel_subtree(other).unwrap();
             Ok(())
-        },
-    );
-    assert!(result.is_err());
-    assert!(!variant.exists());
-    assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
+        })
+        .unwrap();
+    runtime.cancel(run).unwrap();
+    assert!(runtime.commit_generated_images(run, || Ok(())).is_err());
+}
+
+#[tokio::test]
+async fn ac15_cancel_waits_for_publication_that_already_won_the_gate() {
+    for subtree in [false, true] {
+        let (runtime, run) = saving_runtime();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            runtime
+                .commit_generated_images(run, || {
+                    let runtime = &runtime;
+                    scope.spawn(move || {
+                        started_tx.send(()).unwrap();
+                        if subtree {
+                            runtime.cancel_subtree(run).unwrap();
+                        } else {
+                            runtime.cancel(run).unwrap();
+                        }
+                        finished_tx.send(()).unwrap();
+                    });
+                    started_rx.recv().unwrap();
+                    assert!(matches!(
+                        finished_rx.try_recv(),
+                        Err(std::sync::mpsc::TryRecvError::Empty)
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+            finished_rx.recv().unwrap();
+        });
+        assert!(runtime.commit_generated_images(run, || Ok(())).is_err());
+    }
 }

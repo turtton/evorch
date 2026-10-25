@@ -267,6 +267,10 @@ impl AgentRuntime {
 
     /// run へキャンセルを通知する。admission 待機中なら登録を抑止する。
     pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let gate = self.image_commit_gate(run_id)?;
+        let mut cancelled = gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut admissions = self
             .shared
             .admissions
@@ -276,9 +280,11 @@ impl AgentRuntime {
             && admission.result.borrow().is_none()
         {
             admission.cancelled = true;
+            *cancelled = true;
             return Ok(());
         }
         let sender = self.entry(run_id)?.cancel_tx.clone();
+        *cancelled = true;
         sender.send_replace(RunInterrupt::Cancel);
         Ok(())
     }

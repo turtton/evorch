@@ -91,6 +91,11 @@ extension/magic and decode validity. References larger than 2048 pixels on the
 longest side are downscaled to PNG before transmission. Output writes validate
 the mutation ownership permit and writable boundary, and use a temporary file
 and rename in the destination directory. Symlinks cannot redirect writes.
+Team Workers must have their own unexpired path claims for both the original
+and the derived variant, just as for `write`. Claims are checked before the
+paid generation request and again immediately before publication. Absolute
+workspace paths use the same workspace-relative claims; thread scratch paths
+are not claimable by team Workers.
 
 The variant is `<stem>.<max_side>.jpg` or `.png` beside the original, never
 upscaled, with JPEG quality 85. JPEG with `transparent_background: true` is
@@ -98,9 +103,18 @@ rejected. A result contains paths, original width/height, selected profile/model
 a reference-transmission flag and note, and a PNG preview at most 1024 pixels on
 its longest side. Image-capable chat models receive the preview through the
 normal tool-result image path; non-image models get a saved-path note and can
-delegate inspection. The saved original is retained either way. Cancellation
-aborts the request and does not publish generated files. Provider responses are
-limited to 48 MiB and five minutes.
+delegate inspection. The saved original is retained either way. If the original
+is published but the variant rename fails, the tool returns an error with
+`status: "partial_save"`, the saved original `path`, and `variant_failure`
+containing the failed path and reason; `variant_path` is null. Generation
+metadata and the preview are still included. The original is retained (including
+when overwriting), and any previous variant is unchanged.
+
+Cancellation aborts an in-flight request. Ordinary run cancellation and subtree
+cancellation share a per-run publication gate: cancellation that wins the gate
+prevents both files from being published and removes staged files. If publication
+wins, it finishes before cancellation takes effect; already published files are
+not rolled back. Provider responses are limited to 48 MiB and five minutes.
 
 ## Sending, quota, and HTML mocks
 

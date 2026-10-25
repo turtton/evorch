@@ -101,6 +101,40 @@ fn allowed(state: &LoopState) -> bool {
     ) && state.image_model.image_generation_enabled()
 }
 
+pub(crate) fn guard_team_claims(state: &LoopState, input: &Value) -> Result<(), String> {
+    let args: Args = crate::meta::parse(input.clone())?;
+    args.validate()?;
+    let workspace = state
+        .shared
+        .executor
+        .default_cwd()
+        .ok_or("this run has no workspace")?;
+    let roots = crate::artifacts::SourceRoots::new(&workspace, state.scratch_dir())?;
+    let (path, _) = roots.destination(&args.output_path)?;
+    check_team_paths(
+        state,
+        &workspace,
+        &path,
+        args.variant_path(&path).as_deref(),
+    )
+}
+
+fn check_team_paths(
+    state: &LoopState,
+    workspace: &Path,
+    path: &Path,
+    variant: Option<&Path>,
+) -> Result<(), String> {
+    let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    for path in std::iter::once(path).chain(variant) {
+        // Claims are workspace-relative, just like write/edit. Absolute output
+        // paths cannot bypass the board and scratch has no claimable namespace.
+        let relative = path.strip_prefix(&workspace).unwrap_or(path);
+        state.guard_team_artifact("write", &json!({"path": relative}))?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn dispatch(
     state: &mut LoopState,
     runtime: &AgentRuntime,
@@ -135,6 +169,7 @@ async fn execute(
     )?);
     let (path, directory) = roots.destination(&args.output_path)?;
     let variant_path = args.variant_path(&path);
+    check_team_paths(state, &workspace, &path, variant_path.as_deref())?;
     if let Some(path) = &variant_path {
         crate::artifacts::source_io::validate_image_destination(&directory, filename(path)?)?;
     }
@@ -166,6 +201,7 @@ async fn execute(
         quality: args.quality.clone(),
         ..Default::default()
     };
+    check_team_paths(state, &workspace, &path, variant_path.as_deref())?;
     let generated = tokio::select! {
         biased;
         _ = state.channels.cancel_rx.changed() => return Err("image generation interrupted; no files saved".into()),
@@ -196,7 +232,7 @@ async fn execute(
     if state.interrupted().is_some() {
         return Err("image generation interrupted; no files saved".into());
     }
-    save_generated(
+    let saved = save_generated(
         runtime,
         state.task.run_id,
         &directory,
@@ -206,29 +242,64 @@ async fn execute(
             if state.interrupted().is_some() {
                 return Err("image generation interrupted; no files saved".into());
             }
+            check_team_paths(state, &workspace, &path, variant_path.as_deref())?;
             Ok(())
         },
     )?;
+    Ok(generation_result(
+        &args,
+        &path,
+        variant_path.as_deref(),
+        &processed,
+        &generated.profile,
+        &generated.model,
+        &saved,
+    ))
+}
+
+fn generation_result(
+    args: &Args,
+    path: &Path,
+    variant_path: Option<&Path>,
+    processed: &processing::Outputs,
+    profile: &str,
+    model: &str,
+    saved: &SaveOutcome,
+) -> tools::ToolResult {
     let note = if args.reference_image_paths.is_empty() {
         "No reference images sent. Generation was sent to OpenAI."
     } else {
         "reference images were sent to OpenAI"
     };
-    let result = json!({"path":path,"variant_path":variant_path,
-        "width":processed.width,"height":processed.height,"profile":generated.profile,"model":generated.model,
+    let result = json!({"path":path,"variant_path": if matches!(saved, SaveOutcome::Complete) { variant_path } else { None },
+        "status": if matches!(saved, SaveOutcome::Complete) { "saved" } else { "partial_save" },
+        "variant_failure": match &saved {
+            SaveOutcome::Complete => None,
+            SaveOutcome::VariantFailed(error) => Some(json!({"path":variant_path,"error":error})),
+        },
+        "width":processed.width,"height":processed.height,"profile":profile,"model":model,
         "reference_images_sent": !args.reference_image_paths.is_empty(),
         "note":format!("{note}. Decide whether to adopt this material or use it as reference; do not substitute it for an HTML UI mock.")});
-    Ok(
-        tools::ToolResult::success(result.to_string()).with_image(tools::ToolImage {
-            media_type: "image/png".into(),
-            data: processed.preview,
-            path: Some(path),
-        }),
-    )
+    let result = if matches!(saved, SaveOutcome::Complete) {
+        tools::ToolResult::success(result.to_string())
+    } else {
+        tools::ToolResult::error(result.to_string())
+    };
+    result.with_image(tools::ToolImage {
+        media_type: "image/png".into(),
+        data: processed.preview.clone(),
+        path: Some(path.to_owned()),
+    })
 }
 
 fn filename(path: &Path) -> Result<&Path, String> {
     Ok(Path::new(path.file_name().ok_or("missing filename")?))
+}
+
+#[derive(Debug)]
+enum SaveOutcome {
+    Complete,
+    VariantFailed(String),
 }
 
 fn save_generated(
@@ -238,7 +309,7 @@ fn save_generated(
     original: (&Path, &[u8]),
     variant: Option<(&Path, &[u8])>,
     before_commit: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<SaveOutcome, String> {
     use crate::artifacts::source_io::{stage_image, validate_image_destination};
     let staged_variant = variant
         .map(|(_, bytes)| stage_image(directory, bytes))
@@ -254,9 +325,12 @@ fn save_generated(
         // Publish original first: an original failure cannot leave a variant.
         staged_original.publish(filename(original.0)?)?;
         if let Some(staged) = &staged_variant {
-            staged.publish(filename(variant.expect("staged variant").0)?)?;
+            let path = variant.expect("staged variant").0;
+            if let Err(error) = staged.publish(filename(path)?) {
+                return Ok(SaveOutcome::VariantFailed(error));
+            }
         }
-        Ok(())
+        Ok(SaveOutcome::Complete)
     })
 }
 
