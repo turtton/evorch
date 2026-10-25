@@ -17,7 +17,7 @@ use rustix::process::Pid;
 use sandbox::process::{
     ProcessGroupGuard, apply_launch_policy, close_inherited_fds_on_exec, detach_from_terminal,
 };
-use sandbox::{CommandSpec, DirectSandbox, Sandbox, StdioSession};
+use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, DirectSandbox, Sandbox, StdioSession};
 
 const CHILD_FLAG: &str = "SANDBOX_LAUNCH_POLICY_TERMINAL_CHILD";
 const TERMINAL_TEST: &str = "children_cannot_reach_the_evorch_terminal";
@@ -229,6 +229,47 @@ async fn children_do_not_inherit_descriptors_beyond_their_standard_streams() {
         !seen.contains(&name),
         "Tokio command leaked the descriptor: {seen}"
     );
+}
+
+// Given: evorch holds a descriptor without O_CLOEXEC / When: a command runs
+// inside bubblewrap / Then: bubblewrap hands the descriptor on to a command
+// started without the policy, but the command from to_command sees neither it
+// nor evorch's session.
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn bwrap_commands_do_not_inherit_descriptors() {
+    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap required");
+    let (_file, fd, name) = inheritable_descriptor();
+    let probe = format!(
+        "cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/{} || echo descriptor-closed",
+        fd.as_raw_fd()
+    );
+    let wrapped = sandbox
+        .wrap(spec("sh", &["-c", &probe]))
+        .expect("wrap the probe");
+    let mut plain = Command::new(&wrapped.program);
+    wrapped.apply_environment(&mut plain);
+    plain.args(&wrapped.args);
+    let plain = stdout_of(plain);
+    assert!(
+        plain.contains(&name),
+        "without the policy bubblewrap passes the descriptor on, or this probe proves nothing: {plain}"
+    );
+    let detached = stdout_of(wrapped.to_command());
+    let lines: Vec<&str> = detached.lines().collect();
+    let [session, descriptor] = lines[..] else {
+        panic!("{detached}");
+    };
+    assert!(session.parse::<u32>().is_ok(), "{detached}");
+    assert_ne!(
+        session,
+        rustix::process::getsid(None)
+            .expect("own session")
+            .to_string()
+    );
+    assert_eq!(descriptor, "descriptor-closed", "{detached}");
 }
 
 // Given: a program that does not exist / When: it starts with the policy /
