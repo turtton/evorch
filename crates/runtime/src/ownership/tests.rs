@@ -684,6 +684,8 @@ async fn deferred_quiesce_keeps_generation_valid_through_checkpoint_and_heartbea
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let settings = config::OwnershipConfig {
         heartbeat_ms: std::num::NonZeroU64::new(10).unwrap(),
+        // Heartbeats renew once half the lease is spent; keep that short.
+        lease_ms: std::num::NonZeroU64::new(40).unwrap(),
         ..Default::default()
     };
     let host = OwnerHost::open(directory.path(), settings, bus.clone()).unwrap();
@@ -1063,4 +1065,134 @@ fn ipc_release_deletes_the_scratch_before_responding() {
         matches!(response, ipc::Response::Status(owner) if owner.state == OwnerState::Released)
     );
     assert!(!file.exists());
+}
+
+fn leased(thread: &str, owner_id: &str, expires_at: u64) -> ThreadOwner {
+    ThreadOwner::new(
+        thread.into(),
+        Lease {
+            owner_id: owner_id.into(),
+            generation: 1,
+            expires_at,
+        },
+    )
+}
+
+#[test]
+fn heartbeat_ticks_renew_only_once_less_than_half_a_lease_would_remain() {
+    // Default lease 5 s, heartbeat 1 s.
+    let at =
+        |remaining: u64| leased("t", "a", 10_000 + remaining).heartbeat_tick(10_000, 1_000, true);
+    assert_eq!(at(5_000), HeartbeatTick::Keep);
+    assert_eq!(at(3_500), HeartbeatTick::Keep);
+    assert_eq!(at(3_499), HeartbeatTick::Renew);
+    assert_eq!(at(0), HeartbeatTick::Renew);
+    assert_eq!(
+        leased("t", "a", 0).heartbeat_tick(10_000, 1_000, true),
+        HeartbeatTick::Renew
+    );
+    // A heartbeat of at least half the lease renews on every tick.
+    assert_eq!(
+        leased("t", "a", 15_000).heartbeat_tick(10_000, 2_600, true),
+        HeartbeatTick::Renew
+    );
+    // A drained quiescing owner is released unless release is deferred.
+    let mut quiescing = leased("t", "a", 15_000);
+    quiescing.state = OwnerState::Quiescing;
+    assert_eq!(
+        quiescing.heartbeat_tick(10_000, 1_000, true),
+        HeartbeatTick::Release
+    );
+    assert_eq!(
+        quiescing.heartbeat_tick(10_000, 1_000, false),
+        HeartbeatTick::Keep
+    );
+    quiescing.active_turn = true;
+    assert_eq!(
+        quiescing.heartbeat_tick(10_000, 1_000, true),
+        HeartbeatTick::Keep
+    );
+}
+
+fn data_version(connection: &rusqlite::Connection) -> i64 {
+    connection
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn one_heartbeat_tick_writes_every_due_thread_in_a_single_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("owners.db");
+    let mut registry = Registry::open(&path).unwrap();
+    let now = 100_000;
+    let fresh = leased("fresh", "a", now + 5_000);
+    let mut stale = leased("suspect", "a", now - 1);
+    stale.state = OwnerState::Suspect;
+    let mut drained = leased("drained", "a", now + 5_000);
+    drained.state = OwnerState::Quiescing;
+    for owner in [
+        leased("due-1", "a", now + 1_000),
+        leased("due-2", "a", now),
+        fresh.clone(),
+        stale.clone(),
+        drained,
+        leased("foreign", "b", now),
+    ] {
+        registry.start(&owner).unwrap();
+    }
+    let observer = rusqlite::Connection::open(&path).unwrap();
+    let before = data_version(&observer);
+
+    let mut outcomes = registry.heartbeat_owned("a", now, 1_000, true).unwrap();
+    assert_eq!(
+        data_version(&observer),
+        before + 1,
+        "one committed transaction"
+    );
+
+    outcomes.sort_by(|left, right| left.previous.thread_id.cmp(&right.previous.thread_id));
+    let summary: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| {
+            (
+                outcome.previous.thread_id.as_str(),
+                outcome.result.as_ref().map(|(change, _)| *change).ok(),
+            )
+        })
+        .collect();
+    use super::registry::HeartbeatChange::{Kept, Released, Renewed};
+    assert_eq!(
+        summary,
+        [
+            ("drained", Some(Released)),
+            ("due-1", Some(Renewed)),
+            ("due-2", Some(Renewed)),
+            ("fresh", Some(Kept)),
+            ("suspect", None),
+        ],
+        "only this owner's rows; a rejected row does not undo the others"
+    );
+    let reader = Registry::open_readonly(&path).unwrap();
+    for thread in ["due-1", "due-2"] {
+        assert_eq!(reader.attach(thread).unwrap().lease.expires_at, now + 5_000);
+    }
+    assert_eq!(
+        reader.attach("drained").unwrap().state,
+        OwnerState::Released
+    );
+    assert_eq!(reader.attach("fresh").unwrap(), fresh);
+    assert_eq!(reader.attach("suspect").unwrap(), stale);
+    assert_eq!(reader.attach("foreign").unwrap().lease.expires_at, now);
+
+    // A tick with nothing due commits nothing.
+    let before = data_version(&observer);
+    let outcomes = registry.heartbeat_owned("a", now, 1_000, true).unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| !matches!(outcome.result, Ok((Renewed | Released, _)))),
+        "{outcomes:?}"
+    );
+    assert_eq!(data_version(&observer), before);
 }
