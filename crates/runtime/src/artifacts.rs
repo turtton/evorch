@@ -210,7 +210,7 @@ impl ArtifactStore {
 
 /// The canonical directories a capture may read: the run's workspace and its
 /// thread's temporary directory. Allowed directories (ADR 0032) are not sources.
-struct SourceRoots {
+pub(crate) struct SourceRoots {
     workspace: PathBuf,
     scratch: Option<PathBuf>,
     workspace_fd: std::fs::File,
@@ -218,7 +218,7 @@ struct SourceRoots {
 }
 
 impl SourceRoots {
-    fn new(workspace: &Path, scratch: Option<&Path>) -> Result<Self, String> {
+    pub(crate) fn new(workspace: &Path, scratch: Option<&Path>) -> Result<Self, String> {
         let workspace = workspace
             .canonicalize()
             .map_err(|error| format!("workspace is unavailable: {error}"))?;
@@ -237,6 +237,60 @@ impl SourceRoots {
             workspace_fd,
             scratch_fd,
         })
+    }
+
+    pub(crate) fn read_image(
+        &self,
+        path: &Path,
+    ) -> Result<(PathBuf, tools::image::ImageFormat, Vec<u8>), String> {
+        let (path, kind, bytes) = read_source_file(self, path)?;
+        let ArtifactKind::Image(format) = kind else {
+            return Err("reference must be png / jpeg / gif / webp".into());
+        };
+        Ok((path, format, bytes))
+    }
+
+    pub(crate) fn destination(&self, path: &Path) -> Result<(PathBuf, std::fs::File), String> {
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace.join(path)
+        };
+        let parent = joined
+            .parent()
+            .ok_or("output needs a parent directory")?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let name = joined.file_name().ok_or("output needs a filename")?;
+        let resolved = parent.join(name);
+        if !self.contains(&parent) {
+            return Err(self.outside().into());
+        }
+        // Match write's mounted read/write regions, but never grant allowed directories.
+        let mut boundary = sandbox::SandboxBoundary::new(self.workspace.clone());
+        if let Some(scratch) = &self.scratch {
+            boundary = boundary.with_scratch(scratch);
+        }
+        if boundary.access(&resolved) != Some(sandbox::PathAccess::ReadWrite) {
+            return Err("output is not writable inside this run's boundary".into());
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
+            if !metadata.is_file() {
+                return Err("output must be a regular file, not a symlink or directory".into());
+            }
+            if !self.contains(&resolved.canonicalize().map_err(|e| e.to_string())?) {
+                return Err(self.outside().into());
+            }
+        }
+        let (root, relative) = if let Ok(relative) = parent.strip_prefix(&self.workspace) {
+            (&self.workspace_fd, relative)
+        } else if let Some((scratch, fd)) = self.scratch.as_ref().zip(self.scratch_fd.as_ref()) {
+            (fd, parent.strip_prefix(scratch).map_err(|e| e.to_string())?)
+        } else {
+            return Err(self.outside().into());
+        };
+        let directory = source_io::open_directory(root, relative).map_err(|e| e.to_string())?;
+        Ok((resolved, directory))
     }
 
     /// Whether `path`, already resolved, lies inside one of the roots.
@@ -557,7 +611,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
 
 mod inline_images;
 mod inspect;
-mod source_io;
+pub(crate) mod source_io;
 pub use inspect::{ArtifactPage, ArtifactPages, INSPECT_ARTIFACT};
 pub(crate) use inspect::{inspect, spec as inspect_spec};
 

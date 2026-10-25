@@ -98,6 +98,16 @@ impl ExecutionPolicy {
         self
     }
 
+    pub fn with_image_generation(mut self, enabled: bool) -> Self {
+        self.capabilities.allowed_tools.remove("generate_image");
+        if enabled && self.capabilities.allowed_tools.contains("render_artifact") {
+            self.capabilities
+                .allowed_tools
+                .insert("generate_image".into());
+        }
+        self
+    }
+
     /// ロールからポリシーを構築する。
     pub fn for_role(role: Role) -> Self {
         Self {

@@ -24,6 +24,41 @@ pub(super) fn open_root(path: &Path) -> std::io::Result<File> {
     Ok(dir.into())
 }
 
+pub(crate) fn open_directory(root: &File, relative: &Path) -> std::io::Result<File> {
+    let mut directory = root.try_clone()?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        directory = openat(&directory, name, DIRECTORY, Mode::empty())?.into();
+    }
+    Ok(directory)
+}
+
+/// Stage and rename relative to the pinned directory; a replaced symlink is
+/// replaced itself, never followed. No absolute checked path is reopened.
+pub(crate) fn store_image(directory: &File, name: &Path, bytes: &[u8]) -> Result<(), String> {
+    use rustix::fs::{AtFlags, renameat, unlinkat};
+    use std::io::Write;
+    let temporary = format!(".{}.tmp", super::random_id("image")?);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = File::from(openat(
+            directory,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        renameat(directory, temporary.as_str(), directory, name)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = unlinkat(directory, temporary.as_str(), AtFlags::empty());
+    }
+    result.map_err(|e| format!("cannot save generated image: {e}"))
+}
+
 pub(super) fn open_file(root: &File, relative: &Path) -> std::io::Result<File> {
     let mut dir = None;
     let mut components = relative.components().peekable();

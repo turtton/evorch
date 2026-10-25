@@ -2,6 +2,7 @@
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
 #[path = "hosted_search_cache/mod.rs"]
 mod hosted_search_cache;
+mod image_generation_cache;
 mod support;
 use std::sync::Arc;
 

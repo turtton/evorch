@@ -126,6 +126,7 @@ pub(crate) struct LoopState {
     pub(crate) channels: LoopChannels,
     pub(crate) run_state: RunState,
     pub(crate) context: AgentContext,
+    pub(crate) image_model: Arc<dyn AgentModel>,
     policy: ExecutionPolicy,
     pub(crate) tool_specs: Vec<ToolSpec>,
     pub(crate) rules_session: Option<RulesSession>,
@@ -187,9 +188,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let Some(runtime) = crate::AgentRuntime::from_weak(&shared) else {
         return;
     };
+    let image_model = loop_shared
+        .model
+        .invocation_snapshot()
+        .unwrap_or_else(|| Arc::clone(&loop_shared.model));
     let mut policy = runtime
         .execution_policy(task.role)
-        .for_run_config(&task.config, task.parent.is_none());
+        .for_run_config(&task.config, task.parent.is_none())
+        .with_image_generation(image_model.image_generation_enabled());
     // Trusted host binding is checked once for the fixed tool set, and again
     // on every dispatch in case this conversation hands off its ownership.
     if runtime.goal_thread(task.run_id).is_none() {
@@ -307,6 +313,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         channels,
         run_state: RunState::new(),
         context,
+        image_model,
         policy,
         tool_specs: Vec::new(),
         rules_session: None,

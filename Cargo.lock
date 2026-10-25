@@ -5630,6 +5630,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "globset",
+ "image",
  "jsonschema",
  "lol_html",
  "markup5ever 0.39.0",

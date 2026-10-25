@@ -263,11 +263,17 @@ async fn handle(mut socket: TcpStream, state: Arc<ServerState>) {
 
 #[tokio::test]
 async fn cursor_cache_prefix_survives_tool_handoff_and_later_user_turn() {
-    assert_cursor_cache_prefix(false).await;
-    assert_cursor_cache_prefix(true).await;
+    assert_cursor_cache_prefix(false, false).await;
+    assert_cursor_cache_prefix(true, false).await;
 }
 
-async fn assert_cursor_cache_prefix(api_key: bool) {
+#[tokio::test]
+async fn ac12_cursor_preview_survives_native_handoff_and_cache_prefix() {
+    assert_cursor_cache_prefix(false, true).await;
+    assert_cursor_cache_prefix(true, true).await;
+}
+
+async fn assert_cursor_cache_prefix(api_key: bool, image: bool) {
     let harness = Harness::start().await;
     let store = Arc::new(InMemoryCursorTokenStore::new());
     let mut bundle = token();
@@ -305,9 +311,15 @@ async fn assert_cursor_cache_prefix(api_key: bool) {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "cache_call".into(),
-            content: vec![ToolResultContent::Text {
+            content: std::iter::once(ToolResultContent::Text {
                 text: "cache result".into(),
-            }],
+            })
+            .chain(image.then(|| ToolResultContent::Image {
+                media_type: "image/png".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"preview-bytes"),
+                source: Some("material.png".into()),
+            }))
+            .collect(),
             is_error: false,
         }],
     });
@@ -344,5 +356,23 @@ async fn assert_cursor_cache_prefix(api_key: bool) {
         .map(|bytes| serde_json::from_slice(bytes).unwrap())
         .collect();
     assert_eq!(second[2]["content"][0]["toolCallId"], "cache_call");
-    assert_eq!(second[3]["content"][0]["result"], "cache result");
+    if image {
+        assert!(
+            second[3]["content"][0]["result"]
+                .as_str()
+                .unwrap()
+                .contains("material.png")
+        );
+        assert_eq!(second[4]["role"], "user");
+        assert_eq!(second[4]["content"][0]["type"], "image");
+        assert_eq!(
+            second[4]["content"][0]["image"],
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(b"preview-bytes")
+            )
+        );
+    } else {
+        assert_eq!(second[3]["content"][0]["result"], "cache result");
+    }
 }

@@ -49,6 +49,18 @@ impl AgentModel for SwitchableModel {
         Some(current.invocation_snapshot().unwrap_or(current))
     }
 
+    fn image_generation_enabled(&self) -> bool {
+        self.current().image_generation_enabled()
+    }
+
+    async fn generate_image(
+        &self,
+        invocation: &AgentInvocationContext,
+        request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        self.current().generate_image(invocation, request).await
+    }
+
     async fn benchmark_settings(
         &self,
         invocation: &AgentInvocationContext,

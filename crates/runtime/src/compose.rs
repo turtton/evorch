@@ -21,6 +21,7 @@ use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod hosted_search;
+mod image_generation;
 mod images;
 mod output_limits;
 
@@ -931,6 +932,18 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn image_generation_enabled(&self) -> bool {
+        !self.agents.image_generator_chain().is_empty()
+    }
+
+    async fn generate_image(
+        &self,
+        invocation: &AgentInvocationContext,
+        request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        self.generate_image_request(invocation, request).await
+    }
+
     fn web_search_provider(
         &self,
         invocation: &AgentInvocationContext,

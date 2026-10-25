@@ -20,6 +20,7 @@ mod chains;
 mod compaction_window;
 mod fallback;
 mod hosted_search;
+mod image_generation;
 mod live;
 mod model_kinds;
 mod official_compaction;

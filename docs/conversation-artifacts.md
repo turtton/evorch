@@ -27,6 +27,14 @@ present artifacts may use it.
 These conditions come from the runtime (category, root, purpose), not from model
 input. Each tool checks them again when it runs.
 
+## Generated materials
+
+[`generate_image`](image-generation.md) creates or edits material images in the
+workspace or this thread's `$TMPDIR`. Save a variant and reference it relative to
+an HTML mock, then call `render_artifact`. The UI itself must be built in HTML,
+not replaced by a generated screenshot. A root Orchestrator delegates this work
+to a visual Worker and presents its returned artifact IDs.
+
 ## Capture rules
 
 - The file must be a regular file inside the run's workspace or its thread's

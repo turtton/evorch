@@ -27,6 +27,7 @@ pub mod entry_routing;
 pub mod error;
 pub mod escalation;
 pub mod escalation_review;
+pub mod image_generation;
 pub mod learning;
 pub mod mailbox;
 pub mod memory;

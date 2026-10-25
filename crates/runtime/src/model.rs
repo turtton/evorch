@@ -64,6 +64,19 @@ pub trait AgentModel: Send + Sync {
         None
     }
 
+    /// Fixed image-generator capability for a run; independent of its chat route.
+    fn image_generation_enabled(&self) -> bool {
+        false
+    }
+
+    async fn generate_image(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        Err("image generation is not configured".into())
+    }
+
     /// Resolve an optional hosted search capability for the invocation that
     /// produced the tool call. The callback accounts completed search usage even
     /// when response parsing or cancellation prevents delivery of its result.
