@@ -29,6 +29,286 @@ fn debug(error: impl std::fmt::Debug) -> Box<dyn std::error::Error> {
     format!("{error:?}").into()
 }
 
+fn native_map(messages: &Value, checkpoints: usize) -> ProvenanceMap {
+    let raw = messages.as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut mapped = Vec::new();
+    for (raw_index, message) in raw.iter().enumerate() {
+        if message["role"] == "system" {
+            continue;
+        }
+        mapped.push(MessageProvenance {
+            raw_index,
+            ordinal: mapped.len(),
+            blocks: (0..message["content"].as_array().map_or(0, Vec::len))
+                .map(|block_index| BlockProvenance {
+                    block_index,
+                    origin: BlockOrigin::Native,
+                    excluded_reason: None,
+                })
+                .collect(),
+        });
+    }
+    ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: raw.len(),
+        checkpoint_count: checkpoints,
+        messages: mapped,
+    }
+}
+
+fn prepare_native(config: &crate::StorageConfig) -> Result<(u64, u64)> {
+    let database = crate::db::Database::open(config)?;
+    let conn = &database.conn;
+    let runs = conn
+        .prepare("SELECT run_id FROM run_contexts ORDER BY run_id")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut store = SqliteSnapshotStore::new(conn);
+    let (mut saved, mut skipped) = (0, 0);
+    for run_id in runs {
+        let Some(bundle) = store.load_snapshot_bundle(&run_id).map_err(debug)? else {
+            skipped += 1;
+            continue;
+        };
+        let parsed = parse_index_snapshot(&bundle.record.messages_json).and_then(|messages| {
+            let checkpoints = parse_index_snapshot(&bundle.record.checkpoints_json)?;
+            Ok((messages, checkpoints.as_array().map_or(0, Vec::len)))
+        });
+        let Ok((messages, checkpoints)) = parsed else {
+            skipped += 1;
+            continue;
+        };
+        let write = crate::thread_index::SnapshotWrite {
+            record: bundle.record.clone(),
+            expected_snapshot_revision: None,
+            binding: None,
+            status: ProvenanceStatus::Verified {
+                evidence: ProvenanceEvidence::CompletePositionMap,
+            },
+            map: native_map(&messages, checkpoints),
+        };
+        store.save_snapshot_bundle(&write).map_err(debug)?;
+        saved += 1;
+    }
+    checkpoint_truncate(conn)?;
+    Ok((saved, skipped))
+}
+
+fn latency_summary(samples: &[u128]) -> Value {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    json!({
+        "n": sorted.len(),
+        "p50_us": percentile(&sorted, 50),
+        "p95_us": percentile(&sorted, 95),
+        "p99_us": percentile(&sorted, 99),
+        "max_us": sorted.last().copied().unwrap_or(0),
+    })
+}
+
+fn foreground_run(
+    prepared: &Path,
+    work: &Path,
+    label: &str,
+    enabled: bool,
+    ops: usize,
+    pace: std::time::Duration,
+) -> Result<Value> {
+    let db_path = work.join(format!("{label}.db"));
+    std::fs::copy(prepared, &db_path)?;
+    let sync_copy = std::env::var_os("EVORCH_INDEX_GATE_SYNC_COPY").is_some();
+    let copy_sync_started = Instant::now();
+    if sync_copy {
+        std::fs::File::open(&db_path)?.sync_all()?;
+    }
+    let copy_sync_us = copy_sync_started.elapsed().as_micros();
+    let pressure_before = std::fs::read_to_string("/proc/pressure/io").ok();
+    let storage = crate::Storage::open(crate::StorageConfig {
+        db_path: db_path.clone(),
+        thread_index: crate::thread_index::ThreadIndexSettings {
+            enabled,
+            max_bytes: crate::thread_index::DEFAULT_THREAD_INDEX_MAX_BYTES,
+        },
+        ..crate::StorageConfig::default()
+    })?;
+    let handle = storage.handle();
+    handle.start_thread_index_owner(IndexOwner {
+        id: format!("measure-{label}"),
+        kind: IndexOwnerKind::Gui,
+    })?;
+    let filler = "e".repeat(1_024);
+    let (mut all, mut events, mut snapshots, mut notes) = (vec![], vec![], vec![], vec![]);
+    let started = Instant::now();
+    for op in 0..ops {
+        let clock = Instant::now();
+        match op % 10 {
+            7 | 8 => {
+                let body = "s".repeat(((op / 10) * 2_048).min(200 * 1024) + 64);
+                let messages = json!([{"role":"user","content":[{"type":"text","text":body}]}]);
+                let write = crate::thread_index::SnapshotWrite {
+                    record: crate::RunContextRecord {
+                        run_id: format!("e2e-active-{}", op % 4),
+                        role: "worker".into(),
+                        name: "worker".into(),
+                        parent_run_id: None,
+                        config_json: "{}".into(),
+                        messages_json: messages.to_string(),
+                        checkpoints_json: "[]".into(),
+                        terminal_phase: "Running".into(),
+                        restorable: true,
+                        updated_at_ns: crate::system_time_to_ns(std::time::SystemTime::now())?,
+                    },
+                    expected_snapshot_revision: None,
+                    binding: None,
+                    status: ProvenanceStatus::Verified {
+                        evidence: ProvenanceEvidence::CompletePositionMap,
+                    },
+                    map: native_map(&messages, 0),
+                };
+                handle.save_snapshot_bundle(&write).map_err(debug)?;
+                snapshots.push(clock.elapsed().as_micros());
+            }
+            9 => {
+                handle.append_indexed_note("e2e-active-0", &filler)?;
+                notes.push(clock.elapsed().as_micros());
+            }
+            _ => {
+                let event = event_bus::Event {
+                    meta: event_bus::EventMeta {
+                        schema_version: event_bus::SCHEMA_VERSION,
+                        monotonic: std::time::Duration::ZERO,
+                        wall_clock: std::time::SystemTime::now(),
+                    },
+                    kind: event_bus::MessageEvent::MessageDelta {
+                        delta: filler.clone(),
+                        run_id: None,
+                    }
+                    .into(),
+                };
+                handle.append_event(Some("e2e-session"), &event)?;
+                events.push(clock.elapsed().as_micros());
+            }
+        }
+        all.push(clock.elapsed().as_micros());
+        if !pace.is_zero() {
+            let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+            let _ = receiver.recv_timeout(pace);
+        }
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    let status = handle.thread_index_job_status()?;
+    let summarize = |timings: &[(&str, u128)], kinds: &[&str]| {
+        kinds
+            .iter()
+            .map(|&kind| {
+                let samples: Vec<_> = timings
+                    .iter()
+                    .filter(|(k, _)| *k == kind)
+                    .map(|(_, time)| *time)
+                    .collect();
+                (kind.to_owned(), latency_summary(&samples))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let timings = summarize(
+        &status.step_timings_us,
+        &["commit", "merge", "evict", "discovery", "bookkeeping"],
+    );
+    let commit_timings = summarize(&status.commit_timings_us, &["begin", "body", "finish"]);
+    drop(storage);
+    std::fs::remove_file(&db_path)?;
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    Ok(json!({
+        "label": label,
+        "copy_synced": sync_copy,
+        "copy_sync_us": copy_sync_us,
+        "io_pressure_before": pressure_before,
+        "io_pressure_after": std::fs::read_to_string("/proc/pressure/io").ok(),
+        "index_enabled": enabled,
+        "ops": ops,
+        "pace_ms": pace.as_millis(),
+        "seconds": seconds,
+        "all": latency_summary(&all),
+        "events": latency_summary(&events),
+        "snapshots": latency_summary(&snapshots),
+        "notes": latency_summary(&notes),
+        "index_commits": status.counters.commits,
+        "index_steps": status.counters.steps,
+        "idle_steps": status.idle_steps,
+        "forced_steps": status.forced_steps,
+        "merges": status.counters.merges,
+        "paused": status.paused.is_some(),
+        "step_timings_us": timings,
+        "commit_timings_us": commit_timings,
+    }))
+}
+
+#[test]
+#[ignore = "measures a copy of a real store; see module docs"]
+fn foreground_wait_measure() -> Result<()> {
+    let source = PathBuf::from(std::env::var("EVORCH_INDEX_GATE_SOURCE")?);
+    let work = PathBuf::from(std::env::var("EVORCH_INDEX_GATE_WORK")?);
+    std::fs::create_dir_all(&work)?;
+    let prepared = work.join("prepared.db");
+    assert!(!prepared.exists(), "work dir must be fresh");
+    let reuse_prepared = std::env::var_os("EVORCH_INDEX_GATE_PREPARED");
+    std::fs::copy(
+        reuse_prepared.as_ref().map_or(source.as_path(), Path::new),
+        &prepared,
+    )?;
+    let config = crate::StorageConfig {
+        db_path: prepared.clone(),
+        ..crate::StorageConfig::default()
+    };
+    let clock = Instant::now();
+    let (saved, skipped) = if reuse_prepared.is_some() {
+        (0, 0)
+    } else {
+        prepare_native(&config)?
+    };
+    let prepare_seconds = clock.elapsed().as_secs_f64();
+    let ops: usize = std::env::var("EVORCH_INDEX_GATE_OPS").map_or(Ok(2_000), |ops| ops.parse())?;
+    let mut runs = Vec::new();
+    for (pace, rounds) in [(15_u64, 2), (0, 2)] {
+        for round in 0..rounds {
+            for enabled in [false, true] {
+                let label = format!(
+                    "pace{pace}-{}-{round}",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+                let run = foreground_run(
+                    &prepared,
+                    &work,
+                    &label,
+                    enabled,
+                    ops,
+                    std::time::Duration::from_millis(pace),
+                )?;
+                eprintln!("{run}");
+                runs.push(run);
+            }
+        }
+    }
+    let comparisons: Vec<Value> = runs.as_chunks::<2>().0.iter().map(|pair| {
+        let delta = |key: &str| pair[1]["all"][key].as_i64().unwrap() - pair[0]["all"][key].as_i64().unwrap();
+        let (p50,p95,max) = (delta("p50_us"),delta("p95_us"),delta("max_us"));
+        json!({"enabled":pair[1]["label"],"delta_p50_us":p50,"delta_p95_us":p95,"delta_max_us":max,
+            "passed":p50<=5_000 && p95<=50_000 && max<=250_000})
+    }).collect();
+    let summary = json!({
+        "step_max_text_bytes":super::capacity::MEASURED_POLICY.step_max_text_bytes,
+        "threshold_us":{"delta_p50":5_000,"delta_p95":50_000,"delta_max":250_000},
+        "passed":comparisons.iter().all(|pair| pair["passed"]==true),
+        "comparisons":comparisons,
+        "prepared_runs":saved,"skipped_runs":skipped,"prepare_seconds":prepare_seconds,"runs":runs,
+    });
+    let rendered = serde_json::to_string_pretty(&summary)?;
+    std::fs::write(work.join("foreground.json"), &rendered)?;
+    println!("{rendered}");
+    Ok(())
+}
+
 fn checkpoint_truncate(conn: &Connection) -> Result<(i64, i64, i64)> {
     Ok(
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {

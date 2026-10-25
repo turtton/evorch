@@ -205,6 +205,10 @@ pub struct ThreadIndexJobStatus {
     pub idle_steps: u64,
     pub forced_steps: u64,
     pub counters: ThreadIndexCounters,
+    #[cfg(test)]
+    pub step_timings_us: Vec<(&'static str, u128)>,
+    #[cfg(test)]
+    pub commit_timings_us: Vec<(&'static str, u128)>,
 }
 
 pub(super) type ReplySender<T, E> = Sender<Result<T, E>>;
@@ -270,6 +274,8 @@ pub(super) struct IndexJob {
     forced_steps: u64,
     #[cfg(test)]
     observer: Option<Sender<ThreadIndexCounters>>,
+    #[cfg(test)]
+    step_timings_us: Vec<(&'static str, u128)>,
 }
 
 /// Whether a ready index step runs now: idle first, but never starved.
@@ -311,6 +317,8 @@ impl IndexJob {
             forced_steps: 0,
             #[cfg(test)]
             observer: None,
+            #[cfg(test)]
+            step_timings_us: Vec::new(),
         }
     }
 
@@ -334,6 +342,8 @@ impl IndexJob {
             forced_steps: 0,
             #[cfg(test)]
             observer: None,
+            #[cfg(test)]
+            step_timings_us: Vec::new(),
         }
     }
 
@@ -384,6 +394,10 @@ impl IndexJob {
             idle_steps: self.idle_steps,
             forced_steps: self.forced_steps,
             counters: self.rt.counters,
+            #[cfg(test)]
+            step_timings_us: self.step_timings_us.clone(),
+            #[cfg(test)]
+            commit_timings_us: self.rt.commit_timings_us.clone(),
         }
     }
 
@@ -505,6 +519,8 @@ pub(super) fn run_due(
     };
     let env = env(conn, config, source_suspended);
     let now_ns = now_ns();
+    #[cfg(test)]
+    let before = (Instant::now(), job.rt.counters, job.rt.discovery_complete);
     match work::prepare(env, &mut job.rt, &lease, now_ns) {
         Ok(work::Action::Extract(work)) => {
             if let Some(owner) = job.owner.as_ref() {
@@ -532,6 +548,22 @@ pub(super) fn run_due(
             }
             job.maybe_work = false;
         }
+    }
+    #[cfg(test)]
+    if std::env::var_os("EVORCH_INDEX_GATE_WORK").is_some() {
+        let kind = if job.rt.counters.commits > before.1.commits {
+            "commit"
+        } else if job.rt.counters.merges > before.1.merges {
+            "merge"
+        } else if job.rt.counters.evictions > before.1.evictions {
+            "evict"
+        } else if !before.2 {
+            "discovery"
+        } else {
+            "bookkeeping"
+        };
+        job.step_timings_us
+            .push((kind, before.0.elapsed().as_micros()));
     }
     notify_observer(job);
 }

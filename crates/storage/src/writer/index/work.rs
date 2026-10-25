@@ -68,6 +68,8 @@ pub(crate) struct IndexRuntime {
     pub merge_pending: bool,
     pub ready: Option<Extracted>,
     pub counters: ThreadIndexCounters,
+    #[cfg(test)]
+    pub commit_timings_us: Vec<(&'static str, u128)>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -95,6 +97,8 @@ impl IndexRuntime {
             merge_pending: true,
             ready: None,
             counters: ThreadIndexCounters::default(),
+            #[cfg(test)]
+            commit_timings_us: Vec::new(),
         }
     }
 
@@ -1018,7 +1022,14 @@ fn commit(
     let growth = rt
         .policy
         .planned_growth(accounting.charged_bytes, page_size, freelist, false);
-    let outcome = immediate(conn, |conn| {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let transaction = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    #[cfg(test)]
+    let begin_us = started.elapsed().as_micros();
+    #[cfg(test)]
+    let body_started = std::time::Instant::now();
+    let outcome = (|conn: &Connection| -> Result<Result<IndexCommitResult, IndexCapacityStatus>, StorageError> {
         let status = capacity_status(Env { conn, ..env }, rt, growth)?;
         if status.state != CapacityState::Normal {
             return Ok(Err(status));
@@ -1034,7 +1045,20 @@ fn commit(
             requests::finalize(conn, now_ns)?;
         }
         Ok(Ok(result))
-    })?;
+    })(&transaction)?;
+    #[cfg(test)]
+    let body_us = body_started.elapsed().as_micros();
+    #[cfg(test)]
+    let finish_started = std::time::Instant::now();
+    transaction.commit()?;
+    #[cfg(test)]
+    if std::env::var_os("EVORCH_INDEX_GATE_WORK").is_some() {
+        rt.commit_timings_us.extend([
+            ("begin", begin_us),
+            ("body", body_us),
+            ("finish", finish_started.elapsed().as_micros()),
+        ]);
+    }
     match outcome {
         Ok(IndexCommitResult::Committed) => {
             rt.counters.commits += 1;

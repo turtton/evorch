@@ -62,8 +62,9 @@ pub(crate) const MEASURED_POLICY: CapacityPolicy = CapacityPolicy {
     hysteresis_bytes: 16 << 20,
     growth_pages_per_mille: 1_500,
     growth_constant_pages: 256,
-    // No measured run exceeds either bound (max 990,976 B / 1,169 blocks).
-    step_max_text_bytes: 1 << 20,
+    // The E2E foreground gate exceeded its fixed latency bounds at 1 MiB.
+    // ADR 0041 prescribes a 512 KiB retry (27 all-native runs are oversized).
+    step_max_text_bytes: 512 << 10,
     step_max_blocks: 2_048,
     delete_pages_per_mille: 7_000,
     reclaim_max_runs_per_cycle: 64,

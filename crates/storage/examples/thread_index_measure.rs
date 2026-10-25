@@ -723,9 +723,16 @@ fn retention_json(
     pick: fn(&RunSummary) -> &std::result::Result<Footprint, String>,
     coefficients: Coefficients,
     budgets: &[u64],
+    step: Option<(u64, u64)>,
 ) -> Value {
+    let oversized_step = |summary: &RunSummary| {
+        pick(summary).as_ref().is_ok_and(|footprint| {
+            step.is_some_and(|(text, blocks)| footprint.text > text || footprint.blocks > blocks)
+        })
+    };
     let mut runs: Vec<RunCost> = summaries
         .iter()
+        .filter(|summary| !oversized_step(summary))
         .map(|summary| {
             let cost = pick(summary)
                 .as_ref()
@@ -743,7 +750,8 @@ fn retention_json(
         .filter_map(|run| run.2.map(|cost| (cost.1, run.0.clone())))
         .max();
     json!({
-        "runs_total": runs.len(),
+        "runs_total": summaries.len(),
+        "oversized_step": summaries.iter().filter(|summary| oversized_step(summary)).count(),
         "runs_extractable": indexable,
         "target_text_bytes": total_text,
         "target_charged_bytes": total_charged,
@@ -1024,7 +1032,7 @@ fn main() -> Result<()> {
     let output = json!({
         "harness": "crates/storage/examples/thread_index_measure.rs",
         "extractor_version": storage::thread_index::EXTRACTOR_VERSION,
-        "accounting": "PROVISIONAL local copy of the documented IndexAccounting formula (shared IndexAccountant not implemented yet)",
+        "accounting": "shared IndexAccountant: index_attribute_bytes + charge_index_bytes",
         "store": store_json,
         "population": {
             "run_contexts": seen.len(),
@@ -1062,9 +1070,15 @@ fn main() -> Result<()> {
         },
         "retention": {
             "order": "retention_at_ns DESC, run_id DESC (newest kept)",
-            "strict": retention_json(&summaries, |summary| &summary.strict, coefficients, &options.budgets),
-            "upper_bound": retention_json(&summaries, |summary| &summary.upper, coefficients, &options.budgets),
-            "fork_prefix_excluded": retention_json(&summaries, |summary| &summary.estimate, coefficients, &options.budgets),
+            "strict": retention_json(&summaries, |summary| &summary.strict, coefficients, &options.budgets, None),
+            "upper_bound": retention_json(&summaries, |summary| &summary.upper, coefficients, &options.budgets, None),
+            "fork_prefix_excluded": retention_json(&summaries, |summary| &summary.estimate, coefficients, &options.budgets, None),
+        },
+        "step_512kib": {
+            "text_bytes": 512 << 10,
+            "block_count": 2_048,
+            "strict": retention_json(&summaries, |summary| &summary.strict, coefficients, &options.budgets, Some((512 << 10, 2_048))),
+            "upper_bound": retention_json(&summaries, |summary| &summary.upper, coefficients, &options.budgets, Some((512 << 10, 2_048))),
         },
         "elapsed_seconds": started.elapsed().as_secs_f64(),
     });
