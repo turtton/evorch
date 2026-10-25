@@ -400,6 +400,40 @@ fn latest_thread_goals(
 
 type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 
+fn thread_index_settings(config: &config::Config) -> storage::thread_index::ThreadIndexSettings {
+    let settings = &config.storage.thread_index;
+    storage::thread_index::ThreadIndexSettings {
+        enabled: settings.enabled,
+        max_bytes: settings.max_bytes,
+    }
+}
+
+fn reload_index_settings(
+    handle: &storage::StorageHandle,
+    options: &config::LoadOptions,
+) -> Result<(), String> {
+    let config = config::Config::load(options).map_err(|error| error.to_string())?;
+    handle
+        .apply_thread_index_settings(thread_index_settings(&config))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn start_gui_index_owner(handle: &storage::StorageHandle) -> Result<(), storage::StorageError> {
+    handle.start_thread_index_owner(storage::thread_index::IndexOwner {
+        id: format!(
+            "gui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
+        kind: storage::thread_index::IndexOwnerKind::Gui,
+    })?;
+    Ok(())
+}
+
 /// The Evaluator's tools are built before the runtime and the models they
 /// reach, so both are filled in once startup has composed them. The runtime
 /// owns these tools, so the host holds it weakly.
@@ -662,9 +696,11 @@ fn run() -> Result<(), GuiError> {
     let storage_config = StorageConfig {
         db_path: storage_db_path,
         usage_retention_days: composition_config.metrics.retention_days,
+        thread_index: thread_index_settings(&composition_config),
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;
+    start_gui_index_owner(&storage.handle())?;
     // The Evaluator reads and pins threads of the same database the GUI records into.
     let evaluator_host = Arc::new(EvaluatorHost::default());
     let evaluator_tools = |user_config_dir: Option<PathBuf>, catalog_dir: Option<PathBuf>| {
@@ -959,8 +995,15 @@ fn run() -> Result<(), GuiError> {
     let _ = evaluator_host.reload.set({
         let production = production_model.clone();
         let projects = project_models.clone();
+        let handle = storage.handle();
+        let options = if demo_directory.is_some() {
+            settings_load_options.clone()
+        } else {
+            load_options.clone()
+        };
         Box::new(move || {
-            gui::model::production::reload_models(production.as_ref(), projects.as_ref())
+            gui::model::production::reload_models(production.as_ref(), projects.as_ref())?;
+            reload_index_settings(&handle, &options)
         })
     });
     restore_thread_todos(&storage_config, &runtime, &sidebar);
@@ -1213,6 +1256,77 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thread_index_initial_settings_and_reload_reach_writer_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config::Config::default();
+        assert_eq!(
+            super::thread_index_settings(&config),
+            storage::StorageConfig::default().thread_index
+        );
+        config.storage.thread_index.enabled = false;
+        config.storage.thread_index.max_bytes = 1_048_576;
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: dir.path().join("fixture.db"),
+            thread_index: super::thread_index_settings(&config),
+            ..Default::default()
+        })
+        .unwrap();
+        let handle = storage.handle();
+        let initial = handle.thread_index_job_status().unwrap();
+        assert_eq!(initial.settings, super::thread_index_settings(&config));
+        assert!(
+            initial.owner_lease.is_none(),
+            "open does not start an owner"
+        );
+        super::start_gui_index_owner(&handle).unwrap();
+        assert_eq!(
+            handle
+                .thread_index_job_status()
+                .unwrap()
+                .owner_lease
+                .unwrap()
+                .owner
+                .kind,
+            storage::thread_index::IndexOwnerKind::Gui
+        );
+        handle.stop_thread_index_owner().unwrap();
+        assert!(
+            handle
+                .thread_index_job_status()
+                .unwrap()
+                .owner_lease
+                .is_none()
+        );
+        let options = config::LoadOptions {
+            user_config_dir: Some(dir.path().into()),
+            read_env: false,
+            ..Default::default()
+        };
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "version = 3\n[storage.thread_index]\nenabled = true\nmax_bytes = 536870912\n",
+        )
+        .unwrap();
+        super::reload_index_settings(&handle, &options).unwrap();
+        let applied = handle.thread_index_job_status().unwrap();
+        assert_eq!(
+            applied.settings,
+            storage::StorageConfig::default().thread_index
+        );
+        assert!(applied.settings_generation > initial.settings_generation);
+        std::fs::write(
+            &path,
+            "version = 3\n[storage.thread_index]\nmax_bytes = -1\n",
+        )
+        .unwrap();
+        assert!(super::reload_index_settings(&handle, &options).is_err());
+        let unchanged = handle.thread_index_job_status().unwrap();
+        assert_eq!(unchanged.settings, applied.settings);
+        assert_eq!(unchanged.settings_generation, applied.settings_generation);
+    }
+
     #[test]
     fn restoring_goals_keeps_latest_thread_objective_and_one_handoff_owner() {
         let update = |goal: &str, thread: &str, run: &str| {
