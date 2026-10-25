@@ -2,7 +2,7 @@ use egui::{Event, Key, Modifiers};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
-use gui::model::commands::WorkbenchCommand;
+use gui::model::commands::{CommandSink, LoopEvent, WorkbenchCommand};
 use gui::model::composer::{CompletionKind, ProviderStatus};
 use gui::model::transcript::TranscriptEntry;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
@@ -12,6 +12,14 @@ fn workbench(
     allowed: &[&std::path::Path],
     trust: TrustState,
 ) -> HeadlessWorkbench<DemoSource> {
+    HeadlessWorkbench::new(workbench_state(root, allowed, trust), [1200.0, 900.0])
+}
+
+fn workbench_state(
+    root: &std::path::Path,
+    allowed: &[&std::path::Path],
+    trust: TrustState,
+) -> WorkbenchState<DemoSource> {
     for (path, content) in [
         ("src/lib.rs", ""),
         (
@@ -40,11 +48,25 @@ fn workbench(
         .create_thread(thread.clone(), project, "thread")
         .expect("thread");
     sidebar.switch_thread(&thread).expect("switch");
-    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+    WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("state")
         .with_sidebar(sidebar)
-        .with_provider_status(ProviderStatus::Configured);
-    HeadlessWorkbench::new(state, [1200.0, 900.0])
+        .with_provider_status(ProviderStatus::Configured)
+}
+
+/// A runtime that refuses every chat, as one that cannot take the message does.
+struct RefusingRuntime;
+
+impl CommandSink for RefusingRuntime {
+    fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        match command {
+            WorkbenchCommand::SendChat(chat) => vec![LoopEvent::ChatRejected {
+                thread_id: chat.thread_id,
+                reason: "provider unavailable".into(),
+            }],
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
@@ -289,6 +311,43 @@ fn revoking_trust_right_before_a_send_keeps_repo_skills_out_of_it() {
         "Sent @evorch-fixture-skill as plain text — this project is not trusted, so its own \
          skills are not expanded. Enable \"Trust project instructions\" in Project settings to \
          use them.",
+    );
+}
+
+#[test]
+fn a_refused_send_gets_no_untrusted_skill_notice() {
+    // Given: an untrusted project with a repository skill, and a runtime that
+    // refuses chats.
+    let temp = tempfile::tempdir().expect("root");
+    write_untrusted_fixture_skills(temp.path());
+    let state = workbench_state(temp.path(), &[], TrustState::Unapproved)
+        .with_command_sink(Box::new(RefusingRuntime));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a message naming the repository skill is sent and refused.
+    let typed = "use @evorch-fixture-skill please";
+    type_text(&mut harness, typed);
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: it was offered as plain text, but the agent never got it: the
+    // text is back in the composer, with no bubble and no skill notice.
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("one chat is sent: {:?}", harness.state().issued());
+    };
+    assert_eq!(chat.text, typed);
+    assert_eq!(harness.state().composer().input, typed);
+    let entries = harness.state().transcript().entries();
+    assert!(
+        !entries.iter().any(|entry| match entry {
+            TranscriptEntry::UserMessage { .. } => true,
+            TranscriptEntry::Notice { text } => text.contains("as plain text"),
+            _ => false,
+        }),
+        "{entries:?}"
     );
 }
 
