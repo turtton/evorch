@@ -205,6 +205,7 @@ impl ToolExecutor {
         sandbox: Arc<dyn Sandbox>,
         default_cwd: Option<std::path::PathBuf>,
     ) -> Self {
+        let default_cwd = default_cwd.map(absolute_root);
         let mut executor = Self::new(event_bus);
         let shell = Shell::new(Arc::clone(&sandbox));
         let shell = match default_cwd.clone() {
@@ -292,7 +293,10 @@ impl ToolExecutor {
     }
 
     /// 登録済みツール（shell や apply_patch）の既定作業ディレクトリを更新する。
+    /// A relative `cwd` is made absolute against the process directory first,
+    /// so every later resolution, the team guard's included, uses one root.
     pub fn set_default_cwd(&self, cwd: std::path::PathBuf) {
+        let cwd = absolute_root(cwd);
         *self
             .default_cwd
             .write()
@@ -952,6 +956,16 @@ fn capabilities_of(permissions: &Permissions) -> Capabilities {
     }
 }
 
+/// `cwd` made absolute against the process directory, without resolving
+/// symlinks. Arguments are scoped against the root once at validation and again
+/// at execution, which joins an absolute root only once, while a relative root
+/// would be joined twice and name a different place each time. When the path
+/// cannot be made absolute (it is empty or the process directory is gone),
+/// it is kept; the team guard rejects such a root.
+fn absolute_root(cwd: std::path::PathBuf) -> std::path::PathBuf {
+    std::path::absolute(&cwd).unwrap_or(cwd)
+}
+
 /// Rename str_replace-style `old_str`/`new_str` to edit's names, at the top level and in `edits`.
 ///
 /// Models trained on `str_replace` tools send these names. They stay out of the schema
@@ -1201,5 +1215,57 @@ mod tests {
             .expect("テストツールは成功する");
 
         assert_eq!(result.origin, ContentOrigin::WebUntrusted);
+    }
+
+    // Given: an executor whose workspace root is given as a relative path, at
+    //        construction and later through set_default_cwd
+    // When: a call is validated and then executed, each of which scopes its
+    //       arguments against the root
+    // Then: the root is absolute, naming the same place from the process
+    //       directory, and the tool receives its path joined to it exactly once
+    #[tokio::test]
+    async fn relative_workspace_root_is_made_absolute_before_scoping() {
+        let relative = std::path::PathBuf::from("evorch-relative-root-does-not-exist");
+        let expected = std::env::current_dir().unwrap().join(&relative);
+        let bus = Arc::new(EventBus::new(16));
+        let mut events = bus.subscribe();
+        let executor = Arc::new(ToolExecutor::with_standard_tools_in(
+            bus,
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            Some(relative.clone()),
+        ));
+        assert_eq!(executor.default_cwd(), Some(expected.clone()));
+        executor.set_default_cwd(relative);
+        assert_eq!(executor.default_cwd(), Some(expected.clone()));
+
+        let ctx = ToolExecutionContext {
+            run_id: "relative-root".into(),
+            thread_id: None,
+            call_id: None,
+        };
+        // The file does not exist, so the read fails without side effects.
+        let _ = executor
+            .validate_call(
+                ctx,
+                "read".into(),
+                "read-call".into(),
+                serde_json::json!({ "path": "a.txt" }),
+            )
+            .unwrap()
+            .scope_approved()
+            .execute()
+            .await;
+        let input = events
+            .drain_pending_snapshot()
+            .into_iter()
+            .find_map(|event| match event.kind {
+                event_bus::EventKind::Tool(ToolEvent::ToolStarted { input, .. }) => input,
+                _ => None,
+            })
+            .expect("the read started");
+        assert_eq!(
+            input["path"],
+            serde_json::json!(expected.join("a.txt").to_string_lossy())
+        );
     }
 }

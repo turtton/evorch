@@ -50,6 +50,32 @@ fn parse_args_accepts_full_form() {
     );
 }
 
+// Given: 相対パスの --project と空の --project / When: parse_args する
+// Then: 相対パスは今のプロセスの作業ディレクトリ基準の絶対パスになり、tool が引数を
+//       何度 workspace に結合しても同じ場所を指す。空のパスは Usage エラー
+#[test]
+fn parse_args_makes_a_relative_project_absolute() {
+    let parse = |project: &str| {
+        parse_args(argv(&[
+            "run",
+            "--project",
+            project,
+            "--role",
+            "worker",
+            "--prompt",
+            "x",
+        ]))
+    };
+    let parsed = parse("relative/project").expect("相対パスはパースできる");
+    assert_eq!(
+        parsed.project_dir,
+        std::env::current_dir().unwrap().join("relative/project")
+    );
+
+    let error = parse("").expect_err("空のパスはエラーになる");
+    assert_eq!(error.to_string(), usage_error().to_string());
+}
+
 // Given: --role の各既知名 / When: parse_args する / Then: runtime Role へ写像される
 #[test]
 fn parse_args_maps_role_names() {
