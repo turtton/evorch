@@ -116,3 +116,63 @@ fn orchestrator_events_round_trip_through_sqlite() {
         .collect();
     assert_eq!(events, vec![created, changed]);
 }
+
+#[test]
+fn orchestrator_read_returns_only_orchestrator_events_in_order() {
+    // Given: orchestrator events interleaved with other kinds
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let config = StorageConfig {
+        db_path: temp_dir.path().join("orchestrator-only.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    let handle = storage.handle();
+    let progressed = event_bus::Event::new(event_bus::OrchestratorEvent::TaskProgressed {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        progress: serde_json::json!({"completed": ["ac1"]}),
+        reason: "criterion completed".into(),
+    });
+    let checkpoint = event_bus::Event::new(event_bus::OrchestratorEvent::TaskCheckpoint {
+        task_id: "task-1".into(),
+        run_id: "run-1".into(),
+        tool_call_count: 1,
+        cumulative_input_tokens: 2,
+        cumulative_output_tokens: 3,
+        elapsed_ms: 4,
+    });
+    let message = |text: &str| {
+        event_bus::Event::new(event_bus::MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: text.into(),
+        })
+    };
+    for event in [
+        message("before"),
+        progressed.clone(),
+        message("between"),
+        checkpoint.clone(),
+        message("after"),
+    ] {
+        handle
+            .append_event(Some("session-1"), &event)
+            .expect("event must append");
+    }
+    drop(storage);
+    let database = Database::open(&config).expect("database must reopen");
+
+    // When: reading only orchestrator events
+    let events = database
+        .orchestrator_events_ordered()
+        .expect("events must read");
+
+    // Then: exactly the orchestrator events come back, in append order
+    assert_eq!(
+        events
+            .iter()
+            .map(|stored| &stored.event)
+            .collect::<Vec<_>>(),
+        vec![&progressed, &checkpoint]
+    );
+    assert!(events.windows(2).all(|pair| pair[0].id < pair[1].id));
+}
