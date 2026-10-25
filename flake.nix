@@ -101,6 +101,16 @@
         # the default `cargo check --all-targets` pass would only add minutes
         # and metadata-only artifacts to the cached (and attic-pushed) output.
         depsOnlyArgs = {
+          # crane discovers manifests recursively, including this independent
+          # benchmark workspace that does not contribute to the product deps.
+          src = pkgs.lib.cleanSourceWith {
+            src = commonArgs.src;
+            filter = path: _type:
+              let
+                benchmark = "${toString ./.}/examples/benchmark/clamp";
+              in
+              path != benchmark && !(pkgs.lib.hasPrefix "${benchmark}/" path);
+          };
           cargoCheckCommand = "true";
         };
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
@@ -354,8 +364,8 @@
           inherit evorch;
           evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
-          # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
-          # バイナリとセットで push することで次回 run の deps build を skip させる。
+          # Cargo manifests/config、lockfile、toolchain とビルド設定が同じなら
+          # 再利用できる。製品ソース本文の変更だけでは deps を再ビルドしない。
           evorch-deps = cargoArtifacts;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # CI only: the attic client for the push step (see atticClient).
