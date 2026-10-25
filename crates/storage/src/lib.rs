@@ -70,6 +70,7 @@ mod review;
 mod run;
 pub mod task_queue;
 pub mod team;
+pub mod thread_index;
 pub mod thread_start;
 pub mod threads;
 pub mod usage;

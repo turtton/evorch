@@ -503,7 +503,7 @@ request 契約（R5、順序 1 で固定）:
 
 | 単独 owner | ファイル / 責務 |
 |---|---|
-| W1 storage-core | `crates/storage/src/{run.rs,thread_index.rs,lib.rs}`、`migrations/*`、`repo/{thread_index.rs,run_context.rs,run_ledger.rs,mod.rs}`。provenance 型・schema・抽出/会計・状態 SQL・request 永続化 API |
+| W1 storage-core | `crates/storage/src/{run.rs,thread_index.rs,thread_index/*,read.rs,lib.rs}`、`migrations/*`、`repo/{thread_index.rs,run_context.rs,run_ledger.rs,mod.rs}`。provenance 型・schema・抽出/会計・状態 SQL・request 永続化 API。storage の `read.rs`（同一 read transaction の bundle / guarded reference 読み取り配線）も W1 の単独所有 |
 | W2 writer | `crates/storage/src/{writer.rs,writer/state.rs}` と新設 job module。writer コマンド、容量 API、lease/step、設定取り込み。storage 内 wiring は W2 だけが編集 |
 | W3 config | `crates/storage/src/config.rs` と `crates/config/src/*` の設定型・strict・既定値・保存。設定値と適用時点の API は順序 1、実配線は順序 7 |
 | W4 runtime | `crates/runtime/src/meta/threads/*`（`read.rs` / `normalize.rs` 含む）、`meta/specs.rs`、`agent_loop.rs`、`context.rs`、`continuity.rs`、`restore.rs` / `restore/*`、`runtime/chat_restore.rs`、`thread_lineage.rs`、`compaction/*` と runtime の契約テスト。生成側 provenance と guarded note 解決 |
@@ -677,7 +677,7 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 - [x] ADR に計画記載 — commit: この節を書いたコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）。Phase A の merge commit（`5d23cab4`）と Phase 0 計測の要約も同じコミットで記録した。
 - [x] plan review 指摘 R1–R5 反映 — provenance の保存・変換 API、状態遷移表、物理 reserve / admission、normalize / guarded note、CLI request / owner の契約と受け入れケースを追加。S1 の単独ファイル owner と S2 の計測条件も反映。commit: 本項目を追加した `docs(adr): address Phase B plan review contracts`（SHA は `git log` で確認）。コード変更なし。差分範囲・B-1〜B-4 不変・必須契約の記載を確認（実装テストは未実施）。
 - [ ] 計画の独立レビュー（plan review）— M1〜M6 と R1〜R5 / S1〜S2 を反映済み。改訂後の計画に対する独立 Reviewer の合格判定は未取得。判定:
-- [ ] 順序 1 契約の固定 — R1 の保存形式・全変換・W1/W2/W4 API / fixture、R2–R5、設定型・API とファイル所有表を固定。順序 2 / 3 の開始ゲート。commit:
+- [ ] 順序 1 契約の固定 — R1 の保存形式・全変換・W1/W2/W4 API / fixture、R2–R5、設定型・API とファイル所有表を固定。順序 2 / 3 の開始ゲート。storage 共有契約は `crates/storage/src/thread_index.rs` / `thread_index/contracts.rs` に型・trait として定義（SQL / writer / job の実装ではない）。`read.rs` は W1 単独所有。**W3 の strict 設定型・検証の合流が全体の残ゲート**（ユーザー確認済み。本担当は設定取り込み API のシグネチャまでで W3 の実装に触れない）。commit: 本項目更新コミット（`git log` で確認）
 - [ ] 順序 2 最小の抽出器で計測 — W1 の抽出 / 会計関数を W6 から呼ぶ。provenance 不明を native と仮定しない。commit:
 - [ ] 順序 3 migration（v25）・抽出・状態遷移 — provenance 原子的保存・復元を含む。commit:
 - [ ] 順序 4 不可分な置換（索引の置換・evict・source 削除の tombstone）— commit:
