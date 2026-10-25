@@ -12,13 +12,15 @@ use super::capacity::{
 };
 use super::{lease, requests};
 use crate::db::file_sizes;
-use crate::repo::thread_index::{SqliteSnapshotStore, SqliteThreadIndex};
+use crate::repo::thread_index::{LegacyDependencies, SqliteSnapshotStore, SqliteThreadIndex};
+#[cfg(test)]
+use crate::thread_index::IndexStepResult;
 use crate::thread_index::{
     AccountingPolicy, CapacityState, CommitRejection, DEFAULT_ACCOUNTING_POLICY, EXTRACTOR_VERSION,
     ExtractedIndexInput, ExtractionError, IndexAccounting, IndexBlockedReason, IndexCapacityStatus,
     IndexCommitGuard, IndexCommitResult, IndexEvictionReason, IndexFailure, IndexLease,
-    IndexPauseReason, IndexSettingsReceipt, IndexState, IndexStepResult, IndexTarget,
-    PlannedGrowth, RequestGapReason, RequestGuard, SnapshotRepository as _,
+    IndexPauseReason, IndexSettingsReceipt, IndexState, IndexTarget, PlannedGrowth,
+    RequestGapReason, RequestGuard, SnapshotProvenance, SnapshotRepository as _,
     ThreadIndexRepository as _, ThreadIndexSettings, account_index_input, extract_snapshot_bundle,
     reaccount_index,
 };
@@ -29,6 +31,7 @@ const DISCOVERY_BATCH: usize = 256;
 /// One unit of index work, frozen when it was selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Work {
+    pub lease_epoch: u64,
     pub target: IndexTarget,
     pub work_generation: u64,
     pub retention_at_ns: i64,
@@ -36,7 +39,7 @@ pub(crate) struct Work {
 }
 
 /// Why an extraction produced no committable input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExtractFailure {
     /// Deterministic: the same revision will fail again (R2 blocked).
     Extraction(ExtractionError),
@@ -44,6 +47,8 @@ pub(crate) enum ExtractFailure {
     Transient,
     /// The source moved on after selection; the run is pending again.
     Stale,
+    /// Reader-derived evidence must first cross the guarded writer boundary.
+    Legacy(Box<(SnapshotProvenance, LegacyDependencies)>),
 }
 
 pub(crate) type Extracted = (Work, Result<ExtractedIndexInput, ExtractFailure>);
@@ -575,6 +580,7 @@ fn work_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Work> {
             work_generation,
         });
     Ok(Work {
+        lease_epoch: 0,
         target,
         work_generation,
         retention_at_ns: row.get(5)?,
@@ -583,24 +589,54 @@ fn work_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Work> {
 }
 
 /// Reads one bundle in a single read transaction and extracts it. Runs on the
-/// extractor thread (background) or inline (foreground CLI step).
+/// single extractor thread for both GUI and CLI owners.
 pub(crate) fn extract(
     conn: &Connection,
     work: &Work,
     redactor: &SecretRedactor,
 ) -> Result<ExtractedIndexInput, ExtractFailure> {
-    let bundle = (|| {
+    let (bundle, missing_sidecar, dependencies) = (|| {
         let transaction = conn
             .unchecked_transaction()
+            .map_err(|_| ExtractFailure::Transient)?;
+        let missing_sidecar: bool = transaction
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM run_context_provenance WHERE run_id = ?1)",
+                [&work.target.run_id],
+                |row| row.get(0),
+            )
             .map_err(|_| ExtractFailure::Transient)?;
         let bundle = SqliteSnapshotStore::new(&transaction)
             .load_snapshot_bundle(&work.target.run_id)
             .map_err(|_| ExtractFailure::Transient)?;
+        let dependencies = if missing_sidecar {
+            LegacyDependencies::capture(&transaction, &work.target.run_id)
+                .map_err(|_| ExtractFailure::Transient)?
+        } else {
+            None
+        };
         drop(transaction);
-        bundle.ok_or(ExtractFailure::Transient)
+        Ok((
+            bundle.ok_or(ExtractFailure::Transient)?,
+            missing_sidecar,
+            dependencies,
+        ))
     })()?;
     if bundle.source_revision != work.target.source_revision {
         return Err(ExtractFailure::Stale);
+    }
+    if missing_sidecar && dependencies.is_none() {
+        return Err(ExtractFailure::Extraction(
+            ExtractionError::ProvenanceUnknown(
+                crate::thread_index::ProvenanceUnknownReason::LegacyUnproven,
+            ),
+        ));
+    }
+    if let Some(dependencies) = dependencies
+        && bundle.snapshot_revision == 0
+        && let Some(sidecar) = bundle.provenance
+    {
+        return Err(ExtractFailure::Legacy(Box::new((sidecar, dependencies))));
     }
     let input = extract_snapshot_bundle(&bundle, redactor).map_err(ExtractFailure::Extraction)?;
     if input.extractor_version != work.target.extractor_version
@@ -674,7 +710,10 @@ pub(crate) fn prepare(
         return Ok(Action::Progress);
     }
     match next_work(env.conn)? {
-        Some(work) => Ok(Action::Extract(work)),
+        Some(mut work) => {
+            work.lease_epoch = lease.epoch;
+            Ok(Action::Extract(work))
+        }
         None => Ok(Action::Idle {
             next_wake_at_ns: SqliteThreadIndex::new(env.conn).next_retry_at_ns()?,
         }),
@@ -788,8 +827,36 @@ fn handle_extracted(
     (work, extracted): Extracted,
     now_ns: i64,
 ) -> Result<Action, StorageError> {
+    if work.lease_epoch != lease.epoch {
+        rt.counters.discarded += 1;
+        return Ok(Action::Progress);
+    }
+    if SqliteThreadIndex::new(env.conn)
+        .check_guard(&guard(lease, &work), now_ns)?
+        .is_some()
+    {
+        rt.counters.discarded += 1;
+        return Ok(Action::Progress);
+    }
     let input = match extracted {
         Ok(input) => input,
+        Err(ExtractFailure::Legacy(sidecar)) => {
+            let (sidecar, dependencies) = *sidecar;
+            immediate(env.conn, |conn| {
+                let result = SqliteThreadIndex::new(conn).commit_legacy_provenance(
+                    &guard(lease, &work),
+                    &sidecar,
+                    &dependencies,
+                    now_ns,
+                )?;
+                if matches!(result, IndexCommitResult::Discarded(_)) {
+                    rt.counters.discarded += 1;
+                }
+                requests::sync(conn)?;
+                requests::finalize(conn, now_ns)
+            })?;
+            return Ok(Action::Progress);
+        }
         Err(ExtractFailure::Stale) => {
             rt.counters.discarded += 1;
             return Ok(Action::Progress);
@@ -923,7 +990,10 @@ fn budget_step(
         if status.state != CapacityState::Normal {
             return Ok(Budget::Paused(status));
         }
-        if !lease::is_valid(conn, lease, now_ns)? {
+        if SqliteThreadIndex::new(conn)
+            .check_guard(&guard(lease, work), now_ns)?
+            .is_some()
+        {
             return Ok(Budget::Fits);
         }
         SqliteThreadIndex::new(conn).evict_index(&run_id, IndexEvictionReason::LogicalBudget)?;
@@ -985,8 +1055,8 @@ fn commit(
     }
 }
 
-/// Synchronous step shared with the CLI foreground loop: extraction runs
-/// inline because no foreground work shares that process's writer.
+/// Deterministic fixture driver. Production steps dispatch the single extractor.
+#[cfg(test)]
 pub(crate) fn foreground_step(
     env: Env<'_>,
     rt: &mut IndexRuntime,

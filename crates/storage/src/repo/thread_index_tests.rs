@@ -856,7 +856,7 @@ fn note_change_and_clear_advance_source_and_stale_guarded_references() {
             .resolve_guarded_reference(&GuardedReference {
                 version: GUARDED_REFERENCE_VERSION,
                 run_id: "run-a".into(),
-                source_revision: 2,
+                source_revision: bundle(&conn, "run-a").source_revision,
                 source: GuardedSource::WorkingNote { note_seq: seq },
             })
             .unwrap()
@@ -883,8 +883,16 @@ fn note_change_and_clear_advance_source_and_stale_guarded_references() {
             block_index: 0,
         },
     };
-    assert!(matches!(
+    assert_eq!(
         SqliteSnapshotStore::new(&conn).resolve_guarded_reference(&message_ref),
+        Ok(GuardedResolution::StaleReference)
+    );
+    let current_message_ref = GuardedReference {
+        source_revision: second.source_revision,
+        ..message_ref
+    };
+    assert!(matches!(
+        SqliteSnapshotStore::new(&conn).resolve_guarded_reference(&current_message_ref),
         Ok(GuardedResolution::Message {
             ordinal: 0,
             block_index: 0,
@@ -961,14 +969,14 @@ fn discovery_scans_headers_newest_first_and_resumes_after_restart() {
             legacy.source.snapshot_revision,
             legacy.source.context_sha256.as_str()
         ),
-        (0, snapshot_sha256("[]", "[]").as_str())
+        (0, "")
     );
     assert_eq!(
         (
             legacy.source.retention_at_ns,
             legacy.source.provenance_version
         ),
-        (10, Some(PROVENANCE_FORMAT_VERSION))
+        (10, None)
     );
 
     // A legacy snapshot has no sidecar and blocks with a reason, never native.

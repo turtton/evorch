@@ -90,8 +90,6 @@ impl<'c> SqliteThreadIndex<'c> {
                  p.snapshot_sha256, p.format_version \
                  FROM sources s LEFT JOIN run_context_provenance p ON p.run_id = s.run_id \
                  WHERE NOT EXISTS (SELECT 1 FROM thread_index_runs t WHERE t.run_id = s.run_id) \
-                    OR (p.run_id IS NULL AND EXISTS (\
-                        SELECT 1 FROM run_contexts c WHERE c.run_id = s.run_id)) \
                  GROUP BY s.run_id \
                  HAVING ?1 IS NULL OR (MIN(s.at), s.run_id) < (?1, ?2) \
                  ORDER BY MIN(s.at) DESC, s.run_id DESC LIMIT ?3",
@@ -121,24 +119,6 @@ impl<'c> SqliteThreadIndex<'c> {
                 .collect::<Result<Vec<_>, _>>()?;
             for (header, _) in &headers {
                 self.discover_source(header)?;
-                if read_sidecar(conn, &header.target.run_id)?.is_none()
-                    && let Some(bundle) = load_bundle(conn, &header.target.run_id)?
-                    && let Some(sidecar) = bundle.provenance
-                {
-                    write_sidecar(conn, &sidecar)?;
-                    record_source_change(
-                        conn,
-                        &header.target.run_id,
-                        SourceValues {
-                            snapshot_revision: Some(sidecar.snapshot_revision),
-                            sha256: Some(&sidecar.snapshot_sha256),
-                            provenance_version: Some(sidecar.format_version),
-                            updated_at_ns: bundle.record.updated_at_ns,
-                            ..SourceValues::default()
-                        },
-                        None,
-                    )?;
-                }
             }
             let complete = headers.len() < limit;
             // The resume position is the scan key, not the derived retention time.
@@ -201,7 +181,57 @@ impl<'c> SqliteThreadIndex<'c> {
         )?)
     }
 
-    fn check_guard(
+    /// Materializes reader-derived legacy evidence without reading a snapshot
+    /// on the writer. A source change or lease takeover rejects the result.
+    pub(crate) fn commit_legacy_provenance(
+        &mut self,
+        guard: &IndexCommitGuard,
+        sidecar: &SnapshotProvenance,
+        dependencies: &LegacyDependencies,
+        now_ns: i64,
+    ) -> Result<IndexCommitResult, StorageError> {
+        atomic(self.conn, || {
+            if let Some(rejection) = self.check_guard(guard, now_ns)? {
+                return Ok(IndexCommitResult::Discarded(rejection));
+            }
+            if !dependencies.unchanged(self.conn)? {
+                return Ok(IndexCommitResult::Discarded(CommitRejection::SourceChanged));
+            }
+            let revision: Option<u64> = self
+                .conn
+                .query_row(
+                    "SELECT snapshot_revision FROM run_contexts WHERE run_id = ?1",
+                    [&guard.target.run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if revision != Some(0)
+                || sidecar.snapshot_revision != 0
+                || sidecar.run_id != guard.target.run_id
+                || read_sidecar(self.conn, &guard.target.run_id)?.is_some()
+            {
+                return Ok(IndexCommitResult::Discarded(CommitRejection::SourceChanged));
+            }
+            write_sidecar(self.conn, sidecar)?;
+            // Evidence is a source change, not an in-place native promotion.
+            // Its new generation must be re-extracted before indexing.
+            record_source_change(
+                self.conn,
+                &guard.target.run_id,
+                SourceValues {
+                    snapshot_revision: Some(0),
+                    sha256: Some(&sidecar.snapshot_sha256),
+                    provenance_version: Some(sidecar.format_version),
+                    updated_at_ns: now_ns,
+                    ..SourceValues::default()
+                },
+                None,
+            )?;
+            Ok(IndexCommitResult::Committed)
+        })
+    }
+
+    pub(crate) fn check_guard(
         &self,
         guard: &IndexCommitGuard,
         now_ns: i64,

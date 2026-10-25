@@ -1190,3 +1190,214 @@ fn paused_and_disabled_jobs_do_not_wake_and_canonical_writes_continue() {
         "a disabled index never wakes the writer"
     );
 }
+
+#[test]
+fn legacy_proof_supersedes_a_frozen_request_and_a_new_request_completes() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.conn().execute(
+        "INSERT INTO run_contexts VALUES ('legacy','worker','worker',NULL, \
+         '{\"thread_id\":\"legacy\",\"parent_run_id\":null,\"continuity\":{\"inherited_note\":null,\"sources\":[]}}', \
+         '[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"legacy native\"}]}]', \
+         '[]','Done',1,1,0)", [],
+    ).unwrap();
+    fx.conn().execute("INSERT INTO threads(thread_id,root_run_id,created_at_ns,updated_at_ns,source) VALUES('legacy','legacy',1,1,'runtime')",[]).unwrap();
+    fx.conn()
+        .execute(
+            "INSERT INTO thread_runs VALUES('legacy','legacy','legacy',0)",
+            [],
+        )
+        .unwrap();
+    let first = fx
+        .control(S)
+        .submit_request(&all(), &cli(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = first.lease else {
+        panic!("owner")
+    };
+    let IndexStepResult::Idle { .. } = fx.drive(&lease, S) else {
+        panic!("drained")
+    };
+    let ReindexResult::CompletedWithGaps { summary, .. } = terminal(&mut fx, &first.request_id, S)
+    else {
+        panic!("frozen target must not be rebound")
+    };
+    assert_eq!(
+        summary.gaps,
+        vec![RequestGapCount {
+            reason: RequestGapReason::Superseded,
+            count: 1
+        }]
+    );
+    let second = fx
+        .control(2 * S)
+        .submit_request(&all(), &cli(), 2 * S, HOUR)
+        .unwrap();
+    fx.drive(&lease, 2 * S);
+    assert!(
+        matches!(terminal(&mut fx,&second.request_id,2*S), ReindexResult::Completed { summary, .. } if summary.succeeded == 1)
+    );
+    assert!(matches!(
+        terminal(&mut fx, &first.request_id, 2 * S),
+        ReindexResult::CompletedWithGaps { .. }
+    ));
+}
+
+#[test]
+fn disabled_submission_finishes_even_when_another_owner_is_parked() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "disabled source", 1));
+    fx.lease(&gui(), S);
+    fx.control(S)
+        .apply_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &cli(), S, HOUR)
+        .unwrap();
+    assert!(matches!(submitted.lease, LeaseResult::HeldByOther(_)));
+    assert!(
+        matches!(submitted.progress, RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. })
+        if summary.gaps == vec![RequestGapCount { reason:RequestGapReason::IndexDisabled,count:1 }])
+    );
+}
+
+#[test]
+fn capacity_paused_submission_finishes_without_waiting_for_the_owner() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "reserve unavailable", 1));
+    fx.lease(&gui(), S);
+    fx.config.hard_limits.max_db_bytes = MEASURED_POLICY.reserve_bytes();
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &cli(), S, HOUR)
+        .unwrap();
+    assert!(matches!(submitted.progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. })
+        if summary.gaps == vec![RequestGapCount { reason:RequestGapReason::CapacityPaused,count:1 }]));
+}
+
+#[test]
+fn only_the_live_epoch_can_persist_control_failures() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "control failure", 1));
+    let submitted = fx.control(S).submit_request(&all(), &gui(), S, S).unwrap();
+    let LeaseResult::Acquired(old) = submitted.lease else {
+        panic!("owner")
+    };
+    let new = fx.lease(&cli(), 3 * S);
+    super::requests::fail_pending(fx.conn(), &old, 3 * S).unwrap();
+    assert!(matches!(
+        fx.control(3 * S)
+            .request_status(&submitted.request_id, 3 * S)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    super::requests::fail_pending(fx.conn(), &new, 3 * S).unwrap();
+    assert!(matches!(
+        terminal(&mut fx, &submitted.request_id, 3 * S),
+        ReindexResult::Failed {
+            reason: RequestFailure::UnrecoverableControlFailure,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_new_epoch_in_the_same_process_discards_the_previous_extraction() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "old epoch", 1));
+    let LeaseResult::Acquired(old) = fx.control(S).acquire_lease(&gui(), S, S).unwrap() else {
+        panic!("owner")
+    };
+    for _ in 0..10 {
+        fx.control(S).step(&old, S).unwrap();
+        if fx.rt.ready.is_some() {
+            break;
+        }
+    }
+    assert!(fx.rt.ready.is_some());
+    let new = fx.lease(&gui(), 3 * S);
+    assert!(new.epoch > old.epoch);
+    fx.control(3 * S).step(&new, 3 * S).unwrap();
+    assert_eq!(fx.row("run-a").state, "pending");
+    assert_eq!(fx.row("run-a").blocks, 0);
+    assert_eq!(fx.rt.counters.discarded, 1);
+    fx.drive(&new, 3 * S);
+    assert_eq!(fx.row("run-a").state, "indexed");
+}
+
+#[test]
+fn a_changed_target_cannot_evict_older_indexes_before_its_commit_is_rejected() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("old", &"o".repeat(4096), 1));
+    let lease = fx.lease(&gui(), S);
+    fx.drive(&lease, S);
+    fx.rt.settings.max_bytes = fx.charge("old") + 10;
+    fx.save(&verified("new", &"n".repeat(4096), 2));
+    for _ in 0..10 {
+        fx.control(S).step(&lease, S).unwrap();
+        if fx.rt.ready.is_some() {
+            break;
+        }
+    }
+    assert!(fx.rt.ready.is_some());
+    let evictions = fx.rt.counters.evictions;
+    fx.save(&verified("new", "replacement", 3));
+    fx.control(S).step(&lease, S).unwrap();
+    assert_eq!(fx.row("old").state, "indexed");
+    assert_eq!(fx.rt.counters.evictions, evictions);
+    assert_eq!(fx.rt.counters.discarded, 1);
+}
+
+#[test]
+fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
+    let dir = TempDir::new().unwrap();
+    let storage = storage(&dir, HardLimits::default());
+    let handle = storage.handle();
+    handle
+        .save_snapshot_bundle(&verified("run-a", "foreground outside writer", 1))
+        .unwrap();
+    let (sender, receiver) = mpsc::channel();
+    handle
+        .0
+        .send(Command::Index(super::IndexCommand::Observe(sender)))
+        .unwrap();
+    let submitted = handle
+        .submit_thread_index_request(&all(), &cli(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("owner")
+    };
+    // Initial merge is a separate no-op step, then extraction is dispatched.
+    handle.step_thread_index(&lease, S).unwrap();
+    handle.step_thread_index(&lease, S).unwrap();
+    receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+    // The extractor notification is a barrier; no real-clock sleep advances it.
+    assert!(
+        handle
+            .thread_index_job_status()
+            .unwrap()
+            .owner_lease
+            .is_none()
+    );
+    handle
+        .append_indexed_note("other", "canonical writer remains available")
+        .unwrap();
+    for _ in 0..100 {
+        handle.step_thread_index(&lease, S).unwrap();
+        if matches!(
+            handle
+                .thread_index_request_status(&submitted.request_id, S)
+                .unwrap()
+                .progress,
+            RequestProgress::Terminal(ReindexResult::Completed { .. })
+        ) {
+            return;
+        }
+    }
+    panic!("request did not finish");
+}

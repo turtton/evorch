@@ -451,6 +451,29 @@ fn summary(
     })
 }
 
+/// Only the current fenced worker may fail the shared pending requests.
+pub(crate) fn fail_pending(
+    conn: &Connection,
+    held: &crate::thread_index::IndexLease,
+    now_ns: i64,
+) -> Result<(), StorageError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    if lease::is_valid(&transaction, held, now_ns)? {
+        transaction.execute(
+            "UPDATE thread_index_requests SET state = 'failed', failure_reason = ?1, \
+             finished_at_ns = ?2 WHERE state = 'pending'",
+            params![
+                serde_json::to_string(&RequestFailure::UnrecoverableControlFailure)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?,
+                now_ns
+            ],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Shared GUI/CLI status, including whether any owner currently holds the lease.
 pub(crate) fn status(
     conn: &Connection,

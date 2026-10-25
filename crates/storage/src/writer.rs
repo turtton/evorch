@@ -963,7 +963,8 @@ impl StorageHandle {
         now_ns: i64,
     ) -> Result<IndexStepResult, RequestFailure> {
         let lease = lease.clone();
-        self.index_control(|reply| index::IndexCommand::Step(lease, now_ns, reply))
+        let sender = self.0.clone();
+        self.index_control(|reply| index::IndexCommand::Step(lease, now_ns, sender, reply))
     }
 
     /// The shared capacity decision (`capacity_status`) with measured sizes.

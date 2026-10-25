@@ -18,9 +18,10 @@ use rusqlite::{Connection, OpenFlags};
 use secret_guard::SecretRedactor;
 
 use crate::thread_index::{
-    IndexCapacity, IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt,
-    IndexStepResult, LeaseResult, PlannedGrowth, ReindexRequest, RequestFailure, RequestStatus,
-    RequestSubmission, ThreadIndexControl, ThreadIndexSettings,
+    CapacityState, IndexCapacity, IndexCapacityStatus, IndexLease, IndexOwner,
+    IndexSettingsReceipt, IndexStepResult, LeaseResult, PlannedGrowth, ReindexRequest,
+    RequestFailure, RequestGapReason, RequestStatus, RequestSubmission, ThreadIndexControl,
+    ThreadIndexSettings,
 };
 use crate::{StorageConfig, StorageError};
 
@@ -84,6 +85,26 @@ impl ThreadIndexControl for Control<'_> {
             work::discover_all(&transaction, rt, now_ns)?;
             let (request_id, _) = requests::submit_in(&transaction, request, now_ns)?;
             let lease = lease::acquire_in(&transaction, owner, now_ns, lease_duration_ns)?;
+            // A parked owner does not run another step for each request.
+            // Finalize policy gaps at acceptance instead of waiting forever.
+            let status = work::capacity_status(
+                self.env,
+                rt,
+                PlannedGrowth::Bounded {
+                    db: 0,
+                    wal: 0,
+                    shm: 0,
+                },
+            )?;
+            if status.state != CapacityState::Normal {
+                let gap = if !rt.settings.enabled {
+                    RequestGapReason::IndexDisabled
+                } else {
+                    RequestGapReason::CapacityPaused
+                };
+                requests::gap_pending(&transaction, gap)?;
+                requests::finalize(&transaction, now_ns)?;
+            }
             transaction.commit()?;
             Ok::<_, StorageError>((request_id, lease))
         })()
@@ -134,10 +155,23 @@ impl ThreadIndexControl for Control<'_> {
     }
 
     fn step(&mut self, lease: &IndexLease, now_ns: i64) -> Result<IndexStepResult, RequestFailure> {
-        work::foreground_step(self.env, self.rt, lease, now_ns, self.redactor).map_err(|error| {
-            tracing::warn!(error = %error, "thread index step failed");
-            RequestFailure::UnrecoverableControlFailure
-        })
+        // Only in-process fixtures use inline extraction. Production callers
+        // enter IndexCommand::Step and the same extractor as the GUI owner.
+        #[cfg(test)]
+        {
+            work::foreground_step(self.env, self.rt, lease, now_ns, self.redactor).map_err(
+                |error| {
+                    tracing::warn!(error = %error, "thread index step failed");
+                    let _ = requests::fail_pending(self.env.conn, lease, now_ns);
+                    RequestFailure::UnrecoverableControlFailure
+                },
+            )
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (lease, now_ns, self.redactor);
+            unreachable!("production steps must use the shared extractor")
+        }
     }
 }
 
@@ -192,7 +226,12 @@ pub(super) enum IndexCommand {
     Acquire(IndexOwner, i64, i64, ControlReply<LeaseResult>),
     Heartbeat(IndexLease, i64, i64, ControlReply<LeaseResult>),
     Release(IndexLease, ControlReply<()>),
-    Step(IndexLease, i64, ControlReply<IndexStepResult>),
+    Step(
+        IndexLease,
+        i64,
+        SyncSender<super::Command>,
+        ControlReply<IndexStepResult>,
+    ),
     Capacity(Reply<IndexCapacityStatus>),
     ApplySettings(ThreadIndexSettings, Reply<IndexSettingsReceipt>),
     JobStatus(Reply<ThreadIndexJobStatus>),
@@ -374,22 +413,26 @@ impl IndexJob {
         }
     }
 
-    fn dispatch(&mut self, config: &StorageConfig, work: work::Work) {
-        let Some(owner) = self.owner.as_ref() else {
-            return;
-        };
+    fn dispatch(
+        &mut self,
+        config: &StorageConfig,
+        work: work::Work,
+        sender: SyncSender<super::Command>,
+    ) {
         if self.extractor.is_none() {
-            self.extractor = spawn_extractor(&config.db_path, owner.sender.clone());
+            self.extractor = spawn_extractor(&config.db_path, sender);
         }
-        match self
-            .extractor
-            .as_ref()
-            .map(|extractor| extractor.jobs.send(work).is_ok())
-        {
-            Some(true) => self.in_flight = true,
-            _ => {
+        match self.extractor.as_ref() {
+            Some(extractor) => match extractor.jobs.send(work) {
+                Ok(()) => self.in_flight = true,
+                Err(error) => {
+                    self.rt.ready = Some((error.0, Err(work::ExtractFailure::Transient)));
+                    self.extractor = None;
+                }
+            },
+            None => {
                 tracing::warn!("thread index extractor unavailable");
-                self.extractor = None;
+                self.rt.ready = Some((work, Err(work::ExtractFailure::Transient)));
             }
         }
     }
@@ -460,7 +503,11 @@ pub(super) fn run_due(
     let env = env(conn, config, source_suspended);
     let now_ns = now_ns();
     match work::prepare(env, &mut job.rt, &lease, now_ns) {
-        Ok(work::Action::Extract(work)) => job.dispatch(config, work),
+        Ok(work::Action::Extract(work)) => {
+            if let Some(owner) = job.owner.as_ref() {
+                job.dispatch(config, work, owner.sender.clone());
+            }
+        }
         Ok(work::Action::Idle { next_wake_at_ns }) => {
             job.maybe_work = false;
             job.retry_wake = next_wake_at_ns.map(|at| {
@@ -477,6 +524,9 @@ pub(super) fn run_due(
         Ok(work::Action::Paused(_) | work::Action::Progress) => {}
         Err(error) => {
             tracing::warn!(error = %error, "thread index step failed");
+            if let Err(error) = requests::fail_pending(conn, &lease, now_ns) {
+                tracing::warn!(error = %error, "thread index failure could not be persisted");
+            }
             job.maybe_work = false;
         }
     }
@@ -566,8 +616,40 @@ pub(super) fn handle(
         IndexCommand::Release(lease, reply) => {
             let _ = reply.send(control.release_lease(&lease));
         }
-        IndexCommand::Step(lease, now_ns, reply) => {
-            let _ = reply.send(control.step(&lease, now_ns));
+        IndexCommand::Step(lease, now_ns, sender, reply) => {
+            // No snapshot read or extraction may occupy the writer, including
+            // a CLI's foreground loop. Only one extraction can be outstanding.
+            let result = (|| {
+                if !lease::is_valid(conn, &lease, now_ns)? {
+                    return Ok(IndexStepResult::LeaseLost);
+                }
+                if job.in_flight {
+                    return Ok(IndexStepResult::Idle {
+                        next_wake_at_ns: Some(now_ns.saturating_add(50_000_000)),
+                    });
+                }
+                let action = work::prepare(env, &mut job.rt, &lease, now_ns)?;
+                Ok(match action {
+                    work::Action::Extract(work) => {
+                        job.dispatch(config, work, sender);
+                        IndexStepResult::Progress
+                    }
+                    work::Action::Progress => IndexStepResult::Progress,
+                    work::Action::Idle { next_wake_at_ns } => {
+                        IndexStepResult::Idle { next_wake_at_ns }
+                    }
+                    work::Action::Paused(status) => IndexStepResult::Paused(status),
+                    work::Action::LeaseLost => IndexStepResult::LeaseLost,
+                })
+            })()
+            .map_err(|error: StorageError| {
+                tracing::warn!(error = %error, "thread index step failed");
+                if let Err(error) = requests::fail_pending(conn, &lease, now_ns) {
+                    tracing::warn!(error = %error, "thread index failure could not be persisted");
+                }
+                RequestFailure::UnrecoverableControlFailure
+            });
+            let _ = reply.send(result);
         }
         IndexCommand::Capacity(reply) => {
             let _ = reply.send(control.capacity_status(PlannedGrowth::Bounded {
@@ -586,6 +668,7 @@ pub(super) fn handle(
         IndexCommand::Extracted(extracted) => {
             job.in_flight = false;
             job.rt.ready = Some(*extracted);
+            notify_observer(job);
         }
         #[cfg(test)]
         IndexCommand::Block(release) => {

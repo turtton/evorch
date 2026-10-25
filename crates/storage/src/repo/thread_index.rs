@@ -20,9 +20,11 @@ use crate::thread_index::{
 use crate::threads::ThreadRunRow;
 
 // Until the writer job drives the index (ADR 0041 順序5), only tests call it.
+mod dependencies;
 #[allow(dead_code)]
 mod index;
 use crate::{RunContextReceipt, RunContextRecord, RunLedgerEntry, StorageError};
+pub(crate) use dependencies::LegacyDependencies;
 #[allow(unused_imports)]
 pub(crate) use index::{DiscoveryBatch, MAX_ATTEMPTS, SqliteThreadIndex, retry_delay_ns};
 
@@ -736,6 +738,9 @@ fn resolve(
             .is_some_and(|row| row.state == IndexState::Deleted || !row.source_present)
         {
             return Ok(GuardedResolution::SourceDeleted);
+        }
+        if current_source_revision(conn, &reference.run_id)? != reference.source_revision {
+            return Ok(GuardedResolution::StaleReference);
         }
         match reference.source {
             GuardedSource::Message {

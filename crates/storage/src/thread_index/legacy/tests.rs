@@ -118,7 +118,7 @@ fn validated_raw_fork_boundary_excludes_prefix_without_renumbering_or_text_match
 }
 
 #[test]
-fn discovery_commits_proof_once_with_source_revision_and_survives_restart() {
+fn guarded_reader_proof_commits_once_with_source_revision_and_survives_restart() {
     use crate::thread_index::ThreadIndexRepository;
     let dir = tempfile::tempdir().unwrap();
     let config = crate::StorageConfig {
@@ -133,7 +133,7 @@ fn discovery_commits_proof_once_with_source_revision_and_survives_restart() {
     );
     let original = db.snapshot_bundle("run-1").unwrap().unwrap();
     assert!(matches!(
-        original.provenance.unwrap().status,
+        original.provenance.as_ref().unwrap().status,
         ProvenanceStatus::Verified { .. }
     ));
     assert_eq!(
@@ -145,6 +145,27 @@ fn discovery_commits_proof_once_with_source_revision_and_survives_restart() {
     );
     let mut index = crate::repo::thread_index::SqliteThreadIndex::new(&db.conn);
     index.discover_batch(20, 10).unwrap();
+    assert_eq!(
+        index
+            .index_run_status("run-1")
+            .unwrap()
+            .unwrap()
+            .source
+            .target
+            .source_revision,
+        0
+    );
+    let guard = legacy_guard(&db.conn, "run-1", 1);
+    let sidecar = original.provenance.unwrap();
+    let dependencies = crate::repo::thread_index::LegacyDependencies::capture(&db.conn, "run-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        index
+            .commit_legacy_provenance(&guard, &sidecar, &dependencies, 10)
+            .unwrap(),
+        IndexCommitResult::Committed
+    );
     let revision = index
         .index_run_status("run-1")
         .unwrap()
@@ -153,6 +174,12 @@ fn discovery_commits_proof_once_with_source_revision_and_survives_restart() {
         .target
         .source_revision;
     assert!(revision > 0);
+    assert_eq!(
+        index
+            .commit_legacy_provenance(&guard, &sidecar, &dependencies, 10)
+            .unwrap(),
+        IndexCommitResult::Discarded(CommitRejection::SourceChanged)
+    );
     index.discover_batch(20, 20).unwrap();
     assert_eq!(
         index
@@ -172,7 +199,7 @@ fn discovery_commits_proof_once_with_source_revision_and_survives_restart() {
 }
 
 #[test]
-fn discovery_repairs_an_already_blocked_missing_sidecar_run() {
+fn explicit_reindex_repairs_an_already_blocked_missing_sidecar_run() {
     use crate::thread_index::ThreadIndexRepository;
     let db = crate::Database::open_in_memory().unwrap();
     let record = seed(
@@ -198,11 +225,196 @@ fn discovery_repairs_an_already_blocked_missing_sidecar_run() {
             source_present: true,
         })
         .unwrap();
-    db.conn.execute("UPDATE thread_index_runs SET state='blocked',blocked_reason='provenance_unknown' WHERE run_id='run-1'", []).unwrap();
+    let blocked = IndexBlockedReason::Extraction(ExtractionError::ProvenanceUnknown(
+        ProvenanceUnknownReason::LegacyUnproven,
+    ));
+    db.conn
+        .execute(
+            "UPDATE thread_index_runs SET state='blocked',blocked_reason=?1 WHERE run_id='run-1'",
+            [serde_json::to_string(&blocked).unwrap()],
+        )
+        .unwrap();
     index.discover_batch(20, 20).unwrap();
+    assert_eq!(
+        index.index_run_status("run-1").unwrap().unwrap().state,
+        IndexState::Blocked
+    );
+    db.conn.execute("UPDATE thread_index_runs SET state='pending',blocked_reason=NULL,work_generation=work_generation+1 WHERE run_id='run-1'", []).unwrap();
+    let sidecar = db
+        .snapshot_bundle("run-1")
+        .unwrap()
+        .unwrap()
+        .provenance
+        .unwrap();
+    let guard = legacy_guard(&db.conn, "run-1", 1);
+    let dependencies = crate::repo::thread_index::LegacyDependencies::capture(&db.conn, "run-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        index
+            .commit_legacy_provenance(&guard, &sidecar, &dependencies, 20)
+            .unwrap(),
+        IndexCommitResult::Committed
+    );
     let status = index.index_run_status("run-1").unwrap().unwrap();
     assert_eq!(status.state, IndexState::Pending);
     assert!(status.source.target.source_revision > 0);
+}
+
+fn legacy_guard(conn: &Connection, run: &str, epoch: u64) -> IndexCommitGuard {
+    use crate::thread_index::ThreadIndexRepository;
+    conn.execute("UPDATE thread_index_lease SET owner_id='test',owner_kind='cli',epoch=?1,expires_at_ns=1000 WHERE id=1", [epoch]).unwrap();
+    let row = crate::repo::thread_index::SqliteThreadIndex::new(conn)
+        .index_run_status(run)
+        .unwrap()
+        .unwrap();
+    IndexCommitGuard {
+        lease: IndexLease {
+            owner: IndexOwner {
+                id: "test".into(),
+                kind: IndexOwnerKind::Cli,
+            },
+            epoch,
+            expires_at_ns: 1000,
+        },
+        target: row.source.target,
+        work_generation: row.work_generation,
+        expected_state: IndexState::Pending,
+        source_present: true,
+        request: None,
+    }
+}
+
+#[test]
+fn reader_proof_cannot_overwrite_a_new_snapshot_or_a_new_lease() {
+    for changed_snapshot in [false, true] {
+        let db = crate::Database::open_in_memory().unwrap();
+        let record = seed(
+            &db.conn,
+            "run-1",
+            Some(json!({"inherited_note":null,"sources":[]})),
+        );
+        let mut index = crate::repo::thread_index::SqliteThreadIndex::new(&db.conn);
+        index.discover_batch(20, 10).unwrap();
+        let guard = legacy_guard(&db.conn, "run-1", 1);
+        let proof = db
+            .snapshot_bundle("run-1")
+            .unwrap()
+            .unwrap()
+            .provenance
+            .unwrap();
+        let dependencies =
+            crate::repo::thread_index::LegacyDependencies::capture(&db.conn, "run-1")
+                .unwrap()
+                .unwrap();
+        let expected = if changed_snapshot {
+            crate::repo::run_context::upsert(&db.conn, &record).unwrap();
+            CommitRejection::SourceChanged
+        } else {
+            legacy_guard(&db.conn, "run-1", 2);
+            CommitRejection::LeaseLost
+        };
+        assert_eq!(
+            index
+                .commit_legacy_provenance(&guard, &proof, &dependencies, 20)
+                .unwrap(),
+            IndexCommitResult::Discarded(expected)
+        );
+        if changed_snapshot {
+            assert!(matches!(
+                db.snapshot_bundle("run-1")
+                    .unwrap()
+                    .unwrap()
+                    .provenance
+                    .unwrap()
+                    .status,
+                ProvenanceStatus::Unknown { .. }
+            ));
+        } else {
+            assert_eq!(
+                db.conn
+                    .query_row("SELECT count(*) FROM run_context_provenance", [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn reader_proof_rejects_changed_binding_and_fork_source_headers() {
+    use crate::thread_index::ThreadIndexRepository;
+    for change in [
+        "UPDATE thread_runs SET depth=1 WHERE run_id='run-1'",
+        "UPDATE threads SET fork_point_context_len=4 WHERE thread_id='run-1'",
+        "UPDATE run_contexts SET snapshot_revision=1 WHERE run_id='source'",
+        "INSERT INTO review_lineage_edges(child_run_id,parent_run_id,created_at_ns) VALUES('run-1','source',10)",
+    ] {
+        let db = crate::Database::open_in_memory().unwrap();
+        seed(
+            &db.conn,
+            "source",
+            Some(json!({"inherited_note":null,"sources":[]})),
+        );
+        seed(
+            &db.conn,
+            "run-1",
+            Some(json!({"inherited_note":null,"sources":[]})),
+        );
+        db.conn.execute("UPDATE threads SET fork_point_run_id='source',fork_point_context_len=2,lineage_kind='fork' WHERE thread_id='run-1'",[]).unwrap();
+        let mut index = crate::repo::thread_index::SqliteThreadIndex::new(&db.conn);
+        index.discover_batch(20, 10).unwrap();
+        let guard = legacy_guard(&db.conn, "run-1", 1);
+        let proof = db
+            .snapshot_bundle("run-1")
+            .unwrap()
+            .unwrap()
+            .provenance
+            .unwrap();
+        let dependencies =
+            crate::repo::thread_index::LegacyDependencies::capture(&db.conn, "run-1")
+                .unwrap()
+                .unwrap();
+        db.conn.execute(change, []).unwrap();
+        assert_eq!(
+            index
+                .commit_legacy_provenance(&guard, &proof, &dependencies, 20)
+                .unwrap(),
+            IndexCommitResult::Discarded(CommitRejection::SourceChanged)
+        );
+        assert_eq!(
+            index
+                .index_run_status("run-1")
+                .unwrap()
+                .unwrap()
+                .source
+                .target
+                .source_revision,
+            0
+        );
+    }
+}
+
+#[test]
+fn legacy_dependency_cycles_cannot_materialize_a_proof() {
+    let db = crate::Database::open_in_memory().unwrap();
+    seed(
+        &db.conn,
+        "run-1",
+        Some(json!({"inherited_note":null,"sources":[]})),
+    );
+    db.conn
+        .execute(
+            "UPDATE run_contexts SET parent_run_id='run-1' WHERE run_id='run-1'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        crate::repo::thread_index::LegacyDependencies::capture(&db.conn, "run-1")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
