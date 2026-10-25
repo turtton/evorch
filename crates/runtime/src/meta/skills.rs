@@ -40,7 +40,7 @@ fn skill_load_with_registry(
         return error("skill registry is not configured");
     };
     let Some(entry) = registry.get(&args.name) else {
-        return error(format!("unknown skill: {}", args.name));
+        return error(registry.unknown_skill_message(&args.name));
     };
     let loaded = match &args.resource {
         Some(reference) => entry
@@ -153,6 +153,36 @@ mod tests {
             "unknown skill 識別子が欠落: {}",
             dispatch.result.content
         );
+    }
+
+    // Given: repo-agents に withheld を持ち、未信頼として記録したプロジェクトのレジストリ
+    // When:  withheld と未登録名 nope で skill_load を呼ぶ
+    // Then:  withheld は信頼設定の案内、nope は従来どおり unknown skill の error になる
+    #[test]
+    fn skill_load_explains_skill_withheld_from_untrusted_project() {
+        let (registry, _root) = demo_registry();
+        let project = tempdir().unwrap();
+        let withheld_dir = project.path().join(".agents/skills/withheld");
+        fs::create_dir_all(&withheld_dir).unwrap();
+        fs::write(withheld_dir.join("SKILL.md"), "WITHHELD BODY\n").unwrap();
+        let mut registry = SkillRegistry::clone(&registry);
+        registry.withhold_untrusted_project(project.path().to_path_buf());
+        let registry = Arc::new(registry);
+
+        let withheld = skill_load_with_registry(Some(&registry), json!({ "name": "withheld" }));
+        let unknown = skill_load_with_registry(Some(&registry), json!({ "name": "nope" }));
+
+        assert!(withheld.result.is_error);
+        assert!(
+            withheld.result.content.contains(
+                "skill 'withheld' exists in the project's .agents/skills but project skills are disabled because the project is not trusted"
+            ),
+            "信頼設定の案内が欠落: {}",
+            withheld.result.content
+        );
+        assert!(!withheld.result.content.contains("WITHHELD BODY"));
+        assert!(unknown.result.is_error);
+        assert_eq!(unknown.result.content, "unknown skill: nope");
     }
 
     // Given: レジストリ未接続の state
