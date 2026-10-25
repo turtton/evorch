@@ -37,6 +37,7 @@ fn context(run_id: &str, parent: Option<&str>, messages: &str) -> RunContextReco
         terminal_phase: "Error".into(),
         restorable: false,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

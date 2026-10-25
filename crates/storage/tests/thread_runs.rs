@@ -27,6 +27,7 @@ fn context(run_id: &str, parent_run_id: Option<&str>) -> RunContextRecord {
         terminal_phase: "Done".into(),
         restorable: false,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

@@ -218,6 +218,23 @@ impl Database {
         run_context::get(&self.conn, run_id)
     }
 
+    /// Delivery receipts for the given prompt IDs, in request order; IDs
+    /// without a receipt are skipped.
+    pub fn host_input_receipts(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        crate::repo::host_input_receipt::for_ids(&self.conn, prompt_ids)
+    }
+
+    /// One run's delivery receipts, oldest first.
+    pub fn host_input_receipts_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        crate::repo::host_input_receipt::for_run(&self.conn, run_id)
+    }
+
     /// Read one consistent, bounded snapshot of a root and its persisted descendants.
     /// Limits fail closed rather than silently omitting potential evidence.
     pub fn learning_source_contexts(

@@ -95,6 +95,7 @@ fn persist_unfinished_call(storage: &storage::Storage, record: Record) {
             terminal_phase: "Checkpoint".into(),
             restorable: true,
             updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
         })
         .unwrap();
 }

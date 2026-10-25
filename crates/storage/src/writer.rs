@@ -75,8 +75,27 @@ enum Command {
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
         Option<String>,
+        crate::HostInputWrite,
+        ReplyTx<Vec<crate::HostInputTransition>>,
+    ),
+    UpsertRunContextWithReceipts(
+        crate::RunContextRecord,
+        crate::HostInputWrite,
+        ReplyTx<(crate::RunContextReceipt, Vec<crate::HostInputTransition>)>,
+    ),
+    AppendHostInputAccepted(
+        Vec<crate::ReviewEvidenceRow>,
+        Option<String>,
+        crate::HostInputReceipt,
         ReplyTx,
     ),
+    TransitionHostInputs(
+        Vec<crate::HostInputTransition>,
+        ReplyTx<Vec<crate::HostInputTransition>>,
+    ),
+    UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
+    HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
+    HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
@@ -411,15 +430,125 @@ impl StorageHandle {
         edges: &[crate::LineageEdge],
         consumed_reference_id: Option<&str>,
     ) -> Result<(), StorageError> {
+        self.upsert_run_context_with_evidence_and_host_inputs(
+            record,
+            rows,
+            edges,
+            consumed_reference_id,
+            &crate::HostInputWrite::default(),
+        )
+        .map(drop)
+    }
+
+    /// [`Self::upsert_run_context_with_evidence_and_reference_consumption`] that
+    /// also applies receipt changes, returning the transitions that took effect.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, invalid snapshots, evidence or
+    /// receipts, a duplicate prompt ID, suspended writes or persistence failure.
+    pub fn upsert_run_context_with_evidence_and_host_inputs(
+        &self,
+        record: &crate::RunContextRecord,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<Vec<crate::HostInputTransition>, StorageError> {
         self.request(|reply| {
             Command::UpsertRunContextWithEvidence(
                 record.clone(),
                 rows.to_vec(),
                 edges.to_vec(),
                 consumed_reference_id.map(String::from),
+                host_inputs.clone(),
                 reply,
             )
         })
+    }
+
+    /// Replace a snapshot and apply receipt changes in one transaction.
+    /// Returns the snapshot identity and the transitions that took effect.
+    ///
+    /// # Errors
+    /// Rejects invalid snapshots or receipts, suspended writes, SQLite failure
+    /// or a closed writer; nothing is written then.
+    pub fn upsert_run_context_with_receipts(
+        &self,
+        record: &crate::RunContextRecord,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<(crate::RunContextReceipt, Vec<crate::HostInputTransition>), StorageError> {
+        self.request(|reply| {
+            Command::UpsertRunContextWithReceipts(record.clone(), host_inputs.clone(), reply)
+        })
+    }
+
+    /// Record that the runtime accepted a host submission: its evidence, the
+    /// approval it consumes and its `Accepted` receipt commit together.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, oversized or secret-bearing
+    /// text, a duplicate prompt ID, suspended writes or persistence failure.
+    pub fn append_host_input_accepted(
+        &self,
+        rows: &[crate::ReviewEvidenceRow],
+        consumed_reference_id: Option<&str>,
+        receipt: &crate::HostInputReceipt,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AppendHostInputAccepted(
+                rows.to_vec(),
+                consumed_reference_id.map(String::from),
+                receipt.clone(),
+                reply,
+            )
+        })
+    }
+
+    /// Move `Accepted` receipts to a final state without a snapshot; returns
+    /// the transitions that took effect.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn transition_host_inputs(
+        &self,
+        transitions: &[crate::HostInputTransition],
+    ) -> Result<Vec<crate::HostInputTransition>, StorageError> {
+        self.request(|reply| Command::TransitionHostInputs(transitions.to_vec(), reply))
+    }
+
+    /// Mark every `Accepted` receipt of a run that can no longer read it as
+    /// `Unknown`; returns the changed prompt IDs.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn mark_host_inputs_unknown(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.request(|reply| Command::UpdateHostInputReceipts(run_id.into(), reason.into(), reply))
+    }
+
+    /// Receipts for the given prompt IDs after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_input_receipts(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        self.request(|reply| Command::HostInputReceipts(prompt_ids.to_vec(), reply))
+    }
+
+    /// One run's receipts, oldest first, after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_input_receipts_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        self.request(|reply| Command::HostInputReceiptsForRun(run_id.into(), reply))
     }
 
     /// Change restore bookkeeping only if the exact reserved descriptor still owns it.

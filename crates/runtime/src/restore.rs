@@ -534,6 +534,7 @@ fn write_snapshot_with_context(
         terminal_phase: terminal_phase.to_string(),
         restorable: descriptor.restorable,
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
+        host_inputs_json: "[]".into(),
     };
     let receipt = store.handle.upsert_run_context_receipt(&record)?;
     Ok(crate::ownership::SnapshotReference::RunContext { receipt })

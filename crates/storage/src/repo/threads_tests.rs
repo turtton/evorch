@@ -37,7 +37,9 @@ fn context(
     at: i64,
 ) {
     conn.execute(
-        "INSERT INTO run_contexts VALUES (?1, 'worker', ?2, ?3, ?4, '[]', '[]', 'Done', 1, ?5)",
+        "INSERT INTO run_contexts (run_id, role, name, parent_run_id, config_json, messages_json, \
+         checkpoints_json, terminal_phase, restorable, updated_at_ns) \
+         VALUES (?1, 'worker', ?2, ?3, ?4, '[]', '[]', 'Done', 1, ?5)",
         params![run_id, name, parent, config, at],
     )
     .unwrap();
@@ -148,7 +150,7 @@ fn v23_database_migrates_backfills_and_opens_read_only() {
     let database = Database::open_read_only(&path).unwrap();
 
     // Then: runs are bound by name, thread start, GUI attribution and parent links.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 24);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 25);
     assert_eq!(
         bindings(&database.conn),
         [
@@ -268,6 +270,7 @@ fn saving_a_context_binds_explicit_named_and_inherited_threads() {
                 terminal_phase: "Running".into(),
                 restorable: true,
                 updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
             },
         )
         .unwrap();

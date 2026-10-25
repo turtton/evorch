@@ -14,6 +14,7 @@ fn context() -> RunContextRecord {
         ]).to_string(),
         checkpoints_json: json!([{"id":"checkpoint-1", "range":[0,3], "summary":{"role":"user","content":[{"type":"text","text":SECRET}]}}]).to_string(),
         terminal_phase: "Checkpoint".into(), restorable: true, updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

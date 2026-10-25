@@ -32,6 +32,7 @@ fn context(run_id: &str, role: &str, name: &str, phase: &str) -> RunContextRecor
         terminal_phase: phase.into(),
         restorable: false,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

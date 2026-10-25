@@ -8,6 +8,7 @@ pub(crate) mod assistant_reference;
 pub mod catalog;
 pub(crate) mod eval_sample;
 pub mod event;
+pub(crate) mod host_input_receipt;
 pub(crate) mod memory;
 pub mod message;
 pub mod metrics;

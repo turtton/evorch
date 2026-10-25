@@ -337,6 +337,7 @@ fn quiesce_during_snapshot_preparation_waits_for_reference_commit_before_handoff
                 terminal_phase: "Done".into(),
                 restorable: false,
                 updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
             })
             .unwrap()
     });
@@ -420,6 +421,7 @@ fn delayed_old_generation_snapshot_can_replace_history_but_cannot_commit_authori
         terminal_phase: "Checkpoint".into(),
         restorable: false,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     };
     // The old process passed preflight and wrote history, then paused before
     // committing the reference. No read guard spans events DB I/O.
