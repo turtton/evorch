@@ -249,9 +249,11 @@ replace the 100-drain E2E cells.
 plain `--diagnose` retains the ASCII default. Unknown classes fail closed.
 Phrase filters keep the entire phrase as one literal, as production does;
 word queries split terms, and regex candidate replay uses the unfiltered route.
-The supplementary plan reproduces the current scoped storage SQL only for a
-single trigram alternative, Text kind, first replay batch, `after=None` and
-limit 200; it records no bound values and is not an internal production trace.
+The earlier supplementary plan reproduced the scoped storage SQL for a single
+trigram alternative, Text kind, first replay batch, `after=None` and limit 200.
+After the production SQL changed again, the harness stopped emitting that stale
+plan and explicitly reports it unavailable. Old plan artifacts remain historical
+evidence only; they are not the current production plan.
 
 The extended diagnostic also captures each real page's returned thread/hit
 counts, index coverage, partial/cursor flags and bounded output size. It keeps
@@ -326,3 +328,38 @@ continuation replay inferred the start from a last hit and was not exact;
 only its first-window SQL comparison is used as evidence. A subsequent
 algorithm change needs separate production ownership and fresh measurements;
 global FTS evaluation before authorization scope is not an acceptable shortcut.
+
+After the separate scoped-`LIKE`-before-rowid-FTS change (`c2cbcc8`), a fresh
+binary manifest repeated only the same 100-drain warm/off phrase cell. The
+complete 8-thread / 10-hit canonical map still matched on all 200 pages, but
+all-page p95 was **505.560 ms — still FAIL** (first page 507.723 ms, full drain
+528.407 ms, maximum page 551.295 ms). There were zero partial pages, a maximum
+output of 8,276 bytes, zero index steps/commits and normal capacity. IO PSI
+`some avg10` was 81.85% → 80.39%, `full avg10` 80.26% → 78.00%; WAL ended at
+4,157,112 bytes. The new manifest has **one failing cell and 27 missing**;
+old-binary passing cells are historical evidence, not reusable acceptance data.
+The diagnostic EXPLAIN reproduces the earlier SQL shape and must not be
+interpreted as the new production plan.
+
+A subsequent supplementary phrase diagnostic explicitly omitted that stale
+plan. Real first-page dispatch was 510.363 ms. The same first-window public
+candidate replay took 431.178 ms for filtered SQL versus 20.001 ms for the
+unfiltered SQL; both yielded the same four matching conversation candidates.
+The unfiltered window contained 3,302 rows / 7.086 MB:
+
+| Prefilter classification | Rows | Bytes |
+| --- | ---: | ---: |
+| NUL-free ASCII, rejected by substring condition | 1251 | 172057 |
+| Non-ASCII, necessarily passed through | 2051 | 6913576 |
+
+Thus 62.1% of rows / 97.6% of bytes bypassed the ASCII-only prefilter.
+Read-only, rowid-constrained FTS probes were limited to the first 16 distinct
+**already authorized/scoped** rows per category: median probe times were
+197 µs (ASCII rejection) and 198 µs (non-ASCII), all without a match. This
+supports accumulated per-row probe cost as the remaining dominant SQL expense;
+it does not prove global-posting-size causality. Probe timings are supplemental,
+not a production trace or acceptance percentile. Header reads took 60.084 ms;
+filtered redaction/matching took only 23 / 7 µs.
+The corrected observed-cursor replay's second window contained 89 threads /
+325 run slots, agreeing with real coverage, instead of the old last-hit
+estimate of 477 slots.

@@ -102,7 +102,30 @@ pub fn candidates(
     let kinds = case.diagnostic_kinds();
     let mut scans = Vec::new();
     let mut calls = Vec::new();
-    let mut plan = None;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut probe_samples = BTreeMap::<String, Vec<u64>>::new();
+    let mut probe_hits = BTreeMap::<String, usize>::new();
+    let mut probe_seen = std::collections::BTreeSet::new();
+    let mut fts_expression = None;
+    if let ConversationFilter::Literals(alternatives) = case.literal_filter()
+        && let [terms] = alternatives.as_slice()
+    {
+        let phrases = terms
+            .iter()
+            .map(|term| match term_route(term) {
+                storage::thread_search::TermRoute::Trigram(variants) => Some(format!(
+                    "({})",
+                    variants
+                        .iter()
+                        .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                )),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        fts_expression = phrases.map(|phrases| phrases.join(" AND "));
+    }
     for (label, filter) in [("literal", filter), ("full_scan", ConversationFilter::All)] {
         let mut seen = std::collections::BTreeSet::new();
         for (page, token) in actual.page_cursors.iter().enumerate() {
@@ -171,10 +194,8 @@ pub fn candidates(
                 mut duplicate,
             ) = (0, 0, 0, 0, 0, 0, 0);
             let mut statements = 0;
+            let mut categories = BTreeMap::<String, (usize, usize)>::new();
             for (batch_number, batch) in slots.chunks(MAX_SEARCH_BATCH_RUNS).enumerate() {
-                if label == "literal" && plan.is_none() {
-                    plan = Some(explain(path, batch, &filter)?);
-                }
                 let mut after = resume.filter(|_| batch_number == 0).map(|resume| {
                     storage::thread_search::CandidatePosition {
                         seq: 0,
@@ -203,6 +224,31 @@ pub fn candidates(
                     for candidate in &candidates {
                         rows += 1;
                         bytes += candidate.text.len();
+                        let category = prefilter_category(&candidate.text, &case.literal_filter());
+                        let counts = categories.entry(category.to_owned()).or_default();
+                        counts.0 += 1;
+                        counts.1 += candidate.text.len();
+                        // Probe only candidates already read from the settled visible/current
+                        // scope. Never evaluate global FTS before the authorization boundary.
+                        if label == "full_scan"
+                            && let Some(expression) = &fts_expression
+                            && probe_samples.get(category).map_or(0, Vec::len) < 16
+                            && probe_seen.insert(candidate.position.block_id)
+                        {
+                            let start = Instant::now();
+                            let found: bool = conn.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM conversation_fts \
+                                WHERE rowid=?1 AND conversation_fts MATCH ?2)",
+                                rusqlite::params![candidate.position.block_id, expression],
+                                |row| row.get(0),
+                            )?;
+                            probe_samples
+                                .entry(category.to_owned())
+                                .or_default()
+                                .push(start.elapsed().as_micros() as u64);
+                            *probe_hits.entry(category.to_owned()).or_default() +=
+                                usize::from(found);
+                        }
                         let identity = super::corpus::hash(
                             format!("{}:{}", candidate.run_id, candidate.position.block_id)
                                 .as_bytes(),
@@ -226,6 +272,7 @@ pub fn candidates(
             scans.push(json!({"label":label,"actual_route":route,"page":page,
                 "threads_preloaded":selected_threads.len(),"resumed_thread":resume.is_some(),"slots":slots.len(),"members_headers_us":members_us,
                 "statements":statements,"rows":rows,"bytes":bytes,"hits":hits,
+                "text_categories":categories,
                 "duplicate_candidates_prior_pages":duplicate,"sql_us":sql_us,
                 "redact_us":redact_us,"matcher_us":matcher_us}));
         }
@@ -233,7 +280,12 @@ pub fn candidates(
     Ok(
         json!({"stage":"diagnostic_candidates","not_acceptance_measurement":true,
         "class":case.class,"query_sha256":case.hash(),"actual_route":route,
-        "term_count":term_routes.len(),"term_routes":term_routes,"plan":plan,"samples":scans,"calls":calls,
+        "term_count":term_routes.len(),"term_routes":term_routes,
+        "plan":{"available":false,"reason":"stored_diagnostic_sql_shape_precedes_c2cbcc8_not_current_plan"},
+        "scoped_rowid_fts_probes":probe_samples.iter().map(|(category,times)|json!({
+            "category":category,"timing":super::timing(times),"matching_rows":probe_hits[category],
+            "limits":"first at most16 unique already-scoped candidate rowids per category; independent read-only connection, not production call trace"})).collect::<Vec<_>>(),
+        "samples":scans,"calls":calls,
         "limits":"public API replay from observed actual cursor payload (signature not checked here; production validated it), same 100-thread preload plus optional resumed thread, not internal call trace; no hit-limit/byte-fit early stop, candidate counts are overfetch upper bounds, not latency bounds; production matcher private, same RegexBuilder flags/limits reproduced, not reused"}),
     )
 }
@@ -264,75 +316,61 @@ fn observed_position(token: &str) -> Result<ObservedPosition> {
     Ok(serde_json::from_value(value)?)
 }
 
-/// Plan details contain SQL identifiers, never bound query/source text.
-fn explain(
-    path: &Path,
-    runs: &[String],
+fn prefilter_category(
+    text: &str,
     filter: &storage::thread_search::ConversationFilter,
-) -> Result<Value> {
-    use rusqlite::{params_from_iter, types::Value as SqlValue};
+) -> &'static str {
     use storage::thread_search::{ConversationFilter, TermRoute, term_route};
-    let ConversationFilter::Literals(alternatives) = filter else {
-        return Ok(json!({"available":false,"reason":"nonliteral_route"}));
-    };
-    let [terms] = alternatives.as_slice() else {
-        return Ok(json!({"available":false,"reason":"multiple_alternatives"}));
-    };
-    let mut params = Vec::<SqlValue>::new();
-    let scope = runs
-        .iter()
-        .enumerate()
-        .map(|(seq, run)| {
-            params.extend([SqlValue::Text(run.clone()), SqlValue::Integer(seq as i64)]);
-            "(?, ?)"
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut phrases = Vec::new();
-    for term in terms {
-        let TermRoute::Trigram(variants) = term_route(term) else {
-            return Ok(json!({"available":false,"reason":"nontrigram_term"}));
-        };
-        phrases.push(format!(
-            "({})",
-            variants
-                .iter()
-                .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(" OR ")
-        ));
+    if text.contains('\0') {
+        return "nul_unconditional";
     }
-    params.extend([
-        SqlValue::Text("text".into()),
-        SqlValue::Integer(-1),
-        SqlValue::Integer(0),
-        SqlValue::Text(phrases.join(" AND ")),
-        SqlValue::Integer(200),
-    ]);
-    let sql = format!(
-        "EXPLAIN QUERY PLAN WITH scope(run_id, seq) AS (VALUES {scope}), \
-         current_runs AS MATERIALIZED (SELECT scope.seq,r.run_id,r.source_revision,r.snapshot_revision \
-         FROM scope CROSS JOIN thread_index_runs r ON r.run_id=scope.run_id \
-         WHERE r.state='indexed' AND r.source_present=1 AND r.indexed_revision=r.source_revision) \
-         SELECT b.id,r.seq,b.run_id,r.source_revision,r.snapshot_revision,b.source_kind,b.ordinal,\
-         b.block_index,b.note_seq,b.role,b.kind,b.tool_name,b.truncated,b.text FROM current_runs r \
-         CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind ON b.run_id=r.run_id \
-         WHERE b.kind IN (?) AND (r.seq,b.id)>(?,?) AND (EXISTS (SELECT 1 FROM conversation_fts \
-         WHERE rowid=b.id AND conversation_fts MATCH ?)) ORDER BY r.seq,b.id LIMIT ?"
-    );
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut statement = conn.prepare(&sql)?;
-    let details = statement
-        .query_map(params_from_iter(&params), |row| row.get::<_, String>(3))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(
-        json!({"available":true,"scope_runs":runs.len(),"parameters":params.len(),
-        "details":details,"limits":"reproduced current storage SQL for Text, first replay batch, after=None, limit=200; not captured production internal trace"}),
-    )
+    if !text.is_ascii() {
+        return "nonascii_unconditional";
+    }
+    let ConversationFilter::Literals(alternatives) = filter else {
+        return "ascii_unrestricted";
+    };
+    let lower = text.to_ascii_lowercase();
+    let allowed = alternatives.iter().any(|terms| {
+        terms.iter().all(|term| match term_route(term) {
+            TermRoute::Trigram(variants) => variants
+                .iter()
+                .find(|variant| variant.is_ascii())
+                .is_none_or(|variant| lower.contains(&variant.to_ascii_lowercase())),
+            _ => true,
+        })
+    });
+    if allowed {
+        "ascii_pass"
+    } else {
+        "ascii_reject"
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prefilter_categories_keep_unicode_and_nul_unconditional() {
+        let filter =
+            storage::thread_search::ConversationFilter::Literals(vec![vec!["alpha beta".into()]]);
+        assert_eq!(
+            super::prefilter_category("ALPHA BETA", &filter),
+            "ascii_pass"
+        );
+        assert_eq!(
+            super::prefilter_category("alpha gap beta", &filter),
+            "ascii_reject"
+        );
+        assert_eq!(
+            super::prefilter_category("日本語", &filter),
+            "nonascii_unconditional"
+        );
+        assert_eq!(
+            super::prefilter_category("alpha\0beta", &filter),
+            "nul_unconditional"
+        );
+    }
+
     #[test]
     fn observed_cursor_position_retains_scanned_not_last_hit_and_resume() {
         use base64::Engine;
