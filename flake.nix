@@ -121,9 +121,14 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
+        shippedCargoArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
+        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
+          cargoExtraArgs = shippedCargoArgs;
+          doCheck = false;
+        });
+        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
         tests = craneLib.cargoTest (commonArgs // {
-          inherit cargoArtifacts;
+          cargoArtifacts = testCargoArtifacts;
           cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
@@ -149,7 +154,7 @@
           inherit cargoArtifacts;
           # Only the shipped programs; the QA fixtures (headless_capture,
           # native_qa_window) are built with cargo where they are used.
-          cargoExtraArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
+          cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
