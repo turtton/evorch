@@ -380,6 +380,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             };
             tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
             *phase = restored;
+            self.transcripts.interrupt_run_tools(run_id);
         }
     }
 
@@ -420,6 +421,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             tracing::warn!(%run_id, %thread_id, from = ?phase, "reconciled an orphaned run of a claimed thread");
             *phase = ThreadRunPhase::Stopped;
+            self.transcripts.interrupt_run_tools(run_id);
         }
     }
 

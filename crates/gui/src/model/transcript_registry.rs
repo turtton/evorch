@@ -47,6 +47,15 @@ impl TranscriptRegistry {
         }
     }
 
+    /// Interrupts `run_id`'s running calls in every transcript that shows them,
+    /// for runs whose terminal phase was reconciled without an event.
+    pub(crate) fn interrupt_run_tools(&mut self, run_id: &str) {
+        self.thread.interrupt_running_tools(run_id);
+        for model in self.threads.values_mut().chain(self.runs.values_mut()) {
+            model.interrupt_running_tools(run_id);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             thread: TranscriptModel::new(),

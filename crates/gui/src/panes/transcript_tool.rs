@@ -20,6 +20,10 @@ mod sticky;
 pub use orchestration::agent_name;
 
 const LIVE_TAIL_LINES: usize = 4;
+/// Header note of a call whose run ended before it reported a result.
+pub const INTERRUPTED_META: &str = "ended without a result";
+const INTERRUPTED_NOTE: &str =
+    "The run ended before this call reported a result, so its outcome is unknown.";
 /// Room kept in a browser tool card's header for its View button.
 const VIEW_BUTTON_WIDTH: f32 = 64.0;
 
@@ -164,6 +168,7 @@ pub fn tool_card_group(
         ToolStatus::Succeeded | ToolStatus::Approved => palette().TEXT_MUTED,
         ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
         ToolStatus::AwaitingApproval => palette().WARNING_FG,
+        ToolStatus::Interrupted => palette().WARNING_FG,
     };
     let mut header = header::tool_header(
         tool_name,
@@ -177,6 +182,15 @@ pub fn tool_card_group(
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
         header::with_shell_job(&mut header, job, shell_control(last).is_some());
+    }
+    if matches!(status, ToolStatus::Interrupted) {
+        header.meta = Some(
+            [header.meta.take(), Some(INTERRUPTED_META.to_owned())]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
     }
     if folded > 1 {
         let outcome = header.meta.take();
@@ -197,6 +211,7 @@ pub fn tool_card_group(
         ToolStatus::Succeeded | ToolStatus::Approved => (header.icon, "✓ "),
         ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
         ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
+        ToolStatus::Interrupted => (icons::STOP_CIRCLE, "⏹ "),
     };
     let label = format!("{mark}{header_text}");
     let tooltip = focused_input(tool_name, input.as_ref())
@@ -279,6 +294,9 @@ pub fn tool_card_group(
             }
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, palette().ERROR_FG);
+            }
+            if matches!(status, ToolStatus::Interrupted) {
+                ui.colored_label(palette().WARNING_FG, INTERRUPTED_NOTE);
             }
         }
         let response = title.show(ui, expanded && !running, |ui| {
