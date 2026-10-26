@@ -83,7 +83,12 @@ const ROLE_PROFILE_KEYS: &[&str] = &["agents", "routing"];
 const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "auto"];
 const CHAIN_ENTRY_KEYS: &[&str] = &["route", "reasoning_effort"];
 const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
-const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir", "persistence"];
+const DIAGNOSTICS_KEYS: &[&str] = &[
+    "log_level",
+    "log_dir",
+    "persistence",
+    "retain_terminal_task_progress",
+];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
 const SELF_IMPROVEMENT_KEYS: &[&str] = &[

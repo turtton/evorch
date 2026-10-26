@@ -16,6 +16,9 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 event-bus = { path = "../event-bus" }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 # Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
 providers = { path = "../providers" }

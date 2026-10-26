@@ -23,6 +23,8 @@ pub struct DiagnosticsConfig {
     pub log_level: String,
     /// 診断のDB保存。既定はwarning/errorのみ。stderrのログレベルとは独立。
     pub persistence: DiagnosticPersistence,
+    /// Safely reduce terminal task progress during storage maintenance.
+    pub retain_terminal_task_progress: bool,
     /// ログ出力ディレクトリ。未指定の場合は既定の位置を使用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
@@ -33,6 +35,7 @@ impl Default for DiagnosticsConfig {
         Self {
             log_level: "info".to_string(),
             persistence: DiagnosticPersistence::default(),
+            retain_terminal_task_progress: true,
             log_dir: None,
         }
     }

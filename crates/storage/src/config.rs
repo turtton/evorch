@@ -76,6 +76,8 @@ pub struct StorageConfig {
     pub usage_retention_days: u32,
     /// thread 開始状態を保持する日数です。0 は削除を無効化します。
     pub thread_start_retention_days: u32,
+    /// Compact only terminal tasks with exactly equivalent projection and GUI replay.
+    pub retain_terminal_task_progress: bool,
 }
 
 impl Default for StorageConfig {
@@ -92,6 +94,7 @@ impl Default for StorageConfig {
             temp_warn_bytes: 268_435_456,
             usage_retention_days: crate::usage::USAGE_RETENTION_DAYS,
             thread_start_retention_days: crate::thread_start::THREAD_START_RETENTION_DAYS,
+            retain_terminal_task_progress: true,
         }
     }
 }
