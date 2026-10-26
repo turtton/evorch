@@ -690,6 +690,12 @@ impl LoopState {
             );
         }
         self.push_final_result(result);
+        // A shell handoff belongs to this completed batch even when finish is
+        // in the same response and this run has no thread goal. Resolve its cut
+        // before considering normal completion; never drop reserved host input.
+        if self.flush_scheduled_user_messages() || self.has_pending_user_messages() {
+            return true;
+        }
         if self
             .runtime()
             .is_some_and(|runtime| runtime.goal_for_root(self.task.run_id).is_some())
@@ -726,6 +732,8 @@ impl LoopState {
             // THREAD_ID_SEAM: RunTask currently carries run identity only.
             thread_id: None,
             call_id: None,
+            shell_wait_policy: tools::executor::ShellWaitPolicy::AutoYield,
+            shell_input: Some(self.channels.user_inbox.clone()),
         };
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();

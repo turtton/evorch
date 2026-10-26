@@ -71,6 +71,7 @@ async fn relative_file_paths_and_explicit_dot_share_workspace() {
         run_id: "run-test".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     executor
         .execute(
@@ -129,6 +130,7 @@ async fn large_write_diff_is_bounded_before_reaching_the_agent_and_gui() {
                 run_id: "run-diff".into(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "write",
             "write-diff",

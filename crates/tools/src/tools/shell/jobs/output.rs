@@ -4,7 +4,8 @@ use secret_guard::SecretRedactor;
 const LIVE_BYTES: usize = 64 * 1024;
 
 pub(super) struct LiveOutput {
-    pub(super) capture: Capture,
+    captures: [Capture; 2],
+    separate_streams: bool,
     pub(super) text: String,
     pub(super) offset: u64,
     pending: [Vec<u8>; 2],
@@ -15,7 +16,8 @@ pub(super) struct LiveOutput {
 impl Default for LiveOutput {
     fn default() -> Self {
         Self {
-            capture: Capture::default(),
+            captures: Default::default(),
+            separate_streams: false,
             text: String::new(),
             offset: 0,
             pending: [Vec::new(), Vec::new()],
@@ -26,8 +28,19 @@ impl Default for LiveOutput {
     }
 }
 impl LiveOutput {
+    pub(super) fn new(separate_streams: bool) -> Self {
+        Self {
+            separate_streams,
+            ..Self::default()
+        }
+    }
+    pub(super) fn take_capture(&mut self) -> Capture {
+        let [mut out, err] = std::mem::take(&mut self.captures);
+        out.append(&err);
+        out
+    }
     pub(super) fn push(&mut self, stream: usize, bytes: &[u8]) {
-        self.capture.push(bytes);
+        self.captures[if self.separate_streams { stream } else { 0 }].push(bytes);
         // Do not publish partial secret-shaped strings across read boundaries.
         // Live previews flush complete lines; EOF also flushes an unfinished line.
         for byte in bytes {

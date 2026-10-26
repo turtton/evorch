@@ -1,16 +1,14 @@
 //! shell ツールの実装。
 //!
 //! 非対話モードでは [`tokio::process`] で子プロセスを起動し、対話モードでは
-//! portable-pty 経由の擬似端末（PTY）を使う。yield_ms の明示指定時には
-//! owner-scoped job として制御を返し、poll/stdin/stop で継続する。
+//! portable-pty 経由の擬似端末（PTY）を使う。全 start は owner-scoped job で監督し、
+//! モデルの同期呼出しは 10 秒またはホスト入力で継続 handle を返す。
 
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use sandbox::process::GroupChild;
-use sandbox::{CommandSpec, Sandbox, WrappedCommand};
+use sandbox::{CommandSpec, Sandbox};
 use serde::Deserialize;
 
 use crate::error::ToolError;
@@ -234,10 +232,11 @@ impl Tool for Shell {
                 "sandbox_access": {"type":"string", "enum":["isolated", "network", "unsandboxed"], "default":"isolated", "description":guidance::ACCESS_DESCRIPTION},
                 "justification": {"type":"string", "description":"Why this command needs network or unsandboxed access. Required and nonempty for either mode."},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
-                "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
-                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_WAIT_YIELD_MS, "description":"Start with this field to return an async job handle; omit it for synchronous completion. Start/stop: wait for completion or the specified deadline, ignoring intermediate output. Poll/stdin: return early on new output or completion. 0 returns immediately; omitted control yields default to 0. Start/poll: 0..1800000 (30 minutes); stdin/stop: 0..60000."},
+                "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Explicit-yield jobs default to 1 hour; omitted-yield starts have no default timeout. No new timeout cap."},
+                "return_on": {"type":"string", "enum":["completion", "output"], "default":"completion", "description":"Poll only: completion waits for terminal teardown or the wait deadline, ignoring output. Select output explicitly to return on new output (for interactive prompts). Stdin always returns on output or completion."},
+                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_WAIT_YIELD_MS, "description":"Start: explicit 0..1800000 returns a job handle after completion or the wait deadline. Omitted start waits normally; model tool calls automatically return the continuing job after 10000 ms or host input. Poll: omitted defaults to 60000 ms; waits for completion/deadline, not output, unless return_on:output. Stdin/stop: omitted defaults to 0; stdin returns on output/completion, stop waits for teardown/deadline. Zero returns immediately. Start/poll max 1800000 (30 minutes); stdin/stop max 60000. Waiting never restarts the command or extends timeout_ms."},
                 "job_id": {"type":"string", "minLength":1, "description":"Handle returned by this run's asynchronous shell start (for example, job-1)."},
-                "cursor": {"type":"integer", "minimum":0, "description":"Output cursor, in redacted UTF-8 bytes. Omit it to continue after the output already returned; pass a returned cursor (or 0) to re-read from there. Older live output may expire."},
+                "cursor": {"type":"integer", "minimum":0, "description":"Output cursor, in redacted UTF-8 bytes. Omit it to continue after the output already returned; pass a returned cursor (or 0) to re-read from there. On a running poll deadline, omitted cursor favors bounded tail output and flags skipped bytes; explicit cursors keep ordered paging. Older live output may expire."},
                 "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},
                 "close_stdin": {"type":"boolean", "default":false, "description":"stdin only: close pipe stdin or send PTY EOF after writing."}
             },
@@ -245,10 +244,13 @@ impl Tool for Shell {
             "allOf": [{
                 "if": {"properties":{"action":{"enum":["poll", "stdin", "stop"]}}, "required":["action"]},
                 "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["sandbox_access"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
-                "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
+                "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]},{"required":["return_on"]}]}}
             }, {
                 "if": {"properties":{"action":{"enum":["stdin", "stop"]}}, "required":["action"]},
                 "then": {"properties":{"yield_ms":{"maximum":jobs::MAX_CONTROL_YIELD_MS}}}
+            }, {
+                "if": {"properties":{"action":{"const":"poll"}}, "required":["action"]},
+                "else": {"not":{"required":["return_on"]}}
             }]
         })
     }
@@ -325,6 +327,7 @@ impl Tool for Shell {
                 run_id: String::new(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             args,
         )
@@ -471,27 +474,19 @@ impl Tool for Shell {
                 command: wrapped.program.clone(),
                 detail: error.to_string(),
             })?;
-        if let Some(yield_ms) = args.yield_ms {
-            return self
-                .jobs
-                .start(
-                    ctx,
-                    jobs::JobLaunch {
-                        wrapped,
-                        interactive: args.interactive,
-                        timeout_ms: args.timeout_ms,
-                        yield_ms,
-                        escalated: escalated_input,
-                        sandbox,
-                    },
-                )
-                .await;
-        }
-        if args.interactive {
-            run_interactive(&wrapped, args.timeout_ms).await
-        } else {
-            run_process(&wrapped, args.timeout_ms).await
-        }
+        self.jobs
+            .start(
+                ctx,
+                jobs::JobLaunch {
+                    wrapped,
+                    interactive: args.interactive,
+                    timeout_ms: args.timeout_ms,
+                    yield_ms: args.yield_ms,
+                    escalated: escalated_input,
+                    sandbox,
+                },
+            )
+            .await
     }
 }
 
@@ -519,78 +514,6 @@ fn io_failed(error: impl std::fmt::Display) -> ToolError {
     }
 }
 
-/// 非対話モード: tokio::process で子プロセスを実行する。
-///
-/// The command runs under the sandbox launch policy (its own session, no
-/// inherited descriptors). The exited command stays unreaped until its output
-/// ends, so killing what is left of its process group cannot reach a reused id.
-async fn run_process(
-    wrapped: &WrappedCommand,
-    timeout_ms: Option<u64>,
-) -> Result<ToolResult, ToolError> {
-    let mut command = tokio::process::Command::from(wrapped.to_command());
-    command
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
-    let mut child =
-        GroupChild::spawn(&mut command).map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let mut stdout = child
-        .take_stdout()
-        .ok_or_else(|| io_failed("missing stdout"))?;
-    let mut stderr = child
-        .take_stderr()
-        .ok_or_else(|| io_failed("missing stderr"))?;
-    let mut out = Capture::default();
-    let mut err = Capture::default();
-    let completion = async {
-        tokio::join!(
-            child.exited(),
-            drain(&mut stdout, &mut out),
-            drain(&mut stderr, &mut err)
-        )
-    };
-    let waited = match timeout_ms {
-        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), completion).await,
-        None => Ok(completion.await),
-    };
-    let (exit_code, timed_out) = match waited {
-        Ok((exited, stdout, stderr)) => {
-            stdout?;
-            stderr?;
-            exited.map_err(io_failed)?;
-            let status = child.wait().await.map_err(io_failed)?;
-            (status.code().unwrap_or(-1), false)
-        }
-        Err(_) => {
-            let _ = tokio::time::timeout(Duration::from_secs(1), child.kill_and_wait()).await;
-            (-1, true)
-        }
-    };
-    out.append(&err);
-    Ok(shell_result(
-        out,
-        exit_code,
-        if timed_out { timeout_ms } else { None },
-    ))
-}
-
-async fn drain(
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    capture: &mut Capture,
-) -> Result<(), ToolError> {
-    use tokio::io::AsyncReadExt;
-    let mut buffer = [0u8; 8192];
-    loop {
-        let n = reader.read(&mut buffer).await.map_err(io_failed)?;
-        if n == 0 {
-            return Ok(());
-        }
-        capture.push(&buffer[..n]);
-    }
-}
-
 fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> ToolResult {
     let mut result = capture.finish();
     result.is_error = timed_out.is_some() || exit_code != 0;
@@ -600,102 +523,4 @@ fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> Too
     );
     result.content = format!("{status}\n{}", result.content);
     result
-}
-
-// Cancellation also tears down a PTY child; dropping a blocking task's handle
-// alone does not stop the process or its reader thread.
-struct PtyKiller(Box<dyn portable_pty::ChildKiller + Send + Sync>);
-impl Drop for PtyKiller {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-    }
-}
-
-/// 対話モード: portable-pty の擬似端末上で 1 回限り実行する。
-///
-/// wezterm の whoami.rs 例と同じ手順を踏む。スレーブとライターを即座に捨てて
-/// 子プロセス側に EOF を見せないと、リーダーの読み取りが終端せずデッドロックする。
-async fn run_interactive(
-    wrapped: &WrappedCommand,
-    timeout_ms: Option<u64>,
-) -> Result<ToolResult, ToolError> {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    let portable_pty::PtyPair { master, slave } = pair;
-
-    let mut command = portable_pty::CommandBuilder::new(&wrapped.program);
-    command.args(&wrapped.args);
-    if !wrapped.inherit_env {
-        command.env_clear();
-    }
-    for (key, value) in &wrapped.env {
-        command.env(key, value);
-    }
-    if let Some(cwd) = &wrapped.cwd {
-        command.cwd(cwd);
-    } else {
-        command.cwd(std::env::current_dir().map_err(io_failed)?);
-    }
-    let mut child = slave
-        .spawn_command(command)
-        .map_err(|error| spawn_failed(&wrapped.program, error))?;
-    drop(slave);
-
-    let mut reader = master.try_clone_reader().map_err(io_failed)?;
-    // ライターを捨てて子プロセスの標準入力に EOF を見せ、読み取りを終端させる。
-    let writer = master.take_writer().map_err(io_failed)?;
-    drop(writer);
-
-    // wait でブロックする blocking タスクとは独立に殺せるよう、先に killer を複製する。
-    let mut killer = PtyKiller(child.clone_killer());
-
-    let captured = Arc::new(Mutex::new(Capture::default()));
-    let read_capture = Arc::clone(&captured);
-    let mut blocking = tokio::task::spawn_blocking(move || -> Result<u32, ToolError> {
-        let reader_thread = std::thread::spawn(move || -> Result<(), ToolError> {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => return Ok(()),
-                    Ok(n) => read_capture
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(&buffer[..n]),
-                    Err(error) if error.raw_os_error() == Some(5) => return Ok(()), // Linux PTY EOF
-                    Err(error) => return Err(io_failed(error)),
-                }
-            }
-        });
-        let status = child.wait().map_err(io_failed)?;
-        drop(master);
-        reader_thread
-            .join()
-            .map_err(|_| io_failed("PTY reader panicked"))??;
-        Ok(status.exit_code())
-    });
-    let waited = match timeout_ms {
-        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), &mut blocking).await,
-        None => Ok((&mut blocking).await),
-    };
-    let (exit_code, timed_out) = match waited {
-        Ok(joined) => (joined.map_err(io_failed)?? as i32, None),
-        Err(_) => {
-            let _ = killer.0.kill();
-            let _ = tokio::time::timeout(Duration::from_secs(1), blocking).await;
-            (-1, timeout_ms)
-        }
-    };
-    let output = std::mem::take(
-        &mut *captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    Ok(shell_result(output, exit_code, timed_out))
 }

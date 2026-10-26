@@ -131,6 +131,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
                 run_id: "run-21".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "web_search",
             "call-1",
@@ -197,6 +198,7 @@ async fn executor_reports_fallback_in_detail() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "web_search",
             "call-1",
@@ -224,6 +226,7 @@ async fn executor_escapes_markers_in_content_and_detail_and_sets_web_untrusted()
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "web_search",
             "call-1",
@@ -307,6 +310,7 @@ async fn third_party_provider_composes_as_fallback_without_changes() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "web_search",
             "call-1",

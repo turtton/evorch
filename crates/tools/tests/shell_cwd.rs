@@ -84,6 +84,7 @@ async fn standard_executor_injects_project_cwd() {
         run_id: "cwd-test".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     // When: the registered shell is invoked without a cwd argument.
     let result = executor

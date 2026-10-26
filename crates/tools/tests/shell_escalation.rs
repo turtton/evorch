@@ -177,6 +177,7 @@ impl Fixture {
                     run_id: "run-escalation".into(),
                     thread_id: Some("thread-escalation".into()),
                     call_id: None,
+                    ..Default::default()
                 },
                 "shell",
                 "call-escalation",
@@ -255,6 +256,7 @@ async fn approved_merge_reaches_review_and_runs_only_in_the_selected_sandbox() {
                     run_id: "run-escalation".into(),
                     thread_id: Some("thread-escalation".into()),
                     call_id: Some("call-escalation".into()),
+                    ..Default::default()
                 }
             );
             let reviewed_command = if wrapped {
@@ -373,7 +375,9 @@ async fn network_only_request_keeps_the_host_path_unused() {
     );
     executor.set_shell_escalation(gate.clone(), host.clone());
     let result = executor.execute(
-        &ToolExecutionContext { run_id: "run-network".into(), thread_id: None, call_id: None },
+        &ToolExecutionContext { run_id: "run-network".into(), thread_id: None, call_id: None,
+            ..Default::default()
+        },
         "shell", "call-network",
         json!({"command":"printf network", "sandbox_access":"network", "justification":"fetch dependencies"}),
     ).await.expect("tool result");
@@ -408,6 +412,7 @@ async fn network_only_denial_and_invalid_scope_never_spawn() {
         run_id: "run-network".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let denied = executor.execute(&ctx, "shell", "call-denied", json!({
         "command":"printf denied", "sandbox_access":"network", "justification":"fetch dependencies"

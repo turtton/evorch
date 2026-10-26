@@ -92,6 +92,7 @@ async fn run_shell_cases() {
         run_id: "host-environment".into(),
         thread_id: Some("host-environment".into()),
         call_id: None,
+        ..Default::default()
     };
     for interactive in [false, true] {
         for job in [false, true] {

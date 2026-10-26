@@ -63,6 +63,7 @@ impl Fixture {
                 run_id: id.to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             run,
         )

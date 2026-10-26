@@ -835,11 +835,7 @@ impl LoopState {
             }
             // Ordinary follow-ups wait for Stop unless the host explicitly
             // requests delivery at this safe (post-tools) turn boundary.
-            if self.has_pending_user_messages()
-                || self.channels.user_inbox.status().next_turn_requested
-            {
-                self.flush_user_messages();
-            }
+            self.flush_scheduled_user_messages();
             if let Err(error) = self.flush_user_answers() {
                 self.finish_error(error);
                 return;
@@ -1345,6 +1341,15 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        if let Some(kind) = self.interrupted() {
+            self.finish_interrupted(kind);
+            return false;
+        }
+        // A previous cut may have drained newer channel input into local
+        // pending storage. There need not be another channel event to wake us.
+        if self.has_pending_user_messages() && self.flush_user_messages() {
+            return true;
+        }
         // Resume can arrive after the final goal boundary but before Waiting.
         // Keep the scheduling bit when the post-boundary inbox drain sees it.
         if self.goal_wake_pending {
@@ -1406,9 +1411,9 @@ impl LoopState {
                         }
                         continue;
                     }
-                    let trusted_user = message.2;
+                    let seq = message.4;
                     self.take_user_input(message);
-                    if trusted_user { self.channels.user_inbox.consumed(1); }
+                    self.channels.user_inbox.consumed_through(seq);
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();

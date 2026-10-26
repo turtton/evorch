@@ -427,6 +427,7 @@ async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
         run_id: run.to_string(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let started = executor
         .execute(
@@ -531,6 +532,7 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
                 run_id: run.to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             &job,
         )
