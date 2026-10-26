@@ -18,7 +18,7 @@ use rusqlite::{Connection, OpenFlags};
 use secret_guard::SecretRedactor;
 
 use crate::thread_index::{
-    CapacityState, IndexCapacity, IndexCapacityStatus, IndexLease, IndexOwner,
+    CapacityState, IndexCapacity, IndexCapacityStatus, IndexLease, IndexOwner, IndexPauseReason,
     IndexSettingsReceipt, IndexStepResult, LeaseResult, PlannedGrowth, ReindexRequest,
     RequestFailure, RequestGapReason, RequestStatus, RequestSubmission, ThreadIndexControl,
     ThreadIndexSettings,
@@ -96,7 +96,9 @@ impl ThreadIndexControl for Control<'_> {
                     shm: 0,
                 },
             )?;
-            if status.state != CapacityState::Normal {
+            if status.state != CapacityState::Normal
+                && status.state != CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
+            {
                 let gap = if !rt.settings.enabled {
                     RequestGapReason::IndexDisabled
                 } else {

@@ -274,6 +274,8 @@ fn step_scheduling_prefers_idle_but_never_starves() {
 #[test]
 fn startup_applies_accounting_version_and_indexes_newest_first() {
     let mut fx = Fixture::new(512 * MIB);
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, S), idle());
     let versions: (u32, u32) = fx
         .conn()
         .query_row(
@@ -370,6 +372,7 @@ fn raising_the_limit_keeps_evicted_runs_until_include_evicted() {
     fx.control(3 * S)
         .apply_index_settings(enabled(charge + 10))
         .unwrap();
+    assert_eq!(fx.drive(&lease, 3 * S), idle());
     assert_eq!(fx.row("run-old").state, "evicted");
     let receipt = fx
         .control(4 * S)
@@ -401,6 +404,305 @@ fn raising_the_limit_keeps_evicted_runs_until_include_evicted() {
         status.progress,
         RequestProgress::Terminal(ReindexResult::Completed { .. })
     ));
+}
+
+#[test]
+fn settings_shrink_is_deferred_and_evicts_one_oldest_run_per_step() {
+    let mut fx = Fixture::new(512 * MIB);
+    for run in ["run-c", "run-b", "run-a"] {
+        fx.save(&verified(run, &"old index ".repeat(300), 10 * S));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let before = fx.rt.counters.evictions;
+    let receipt = fx.control(3 * S).apply_index_settings(enabled(0)).unwrap();
+    assert_eq!(receipt.settings.max_bytes, 0);
+    assert_eq!(
+        fx.rt.counters.evictions, before,
+        "receipt is not bulk eviction"
+    );
+    fx.save(&verified("run-new", "no growth during adjustment", 20 * S));
+    for (offset, run) in ["run-a", "run-b", "run-c"].into_iter().enumerate() {
+        assert_eq!(
+            fx.control(4 * S).step(&lease, 4 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+        assert_eq!(fx.rt.counters.evictions, before + offset as u64 + 1);
+        assert_eq!(
+            fx.row(run).state,
+            "evicted",
+            "creation time ties use run_id"
+        );
+        assert_eq!(fx.row("run-new").blocks, 0);
+    }
+}
+
+#[test]
+fn settings_shrink_preserves_old_blocks_when_db_or_pinned_wal_cannot_admit_delete() {
+    for wal_limited in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-old", &"retained ".repeat(400), 10 * S));
+        let lease = fx.lease(&gui(), S);
+        assert_eq!(fx.drive(&lease, 2 * S), idle());
+        let reader = Connection::open(&fx.config.db_path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+            .unwrap();
+        let sizes = fx.sizes();
+        if wal_limited {
+            fx.config.hard_limits.max_wal_bytes = sizes.wal + 1;
+        } else {
+            fx.config.hard_limits.max_db_bytes = sizes.total() + MEASURED_POLICY.reserve_bytes();
+        }
+        fx.control(3 * S).apply_index_settings(enabled(0)).unwrap();
+        assert_eq!(
+            fx.row("run-old").state,
+            "indexed",
+            "no unadmitted settings delete"
+        );
+        assert!(matches!(
+            fx.drive(&lease, 4 * S),
+            IndexStepResult::Paused(_)
+        ));
+        assert_eq!(fx.row("run-old").blocks, 1);
+        assert_eq!(fx.rt.counters.evictions, 0);
+        assert!(
+            !capacity::checkpoint_truncate(fx.conn()).unwrap(),
+            "reader pins WAL"
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        fx.config.hard_limits = HardLimits::default();
+        fx.control(5 * S).apply_index_settings(enabled(0)).unwrap();
+        assert_eq!(fx.drive(&lease, 6 * S), idle());
+        assert_eq!(fx.row("run-old").state, "evicted");
+    }
+}
+
+#[test]
+fn self_eviction_of_previous_revision_requires_delete_admission() {
+    for oversized_step in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-old", &"old ".repeat(800), 10 * S));
+        let lease = fx.lease(&gui(), S);
+        assert_eq!(fx.drive(&lease, 2 * S), idle());
+        let old_charge = fx.row("run-old").charged;
+        fx.control(3 * S)
+            .apply_index_settings(enabled(old_charge + 1))
+            .unwrap();
+        let body = "new ".repeat(if oversized_step { 140_000 } else { 2_000 });
+        fx.save(&verified("run-old", &body, 20 * S));
+        let mut work = work::next_work(fx.conn()).unwrap().unwrap();
+        work.lease_epoch = lease.epoch;
+        let input = work::extract(fx.conn(), &work, &fx.redactor).unwrap();
+        fx.rt.ready = Some((work, Ok(input)));
+        let reader = Connection::open(&fx.config.db_path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+            .unwrap();
+        fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
+        assert!(matches!(
+            fx.drive(&lease, 4 * S),
+            IndexStepResult::Paused(_)
+        ));
+        let retained = fx.row("run-old");
+        assert_eq!(
+            (retained.state.as_str(), retained.blocks, retained.charged),
+            ("pending", 1, old_charge)
+        );
+        assert_eq!(fx.rt.counters.evictions, 0);
+        reader.execute_batch("ROLLBACK").unwrap();
+        fx.config.hard_limits = HardLimits::default();
+        fx.control(5 * S)
+            .apply_index_settings(enabled(old_charge + 1))
+            .unwrap();
+        assert_eq!(fx.drive(&lease, 6 * S), idle());
+        assert_eq!(fx.row("run-old").state, "evicted");
+    }
+}
+
+#[test]
+fn reaccounting_is_deferred_and_cannot_delete_through_pinned_wal_limit() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-old", &"old ".repeat(800), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let old_charge = fx.row("run-old").charged;
+    let reader = Connection::open(&fx.config.db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+        .unwrap();
+    fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
+    fx.rt.accounting.version += 1;
+    fx.rt.accounting.per_run_bytes += old_charge;
+    fx.control(3 * S)
+        .apply_index_settings(enabled(old_charge + 1))
+        .unwrap();
+    assert_eq!(
+        fx.row("run-old").charged,
+        old_charge,
+        "receipt must not reaccount eagerly"
+    );
+    assert!(matches!(
+        fx.drive(&lease, 4 * S),
+        IndexStepResult::Paused(_)
+    ));
+    assert_eq!(fx.row("run-old").blocks, 1);
+    reader.execute_batch("ROLLBACK").unwrap();
+    fx.config.hard_limits = HardLimits::default();
+    fx.control(5 * S)
+        .apply_index_settings(enabled(old_charge + 1))
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 6 * S), idle());
+    assert_eq!(fx.row("run-old").state, "evicted");
+}
+
+#[test]
+fn settings_adjustment_resumes_from_persisted_rows_after_restart() {
+    let mut fx = Fixture::new(512 * MIB);
+    for (run, at) in [("run-c", 30), ("run-b", 20), ("run-a", 10)] {
+        fx.save(&verified(run, &"persistent index ".repeat(200), at * S));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.config.thread_index = enabled(0);
+    let settings = fx.config.thread_index;
+    fx.control(3 * S).apply_index_settings(settings).unwrap();
+    let zero = PlannedGrowth::Bounded {
+        db: 0,
+        wal: 0,
+        shm: 0,
+    };
+    assert_eq!(
+        fx.control(3 * S).capacity_status(zero).unwrap().state,
+        CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
+    );
+    assert_eq!(
+        fx.control(4 * S).step(&lease, 4 * S).unwrap(),
+        IndexStepResult::Progress
+    );
+    assert_eq!(fx.row("run-a").state, "evicted");
+    let mut restarted = fx.peer();
+    let lease = restarted.lease(&gui(), 5 * S);
+    assert_eq!(
+        restarted.row("run-b").state,
+        "indexed",
+        "restart receipt deletes nothing"
+    );
+    assert_eq!(restarted.drive(&lease, 6 * S), idle());
+    assert_eq!(restarted.rt.counters.evictions, 2);
+    assert_eq!(restarted.row("run-c").state, "evicted");
+    restarted
+        .conn()
+        .execute(
+            "INSERT INTO conversation_fts(conversation_fts, rank) VALUES('integrity-check', 1)",
+            [],
+        )
+        .unwrap();
+}
+
+#[test]
+fn admitted_settings_delete_grows_pinned_wal_within_the_planned_bound() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-old", &"deletion WAL ".repeat(400), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let page_size = capacity::page_size(fx.conn()).unwrap();
+    let growth = MEASURED_POLICY.planned_growth(
+        fx.row("run-old").charged,
+        page_size,
+        capacity::freelist_bytes(fx.conn(), page_size).unwrap(),
+        true,
+    );
+    let PlannedGrowth::Bounded { db, wal, shm } = growth else {
+        panic!("bounded deletion");
+    };
+    let reader = Connection::open(&fx.config.db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+        .unwrap();
+    fx.control(3 * S).apply_index_settings(enabled(0)).unwrap();
+    let before = fx.sizes();
+    fx.config.hard_limits.max_db_bytes =
+        before.total() + db + wal + shm + MEASURED_POLICY.reserve_bytes() + 1;
+    fx.config.hard_limits.max_wal_bytes = before.wal + wal + 1;
+    assert_eq!(
+        fx.control(4 * S).step(&lease, 4 * S).unwrap(),
+        IndexStepResult::Progress
+    );
+    assert_eq!(fx.row("run-old").state, "evicted");
+    let after = fx.sizes();
+    assert!(
+        after.wal > before.wal,
+        "logical deletion still appends WAL frames"
+    );
+    assert!(after.wal <= before.wal + wal);
+    assert!(after.total() <= before.total() + db + wal + shm);
+    assert!(after.total() + MEASURED_POLICY.reserve_bytes() < fx.config.hard_limits.max_db_bytes);
+    assert!(!capacity::checkpoint_truncate(fx.conn()).unwrap());
+    reader.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn deletion_outside_the_measured_step_keeps_the_old_index() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified(
+        "run-old",
+        &"legacy large index ".repeat(200),
+        10 * S,
+    ));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    // A future smaller envelope (or an index written by an older policy).
+    fx.rt.policy.step_max_text_bytes = 1;
+    fx.control(3 * S).apply_index_settings(enabled(0)).unwrap();
+    let IndexStepResult::Paused(status) = fx.drive(&lease, 4 * S) else {
+        panic!("must pause");
+    };
+    assert_eq!(
+        status.state,
+        CapacityState::IndexPaused(IndexPauseReason::GrowthUnbounded)
+    );
+    assert_eq!(fx.row("run-old").blocks, 1);
+    assert_eq!(fx.rt.counters.evictions, 0);
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(
+        !work::recheck_pause(env, &mut fx.rt).unwrap(),
+        "an unbounded delete cannot falsely resume with the insert bound"
+    );
+}
+
+#[test]
+fn replacement_admits_old_delete_and_new_insert_as_one_bounded_step() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-old", &"o".repeat(4_000), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.save(&verified("run-old", &"n".repeat(4_000), 20 * S));
+    // Each half is within the envelope, their combined write is not.
+    fx.rt.policy.step_max_text_bytes = 7_999;
+    let IndexStepResult::Paused(status) = fx.drive(&lease, 3 * S) else {
+        panic!("must pause");
+    };
+    assert_eq!(
+        status.state,
+        CapacityState::IndexPaused(IndexPauseReason::GrowthUnbounded)
+    );
+    assert_eq!(fx.row("run-old").state, "pending");
+    assert_eq!(fx.row("run-old").blocks, 1);
+    let text: String = fx
+        .conn()
+        .query_row(
+            "SELECT text FROM conversation_blocks WHERE run_id = 'run-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(text, "o".repeat(4_000));
 }
 
 #[test]

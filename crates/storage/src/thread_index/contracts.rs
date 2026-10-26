@@ -265,6 +265,9 @@ pub struct ThreadIndexSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Acknowledges writer-ordered settings, not completion of budget/version
+/// adjustment. `capacity_status` reports `SettingsAdjustment` until bounded
+/// maintenance steps finish; physical pauses retain their specific reason.
 pub struct IndexSettingsReceipt {
     pub applied_generation: u64,
     pub settings: ThreadIndexSettings,
@@ -281,6 +284,7 @@ pub enum PlannedGrowth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexPauseReason {
     Disabled,
+    SettingsAdjustment,
     ReserveInsufficient,
     WalLimit,
     GrowthUnbounded,

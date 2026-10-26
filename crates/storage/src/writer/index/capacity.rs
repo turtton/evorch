@@ -45,7 +45,6 @@ pub(crate) struct CapacityPolicy {
     pub step_max_blocks: u64,
     /// Eviction write growth per charged byte freed (per mille, in pages).
     pub delete_pages_per_mille: u64,
-    pub reclaim_max_runs_per_cycle: usize,
 }
 
 /// Fixed by the gate measurement on the real store copy (see ADR 0041
@@ -67,7 +66,6 @@ pub(crate) const MEASURED_POLICY: CapacityPolicy = CapacityPolicy {
     step_max_text_bytes: 512 << 10,
     step_max_blocks: 2_048,
     delete_pages_per_mille: 7_000,
-    reclaim_max_runs_per_cycle: 64,
 };
 
 /// Explicit FTS merge work per step (pages) and the growth bound admitted for
