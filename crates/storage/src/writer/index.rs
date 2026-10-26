@@ -500,6 +500,15 @@ pub(super) fn run_due(
         job.retry_wake = None;
         job.maybe_work = true;
     }
+    // Source commands can invalidate a parked result without changing the
+    // physical sizes. Release only that stale pause before deciding to sleep.
+    if job.rt.paused_work.is_some() {
+        match work::discard_stale_pause(env(conn, config, source_suspended), &mut job.rt) {
+            Ok(true) => job.maybe_work = true,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(error = %error, "thread index paused work recheck failed"),
+        }
+    }
     if !job.wants_step()
         || !should_step(
             idle,

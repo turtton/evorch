@@ -18,8 +18,8 @@ fn run_row(db: &Database, run: &str, state: &str, source: u64, indexed: Option<u
             "INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision, \
              indexed_revision, source_context_sha256, extractor_version, accounting_version, \
              source_updated_at_ns, retention_at_ns, blocked_reason, evicted_reason, \
-             next_attempt_at_ns, source_present) \
-             VALUES (?1, ?2, ?3, 7, ?4, 'hash', 1, 0, 1, 1, ?5, ?6, ?7, ?8)",
+             next_attempt_at_ns, source_present, indexed_extractor_version) \
+             VALUES (?1, ?2, ?3, 7, ?4, 'hash', 1, 0, 1, 1, ?5, ?6, ?7, ?8, 1)",
             params![
                 run, state, source, indexed, blocked, evicted, retry, present
             ],
@@ -86,6 +86,36 @@ fn texts(
 }
 
 const TEXT: &[IndexBlockKind] = &[IndexBlockKind::Text];
+
+#[test]
+fn every_candidate_route_and_coverage_require_the_current_extractor() {
+    let db = db();
+    indexed(&db, "run-current");
+    indexed(&db, "run-obsolete");
+    indexed(&db, "run-mismatched");
+    for run in ["run-current", "run-obsolete", "run-mismatched"] {
+        block(&db, run, 0, "text", "oldneedle ab");
+    }
+    db.conn.execute("UPDATE thread_index_runs SET extractor_version = 0, indexed_extractor_version = 0 WHERE run_id = 'run-obsolete'", []).unwrap();
+    db.conn.execute("UPDATE thread_index_runs SET indexed_extractor_version = 0 WHERE run_id = 'run-mismatched'", []).unwrap();
+    let runs = ["run-current", "run-obsolete", "run-mismatched"];
+    for filter in [
+        ConversationFilter::All,
+        literals(&[&["oldneedle"]]),
+        literals(&[&["ab"]]),
+    ] {
+        assert_eq!(texts(&db, &runs, TEXT, &filter), ["oldneedle ab"]);
+    }
+    let coverage = db.thread_index_coverage(&runs.map(str::to_owned)).unwrap();
+    assert_eq!(
+        coverage.iter().map(|r| r.coverage).collect::<Vec<_>>(),
+        [
+            RunCoverage::Indexed,
+            RunCoverage::Pending,
+            RunCoverage::Pending
+        ]
+    );
+}
 
 #[test]
 fn terms_route_to_trigram_like_or_scan_by_length_and_case_folding() {

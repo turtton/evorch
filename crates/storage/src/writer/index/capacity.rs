@@ -154,6 +154,7 @@ pub(crate) fn evaluate(
     let reserve = policy.reserve_bytes();
     let status = |state| IndexCapacityStatus {
         state,
+        adjustment: None,
         db_bytes: measured.sizes.db,
         wal_bytes: measured.sizes.wal,
         shm_bytes: measured.sizes.shm,

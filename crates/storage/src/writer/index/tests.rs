@@ -705,6 +705,264 @@ fn replacement_admits_old_delete_and_new_insert_as_one_bounded_step() {
     assert_eq!(text, "o".repeat(4_000));
 }
 
+fn searchable_runs(fx: &Fixture, runs: &[String]) -> Vec<String> {
+    fx.db
+        .conversation_candidates(&crate::thread_search::ConversationQuery {
+            runs,
+            kinds: &[IndexBlockKind::Text],
+            filter: &crate::thread_search::ConversationFilter::All,
+            after: None,
+            limit: 100,
+        })
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.run_id)
+        .collect()
+}
+
+#[test]
+fn lowering_coefficients_and_budget_keeps_every_run_that_fits_after_reaccounting() {
+    for count in [1, 3] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.rt.accounting.version += 1;
+        fx.rt.accounting.per_run_bytes = 100_000;
+        fx.control(S)
+            .apply_index_settings(enabled(512 * MIB))
+            .unwrap();
+        let runs: Vec<String> = (0..count).map(|n| format!("run-{n}")).collect();
+        for (n, run) in runs.iter().enumerate() {
+            fx.save(&verified(
+                run,
+                "retained searchable conversation",
+                (10 + n as i64) * S,
+            ));
+        }
+        let lease = fx.lease(&gui(), S);
+        assert_eq!(fx.drive(&lease, 2 * S), idle());
+        let mut policy = DEFAULT_ACCOUNTING_POLICY;
+        policy.version = fx.rt.accounting.version + 1;
+        let expected: u64 = runs.iter().map(|run| {
+            let (text, attrs, blocks) = fx.conn().query_row(
+                "SELECT text_bytes, attribute_bytes, block_count FROM thread_index_runs WHERE run_id = ?1",
+                [run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            reaccount_index(text, attrs, blocks, policy).unwrap().charged_bytes
+        }).sum();
+        assert!(expected < fx.row(&runs[0]).charged);
+        fx.rt.accounting = policy;
+        fx.control(3 * S)
+            .apply_index_settings(enabled(expected + 1))
+            .unwrap();
+        // The first reaccount must not evict because later runs still have
+        // old charges. Search remains available throughout accounting.
+        assert_eq!(
+            fx.control(4 * S).step(&lease, 4 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+        assert_eq!(
+            fx.rt.counters.evictions, 0,
+            "mixed old/new total must not cause eviction"
+        );
+        assert_eq!(searchable_runs(&fx, &runs), runs);
+        assert_eq!(fx.drive(&lease, 5 * S), idle());
+        assert_eq!(fx.rt.counters.evictions, 0);
+        assert_eq!(searchable_runs(&fx, &runs), runs);
+        for run in &runs {
+            assert_eq!(fx.row(run).state, "indexed");
+        }
+    }
+}
+
+#[test]
+fn reaccounting_and_eviction_phases_resume_separately_and_only_remove_the_needed_oldest_run() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.rt.accounting.version += 1;
+    fx.rt.accounting.per_run_bytes = 100_000;
+    fx.control(S)
+        .apply_index_settings(enabled(512 * MIB))
+        .unwrap();
+    let runs = ["run-a", "run-b", "run-c"].map(str::to_owned);
+    for run in &runs {
+        fx.save(&verified(run, "phase index", 10 * S));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let policy = AccountingPolicy {
+        version: fx.rt.accounting.version + 1,
+        ..DEFAULT_ACCOUNTING_POLICY
+    };
+    let new_charge = fx.charge("run-a");
+    let settings = enabled(2 * new_charge);
+    fx.config.thread_index = settings;
+    fx.rt.accounting = policy;
+    fx.control(3 * S).apply_index_settings(settings).unwrap();
+    let zero = PlannedGrowth::Bounded {
+        db: 0,
+        wal: 0,
+        shm: 0,
+    };
+    assert_eq!(
+        fx.control(3 * S).capacity_status(zero).unwrap().adjustment,
+        Some(IndexAdjustmentPhase::Reaccounting)
+    );
+    assert_eq!(
+        fx.control(4 * S).step(&lease, 4 * S).unwrap(),
+        IndexStepResult::Progress
+    );
+    assert_eq!(fx.rt.counters.evictions, 0);
+    let mut restarted = fx.peer();
+    restarted.rt.accounting = policy;
+    restarted
+        .control(5 * S)
+        .apply_index_settings(settings)
+        .unwrap();
+    let lease = restarted.lease(&gui(), 5 * S);
+    for _ in 0..2 {
+        assert_eq!(
+            restarted.control(6 * S).step(&lease, 6 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+        assert_eq!(restarted.rt.counters.evictions, 0);
+        assert_eq!(searchable_runs(&restarted, &runs), runs);
+    }
+    assert_eq!(
+        restarted
+            .control(7 * S)
+            .capacity_status(zero)
+            .unwrap()
+            .adjustment,
+        Some(IndexAdjustmentPhase::Evicting)
+    );
+    let mut restarted_again = restarted.peer();
+    restarted_again.rt.accounting = policy;
+    restarted_again
+        .control(8 * S)
+        .apply_index_settings(settings)
+        .unwrap();
+    let lease = restarted_again.lease(&gui(), 8 * S);
+    assert_eq!(restarted_again.drive(&lease, 9 * S), idle());
+    assert_eq!(restarted_again.rt.counters.evictions, 1);
+    assert_eq!(restarted_again.row("run-a").state, "evicted");
+    assert_eq!(searchable_runs(&restarted_again, &runs), runs[1..]);
+    assert_eq!(
+        restarted_again
+            .control(10 * S)
+            .capacity_status(zero)
+            .unwrap()
+            .adjustment,
+        None
+    );
+}
+
+#[test]
+fn obsolete_extractor_is_hidden_without_owner_during_adjustment_and_capacity_pause() {
+    let mut fx = Fixture::new(512 * MIB);
+    let runs = vec!["run-a".to_owned(), "run-b".to_owned()];
+    for (n, run) in runs.iter().enumerate() {
+        fx.save(&verified(
+            run,
+            "obsolete extractor text",
+            (10 + n as i64) * S,
+        ));
+    }
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.conn()
+        .execute_batch(
+            "UPDATE thread_index_runs SET extractor_version = 0, indexed_extractor_version = 0;
+         UPDATE thread_index_state SET extractor_version = 0;",
+        )
+        .unwrap();
+    let mut restarted = fx.peer(); // settings acceptance, but no owner/step
+    let check_hidden = |fx: &Fixture| {
+        assert!(
+            searchable_runs(fx, &runs).is_empty(),
+            "old extractor must not return hits"
+        );
+        assert!(
+            fx.db
+                .thread_index_coverage(&runs)
+                .unwrap()
+                .iter()
+                .all(|r| r.coverage == crate::thread_search::RunCoverage::Pending)
+        );
+    };
+    check_hidden(&restarted);
+    let lease = restarted.lease(&gui(), 3 * S);
+    assert_eq!(
+        restarted.control(4 * S).step(&lease, 4 * S).unwrap(),
+        IndexStepResult::Progress
+    );
+    assert_eq!(
+        restarted.row("run-b").state,
+        "indexed",
+        "bounded adjustment leaves later rows untouched"
+    );
+    check_hidden(&restarted);
+    let reader = Connection::open(&restarted.config.db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+        .unwrap();
+    restarted.config.hard_limits.max_wal_bytes = restarted.sizes().wal + 1;
+    assert!(matches!(
+        restarted.drive(&lease, 5 * S),
+        IndexStepResult::Paused(_)
+    ));
+    check_hidden(&restarted);
+    reader.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn stale_unbounded_replacement_resumes_after_a_smaller_revision_without_settings_reload() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-old", &"o".repeat(4_000), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.save(&verified("run-old", &"n".repeat(4_000), 20 * S));
+    fx.rt.policy.step_max_text_bytes = 7_999;
+    assert!(matches!(
+        fx.drive(&lease, 3 * S),
+        IndexStepResult::Paused(_)
+    ));
+    fx.save(&verified("run-old", "small updated source", 30 * S));
+    fx.save(&verified("run-other", "another pending run", 40 * S));
+    assert_eq!(
+        fx.drive(&lease, 4 * S),
+        idle(),
+        "stale growth must be discarded without reload/restart"
+    );
+    assert_eq!(fx.row("run-old").state, "indexed");
+    assert_eq!(fx.row("run-other").state, "indexed");
+    assert!(fx.rt.ready.is_none());
+    assert!(fx.rt.paused_growth.is_none());
+}
+
+#[test]
+fn parked_background_owner_discards_a_stale_replacement_bound_on_the_next_source_command() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-old", &"o".repeat(4_000), 10 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.save(&verified("run-old", &"n".repeat(4_000), 20 * S));
+    fx.rt.policy.step_max_text_bytes = 7_999;
+    assert!(matches!(
+        fx.drive(&lease, 3 * S),
+        IndexStepResult::Paused(_)
+    ));
+    let mut job = super::IndexJob::inert();
+    std::mem::swap(&mut job.rt, &mut fx.rt);
+    // Deliberately no owner: run_due must discard an obsolete bound even
+    // before its scheduling gate can authorize another step.
+    super::run_due(&mut job, &fx.db.conn, &fx.config, false, false);
+    assert!(job.rt.pause.is_some(), "unchanged bound must remain parked");
+    fx.save(&verified("run-old", "now smaller", 30 * S));
+    super::run_due(&mut job, &fx.db.conn, &fx.config, false, false);
+    assert!(job.rt.pause.is_none());
+    assert!(job.rt.paused_work.is_none());
+    assert!(job.rt.ready.is_none());
+    assert!(job.maybe_work);
+}
+
 #[test]
 fn oversize_reasons_are_distinguished_in_runs_and_request_gaps() {
     let mut fx = Fixture::new(512 * MIB);

@@ -299,12 +299,23 @@ pub enum CapacityState {
     SourceSuspended(LimitKind),
 }
 
+/// Durable adjustment phase derived from the run versions and charged totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexAdjustmentPhase {
+    /// All charges must be settled before deciding which runs need eviction.
+    Reaccounting,
+    /// Every charge is current; evict only until the new total fits.
+    Evicting,
+}
+
 /// Stop at P+G+R >= H or WAL+G_wal >= max_wal; resume only with +J strictly
 /// below BOTH limits and source writes resumed. IndexPaused does not imply
 /// source suspension. R/J/step bounds require measurements before job work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexCapacityStatus {
     pub state: CapacityState,
+    /// Present even when a physical-capacity reason currently stops this phase.
+    pub adjustment: Option<IndexAdjustmentPhase>,
     pub db_bytes: u64,
     pub wal_bytes: u64,
     pub shm_bytes: u64,

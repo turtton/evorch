@@ -17,12 +17,12 @@ use crate::repo::thread_index::{LegacyDependencies, SqliteSnapshotStore, SqliteT
 use crate::thread_index::IndexStepResult;
 use crate::thread_index::{
     AccountingPolicy, CapacityState, CommitRejection, DEFAULT_ACCOUNTING_POLICY, EXTRACTOR_VERSION,
-    ExtractedIndexInput, ExtractionError, IndexAccounting, IndexBlockedReason, IndexCapacityStatus,
-    IndexCommitGuard, IndexCommitResult, IndexEvictionReason, IndexFailure, IndexLease,
-    IndexPauseReason, IndexSettingsReceipt, IndexState, IndexTarget, PlannedGrowth,
-    RequestGapReason, RequestGuard, SnapshotProvenance, SnapshotRepository as _,
-    ThreadIndexRepository as _, ThreadIndexSettings, account_index_input, extract_snapshot_bundle,
-    reaccount_index,
+    ExtractedIndexInput, ExtractionError, IndexAccounting, IndexAdjustmentPhase,
+    IndexBlockedReason, IndexCapacityStatus, IndexCommitGuard, IndexCommitResult,
+    IndexEvictionReason, IndexFailure, IndexLease, IndexPauseReason, IndexSettingsReceipt,
+    IndexState, IndexTarget, PlannedGrowth, RequestGapReason, RequestGuard, SnapshotProvenance,
+    SnapshotRepository as _, ThreadIndexRepository as _, ThreadIndexSettings, account_index_input,
+    extract_snapshot_bundle, reaccount_index,
 };
 use crate::{HardLimits, LimitKind, StorageError};
 
@@ -65,6 +65,8 @@ pub(crate) struct IndexRuntime {
     /// Retry the refused operation's actual bound (a deletion can be larger
     /// than a new-index step). This prevents false resume/pause cycles.
     pub paused_growth: Option<PlannedGrowth>,
+    /// A result-specific bound is valid only for this revision/generation.
+    pub paused_work: Option<Work>,
     /// `P` when a sticky pause (reclaim exhausted / WAL pinned) was recorded.
     pub sticky_total_bytes: u64,
     pub discovery_complete: bool,
@@ -96,6 +98,7 @@ impl IndexRuntime {
             accounting: DEFAULT_ACCOUNTING_POLICY,
             pause: None,
             paused_growth: None,
+            paused_work: None,
             sticky_total_bytes: 0,
             discovery_complete: false,
             merge_pending: true,
@@ -223,6 +226,7 @@ pub(crate) fn apply_settings(
     rt.settings_generation += 1;
     rt.pause = None;
     rt.paused_growth = None;
+    rt.paused_work = None;
     Ok(IndexSettingsReceipt {
         applied_generation: rt.settings_generation,
         settings,
@@ -230,16 +234,26 @@ pub(crate) fn apply_settings(
 }
 
 fn adjustment_pending(conn: &Connection, rt: &IndexRuntime) -> Result<bool, StorageError> {
+    Ok(adjustment_phase(conn, rt)?.is_some())
+}
+
+fn adjustment_phase(
+    conn: &Connection,
+    rt: &IndexRuntime,
+) -> Result<Option<IndexAdjustmentPhase>, StorageError> {
     let versions = applied_versions(conn)?;
-    Ok(versions != (EXTRACTOR_VERSION, rt.accounting.version)
-        || charged_total(conn)? > rt.settings.max_bytes
+    if versions != (EXTRACTOR_VERSION, rt.accounting.version)
         || conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM thread_index_runs WHERE state <> 'deleted' AND \
              (extractor_version <> ?1 OR accounting_version <> ?2 OR \
               (charged_bytes > 0 AND indexed_accounting_version IS NOT ?2)))",
             params![EXTRACTOR_VERSION, rt.accounting.version],
             |row| row.get::<_, bool>(0),
-        )?)
+        )?
+    {
+        return Ok(Some(IndexAdjustmentPhase::Reaccounting));
+    }
+    Ok((charged_total(conn)? > rt.settings.max_bytes).then_some(IndexAdjustmentPhase::Evicting))
 }
 
 /// Existing blocks remain on pending/retry/blocked rows. Use their stored
@@ -296,7 +310,8 @@ fn add_growth(left: PlannedGrowth, right: PlannedGrowth) -> PlannedGrowth {
 
 /// At most ONE run per step, inside a write transaction. No extraction,
 /// backfill, merge or ready-result commit may overtake this reconciliation.
-/// A run's new accounting and any eviction of that run commit atomically.
+/// Reaccount every run first, then evict using ONLY the settled new total.
+/// Each charge update and each later eviction commits atomically per run.
 fn adjustment_step(
     env: Env<'_>,
     rt: &mut IndexRuntime,
@@ -333,13 +348,9 @@ fn adjustment_step(
             })
             .transpose()
             .map_err(|error| StorageError::Serialization(format!("{error:?}")))?;
-        let projected = match (&stale, new_charge) {
-            (Some((_, _, _, _, _, old)), Some(new)) => {
-                u128::from(total.saturating_sub(*old)) + u128::from(new)
-            }
-            _ => u128::from(total),
-        };
-        if (total > rt.settings.max_bytes || projected > u128::from(rt.settings.max_bytes))
+        if stale.is_none()
+            && applied_versions(conn)? == (EXTRACTOR_VERSION, rt.accounting.version)
+            && total > rt.settings.max_bytes
             && let Some((run_id, _)) = SqliteThreadIndex::new(conn)
                 .eviction_candidates(1)?
                 .into_iter()
@@ -350,8 +361,6 @@ fn adjustment_step(
             if status.state != CapacityState::Normal {
                 return Ok(Err(status));
             }
-            // If this is the stale row, eviction clears its accounting in
-            // this transaction; it must not be reaccounted after deletion.
             SqliteThreadIndex::new(conn)
                 .evict_index(&run_id, IndexEvictionReason::LogicalBudget)?;
             conn.execute(
@@ -448,21 +457,25 @@ fn physical_capacity_status(
     growth: PlannedGrowth,
 ) -> Result<IndexCapacityStatus, StorageError> {
     let measured = env.measure()?;
+    let adjustment = adjustment_phase(env.conn, rt)?;
     if rt.sticky() {
         let mut status = rt.pause.expect("sticky pause recorded");
         status.db_bytes = measured.sizes.db;
         status.wal_bytes = measured.sizes.wal;
         status.shm_bytes = measured.sizes.shm;
+        status.adjustment = adjustment;
         return Ok(status);
     }
-    Ok(capacity::evaluate(
+    let mut status = capacity::evaluate(
         &rt.policy,
         env.limits,
         rt.settings.enabled,
         measured,
         growth,
         rt.pause.is_some(),
-    ))
+    );
+    status.adjustment = adjustment;
+    Ok(status)
 }
 
 fn admit(
@@ -495,6 +508,7 @@ fn pause(
     if status.state == CapacityState::Normal {
         rt.pause = None;
         rt.paused_growth = None;
+        rt.paused_work = None;
         return Ok(status);
     }
     if rt.pause.is_none() {
@@ -546,7 +560,10 @@ fn reclaim(env: Env<'_>, rt: &mut IndexRuntime) -> Result<IndexCapacityStatus, S
             + u128::from(rt.policy.reserve_bytes())
             + u128::from(rt.policy.hysteresis_bytes);
         let deficit = needed.saturating_sub(u128::from(env.limits.max_db_bytes));
-        if deficit > 0 && !deleted {
+        if deficit > 0
+            && !deleted
+            && adjustment_phase(conn, rt)? != Some(IndexAdjustmentPhase::Reaccounting)
+        {
             deleted = immediate(conn, |conn| {
                 let mut index = SqliteThreadIndex::new(conn);
                 let Some((run_id, _)) = index.eviction_candidates(1)?.into_iter().next() else {
@@ -640,6 +657,7 @@ fn sticky(
     rt.sticky_total_bytes = measured.sizes.total();
     Ok(IndexCapacityStatus {
         state: CapacityState::IndexPaused(reason),
+        adjustment: adjustment_phase(env.conn, rt)?,
         db_bytes: measured.sizes.db,
         wal_bytes: measured.sizes.wal,
         shm_bytes: measured.sizes.shm,
@@ -670,6 +688,9 @@ fn log_reclaim(
 /// Re-judges a pause after a capacity-change notification (maintenance
 /// checkpoint, cleanup, settings). Sticky reasons need a measured decrease.
 pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool, StorageError> {
+    if discard_stale_pause(env, rt)? {
+        return Ok(true);
+    }
     let Some(status) = rt.pause else {
         return Ok(true);
     };
@@ -692,7 +713,7 @@ pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool,
     let growth = rt
         .paused_growth
         .unwrap_or_else(|| growth_for_step_max(rt, page_size, freelist));
-    let status = capacity::evaluate(
+    let mut status = capacity::evaluate(
         &rt.policy,
         env.limits,
         rt.settings.enabled,
@@ -700,14 +721,48 @@ pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool,
         growth,
         true,
     );
+    status.adjustment = adjustment_phase(env.conn, rt)?;
     if status.state == CapacityState::Normal {
         tracing::info!(db_bytes = status.db_bytes, "thread index resumed");
         rt.pause = None;
         rt.paused_growth = None;
+        rt.paused_work = None;
         return Ok(true);
     }
     rt.pause = Some(status);
     Ok(false)
+}
+
+/// Invalidates only a result-specific pause. Physical pauses without a frozen
+/// work item (e.g. an old index larger than the envelope) keep their stop rule.
+/// Called after source commands too, so a parked owner need not await a timer.
+pub(crate) fn discard_stale_pause(
+    env: Env<'_>,
+    rt: &mut IndexRuntime,
+) -> Result<bool, StorageError> {
+    let Some(work) = rt.paused_work.as_ref() else {
+        return Ok(false);
+    };
+    let live = lease::current(env.conn)?;
+    let stale = match live {
+        // Expiry itself is checked at prepare/commit. Here only determine
+        // whether the frozen result still describes this source and request.
+        Some(lease) if lease.epoch == work.lease_epoch => SqliteThreadIndex::new(env.conn)
+            .check_guard(&guard(&lease, work), lease.expires_at_ns.saturating_sub(1))?
+            .is_some(),
+        _ => true,
+    };
+    if !stale {
+        return Ok(false);
+    }
+    if rt.ready.as_ref().is_some_and(|(ready, _)| ready == work) {
+        rt.ready = None;
+        rt.counters.discarded += 1;
+    }
+    rt.paused_work = None;
+    rt.paused_growth = None;
+    rt.pause = None;
+    Ok(true)
 }
 
 fn guard(lease: &IndexLease, work: &Work) -> IndexCommitGuard {
@@ -863,6 +918,7 @@ pub(crate) fn prepare(
         return Ok(Action::LeaseLost);
     }
     rt.counters.steps += 1;
+    discard_stale_pause(env, rt)?;
     if !rt.settings.enabled {
         let status = capacity_status(
             env,
@@ -967,6 +1023,7 @@ fn evict_self(
         let growth = deletion_growth(conn, rt, &work.target.run_id)?;
         let status = admit(Env { conn, ..env }, rt, growth)?;
         if status.state != CapacityState::Normal {
+            rt.paused_work = Some(work.clone());
             return Ok(Budget::Paused(status));
         }
         SqliteThreadIndex::new(conn).evict_index(&work.target.run_id, reason)?;
@@ -1196,6 +1253,7 @@ fn budget_step(
         let growth = deletion_growth(conn, rt, &run_id)?;
         let status = admit(Env { conn, ..env }, rt, growth)?;
         if status.state != CapacityState::Normal {
+            rt.paused_work = Some(work.clone());
             return Ok(Budget::Paused(status));
         }
         if SqliteThreadIndex::new(conn)
@@ -1247,6 +1305,7 @@ fn commit(
         };
         let status = admit(Env { conn, ..env }, rt, growth)?;
         if status.state != CapacityState::Normal {
+            rt.paused_work = Some(work.clone());
             return Ok(Err(status));
         }
         let result = SqliteThreadIndex::new(conn).commit_index_input(

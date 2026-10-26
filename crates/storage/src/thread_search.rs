@@ -16,7 +16,7 @@
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Row, params_from_iter};
 
-use crate::thread_index::{BlockLocator, IndexBlockKind, IndexRole};
+use crate::thread_index::{BlockLocator, EXTRACTOR_VERSION, IndexBlockKind, IndexRole};
 use crate::{Database, StorageError};
 
 mod tokenizer_prefilter;
@@ -33,6 +33,17 @@ pub const MAX_SEARCH_PAGE_ROWS: usize = 500;
 /// Case-variant spellings one term may expand to before it falls back to a
 /// scan; see [`term_route`].
 pub const MAX_TERM_VARIANTS: usize = 16;
+
+/// Shared by coverage, every candidate route and therefore runtime ownership
+/// and cursor validation. Deferred settings must not expose old extraction.
+fn current_index_sql() -> String {
+    format!(
+        "r.state = 'indexed' AND r.source_present = 1 \
+         AND r.indexed_revision = r.source_revision \
+         AND r.extractor_version = {EXTRACTOR_VERSION} \
+         AND r.indexed_extractor_version = {EXTRACTOR_VERSION}"
+    )
+}
 
 /// How one case-insensitive literal term can be narrowed in SQL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,25 +253,24 @@ impl Database {
         let sql = format!(
             "WITH scope(run_id, seq) AS (VALUES {scope}) \
              SELECT scope.run_id, r.state, r.source_present, r.source_revision, \
-                    r.indexed_revision \
+                    ({current}) \
              FROM scope LEFT JOIN thread_index_runs r ON r.run_id = scope.run_id \
-             ORDER BY scope.seq"
+             ORDER BY scope.seq",
+            current = current_index_sql(),
         );
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(params), |row| {
             let state: Option<String> = row.get(1)?;
             let present: Option<bool> = row.get(2)?;
             let source: Option<u64> = row.get(3)?;
-            let indexed: Option<u64> = row.get(4)?;
+            let current: Option<bool> = row.get(4)?;
             let coverage = match (state.as_deref(), present) {
                 (None, _) => RunCoverage::Undiscovered,
                 (Some("deleted"), _) | (_, Some(false)) => RunCoverage::Deleted,
                 (Some("evicted"), _) => RunCoverage::Evicted,
                 (Some("blocked"), _) => RunCoverage::Blocked,
                 (Some("retry_wait"), _) => RunCoverage::RetryWait,
-                (Some("indexed"), _) if indexed.is_some() && indexed == source => {
-                    RunCoverage::Indexed
-                }
+                (Some("indexed"), _) if current == Some(true) => RunCoverage::Indexed,
                 _ => RunCoverage::Pending,
             };
             Ok(RunIndexCoverage {
@@ -336,10 +346,10 @@ fn conversation_candidate_sql(
                  FROM thread_index_runs r \
                  CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
                      ON b.run_id = r.run_id \
-                 WHERE r.run_id = ?{run_parameter} AND r.state = 'indexed' \
-                   AND r.source_present = 1 AND r.indexed_revision = r.source_revision \
+                 WHERE r.run_id = ?{run_parameter} AND ({current}) \
                    AND b.kind = '{kind}'{after} AND ({filter})",
                 kind = kind_text(*kind),
+                current = current_index_sql(),
             ));
         }
     }
