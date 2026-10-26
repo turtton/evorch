@@ -6,7 +6,9 @@
 use std::process::Stdio;
 use std::sync::Arc;
 
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::error::ToolError;
@@ -89,27 +91,31 @@ impl Tool for GitDiff {
                 detail: error.to_string(),
             })?;
 
-        let mut command = Command::new(&wrapped.program);
-        wrapped.apply_environment(command.as_std_mut());
+        // The launch policy keeps git (and any external diff tool or textconv
+        // filter it runs) off evorch's terminal and descriptors. Cancelling the
+        // call kills the whole process group.
+        let mut command = Command::from(wrapped.to_command());
         command
-            .args(&wrapped.args)
             // git diff は標準入力を読まない。フック等が読んでも即時 EOF にする。
-            .stdin(Stdio::null());
-        if let Some(cwd) = wrapped.cwd {
-            command.current_dir(cwd);
-        }
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
-        let output = command
-            .output()
-            .await
-            .map_err(|error| ToolError::SpawnFailed {
-                command: wrapped.program,
-                detail: error.to_string(),
-            })?;
+        let spawn_failed = |error: std::io::Error| ToolError::SpawnFailed {
+            command: wrapped.program.clone(),
+            detail: error.to_string(),
+        };
+        let mut child = GroupChild::spawn(&mut command).map_err(spawn_failed)?;
+        let (stdout, stderr) = (child.take_stdout(), child.take_stderr());
+        // Once git exits, waiting kills helpers that still hold its output, so
+        // the reads end and no reaped group id is signalled later.
+        let (status, stdout, stderr) =
+            tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr))
+                .map_err(spawn_failed)?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let status = output.status;
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
 
         // リポジトリ外での実行は git のバージョンでメッセージが異なる
         // （古: "fatal: not a git repository" / 新: "warning: Not a git repository.
@@ -126,4 +132,12 @@ impl Tool for GitDiff {
         }
         Ok(ToolResult::success(stdout))
     }
+}
+
+async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
 }

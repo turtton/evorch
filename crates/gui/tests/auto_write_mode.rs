@@ -190,6 +190,7 @@ fn sink_rejects_old_permit_even_after_same_host_reclaims() {
     // When
     let events = sink.submit_chat_with_permit(
         ChatSubmission {
+            submission_id: String::new(),
             project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
@@ -229,6 +230,7 @@ fn renewed_generation_does_not_reuse_previous_chat_run() {
     let first = owner.start("thread").unwrap();
     let (_rt, mut sink, _) = runtime_sink(owner.clone());
     let chat = ChatSubmission {
+        submission_id: String::new(),
         project_root: None,
         fork_seed: None,
         composer_role: gui::model::composer::ComposerRole::Worker,

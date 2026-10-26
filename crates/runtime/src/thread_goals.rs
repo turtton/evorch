@@ -29,9 +29,17 @@ pub(crate) struct ThreadGoals {
 }
 
 pub(crate) struct GoalEntry {
+    // Runtime-only identity for new human input, including epoch saturation.
+    input_revision: std::sync::Arc<()>,
     snapshot: ThreadGoalSnapshot,
     reviewer: Option<RunId>,
     review_result: Option<GoalReview>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GoalInputStamp {
+    thread: String,
+    revision: std::sync::Arc<()>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -229,6 +237,7 @@ impl AgentRuntime {
         let previous = goals.goals.insert(
             thread_id.into(),
             GoalEntry {
+                input_revision: std::sync::Arc::new(()),
                 snapshot: snapshot.clone(),
                 reviewer: None,
                 review_result: None,
@@ -319,6 +328,7 @@ impl AgentRuntime {
         goals.goals.insert(
             snapshot.thread_id.clone(),
             GoalEntry {
+                input_revision: std::sync::Arc::new(()),
                 snapshot,
                 reviewer: None,
                 review_result: None,
@@ -638,6 +648,7 @@ impl AgentRuntime {
             let Some(entry) = goals.goals.get_mut(&thread) else {
                 return;
             };
+            entry.input_revision = std::sync::Arc::new(());
             if entry.snapshot.phase == ThreadGoalPhase::Complete {
                 return;
             }
@@ -672,6 +683,56 @@ impl AgentRuntime {
             reviewer
         };
         self.cancel_goal_reviewer(reviewer);
+    }
+
+    pub(crate) fn goal_input_stamp(&self, root: RunId) -> Option<GoalInputStamp> {
+        let goals = self.goal_lock();
+        let thread = goals.roots.get(&root)?;
+        Some(GoalInputStamp {
+            thread: thread.clone(),
+            revision: std::sync::Arc::clone(&goals.goals.get(thread)?.input_revision),
+        })
+    }
+
+    /// Called with I held, but never A/R/G. Only removes the reviewer; the caller
+    /// must release all locks before cancelling that reviewer.
+    pub(crate) fn stop_admission_goal(
+        &self,
+        root: RunId,
+        expected: Option<&GoalInputStamp>,
+        goals: &mut ThreadGoals,
+    ) -> Option<RunId> {
+        let expected = expected?;
+        if goals.roots.get(&root) != Some(&expected.thread) {
+            return None;
+        }
+        let entry = goals.goals.get_mut(&expected.thread)?;
+        if !std::sync::Arc::ptr_eq(&entry.input_revision, &expected.revision)
+            || entry.snapshot.phase == ThreadGoalPhase::Complete
+        {
+            return None;
+        }
+        let reviewer = entry.reviewer.take();
+        invalidate(entry);
+        entry.snapshot.work_stopped = true;
+        self.publish_thread_goal(&entry.snapshot);
+        reviewer
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_goal_reviewer(&self, root: RunId, reviewer: RunId) {
+        let mut goals = self.goal_lock();
+        let thread = goals.roots[&root].clone();
+        goals.goals.get_mut(&thread).unwrap().reviewer = Some(reviewer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_goal_reviewer(&self, root: RunId) -> Option<RunId> {
+        let goals = self.goal_lock();
+        goals
+            .goals
+            .get(goals.roots.get(&root)?)
+            .and_then(|entry| entry.reviewer)
     }
 
     fn cancel_goal_reviewer(&self, reviewer: Option<RunId>) {

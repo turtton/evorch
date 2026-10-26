@@ -1,8 +1,27 @@
 use super::WorkbenchState;
-use crate::model::commands::{ChatContinuation, ChatSubmission, WorkbenchCommand};
-use crate::model::composer::{ComposerInput, ProviderStatus};
+use super::history::DeliveryStatus;
+use crate::model::commands::{ChatContinuation, ChatSubmission, LoopEvent, WorkbenchCommand};
+use crate::model::composer::{
+    ComposerInput, ProviderStatus, mention_skills, withheld_skill_mentions,
+};
+use crate::model::project_bridge::repo_skills_admitted;
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
+use crate::panes::project_dialog::TRUST_LABEL;
+
+/// Tells why the mentioned repository skills `names` went out as plain text
+/// and where to trust the project so they are inlined.
+fn untrusted_skills_notice(names: &[&str]) -> String {
+    let mentions = names
+        .iter()
+        .map(|name| format!("@{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Sent {mentions} as plain text — this project is not trusted, so its own skills are \
+         not expanded. Enable \"{TRUST_LABEL}\" in Project settings to use them."
+    )
+}
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Continue a thread's saved conversation, as `/continue` does. `automatic`
@@ -124,14 +143,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.push_notice(guidance.clone());
                     }
                     ProviderStatus::Configured => {
-                        let prompt = match self.expand_skill_mentions(text) {
-                            Ok(prompt) => prompt,
+                        let (prompt, withheld_notice) = match self.expand_skill_mentions(text) {
+                            Ok(expansion) => expansion,
                             Err(notice) => {
                                 self.push_notice(notice);
                                 return;
                             }
                         };
                         let submission = ChatSubmission {
+                            submission_id: uuid::Uuid::new_v4().to_string(),
                             fork_seed: self.fork_seed(thread_id),
                             project_root: self
                                 .thread_project(thread_id)
@@ -186,51 +206,73 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.composer.restore_thread_role(thread);
                         }
                         self.history.push(super::history::UserMessage {
+                            id: submission.submission_id.clone(),
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
+                            prompt: prompt.clone(),
                             at: sent_at,
+                            status: DeliveryStatus::Queued,
+                            resolution: None,
                         });
                         // A busy run reads follow-ups later; they wait above the composer
                         // and join the transcript once delivered.
                         let queued = self
                             .follow_up_would_queue(&submission.thread_id)
                             .then(|| submission.thread_id.clone());
-                        if queued.is_none() {
-                            // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
-                            self.transcripts.push_thread(TranscriptEntry::UserMessage {
-                                text: prompt.clone(),
-                            });
-                        }
                         self.save_sidebar();
+                        let submission_id = submission.submission_id.clone();
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));
                         let events = match permit {
                             Some(permit) => self.sink.submit_chat_with_permit(submission, permit),
                             None => self.sink.submit(WorkbenchCommand::SendChat(submission)),
                         };
-                        let rejected = events.iter().any(|event| {
-                            matches!(
-                                event,
-                                crate::model::commands::LoopEvent::ChatRejected { .. }
-                                    | crate::model::commands::LoopEvent::CommandRejected { .. }
-                            )
+                        let rejection = events.iter().find_map(|event| match event {
+                            LoopEvent::ChatRejected { reason, .. }
+                            | LoopEvent::CommandRejected { reason } => Some(reason.clone()),
+                            _ => None,
                         });
-                        if !rejected && let Some(chat) = title_chat {
-                            self.start_auto_title(chat);
-                        }
-                        if let Some(thread) = queued {
-                            if rejected {
-                                self.transcripts
-                                    .push_thread(TranscriptEntry::UserMessage { text: prompt });
-                            } else {
-                                self.queue_follow_up(&thread, text.into(), prompt);
+                        match rejection {
+                            // The agent never saw it: no bubble, and the composer keeps
+                            // the text and attachments to edit and send again.
+                            Some(reason) => {
+                                self.reject_submission(&submission_id, reason);
+                            }
+                            None => {
+                                if let Some(chat) = title_chat {
+                                    self.start_auto_title(chat);
+                                }
+                                match queued {
+                                    Some(thread) => {
+                                        self.queue_follow_up(
+                                            &thread,
+                                            submission_id,
+                                            text.into(),
+                                            prompt,
+                                        );
+                                    }
+                                    None => {
+                                        // The runtime echoes the expanded prompt; matching it
+                                        // avoids a duplicate bubble.
+                                        self.transcripts.push_thread(
+                                            TranscriptEntry::UserMessage { text: prompt },
+                                        );
+                                        self.mark_delivered(&[submission_id]);
+                                        self.save_sidebar();
+                                    }
+                                }
+                                // Only an accepted message says its repository skills went
+                                // out as plain text; a refused one goes back to the composer.
+                                if let Some(notice) = withheld_notice {
+                                    self.push_notice(notice);
+                                }
+                                self.composer.input.clear();
+                                self.composer.attachments.clear();
                             }
                         }
                         for event in events {
                             self.apply_loop_event(event);
                         }
-                        self.composer.input.clear();
-                        self.composer.attachments.clear();
                     }
                 }
             }
@@ -361,14 +403,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     /// Inlines skills written as `@name`, read fresh so edits apply on the next send.
-    fn expand_skill_mentions(&self, text: &str) -> Result<String, String> {
+    ///
+    /// Like the runtime, an untrusted project's own skills stay out: their
+    /// mentions are sent as plain text, and the notice returned beside the
+    /// prompt names them and says how to let them in.
+    fn expand_skill_mentions(&self, text: &str) -> Result<(String, Option<String>), String> {
         if !text.contains('@') {
-            return Ok(text.into());
+            return Ok((text.into(), None));
         }
-        let root = self.active_repo_root();
-        let skills = runtime::skill::build_standard_registry(root.as_deref());
-        crate::model::composer::expand_skill_mentions(text, root.as_deref(), &skills)
-            .map_err(|name| format!("Could not load skill @{name}"))
+        let project = self.active_project();
+        let root = project.map(|project| project.repo_root.as_path());
+        let repo_skills = repo_skills_admitted(project);
+        let skills = mention_skills(root, repo_skills);
+        let prompt = crate::model::composer::expand_skill_mentions(text, root, &skills)
+            .map_err(|name| format!("Could not load skill @{name}"))?;
+        let notice = root.filter(|_| !repo_skills).and_then(|root| {
+            let trusted = mention_skills(Some(root), true);
+            let withheld = withheld_skill_mentions(text, Some(root), &skills, &trusted);
+            (!withheld.is_empty()).then(|| untrusted_skills_notice(&withheld))
+        });
+        Ok((prompt, notice))
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {

@@ -52,6 +52,7 @@ fn apply_patch_history_keeps_anthropic_tool_use_and_result_pair() {
 #[test]
 fn canonical_request_converts_to_anthropic_wire_shape() {
     let request = ChatRequest {
+        responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![
             Message {
@@ -123,6 +124,7 @@ fn canonical_request_converts_to_anthropic_wire_shape() {
 #[test]
 fn user_only_blocks_follow_anthropic_role_constraints() {
     let request = ChatRequest {
+        responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![
             Message {
@@ -165,6 +167,7 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
 fn top_level_schema_combinators_are_omitted_for_anthropic() {
     let nested = json!({"anyOf": [{"type": "string"}, {"type": "integer"}]});
     let request = ChatRequest {
+        responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![],
         tools: vec![ToolSpec {
@@ -321,6 +324,7 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
 #[test]
 fn tool_result_images_are_native_image_blocks() {
     let request = ChatRequest {
+        responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![Message {
             role: Role::User,

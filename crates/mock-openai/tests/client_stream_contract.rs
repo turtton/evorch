@@ -13,6 +13,7 @@ use serde_json::json;
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "test-model".to_string(),
         messages: vec![Message {
             role: Role::User,

@@ -51,6 +51,7 @@ fn text_of_role(messages: &[Message], role: MessageRole) -> Option<&str> {
                 }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
@@ -74,6 +75,7 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

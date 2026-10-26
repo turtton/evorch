@@ -119,6 +119,9 @@ fn search_error(error: ProviderError) -> SearchError {
         ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => {
             SearchError::Protocol("invalid hosted-search response".into())
         }
+        ProviderError::ResponsesScopeChanged { .. } => {
+            SearchError::Protocol("Responses scope changed".into())
+        }
         ProviderError::Request(_) | ProviderError::Transport { .. } => {
             SearchError::Transport("hosted-search request failed".into())
         }

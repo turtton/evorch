@@ -2,10 +2,13 @@ use super::*;
 use event_bus::event::diagnostic_codes;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
+#[cfg(test)]
+pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
 pub(super) struct Admission {
     parent: Option<RunId>,
     pub(super) cancelled: bool,
+    pub(super) execution: Arc<ExecutionControl>,
     ownership: Option<crate::ownership::OwnerPermit>,
     completion: Option<watch::Sender<Option<Result<(), RuntimeError>>>>,
     pub(super) result: watch::Receiver<Option<Result<(), RuntimeError>>>,
@@ -41,7 +44,7 @@ impl AgentRuntime {
         config: &RunConfig,
         reason: String,
     ) {
-        self.reserve_admission(run_id, parent, config.ownership.clone());
+        let execution = self.reserve_admission(run_id, parent, config.ownership.clone());
         let mut admissions = self
             .shared
             .admissions
@@ -49,42 +52,110 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(completion) = admissions
             .get_mut(&run_id)
+            .filter(|admission| Arc::ptr_eq(&admission.execution, &execution))
             .and_then(|admission| admission.completion.take())
         {
             completion.send_replace(Some(Err(Self::review_error(run_id, reason))));
         }
     }
 
-    /// Establish an awaitable identity before publishing a handoff. Provider
-    /// admission reuses this channel so event consumers can immediately wait.
+    /// Reserve before publishing a handoff, so cancellation already has a
+    /// generation-bound channel before provider admission or RunEntry exists.
     pub(super) fn reserve_admission(
         &self,
         run_id: RunId,
         parent: Option<RunId>,
         ownership: Option<crate::ownership::OwnerPermit>,
+    ) -> Arc<ExecutionControl> {
+        let mut intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inherited = intents.get(&run_id).is_some_and(|i| i.cancelled)
+            || parent
+                .and_then(|p| intents.get(&p))
+                .is_some_and(|i| i.cancelled);
+        let intent = intents.entry(run_id).or_default();
+        intent.parent = intent.parent.or(parent);
+        let execution = Arc::clone(
+            intent
+                .execution
+                .get_or_insert_with(|| ExecutionControl::new(inherited)),
+        );
+        self.reserve_admission_for(run_id, parent, ownership, Arc::clone(&execution));
+        execution
+    }
+
+    fn reserve_admission_for(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        ownership: Option<crate::ownership::OwnerPermit>,
+        execution: Arc<ExecutionControl>,
     ) {
         let mut admissions = self
             .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(admission) = admissions.get(&run_id) {
-            let pending = admission.snapshot().result.is_none();
-            if pending {
-                return;
-            }
+        if admissions
+            .get(&run_id)
+            .is_some_and(|a| Arc::ptr_eq(&a.execution, &execution) && a.snapshot().result.is_none())
+        {
+            return;
         }
         let (completion, result) = watch::channel(None);
         admissions.insert(
             run_id,
             Admission {
                 parent,
-                cancelled: false,
+                cancelled: execution.cancelled(),
+                execution,
                 ownership,
                 completion: Some(completion),
                 result,
             },
         );
+    }
+
+    /// Handoff already reserved this execution before taking Q. Only A is
+    /// needed here; never reacquire I from the handoff callback.
+    pub(super) fn update_admission_owner(
+        &self,
+        run: RunId,
+        execution: &Arc<ExecutionControl>,
+        owner: Option<crate::ownership::OwnerPermit>,
+    ) {
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(admission) = admissions.get_mut(&run)
+            && Arc::ptr_eq(&admission.execution, execution)
+        {
+            admission.ownership = owner;
+        }
+    }
+
+    pub(super) fn fail_reserved_admission(
+        &self,
+        run: RunId,
+        execution: &Arc<ExecutionControl>,
+        reason: String,
+    ) {
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(admission) = admissions.get_mut(&run)
+            && Arc::ptr_eq(&admission.execution, execution)
+            && let Some(completion) = admission.completion.take()
+        {
+            completion.send_replace(Some(Err(RuntimeError::Model { reason })));
+        }
     }
 
     // Forward the prepared review seed without performing storage reads.
@@ -98,15 +169,23 @@ impl AgentRuntime {
         config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
+        execution: Arc<ExecutionControl>,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
     ) -> RunId {
         let mut admissions = self
             .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cancelled = admissions
+        if admissions
             .get(&run_id)
-            .is_some_and(|admission| admission.result.borrow().is_none() && admission.cancelled);
+            .is_some_and(|a| !Arc::ptr_eq(&a.execution, &execution))
+        {
+            admissions.remove(&run_id);
+        }
+        let cancelled = admissions.get(&run_id).is_some_and(|admission| {
+            Arc::ptr_eq(&admission.execution, &execution) && admission.cancelled
+        });
         if !cancelled {
             self.register_run(
                 run_id,
@@ -116,11 +195,14 @@ impl AgentRuntime {
                 config,
                 continuation,
                 review_seed,
+                Arc::clone(&execution),
+                intents,
             );
         } else {
             drop(continuation);
         }
         if let Some(admission) = admissions.get_mut(&run_id)
+            && Arc::ptr_eq(&admission.execution, &execution)
             && let Some(completion) = admission.completion.take()
         {
             completion.send_replace(Some(if cancelled {
@@ -146,8 +228,21 @@ impl AgentRuntime {
         config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
+        execution: Arc<ExecutionControl>,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
     ) -> RunId {
-        self.reserve_admission(run_id, parent, config.ownership.clone());
+        assert!(
+            intents
+                .get(&run_id)
+                .and_then(|i| i.execution.as_ref())
+                .is_some_and(|current| Arc::ptr_eq(current, &execution))
+        );
+        self.reserve_admission_for(
+            run_id,
+            parent,
+            config.ownership.clone(),
+            Arc::clone(&execution),
+        );
         let result = self
             .shared
             .admissions
@@ -156,6 +251,7 @@ impl AgentRuntime {
             .get_mut(&run_id)
             .and_then(|admission| admission.completion.take())
             .expect("reserved admission has one completion sender");
+        let goal_stamp = self.goal_input_stamp(run_id);
         let runtime = self.clone();
         tokio::spawn(async move {
             let handoff = matches!(
@@ -178,15 +274,32 @@ impl AgentRuntime {
                 .model_for(&config)
                 .admit(&invocation, role)
                 .await;
-            // Cancellation and registration share this fence; no await inside it.
+            #[cfg(test)]
+            if admitted.is_err() {
+                runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
+            }
+            // Registration and generation replacement share I -> A. Never
+            // acquire a publication gate under these global locks.
+            let intents = runtime
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let admissions = runtime
                 .shared
                 .admissions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if admissions
+            let current = intents
                 .get(&run_id)
-                .is_some_and(|admission| admission.cancelled)
+                .and_then(|i| i.execution.as_ref())
+                .is_some_and(|e| Arc::ptr_eq(e, &execution));
+            if !current
+                || execution.cancelled()
+                || intents.get(&run_id).is_some_and(|i| i.cancelled)
+                || admissions
+                    .get(&run_id)
+                    .is_none_or(|a| !Arc::ptr_eq(&a.execution, &execution) || a.cancelled)
             {
                 admitted = Err(RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
@@ -201,15 +314,51 @@ impl AgentRuntime {
                     config,
                     continuation,
                     review_seed,
+                    Arc::clone(&execution),
+                    &intents,
                 );
             } else {
                 // Release before notifying waiters; retries must observe the durable seed.
                 drop(continuation);
             }
+            // Stop must never see a registered entry as a pending admission:
+            // publish success before releasing the registration/cancellation fence.
+            if admitted.is_ok() {
+                result.send_replace(Some(Ok(())));
+            }
             let failure = handoff.then(|| admitted.as_ref().err()).flatten();
             drop(admissions);
-            if failure.is_some() {
-                runtime.goal_work_stopped(run_id);
+            let reviewer = if current && failure.is_some() {
+                #[cfg(test)]
+                runtime
+                    .execution_hook(cancellation::HookPoint::AdmissionGoalCheckpoint, &execution);
+                let mut goals = runtime.goal_lock();
+                let reviewer = runtime.stop_admission_goal(run_id, goal_stamp.as_ref(), &mut goals);
+                drop(goals);
+                reviewer
+                    .and_then(|reviewer| intents.get(&reviewer).and_then(|i| i.execution.clone()))
+            } else {
+                None
+            };
+            drop(intents);
+            #[cfg(test)]
+            if admitted.is_ok() {
+                runtime.execution_hook(cancellation::HookPoint::AdmissionRegistered, &execution);
+            }
+            #[cfg(test)]
+            if admitted.is_ok() {
+                let hook = runtime
+                    .shared
+                    .admission_registration_hook
+                    .lock()
+                    .unwrap()
+                    .clone();
+                if let Some(hook) = hook {
+                    hook(run_id);
+                }
+            }
+            if let Some(reviewer) = reviewer {
+                runtime.cancel_execution(&reviewer);
             }
             // A cancelled admission is the user's stop, not an admission failure.
             if let Some(error) = failure
@@ -228,7 +377,11 @@ impl AgentRuntime {
                         call_id: None,
                     }));
             }
-            result.send_replace(Some(admitted));
+            #[cfg(test)]
+            runtime.execution_hook(cancellation::HookPoint::AdmissionCompleted, &execution);
+            if admitted.is_err() {
+                result.send_replace(Some(admitted));
+            }
         });
         run_id
     }
@@ -262,24 +415,6 @@ impl AgentRuntime {
                 })?;
             }
         }
-        Ok(())
-    }
-
-    /// run へキャンセルを通知する。admission 待機中なら登録を抑止する。
-    pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let mut admissions = self
-            .shared
-            .admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(admission) = admissions.get_mut(&run_id)
-            && admission.result.borrow().is_none()
-        {
-            admission.cancelled = true;
-            return Ok(());
-        }
-        let sender = self.entry(run_id)?.cancel_tx.clone();
-        sender.send_replace(RunInterrupt::Cancel);
         Ok(())
     }
 }

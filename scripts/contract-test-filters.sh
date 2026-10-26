@@ -6,6 +6,9 @@ CACHE_CONTRACT_FILTER='
   package(=mock-openai)
   | (package(=providers) & (
       (kind(lib) & test(observe::cache))
+      | (kind(lib) & test(wire::responses::))
+      | (kind(lib) & test(responses_replay::))
+      | binary(=responses_encrypted_replay)
       | (kind(lib) & test(provider::cursor::tests))
       | (kind(lib) & test(provider::claude::))
       | binary(=cache_prefix_contract)
@@ -18,6 +21,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=request_turn_context)
       | binary(=anthropic_signed_replay)
       | (binary(=anthropic_web_search) & test(search_isolated_from_chat_cache_and_claude_response_correlation))
+      | (binary(=image_generation_contract) & test(ac4_image_generation_preserves_chat_cache_baseline))
       | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
   | (package(=routing) & binary(=claude_identity))
   | (package(=runtime) & (

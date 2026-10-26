@@ -289,12 +289,7 @@ fn validate_rules(
     if frontmatter.name.chars().count() > 64 {
         return Err(SkillValidationError::NameTooLong);
     }
-    if !frontmatter.name.split('-').all(|segment| {
-        !segment.is_empty()
-            && segment
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    }) {
+    if !has_valid_name_format(&frontmatter.name) {
         return Err(SkillValidationError::InvalidNameFormat);
     }
     if frontmatter.name != dir_name {
@@ -314,6 +309,24 @@ fn validate_rules(
         return Err(SkillValidationError::CompatibilityTooLong);
     }
     Ok(())
+}
+
+/// `^[a-z0-9]+(-[a-z0-9]+)*$` に一致するか (空文字列は一致しない)。
+fn has_valid_name_format(name: &str) -> bool {
+    name.split('-').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
+/// frontmatter の `name` 規約 (64 文字以内・書式) を満たすか。
+///
+/// パス区切り・`.`・`..` を含む名前は通らないため、通った名前は 1 つのパス要素として
+/// 安全に使える。
+pub(crate) fn is_valid_skill_name(name: &str) -> bool {
+    name.chars().count() <= 64 && has_valid_name_format(name)
 }
 
 #[cfg(test)]

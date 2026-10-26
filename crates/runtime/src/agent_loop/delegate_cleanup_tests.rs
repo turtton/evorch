@@ -105,6 +105,7 @@ fn fixture_with_model(
         benchmark_checked: false,
         benchmark_replay: false,
         task: RunTask {
+            publication: crate::runtime::ExecutionControl::new(false).publication(),
             ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),
             run_id: parent,
@@ -132,6 +133,7 @@ fn fixture_with_model(
         },
         run_state: RunState::new(),
         context: AgentContext::new(parent, Role::Orchestrator),
+        image_model: Arc::clone(&runtime.shared.model),
         policy: runtime.execution_policy(Role::Orchestrator),
         tool_specs: Vec::new(),
         rules_session: None,

@@ -21,6 +21,7 @@ use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod hosted_search;
+mod image_generation;
 mod images;
 mod output_limits;
 
@@ -229,6 +230,7 @@ pub struct RoutedModel {
     affinity: Mutex<SessionAffinity>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
+    image_health: Arc<routing::ProviderHealth>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
     /// フォールバックの一周で Retry-After を待つ上限。
@@ -287,6 +289,7 @@ impl RoutedModel {
                 .with_health(Arc::clone(&health)),
             router: composed.router.with_health(Arc::clone(&health)),
             health,
+            image_health: Arc::new(routing::ProviderHealth::default()),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
@@ -629,6 +632,84 @@ impl RoutedModel {
         }
     }
 
+    async fn resolve_replay_scope_with_tier(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+        tier: Option<Option<providers::ServiceTier>>,
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        let route = self.resolve_invocation(invocation, role, tools)?.route;
+        let provider = &self.providers[&route.profile];
+        let (base, speed) = config::types::provider::parse_model_speed(&route.model_id);
+        let request = ChatRequest {
+            model: base.into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            service_tier: tier.unwrap_or_else(|| replay_service_tier(speed)),
+            output_schema: None,
+            observation: None,
+            responses_replay: Some(replay_metadata(&route.model_id, speed)),
+        };
+        provider
+            .client
+            .resolve_responses_scope(&provider.auth, &request)
+            .await
+            .map_err(provider_error)
+    }
+
+    fn switch_requirement(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        route: &routing::ResolvedRoute,
+        pinned_before: Option<&(String, String)>,
+        messages: &[Message],
+    ) -> Option<bool> {
+        if invocation.purpose != event_bus::RequestPurpose::Agent {
+            return None;
+        }
+        let edit_key = (
+            invocation.run_id.clone(),
+            chain_key(role, invocation.category.as_deref()),
+        );
+        let edit_tool = self.providers[&route.profile]
+            .profile
+            .edit_tool_for(&route.model_id);
+        let carries_compaction = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, providers::ContentBlock::Compaction { .. }));
+        let previous_edit_tool = self
+            .edit_tools_by_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&edit_key)
+            .copied();
+        // A restored opaque checkpoint cannot reveal its editing interface.
+        // New settings are not evidence of the interface that produced it.
+        let unknown_checkpoint = previous_edit_tool.is_none() && carries_compaction;
+        let incompatible_history = messages.iter().flat_map(|message| &message.content).any(|block| {
+                        matches!((edit_tool, block),
+                            (config::EditToolConfig::Edit, providers::ContentBlock::ToolUse { name, .. }) if name == "apply_patch")
+                            || matches!((edit_tool, block),
+                                (config::EditToolConfig::ApplyPatch, providers::ContentBlock::ToolUse { name, .. }) if matches!(name.as_str(), "edit" | "write"))
+                    });
+        let edit_switch = previous_edit_tool.is_some_and(|previous| previous != edit_tool);
+        let resummarize = unknown_checkpoint
+            || incompatible_history
+            || edit_switch
+            || (carries_compaction && !self.providers[&route.profile].client.replays_compaction());
+        let switching = edit_switch
+            || pinned_before.is_some_and(|(profile, model)| {
+                *profile != route.profile || *model != route.model_id
+            });
+        (resummarize || switching).then_some(resummarize)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn complete_request(
         &self,
@@ -639,6 +720,7 @@ impl RoutedModel {
         bus: Option<&EventBus>,
         output_schema: Option<&providers::JsonSchema>,
         benchmark: Option<&crate::benchmark::BenchmarkModelSettings>,
+        replay: Option<&crate::ResponsesReplayState>,
     ) -> Result<ChatResponse, RuntimeError> {
         let summary = invocation.purpose == event_bus::RequestPurpose::Compaction
             && invocation.model_preference.is_none();
@@ -654,20 +736,12 @@ impl RoutedModel {
         } else {
             self.resolve_invocation(invocation, role, tools)?
         };
-        let carries_compaction = messages
-            .iter()
-            .flat_map(|message| &message.content)
-            .any(|block| matches!(block, providers::ContentBlock::Compaction { .. }));
         let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
         let mut position = chain.as_ref().map(|choice| choice.position);
         let chain = chain.map(|choice| choice.chain);
         let router = self.router_for(!tools.is_empty());
         let mut cycle: Option<routing::FallbackCycle> = None;
         let mut failures = Vec::new();
-        let edit_key = (
-            invocation.run_id.clone(),
-            chain_key(role, invocation.category.as_deref()),
-        );
         loop {
             let (base_model_id, speed) =
                 config::types::provider::parse_model_speed(&route.model_id);
@@ -757,67 +831,30 @@ impl RoutedModel {
                     "candidate cannot preserve tool calling",
                 ));
             }
-            if invocation.purpose == event_bus::RequestPurpose::Agent {
-                // A switch is a cache boundary (ADR 0030): the agent loop re-summarizes a
-                // checkpoint the target cannot replay and, knowing every configured window,
-                // compacts for a smaller one before the request is sent again.
-                let previous_edit_tool = self
-                    .edit_tools_by_run
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(&edit_key)
-                    .copied();
-                // A restored opaque checkpoint cannot reveal its editing interface.
-                // New settings are not evidence of the interface that produced it.
-                let unknown_checkpoint = previous_edit_tool.is_none() && carries_compaction;
-                let incompatible_history = messages.iter().flat_map(|message| &message.content).any(|block| {
-                        matches!((edit_tool, block),
-                            (config::EditToolConfig::Edit, providers::ContentBlock::ToolUse { name, .. }) if name == "apply_patch")
-                            || matches!((edit_tool, block),
-                                (config::EditToolConfig::ApplyPatch, providers::ContentBlock::ToolUse { name, .. }) if matches!(name.as_str(), "edit" | "write"))
-                    });
-                let edit_switch = previous_edit_tool.is_some_and(|previous| previous != edit_tool);
-                let resummarize = unknown_checkpoint
-                    || incompatible_history
-                    || edit_switch
-                    || (carries_compaction && !provider.client.replays_compaction());
-                let switching = edit_switch
-                    || pinned_before.as_ref().is_some_and(|(profile, model)| {
-                        *profile != route.profile || *model != route.model_id
-                    });
-                // Keep the old interface until preparation commits: failed or cancelled
-                // opaque re-summaries must request the same boundary again on resume.
-                if !resummarize {
-                    self.edit_tools_by_run
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(edit_key.clone(), edit_tool);
+            if let Some(resummarize) =
+                self.switch_requirement(invocation, role, &route, pinned_before.as_ref(), messages)
+            {
+                if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
+                    routing::pin(
+                        &mut self
+                            .affinity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        &invocation.run_id,
+                        chain,
+                        position,
+                    );
                 }
-                if resummarize || switching {
-                    if let (Some(chain), Some(position)) = (chain.as_ref(), position) {
-                        routing::pin(
-                            &mut self
-                                .affinity
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner),
-                            &invocation.run_id,
-                            chain,
-                            position,
-                        );
-                    }
-                    tracing::info!(run_id = %invocation.run_id, profile = %route.profile,
-                        model = %route.model_id, resummarize,
-                        "preparing the context before switching models");
-                    return Err(RuntimeError::ModelSwitch {
-                        selected: format!("{}/{}", route.profile, route.model_id),
-                        resummarize,
-                    });
-                }
+                return Err(RuntimeError::ModelSwitch {
+                    selected: format!("{}/{}", route.profile, route.model_id),
+                    resummarize,
+                });
             }
             let accepts_images = self
                 .accepts_images(messages, &route.profile, base_model_id)
                 .await;
             let mut request = ChatRequest {
+                responses_replay: Some(replay_metadata(&route.model_id, speed)),
                 output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
                 messages: images::for_model(messages, &tools, accepts_images),
@@ -830,12 +867,7 @@ impl RoutedModel {
                 },
                 reasoning_effort: reasoning_effort.clone(),
                 service_tier: benchmark.map_or_else(
-                    || match speed {
-                        config::types::provider::ModelSpeed::Fast => {
-                            Some(providers::ServiceTier::Priority)
-                        }
-                        config::types::provider::ModelSpeed::Standard => None,
-                    },
+                    || replay_service_tier(speed),
                     |settings| settings.service_tier,
                 ),
                 observation: Some(ObservationContext {
@@ -844,6 +876,27 @@ impl RoutedModel {
                     purpose: invocation.purpose,
                 }),
             };
+            let scope = provider
+                .client
+                .resolve_responses_scope(&provider.auth, &request)
+                .await
+                .map_err(provider_error)?;
+            if let Some(replay) = replay
+                && replay.scope() != scope.as_ref()
+            {
+                return Err(RuntimeError::ResponsesScopeChanged {
+                    actual: scope.map(Box::new),
+                    selected: format!("{}/{}", route.profile, route.model_id),
+                });
+            }
+            request.responses_replay.as_mut().unwrap().expected_scope = scope;
+            if invocation.purpose == event_bus::RequestPurpose::Agent {
+                self.model_switch_prepared(
+                    invocation,
+                    role,
+                    &format!("{}/{}", route.profile, route.model_id),
+                );
+            }
             let result = structured::send(provider, &mut request, bus).await;
             let error = match result {
                 Ok(response) => {
@@ -879,6 +932,12 @@ impl RoutedModel {
             failures.push(format!(
                 "profile={profile_name} model={model_id}: {provider_error}"
             ));
+            if let providers::ProviderError::ResponsesScopeChanged { actual } = error {
+                return Err(RuntimeError::ResponsesScopeChanged {
+                    actual: Some(actual),
+                    selected: format!("{}/{}", route.profile, route.model_id),
+                });
+            }
             let failure = routing::FailureKind::classify(&error, provider.profile.provider_type);
             self.record_cooldown(
                 &route,
@@ -973,6 +1032,18 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn image_generation_enabled(&self) -> bool {
+        !self.agents.image_generator_chain().is_empty()
+    }
+
+    async fn generate_image(
+        &self,
+        invocation: &AgentInvocationContext,
+        request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        self.generate_image_request(invocation, request).await
+    }
+
     fn edit_tools_by_run(&self) -> BTreeMap<(String, String), config::EditToolConfig> {
         self.edit_tools_by_run
             .lock()
@@ -1067,10 +1138,7 @@ impl AgentModel for RoutedModel {
                 reasoning_effort,
             },
             generation,
-            service_tier: match speed {
-                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
-                config::types::provider::ModelSpeed::Standard => None,
-            },
+            service_tier: replay_service_tier(speed),
         })
     }
 
@@ -1130,17 +1198,15 @@ impl AgentModel for RoutedModel {
         let accepts_images = self
             .accepts_images(messages, &route.profile, base_model_id)
             .await;
-        let request = ChatRequest {
+        let mut request = ChatRequest {
+            responses_replay: Some(replay_metadata(&route.model_id, speed)),
             model: base_model_id.to_owned(),
             messages: images::for_model(messages, &tools, accepts_images),
             tools,
             temperature: generation.temperature,
             max_tokens: self.output_limit(&route, generation.max_tokens).await,
             reasoning_effort,
-            service_tier: match speed {
-                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
-                config::types::provider::ModelSpeed::Standard => None,
-            },
+            service_tier: replay_service_tier(speed),
             output_schema: None,
             observation: Some(ObservationContext {
                 turn: invocation.turn.clone(),
@@ -1148,11 +1214,42 @@ impl AgentModel for RoutedModel {
                 purpose: event_bus::RequestPurpose::Compaction,
             }),
         };
-        compactor
-            .compact(&request)
+        let scope = provider
+            .client
+            .resolve_responses_scope(&provider.auth, &request)
             .await
-            .map(Some)
-            .map_err(model_error)
+            .map_err(provider_error)?;
+        // The incoming history already obeys the raw-index floor; independently
+        // resolved compactor routes may only narrow eligibility, never revive it.
+        request.messages = crate::ResponsesReplayState::default()
+            .filter(
+                request.messages.into_iter().enumerate().collect(),
+                scope.as_ref(),
+            )
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect();
+        request.responses_replay.as_mut().unwrap().expected_scope = scope;
+        for _ in 0..16 {
+            match compactor.compact(&request).await {
+                Ok(result) => return Ok(Some(result)),
+                Err(providers::ProviderError::ResponsesScopeChanged { actual }) => {
+                    request.messages = crate::ResponsesReplayState::default()
+                        .filter(
+                            request.messages.into_iter().enumerate().collect(),
+                            Some(&actual),
+                        )
+                        .into_iter()
+                        .map(|(_, m)| m)
+                        .collect();
+                    request.responses_replay.as_mut().unwrap().expected_scope = Some(*actual);
+                }
+                Err(error) => return Err(provider_error(error)),
+            }
+        }
+        Err(RuntimeError::Model {
+            reason: "compaction scope did not stabilize".into(),
+        })
     }
 
     async fn complete(
@@ -1162,7 +1259,7 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, None, None, None)
+        self.complete_request(invocation, role, messages, tools, None, None, None, None)
             .await
     }
 
@@ -1173,8 +1270,17 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         schema: &providers::JsonSchema,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, &[], None, Some(schema), None)
-            .await
+        self.complete_request(
+            invocation,
+            role,
+            messages,
+            &[],
+            None,
+            Some(schema),
+            None,
+            None,
+        )
+        .await
     }
 
     async fn complete_streaming(
@@ -1185,8 +1291,91 @@ impl AgentModel for RoutedModel {
         tools: &[ToolSpec],
         bus: &EventBus,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, Some(bus), None, None)
+        self.complete_request(
+            invocation,
+            role,
+            messages,
+            tools,
+            Some(bus),
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_replay_context(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<(), RuntimeError> {
+        let resolved = self.resolve_invocation(invocation, role, tools)?;
+        if let Some(resummarize) = self.switch_requirement(
+            invocation,
+            role,
+            &resolved.route,
+            resolved.pinned_before.as_ref(),
+            messages,
+        ) {
+            if let Some(choice) = resolved.chain {
+                routing::pin(
+                    &mut self
+                        .affinity
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    &invocation.run_id,
+                    &choice.chain,
+                    choice.position,
+                );
+            }
+            return Err(RuntimeError::ModelSwitch {
+                selected: format!("{}/{}", resolved.route.profile, resolved.route.model_id),
+                resummarize,
+            });
+        }
+        let scope = self.resolve_replay_scope(invocation, role, tools).await?;
+        if replay.scope() != scope.as_ref() {
+            return Err(RuntimeError::ResponsesScopeChanged {
+                actual: scope.map(Box::new),
+                selected: format!("{}/{}", resolved.route.profile, resolved.route.model_id),
+            });
+        }
+        Ok(())
+    }
+
+    async fn resolve_replay_scope(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        self.resolve_replay_scope_with_tier(invocation, role, tools, None)
             .await
+    }
+
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &EventBus,
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_request(
+            invocation,
+            role,
+            messages,
+            tools,
+            Some(bus),
+            None,
+            None,
+            Some(replay),
+        )
+        .await
     }
 
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
@@ -1378,6 +1567,42 @@ fn route_resolution_error(
     };
     RuntimeError::Model {
         reason: reason.chars().take(500).collect(),
+    }
+}
+
+fn replay_service_tier(
+    speed: config::types::provider::ModelSpeed,
+) -> Option<providers::ServiceTier> {
+    match speed {
+        config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
+        config::types::provider::ModelSpeed::Standard => None,
+    }
+}
+
+fn replay_metadata(
+    route_model: &str,
+    speed: config::types::provider::ModelSpeed,
+) -> providers::ResponsesReplayContext {
+    providers::ResponsesReplayContext {
+        route_model: route_model.into(),
+        speed: match speed {
+            config::types::provider::ModelSpeed::Fast => providers::ResponsesSpeed::Fast,
+            config::types::provider::ModelSpeed::Standard => providers::ResponsesSpeed::Standard,
+        },
+        expected_scope: None,
+    }
+}
+
+fn provider_error(error: providers::ProviderError) -> RuntimeError {
+    match error {
+        providers::ProviderError::ResponsesScopeChanged { actual } => {
+            let selected = format!("{}/{}", actual.profile, actual.route_model);
+            RuntimeError::ResponsesScopeChanged {
+                actual: Some(actual),
+                selected,
+            }
+        }
+        other => model_error(other),
     }
 }
 

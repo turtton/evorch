@@ -135,6 +135,7 @@ fn chunk(body: &str) -> String {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "gpt-contract".into(),
         messages: vec![],
         tools: vec![],

@@ -462,3 +462,246 @@ async fn redeclared_trust_under_another_spelling_reaches_new_runs() {
     assert!(system.contains("project-rule"), "{system}");
     assert!(skills.contains(&"project-skill".to_owned()), "{skills:?}");
 }
+
+const WITHHELD_BODY: &str = "WITHHELD-SKILL-BODY";
+const WITHHELD_DESCRIPTION: &str = "WITHHELD-SKILL-DESCRIPTION";
+
+/// A repository skill under `<root>/<directory>` whose description and body are sentinels.
+fn write_withheld_skill(root: &std::path::Path, directory: &str, name: &str) {
+    let directory = root.join(directory).join(name);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {WITHHELD_DESCRIPTION}\n---\n{WITHHELD_BODY}\n"),
+    )
+    .unwrap();
+}
+
+/// The error flag and text of the tool result answering `id`.
+fn tool_result(request: &[providers::Message], id: &str) -> (bool, String) {
+    request
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } if tool_call_id == id => Some((
+                *is_error,
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        providers::ToolResultContent::Text { text } => Some(text.as_str()),
+                        providers::ToolResultContent::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("tool result {id} is in the request"))
+}
+
+fn assert_explains_trust_gate(text: &str, directory: &str) {
+    assert!(
+        text.contains(&format!("exists in the project's {directory}")),
+        "{text}"
+    );
+    assert!(text.contains("not trusted"), "{text}");
+    assert!(text.contains("Trust project instructions"), "{text}");
+    assert!(!text.contains("unknown skill"), "{text}");
+    assert!(!text.contains(WITHHELD_BODY), "{text}");
+    assert!(!text.contains(WITHHELD_DESCRIPTION), "{text}");
+}
+
+fn bound_to(root: &std::path::Path) -> RunConfig {
+    RunConfig {
+        project_root: Some(root.to_path_buf()),
+        ..RunConfig::default()
+    }
+}
+
+// Regression: an untrusted project's repository skills were reported as
+// `unknown skill`, so users and agents mistook the trust gate for a bug.
+// skill_load now names the gate without returning the skill's text, a name
+// the project lacks stays unknown, and trusting the project loads the skill.
+#[tokio::test]
+async fn untrusted_project_skill_load_explains_the_trust_gate() {
+    let (_temp, repo) = canonical_repo();
+    write_withheld_skill(&repo, ".evorch/skills", "evorch-skill");
+    write_withheld_skill(&repo, ".agents/skills", "agents-skill");
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new([
+        Ok(support::tool_responses([
+            (
+                "evorch",
+                "skill_load",
+                serde_json::json!({"name": "evorch-skill"}),
+            ),
+            (
+                "agents",
+                "skill_load",
+                serde_json::json!({"name": "agents-skill"}),
+            ),
+            (
+                "missing",
+                "skill_load",
+                serde_json::json!({"name": "missing-skill"}),
+            ),
+        ])),
+        Ok(text_response("done", providers::FinishReason::Stop)),
+        Ok(tool_response(
+            "trusted",
+            "skill_load",
+            serde_json::json!({"name": "agents-skill"}),
+        )),
+        Ok(text_response("done", providers::FinishReason::Stop)),
+    ]));
+    let (runtime, _mounts) = approving_runtime(&bus, Arc::clone(&model), &repo);
+    runtime.set_project_trust(repo.clone(), ProjectTrust::Unapproved);
+
+    let run = runtime.delegate_background(Role::Worker, "go".into(), bound_to(&repo));
+
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let request = model.observed().await[1].clone();
+    for (id, directory) in [("evorch", ".evorch/skills"), ("agents", ".agents/skills")] {
+        let (is_error, text) = tool_result(&request, id);
+        assert!(is_error, "{text}");
+        assert_explains_trust_gate(&text, directory);
+    }
+    let (is_error, text) = tool_result(&request, "missing");
+    assert!(is_error, "{text}");
+    assert!(text.contains("unknown skill: missing-skill"), "{text}");
+    assert!(!text.contains("not trusted"), "{text}");
+    let sent = format!("{request:?}");
+    assert!(!sent.contains(WITHHELD_BODY), "{sent}");
+    assert!(!sent.contains(WITHHELD_DESCRIPTION), "{sent}");
+
+    runtime.set_project_trust(repo.clone(), ProjectTrust::Approved);
+    let run = runtime.delegate_background(Role::Worker, "go".into(), bound_to(&repo));
+
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let request = model.observed().await[3].clone();
+    let (is_error, text) = tool_result(&request, "trusted");
+    assert!(!is_error, "{text}");
+    assert!(text.contains(WITHHELD_BODY), "{text}");
+}
+
+// The same gate explains a delegate whose load_skills names a withheld skill,
+// before any child run is registered.
+#[tokio::test]
+async fn untrusted_project_delegate_load_skills_explains_the_trust_gate() {
+    let (_temp, repo) = canonical_repo();
+    write_withheld_skill(&repo, ".agents/skills", "agents-skill");
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "delegate",
+            "delegate",
+            serde_json::json!({
+                "target": {"role": "worker"},
+                "prompt": "CHILD",
+                "load_skills": ["agents-skill"],
+            }),
+        )),
+        Ok(text_response("parent done", providers::FinishReason::Stop)),
+    ]));
+    let (runtime, _mounts) = approving_runtime(&bus, Arc::clone(&model), &repo);
+    runtime.set_project_trust(repo.clone(), ProjectTrust::Unapproved);
+
+    let parent = runtime.delegate_background(Role::Orchestrator, "ORCH".into(), bound_to(&repo));
+
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+    let request = model.observed().await.pop().unwrap();
+    let (is_error, text) = tool_result(&request, "delegate");
+    assert!(is_error, "{text}");
+    assert_explains_trust_gate(&text, ".agents/skills");
+    assert_eq!(runtime.list_agents().len(), 1, "no child run is registered");
+}
+
+/// `link` becomes a symlink to `target`, creating the directories above it.
+fn symlink(target: &std::path::Path, link: &std::path::Path) {
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+// The trust hint must not report skills outside the project: a symlinked
+// skills directory or one above it, a symlinked skill directory and a
+// symlinked SKILL.md all leave the name unknown, in both repository scopes.
+#[tokio::test]
+async fn untrusted_project_skill_hint_does_not_follow_symlinks_out_of_the_project() {
+    let outside_temp = tempfile::tempdir().unwrap();
+    let outside = outside_temp.path().canonicalize().unwrap();
+    write_withheld_skill(&outside, "evorch-root/skills", "evorch-ancestor");
+    write_withheld_skill(&outside, "agents-skills", "agents-skills-root");
+    write_withheld_skill(&outside, "dirs", "evorch-dir");
+    write_withheld_skill(&outside, "dirs", "agents-dir");
+    write_withheld_skill(&outside, "files", "target");
+    let skill_md = outside.join("files/target/SKILL.md");
+    let (_roots_temp, roots) = canonical_repo();
+    symlink(&outside.join("evorch-root"), &roots.join(".evorch"));
+    symlink(
+        &outside.join("agents-skills"),
+        &roots.join(".agents/skills"),
+    );
+    let (_entries_temp, entries) = canonical_repo();
+    symlink(
+        &outside.join("dirs/evorch-dir"),
+        &entries.join(".evorch/skills/evorch-dir"),
+    );
+    symlink(
+        &outside.join("dirs/agents-dir"),
+        &entries.join(".agents/skills/agents-dir"),
+    );
+    symlink(
+        &skill_md,
+        &entries.join(".evorch/skills/evorch-md/SKILL.md"),
+    );
+    symlink(
+        &skill_md,
+        &entries.join(".agents/skills/agents-md/SKILL.md"),
+    );
+    let cases: [(&std::path::Path, &[&'static str]); 2] = [
+        (&roots, &["evorch-ancestor", "agents-skills-root"]),
+        (
+            &entries,
+            &["evorch-dir", "agents-dir", "evorch-md", "agents-md"],
+        ),
+    ];
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new(cases.iter().flat_map(|(_, names)| {
+        [
+            Ok(support::tool_responses(names.iter().map(|name| {
+                (*name, "skill_load", serde_json::json!({"name": name}))
+            }))),
+            Ok(text_response("done", providers::FinishReason::Stop)),
+        ]
+    })));
+    let (runtime, _mounts) = approving_runtime(&bus, Arc::clone(&model), &roots);
+
+    for (index, (root, names)) in cases.iter().enumerate() {
+        runtime.set_project_trust(root.to_path_buf(), ProjectTrust::Unapproved);
+        let run = runtime.delegate_background(Role::Worker, "go".into(), bound_to(root));
+
+        assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+        let request = model.observed().await[index * 2 + 1].clone();
+        for name in *names {
+            let directory = if name.starts_with("evorch") {
+                ".evorch/skills"
+            } else {
+                ".agents/skills"
+            };
+            let followed = root.join(directory).join(name).join("SKILL.md");
+            assert!(
+                followed.is_file(),
+                "{} resolves outside",
+                followed.display()
+            );
+            let (is_error, text) = tool_result(&request, name);
+            assert!(is_error, "{text}");
+            assert!(text.contains(&format!("unknown skill: {name}")), "{text}");
+            assert!(!text.contains("not trusted"), "{text}");
+        }
+    }
+}

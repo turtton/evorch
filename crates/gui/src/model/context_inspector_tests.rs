@@ -216,3 +216,177 @@ fn preview_thread_is_forwarded_and_part_of_the_reuse_key() {
     second.thread_id = Some("triage-b".into());
     assert_ne!(first, second);
 }
+
+mod responses_native_items {
+    use super::*;
+
+    const CIPHERTEXT: &str = "gAAAAB3-gui-sentinel-ciphertext";
+    const ITEM_ID: &str = "rs_gui_sentinel_item";
+
+    fn native(ciphertext: &str) -> ContentBlock {
+        ContentBlock::ResponsesReasoning {
+            item: serde_json::json!({
+                "type": "reasoning",
+                "id": ITEM_ID,
+                "summary": [{"type": "summary_text", "text": "visible summary"}],
+                "encrypted_content": ciphertext,
+                "future_field": {"native": true}
+            }),
+            origin: providers::ResolvedResponsesScope {
+                dialect: providers::ResponsesDialect::Codex,
+                profile: "work".into(),
+                route_model: "gpt-5.1-codex".into(),
+                wire_model: "gpt-5.1-codex".into(),
+                speed: providers::ResponsesSpeed::Standard,
+                service_tier: None,
+                endpoint_fingerprint: "ab".repeat(32),
+                account: providers::ResponsesAccount::Codex {
+                    identity: "gui-account".into(),
+                },
+            },
+        }
+    }
+
+    fn assistant(content: Vec<ContentBlock>) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content,
+        }
+    }
+
+    fn json_tokens(message: &Message) -> u64 {
+        u64::try_from(serde_json::to_string(message).unwrap().len())
+            .unwrap()
+            .div_ceil(4)
+    }
+
+    #[test]
+    fn native_state_adds_no_text_or_blank_separator_but_keeps_its_budget() {
+        // Given: a reply whose native item sits between the summary and the answer.
+        let message = assistant(vec![
+            ContentBlock::Reasoning {
+                text: "visible summary".into(),
+            },
+            native(CIPHERTEXT),
+            ContentBlock::Text {
+                text: "visible answer".into(),
+            },
+        ]);
+        let mut without_native = message.clone();
+        without_native.content.remove(1);
+
+        // When: the saved history is flattened for display.
+        let rows = message_rows(std::slice::from_ref(&message));
+
+        // Then: the text is identical to the reply without native state, yet the
+        // budget counts the whole canonical JSON including item and origin.
+        assert_eq!(
+            rows[0].text,
+            message_rows(&[without_native.clone()])[0].text
+        );
+        assert_eq!(rows[0].text, "visible summary\n\nvisible answer");
+        assert_eq!(rows[0].summary, "visible summary");
+        for private in [
+            CIPHERTEXT,
+            ITEM_ID,
+            "future_field",
+            "gui-account",
+            "encrypted",
+        ] {
+            assert!(!rows[0].text.contains(private), "text leaked {private:?}");
+        }
+        assert_eq!(rows[0].tokens, json_tokens(&message));
+        assert!(rows[0].tokens > json_tokens(&without_native));
+    }
+
+    #[test]
+    fn native_only_message_is_budgeted_but_not_listed() {
+        // Given: a native-only reply between two displayable messages.
+        let native_only = assistant(vec![native(CIPHERTEXT)]);
+        let messages = [
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "question".into(),
+                }],
+            },
+            native_only.clone(),
+            assistant(vec![ContentBlock::Text {
+                text: "answer".into(),
+            }]),
+        ];
+
+        // When: the history is flattened.
+        let rows = message_rows(&messages);
+
+        // Then: no empty row is listed, but its tokens still reach the assistant budget.
+        assert_eq!(
+            rows.iter().map(|row| row.listed).collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert!(rows[1].text.is_empty() && rows[1].summary.is_empty());
+        let assistant_budget = run_segments(&rows)
+            .into_iter()
+            .find(|segment| segment.label == "assistant")
+            .map(|segment| segment.tokens);
+        assert_eq!(
+            assistant_budget,
+            Some(json_tokens(&native_only) + json_tokens(&messages[2]))
+        );
+        assert_eq!(
+            message_list_heading(&rows),
+            (
+                "Messages (2 of 3)".to_owned(),
+                Some("1 replay-only message hidden · counted in the budget".to_owned())
+            )
+        );
+        let mut twice = messages.to_vec();
+        twice.push(native_only.clone());
+        assert_eq!(
+            message_list_heading(&message_rows(&twice)).1.as_deref(),
+            Some("2 replay-only messages hidden · counted in the budget")
+        );
+        assert_eq!(
+            message_list_heading(&message_rows(&[messages[0].clone(), messages[2].clone()])),
+            ("Messages (2)".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn budget_estimate_follows_ceil_bytes_over_four_for_large_native_items() {
+        // Given: ciphertexts straddling the 4n / 4n+1 boundary, escapes, Japanese and 1 MiB.
+        let base = assistant(vec![native("")]);
+        let base_len = serde_json::to_string(&base).unwrap().len();
+        let aligned = "A".repeat((4 - base_len % 4) % 4 + 4);
+        let cases = [
+            aligned.clone(),
+            format!("{aligned}A"),
+            format!("{aligned}\"\\\n日本語"),
+            "Q".repeat(1 << 20),
+        ];
+        let mut previous = None;
+        for ciphertext in &cases[..2] {
+            let message = assistant(vec![native(ciphertext)]);
+            let tokens = message_rows(std::slice::from_ref(&message))[0].tokens;
+            assert_eq!(tokens, json_tokens(&message));
+            if let Some(previous) = previous {
+                assert_eq!(tokens, previous + 1, "one byte past 4n starts a new token");
+            }
+            previous = Some(tokens);
+        }
+        for ciphertext in &cases[2..] {
+            let message = assistant(vec![native(ciphertext)]);
+            let rows = message_rows(std::slice::from_ref(&message));
+
+            // Then: every estimate is exact and the run budget keeps it under "assistant".
+            assert_eq!(rows[0].tokens, json_tokens(&message));
+            assert_eq!(
+                run_segments(&rows),
+                [BudgetSegment {
+                    label: "assistant",
+                    tokens: rows[0].tokens
+                }]
+            );
+        }
+    }
+}

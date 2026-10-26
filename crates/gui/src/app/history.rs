@@ -5,9 +5,78 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct UserMessage {
+    /// The submission ID; empty in files saved before submissions had one.
+    #[serde(default)]
+    pub id: String,
     pub thread_id: String,
     pub text: String,
+    /// The expanded prompt the agent receives; empty in older files.
+    #[serde(default)]
+    pub prompt: String,
     pub at: std::time::SystemTime,
+    #[serde(default)]
+    pub status: DeliveryStatus,
+    /// What the user did about a message that never reached the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
+}
+
+/// How far a composer message got towards the agent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(super) enum DeliveryStatus {
+    /// Handed to the runtime; a busy run may still hold it in its inbox.
+    Queued,
+    /// In the conversation. Files from before statuses existed only kept
+    /// messages once they were sent, so they load as delivered.
+    #[default]
+    Delivered,
+    /// The runtime refused it, so the agent never received it.
+    Rejected { reason: String },
+    /// Accepted, but the run ended before reading it.
+    Dropped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Resolution {
+    /// Its text went back into the composer.
+    Restored,
+    Dismissed,
+}
+
+impl UserMessage {
+    /// Replay draws it as a sent message. A queued one keeps that until the
+    /// runtime can confirm delivery.
+    fn shown_as_sent(&self) -> bool {
+        matches!(
+            self.status,
+            DeliveryStatus::Queued | DeliveryStatus::Delivered
+        )
+    }
+
+    /// A message that never reached the agent and that the user has not
+    /// restored or dismissed yet.
+    pub(super) fn awaits_user(&self) -> bool {
+        self.resolution.is_none()
+            && matches!(
+                self.status,
+                DeliveryStatus::Rejected { .. } | DeliveryStatus::Dropped
+            )
+    }
+
+    pub(super) fn undelivered_row(&self) -> crate::model::composer::QueuedFollowUp {
+        crate::model::composer::QueuedFollowUp {
+            submission_id: self.id.clone(),
+            text: self.text.clone(),
+            prompt: self.prompt.clone(),
+            undelivered: true,
+            rejection: match &self.status {
+                DeliveryStatus::Rejected { reason } => Some(reason.clone()),
+                _ => None,
+            },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +176,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     let saved: HistorySidebar = serde_json::from_slice(&bytes)
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
                     self.history = saved.user_messages;
+                    self.restore_undelivered_rows();
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(storage::StorageError::Serialization(error.to_string())),
@@ -340,9 +410,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             return;
         }
+        let running_calls = self.transcripts.running_tool_runs();
         let protected_runs: std::collections::BTreeSet<_> = self
             .phases
             .keys()
+            .chain(&running_calls)
             .filter(|run| {
                 self.thread_for_run(run)
                     .is_none_or(|thread| protected_threads.contains(&thread))
@@ -381,6 +453,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tracing::warn!(%run_id, from = ?phase, to = ?restored, "reconciled orphaned history phase");
             *phase = restored;
             self.transcripts.interrupt_run_tools(run_id);
+        }
+        // An owner that exited mid-call leaves the run in its active_runs.
+        // Only a probe that proved the owner dead, of a record that did not
+        // change during the probes, shows the run is no longer executing.
+        let executing = |run: &String| {
+            owners.iter().chain(&current_owners).any(|owner| {
+                owner.active_runs.contains(run)
+                    && !(liveness.get(&owner.lease.owner_id) == Some(&false)
+                        && before.get(&owner.thread_id) == after.get(&owner.thread_id))
+            })
+        };
+        // No live owner can be executing these runs, so their calls will never
+        // report a result. This includes runs whose phase stays as replayed
+        // because their snapshot or every phase event is missing.
+        for run_id in &running_calls {
+            if !protected_runs.contains(run_id) && !executing(run_id) {
+                self.transcripts.interrupt_run_tools(run_id);
+            }
         }
     }
 
@@ -426,8 +516,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {
+        if !message.shown_as_sent() {
+            return;
+        }
         self.transcripts.select_thread(Some(message.thread_id));
         self.transcripts
             .push_thread(TranscriptEntry::UserMessage { text: message.text });
+    }
+
+    /// Messages that never reached the agent come back above the composer,
+    /// not as sent bubbles, until the user restores or dismisses them.
+    fn restore_undelivered_rows(&mut self) {
+        for message in self.history.iter().filter(|message| message.awaits_user()) {
+            let rows = self
+                .follow_up_queues
+                .entry(message.thread_id.clone())
+                .or_default();
+            if !rows.iter().any(|row| row.submission_id == message.id) {
+                rows.push(message.undelivered_row());
+            }
+        }
     }
 }

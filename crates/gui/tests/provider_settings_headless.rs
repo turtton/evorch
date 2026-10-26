@@ -251,9 +251,14 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
     harness.run();
     harness.click_label("Send");
     harness.run();
+    let [WorkbenchCommand::SendChat(sent)] = harness.state().issued() else {
+        panic!("expected one chat: {:?}", harness.state().issued());
+    };
+    let submission_id = sent.submission_id.clone();
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id,
             project_root: Some(harness.state().sidebar().projects[0].repo_root.clone()),
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,

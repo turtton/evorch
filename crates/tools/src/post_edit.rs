@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
+use sandbox::process::GroupChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -316,22 +317,6 @@ impl Drop for SupervisorFinished {
     }
 }
 
-// Same process-group strategy as shell; keeping it local avoids introducing a
-// general process framework for this single fixed external command.
-struct ProcessGroup(Option<rustix::process::Pid>);
-impl ProcessGroup {
-    fn kill(&self) {
-        if let Some(pid) = self.0 {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
-
 async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String> {
     let mut retained = Vec::new();
     let mut truncated = false;
@@ -368,16 +353,11 @@ async fn supervise(
             "checker deadline elapsed before launch",
         );
     }
-    let mut child = match command.spawn() {
+    let mut child = match GroupChild::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
     };
-    let group = ProcessGroup(
-        child
-            .id()
-            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32)),
-    );
-    let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let pipes = (child.take_stdin(), child.take_stdout(), child.take_stderr());
     let result = {
         let completion = async {
             let (Some(mut stdin), Some(mut stdout), Some(stderr)) = pipes else {
@@ -393,12 +373,9 @@ async fn supervise(
                 }
             };
             let discard = async { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await };
-            let wait = async {
-                let status = child.wait().await?;
-                // A leader can exit while descendants still hold the pipes open.
-                group.kill();
-                Ok::<_, io::Error>(status)
-            };
+            // A leader can exit while descendants still hold the pipes open;
+            // waiting kills them before it reaps the leader.
+            let wait = child.wait();
             let (_, _, stderr, status) =
                 tokio::try_join!(write, discard, capture_stderr(stderr), wait)?;
             Ok((status, stderr))
@@ -418,10 +395,8 @@ async fn supervise(
         }
     };
     // Includes timeout, cancellation, IO failure, and normal leader exit. Never
-    // return until the direct child has been reaped; group cleanup precedes wait.
-    group.kill();
-    let _ = child.start_kill();
-    if let Err(error) = child.wait().await {
+    // return until the direct child has been reaped; group cleanup precedes it.
+    if let Err(error) = child.kill_and_wait().await {
         return unavailable(
             UnavailableReason::Io,
             format!("checker cleanup failed: {error}"),
@@ -454,17 +429,13 @@ impl PostEditHook for CommentChecker {
             Ok(wrapped) => wrapped,
             Err(error) => return unavailable(UnavailableReason::Io, error),
         };
-        let mut command = tokio::process::Command::new(&wrapped.program);
-        command.args(&wrapped.args);
-        wrapped.apply_environment(command.as_std_mut());
-        if let Some(cwd) = &wrapped.cwd {
-            command.current_dir(cwd);
-        }
+        // The launch policy gives the checker its own session and process group,
+        // which the supervisor kills with any descendants.
+        let mut command = tokio::process::Command::from(wrapped.to_command());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .kill_on_drop(true);
         let deadline = tokio::time::Instant::now() + self.timeout;
         let (cancel, cancelled) = oneshot::channel();

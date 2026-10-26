@@ -60,7 +60,7 @@ impl Shared {
                 })
             }),
             model,
-            repo_skills: declared.is_none_or(|trust| trust == ProjectTrust::Approved),
+            repo_skills: ProjectTrust::admits_repo_skills(declared),
             slug: OnceLock::new(),
         });
         projects.insert(root, Arc::clone(&project));

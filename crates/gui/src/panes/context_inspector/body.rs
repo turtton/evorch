@@ -5,8 +5,8 @@ use runtime::base_context::BaseContextReport;
 
 use super::{ContextInspectorPane, RunActuals, Selection, budget_bar, list_row, usage_line};
 use crate::model::context_inspector::{
-    MessageRow, compact_tokens, compare_rows, message_rows, preview_segments, run_segments,
-    run_summary, source_label, tool_difference,
+    MessageRow, compact_tokens, compare_rows, message_list_heading, message_rows, preview_segments,
+    run_segments, run_summary, source_label, tool_difference,
 };
 use crate::panes::usage::charts::segment;
 use crate::theme::text::{h3, muted, section};
@@ -163,8 +163,12 @@ impl ContextInspectorPane {
         actual_line(ui, actuals);
         split(ui, |ui, column| match column {
             Column_::List => {
-                ui.label(section(format!("Messages ({})", rows.len())));
-                for (index, row) in rows.iter().enumerate() {
+                let (heading, hidden_note) = message_list_heading(&rows);
+                ui.label(section(heading));
+                if let Some(note) = hidden_note {
+                    ui.label(muted(note));
+                }
+                for (index, row) in rows.iter().enumerate().filter(|(_, row)| row.listed) {
                     let label = format!(
                         "{} · {} · {}",
                         row.role,
@@ -188,7 +192,7 @@ impl ContextInspectorPane {
                     });
             }
             Column_::Detail => match self.selection {
-                Selection::Message(index) if index < rows.len() => {
+                Selection::Message(index) if rows.get(index).is_some_and(|row| row.listed) => {
                     let row: &MessageRow = &rows[index];
                     ui.label(h3(format!("{} message", row.role)));
                     ui.label(muted(format!("{} tokens (estimate)", row.tokens)));

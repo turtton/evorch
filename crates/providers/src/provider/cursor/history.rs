@@ -131,7 +131,47 @@ pub(super) fn build_run(
         })
         .collect();
     let mut turn: Option<Proto> = None;
-    for (index, message) in history
+    // Cursor's MCP result is text-only. Replay returned images through its
+    // existing user-image representation after the tool result, not inside MCP.
+    let expanded: Vec<_> = history
+        .iter()
+        .flat_map(|message| {
+            let images: Vec<_> = message
+                .content
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::ToolResult { content, .. } = block {
+                        Some(content)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .filter_map(|part| {
+                    if let ToolResultContent::Image {
+                        media_type, data, ..
+                    } = part
+                    {
+                        Some(ContentBlock::Image {
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut messages = vec![message.clone()];
+            if !images.is_empty() {
+                messages.push(Message {
+                    role: Role::User,
+                    content: images,
+                });
+            }
+            messages
+        })
+        .collect();
+    for (index, message) in expanded
         .iter()
         .enumerate()
         .filter(|(_, m)| m.role != Role::System)
@@ -215,9 +255,10 @@ pub(super) fn build_run(
         checkpoint = checkpoint.bytes(8, state.store(Proto::new().message(1, turn).0)?);
     }
     let action = match active {
-        Some(user) => {
-            Proto::new().message(1, Proto::new().message(1, user_message(user, history_end)?))
-        }
+        Some(user) => Proto::new().message(
+            1,
+            Proto::new().message(1, user_message(user, expanded.len())?),
+        ),
         None => Proto::new().message(2, Proto::new()),
     };
     let details = Proto::new()

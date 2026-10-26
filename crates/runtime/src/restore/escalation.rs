@@ -34,6 +34,7 @@ pub(crate) fn persist_escalation_seed(
         return Ok(());
     };
     let descriptor = RunRestoreDescriptor {
+        responses_replay: None,
         admission_reservation_id: None,
         thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),
         turn: None,

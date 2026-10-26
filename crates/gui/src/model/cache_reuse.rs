@@ -76,7 +76,7 @@ impl super::TelemetryRow {
         let billed_average = self
             .latest_context
             .is_some()
-            .then(|| self.usage.cache_hit_rate());
+            .then(|| self.conversation_usage.cache_hit_rate());
         self.cache_reuse.tooltip(billed_latest, billed_average)
     }
 }

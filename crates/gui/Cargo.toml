@@ -62,12 +62,15 @@ tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify-rust = "4"
 
 [dev-dependencies]
+# Leaves a descriptor without O_CLOEXEC open to check child launches.
+rustix = "1"
 test-support = { path = "../test-support" }
 wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }

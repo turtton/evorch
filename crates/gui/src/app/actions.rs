@@ -655,12 +655,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .find(|project| project.id == thread.project_id)
     }
 
-    pub(super) fn active_repo_root(&self) -> Option<PathBuf> {
+    /// The selected project, the one composer mentions resolve in.
+    pub(super) fn active_project(&self) -> Option<&workspace_ui::ProjectRecord> {
         let project_id = self.sidebar.selected_project.as_ref()?;
         self.sidebar
             .projects
             .iter()
             .find(|project| &project.id == project_id)
+    }
+
+    pub(super) fn active_repo_root(&self) -> Option<PathBuf> {
+        self.active_project()
             .map(|project| project.repo_root.clone())
     }
 

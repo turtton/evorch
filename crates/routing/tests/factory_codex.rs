@@ -96,6 +96,7 @@ fn temp_file_store() -> (tempfile::TempDir, Arc<dyn CredentialStore>) {
 /// codex 契約テストで使用する最小リクエスト。
 fn chat_request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {
             role: Role::User,

@@ -105,6 +105,19 @@ pub trait AgentModel: Send + Sync {
         None
     }
 
+    /// Fixed image-generator capability for a run; independent of its chat route.
+    fn image_generation_enabled(&self) -> bool {
+        false
+    }
+
+    async fn generate_image(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _request: providers::ImageGenerationRequest,
+    ) -> Result<crate::image_generation::GeneratedImage, String> {
+        Err("image generation is not configured".into())
+    }
+
     /// Resolve an optional hosted search capability for the invocation that
     /// produced the tool call. The callback accounts completed search usage even
     /// when response parsing or cancellation prevents delivery of its result.
@@ -161,6 +174,48 @@ pub trait AgentModel: Send + Sync {
         _tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
         Ok(None)
+    }
+
+    /// Validate D3 and replay boundaries before estimating the next window.
+    async fn prepare_replay_context(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _replay: &crate::ResponsesReplayState,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Resolve the actual candidate scope before D3/window preparation.
+    ///
+    /// The default is for models without Responses replay. Implementations that
+    /// return `ResponsesReasoning` must participate in replay preparation and
+    /// check the prepared scope before sending (as `RoutedModel` does). Response
+    /// origins alone must never bind durable state or reconstruct its floor.
+    async fn resolve_replay_scope(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _tools: &[ToolSpec],
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        Ok(None)
+    }
+
+    /// Replay-aware seams keep legacy models source compatible.
+    /// The default does not authorize opaque replay or infer a scope from output.
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &event_bus::EventBus,
+        _replay: &crate::ResponsesReplayState,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_streaming(invocation, role, messages, tools, bus)
+            .await
     }
 
     /// ロールの会話履歴に対して補完を要求する。
@@ -228,6 +283,7 @@ pub trait AgentModel: Send + Sync {
                 | providers::ContentBlock::Text { .. }
                 | providers::ContentBlock::Reasoning { .. }
                 | providers::ContentBlock::Anthropic { .. }
+                | providers::ContentBlock::ResponsesReasoning { .. }
                 | providers::ContentBlock::ToolUse { .. }
                 | providers::ContentBlock::ToolResult { .. } => continue,
             };

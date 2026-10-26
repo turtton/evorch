@@ -115,6 +115,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
                 )
             } else {
                 let events = sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    submission_id: String::new(),
                     project_root: None,
                     fork_seed: None,
                     thread_id: "thread-1".into(),

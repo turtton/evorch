@@ -15,6 +15,7 @@ fn image_block_round_trips_without_becoming_text() {
 #[test]
 fn image_payload_reaches_each_wire_protocol() {
     let request = providers::ChatRequest {
+        responses_replay: None,
         model: "vision".into(),
         messages: vec![Message {
             role: Role::User,

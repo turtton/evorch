@@ -102,6 +102,15 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
+        let stop_gate = self.stop_restore_gate(run_id);
+        let _stop_guard = stop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Stop shares the run-local gate through registration/admission reservation:
+        // a delayed automatic wake cannot replace an operator-stopped entry.
+        if !operator_resume && self.operator_stopped(run_id) {
+            return Err(fail(RunRestoreFailure::StoppedByOperator));
+        }
         let previous = {
             let runs = lock_runs(&self.shared.runs);
             runs.get(&run_id)
@@ -135,6 +144,13 @@ impl AgentRuntime {
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         self.validate_history_restore(&record, &descriptor, &authority)?;
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.execution_hook(
+                super::cancellation::HookPoint::RootRestoreValidated,
+                &execution,
+            );
+        }
         let role = Role::from_name(&descriptor.role)
             .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
         if previous.is_some_and(|(previous_role, _)| previous_role != role)
@@ -343,6 +359,10 @@ impl AgentRuntime {
         }
         if let Some(prompt) = prompt {
             self.goal_user_input(run_id, prompt);
+        }
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.execution_hook(super::cancellation::HookPoint::RootGoalUpdated, &execution);
         }
         if let Some(request) = pending_request {
             self.remember_thread_request(run_id, &request);

@@ -8,6 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn request() -> providers::ChatRequest {
     providers::ChatRequest {
+        responses_replay: None,
         model: "gpt-5.1-codex".into(),
         messages: vec![],
         tools: vec![],

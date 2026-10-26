@@ -6,7 +6,7 @@ mod mention;
 mod role;
 pub use mention::{
     CompletionItem, CompletionKind, MentionIndex, MentionQuery, expand_skill_mentions, mention_at,
-    split_skill_attachments,
+    mention_skills, split_skill_attachments, withheld_skill_mentions,
 };
 pub use role::ComposerRole;
 
@@ -213,16 +213,21 @@ impl Default for ProviderStatus {
     }
 }
 
-/// A follow-up accepted while its run was busy. It stays above the composer
-/// until the runtime reports it entered the agent's context.
+/// A message waiting above the composer: a follow-up accepted while its run
+/// was busy, until the runtime reports it entered the agent's context, or one
+/// that never reached the agent, until the user edits or dismisses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedFollowUp {
+    /// The submission this row stands for in the thread's saved history.
+    pub submission_id: String,
     /// What the user typed; restoring it re-expands `@skill` mentions.
     pub text: String,
     /// The expanded prompt the agent receives and the transcript shows.
     pub prompt: String,
-    /// The run ended first, so the runtime dropped it.
+    /// It never reached the agent: the run ended first or the runtime refused it.
     pub undelivered: bool,
+    /// The runtime's reason for refusing it; `None` when the run ended first.
+    pub rejection: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]

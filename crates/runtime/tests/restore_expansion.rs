@@ -140,7 +140,7 @@ async fn team_history_rejects_missing_or_mismatched_current_store() {
 }
 
 #[tokio::test]
-async fn team_history_rejects_persisted_claims_and_live_unclaimed_descendants() {
+async fn team_history_keeps_claim_gate_but_allows_live_unclaimed_descendants() {
     let fixture = Fixture::new();
     let runtime = fixture.runtime();
     let root = fixture.root(&runtime).await;
@@ -149,12 +149,6 @@ async fn team_history_rejects_persisted_claims_and_live_unclaimed_descendants() 
     let child = runtime
         .delegate_background_as_child(root, Role::Explorer, "still running", RunConfig::default())
         .unwrap();
-    let error = runtime
-        .continue_goal(root, "continue".into(), fixture.authority())
-        .unwrap_err();
-    assert!(error.to_string().contains("descendant is still running"));
-    runtime.cancel(child).unwrap();
-    runtime.wait(child).await.unwrap();
     let board =
         runtime::team::TeamBoard::durable(fixture.storage.handle(), "project:thread".into());
     board
@@ -163,7 +157,7 @@ async fn team_history_rejects_persisted_claims_and_live_unclaimed_descendants() 
             paths: vec!["src".into()],
         })
         .unwrap();
-    board.claim("uncertain", "interrupted-worker", 0).unwrap();
+    let lease = board.claim("uncertain", "interrupted-worker", 0).unwrap();
     let error = runtime
         .continue_goal(root, "continue".into(), fixture.authority())
         .unwrap_err();
@@ -176,6 +170,30 @@ async fn team_history_rejects_persisted_claims_and_live_unclaimed_descendants() 
             .unwrap()
             .history_available_with_current_authority
     );
+    board.complete("uncertain", &lease, 0).unwrap();
+    assert_eq!(
+        runtime
+            .continue_goal(
+                root,
+                "continue with reconciled claims".into(),
+                fixture.authority()
+            )
+            .unwrap(),
+        root
+    );
+    assert_eq!(
+        runtime
+            .list_agents()
+            .iter()
+            .find(|agent| agent.run_id == child)
+            .unwrap()
+            .parent_run_id,
+        Some(root)
+    );
+    runtime.cancel(child).unwrap();
+    runtime.cancel(root).unwrap();
+    runtime.wait(child).await.unwrap();
+    runtime.wait(root).await.unwrap();
 }
 
 #[tokio::test]
@@ -457,7 +475,7 @@ impl runtime::AgentModel for PendingChildAdmission {
 }
 
 #[tokio::test]
-async fn team_history_rejects_child_before_and_after_admission_registration() {
+async fn team_history_allows_unclaimed_child_before_and_after_admission_registration() {
     let fixture = Fixture::new();
     let bus = Arc::new(EventBus::new(128));
     let model = Arc::new(PendingChildAdmission {
@@ -482,23 +500,21 @@ async fn team_history_rejects_child_before_and_after_admission_registration() {
         runtime.inspect_agent(child).is_err(),
         "admission has not registered the child"
     );
-    for result in [
-        runtime.continue_goal(root, "continue".into(), fixture.authority()),
-        runtime.delegate_chat(
+    let other = runtime
+        .delegate_chat(
             "team",
             Role::Orchestrator,
             "continue".into(),
             fixture.authority(),
-        ),
-    ] {
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("awaiting admission")
-        );
-    }
-    assert_eq!(fixture.model.observed().await.len(), 1);
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(other).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(
+        runtime
+            .continue_goal(root, "continue".into(), fixture.authority())
+            .unwrap(),
+        root
+    );
     model.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while runtime.inspect_agent(child).is_err() {
@@ -507,35 +523,14 @@ async fn team_history_rejects_child_before_and_after_admission_registration() {
     })
     .await
     .unwrap();
-    let error = runtime
-        .continue_goal(root, "continue".into(), fixture.authority())
-        .unwrap_err();
-    assert!(error.to_string().contains("descendant is still running"));
     runtime.cancel(child).unwrap();
     assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Error);
-    // Refusals did not consume the checkpoint; once the old child stops,
-    // a fresh root run can reuse it with current authority.
-    let resumed = runtime
-        .continue_goal(
-            root,
-            "continue after child stops".into(),
-            fixture.authority(),
-        )
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while runtime.inspect_agent(resumed).unwrap().phase != AgentRunPhase::Waiting {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(resumed, root);
-    runtime.cancel(resumed).unwrap();
-    runtime.wait(resumed).await.unwrap();
+    runtime.cancel(root).unwrap();
+    runtime.wait(root).await.unwrap();
 }
 
 #[tokio::test]
-async fn single_history_rejects_live_children_for_every_renewable_descriptor() {
+async fn single_history_allows_live_children_and_concurrent_roots_for_all_descriptors() {
     for marker in ["plain", "context", "ownership"] {
         let fixture = Fixture::new();
         let runtime = fixture.runtime();
@@ -597,47 +592,51 @@ async fn single_history_rejects_live_children_for_every_renewable_descriptor() {
                 RunConfig::default(),
             )
             .unwrap();
-        for attempt in [
-            runtime.continue_goal(root, "continue".into(), RunConfig::default()),
-            runtime.delegate_chat(
-                marker,
-                Role::Worker,
-                "continue".into(),
-                RunConfig::default(),
-            ),
-        ] {
-            let error = attempt.unwrap_err().to_string();
-            assert!(
-                error.contains("root_reconciliation_required"),
-                "{marker}: {error}"
-            );
-        }
-        assert_eq!(
-            runtime.restore_diagnostics(root).unwrap().unwrap(),
-            before,
-            "refusal must preserve the checkpoint"
-        );
-        runtime.cancel(child).unwrap();
-        assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Error);
         let resumed = runtime
             .delegate_chat(
                 marker,
                 Role::Worker,
-                "continue after child stops".into(),
+                "continue".into(),
                 RunConfig::default(),
             )
             .unwrap();
-        assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
-        assert!(
-            serde_json::to_string(fixture.model.observed().await.last().unwrap())
-                .unwrap()
-                .contains("single root history")
+        assert_ne!(resumed, root);
+        assert_eq!(
+            runtime
+                .continue_goal(root, "continue in place".into(), RunConfig::default())
+                .unwrap(),
+            root
         );
+        for live in [root, resumed] {
+            assert_eq!(
+                runtime.inspect_agent(live).unwrap().phase,
+                AgentRunPhase::Pending
+            );
+        }
+        assert_eq!(
+            runtime
+                .list_agents()
+                .iter()
+                .find(|agent| agent.run_id == child)
+                .unwrap()
+                .parent_run_id,
+            Some(root),
+            "the new root does not adopt the previous root's child"
+        );
+        assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+        assert!(fixture.model.observed().await.iter().any(|messages| {
+            let text = serde_json::to_string(messages).unwrap();
+            text.contains("single root history") && text.contains("continue")
+        }));
+        runtime.cancel(child).unwrap();
+        runtime.cancel(root).unwrap();
+        runtime.wait(child).await.unwrap();
+        runtime.wait(root).await.unwrap();
     }
 }
 
 #[tokio::test]
-async fn single_history_rejects_child_waiting_for_provider_admission() {
+async fn single_history_allows_child_waiting_for_provider_admission() {
     let fixture = Fixture::new();
     let bus = Arc::new(EventBus::new(128));
     let model = Arc::new(PendingChildAdmission {
@@ -663,34 +662,27 @@ async fn single_history_rejects_child_waiting_for_provider_admission() {
         .await
         .unwrap();
     assert!(runtime.inspect_agent(child).is_err());
-    for attempt in [
-        runtime.continue_goal(root, "continue".into(), RunConfig::default()),
-        runtime.delegate_chat(
+    let resumed = runtime
+        .delegate_chat(
             "pending-single",
             Role::Worker,
             "continue".into(),
             RunConfig::default(),
-        ),
-    ] {
-        let error = attempt.unwrap_err().to_string();
-        assert!(
-            error.contains("root_reconciliation_required") && error.contains("awaiting admission"),
-            "{error}"
-        );
-    }
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(
+        runtime
+            .continue_goal(root, "continue".into(), RunConfig::default())
+            .unwrap(),
+        root
+    );
     runtime.cancel(child).unwrap();
     model.release.notify_one();
     assert!(matches!(
         runtime.wait(child).await,
         Err(runtime::RuntimeError::RunTerminated { .. })
     ));
-    let resumed = runtime
-        .delegate_chat(
-            "pending-single",
-            Role::Worker,
-            "continue after admission cancelled".into(),
-            RunConfig::default(),
-        )
-        .unwrap();
-    assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+    runtime.cancel(root).unwrap();
+    runtime.wait(root).await.unwrap();
 }

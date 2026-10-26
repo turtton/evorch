@@ -69,3 +69,19 @@ pub async fn next_event(rx: &mut EventReceiver) -> Event {
         .expect("1 秒以内にイベントを受信できる")
         .unwrap_or_else(|err| panic!("イベントの受信に失敗しました: {err:?}"))
 }
+
+#[allow(dead_code)]
+pub fn b3_opaque() -> providers::ContentBlock {
+    let request: providers::ChatRequest =
+        serde_json::from_value(serde_json::json!({"model":"m","messages":[]})).unwrap();
+    providers::ContentBlock::ResponsesReasoning {
+        item: serde_json::json!({"type":"reasoning","id":"rs_other","summary":[],"encrypted_content":"b3-secret-ciphertext"}),
+        origin: providers::ResolvedResponsesScope::resolve(
+            &request,
+            providers::ResponsesDialect::OpenAi,
+            Some("work"),
+            "https://example.test/responses",
+            providers::ResponsesAccount::Unavailable,
+        ),
+    }
+}

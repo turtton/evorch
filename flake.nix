@@ -101,11 +101,34 @@
         # the default `cargo check --all-targets` pass would only add minutes
         # and metadata-only artifacts to the cached (and attic-pushed) output.
         depsOnlyArgs = {
+          # crane discovers manifests recursively, including this independent
+          # benchmark workspace that does not contribute to the product deps.
+          src = pkgs.lib.cleanSourceWith {
+            src = commonArgs.src;
+            filter = path: _type:
+              let
+                benchmark = "${toString ./.}/examples/benchmark/clamp";
+              in
+              path != benchmark && !(pkgs.lib.hasPrefix "${benchmark}/" path);
+          };
           cargoCheckCommand = "true";
+          # Trade a little cold-build CPU for smaller cached dependency downloads.
+          zstdCompressionExtraArgs = "-9";
+          # Keep vendored sources in the cache closure independently of how the
+          # cargo artifacts happen to be compressed.
+          postInstall = ''
+            mkdir -p "$out"
+            printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
+          '';
         };
-        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
+        shippedCargoArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
+        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
+          cargoExtraArgs = shippedCargoArgs;
+          doCheck = false;
+        });
+        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
         tests = craneLib.cargoTest (commonArgs // {
-          inherit cargoArtifacts;
+          cargoArtifacts = testCargoArtifacts;
           cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
@@ -131,7 +154,7 @@
           inherit cargoArtifacts;
           # Only the shipped programs; the QA fixtures (headless_capture,
           # native_qa_window) are built with cargo where they are used.
-          cargoExtraArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
+          cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
@@ -354,8 +377,8 @@
           inherit evorch;
           evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
-          # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
-          # バイナリとセットで push することで次回 run の deps build を skip させる。
+          # Cargo manifests/config、lockfile、toolchain とビルド設定が同じなら
+          # 再利用できる。製品ソース本文の変更だけでは deps を再ビルドしない。
           evorch-deps = cargoArtifacts;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # CI only: the attic client for the push step (see atticClient).

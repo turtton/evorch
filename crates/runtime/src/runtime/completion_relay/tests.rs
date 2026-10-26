@@ -174,34 +174,44 @@ async fn stop_scopes_follow_intents_and_registered_parents_without_hard_cancel()
     publish(&runtime, child, AgentRunPhase::Done);
     assert_eq!(runtime.live_descendants(root), vec![grandchild]);
     assert_eq!(
-        *runtime.entry(root).unwrap().cancel_tx.borrow(),
+        *runtime.entry(root).unwrap().execution.cancel_tx.borrow(),
         RunInterrupt::None
     );
 
     runtime.stop(root, StopScope::SelfOnly).unwrap();
     assert_eq!(
-        *runtime.entry(root).unwrap().cancel_tx.borrow(),
+        *runtime.entry(root).unwrap().execution.cancel_tx.borrow(),
         RunInterrupt::Stop
     );
     assert_eq!(
-        *runtime.entry(grandchild).unwrap().cancel_tx.borrow(),
+        *runtime
+            .entry(grandchild)
+            .unwrap()
+            .execution
+            .cancel_tx
+            .borrow(),
         RunInterrupt::None
     );
     runtime.stop(root, StopScope::Subtree).unwrap();
     for id in [root, child, grandchild] {
         assert_eq!(
-            *runtime.entry(id).unwrap().cancel_tx.borrow(),
+            *runtime.entry(id).unwrap().execution.cancel_tx.borrow(),
             RunInterrupt::Stop
         );
     }
     assert_eq!(
-        *runtime.entry(unrelated).unwrap().cancel_tx.borrow(),
+        *runtime
+            .entry(unrelated)
+            .unwrap()
+            .execution
+            .cancel_tx
+            .borrow(),
         RunInterrupt::None
     );
     assert!(!runtime.spawn_cancelled(root));
     runtime.cancel(root).unwrap();
     assert_eq!(
-        *runtime.entry(root).unwrap().cancel_tx.borrow(),
+        *runtime.entry(root).unwrap().execution.cancel_tx.borrow(),
         RunInterrupt::Cancel
     );
     assert!(matches!(
@@ -244,15 +254,22 @@ async fn stop_cancels_pending_admission_for_self_and_subtree() {
             runtime.delegate_background(Role::Orchestrator, "root".into(), RunConfig::default());
         let pending = runtime.reserve_child_run_id(root).unwrap();
         runtime.seed_spawn_intent(pending, &root.to_string());
-        runtime.admit_run(
-            pending,
-            Some(root),
-            Role::Worker,
-            "pending".into(),
-            RunConfig::default(),
-            RunContinuation::Fresh,
-            None,
-        );
+        runtime.reserve_admission(pending, Some(root), None);
+        let execution = runtime.execution_snapshot(pending).unwrap();
+        {
+            let _intents = runtime.shared.spawn_intents.lock().unwrap();
+            runtime.admit_run(
+                pending,
+                Some(root),
+                Role::Worker,
+                "pending".into(),
+                RunConfig::default(),
+                RunContinuation::Fresh,
+                None,
+                execution,
+                &_intents,
+            );
+        }
         assert_eq!(runtime.live_descendants(root), vec![pending]);
         let target = if scope == StopScope::SelfOnly {
             pending

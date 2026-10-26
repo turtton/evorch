@@ -27,7 +27,8 @@ impl From<&providers::ProviderError> for FailureKind {
                 _ => Self::Other,
             },
             providers::ProviderError::Timeout => Self::Timeout,
-            providers::ProviderError::InvalidSse { .. }
+            providers::ProviderError::ResponsesScopeChanged { .. }
+            | providers::ProviderError::InvalidSse { .. }
             | providers::ProviderError::InvalidJson { .. }
             | providers::ProviderError::Request(_)
             | providers::ProviderError::Transport { .. } => Self::Other,
@@ -86,7 +87,8 @@ pub fn is_transient(error: &providers::ProviderError) -> bool {
             matches!(status, 408 | 429 | 500..=599)
         }
         providers::ProviderError::RetriesExhausted { last, .. } => is_transient(last),
-        providers::ProviderError::Request(_)
+        providers::ProviderError::ResponsesScopeChanged { .. }
+        | providers::ProviderError::Request(_)
         | providers::ProviderError::InvalidSse { .. }
         | providers::ProviderError::InvalidJson { .. } => false,
     }

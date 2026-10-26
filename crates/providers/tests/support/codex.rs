@@ -10,6 +10,7 @@ pub const MODEL: &str = "gpt-5.1-codex";
 
 pub fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {
             role: Role::User,

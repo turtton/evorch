@@ -61,6 +61,53 @@ fn record(fixture: &Fixture, run: RunId) -> storage::RunContextRecord {
         .unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_does_not_wait_for_another_chats_restore_storage_gate() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let restoring = fixture.terminal().await;
+    let live = runtime.delegate_background(
+        Role::Worker,
+        "another chat".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    wait_for_waiting(runtime, live).await;
+    let (restored, stop_result) = {
+        let store = runtime.shared.run_store.get().unwrap();
+        let storage_gate = store.restore_gate.lock().unwrap();
+        let other_runtime = runtime.clone();
+        let handle = tokio::runtime::Handle::current();
+        let (started, entered) = std::sync::mpsc::channel();
+        let restoring_thread = std::thread::spawn(move || {
+            let _runtime = handle.enter();
+            started.send(()).unwrap();
+            other_runtime.resume_chat(restoring, RunConfig::default())
+        });
+        entered.recv().unwrap();
+        let stopping_runtime = runtime.clone();
+        let (finished, stopped) = std::sync::mpsc::channel();
+        let stopping_thread = std::thread::spawn(move || {
+            let result = stopping_runtime.stop(live, StopScope::SelfOnly);
+            finished.send(result).unwrap();
+        });
+        let stop_result = stopped.recv_timeout(Duration::from_secs(2));
+        // Release/join even on failure, so the regression never strands a thread.
+        drop(storage_gate);
+        stopping_thread.join().unwrap();
+        (restoring_thread.join().unwrap().unwrap(), stop_result)
+    };
+    stop_result
+        .expect("Stop waited for another chat's restore gate")
+        .unwrap();
+    assert_eq!(runtime.wait(live).await.unwrap(), AgentRunPhase::Stopped);
+    runtime.cancel(restored).unwrap();
+    runtime.wait(restored).await.unwrap();
+}
+
 #[tokio::test]
 async fn completed_resume_preserves_history_goal_request_and_current_review_authority() {
     let model = Arc::new(RecordingModel {

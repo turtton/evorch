@@ -186,6 +186,7 @@ async fn fallback_repins_affinity_and_preserves_request_when_primary_fails() {
     );
     let mut first = requests[0].lock().unwrap()[0].clone();
     first.model = "model-1".into();
+    first.responses_replay.as_mut().unwrap().route_model = "model-1".into();
     assert_eq!(requests[1].lock().unwrap()[0], first);
     assert_eq!(complete(&model, "session").await, Ok(response()));
     assert_eq!(requests[0].lock().unwrap().len(), 1);
@@ -224,6 +225,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
                 &[],
                 &[],
                 streaming.then_some(bus.as_ref()),
+                None,
                 None,
                 None,
             )

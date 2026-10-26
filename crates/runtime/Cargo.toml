@@ -22,6 +22,7 @@ futures-util = { workspace = true }
 globset = { workspace = true }
 # run ID や質問 ID などのランダムな識別子の生成に使用する。
 getrandom = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 lol_html = { workspace = true }
 # WHATWG character-reference table, already used by the HTML dependencies.
 markup5ever = "0.39"

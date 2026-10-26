@@ -197,7 +197,7 @@ fn codex_dialect_wire_bytes_match_the_pre_migration_shape() {
     assert_eq!(rich, golden.trim_end());
     assert_eq!(
         minimal,
-        r#"{"model":"m","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[],"store":false,"stream":true,"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":"auto"},"include":[]}"#
+        r#"{"model":"m","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[],"store":false,"stream":true,"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}"#
     );
 }
 
@@ -224,7 +224,7 @@ fn openai_dialect_maps_generation_settings() {
     assert_eq!(value["parallel_tool_calls"], true);
     assert_eq!(value["store"], false);
     assert_eq!(value["stream"], true);
-    assert_eq!(value["include"], json!([]));
+    assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(
         value["text"]["format"],
         json!({
@@ -272,7 +272,7 @@ fn openai_dialect_omits_unset_optional_settings() {
     );
     assert_eq!(value["store"], false);
     assert_eq!(value["stream"], true);
-    assert_eq!(value["include"], json!([]));
+    assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
 }
 
 // Given: reasoning effort set or unset / When: both dialects are serialized
@@ -336,4 +336,294 @@ fn openai_dialect_skips_compaction_but_shares_the_input_shape() {
     assert_eq!(openai["input"], Value::Array(codex_input));
     assert!(!openai.to_string().contains("opaque=="));
     assert!(!openai.to_string().contains("/w/a.png"));
+}
+
+#[test]
+fn b3_include_is_stable_for_both_dialects() {
+    for dialect in [ResponsesDialect::Codex, ResponsesDialect::OpenAi] {
+        for effort in [None, Some("high".to_owned())] {
+            let mut request = minimal_request();
+            request.reasoning_effort = effort;
+            let value = wire(&request, dialect, None);
+            assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
+            assert_eq!(value["store"], false);
+        }
+    }
+}
+
+// Locate root include's value with serde's byte offset; compare the surrounding
+// bytes, not a normalized object that would hide spacing or key/tool reordering.
+fn include_span(bytes: &str) -> Option<std::ops::Range<usize>> {
+    serde_json::from_str::<Value>(bytes).ok()?.as_object()?;
+    let mut depth = 0usize;
+    let mut position = 0;
+    let mut found = None;
+    while position < bytes.len() {
+        match bytes.as_bytes()[position] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.checked_sub(1)?,
+            b'"' => {
+                let mut stream =
+                    serde_json::Deserializer::from_str(&bytes[position..]).into_iter::<String>();
+                let key = stream.next()?.ok()?;
+                position += stream.byte_offset();
+                if depth == 1 && key == "include" && bytes[position..].trim_start().starts_with(':')
+                {
+                    let colon = position + bytes[position..].find(':')?;
+                    let start = colon + 1;
+                    let mut stream =
+                        serde_json::Deserializer::from_str(&bytes[start..]).into_iter::<Value>();
+                    let value = stream.next()?.ok()?;
+                    if found.is_some() || !value.is_array() {
+                        return None;
+                    }
+                    found = Some(start..start + stream.byte_offset());
+                }
+                continue;
+            }
+            _ => {}
+        }
+        position += 1;
+    }
+    found
+}
+fn only_include_changed(old: &str, new: &str) -> bool {
+    let Some(a) = include_span(old) else {
+        return false;
+    };
+    let Some(b) = include_span(new) else {
+        return false;
+    };
+    &old[a.clone()] == "[]"
+        && &new[b.clone()] == "[\"reasoning.encrypted_content\"]"
+        && old[..a.start] == new[..b.start]
+        && old[a.end..] == new[b.end..]
+}
+
+#[test]
+fn b3_golden_allows_only_include_value_bytes_and_rejects_other_changes() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!(
+                "../../../tests/fixtures/codex/wire_request_pre_b3.json"
+            ))
+        ),
+        "71901338bd55459a5385ff4d32b398fd79d269afed7c276b0e392c1a87912ae3"
+    );
+    let old = include_str!("../../../tests/fixtures/codex/wire_request_pre_b3.json").trim_end();
+    let new = serde_json::to_string(&to_wire_request(
+        &rich_request(),
+        &options(ResponsesDialect::Codex, None),
+    ))
+    .unwrap();
+    assert!(only_include_changed(old, &new));
+    for changed in [
+        new.replacen("\"model\":", "\"model\": ", 1),
+        new.replacen("gpt-5-codex", "other-model", 1),
+        new.replacen("alpha", "changed_tool", 1),
+        new.replacen("\"store\":false", "\"store\":true", 1),
+        new.replace("reasoning.encrypted_content", "wrong.include"),
+    ] {
+        assert_ne!(new, changed);
+        assert!(!only_include_changed(old, &changed));
+    }
+    let wire = to_wire_request(&rich_request(), &options(ResponsesDialect::Codex, None));
+    let first = serde_json::to_string(&wire.tools.as_ref().unwrap()[0]).unwrap();
+    let second = serde_json::to_string(&wire.tools.as_ref().unwrap()[1]).unwrap();
+    let reordered = new.replace(&format!("{first},{second}"), &format!("{second},{first}"));
+    assert_ne!(new, reordered);
+    assert!(!only_include_changed(old, &reordered));
+    assert_eq!(
+        include_span(r#"{"nested":{"include":[]},"include":[],"tail":{"include":[1]}}"#)
+            .map(|r| &r#"{"nested":{"include":[]},"include":[],"tail":{"include":[1]}}"#[r]),
+        Some("[]")
+    );
+    let mut changed = rich_request();
+    changed.tools[0].description.push_str(" changed");
+    assert!(!only_include_changed(
+        old,
+        &serde_json::to_string(&to_wire_request(
+            &changed,
+            &options(ResponsesDialect::Codex, None)
+        ))
+        .unwrap()
+    ));
+}
+
+fn replay_scope(dialect: ResponsesDialect) -> crate::ResolvedResponsesScope {
+    crate::ResolvedResponsesScope::resolve(
+        &minimal_request(),
+        dialect,
+        Some("work"),
+        "https://example.test/v1/responses",
+        crate::ResponsesAccount::Unavailable,
+    )
+}
+
+#[test]
+fn b3_native_item_round_trip_and_replay_keeps_boundaries_and_fields() {
+    use crate::{ContentBlock, Message, ResponsesReplayContext, ResponsesSpeed, Role};
+    for dialect in [ResponsesDialect::OpenAi, ResponsesDialect::Codex] {
+        let scope = replay_scope(dialect);
+        let item = json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque\n日本語", "content":[{"type":"reasoning_text","text":"visible"}],"status":"completed","future":{"a":true}});
+        let opaque = ContentBlock::ResponsesReasoning {
+            item: item.clone(),
+            origin: scope.clone(),
+        };
+        assert_eq!(opaque.text(), None);
+        assert_eq!(opaque.reasoning_text(), None);
+        assert!(!opaque.is_reasoning());
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(serde_json::to_value(&opaque).unwrap()).unwrap(),
+            opaque
+        );
+        let mut request = minimal_request();
+        request.responses_replay = Some(ResponsesReplayContext {
+            route_model: scope.route_model.clone(),
+            speed: ResponsesSpeed::Standard,
+            expected_scope: Some(scope.clone()),
+        });
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                },
+                opaque.clone(),
+                ContentBlock::Text {
+                    text: "after".into(),
+                },
+            ],
+        }];
+        let value = serde_json::to_value(
+            super::to_wire_request_with_scope(&request, &options(dialect, None), &scope).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["input"][1], item);
+        assert_eq!(value["input"].as_array().unwrap().len(), 3);
+        assert!(!value.to_string().contains("origin"));
+        assert!(
+            wire(&request, dialect, None)["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["type"] != "reasoning")
+        );
+        for role in [Role::User, Role::System] {
+            request.messages[0].role = role;
+            let value = serde_json::to_value(
+                super::to_wire_request_with_scope(&request, &options(dialect, None), &scope)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(!value.to_string().contains("opaque"));
+        }
+        request.messages[0].role = Role::Assistant;
+        request
+            .responses_replay
+            .as_mut()
+            .unwrap()
+            .expected_scope
+            .as_mut()
+            .unwrap()
+            .profile = "other".into();
+        assert!(matches!(
+            super::to_wire_request_with_scope(&request, &options(dialect, None), &scope),
+            Err(crate::ProviderError::ResponsesScopeChanged { .. })
+        ));
+    }
+}
+
+#[test]
+fn b3_review_m1_canonical_debug_redacts_reasoning_without_changing_serde() {
+    use crate::{ChatResponse, ContentBlock, Message, Role, StreamEvent};
+    let sentinel = "m1-canonical-ciphertext-sentinel-🔒";
+    let item = json!({"type":"reasoning","id":"rs_debug","summary":[],"encrypted_content":sentinel,"future":{"field":"preserved"}});
+    let origin = replay_scope(ResponsesDialect::OpenAi);
+    let block = ContentBlock::ResponsesReasoning {
+        item: item.clone(),
+        origin: origin.clone(),
+    };
+    let encoded = serde_json::to_value(&block).unwrap();
+    assert_eq!(
+        encoded,
+        json!({"type":"responses_reasoning","item":item,"origin":origin})
+    );
+    for debug in [format!("{block:?}"), format!("{block:#?}")] {
+        assert!(
+            !debug.contains(sentinel),
+            "canonical Debug exposed ciphertext"
+        );
+        assert!(debug.contains("redacted"));
+    }
+    let response = ChatResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: vec![block],
+        },
+        usage: Default::default(),
+        finish_reason: crate::FinishReason::Stop,
+    };
+    assert!(!format!("{:?}", StreamEvent::Completed { response }).contains(sentinel));
+}
+
+#[test]
+fn b3_review_m1_wire_debug_redacts_reasoning_without_changing_serialization() {
+    use crate::{ContentBlock, Message, ResponsesReplayContext, Role};
+    let sentinel = "m1-wire-ciphertext-sentinel-🔒";
+    for dialect in [ResponsesDialect::OpenAi, ResponsesDialect::Codex] {
+        let scope = replay_scope(dialect);
+        let item = json!({"type":"reasoning","id":"rs_debug","summary":[],"encrypted_content":sentinel,"future":true});
+        let mut request = minimal_request();
+        request.responses_replay = Some(ResponsesReplayContext {
+            route_model: scope.route_model.clone(),
+            speed: scope.speed,
+            expected_scope: Some(scope.clone()),
+        });
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ResponsesReasoning {
+                item: item.clone(),
+                origin: scope.clone(),
+            }],
+        }];
+        let wire =
+            super::to_wire_request_with_scope(&request, &options(dialect, None), &scope).unwrap();
+        assert_eq!(serde_json::to_value(&wire).unwrap()["input"][0], item);
+        let serialized: Value =
+            serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        assert_eq!(serialized["input"][0], item);
+        assert!(
+            !format!("{wire:?}").contains(sentinel),
+            "wire Debug exposed ciphertext"
+        );
+        assert!(
+            !format!("{:#?}", wire.input).contains(sentinel),
+            "input Debug exposed ciphertext"
+        );
+    }
+}
+
+#[test]
+fn b3_review_m1_existing_text_debug_shape_is_unchanged() {
+    assert_eq!(
+        format!(
+            "{:?}",
+            crate::ContentBlock::Text {
+                text: "visible".into()
+            }
+        ),
+        r#"Text { text: "visible" }"#
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            crate::ContentBlock::Reasoning {
+                text: "plain thinking".into()
+            }
+        ),
+        r#"Reasoning { text: "plain thinking" }"#
+    );
 }

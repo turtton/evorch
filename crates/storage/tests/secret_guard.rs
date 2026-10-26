@@ -336,3 +336,74 @@ fn normal_prose_and_short_token_like_values_are_not_rejected() {
     let db = Database::open(&config(&temp)).expect("database must open");
     assert_eq!(db.events_all_ordered().unwrap().len(), corpus.len());
 }
+
+#[test]
+fn known_credential_is_protected_only_inside_responses_ciphertext() {
+    // Given: a known credential value under an env name no other test in this file sets.
+    const ENV: &str = "SLACK_APP_TOKEN";
+    const SENTINEL: &str = "evorch-b3-known-sentinel-7c1d9e20-9876543210";
+    let previous = std::env::var(ENV).ok();
+    // SAFETY: テストプロセス内で本テスト専用の env 名に一意の sentinel を設定し、終了時に復元する。
+    unsafe { std::env::set_var(ENV, SENTINEL) };
+    let temp = TempDir::new().expect("temporary directory must be created");
+    let storage = Storage::open(config(&temp)).expect("storage must open");
+    let snapshot = |summary: &str, ciphertext: &str| storage::RunContextRecord {
+        run_id: "run-b3".into(),
+        role: "worker".into(),
+        name: "chat:Worker:b3".into(),
+        parent_run_id: None,
+        config_json: "{}".into(),
+        messages_json: serde_json::json!([{
+            "role": "assistant",
+            "content": [{
+                "type": "responses_reasoning",
+                "item": {
+                    "type": "reasoning", "id": "rs_known",
+                    "summary": [{"type": "summary_text", "text": summary}],
+                    "encrypted_content": ciphertext
+                },
+                "origin": {
+                    "dialect": "codex", "profile": "", "route_model": "m", "wire_model": "m",
+                    "speed": "standard", "service_tier": null,
+                    "endpoint_fingerprint": "ef".repeat(32),
+                    "account": {"kind": "unavailable"}
+                }
+            }]
+        }])
+        .to_string(),
+        checkpoints_json: "[]".into(),
+        terminal_phase: "Checkpoint".into(),
+        restorable: true,
+        updated_at_ns: 1,
+    };
+
+    // When: the value appears once inside the ciphertext and once in the summary.
+    let protected = snapshot("clean summary", &format!("gAAAAB3/{SENTINEL}/=="));
+    let accepted = storage.handle().upsert_run_context(&protected);
+    let rejected = storage
+        .handle()
+        .upsert_run_context(&snapshot(&format!("summary {SENTINEL}"), "gAAAAB3=="));
+    let saved = Database::open(&config(&temp))
+        .expect("database must open")
+        .run_context("run-b3")
+        .expect("context read must succeed");
+    // SAFETY: 上記 sentinel の後始末であり、外部環境へ影響を残さない。
+    unsafe {
+        match &previous {
+            Some(value) => std::env::set_var(ENV, value),
+            None => std::env::remove_var(ENV),
+        }
+    }
+
+    // Then: the ciphertext is kept exactly; the plaintext copy refuses the snapshot
+    // without echoing the credential and leaves the accepted snapshot in place.
+    accepted.expect("ciphertext is protected, not scanned");
+    let error = rejected.expect_err("plaintext credential must refuse the snapshot");
+    assert!(matches!(error, StorageError::Serialization(_)));
+    assert!(!format!("{error} / {error:?}").contains(SENTINEL));
+    let saved = saved.expect("accepted snapshot must remain");
+    assert_eq!(saved.messages_json, {
+        let value: serde_json::Value = serde_json::from_str(&protected.messages_json).unwrap();
+        serde_json::to_string(&value).unwrap()
+    });
+}

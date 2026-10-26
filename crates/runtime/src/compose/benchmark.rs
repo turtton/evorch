@@ -138,6 +138,7 @@ impl AgentModel for Frozen {
                 None,
                 None,
                 Some(&self.settings),
+                None,
             )
             .await
     }
@@ -159,6 +160,63 @@ impl AgentModel for Frozen {
                 Some(bus),
                 None,
                 Some(&self.settings),
+                None,
+            )
+            .await
+    }
+    async fn prepare_replay_context(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        _messages: &[Message],
+        tools: &[ToolSpec],
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<(), RuntimeError> {
+        let scope = self.resolve_replay_scope(invocation, role, tools).await?;
+        if replay.scope() != scope.as_ref() {
+            return Err(RuntimeError::ResponsesScopeChanged {
+                actual: scope.map(Box::new),
+                selected: self.selected_model(role, None),
+            });
+        }
+        Ok(())
+    }
+
+    async fn resolve_replay_scope(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        self.model
+            .resolve_replay_scope_with_tier(
+                &self.invocation(invocation),
+                role,
+                tools,
+                Some(self.settings.service_tier),
+            )
+            .await
+    }
+
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &EventBus,
+        replay: &crate::ResponsesReplayState,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.model
+            .complete_request(
+                &self.invocation(invocation),
+                role,
+                messages,
+                tools,
+                Some(bus),
+                None,
+                Some(&self.settings),
+                Some(replay),
             )
             .await
     }

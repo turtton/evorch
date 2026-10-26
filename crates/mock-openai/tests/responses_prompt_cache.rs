@@ -146,6 +146,7 @@ fn responses_prompt_cache_includes_instructions_and_tools() {
 
 fn chat_request(messages: Vec<Message>) -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "m".into(),
         messages,
         tools: vec![providers::ToolSpec {

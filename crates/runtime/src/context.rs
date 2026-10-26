@@ -46,6 +46,116 @@ impl CompactionCheckpoint {
     }
 }
 
+/// Durable raw-index replay boundary. Never reconstruct this from item origins.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponsesReplayState {
+    pub floor: usize,
+    pub binding: ResponsesReplayBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResponsesReplayBinding {
+    #[default]
+    Unbound,
+    Bound {
+        scope: providers::ResolvedResponsesScope,
+    },
+    Reset,
+}
+
+impl ResponsesReplayState {
+    pub fn scope(&self) -> Option<&providers::ResolvedResponsesScope> {
+        match &self.binding {
+            ResponsesReplayBinding::Bound { scope } => Some(scope),
+            ResponsesReplayBinding::Unbound | ResponsesReplayBinding::Reset => None,
+        }
+    }
+
+    pub fn reset(end: usize) -> Self {
+        Self {
+            floor: end,
+            binding: ResponsesReplayBinding::Reset,
+        }
+    }
+
+    pub fn prepare(&mut self, scope: Option<providers::ResolvedResponsesScope>, end: usize) {
+        if self.scope() == scope.as_ref() {
+            return;
+        }
+        if self.scope().is_some() {
+            self.floor = end;
+        }
+        self.binding = match scope {
+            Some(scope) => ResponsesReplayBinding::Bound { scope },
+            None => ResponsesReplayBinding::Reset,
+        };
+    }
+
+    pub(crate) fn validate(
+        &self,
+        messages: &[Message],
+        checkpoints: &[CompactionCheckpoint],
+    ) -> Result<(), String> {
+        let opaque = messages
+            .iter()
+            .chain(checkpoints.iter().map(|c| &c.summary))
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ResponsesReasoning { .. }));
+        let reset_has_live_opaque = matches!(self.binding, ResponsesReplayBinding::Reset)
+            && messages
+                .iter()
+                .enumerate()
+                .chain(
+                    checkpoints
+                        .iter()
+                        .map(|c| (c.range.1.saturating_sub(1), &c.summary)),
+                )
+                .any(|(i, m)| {
+                    i >= self.floor
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ResponsesReasoning { .. }))
+                });
+        if reset_has_live_opaque
+            || self.floor > messages.len()
+            || (matches!(self.binding, ResponsesReplayBinding::Unbound)
+                && (opaque || self.floor != 0))
+        {
+            return Err("invalid Responses replay state".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn for_saved_end(&self, end: usize) -> Self {
+        Self {
+            floor: self.floor.min(end),
+            binding: self.binding.clone(),
+        }
+    }
+
+    pub(crate) fn filter(
+        &self,
+        indexed: Vec<(usize, Message)>,
+        scope: Option<&providers::ResolvedResponsesScope>,
+    ) -> Vec<(usize, Message)> {
+        indexed
+            .into_iter()
+            .filter_map(|(index, mut message)| {
+                message.content.retain(|block| {
+                    !matches!(block, ContentBlock::ResponsesReasoning { .. })
+                        || (index >= self.floor
+                            && scope.is_some_and(|scope| {
+                                providers::responses_replay::eligible(block, message.role, scope)
+                            }))
+                });
+                (!message.content.is_empty()).then_some((index, message))
+            })
+            .collect()
+    }
+}
+
 /// 単一 AgentRun の会話コンテキスト。
 ///
 /// # 独立性の保証 (independence by construction)
@@ -65,12 +175,26 @@ pub struct AgentContext {
     pub messages: Vec<Message>,
     /// raw 履歴を保持したままモデル可視窓を投影する圧縮履歴。
     checkpoints: Vec<CompactionCheckpoint>,
+    pub responses_replay: ResponsesReplayState,
+}
+
+/// A text-only view plus the trusted replacement body that structural fallback
+/// must preserve. The index is in the raw log, not the projected message list.
+pub(crate) struct TextCompactionView {
+    pub(crate) indexed: Vec<(usize, Message)>,
+    pub(crate) protected: Option<(usize, String)>,
 }
 
 impl AgentContext {
     /// 空の履歴でコンテキストを生成する。
     pub fn new(run_id: RunId, role: Role) -> Self {
-        let mut context = Self::from_restored(run_id, role, Vec::new(), Vec::new());
+        let mut context = Self::from_restored(
+            run_id,
+            role,
+            Vec::new(),
+            Vec::new(),
+            ResponsesReplayState::default(),
+        );
         context.provenance = Default::default();
         context
     }
@@ -80,6 +204,7 @@ impl AgentContext {
         role: Role,
         messages: Vec<Message>,
         checkpoints: Vec<CompactionCheckpoint>,
+        responses_replay: ResponsesReplayState,
     ) -> Self {
         Self {
             provenance: crate::restore::provenance::ConversationProvenance::unknown(),
@@ -87,6 +212,7 @@ impl AgentContext {
             role,
             messages,
             checkpoints,
+            responses_replay,
         }
     }
 
@@ -95,10 +221,65 @@ impl AgentContext {
     }
 
     pub(crate) fn compaction_view(&self) -> Vec<(usize, Message)> {
-        let Some(checkpoint) = self
-            .latest_checkpoint()
-            .filter(|checkpoint| checkpoint.protects_history)
-        else {
+        self.responses_replay
+            .filter(self.raw_compaction_view(), self.responses_replay.scope())
+    }
+
+    /// Native checkpoints remain useful on their provider, but cannot be a
+    /// knowledge source for a text-only re-summary. Recover the last readable D3
+    /// replacement and its raw tail, never the batch that D3 deliberately hid.
+    pub(crate) fn text_compaction_view(&self) -> Result<TextCompactionView, &'static str> {
+        let checkpoint = self.checkpoints.iter().rev().find(|checkpoint| {
+            checkpoint.protects_history
+                && !checkpoint
+                    .summary
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Compaction { .. }))
+        });
+        if checkpoint.is_none()
+            && self
+                .checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.protects_history)
+        {
+            return Err("protected native checkpoint has no readable recovery summary");
+        }
+        let mut indexed = self.responses_replay.filter(
+            self.project_indexed(checkpoint),
+            self.responses_replay.scope(),
+        );
+        for (_, message) in &mut indexed {
+            message
+                .content
+                .retain(|block| !matches!(block, ContentBlock::Compaction { .. }));
+        }
+        indexed.retain(|(_, message)| !message.content.is_empty());
+        let protected = checkpoint.map(|checkpoint| {
+            let body = checkpoint
+                .summary
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (checkpoint.range.1 - 1, body)
+        });
+        Ok(TextCompactionView { indexed, protected })
+    }
+
+    fn raw_compaction_view(&self) -> Vec<(usize, Message)> {
+        self.project_indexed(
+            self.latest_checkpoint()
+                .filter(|checkpoint| checkpoint.protects_history),
+        )
+    }
+
+    fn project_indexed(&self, checkpoint: Option<&CompactionCheckpoint>) -> Vec<(usize, Message)> {
+        let Some(checkpoint) = checkpoint else {
             return self.messages.iter().cloned().enumerate().collect();
         };
         let (start, end) = checkpoint.range;
@@ -200,10 +381,33 @@ impl AgentContext {
     /// モデルに送るメッセージ窓を raw 履歴から投影する。
     #[must_use]
     pub fn visible_messages(&self) -> Vec<Message> {
-        let Some(checkpoint) = self.latest_checkpoint() else {
-            return self.messages.clone();
+        let indexed = if let Some(checkpoint) = self.latest_checkpoint() {
+            let (start, end) = checkpoint.range;
+            let mut view: Vec<_> = self.messages[..start].iter().cloned().enumerate().collect();
+            view.extend(
+                self.messages[start..end]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.role == MessageRole::System)
+                    .map(|(i, m)| (start + i, m.clone())),
+            );
+            view.push((end - 1, checkpoint.summary.clone()));
+            view.extend(
+                self.messages[end..]
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, m)| (end + i, m)),
+            );
+            view
+        } else {
+            self.messages.iter().cloned().enumerate().collect()
         };
-        checkpoint.project(&self.messages)
+        self.responses_replay
+            .filter(indexed, self.responses_replay.scope())
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect()
     }
 }
 
@@ -475,6 +679,7 @@ mod tests {
             context.role,
             raw.clone(),
             vec![first.clone()],
+            ResponsesReplayState::default(),
         );
         assert_eq!(
             restored.visible_messages(),
@@ -503,5 +708,188 @@ mod tests {
             ],
         );
         assert_eq!(restored.messages, raw);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod responses_replay_tests {
+    use super::*;
+
+    pub(crate) fn scope(model: &str) -> providers::ResolvedResponsesScope {
+        providers::ResolvedResponsesScope {
+            dialect: providers::ResponsesDialect::Codex,
+            profile: "codex".into(),
+            route_model: model.into(),
+            wire_model: model.into(),
+            speed: providers::ResponsesSpeed::Standard,
+            service_tier: None,
+            endpoint_fingerprint: "endpoint".into(),
+            account: providers::ResponsesAccount::Codex {
+                identity: "account-a".into(),
+            },
+        }
+    }
+    pub(crate) fn opaque(id: &str, scope: providers::ResolvedResponsesScope) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ResponsesReasoning {
+                item: serde_json::json!({"type":"reasoning", "id":id, "summary":[], "encrypted_content":format!("cipher-{id}")}),
+                origin: scope,
+            }],
+        }
+    }
+    #[test]
+    fn b3_unbound_history_never_replays_opaque_in_either_projection() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_user("goal");
+        context.push_assistant(opaque("R1", scope("A")));
+        assert_eq!(
+            context.visible_messages().len(),
+            1,
+            "unbound opaque must be excluded from generation"
+        );
+        assert_eq!(
+            context.compaction_view().len(),
+            1,
+            "unbound opaque must be excluded from official compaction"
+        );
+        assert_eq!(context.messages.len(), 2, "raw history is immutable");
+    }
+    #[test]
+    fn b3_a_b_a_and_account_boundaries_never_revive_old_items() {
+        let a = scope("A");
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.responses_replay.prepare(Some(a.clone()), 0);
+        context.push_assistant(opaque("R1", a.clone()));
+        assert_eq!(context.visible_messages().len(), 1);
+        context
+            .responses_replay
+            .prepare(Some(scope("B")), context.messages.len());
+        context
+            .responses_replay
+            .prepare(Some(a.clone()), context.messages.len());
+        context.push_assistant(opaque("R2", a.clone()));
+        assert_eq!(
+            context.visible_messages(),
+            vec![context.messages[1].clone()]
+        );
+        assert_eq!(
+            context.compaction_view(),
+            vec![(1, context.messages[1].clone())]
+        );
+        let stable = context.responses_replay.clone();
+        // Tokens are deliberately absent from scope: same-account refresh is stable.
+        context
+            .responses_replay
+            .prepare(Some(a.clone()), context.messages.len());
+        assert_eq!(context.responses_replay, stable);
+        let mut account_b = a.clone();
+        account_b.account = providers::ResponsesAccount::Codex {
+            identity: "account-b".into(),
+        };
+        context
+            .responses_replay
+            .prepare(Some(account_b), context.messages.len());
+        context
+            .responses_replay
+            .prepare(Some(a), context.messages.len());
+        assert!(context.visible_messages().is_empty());
+        assert!(context.compaction_view().is_empty());
+        assert_eq!(context.messages.len(), 2);
+    }
+
+    #[test]
+    fn b3_saved_end_clamps_floor_without_changing_eligibility() {
+        let a = scope("A");
+        let messages: Vec<_> = (0..6)
+            .map(|i| opaque(&format!("R{i}"), a.clone()))
+            .collect();
+        for floor in [1, 3, 5] {
+            let replay = ResponsesReplayState {
+                floor,
+                binding: ResponsesReplayBinding::Bound { scope: a.clone() },
+            };
+            replay.validate(&messages, &[]).unwrap();
+            let saved = replay.for_saved_end(3);
+            assert_eq!(saved.floor, floor.min(3));
+            for i in 0..3 {
+                assert_eq!(i >= saved.floor, i >= floor);
+            }
+            assert_eq!(replay.floor, floor);
+        }
+        let mut child = ResponsesReplayState::reset(3);
+        child.prepare(Some(a), 3);
+        assert_eq!(child.floor, 3);
+        assert!(
+            child
+                .filter(
+                    messages[..3].iter().cloned().enumerate().collect(),
+                    child.scope()
+                )
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn b3_restore_validation_checks_checkpoint_opaque_and_explicit_reset() {
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "goal".into(),
+            }],
+        }];
+        let checkpoint = CompactionCheckpoint {
+            id: "checkpoint".into(),
+            summary: opaque("R1", scope("A")),
+            range: (0, 1),
+            protects_history: true,
+        };
+        assert!(
+            ResponsesReplayState::default()
+                .validate(&messages, std::slice::from_ref(&checkpoint))
+                .is_err()
+        );
+        ResponsesReplayState::default()
+            .validate(&messages, &[])
+            .unwrap();
+        ResponsesReplayState::reset(1)
+            .validate(&messages, &[checkpoint])
+            .unwrap();
+        assert!(
+            ResponsesReplayState::reset(2)
+                .validate(&messages, &[])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn b3_native_protection_without_readable_source_never_falls_back_to_hidden_raw() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_user("goal");
+        context.push_assistant(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "hidden".into(),
+                name: "edit".into(),
+                input: serde_json::json!({"hidden": "never recover this raw batch"}),
+            }],
+        });
+        context.apply_checkpoint(CompactionCheckpoint {
+            id: "native-without-readable-source".into(),
+            summary: Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Compaction {
+                    encrypted_content: "native".into(),
+                }],
+            },
+            range: (1, 2),
+            protects_history: true,
+        });
+        assert!(context.text_compaction_view().is_err());
+        assert_eq!(
+            context.compaction_view()[1].1,
+            context.latest_checkpoint().unwrap().summary
+        );
+        assert_eq!(context.messages.len(), 2);
     }
 }

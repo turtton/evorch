@@ -27,6 +27,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
                 None
             }
             ContentBlock::Image { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -170,6 +171,7 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBloc
                 prefix_hash: prefix_hash.clone(),
             }
         }
+        ContentBlock::ResponsesReasoning { .. } => return None,
         ContentBlock::Compaction { .. } => {
             tracing::warn!("Anthropic では compaction block をスキップします");
             return None;

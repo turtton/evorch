@@ -192,6 +192,7 @@ fn project(
         ),
         ContentBlock::Reasoning { .. }
         | ContentBlock::Anthropic { .. }
+        | ContentBlock::ResponsesReasoning { .. }
         | ContentBlock::Compaction { .. } => return None,
     };
     Some(Block {
