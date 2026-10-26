@@ -1185,6 +1185,10 @@ impl Drop for GuiStorageResources {
 }
 
 impl eframe::App for GuiApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.workbench.logic(ctx, frame);
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.workbench.raw_input_hook(ctx, raw_input);
     }
@@ -1889,3 +1893,7 @@ mod storage_shutdown_tests {
         assert!(permit.validate_generation().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "support/gui_app_tests.rs"]
+mod gui_app_tests;

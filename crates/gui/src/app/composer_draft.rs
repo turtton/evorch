@@ -42,6 +42,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.persist_composer_draft_at(Instant::now());
     }
 
+    /// Drain may take many frames. Force the first save, then reuse the dirty
+    /// debounce/retry path instead of writing unchanged history on every tick.
+    pub(super) fn flush_shutdown_draft_at(&mut self, now: Instant) {
+        if !self.shutdown_draft_flushed {
+            self.shutdown_draft_flushed = true;
+            self.record_composer_draft(now);
+            self.draft_dirty_at.set(Some(now));
+            self.save_sidebar();
+        } else {
+            self.persist_composer_draft_at(now);
+        }
+    }
+
     /// Operation/shutdown boundary: include input not yet observed by a UI frame.
     pub fn flush_composer_draft(&mut self) {
         self.record_composer_draft(Instant::now());
@@ -130,5 +143,42 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use crate::app::delivery_tests::state;
+
+    #[test]
+    fn drain_wait_saves_once_then_only_dirty_changes_and_failed_save_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sidebar.json");
+        let mut state = state(&path);
+        let now = Instant::now();
+        state.composer.input = "first".into();
+        state.flush_shutdown_draft_at(now);
+        for n in 1..100 {
+            state.flush_shutdown_draft_at(now + Duration::from_millis(n * 100));
+        }
+        assert_eq!(state.sidebar_write_count.get(), 1);
+        let edit = now + Duration::from_secs(10);
+        state.composer.input = "changed during drain".into();
+        state.flush_shutdown_draft_at(edit);
+        state.flush_shutdown_draft_at(edit + DRAFT_DEBOUNCE);
+        assert_eq!(state.sidebar_write_count.get(), 2);
+
+        state.shutdown_draft_flushed = false;
+        let unavailable = directory.path().join("missing/sidebar.json");
+        state.sidebar_path = Some(unavailable.clone());
+        state.flush_shutdown_draft_at(edit + Duration::from_secs(1));
+        assert!(state.draft_dirty_at.get().is_some());
+        std::fs::create_dir(unavailable.parent().unwrap()).unwrap();
+        state.flush_shutdown_draft_at(edit + Duration::from_secs(1) + DRAFT_DEBOUNCE);
+        assert_eq!(state.sidebar_write_count.get(), 3);
+        assert!(state.draft_dirty_at.get().is_none());
+        state.flush_shutdown_draft_at(edit + Duration::from_secs(5));
+        assert_eq!(state.sidebar_write_count.get(), 3);
     }
 }

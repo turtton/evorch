@@ -312,6 +312,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         let previous = self.sidebar.active_thread.clone();
         self.sidebar.switch_thread(&thread_id)?;
+        self.finish_thread_switch(previous);
+        Ok(())
+    }
+
+    /// All selection paths, including archive -> None, preserve the old editor
+    /// before restoring the new thread and committing the selection atomically.
+    pub(super) fn finish_thread_switch(&mut self, previous: Option<ThreadId>) {
         if let Some(previous) = previous
             && let Some(thread) = self
                 .sidebar
@@ -323,27 +330,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.composer_attachments
                 .insert(previous, std::mem::take(&mut self.composer.attachments));
         }
-        self.transcripts.select_thread(Some(thread_id.to_string()));
+        self.transcripts
+            .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         if let Some(thread) = self
             .sidebar
             .threads
             .iter()
-            .find(|thread| thread.id == thread_id)
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
         {
             self.composer.restore_thread_role(thread);
             self.composer.input.clone_from(&thread.draft_input);
             self.composer.attachments = self
                 .composer_attachments
-                .remove(&thread_id)
+                .remove(&thread.id)
                 .unwrap_or_default();
-            self.composer.completions_dismissed_for = None;
+        } else {
+            self.composer.input.clear();
+            self.composer.attachments.clear();
         }
+        self.composer.completions_dismissed_for = None;
+        self.refresh_draft_banner();
         self.focus = ConversationFocus::Thread;
         self.sync_subagent_thread_panes();
         // Previews, skills and the shell follow the thread now in view.
         self.sync_shell_cwd();
         self.save_sidebar();
-        Ok(())
     }
 
     pub fn toggle_pin(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {

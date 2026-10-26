@@ -318,3 +318,28 @@ fn shutdown_failure_is_in_the_close_dialog_not_the_header() {
     assert!(harness.state().ownership_action_error.is_none());
     assert!(!harness.state().shutdown_requested);
 }
+
+#[test]
+fn repeated_quiesce_ticks_do_not_write_unchanged_sidebar_while_draining() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = host(&directory);
+    let permit = host.start("thread").unwrap();
+    permit.begin_turn().unwrap();
+    let mut state = crate::app::delivery_tests::state(&directory.path().join("sidebar.json"))
+        .with_ownership(host.clone());
+    state.composer.input = "save before drain".into();
+    let ctx = egui::Context::default();
+    for _ in 0..20 {
+        state.quiesce_ownership(&host, &ctx);
+        assert!(state.shutdown_confirmed);
+    }
+    assert_eq!(state.sidebar_write_count.get(), 1);
+    assert!(!state.close_in_flight);
+    assert_eq!(
+        workspace_ui::load_sidebar(state.sidebar_path.as_ref().unwrap())
+            .unwrap()
+            .threads[0]
+            .draft_input,
+        "save before drain"
+    );
+}
