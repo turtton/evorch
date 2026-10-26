@@ -294,6 +294,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn quiesce_ownership(&mut self, host: &OwnerHost, ctx: &egui::Context) {
+        self.flush_composer_draft();
         let result = host.begin_quiesce();
         match &result {
             Ok(false) => {

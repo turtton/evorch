@@ -82,12 +82,15 @@ fn new_thread_command_is_not_saved_as_the_previous_draft() {
 }
 
 #[test]
-fn active_draft_is_saved_after_a_frame_without_switching() {
+fn active_draft_is_saved_after_idle_debounce_without_switching() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sidebar.json");
     let mut harness =
         gui::headless::HeadlessWorkbench::new(state(temp.path(), &path), [900.0, 700.0]);
     harness.state_mut().composer_mut().input = "still typing".into();
+    harness.run();
+    assert!(!path.exists(), "typing alone must not write the sidebar");
+    std::thread::sleep(std::time::Duration::from_millis(800));
     harness.run();
     let saved = workspace_ui::load_sidebar(&path).unwrap();
     assert_eq!(saved.threads[0].draft_input, "still typing");

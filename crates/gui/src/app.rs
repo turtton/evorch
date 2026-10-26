@@ -7,6 +7,7 @@ mod auto_grouping;
 pub mod auto_title;
 mod branching;
 mod composer;
+mod composer_draft;
 mod conversation;
 mod delivery;
 #[cfg(test)]
@@ -81,5 +82,9 @@ impl<S: AgentRunSource> eframe::App for WorkbenchApp<S> {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.0.ui(ui, frame);
+    }
+
+    fn on_exit(&mut self) {
+        self.0.flush_composer_draft();
     }
 }

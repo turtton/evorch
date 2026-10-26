@@ -7,11 +7,16 @@ use crate::model::composer::ProviderStatus;
 use std::sync::{Arc, Mutex};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+mod performance;
 mod review;
 
 #[derive(Default)]
 struct Receipts(Arc<Mutex<Vec<storage::HostInputReceipt>>>);
 impl CommandSink for Receipts {
+    fn has_host_input_receipts(&self) -> bool {
+        true
+    }
+
     fn host_input_receipts(
         &self,
         _: &[String],
@@ -23,7 +28,7 @@ impl CommandSink for Receipts {
     }
 }
 
-fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
+pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("test");
     sidebar
@@ -149,6 +154,7 @@ fn receipts_override_counts_and_resolved_originals_ignore_late_delivery() {
     let receipts = Arc::new(Mutex::new(vec![receipt]));
     state.sink = Box::new(Receipts(receipts.clone()));
     state.history[0].status = DeliveryStatus::Queued;
+    state.apply_events([]);
     state.reconcile_follow_ups();
     assert_eq!(state.history[0].status, DeliveryStatus::Unknown);
     assert!(

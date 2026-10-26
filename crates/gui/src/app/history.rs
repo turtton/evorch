@@ -105,16 +105,24 @@ struct HistorySidebar {
     composer_drafts: Vec<ComposerDraft>,
 }
 
+#[derive(Serialize)]
+struct HistorySidebarRef<'a> {
+    #[serde(flatten)]
+    sidebar: &'a workspace_ui::SidebarState,
+    user_messages: &'a [UserMessage],
+    composer_drafts: &'a [ComposerDraft],
+}
+
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn write_history_sidebar(
         &self,
         path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.sidebar.validate()?;
-        let saved = HistorySidebar {
-            sidebar: self.sidebar.clone(),
-            user_messages: self.history.clone(),
-            composer_drafts: self.composer_drafts.clone(),
+        let saved = HistorySidebarRef {
+            sidebar: &self.sidebar,
+            user_messages: &self.history,
+            composer_drafts: &self.composer_drafts,
         };
         // One atomic file holds the original, its resolution, and its draft.
         // Never expose half a resend transition after a crash.
@@ -134,6 +142,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             let _ = std::fs::remove_file(&tmp);
         }
         result?;
+        #[cfg(test)]
+        self.sidebar_write_count
+            .set(self.sidebar_write_count.get() + 1);
         Ok(())
     }
 
@@ -563,32 +574,45 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// History reconciliation left it alone because the previous owner could
     /// still have been live; now it is shown as Stopped, like an orphaned
     /// checkpoint, instead of keeping the thread running forever.
+    #[cfg(test)]
     pub(super) fn reconcile_claimed_thread(&mut self, thread_id: &str) {
+        self.receipt_reconciliation.last_repair = None;
+        let mut receipts = self
+            .read_receipts_if_due(std::time::Instant::now())
+            .unwrap_or_default();
+        self.settle_claimed_receipts(thread_id, &mut receipts);
+        let changed = self.apply_receipts(&receipts, false);
+        self.finish_receipt_reconciliation(changed);
+    }
+
+    pub(super) fn settle_claimed_receipts(
+        &mut self,
+        thread_id: &str,
+        receipts: &mut [storage::HostInputReceipt],
+    ) {
         use workspace_ui::ThreadRunPhase;
-        let ids: Vec<_> = self
-            .history
-            .iter()
-            .filter(|message| message.thread_id == thread_id)
-            .map(|message| message.id.clone())
-            .collect();
-        let receipts = match self.sink.host_input_receipts(&ids) {
-            Some(Ok(receipts)) => receipts,
-            Some(Err(error)) => {
-                tracing::warn!(%error, "claimed receipt lookup failed");
-                Vec::new()
-            }
-            None => Vec::new(),
-        };
         let runs = self
-            .history_run_candidates(&receipts)
+            .history_run_candidates(receipts)
             .remove(thread_id)
             .unwrap_or_default();
         for run_id in &runs {
             if self.receipt_run_is_live(run_id) {
                 continue;
             }
-            if let Err(error) = self.sink.mark_unreachable_host_inputs(run_id) {
-                tracing::warn!(%run_id, %error, "claimed receipt reconciliation failed");
+            match self.sink.mark_unreachable_host_inputs(run_id) {
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "claimed receipt reconciliation failed");
+                }
+                Ok(changed) => {
+                    // Only storage-confirmed transitions may change the projection.
+                    // Reuse this batch rather than querying storage again.
+                    let changed: std::collections::HashSet<_> = changed.iter().collect();
+                    for receipt in receipts.iter_mut() {
+                        if changed.contains(&receipt.prompt_id) {
+                            receipt.status = storage::HostInputStatus::Unknown;
+                        }
+                    }
+                }
             }
             let Some(phase) = self.phases.get_mut(run_id) else {
                 continue;
@@ -603,7 +627,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             *phase = ThreadRunPhase::Stopped;
             self.transcripts.interrupt_run_tools(run_id);
         }
-        self.reconcile_receipts();
     }
 
     fn receipt_run_is_live(&self, run: &str) -> bool {
@@ -627,13 +650,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 )
             })
             .collect();
+        let receipts: std::collections::HashMap<_, _> = receipts
+            .iter()
+            .map(|receipt| (receipt.prompt_id.as_str(), receipt))
+            .collect();
         // Accepted commits before ChatAccepted attaches the run to the sidebar.
         // The saved submission ID is sufficient to recover that crash window.
         for message in &self.history {
-            if let Some(receipt) = receipts
-                .iter()
-                .find(|receipt| receipt.prompt_id == message.id)
-            {
+            if let Some(receipt) = receipts.get(message.id.as_str()) {
                 candidates
                     .entry(message.thread_id.clone())
                     .or_default()

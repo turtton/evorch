@@ -99,6 +99,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_composer(&mut self) {
+        self.flush_composer_draft();
         // A persisted conversation role is authoritative for chat and /continue,
         // even if an editor caller changed the transient composer model.
         if let Some(thread) = self
@@ -241,7 +242,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         });
                         // A busy run reads follow-ups later; they wait above the composer
                         // and join the transcript once delivered.
-                        let durable = self.sink.host_input_receipts(&[]).is_some();
+                        let durable = self.sink.has_host_input_receipts();
                         let queued = (durable || self.follow_up_would_queue(&submission.thread_id))
                             .then(|| submission.thread_id.clone());
                         if let Some(thread) = self
@@ -438,7 +439,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
-        self.persist_composer_draft();
+        self.flush_composer_draft();
     }
 
     /// Inlines skills written as `@name`, read fresh so edits apply on the next send.

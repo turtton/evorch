@@ -12,7 +12,8 @@ use crate::model::transcript::TranscriptEntry;
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Process validated runtime events even when eframe skips painting a hidden window.
     pub fn logic(&mut self, ctx: &egui::Context) {
-        self.drain_pump();
+        self.drain_pump(ctx, true);
+        self.persist_composer_draft();
         self.dispatch_system_notifications(ctx);
         // Folded events add and bind threads while the window is hidden, too.
         self.sync_thread_mirror(Instant::now());
@@ -36,7 +37,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
         }
-        let (event_count, drain_time, fold_time) = self.drain_pump();
+        let (event_count, drain_time, fold_time) = self.drain_pump(&ctx, false);
         self.dispatch_system_notifications(&ctx);
         self.poll_external();
         self.poll_auto_titles();
@@ -195,7 +196,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    fn drain_pump(&mut self) -> (usize, Duration, Duration) {
+    fn drain_pump(&mut self, ctx: &egui::Context, logic: bool) -> (usize, Duration, Duration) {
+        let frame = ctx.cumulative_frame_nr();
+        // eframe calls logic and ui in the same frame; egui can also rerun a
+        // discarded UI pass. Neither may read the receipts a second time.
+        let same_frame = self.last_pump_frame == Some(frame);
+        let hidden_tick = logic && self.last_pump_logic_only;
+        if !logic {
+            self.last_pump_logic_only = false;
+        }
+        if same_frame && !hidden_tick {
+            return (0, Duration::ZERO, Duration::ZERO);
+        }
+        // run_logic does not increment egui's frame counter while hidden. Each
+        // consecutive logic-only tick is still a new opportunity for repair.
+        self.last_pump_logic_only = logic;
+        self.last_pump_frame = Some(frame);
         let drain_started = Instant::now();
         let events = self
             .pump
@@ -211,21 +227,38 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Synchronous fold for fixtures/tests/headless capture; production uses
     /// `EventPump`.
     pub fn apply_events(&mut self, events: impl IntoIterator<Item = Event>) {
-        for event in events {
-            self.fold_event(&event);
+        let events: Vec<_> = events.into_iter().collect();
+        for event in &events {
+            self.note_receipt_event(event);
         }
+        // A queued input may be consumed without a pump (headless fixtures or
+        // lagged notifications). Poll only unsettled work at this frame boundary.
+        if self
+            .follow_up_queues
+            .values()
+            .any(|rows| rows.iter().any(|row| !row.undelivered))
+        {
+            self.receipt_reconciliation.dirty = true;
+        }
+        let mut receipts = self.read_receipts_if_due(Instant::now());
+        // Snapshots precede provider events in storage. Project delivered prompts
+        // before folding their replies, even if the receipt notification was lost.
+        let mut changed = receipts
+            .as_ref()
+            .is_some_and(|receipts| self.apply_receipts(receipts, false));
+        for event in events {
+            self.fold_event(&event, receipts.as_deref_mut().unwrap_or_default());
+        }
+        // A terminal phase in this batch may settle an Accepted receipt. Reuse
+        // the same lookup; admission-pending live runs must stay Queued.
+        if let Some(receipts) = receipts {
+            changed |= self.apply_receipts(&receipts, false);
+        }
+        self.finish_receipt_reconciliation(changed);
         self.refresh_active_thread_workspace();
     }
 
-    fn fold_event(&mut self, event: &Event) {
-        // Snapshots commit before notification/provider events; project a newly
-        // delivered prompt before the response it caused, even after bus lag.
-        if matches!(
-            event.kind,
-            event_bus::EventKind::Lifecycle(_) | event_bus::EventKind::Provider(_)
-        ) {
-            self.reconcile_receipts();
-        }
+    fn fold_event(&mut self, event: &Event, receipts: &mut [storage::HostInputReceipt]) {
         self.fold_user_question(event);
         self.invalidate_restore_diagnostics(event);
         if self.apply_conversation_event(event) {
@@ -234,13 +267,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.bind_goal_event(event);
         self.fold_agent_browser_event(event);
         self.sink.observe_lifecycle(event);
-        self.apply_runtime_event(event);
-        if matches!(
-            event.kind,
-            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { .. })
-        ) {
-            self.reconcile_receipts();
-        }
+        self.apply_runtime_event(event, receipts);
         self.pending_approvals.apply_event(
             event,
             |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
@@ -291,7 +318,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.fold_system_notification(event);
     }
 
-    fn apply_runtime_event(&mut self, event: &Event) {
+    fn apply_runtime_event(&mut self, event: &Event, receipts: &mut [storage::HostInputReceipt]) {
         match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 source_run_id,
@@ -340,7 +367,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .as_ref()
                 .is_some_and(|host| host.owner_id() == owner_id) =>
             {
-                self.reconcile_claimed_thread(thread_id);
+                self.settle_claimed_receipts(thread_id, receipts);
             }
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
                 self.wake_conversation_root(run_id);

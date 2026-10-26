@@ -346,21 +346,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
-    pub(super) fn persist_composer_draft(&mut self) {
-        let Some(thread) = self
-            .sidebar
-            .threads
-            .iter_mut()
-            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
-        else {
-            return;
-        };
-        if thread.draft_input != self.composer.input {
-            thread.draft_input.clone_from(&self.composer.input);
-            self.save_sidebar();
-        }
-    }
-
     pub fn toggle_pin(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
         let pinned = self
             .sidebar
@@ -554,7 +539,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(path) = self.sidebar_path.as_ref() else {
             return;
         };
-        if let Err(error) = self.write_history_sidebar(path) {
+        if let Err(error) = self.persist_history() {
             tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
         }
     }

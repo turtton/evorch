@@ -1200,7 +1200,7 @@ impl eframe::App for GuiApp {
 
 impl Drop for GuiApp {
     fn drop(&mut self) {
-        self.workbench.0.save_sidebar();
+        self.workbench.0.flush_composer_draft();
     }
 }
 
