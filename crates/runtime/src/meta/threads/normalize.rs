@@ -258,6 +258,7 @@ mod tests {
             terminal_phase: "Done".into(),
             restorable: true,
             updated_at_ns: 0,
+            host_inputs_json: "[]".into(),
         }
     }
     fn message(role: Role, content: Vec<ContentBlock>) -> Message {

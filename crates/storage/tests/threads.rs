@@ -39,6 +39,7 @@ fn context(run_id: &str, parent: Option<&str>, config: &str, messages: &str) -> 
         terminal_phase: "Done".into(),
         restorable: false,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

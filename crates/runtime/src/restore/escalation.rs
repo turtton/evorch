@@ -99,6 +99,7 @@ pub(crate) fn persist_escalation_seed(
             terminal_phase: "Error".into(),
             restorable: true,
             updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
+            host_inputs_json: "[]".into(),
         })?;
     Ok(())
 }

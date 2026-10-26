@@ -218,6 +218,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_event(&mut self, event: &Event) {
+        // Snapshots commit before notification/provider events; project a newly
+        // delivered prompt before the response it caused, even after bus lag.
+        if matches!(
+            event.kind,
+            event_bus::EventKind::Lifecycle(_) | event_bus::EventKind::Provider(_)
+        ) {
+            self.reconcile_receipts();
+        }
         self.fold_user_question(event);
         self.invalidate_restore_diagnostics(event);
         if self.apply_conversation_event(event) {
@@ -227,6 +235,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.fold_agent_browser_event(event);
         self.sink.observe_lifecycle(event);
         self.apply_runtime_event(event);
+        if matches!(
+            event.kind,
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { .. })
+        ) {
+            self.reconcile_receipts();
+        }
         self.pending_approvals.apply_event(
             event,
             |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),

@@ -192,6 +192,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 text: text.into(),
                                 ..submission.clone()
                             });
+                        let previous_history = self.history.clone();
+                        let previous_drafts = self.composer_drafts.clone();
+                        let previous_sidebar = self.sidebar.clone();
+                        let resent_from = self
+                            .composer_drafts
+                            .iter()
+                            .find(|draft| draft.thread_id == submission.thread_id)
+                            .map(|draft| draft.origin.clone());
+                        let origins: Vec<_> = self
+                            .composer_drafts
+                            .iter()
+                            .filter(|draft| draft.thread_id == submission.thread_id)
+                            .map(|draft| draft.origin.clone())
+                            .collect();
+                        for message in &mut self.history {
+                            if origins.contains(&message.id) {
+                                message.resolution = Some(super::history::Resolution::Resent {
+                                    new_id: submission.submission_id.clone(),
+                                });
+                            }
+                        }
+                        self.composer_drafts
+                            .retain(|draft| draft.thread_id != submission.thread_id);
                         let sent_at = std::time::SystemTime::now();
                         if let Some(thread) = self
                             .sidebar
@@ -211,15 +234,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             text: text.into(),
                             prompt: prompt.clone(),
                             at: sent_at,
+                            image_count: submission.images.len(),
+                            resent_from,
                             status: DeliveryStatus::Queued,
                             resolution: None,
                         });
                         // A busy run reads follow-ups later; they wait above the composer
                         // and join the transcript once delivered.
-                        let queued = self
-                            .follow_up_would_queue(&submission.thread_id)
+                        let durable = self.sink.host_input_receipts(&[]).is_some();
+                        let queued = (durable || self.follow_up_would_queue(&submission.thread_id))
                             .then(|| submission.thread_id.clone());
-                        self.save_sidebar();
+                        if let Some(thread) = self
+                            .sidebar
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.id.to_string() == submission.thread_id)
+                        {
+                            thread.draft_input.clear();
+                        }
+                        if let Err(error) = self.persist_history() {
+                            self.history = previous_history;
+                            self.composer_drafts = previous_drafts;
+                            self.sidebar = previous_sidebar;
+                            self.push_notice(format!("送信前の保存に失敗しました: {error}"));
+                            return;
+                        }
                         let submission_id = submission.submission_id.clone();
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));

@@ -178,6 +178,9 @@ pub mod diagnostic_codes {
     pub const CONTEXT_CHECKPOINT_SAVED: &str = "ContextCheckpointSaved";
     /// A restoration checkpoint could not be persisted.
     pub const CONTEXT_SNAPSHOT_FAILED: &str = "ContextSnapshotFailed";
+    /// Host input delivery receipts could not be settled; they stay accepted
+    /// and the host shows them as of unknown delivery.
+    pub const HOST_INPUT_RECEIPT_FAILED: &str = "HostInputReceiptFailed";
     /// Direct -> orchestrator ownership or question transfer failed.
     pub const ESCALATION_HANDOFF_FAILED: &str = "EscalationHandoffFailed";
     /// The orchestrator run for an escalation handoff was not admitted.
@@ -225,6 +228,7 @@ pub mod diagnostic_codes {
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
         CONTEXT_SNAPSHOT_FAILED,
+        HOST_INPUT_RECEIPT_FAILED,
         ESCALATION_HANDOFF_FAILED,
         ESCALATION_ADMISSION_FAILED,
         CRASH_RECOVERED,
@@ -560,6 +564,28 @@ pub enum LifecycleEvent {
         run_id: String,
         /// Automatic continuations allowed between user inputs.
         limit: u32,
+    },
+    /// A committed run context snapshot now contains this host submission.
+    /// Notification only: the stored receipt is authoritative, and the text
+    /// is never part of the event.
+    HostInputDelivered {
+        run_id: String,
+        /// The GUI submission ID.
+        prompt_id: String,
+    },
+    /// The run ended before reading this accepted host submission.
+    HostInputDropped {
+        run_id: String,
+        prompt_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The runtime cannot tell whether the agent received this submission.
+    HostInputUnknown {
+        run_id: String,
+        prompt_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -1348,6 +1374,32 @@ mod tests {
     #[test]
     fn serde_round_trip_preserves_every_variant() {
         let cases: Vec<(&'static str, EventKind)> = vec![
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputDelivered {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-1".into(),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputDropped {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-2".into(),
+                    reason: Some("run_ended".into()),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::HostInputUnknown {
+                    run_id: "run-1".into(),
+                    prompt_id: "prompt-3".into(),
+                    reason: None,
+                }
+                .into(),
+            ),
             (
                 "Lifecycle",
                 LifecycleEvent::Started {

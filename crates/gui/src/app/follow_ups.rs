@@ -1,14 +1,12 @@
 //! Follow-ups queued while a run is busy stay above the composer until the
 //! runtime reports they entered the agent's context.
 //!
-//! The runtime only reports how many host messages are still pending, and it
-//! consumes them in submission order, so the oldest waiting entries are the
-//! delivered ones whenever the count drops.
+//! Durable receipts are authoritative. The count fallback is only for
+//! lightweight fixture sinks that have no receipt store.
 use super::WorkbenchState;
 use super::history::Resolution;
 use crate::model::composer::QueuedFollowUp;
 use crate::model::tasks::AgentRunSource;
-use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Whether a chat submitted now would wait in a live run's inbox.
@@ -40,6 +38,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Move delivered follow-ups into their transcripts, mark ones a finished
     /// run dropped, and mirror the active thread's queue into the composer.
     pub(super) fn reconcile_follow_ups(&mut self) {
+        self.refresh_draft_banner();
+        if self.reconcile_receipts() {
+            self.mirror_active_queue();
+            return;
+        }
         let threads: Vec<String> = self.follow_up_queues.keys().cloned().collect();
         let mut delivered_ids = Vec::new();
         for thread in threads {
@@ -55,13 +58,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             for mut item in std::mem::take(queue) {
                 if delivered > 0 && !item.undelivered {
                     delivered -= 1;
+                    self.transcripts
+                        .push_host_input(&thread, &item.submission_id, item.prompt);
                     delivered_ids.push(item.submission_id);
-                    self.transcripts.push_to_thread(
-                        &thread,
-                        TranscriptEntry::UserMessage { text: item.prompt },
-                    );
                 } else {
                     item.undelivered |= dropped;
+                    if dropped
+                        && let Some(message) = self.history.iter_mut().find(|message| {
+                            message.id == item.submission_id
+                                && message.status == super::history::DeliveryStatus::Queued
+                        })
+                    {
+                        message.status = super::history::DeliveryStatus::Dropped;
+                    }
                     kept.push(item);
                 }
             }
@@ -89,39 +98,45 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Put an undelivered follow-up back into the composer to edit and resend.
     pub(super) fn restore_queued_follow_up(&mut self, index: usize) {
-        let Some(item) = self.take_undelivered(index) else {
+        let Some(id) = self
+            .composer
+            .queued
+            .get(index)
+            .filter(|item| item.undelivered)
+            .map(|item| item.submission_id.clone())
+        else {
             return;
         };
-        self.resolve_undelivered(&item.submission_id, Resolution::Restored);
-        if self.composer.input.trim().is_empty() {
-            self.composer.input = item.text;
-        } else {
-            self.composer.input = format!("{}\n\n{}", self.composer.input, item.text);
-        }
-        self.composer.pending_cursor = Some(self.composer.input.chars().count());
-        self.composer.focus_requested = true;
-        self.persist_composer_draft();
+        self.move_to_composer(&id);
     }
 
     pub(super) fn dismiss_queued_follow_up(&mut self, index: usize) {
-        if let Some(item) = self.take_undelivered(index) {
-            self.resolve_undelivered(&item.submission_id, Resolution::Dismissed);
+        let Some(id) = self
+            .composer
+            .queued
+            .get(index)
+            .filter(|item| item.undelivered)
+            .map(|item| item.submission_id.clone())
+        else {
+            return;
+        };
+        let Some(message) = self
+            .history
+            .iter_mut()
+            .find(|message| message.id == id && message.awaits_user())
+        else {
+            return;
+        };
+        message.resolution = Some(Resolution::Dismissed);
+        if let Err(error) = self.persist_history() {
+            self.history
+                .iter_mut()
+                .find(|message| message.id == id)
+                .unwrap()
+                .resolution = None;
+            self.push_notice(format!("状態を保存できませんでした: {error}"));
+            return;
         }
-    }
-
-    /// Only entries that never reached the agent leave on request; waiting
-    /// ones belong to the run.
-    fn take_undelivered(&mut self, index: usize) -> Option<QueuedFollowUp> {
-        let thread = self.sidebar.active_thread.as_ref()?.to_string();
-        let queue = self.follow_up_queues.get_mut(&thread)?;
-        if !queue.get(index)?.undelivered {
-            return None;
-        }
-        let item = queue.remove(index);
-        if queue.is_empty() {
-            self.follow_up_queues.remove(&thread);
-        }
-        self.mirror_active_queue();
-        Some(item)
+        self.rebuild_delivery_rows();
     }
 }

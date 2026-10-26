@@ -33,6 +33,9 @@ pub(crate) struct RestoredState {
     /// Boxed so the restore continuations stay small.
     pub(crate) allowed_directories: Box<crate::allowed_directories::ToldDirectories>,
     pub(crate) allowed_instructions: Box<crate::allowed_instructions::AllowedInstructions>,
+    /// Prompt IDs of host inputs the saved messages hold. Unreadable lists
+    /// restore as empty: they only drive delivery receipts.
+    pub(crate) host_inputs: Vec<String>,
 }
 
 impl RestoredState {
@@ -98,6 +101,7 @@ impl RestoredState {
             turn_completed,
             allowed_directories: Box::new(descriptor.allowed_directories),
             allowed_instructions: Box::new(descriptor.allowed_instructions),
+            host_inputs: serde_json::from_str(&record.host_inputs_json).unwrap_or_default(),
         })
     }
 }
@@ -276,7 +280,7 @@ pub(crate) fn persist_prepared_context(
     context: &crate::AgentContext,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&context.messages);
-    write_snapshot_with_context(state, context, "Checkpoint", end)
+    write_snapshot_with_context(state, context, "Checkpoint", end, &[])
 }
 
 /// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
@@ -294,8 +298,11 @@ pub(crate) fn persist_tool_intent(
     write_snapshot(state, "Checkpoint", end)
 }
 
+/// `dropped` are host inputs the run never read. The snapshot delivers the
+/// appended inputs it holds; the rest become unknown in the same transaction.
 pub(crate) fn persist_terminal_snapshot(
     state: &LoopState,
+    dropped: &[String],
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let phase = match state.run_state.phase() {
         AgentRunPhase::Done => "Done",
@@ -313,7 +320,8 @@ pub(crate) fn persist_terminal_snapshot(
             crate::ownership::SnapshotNoneReason::Skipped,
         ));
     }
-    write_snapshot(state, phase, end)
+    let settled = state.terminal_host_inputs(dropped, Some(end), "outside_terminal_snapshot");
+    write_snapshot_with_context(state, &state.context, phase, end, &settled)
 }
 
 /// Non-system message count. Host follow-ups may refresh system messages,
@@ -367,14 +375,17 @@ fn write_snapshot(
     terminal_phase: &str,
     end: usize,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
-    write_snapshot_with_context(state, &state.context, terminal_phase, end)
+    write_snapshot_with_context(state, &state.context, terminal_phase, end, &[])
 }
 
+/// Every snapshot delivers the tracked host inputs it holds for the first time;
+/// `settled` adds the final receipt changes of a terminal snapshot.
 fn write_snapshot_with_context(
     state: &LoopState,
     context: &crate::AgentContext,
     terminal_phase: &str,
     end: usize,
+    settled: &[storage::HostInputTransition],
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     context
         .responses_replay
@@ -532,6 +543,7 @@ fn write_snapshot_with_context(
         allowed_directories: state.told_directories.clone(),
         allowed_instructions: state.allowed_instructions.clone(),
     };
+    let host_inputs = state.host_inputs().snapshot(end);
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
         role: descriptor.role.clone(),
@@ -552,8 +564,29 @@ fn write_snapshot_with_context(
         terminal_phase: terminal_phase.to_string(),
         restorable: descriptor.restorable,
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
+        host_inputs_json: serde_json::to_string(&host_inputs.ids)?,
     };
-    let receipt = store.handle.upsert_run_context_receipt(&record)?;
+    let write = storage::HostInputWrite {
+        transitions: host_inputs
+            .delivered
+            .iter()
+            .map(|id| {
+                storage::HostInputTransition::new(
+                    id.clone(),
+                    storage::HostInputStatus::Delivered,
+                    None,
+                )
+            })
+            .chain(settled.iter().cloned())
+            .collect(),
+        ..Default::default()
+    };
+    let (receipt, applied) = store
+        .handle
+        .upsert_run_context_with_receipts(&record, &write)?;
+    // Committed: later snapshots keep these IDs without delivering them again.
+    state.host_inputs().committed(&host_inputs.delivered);
+    runtime.emit_host_input_transitions(state.caller_run_id(), &applied);
     Ok(crate::ownership::SnapshotReference::RunContext { receipt })
 }
 

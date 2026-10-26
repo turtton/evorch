@@ -35,19 +35,39 @@ struct WriterState {
 }
 
 /// All review mutations share the same suspension gate and rollback boundary.
-fn review_transaction(
+fn review_transaction<T>(
     state: &WriterState,
-    operation: impl FnOnce(&Connection) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
+    operation: impl FnOnce(&Connection) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
     if state.writes_suspended {
         return Err(StorageError::Serialization(
             "review writes suspended by storage limit".into(),
         ));
     }
     let transaction = state.conn.unchecked_transaction()?;
-    operation(&transaction)?;
+    let value = operation(&transaction)?;
     transaction.commit()?;
-    Ok(())
+    Ok(value)
+}
+
+/// The snapshot and its receipt changes commit together or not at all.
+fn upsert_run_context_with_receipts(
+    state: &WriterState,
+    record: &crate::RunContextRecord,
+    write: &crate::HostInputWrite,
+) -> Result<(crate::RunContextReceipt, Vec<crate::HostInputTransition>), StorageError> {
+    if state.writes_suspended {
+        return Err(StorageError::Serialization(
+            "run context writes suspended by storage limit".into(),
+        ));
+    }
+    let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+    let transaction = state.conn.unchecked_transaction()?;
+    let receipt = crate::repo::run_context::upsert(&transaction, record)?;
+    let applied =
+        crate::repo::host_input_receipt::apply(&transaction, Some(record), write, now_ns)?;
+    transaction.commit()?;
+    Ok((receipt, applied))
 }
 
 pub(super) fn run_writer(
@@ -273,14 +293,78 @@ pub(super) fn run_writer(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::UpsertRunContextWithEvidence(record, rows, edges, reference_id, reply)) => {
+            Ok(Command::UpsertRunContextWithEvidence(
+                record,
+                rows,
+                edges,
+                reference_id,
+                host_inputs,
+                reply,
+            )) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::assistant_reference::consume(
+                                conn,
+                                reference_id.as_deref(),
+                            )?;
+                            crate::repo::run_context::upsert(conn, &record)?;
+                            crate::repo::review_evidence::insert(conn, &rows)?;
+                            crate::repo::review_lineage::insert(conn, &edges)?;
+                            crate::repo::host_input_receipt::apply(
+                                conn,
+                                Some(&record),
+                                &host_inputs,
+                                now_ns,
+                            )
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpsertRunContextWithReceipts(record, host_inputs, reply)) => {
+                let _ = reply.send(upsert_run_context_with_receipts(
+                    &state,
+                    &record,
+                    &host_inputs,
+                ));
+            }
+            Ok(Command::AppendHostInputAccepted(rows, edges, reference_id, receipt, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
-                    crate::repo::run_context::upsert(conn, &record)?;
+                    crate::repo::review_lineage::insert(conn, &edges)?;
                     crate::repo::review_evidence::insert(conn, &rows)?;
-                    crate::repo::review_lineage::insert(conn, &edges)
+                    crate::repo::host_input_receipt::insert(conn, &receipt)
                 });
                 let _ = reply.send(result);
+            }
+            Ok(Command::TransitionHostInputs(transitions, reply)) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::host_input_receipt::transition(conn, &transitions, now_ns)
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpdateHostInputReceipts(run_id, reason, reply)) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::host_input_receipt::mark_unknown(
+                                conn, &run_id, &reason, now_ns,
+                            )
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::HostInputReceipts(ids, reply)) => {
+                let _ = reply.send(crate::repo::host_input_receipt::for_ids(&state.conn, &ids));
+            }
+            Ok(Command::HostInputReceiptsForRun(run_id, reply)) => {
+                let _ = reply.send(crate::repo::host_input_receipt::for_run(
+                    &state.conn,
+                    &run_id,
+                ));
             }
             Ok(Command::CompareAndSwapRunContextRestoreState(
                 run_id,

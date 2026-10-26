@@ -38,6 +38,7 @@ fn latest_named_history_includes_stopped_but_not_running_snapshots() {
         terminal_phase: "Done".into(),
         restorable: true,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     };
     handle.upsert_run_context(&record).unwrap();
     record.run_id = "run-2".into();

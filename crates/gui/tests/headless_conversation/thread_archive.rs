@@ -505,6 +505,7 @@ fn persisted_archive_run(
                 terminal_phase: snapshot.into(),
                 restorable,
                 updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
             })
             .unwrap();
     }

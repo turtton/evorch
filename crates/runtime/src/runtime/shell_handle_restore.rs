@@ -109,6 +109,7 @@ mod tests {
             turn_completed: true,
             allowed_directories: Default::default(),
             allowed_instructions: Default::default(),
+            host_inputs: Vec::new(),
         };
         assert_eq!(restored_floor(&restored).unwrap(), Some(1000));
     }

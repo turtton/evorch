@@ -66,6 +66,9 @@ impl SpanMapper {
             | LifecycleEvent::AgentRunRestored { .. }
             | LifecycleEvent::RootWakeRequested { .. }
             | LifecycleEvent::AutoContinuationPaused { .. }
+            | LifecycleEvent::HostInputDelivered { .. }
+            | LifecycleEvent::HostInputDropped { .. }
+            | LifecycleEvent::HostInputUnknown { .. }
             | LifecycleEvent::TaskPromptPublished { .. }
             | LifecycleEvent::TurnCompleted { .. }
             | LifecycleEvent::BackgroundTaskCompleted { .. }

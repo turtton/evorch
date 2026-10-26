@@ -18,6 +18,13 @@ impl LoopState {
                 false
             }
         };
+        // No host input enters this incarnation from here: wait out a send in
+        // progress, then take what never reached the context.
+        crate::runtime::user_inbox::seal_off_thread(std::sync::Arc::clone(
+            &self.channels.user_inbox,
+        ))
+        .await;
+        let dropped = self.drain_undelivered_inbox();
         let authority = if let Some(permit) = self.task.config.ownership.clone() {
             // Teardown must drain even after Stop/Cancel. Contention is waited
             // out (it never revokes authority); a real fence fails closed.
@@ -40,7 +47,7 @@ impl LoopState {
         // ADR 0027 §5: drain -> persist uncertainty/terminal history -> release
         // handles -> publish terminal. Ownership references commit after history.
         let (snapshot, saved) = if authority {
-            match crate::restore::persist_terminal_snapshot(self) {
+            match crate::restore::persist_terminal_snapshot(self, &dropped) {
                 Ok(snapshot) => {
                     let saved = matches!(
                         snapshot,
@@ -48,11 +55,16 @@ impl LoopState {
                     );
                     if saved {
                         self.snapshot_saved_diagnostic();
+                    } else {
+                        self.settle_unsaved_host_inputs(&dropped, "no_terminal_snapshot");
                     }
                     (snapshot, saved)
                 }
                 Err(error) => {
                     self.snapshot_diagnostic(&error);
+                    // Nothing of the failed transaction was notified; settle
+                    // separately, or leave the receipts for reconciliation.
+                    self.settle_unsaved_host_inputs(&dropped, "terminal_snapshot_failed");
                     if uncertain
                         || matches!(error, crate::restore::SnapshotError::AssistantReference(_))
                     {
@@ -69,6 +81,7 @@ impl LoopState {
                 }
             }
         } else {
+            self.settle_unsaved_host_inputs(&dropped, "ownership_not_held");
             (
                 crate::ownership::SnapshotReference::none(
                     crate::ownership::SnapshotNoneReason::Skipped,
@@ -114,7 +127,7 @@ impl LoopState {
             self.finalization_error(error.to_string());
             // The initial terminal phase was provisional. No reference committed;
             // best-effort correction preserves Error for recovery (Q3).
-            if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
+            if let Err(error) = crate::restore::persist_terminal_snapshot(self, &dropped) {
                 self.snapshot_diagnostic(&error);
             }
         }
@@ -151,6 +164,16 @@ impl LoopState {
             crate::escalation::handoff::complete(&shared, self, memo).await;
         }
         self.publish_terminal();
+    }
+
+    /// Settle host inputs no terminal snapshot records: `dropped` were never
+    /// read, and unrecorded appends may have been. A failure leaves them
+    /// accepted, which the host shows as of unknown delivery.
+    fn settle_unsaved_host_inputs(&self, dropped: &[String], reason: &str) {
+        let transitions = self.terminal_host_inputs(dropped, None, reason);
+        if let Some(runtime) = self.runtime() {
+            runtime.settle_host_inputs(self.task.run_id, &transitions);
+        }
     }
 
     fn finalization_error(&mut self, reason: String) {

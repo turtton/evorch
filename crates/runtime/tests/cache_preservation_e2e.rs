@@ -2237,6 +2237,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
                 media_type: "image/png".into(),
                 data: "aW1hZ2U=".into(),
             }],
+            None,
         )
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
@@ -2346,6 +2347,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     media_type: "image/png".into(),
                     data: "aW1hZ2U=".into(),
                 }],
+                None,
             )
             .unwrap();
         review_storage.attach(&harness.runtime);
@@ -4411,3 +4413,6 @@ async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
     );
     assert_append_only(CacheProtocol::OpenAi, &requests[2], &requests[3]).unwrap();
 }
+
+#[path = "cache_preservation/host_receipts.rs"]
+mod host_receipts;

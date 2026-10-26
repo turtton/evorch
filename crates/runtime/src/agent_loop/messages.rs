@@ -43,17 +43,8 @@ impl LoopState {
         });
         let received = !messages.is_empty();
         let count = messages.iter().filter(|message| message.2).count();
-        for (text, images, trusted_user, prompt_id) in messages {
-            self.accept_input_identity(trusted_user, prompt_id);
-            self.context.push_user(&text);
-            if let Some(message) = self.context.messages.last_mut() {
-                message.content.extend(images.into_iter().map(|image| {
-                    providers::ContentBlock::Image {
-                        media_type: image.media_type,
-                        data: image.data,
-                    }
-                }));
-            }
+        for message in messages {
+            self.take_user_input(message);
         }
         self.channels.user_inbox.consumed(count);
         if received {

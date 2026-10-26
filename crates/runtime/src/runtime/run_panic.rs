@@ -31,6 +31,17 @@ impl AgentRuntime {
             Ok(()) => "stopped".to_string(),
             Err(error) => format!("cleanup failed: {error}"),
         };
+        // Close host input before Error is public; the loop's state is gone,
+        // so anything it accepted may or may not have reached the model.
+        let inbox = lock_runs(&self.shared.runs)
+            .get(&run_id)
+            .map(|entry| Arc::clone(&entry.user_inbox));
+        if let Some(inbox) = inbox {
+            user_inbox::seal_off_thread(inbox).await;
+        }
+        if let Err(error) = self.mark_unreachable_host_inputs(&id, "run_panicked") {
+            self.host_input_diagnostic(run_id, &error.to_string());
+        }
         let mut detail = panic.message.clone();
         if let Some(location) = &panic.location {
             detail.push_str(&format!("\n{DIAGNOSTIC_SITE_PREFIX}{location}"));
