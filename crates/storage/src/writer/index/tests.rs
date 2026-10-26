@@ -2218,3 +2218,223 @@ fn wal_retry_rechecks_frozen_revision_generation_and_lease_before_commit() {
         assert_eq!(fx.row("run-a").blocks, 0);
     }
 }
+
+#[test]
+fn wal_retry_rejects_ready_commit_when_only_time_crosses_lease_expiry() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    };
+
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "expiry fence searchable phrase", 1));
+    let submission = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submission.lease else {
+        panic!("lease")
+    };
+    for _ in 0..10 {
+        if fx.rt.ready.is_some() {
+            break;
+        }
+        assert_eq!(
+            fx.control(2 * S).step(&lease, 2 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+    }
+    assert!(fx.rt.ready.is_some());
+    wal_high_water(&fx);
+    fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
+    let clock = Arc::new(AtomicI64::new(3 * S));
+    fx.rt.admission_clock = Some(clock.clone());
+    fx.conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if let AuthAction::Pragma {
+                pragma_name: "wal_checkpoint",
+                ..
+            } = ctx.action
+            {
+                // Neither owner, epoch nor expiry changes: only current time does.
+                clock.store(lease.expires_at_ns, Ordering::SeqCst);
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    let before = fx
+        .control(3 * S)
+        .request_status(&submission.request_id, 3 * S)
+        .unwrap();
+    let outcome = fx.control(3 * S).step(&lease, 3 * S).unwrap();
+    assert_eq!(outcome, IndexStepResult::LeaseLost);
+    assert_eq!(super::lease::current(fx.conn()).unwrap(), Some(lease));
+    assert_eq!(fx.rt.counters.commits, 0);
+    assert_eq!(fx.row("run-a").state, "pending");
+    assert_eq!(fx.row("run-a").blocks, 0);
+    assert_eq!(fx.row("run-a").charged, 0);
+    assert_eq!(fx.row("run-a").indexed_at_ns, None);
+    let fts_rows: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM conversation_fts WHERE conversation_fts MATCH 'expiry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_rows, 0);
+    assert_eq!(
+        fx.control(3 * S)
+            .request_status(&submission.request_id, 3 * S)
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn wal_retry_refreshes_commit_and_request_completion_timestamps() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    };
+
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "unexpired retry", 1));
+    let submission = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submission.lease else {
+        panic!("lease")
+    };
+    for _ in 0..10 {
+        if fx.rt.ready.is_some() {
+            break;
+        }
+        assert_eq!(
+            fx.control(2 * S).step(&lease, 2 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+    }
+    assert!(fx.rt.ready.is_some());
+    wal_high_water(&fx);
+    fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
+    let clock = Arc::new(AtomicI64::new(3 * S));
+    fx.rt.admission_clock = Some(clock.clone());
+    fx.conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if let AuthAction::Pragma {
+                pragma_name: "wal_checkpoint",
+                ..
+            } = ctx.action
+            {
+                clock.store(4 * S, Ordering::SeqCst);
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    assert_eq!(
+        fx.control(3 * S).step(&lease, 3 * S).unwrap(),
+        IndexStepResult::Progress
+    );
+    assert_eq!(fx.row("run-a").indexed_at_ns, Some(4 * S));
+    let completed_at: i64 = fx
+        .conn()
+        .query_row(
+            "SELECT finished_at_ns FROM thread_index_requests WHERE request_id=?1",
+            [&submission.request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(completed_at, 4 * S);
+    assert!(matches!(terminal(&mut fx, &submission.request_id, 4*S),
+        ReindexResult::Completed { summary, .. } if summary.succeeded == 1));
+}
+
+#[test]
+fn wal_retry_expiration_stops_merge_adjustment_and_self_eviction() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    };
+
+    for operation in ["merge", "adjustment", "self_eviction", "budget_eviction"] {
+        let mut fx = Fixture::new(512 * MIB);
+        if operation == "budget_eviction" {
+            fx.save(&verified("run-old", "older index", 0));
+            let lease = fx.lease(&gui(), S);
+            assert_eq!(fx.drive(&lease, 2 * S), idle());
+        }
+        let oversized = "x".repeat(MEASURED_POLICY.step_max_text_bytes as usize + 1);
+        let body = if operation == "self_eviction" {
+            &oversized
+        } else {
+            "bounded source"
+        };
+        fx.save(&verified("run-a", body, 1));
+        let lease = fx.lease(&gui(), S);
+        if operation == "adjustment" {
+            assert_eq!(fx.drive(&lease, 2 * S), idle());
+            fx.control(2 * S).apply_index_settings(enabled(0)).unwrap();
+        } else if matches!(operation, "self_eviction" | "budget_eviction") {
+            for _ in 0..10 {
+                if fx.rt.ready.is_some() {
+                    break;
+                }
+                assert_eq!(
+                    fx.control(2 * S).step(&lease, 2 * S).unwrap(),
+                    IndexStepResult::Progress
+                );
+            }
+            assert!(fx.rt.ready.is_some());
+            if operation == "budget_eviction" {
+                let max_bytes = fx.charge("run-a");
+                assert!(fx.row("run-old").charged <= max_bytes);
+                fx.control(2 * S)
+                    .apply_index_settings(enabled(max_bytes))
+                    .unwrap();
+            }
+        }
+        let before = fx.row("run-a");
+        let counters = fx.rt.counters;
+        wal_high_water(&fx);
+        fx.config.hard_limits.max_wal_bytes =
+            fx.sizes().wal + if operation == "merge" { 8_437_792 } else { 1 };
+        let clock = Arc::new(AtomicI64::new(3 * S));
+        fx.rt.admission_clock = Some(clock.clone());
+        fx.conn()
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if let AuthAction::Pragma {
+                    pragma_name: "wal_checkpoint",
+                    ..
+                } = ctx.action
+                {
+                    clock.store(lease.expires_at_ns + 1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        assert_eq!(
+            fx.control(3 * S).step(&lease, 3 * S).unwrap(),
+            IndexStepResult::LeaseLost,
+            "{operation}"
+        );
+        assert_eq!(super::lease::current(fx.conn()).unwrap(), Some(lease));
+        let after = fx.row("run-a");
+        assert_eq!(
+            (after.state, after.blocks, after.charged),
+            (before.state, before.blocks, before.charged),
+            "{operation}"
+        );
+        assert_eq!(fx.rt.counters.commits, counters.commits);
+        assert_eq!(fx.rt.counters.merges, counters.merges);
+        assert_eq!(fx.rt.counters.evictions, counters.evictions);
+        if operation == "budget_eviction" {
+            assert_eq!(fx.row("run-old").state, "indexed");
+            assert_eq!(fx.row("run-old").blocks, 1);
+        }
+    }
+}
