@@ -1,7 +1,7 @@
 # TaskProgressed maintenance
 
 This change does not run an offline repair at installation or merge. **Do not
-run `--apply` until all evorch GUI/runtime processes have exited.** Use a version
+run either preview or `--apply` until all evorch GUI/runtime processes have exited.** Use a version
 containing this command; do not run older binaries against a store while it is
 under maintenance.
 
@@ -70,21 +70,37 @@ This is why stopping *all* processes remains an operator prerequisite. Symlink
 aliases resolve to the same lease; hard-link aliases and network filesystems
 with unreliable locking are not supported safety guarantees.
 
-The cursor preview never opens the source writable or migrates it. For a
-checkpointed offline store without a WAL it uses immutable read-only SQLite
-access to avoid creating WAL/SHM sidecars; do not use this offline preview while
-an old, non-cooperating process is starting. Use the separate live read-only
-retention preview below for live-store analysis.
+Both previews require the existing maintenance lease and a checkpointed,
+offline store. They never create even a missing lease: if it is absent, start
+current evorch once and exit cleanly first. Canonical paths are used to inspect
+the real DB/WAL/SHM, including through symlinks; metadata errors are errors.
+A nonempty WAL (for example after a crash) is refused **before SQLite opens
+the source**, rather than allowing a read-only SQLite connection to initialize
+or create SHM. Start evorch once and exit cleanly to checkpoint it, or use
+explicit `--apply` while offline (with the normal backup safeguards).
+
+Only after confirming WAL is absent or zero bytes do previews use immutable
+read-only SQLite to avoid all source/sidecar writes. DB/WAL/SHM presence, size
+and mtime are checked before and after reading; any change rejects the result.
+This is an offline contract, not a supported live snapshot: a legacy process
+that ignores the lease can race these checks, and same-size/mtime-preserving
+external modifications cannot be detected. Stop all processes, including older
+versions, before either preview. No writable-SHM or private-copy fallback is
+used.
 
 ## Live: replay-equivalent retention
 
-Maintenance considers at most **one task per tick**, with a fixed upper event-ID
-cursor for the pass. New arrivals beyond that cursor wait for the next pass;
+Maintenance inspects at most **one candidate index entry / task per tick**,
+using an ID-leading partial index and a fixed upper event-ID cursor for the
+pass. Excluded/malformed entries advance the cursor too. A task can be revisited
+by later entries; every visit remains bounded. New arrivals beyond the upper
+cursor are excluded by the index range, not scanned and filtered afterward;
 eligibility and deletion share an immediate writer transaction. Other writers
 cannot append between the check and deletion. Normal bounded incremental vacuum
 and WAL reclamation follow, yielding to the writer command loop between ticks.
 
-Candidate tasks must be `Completed` or `Cancelled` in the tasks projection,
+Candidate tasks must be `Completed` or `Cancelled` in the **bounded replay**
+of the task's events, without relying on a pre-existing `tasks` table row,
 and their latest progress must also be terminal. No progress of any run
 generation may follow an earlier terminal fence. `Stopped`, `Failed` and other
 states are excluded. Failed is not a terminal fence in the production projection
@@ -125,8 +141,8 @@ layer `EVORCH_DIAGNOSTICS__RETAIN_TERMINAL_TASK_PROGRESS=false`):
 retain_terminal_task_progress = false
 ```
 
-Analyze the current store in a consistent read-only snapshot, without applying
-retention, migrations or vacuum:
+Analyze a checkpointed offline store without applying retention, migrations or
+vacuum (the same offline lease/WAL checks above apply):
 
 ```sh
 evorch maintenance preview-task-progress-retention \
@@ -134,8 +150,15 @@ evorch maintenance preview-task-progress-retention \
 ```
 
 The result reports examined/eligible/excluded task counts and deletion bytes.
-A live store may grow after the preview, so it is not a reservation or exact
-prediction of a later maintenance pass.
+The store may grow after it is restarted, so the preview is not a reservation or
+exact prediction of a later maintenance pass.
+
+An earlier implementation's all-excluded result was caused by its dependency
+on the stored `tasks` projection, which ordinary event append does not update;
+it was **not** evidence that exact replay always differs. This rule now derives
+terminal state from bounded event replay. Connecting the application's stored
+projection to ordinary append is a separate, pre-existing issue and is not
+changed here.
 
 The two operations have different roles: retention removes redundant whole
 progress events only when replay is unchanged. It deliberately keeps first

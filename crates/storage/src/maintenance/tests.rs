@@ -37,13 +37,15 @@ fn seed(path: &std::path::Path, events: &[Event]) -> StorageConfig {
             .append_event(Some("session"), event)
             .unwrap();
     }
-    storage.handle().reconcile().unwrap();
     storage.close();
     config
 }
 
 fn snapshot(config: &StorageConfig) -> (crate::entity::TaskRecord, DurableTasksModel) {
     let db = Database::open(config).unwrap();
+    // Snapshot the event-derived state explicitly. Seeding must exercise normal
+    // append only, without accidentally supplying retention a tasks projection.
+    crate::projection::reconcile(&db.conn).unwrap();
     let mut gui = DurableTasksModel::default();
     for stored in db.orchestrator_events_ordered().unwrap() {
         gui.apply_event(&stored.event);
@@ -91,12 +93,19 @@ fn cursor_dry_run_changes_no_files_and_apply_backs_up_is_idempotent_and_preserve
     assert!(applied.vacuum && applied.checkpoint_truncated);
     assert!(applied.database_bytes_after < applied.database_bytes_before);
     assert_eq!(snapshot(&config), before);
+    let (backup_conn, files) = offline::read_only_preview_connection(&backup).unwrap();
     assert_eq!(
-        strip_task_progress_cursor(&backup, &StripOptions::default())
-            .unwrap()
-            .target_rows,
+        backup_conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE json_type(payload,'$.payload.payload.progress.resume_cursor') IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
         3
     );
+    files.verify().unwrap();
+    drop(backup_conn);
     let repeated = strip_task_progress_cursor(
         &path,
         &StripOptions {
@@ -505,4 +514,133 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
             .unwrap(),
         26
     );
+}
+
+fn directory_contents(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+// Exit without destructors to leave WAL/SHM exactly as an abnormal exit does.
+#[test]
+fn wal_fixture_child() {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("EVORCH_TEST_WAL_FIXTURE") else {
+        return;
+    };
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE events SET payload=json_remove(payload,'$.payload.payload.progress.resume_cursor') WHERE kind='Orchestrator';").unwrap();
+    println!("WAL committed");
+    std::io::stdout().flush().unwrap();
+    // Deliberately skip Connection::drop/checkpoint, as on an abnormal exit.
+    std::process::exit(0);
+}
+
+fn wal_fixture(path: &std::path::Path) -> std::process::Child {
+    use std::io::BufRead;
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "maintenance::tests::wal_fixture_child",
+            "--nocapture",
+        ])
+        .env("EVORCH_TEST_WAL_FIXTURE", path)
+        .stdout(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    loop {
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        if line.contains("WAL committed") {
+            break;
+        }
+        line.clear();
+    }
+    child
+}
+
+#[test]
+fn wal_preview_never_changes_source_files_including_after_abnormal_exit() {
+    for keep_shm in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        seed(&path, &[event(Some("Title"), "completed", None)]);
+        let mut child = wal_fixture(&path);
+        assert!(child.wait().unwrap().success());
+        if !keep_shm {
+            fs::remove_file(crate::db::suffixed_path(&path, "-shm")).unwrap();
+        }
+        let before = directory_contents(dir.path());
+        assert!(!before[std::ffi::OsStr::new("events.db-wal")].is_empty());
+        let error = strip_task_progress_cursor(&path, &StripOptions::default()).unwrap_err();
+        assert!(error.to_string().contains("nonempty WAL"));
+        assert!(preview_task_progress_retention(&path).is_err());
+        assert_eq!(directory_contents(dir.path()), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_preview_uses_canonical_wal_and_propagates_sidecar_metadata_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("actual.db");
+    seed(&path, &[event(Some("Title"), "completed", None)]);
+    let mut child = wal_fixture(&path);
+    assert!(child.wait().unwrap().success());
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("alias.db");
+    std::os::unix::fs::symlink(&path, &alias).unwrap();
+    let before = directory_contents(dir.path());
+    assert!(
+        strip_task_progress_cursor(&alias, &StripOptions::default())
+            .unwrap_err()
+            .to_string()
+            .contains("nonempty WAL")
+    );
+    assert_eq!(directory_contents(dir.path()), before);
+    assert_eq!(fs::read_dir(aliases.path()).unwrap().count(), 1);
+    let wal = crate::db::suffixed_path(&path, "-wal");
+    fs::remove_file(&wal).unwrap();
+    // ELOOP is a deterministic metadata error even when tests run as root.
+    std::os::unix::fs::symlink(&wal, &wal).unwrap();
+    assert!(strip_task_progress_cursor(&alias, &StripOptions::default()).is_err());
+    assert!(preview_task_progress_retention(&alias).is_err());
+}
+
+#[test]
+fn preview_requires_a_lease_and_detects_database_or_sidecar_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    seed(&path, &[event(Some("Title"), "completed", None)]);
+    for changed in ["events.db", "events.db-wal", "events.db-shm"] {
+        let (conn, files) = offline::read_only_preview_connection(&path).unwrap();
+        let file = dir.path().join(changed);
+        let original = fs::read(&file).ok();
+        fs::write(&file, b"concurrent modification").unwrap();
+        assert!(files.verify().is_err(), "{changed}");
+        drop(conn);
+        if let Some(original) = original {
+            fs::write(file, original).unwrap();
+        } else {
+            fs::remove_file(file).unwrap();
+        }
+    }
+    fs::remove_file(offline::lease_path(&path).unwrap()).unwrap();
+    let before = directory_contents(dir.path());
+    assert!(
+        strip_task_progress_cursor(&path, &StripOptions::default())
+            .unwrap_err()
+            .to_string()
+            .contains("existing maintenance lease")
+    );
+    assert!(preview_task_progress_retention(&path).is_err());
+    assert_eq!(directory_contents(dir.path()), before);
 }

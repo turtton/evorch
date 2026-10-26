@@ -59,7 +59,7 @@ pub(crate) fn writer_lease(path: &Path) -> Result<File, StorageError> {
     Ok(file)
 }
 
-fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
+pub(super) fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
     let canonical = path
         .canonicalize()
         .or_else(|_| {
@@ -92,8 +92,27 @@ fn lease_file(path: &Path) -> Result<File, StorageError> {
         .map_err(|error| StorageError::Io(error.to_string()))
 }
 
+pub(super) fn preview_lease(path: &Path) -> Result<File, StorageError> {
+    let lease = match File::open(lease_path(path)?) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(invalid(
+                "offline preview requires an existing maintenance lease; start current evorch once and exit cleanly first",
+            ));
+        }
+        Err(error) => return Err(StorageError::Io(error.to_string())),
+    };
+    lease.try_lock().map_err(|error| {
+        invalid(format!(
+            "database is in use; stop all evorch processes: {error}"
+        ))
+    })?;
+    Ok(lease)
+}
+
 /// Preview opens the source read-only; even its lease is opened read-only and
-/// only if already present. No sidecar, backup, migration or checkpoint is made.
+/// only if already present (otherwise refuses). No sidecar, backup, migration
+/// or checkpoint is made. A nonempty WAL also refuses before SQLite is opened.
 /// Apply holds the lease and SQLite exclusive locking mode across all commits,
 /// backup and vacuum. A plain BEGIN EXCLUSIVE in WAL is *not* sufficient.
 pub fn strip_task_progress_cursor(
@@ -108,31 +127,27 @@ pub fn strip_task_progress_cursor(
     if !path.is_file() {
         return Err(invalid("database does not exist"));
     }
-    let lease = if options.apply {
-        Some(lease_file(path)?)
-    } else {
-        match File::open(lease_path(path)?) {
-            Ok(file) => Some(file),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(StorageError::Io(error.to_string())),
-        }
-    };
-    if let Some(lease) = &lease {
+    let _lease = if options.apply {
+        let lease = lease_file(path)?;
         lease.try_lock().map_err(|error| {
             invalid(format!(
                 "database is in use; stop all evorch processes: {error}"
             ))
         })?;
-    }
+        lease
+    } else {
+        preview_lease(path)?
+    };
     let flags = if options.apply {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
-    let conn = if options.apply {
-        Connection::open_with_flags(path, flags)?
+    let (conn, preview_files) = if options.apply {
+        (Connection::open_with_flags(path, flags)?, None)
     } else {
-        read_only_preview_connection(path)?
+        let (conn, files) = read_only_preview_connection(path)?;
+        (conn, Some(files))
     };
     conn.busy_timeout(Duration::ZERO)?;
     if options.apply {
@@ -159,6 +174,10 @@ pub fn strip_task_progress_cursor(
         .max(crate::db::file_sizes(path)?.total());
     summary.vacuum_space_budget_bytes = space_basis.saturating_mul(2);
     if !options.apply {
+        preview_files
+            .as_ref()
+            .expect("dry-run file verification")
+            .verify()?;
         return Ok(summary);
     }
     // Verify the existing accounting schema before any payload write. Do not
@@ -318,34 +337,85 @@ pub(super) fn require_space(path: &Path, required: u64) -> Result<(), StorageErr
     }
 }
 
-// Checkpointed offline stores need immutable mode to avoid creating WAL/SHM.
-// A WAL-bearing live store is opened read-only and is never checkpointed here.
-pub(super) fn read_only_preview_connection(path: &Path) -> Result<Connection, StorageError> {
-    let wal = crate::db::suffixed_path(path, "-wal");
-    if fs::metadata(wal).map(|meta| meta.len()).unwrap_or(0) == 0 {
-        let absolute = path
-            .canonicalize()
-            .map_err(|error| StorageError::Io(error.to_string()))?;
-        let mut uri = String::from("file:");
-        let text = absolute
-            .to_str()
-            .ok_or_else(|| invalid("database path must be UTF-8"))?;
-        for byte in text.bytes() {
-            if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
-                uri.push(char::from(byte));
-            } else {
-                uri.push_str(&format!("%{byte:02X}"));
+#[derive(Debug, PartialEq, Eq)]
+struct FileStamp {
+    bytes: u64,
+    modified: SystemTime,
+}
+
+pub(super) struct PreviewFiles {
+    paths: [PathBuf; 3],
+    stamps: [Option<FileStamp>; 3],
+}
+
+impl PreviewFiles {
+    fn stamps(paths: &[PathBuf; 3]) -> Result<[Option<FileStamp>; 3], StorageError> {
+        let mut stamps = [None, None, None];
+        for (path, stamp) in paths.iter().zip(&mut stamps) {
+            match fs::metadata(path) {
+                Ok(meta) if meta.is_file() => {
+                    *stamp = Some(FileStamp {
+                        bytes: meta.len(),
+                        modified: meta
+                            .modified()
+                            .map_err(|error| StorageError::Io(error.to_string()))?,
+                    });
+                }
+                Ok(_) => return Err(invalid("database or sidecar is not a regular file")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(StorageError::Io(error.to_string())),
             }
         }
-        uri.push_str("?mode=ro&immutable=1");
-        Ok(Connection::open_with_flags(
-            uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )?)
-    } else {
-        Ok(Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+        Ok(stamps)
     }
+
+    pub(super) fn verify(&self) -> Result<(), StorageError> {
+        if Self::stamps(&self.paths)? != self.stamps {
+            return Err(invalid(
+                "database files changed during offline preview; stop all evorch processes and retry",
+            ));
+        }
+        Ok(())
+    }
+}
+
+// The caller holds the offline lease. Never open a WAL-bearing source with
+// mode=ro alone: SQLite may create/init WAL/SHM despite a read-only main DB.
+pub(super) fn read_only_preview_connection(
+    path: &Path,
+) -> Result<(Connection, PreviewFiles), StorageError> {
+    let absolute = path
+        .canonicalize()
+        .map_err(|error| StorageError::Io(error.to_string()))?;
+    let paths = [
+        absolute.clone(),
+        crate::db::suffixed_path(&absolute, "-wal"),
+        crate::db::suffixed_path(&absolute, "-shm"),
+    ];
+    let stamps = PreviewFiles::stamps(&paths)?;
+    if stamps[1].as_ref().is_some_and(|stamp| stamp.bytes != 0) {
+        return Err(invalid(
+            "offline preview refuses a nonempty WAL without opening SQLite; start evorch once and exit cleanly to checkpoint, or run explicit --apply while offline to checkpoint",
+        ));
+    }
+    let files = PreviewFiles { paths, stamps };
+    let mut uri = String::from("file:");
+    let text = absolute
+        .to_str()
+        .ok_or_else(|| invalid("database path must be UTF-8"))?;
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    let conn = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.busy_timeout(Duration::ZERO)?;
+    files.verify()?;
+    Ok((conn, files))
 }

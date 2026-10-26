@@ -26,7 +26,7 @@ pub struct RetentionSummary {
 
 #[derive(Debug, Default)]
 pub(crate) struct Cursor {
-    after: String,
+    after: i64,
     through: Option<i64>,
 }
 
@@ -55,9 +55,8 @@ impl PreviewHistory {
 
 /// A finite read-only snapshot; no migrations, deletes, checkpoints or vacuum.
 pub fn preview_task_progress_retention(path: &Path) -> Result<RetentionSummary, StorageError> {
-    // A live preview must honor WAL even if a writer starts between stat/open.
-    // Never use immutable=1 here: it deliberately ignores concurrent WAL data.
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let _lease = super::offline::preview_lease(path)?;
+    let (conn, preview_files) = super::offline::read_only_preview_connection(path)?;
     let tx = conn.unchecked_transaction()?;
     // Build a small in-memory ID/size index in ONE source scan. The live
     // store may predate v26; never create its indexes as a preview side effect.
@@ -84,17 +83,13 @@ pub fn preview_task_progress_retention(path: &Path) -> Result<RetentionSummary, 
     drop(rows);
     drop(statement);
     let mut summary = RetentionSummary::default();
-    for (task, history) in by_task {
+    for history in by_task.into_values() {
         if history.orchestrator_rows == 0 {
             continue;
         }
         summary.tasks_examined += 1;
         summary.tasks_excluded += 1;
-        if !history.bounded()
-            || !crate::repo::task::get(&tx, &task)?.is_some_and(|record| {
-                matches!(record.status, TaskStatus::Completed | TaskStatus::Cancelled)
-            })
-        {
+        if !history.bounded() {
             continue;
         }
         if let Some(history) = decode_history(&tx, history.sizes)?
@@ -111,6 +106,7 @@ pub fn preview_task_progress_retention(path: &Path) -> Result<RetentionSummary, 
         }
     }
     tx.commit()?;
+    preview_files.verify()?;
     Ok(summary)
 }
 
@@ -141,24 +137,31 @@ fn step(
             through
         }
     };
-    // This index exists on old DBs only after migration. Preview may inspect an
-    // older live database: SQLite can use an equivalent bounded query without it.
-    let task: Option<String> = conn.query_row(
-        &format!("SELECT json_extract(payload, '$.payload.payload.task_id') FROM events WHERE {TASK_ROWS} AND json_extract(payload, '$.payload.payload.task_id') > ?1 AND id <= ?2 ORDER BY json_extract(payload, '$.payload.payload.task_id'), id LIMIT 1"),
-        params![cursor.after, through], |row| row.get(0),
+    // The ID-leading partial index makes this a bounded range seek, not a
+    // task-name scan that can inspect arbitrarily many post-pass arrivals.
+    // Inspect at most one index entry, advancing even for malformed/excluded
+    // rows. Revisiting a task is harmless and keeps discovery stateless/bounded.
+    let candidate: Option<(i64, rusqlite::types::Value)> = conn.query_row(
+        &format!("SELECT id, json_extract(payload, '$.payload.payload.task_id') FROM events INDEXED BY idx_events_durable_retention_scan WHERE {TASK_ROWS} AND id > ?1 AND id <= ?2 ORDER BY id LIMIT 1"),
+        params![cursor.after, through], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;
-    let Some(task) = task else {
+    let Some((id, task)) = candidate else {
         *cursor = Cursor::default();
         return Ok((RetentionSummary::default(), true));
+    };
+    cursor.after = id;
+    let rusqlite::types::Value::Text(task) = task else {
+        return Ok((RetentionSummary::default(), false));
     };
     let mut summary = RetentionSummary {
         tasks_examined: 1,
         tasks_excluded: 1,
         ..Default::default()
     };
-    if crate::repo::task::get(conn, &task)?.is_some_and(|record| {
-        matches!(record.status, TaskStatus::Completed | TaskStatus::Cancelled)
-    }) && let Some(history) = history(conn, &task, through)?
+    // Ordinary append does not maintain `tasks`. Its stored projection is not
+    // an eligibility source; equivalent() derives terminal state with the same
+    // bounded production replay used to prove full/reduced equality.
+    if let Some(history) = history(conn, &task, through)?
         && let Some(keep) = equivalent(&history)?
     {
         summary.tasks_excluded = 0;
@@ -176,7 +179,6 @@ fn step(
             }
         }
     }
-    cursor.after = task;
     Ok((summary, false))
 }
 
@@ -311,4 +313,63 @@ fn replay(
     }
     crate::projection::reconcile(&db.conn)?;
     Ok((crate::repo::task::get(&db.conn, task)?, gui))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_has_a_vm_budget_and_yields_after_many_post_pass_arrivals() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            retain_terminal_task_progress: false,
+            ..Default::default()
+        };
+        let writer = crate::Storage::open(config.clone()).unwrap();
+        let db = Database::open(&config).unwrap();
+        for task in [serde_json::json!(42), serde_json::json!("z-old")] {
+            db.conn
+                .execute(
+                    "INSERT INTO events(schema_version,monotonic_ns,wall_clock_ns,kind,payload) VALUES(1,0,0,'Orchestrator',?1)",
+                    [serde_json::json!({"kind":"Orchestrator","payload":{"kind":"TaskProgressed","payload":{"task_id":task,"run_id":"run","progress":{"status":"running"},"reason":"boundary"}}}).to_string()],
+                )
+                .unwrap();
+        }
+        let mut cursor = Cursor::default();
+        tick(&db.conn, &mut cursor).unwrap();
+        assert_eq!(cursor.after, 1, "malformed task must still advance");
+        assert_eq!(cursor.through, Some(2));
+        db.conn.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO events(schema_version,monotonic_ns,wall_clock_ns,kind,payload) SELECT 1,0,0,'Orchestrator',json_object('kind','Orchestrator','payload',json_object('kind','TaskProgressed','payload',json_object('task_id',printf('a-new-%05d',x),'run_id','run','progress',json_object('status','running'),'reason','boundary'))) FROM n;").unwrap();
+        for expected_after in [2, 0] {
+            let budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = budget.clone();
+            db.conn
+                .progress_handler(
+                    100,
+                    Some(move || {
+                        observed.fetch_add(100, std::sync::atomic::Ordering::Relaxed) >= 10_000
+                    }),
+                )
+                .unwrap();
+            tick(&db.conn, &mut cursor).unwrap();
+            db.conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+            assert!(budget.load(std::sync::atomic::Ordering::Relaxed) < 10_000);
+            assert_eq!(cursor.after, expected_after);
+            // Completion means the IMMEDIATE transaction has yielded; a
+            // subsequent command on the real writer must be serviced.
+            writer
+                .handle()
+                .append_event(
+                    None,
+                    &event_bus::Event::new(event_bus::LifecycleEvent::Started {
+                        session_id: "other-writer".into(),
+                    }),
+                )
+                .unwrap();
+        }
+        assert!(cursor.through.is_none(), "finite pass must finish");
+        writer.close();
+    }
 }

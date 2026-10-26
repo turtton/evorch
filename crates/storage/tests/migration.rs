@@ -47,8 +47,9 @@ const EXPECTED_TABLES: [&str; 37] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 37] = [
+const EXPECTED_INDICES: [&str; 38] = [
     "idx_events_durable_retention",
+    "idx_events_durable_retention_scan",
     "idx_events_task_lifecycle",
     "host_input_receipts_run",
     "idx_threads_project_updated",

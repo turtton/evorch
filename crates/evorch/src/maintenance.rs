@@ -8,7 +8,8 @@ use storage::maintenance::{
 
 pub const USAGE: &str = "usage: evorch maintenance <strip-task-progress-cursor|preview-task-progress-retention> [--db <path>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
-Default: read-only dry-run. Stop ALL evorch GUI/runtime processes before --apply.
+Default: read-only dry-run. Stop ALL evorch GUI/runtime processes before either preview or --apply.
+Preview requires an existing maintenance lease and a checkpointed DB (no nonempty WAL).
 Apply creates a backup, commits bounded batches, then full VACUUM and WAL TRUNCATE.
 Full VACUUM can take minutes or longer; time depends on disk throughput and DB size.
 Allow up to four times the database size as free space (backup plus scratch).
