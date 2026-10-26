@@ -9,6 +9,7 @@ fn owner() -> ToolExecutionContext {
         run_id: "owner".into(),
         thread_id: Some("thread".into()),
         call_id: None,
+        ..Default::default()
     }
 }
 
@@ -209,4 +210,33 @@ async fn allocator_failure_never_launches_the_command() {
     assert!(!marker.exists());
     assert!(shell.jobs.jobs.lock().unwrap().is_empty());
     assert!(shell.jobs.by_handle.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn full_unobserved_retention_refuses_sync_spawn_and_keeps_every_outcome() {
+    let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    let ctx = owner();
+    for _ in 0..MAX_RETAINED {
+        let handle = start(&shell, &ctx, "true").await;
+        shell.wait_for_job(&ctx, &handle).await.unwrap();
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        shell.execute_with_context(
+            &ctx,
+            json!({"command":"touch must-not-start", "cwd":directory.path()}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("32/32"));
+    assert!(result.content.contains("60-second completion wait"));
+    assert_eq!(result.content.matches("Poll your ").count(), 3);
+    assert!(!directory.path().join("must-not-start").exists());
+    assert_eq!(shell.jobs.jobs.lock().unwrap().len(), MAX_RETAINED);
+    assert_eq!(shell.jobs.by_handle.lock().unwrap().len(), MAX_RETAINED);
+    assert!(shell.has_unobserved_shell_jobs(&ctx.run_id));
 }

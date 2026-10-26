@@ -37,6 +37,7 @@ async fn renders_canonical_lines_when_server_publishes() {
                 run_id: "run-lsp".into(),
                 thread_id: Some("thread-lsp".into()),
                 call_id: Some("call-lsp".into()),
+                ..Default::default()
             },
             serde_json::json!({"path":path}),
         )

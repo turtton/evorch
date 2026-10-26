@@ -78,7 +78,7 @@ impl LoopState {
     /// identity, append it with its images, and note a tracked host input.
     pub(crate) fn take_user_input(&mut self, input: crate::runtime::user_inbox::UserInput) {
         let tracked = crate::runtime::user_inbox::tracked_prompt_id(&input).map(String::from);
-        let (text, images, trusted_user, prompt_id) = input;
+        let (text, images, trusted_user, prompt_id, _) = input;
         self.accept_input_identity(trusted_user, prompt_id);
         self.append_user_message(&text, images, tracked);
     }

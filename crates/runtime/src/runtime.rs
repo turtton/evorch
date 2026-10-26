@@ -2037,14 +2037,14 @@ impl AgentRuntime {
             if trusted_user {
                 self.goal_user_input(run_id, &text);
             }
-            let enqueue = || {
-                permit.send((text.clone(), images, trusted_user, prompt_id));
+            let enqueue = |seq| {
+                permit.send((text.clone(), images, trusted_user, prompt_id, seq));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {
                 inbox.enqueue(enqueue)?;
             } else {
-                enqueue()?;
+                enqueue(0)?;
             }
             Ok::<_, RuntimeError>(())
         };
@@ -3269,7 +3269,7 @@ mod review_provenance_tests {
         }
         let mut delivered = Vec::new();
         for _ in 0..16 {
-            let (text, images, trusted, prompt_id) = receiver.recv().await.unwrap();
+            let (text, images, trusted, prompt_id, _) = receiver.recv().await.unwrap();
             assert!(trusted && images.is_empty());
             assert!(prompt_id.is_some());
             delivered.push(text);

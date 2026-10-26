@@ -31,6 +31,8 @@ const MAX_INPUT_BYTES: usize = 16 * 1024;
 /// Start and poll may wait long; stdin and stop stay short.
 pub(super) const MAX_WAIT_YIELD_MS: u64 = 30 * 60 * 1000;
 pub(super) const MAX_CONTROL_YIELD_MS: u64 = 60_000;
+pub(super) const AUTO_YIELD_MS: u64 = 10_000;
+pub(super) const DEFAULT_POLL_MS: u64 = 60_000;
 const DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 // A poll that blocked at least this long waited for the job rather than
 // immediately re-reading an unchanged result.
@@ -47,8 +49,9 @@ pub(super) struct ControlArgs {
     pub job_id: String,
     // Omitted continues after the output already returned; explicit re-reads.
     pub cursor: Option<u64>,
+    pub yield_ms: Option<u64>,
     #[serde(default)]
-    pub yield_ms: u64,
+    pub return_on: ReturnOn,
     pub input: Option<String>,
     #[serde(default)]
     pub close_stdin: bool,
@@ -56,11 +59,19 @@ pub(super) struct ControlArgs {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReturnOn {
+    #[default]
+    Completion,
+    Output,
+}
+
 pub(super) struct JobLaunch {
     pub wrapped: WrappedCommand,
     pub interactive: bool,
     pub timeout_ms: Option<u64>,
-    pub yield_ms: u64,
+    pub yield_ms: Option<u64>,
     pub escalated: Option<EscalatedInput>,
     pub sandbox: Arc<dyn Sandbox>,
 }
@@ -108,6 +119,8 @@ struct Job {
     owner: String,
     call_id: Option<String>,
     thread: Option<String>,
+    synchronous: bool,
+    timeout_ms: Option<u64>,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
     cancel: watch::Sender<bool>,
@@ -117,6 +130,8 @@ struct Job {
 
 struct State {
     output: LiveOutput,
+    final_result: Option<Result<ToolResult, ToolError>>,
+    exposed: bool,
     completion: Option<Completion>,
     observed: bool,
     completion_notified: bool,
@@ -165,10 +180,19 @@ impl JobRegistry {
             escalated,
             sandbox,
         } = launch;
-        if ctx.run_id.is_empty() {
-            return Err(invalid("asynchronous shell requires a nonempty run_id"));
+        let synchronous = yield_ms.is_none();
+        if let Some(ms) = yield_ms {
+            validate_yield(ms, "start")?;
         }
-        validate_yield(yield_ms, "start")?;
+        let timeout_ms = timeout_ms.or((!synchronous).then_some(DEFAULT_TIMEOUT_MS));
+        let started = tokio::time::Instant::now();
+        let mut host_input = if synchronous
+            && ctx.shell_wait_policy == crate::executor::ShellWaitPolicy::AutoYield
+        {
+            ctx.shell_input.as_ref().map(|input| input.begin_wait())
+        } else {
+            None
+        };
         let (cancel, cancel_rx) = watch::channel(false);
         let (input, input_rx) = mpsc::channel(4);
         let (changed, _) = watch::channel(0);
@@ -178,9 +202,7 @@ impl JobRegistry {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if jobs.values().filter(|job| job.running()).count() >= MAX_RUNNING {
-                return Ok(ToolResult::error(
-                    "shell job capacity reached; stop or finish an existing job before starting another",
-                ));
+                return Ok(capacity_error(&jobs, ctx, true));
             }
             let mut by_handle = self
                 .by_handle
@@ -197,9 +219,7 @@ impl JobRegistry {
                         by_handle.remove(&removed.handle);
                     }
                 } else {
-                    return Ok(ToolResult::error(
-                        "shell result capacity reached; poll a finished job to observe its outcome before starting another",
-                    ));
+                    return Ok(capacity_error(&jobs, ctx, false));
                 }
             }
             let handle = format!("job-{}", self.allocator.allocate()?);
@@ -209,8 +229,12 @@ impl JobRegistry {
                 owner: ctx.run_id.clone(),
                 call_id: ctx.call_id.clone(),
                 thread: ctx.thread_id.clone(),
+                synchronous,
+                timeout_ms,
                 state: Mutex::new(State {
-                    output: LiveOutput::default(),
+                    output: LiveOutput::new(synchronous),
+                    final_result: None,
+                    exposed: !synchronous,
                     completion: None,
                     observed: false,
                     completion_notified: false,
@@ -230,7 +254,7 @@ impl JobRegistry {
             by_handle.insert(job.handle.clone(), Arc::clone(&job));
             job
         };
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let timeout = timeout_ms.map(Duration::from_millis);
         let worker = Arc::clone(&job);
         // The registry owns cancellation; the task owns the process and reaping.
         tokio::spawn(async move {
@@ -239,11 +263,21 @@ impl JobRegistry {
             } else {
                 run_pipe(&wrapped, &worker, input_rx, cancel_rx, timeout).await
             };
-            worker.complete(completion.unwrap_or_else(|error| Completion {
-                status: "failed",
-                exit_code: None,
-                error: Some(error.to_string()),
-            }));
+            match completion {
+                Ok(completion) => worker.complete(completion),
+                Err(error) => {
+                    worker
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .final_result = Some(Err(error.clone()));
+                    worker.complete(Completion {
+                        status: "failed",
+                        exit_code: None,
+                        error: Some(error.to_string()),
+                    });
+                }
+            }
         });
         let events = self
             .events
@@ -259,10 +293,61 @@ impl JobRegistry {
             job: Arc::clone(&job),
             delivered: false,
         };
-        job.wait_for_completion(yield_ms).await;
-        let (result, _) = job.snapshot(0);
+        let reason = if let Some(ms) = yield_ms {
+            job.wait_for_completion(ms).await;
+            None
+        } else if ctx.shell_wait_policy == crate::executor::ShellWaitPolicy::UntilTerminal {
+            job.until_terminal().await;
+            None
+        } else {
+            tokio::select! {
+                biased;
+                _ = job.until_terminal() => None,
+                _ = async {
+                    match host_input.as_mut() {
+                        Some(input) => { let _ = input.wait_for(|pending| *pending).await; if !*input.borrow() { std::future::pending::<()>().await; } }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => Some("User input arrived; control returned early while the command continues."),
+                _ = tokio::time::sleep_until(started + Duration::from_millis(AUTO_YIELD_MS)) => Some("Still running after 10000 ms; control returned automatically."),
+            }
+        };
+        // Linearize terminal-vs-handoff under one state lock. Completion that
+        // won this lock returns the legacy synchronous result; otherwise the
+        // continuing handle is exposed and snapshotted atomically.
+        let outcome = {
+            let mut state = job
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if synchronous && state.completion.is_some() {
+                state.observed = true;
+                state
+                    .final_result
+                    .take()
+                    .expect("synchronous completion is finalized once")
+            } else {
+                state.exposed = true;
+                let (mut result, _) = job.snapshot_locked(&mut state, 0, false);
+                if let Some(reason) = reason {
+                    result.content.push_str(&format!("\n{reason} The command was not restarted. Stdin is closed. Continue with shell action:poll, job_id:{} (omit yield_ms to wait up to 60 seconds for completion), or action:stop to cancel. The ten-second boundary releases this shell wait; other tools may still delay the next model request.\n", job.handle));
+                }
+                launch.delivered = true;
+                return Ok(result);
+            }
+        };
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handles = self
+            .by_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.remove(&job.id);
+        handles.remove(&job.handle);
         launch.delivered = true;
-        Ok(result)
+        outcome
     }
 
     pub(super) async fn control(
@@ -270,7 +355,15 @@ impl JobRegistry {
         ctx: &ToolExecutionContext,
         args: ControlArgs,
     ) -> Result<ToolResult, ToolError> {
-        validate_yield(args.yield_ms, &args.action)?;
+        let yield_ms = args.yield_ms.unwrap_or(if args.action == "poll" {
+            DEFAULT_POLL_MS
+        } else {
+            0
+        });
+        validate_yield(yield_ms, &args.action)?;
+        if args.action != "poll" && args.return_on != ReturnOn::Completion {
+            return Err(invalid("return_on is only supported for poll"));
+        }
         let _ = args.cwd; // Existing jobs retain their original wrapped command.
         let job = self.by_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&args.job_id)
             .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
@@ -342,12 +435,19 @@ impl JobRegistry {
             _ => return Err(invalid("shell action must be start, poll, stdin, or stop")),
         }
         let cursor = args.cursor.unwrap_or_else(|| job.delivered_cursor());
-        let waited = if args.action == "stop" {
-            job.wait_for_completion(args.yield_ms).await
+        let waited = if args.action == "stdin" || args.return_on == ReturnOn::Output {
+            job.wait_for_change(cursor, yield_ms).await
         } else {
-            job.wait_for_change(cursor, args.yield_ms).await
+            job.wait_for_completion(yield_ms).await
         };
-        let (mut result, changed) = job.snapshot(cursor);
+        let (mut result, changed) = job.snapshot_preview(
+            cursor,
+            args.action == "poll"
+                && args.cursor.is_none()
+                && yield_ms > 0
+                && waited >= Duration::from_millis(yield_ms)
+                && job.running(),
+        );
         if args.action == "poll" {
             result.progress = Some(if changed || waited >= MEANINGFUL_WAIT {
                 Progress::Advanced
@@ -478,7 +578,7 @@ impl JobRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.observed || state.completion_notified {
+            if !state.exposed || state.observed || state.completion_notified {
                 continue;
             }
             if let Some(done) = &state.completion {
@@ -497,6 +597,35 @@ impl JobRegistry {
         notices.sort_by(|a, b| a.0.cmp(&b.0));
         notices.into_iter().map(|(_, notice)| notice).collect()
     }
+}
+
+fn capacity_error(
+    jobs: &HashMap<String, Arc<Job>>,
+    ctx: &ToolExecutionContext,
+    running: bool,
+) -> ToolResult {
+    let mut visible: Vec<_> = jobs
+        .values()
+        .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id)
+        .collect();
+    visible.sort_by(|a, b| a.handle.cmp(&b.handle));
+    let mut message = if running {
+        format!(
+            "Command not started: running shell job capacity reached ({MAX_RUNNING}/{MAX_RUNNING})."
+        )
+    } else {
+        format!(
+            "Command not started: shell result capacity reached ({MAX_RETAINED}/{MAX_RETAINED})."
+        )
+    };
+    if visible.is_empty() {
+        message.push_str(" No jobs are visible to this owner; another owner must observe completed results or stop/wait for its jobs before retrying.");
+    } else {
+        for job in visible.into_iter().take(3) {
+            message.push_str(&format!(" Poll your {} to completion (omit yield_ms for a 60-second completion wait), or stop it and observe its terminal outcome before retrying.", job.handle));
+        }
+    }
+    ToolResult::error(message)
 }
 
 fn invalid(detail: &str) -> ToolError {
@@ -621,16 +750,38 @@ impl Job {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.output.flush(0);
         state.output.flush(1);
-        let result = std::mem::take(&mut state.output.capture).finish();
+        let capture = state.output.take_capture();
+        let result = if self.synchronous {
+            super::shell_result(
+                capture,
+                completion.exit_code.unwrap_or(-1),
+                (completion.status == "timed_out")
+                    .then_some(self.timeout_ms)
+                    .flatten(),
+            )
+        } else {
+            capture.finish()
+        };
         state.artifact_notice =
             crate::output::artifact_reference(&result.content).map(str::to_owned);
-        state.artifact = result.detail;
+        state.artifact = result.detail.clone();
+        if self.synchronous && state.final_result.is_none() {
+            state.final_result = Some(Ok(result));
+        }
         state.completion = Some(completion);
         state.process = None;
         state.sandbox = None;
         drop(state);
         self.changed
             .send_modify(|version| *version = version.wrapping_add(1));
+    }
+    async fn until_terminal(&self) {
+        let mut changed = self.changed.subscribe();
+        while self.running() {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
     }
     async fn wait_for_change(&self, cursor: u64, ms: u64) -> Duration {
         self.wait(ms, Some(cursor)).await
@@ -645,7 +796,7 @@ impl Job {
             .delivered_cursor
     }
     // Subscribe before inspecting state, and keep one deadline across output
-    // notifications. Start/stop wait only for teardown; poll/stdin may yield on
+    // notifications. Start/stop/default poll wait for teardown; stdin/output poll yield on
     // retained output beyond their cursor. Returns how long the call blocked.
     async fn wait(&self, ms: u64, output_cursor: Option<u64>) -> Duration {
         if ms == 0 {
@@ -714,11 +865,23 @@ impl Job {
 
     /// Output from `cursor` and the job status, plus whether this response
     /// shows output or a status not shown by previous responses for this job.
+    #[cfg(test)]
     fn snapshot(&self, cursor: u64) -> (ToolResult, bool) {
+        self.snapshot_preview(cursor, false)
+    }
+    fn snapshot_preview(&self, cursor: u64, prefer_tail: bool) -> (ToolResult, bool) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.snapshot_locked(&mut state, cursor, prefer_tail)
+    }
+    fn snapshot_locked(
+        &self,
+        state: &mut State,
+        cursor: u64,
+        prefer_tail: bool,
+    ) -> (ToolResult, bool) {
         // A kill/drain alone is not an observed outcome. Only a terminal tool
         // response acknowledges the potentially partial filesystem effects.
         if state.completion.is_some() {
@@ -730,9 +893,19 @@ impl Job {
         let mut start = cursor
             .clamp(available_from, total)
             .saturating_sub(available_from) as usize;
+        if prefer_tail {
+            start = start.max(output.text.len().saturating_sub(PREVIEW_BYTES / 2));
+            while !output.text.is_char_boundary(start) {
+                start += 1;
+            }
+            if let Some((index, _)) = output.text[start..].match_indices('\n').rev().nth(199) {
+                start += index + 1;
+            }
+        }
         while !output.text.is_char_boundary(start) {
             start += 1;
         }
+        let skipped = available_from + start as u64 > cursor;
         let mut end = (start + PREVIEW_BYTES / 2).min(output.text.len());
         while !output.text.is_char_boundary(end) {
             end -= 1;
@@ -748,9 +921,9 @@ impl Job {
             "shell job: {}\nstatus: {status}\ncursor: {next_cursor}\n",
             self.handle
         );
-        if cursor < available_from {
+        if skipped {
             content.push_str(
-                "[Earlier live output expired; use the output artifact after completion.]\n",
+                "[Earlier live output omitted or expired; re-read an explicit cursor, or use the output artifact after completion.]\n",
             );
         }
         if let Some(code) = exit_code {
@@ -765,7 +938,7 @@ impl Job {
             content.push_str(notice);
         }
         let mut result = ToolResult::success(content).with_detail(serde_json::json!({
-            "shell_job": {"job_id": self.handle, "job_uid": self.id, "run_id": self.owner, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": cursor < available_from, "recoverable_after_restart": false},
+            "shell_job": {"job_id": self.handle, "job_uid": self.id, "run_id": self.owner, "status": status, "exit_code": exit_code, "cursor": next_cursor, "available_from": available_from, "output_end": total, "has_more": next_cursor < total, "output_gap": skipped, "recoverable_after_restart": false},
             "output_artifact": state.artifact.as_ref().and_then(|value| value.get("output_artifact"))
         }));
         result.is_error = matches!(status, "failed" | "timed_out" | "cancelled");

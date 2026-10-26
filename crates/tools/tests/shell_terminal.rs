@@ -81,6 +81,7 @@ fn run_probes_with_terminal() {
         run_id: "run-terminal-probe".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let job = runtime
         .block_on(
@@ -146,6 +147,7 @@ fn shell_commands_do_not_inherit_evorch_descriptors() {
         run_id: "run-descriptor-probe".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let job = runtime
         .block_on(

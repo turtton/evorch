@@ -726,6 +726,8 @@ impl LoopState {
             // THREAD_ID_SEAM: RunTask currently carries run identity only.
             thread_id: None,
             call_id: None,
+            shell_wait_policy: tools::executor::ShellWaitPolicy::AutoYield,
+            shell_input: Some(self.channels.user_inbox.clone()),
         };
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();

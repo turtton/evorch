@@ -75,8 +75,13 @@ impl Fixture {
     }
 
     async fn execute_command(&self, command: &str) -> tools::ToolResult {
+        // The fixture cancels its provenance-only run before dispatch. Wait for
+        // that run's cleanup before adding a supervised shell to the same owner.
+        self.runtime.wait(self.run).await.unwrap();
         self.executor.execute(
-            &ToolExecutionContext { run_id: self.run.to_string(), thread_id: None, call_id: None },
+            &ToolExecutionContext { run_id: self.run.to_string(), thread_id: None, call_id: None,
+            ..Default::default()
+        },
             "shell", "call-shell",
             json!({"command":command, "sandbox_access":"unsandboxed", "justification":"host inspection"}),
         ).await.expect("execute")
@@ -218,7 +223,10 @@ async fn composed_executor_escalates_when_auto_reviewer_approves() {
     .expect("compose")
     .runtime;
     let run = support::review_host_run(&runtime);
-    let result = executor.execute(&ToolExecutionContext { run_id: run.to_string(), thread_id: None, call_id: None }, "shell", "call", json!({"command":"printf composed", "sandbox_access":"unsandboxed","justification":"inspect"})).await.expect("execute");
+    runtime.wait(run).await.unwrap();
+    let result = executor.execute(&ToolExecutionContext { run_id: run.to_string(), thread_id: None, call_id: None,
+            ..Default::default()
+        }, "shell", "call", json!({"command":"printf composed", "sandbox_access":"unsandboxed","justification":"inspect"})).await.expect("execute");
     assert_eq!(result.content, "exit_code: 0\ncomposed");
     assert_eq!(
         runtime.execution_policy(agents::Role::Worker),

@@ -103,7 +103,27 @@ async fn evaluate_inner(
         .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut result = executor.execute(&ToolExecutionContext { run_id: "benchmark-verifier".into(), thread_id: None, call_id: None }, "shell", "benchmark-verifier", serde_json::json!({"command":command, "cwd":verify_workspace, "timeout_ms":context.spec.budget.timeout_seconds.saturating_mul(1000)})).await?;
+    let ctx = ToolExecutionContext {
+        run_id: "benchmark-verifier".into(),
+        shell_wait_policy: tools::executor::ShellWaitPolicy::UntilTerminal,
+        ..Default::default()
+    };
+    let args = serde_json::json!({
+        "command": command,
+        "cwd": verify_workspace,
+        "timeout_ms": context.spec.budget.timeout_seconds.saturating_mul(1000),
+    });
+    let mut result = executor
+        .execute(&ctx, "shell", "benchmark-verifier", args)
+        .await?;
+    if result
+        .detail
+        .as_ref()
+        .and_then(|d| d["shell_job"]["status"].as_str())
+        == Some("running")
+    {
+        return Err(invalid("verifier shell violated UntilTerminal contract"));
+    }
     if let Some(path) = result
         .detail
         .as_ref()
@@ -131,4 +151,68 @@ async fn evaluate_inner(
         verifier_tampered: vec![],
         unexpected_changes: vec![],
     })
+}
+
+#[cfg(test)]
+mod auto_yield_contract_tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn evaluator_waits_past_ten_seconds_then_rejects_exit_seven() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().join("fixture");
+        std::fs::create_dir(&fixture).unwrap();
+        let started = directory.path().join("started");
+        let release = directory.path().join("release");
+        std::fs::write(
+            fixture.join("verify.sh"),
+            format!(
+                "echo started > '{}'; while ! test -e '{}'; do sleep 0.01; done; exit 7",
+                started.display(),
+                release.display(),
+            ),
+        )
+        .unwrap();
+        let original = file_inventory(&fixture).unwrap();
+        let spec: TaskSpec = serde_json::from_value(serde_json::json!({
+            "fixture_dir":fixture, "root_prompt":"verify", "target":{"role":"worker","category":null,"occurrence":1},
+            "verifier":{"program":"sh","args":["verify.sh"],"protected_paths":["verify.sh"],"allowed_changed_paths":[]},
+            "budget":{"max_tokens":1000,"max_tool_calls":10,"timeout_seconds":60}
+        })).unwrap();
+        let context = VerificationContext {
+            spec: &spec,
+            protected: &original,
+            original_files: &original,
+            fixture: &fixture,
+            sandbox: SandboxChoice::DirectUnchecked,
+        };
+        let mut evaluating = std::pin::pin!(evaluate(&fixture, &context));
+        std::future::poll_fn(|cx| {
+            assert!(evaluating.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        for _ in 0..2000 {
+            tokio::task::yield_now().await;
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(started.exists());
+        tokio::time::advance(Duration::from_secs(20)).await;
+        std::future::poll_fn(|cx| {
+            assert!(evaluating.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        std::fs::write(release, "").unwrap();
+        tokio::time::resume();
+        let evaluation = evaluating.await;
+        assert!(!evaluation.passed);
+        assert!(evaluation.output.starts_with("exit_code: 7\n"));
+    }
 }

@@ -679,6 +679,7 @@ impl Tool for BrowserTool {
                 run_id: "default".into(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             args,
         )

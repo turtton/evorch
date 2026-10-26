@@ -59,10 +59,12 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
     let runtime = AgentRuntime::new(bus, executor.clone(), model.clone());
     executor.set_shell_escalation(runtime.shell_escalation_gate(), host.clone());
     let run = support::review_host_run(&runtime);
+    runtime.wait(run).await.unwrap();
     let ctx = ToolExecutionContext {
         run_id: run.to_string(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     // When: settings are applied while review is suspended, then approval is released.
     let execution = executor.execute(
@@ -153,6 +155,7 @@ async fn escalation_is_denied_when_settings_change_during_human_approval() {
             run_id: "human".into(),
             thread_id: None,
             call_id: Some("call".into()),
+            ..Default::default()
         };
         // When: the operator disables escalation before resolving the human approval.
         let update = async {

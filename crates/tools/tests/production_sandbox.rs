@@ -37,7 +37,8 @@ async fn production_executor_runs_shell_inside_bwrap() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
-            },
+            ..Default::default()
+        },
             "shell",
             "call-production-pwd",
             serde_json::json!({ "command": "pwd && echo hello | tr a-z A-Z > output.rs && cat *.rs && echo err >&2" }),
@@ -97,6 +98,7 @@ async fn assert_shell_listing(command: &'static str) {
                 run_id: "shell-listing-regression".into(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "shell",
             "listing",
@@ -143,6 +145,7 @@ async fn output_artifact_and_scratch_survive_between_calls() {
         run_id: "output-mount-test".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let result = executor.execute(&ctx, "shell", "produce", serde_json::json!({
         "command": "printf saved > /tmp/run-artifact; i=0; while [ $i -lt 400 ]; do printf 'line %s\\n' \"$i\"; i=$((i+1)); done", "cwd":"."

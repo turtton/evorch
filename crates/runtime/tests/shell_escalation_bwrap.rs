@@ -58,6 +58,7 @@ async fn scenario(approved: bool) {
         run_id: "bwrap".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     let command = format!("cat '{}'", marker.path().display());
     let control = executor

@@ -189,6 +189,7 @@ async fn ordinary_policy_and_approval_gates_still_have_no_escalation_guidance() 
                 run_id: "ordinary-gate".into(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             };
             let args = json!({"path":path});
             let error = if prepared {

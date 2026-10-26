@@ -15,8 +15,12 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
         owner: "owner".into(),
         call_id: None,
         thread: None,
+        synchronous: false,
+        timeout_ms: None,
         state: Mutex::new(State {
             output: LiveOutput::default(),
+            final_result: None,
+            exposed: true,
             completion: None,
             observed: false,
             completion_notified: false,
@@ -51,6 +55,7 @@ fn owner() -> ToolExecutionContext {
         run_id: "owner".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     }
 }
 
@@ -171,7 +176,11 @@ async fn poll_and_stdin_still_return_early_on_output() {
     for action in ["poll", "stdin"] {
         let (registry, job, mut input) = fixture();
         let owner = owner();
-        let mut waiting = std::pin::pin!(registry.control(&owner, args(action, 60_000)));
+        let mut arguments = args(action, 60_000);
+        if action == "poll" {
+            arguments.return_on = ReturnOn::Output;
+        }
+        let mut waiting = std::pin::pin!(registry.control(&owner, arguments));
         pending(waiting.as_mut()).await;
         if action == "stdin" {
             let request = input.recv().await.unwrap();
@@ -199,13 +208,13 @@ async fn omitted_cursor_continues_after_returned_output_and_explicit_cursor_rere
     // The start response already returned the first line.
     assert!(job.snapshot(0).0.content.contains("first\n"));
     job.push(0, b"second\n");
-    let poll = serde_json::json!({"action": "poll", "job_id": "job-0"});
+    let poll = serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms":0});
     let next = control(&registry, poll.clone()).await;
     assert!(next.content.contains("second\n"));
     assert!(!next.content.contains("first\n"));
     let reread = control(
         &registry,
-        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0}),
+        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0, "yield_ms":0}),
     )
     .await;
     assert!(reread.content.contains("first\nsecond\n"));
@@ -220,7 +229,9 @@ async fn omitted_cursor_poll_waits_for_output_after_the_returned_cursor() {
     job.push(0, b"old\n");
     let _ = job.snapshot(0);
     let owner = owner();
-    let mut waiting = std::pin::pin!(registry.control(&owner, args("poll", 60_000)));
+    let mut arguments = args("poll", 60_000);
+    arguments.return_on = ReturnOn::Output;
+    let mut waiting = std::pin::pin!(registry.control(&owner, arguments));
     // Output already returned does not end the wait.
     pending(waiting.as_mut()).await;
     job.push(0, b"new\n");
@@ -243,7 +254,8 @@ async fn poll_reports_progress_only_for_changes_or_real_waits() {
         control(&registry, poll(0)).await.progress,
         Some(Progress::Stalled)
     );
-    let reread = serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0});
+    let reread =
+        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0, "yield_ms":0});
     assert_eq!(
         control(&registry, reread).await.progress,
         Some(Progress::Stalled)
@@ -288,12 +300,14 @@ async fn paging_through_retained_output_is_progress() {
         exit_code: Some(0),
         error: None,
     });
-    let poll = serde_json::json!({"action": "poll", "job_id": "job-0"});
+    let mut poll =
+        serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms":0, "cursor":0});
     let mut pages = Vec::new();
     loop {
         let result = control(&registry, poll.clone()).await;
         let more = result.detail.as_ref().unwrap()["shell_job"]["has_more"] == true;
         pages.push(result.progress);
+        poll["cursor"] = result.detail.as_ref().unwrap()["shell_job"]["cursor"].clone();
         if !more {
             break;
         }
@@ -305,4 +319,58 @@ async fn paging_through_retained_output_is_progress() {
         control(&registry, poll).await.progress,
         Some(Progress::Stalled)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_poll_waits_sixty_seconds_despite_output_and_returns_tail() {
+    assert_eq!(DEFAULT_POLL_MS, 60_000);
+    assert_eq!(AUTO_YIELD_MS, 10_000);
+    let (registry, job, _input) = fixture();
+    let owner = owner();
+    let args =
+        serde_json::from_value(serde_json::json!({"action":"poll","job_id":"job-0"})).unwrap();
+    let mut waiting = std::pin::pin!(registry.control(&owner, args));
+    pending(waiting.as_mut()).await;
+    job.push(0, b"early output\n");
+    pending(waiting.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(59_999)).await;
+    job.push(
+        0,
+        (0..1000)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>()
+            .as_bytes(),
+    );
+    pending(waiting.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let result = ready(waiting.as_mut()).await.unwrap();
+    assert!(result.content.contains("line 999\n"));
+    let detail = &result.detail.as_ref().unwrap()["shell_job"];
+    assert_eq!(detail["status"], "running");
+    assert_eq!(detail["cursor"], detail["output_end"]);
+    assert_eq!(detail["output_gap"], true);
+    let reread = control(
+        &registry,
+        serde_json::json!({"action":"poll","job_id":"job-0","cursor":0,"yield_ms":0}),
+    )
+    .await;
+    assert!(reread.content.contains("early output"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_poll_returns_on_terminal_not_new_output() {
+    let (registry, job, _input) = fixture();
+    let owner = owner();
+    let mut waiting = std::pin::pin!(registry.control(&owner, args("poll", MAX_WAIT_YIELD_MS)));
+    pending(waiting.as_mut()).await;
+    job.push(1, b"compiler progress\n");
+    pending(waiting.as_mut()).await;
+    job.complete(Completion {
+        status: "failed",
+        exit_code: Some(7),
+        error: None,
+    });
+    let result = ready(waiting.as_mut()).await.unwrap();
+    assert!(result.is_error);
+    assert_eq!(result.detail.unwrap()["shell_job"]["exit_code"], 7);
 }

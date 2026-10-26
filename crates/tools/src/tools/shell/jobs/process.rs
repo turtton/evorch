@@ -14,7 +14,7 @@ pub(super) async fn run_pipe(
     job: &Arc<Job>,
     mut input: mpsc::Receiver<Input>,
     mut cancel: watch::Receiver<bool>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<Completion, ToolError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     if *cancel.borrow() {
@@ -29,7 +29,11 @@ pub(super) async fn run_pipe(
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::piped());
+        .stdin(if job.synchronous {
+            std::process::Stdio::null()
+        } else {
+            std::process::Stdio::piped()
+        });
     let mut child =
         GroupChild::spawn(&mut command).map_err(|error| spawn_failed(&wrapped.program, error))?;
     job.register_process(Some(child.group().clone()));
@@ -41,7 +45,7 @@ pub(super) async fn run_pipe(
             .take_stderr()
             .ok_or_else(|| io_failed("missing stderr"))?;
         let mut stdin = child.take_stdin();
-        let timer = tokio::time::sleep(timeout);
+        let timer = deadline(timeout);
         tokio::pin!(timer);
         let mut out = [0u8; 8192];
         let mut err = [0u8; 8192];
@@ -55,7 +59,7 @@ pub(super) async fn run_pipe(
             tokio::select! {
                 biased;
                 _ = async { let _ = cancel.wait_for(|value| *value).await; } => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "cancelled", exit_code: None, error: None }); }
-                _ = &mut timer => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.as_millis())) }); }
+                _ = &mut timer => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.expect("timer only resolves with a timeout").as_millis())) }); }
                 // A shell exiting must not leave detached descendants holding the
                 // output pipes or mutating the workspace after completion: waiting
                 // kills them before it reaps the shell.
@@ -91,7 +95,7 @@ pub(super) async fn run_pty(
     job: &Arc<Job>,
     mut input: mpsc::Receiver<Input>,
     mut cancel: watch::Receiver<bool>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<Completion, ToolError> {
     if *cancel.borrow() {
         return Ok(Completion {
@@ -133,6 +137,12 @@ pub(super) async fn run_pty(
         .spawn_command(command)
         .map_err(|error| spawn_failed(&wrapped.program, error))?;
     drop(pair.slave);
+    if job.synchronous {
+        *writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     let group = ProcessGroup::new(child.process_id());
     // Cancelling the job future stops the PTY session's group; once the waiter
     // has reaped the shell, nothing is signalled.
@@ -167,14 +177,14 @@ pub(super) async fn run_pty(
             .ok_or_else(|| std::io::Error::other("the shell was not reaped"))
     });
     let mut writing: Option<tokio::task::JoinHandle<()>> = None;
-    let timer = tokio::time::sleep(timeout);
+    let timer = deadline(timeout);
     tokio::pin!(timer);
     let mut reaped = false;
     let completion = loop {
         tokio::select! {
             biased;
             _ = async { let _ = cancel.wait_for(|value| *value).await; } => { break Completion { status: "cancelled", exit_code: None, error: None }; }
-            _ = &mut timer => { break Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.as_millis())) }; }
+            _ = &mut timer => { break Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.expect("timer only resolves with a timeout").as_millis())) }; }
             status = &mut waiting => {
                 reaped = true;
                 break match status.map_err(io_failed).and_then(|status| status.map_err(io_failed)) {
@@ -215,4 +225,11 @@ pub(super) async fn run_pty(
     }
     read_result.map_err(io_failed)??;
     Ok(completion)
+}
+
+async fn deadline(timeout: Option<Duration>) {
+    match timeout {
+        Some(timeout) => tokio::time::sleep(timeout).await,
+        None => std::future::pending::<()>().await,
+    }
 }

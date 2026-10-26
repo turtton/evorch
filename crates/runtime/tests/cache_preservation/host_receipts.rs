@@ -267,3 +267,143 @@ async fn failed_snapshot_unknown_then_resend_preserves_the_wire_prefix() {
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
     verify_trace(&harness, run, &events, 0);
 }
+
+#[tokio::test]
+async fn shell_host_input_handoff_is_once_only_and_preserves_the_wire_prefix() {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let release = directory.path().join("release");
+        let command = format!(
+            "echo started > '{}'; while ! test -e '{}'; do sleep 0.01; done",
+            started.display(),
+            release.display()
+        );
+        let shell = Arc::new(tools::tools::Shell::new(Arc::new(
+            sandbox::DirectSandbox::new_unchecked(),
+        )));
+        let gated = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut harness = harness_with_wire(
+            wire,
+            vec![
+                ScriptedResponse::tool_call(
+                    "shell-start",
+                    MODEL,
+                    0,
+                    "shell-start",
+                    "shell",
+                    [json!({"command":command}).to_string()],
+                ),
+                read_response(0),
+                text_response("cache reuse after handoff"),
+            ],
+            1_000_000,
+            gated.clone(),
+            vec![shell.clone()],
+            None,
+            0.5,
+            |_| {},
+        );
+        let (_storage, config) = attach_store(&mut harness);
+        let run = harness
+            .runtime
+            .delegate_chat(
+                "shell-handoff",
+                Role::Worker,
+                "initial".into(),
+                chat_config("initial", true),
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        harness
+            .runtime
+            .send_message_with_images(
+                run,
+                "unique shell handoff input".into(),
+                vec![],
+                Some("handoff".into()),
+            )
+            .unwrap();
+        // Pause the second tool after the handoff request. Finish and observe
+        // the real job before allowing Stop, which correctly refuses unobserved
+        // jobs even if a model has emitted final text.
+        tokio::time::timeout(std::time::Duration::from_secs(5), gated.started.notified())
+            .await
+            .unwrap();
+        std::fs::write(&release, "").unwrap();
+        let request = harness
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .find(|r| r.path == wire.path() && r.body.to_string().contains("shell job: "))
+            .unwrap()
+            .body
+            .to_string();
+        let handle = request
+            .split("shell job: ")
+            .nth(1)
+            .unwrap()
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .next()
+            .unwrap();
+        let ctx = tools::ToolExecutionContext {
+            run_id: run.to_string(),
+            ..Default::default()
+        };
+        shell
+            .execute_with_context(&ctx, json!({"action":"poll", "job_id":handle}))
+            .await
+            .unwrap();
+        gated.release.notify_one();
+        let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+        let requests: Vec<_> = harness
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|r| r.path == wire.path())
+            .map(|r| r.body)
+            .collect();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            assert_eq!(
+                request
+                    .to_string()
+                    .matches("unique shell handoff input")
+                    .count(),
+                1
+            );
+            assert!(request.to_string().contains("User input arrived"));
+            assert!(request.to_string().contains("command was not restarted"));
+        }
+        assert_eq!(
+            receipt(&harness, "handoff").status,
+            storage::HostInputStatus::Delivered
+        );
+        let record = storage::Database::open(&config)
+            .unwrap()
+            .run_context(&run.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&record.host_inputs_json).unwrap(),
+            ["initial", "handoff"]
+        );
+        std::fs::write(release, "").unwrap();
+        harness
+            .runtime
+            .stop(run, runtime::StopScope::SelfOnly)
+            .unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+        verify_trace(&harness, run, &events, 0);
+    }
+}

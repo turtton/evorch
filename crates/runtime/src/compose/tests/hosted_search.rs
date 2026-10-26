@@ -121,6 +121,7 @@ async fn selected_capability_name_reaches_tool_metadata() {
                     run_id: "metadata-run".into(),
                     thread_id: None,
                     call_id: None,
+                    ..Default::default()
                 },
                 serde_json::json!({"query": "query"}),
                 Some(&*provider),

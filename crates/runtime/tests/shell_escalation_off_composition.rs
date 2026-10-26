@@ -106,6 +106,7 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
         run_id: run.to_string(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     // When: Off -> Auto -> Off is applied to the same executor.
     for (mode, expected_wraps) in [

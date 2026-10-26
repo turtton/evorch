@@ -66,20 +66,47 @@ impl PostEditHook for PolicyCheckedPostEditHook {
     }
 }
 
+/// Synchronous callers must wait for a terminal outcome; only model tool calls
+/// opt into returning a continuing shell job after ten seconds or host input.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ShellWaitPolicy {
+    #[default]
+    UntilTerminal,
+    AutoYield,
+}
+
+/// Run-scoped host-input wakeup. The runtime owns ordering and delivery; this
+/// signal only releases a shell wait, never cancels or acknowledges input.
+pub trait ShellInputControl: std::fmt::Debug + Send + Sync {
+    fn begin_wait(&self) -> tokio::sync::watch::Receiver<bool>;
+}
+
 /// ツール実行時の文脈情報。
 ///
 /// [`ToolExecutor::execute`] の必須引数であり、呼び出し元 (AgentRun) が
 /// その実行を一意に識別する `run_id` を運ぶ。Executor は `ToolStarted` /
 /// `ToolCompleted` イベントへこの値を stamp し、イベントと run の相関を
 /// 可能にする。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct ToolExecutionContext {
     /// 実行元 AgentRun の識別子 (例: `run-7`)。
     pub run_id: String,
     /// 実行元スレッドの識別子。スレッド相関が利用できない場合は `None`。
     pub thread_id: Option<String>,
     pub call_id: Option<String>,
+    pub shell_wait_policy: ShellWaitPolicy,
+    pub shell_input: Option<Arc<dyn ShellInputControl>>,
 }
+
+impl PartialEq for ToolExecutionContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_id == other.run_id
+            && self.thread_id == other.thread_id
+            && self.call_id == other.call_id
+            && self.shell_wait_policy == other.shell_wait_policy
+    }
+}
+impl Eq for ToolExecutionContext {}
 
 /// ツールとコンパイル済みスキーマ検証器の登録エントリ。
 struct RegisteredTool {
@@ -1068,6 +1095,7 @@ mod tests {
             run_id: "r1".into(),
             thread_id: None,
             call_id: None,
+            ..Default::default()
         };
 
         // When: the executor reads the file.
@@ -1115,6 +1143,7 @@ mod tests {
             run_id: "warning-artifact".into(),
             thread_id: None,
             call_id: None,
+            ..Default::default()
         };
         let content = "// edited comment\n".repeat(5000);
         let result = executor
@@ -1208,6 +1237,7 @@ mod tests {
             run_id: "run-1".to_string(),
             thread_id: None,
             call_id: None,
+            ..Default::default()
         };
         let result = executor
             .execute(&ctx, "origin_tamper", "call-1", serde_json::json!({}))
@@ -1242,6 +1272,7 @@ mod tests {
             run_id: "relative-root".into(),
             thread_id: None,
             call_id: None,
+            ..Default::default()
         };
         // The file does not exist, so the read fails without side effects.
         let _ = executor

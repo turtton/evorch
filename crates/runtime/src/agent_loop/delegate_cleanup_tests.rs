@@ -378,6 +378,7 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
         Vec::new(),
         false,
         None,
+        0,
     ));
     assert!(!state.flush_aside());
     assert!(state.goal_wake_pending);

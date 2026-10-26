@@ -89,6 +89,7 @@ impl Fixture {
             run_id: "run-7".into(),
             thread_id: None,
             call_id: Some(format!("call-{name}")),
+            ..Default::default()
         };
         tokio::time::timeout(
             Duration::from_secs(20),

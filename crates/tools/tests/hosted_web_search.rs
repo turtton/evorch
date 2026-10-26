@@ -91,6 +91,7 @@ async fn hosted_primary_uses_only_exa_for_the_narrow_fallback_matrix() {
                         run_id: "run-a".into(),
                         thread_id: None,
                         call_id: None,
+                        ..Default::default()
                     },
                     "web_search".into(),
                     "call-a".into(),
