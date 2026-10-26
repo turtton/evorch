@@ -470,7 +470,7 @@ impl SourceSnapshot {
                             continue
                         }
                         providers::ContentBlock::Reasoning { .. }
-                        | providers::ContentBlock::Anthropic { .. } | providers::ContentBlock::Image { .. } => continue,
+                        | providers::ContentBlock::Anthropic { .. } | providers::ContentBlock::ResponsesReasoning { .. } | providers::ContentBlock::Image { .. } => continue,
                     };
                     visible.push(SourceRecord {
                         reference: format!(

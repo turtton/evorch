@@ -71,6 +71,7 @@ pub fn request() -> HostedWebSearchRequest {
 
 pub fn chat_request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "selected-codex-model".into(),
         messages: vec![Message {
             role: Role::User,

@@ -63,7 +63,9 @@ fn classify_provider_error(error: ProviderError) -> CodexAuthError {
         | ProviderError::RateLimited { .. } => CodexAuthError::Network,
         ProviderError::Http { .. } => CodexAuthError::Rejected,
         ProviderError::InvalidJson { .. } => CodexAuthError::StoreUnavailable,
-        ProviderError::InvalidSse { .. } => CodexAuthError::Unavailable,
+        ProviderError::ResponsesScopeChanged { .. } | ProviderError::InvalidSse { .. } => {
+            CodexAuthError::Unavailable
+        }
     }
 }
 

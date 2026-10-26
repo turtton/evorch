@@ -45,6 +45,7 @@ data: {"id":"chatcmpl_nosignal","choices":[],"usage":{"prompt_tokens":11,"comple
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {
             role: Role::User,
@@ -191,8 +192,39 @@ async fn stream_uses_openai_wire_contract() {
     )
     .expect("互換clientを構築できる");
 
+    let mut input = request();
+    input.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "plain thought".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+        },
+    );
+    input.messages.insert(1, serde_json::from_value(serde_json::json!({"role":"user","content":[{"type":"tool_result","tool_call_id":"call1","is_error":false,"content":[{"type":"text","text":"ok"}]}]})).unwrap());
+    let expected = serde_json::json!({
+        "model":"compatible-model",
+        "messages":[
+            {"role":"assistant","tool_calls":[
+                {"id":"call1","type":"function","function":{"name":"read","arguments":"{}"}}
+            ]},
+            {"role":"tool","content":"ok","tool_call_id":"call1"},
+            {"role":"user","content":"Hello"}
+        ],
+        "stream":true,
+        "stream_options":{"include_usage":true}
+    });
+    input.messages[0].content.push(support::b3_opaque());
     let events = client
-        .stream(&ProviderAuth::new("sk-compatible"), &request())
+        .stream(&ProviderAuth::new("sk-compatible"), &input)
         .await
         .expect("streamを開始できる")
         .collect::<Vec<_>>()
@@ -205,6 +237,10 @@ async fn stream_uses_openai_wire_contract() {
     assert!(
         matches!(events.last(), Some(StreamEvent::Completed { response }) if response.finish_reason == FinishReason::Stop)
     );
+    let requests = server.received_requests().await.unwrap();
+    let actual: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(actual, expected);
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("b3-secret-ciphertext"));
 }
 
 // Given: OpenAI互換backendの429 / When: send / Then: RateLimitedへ変換する

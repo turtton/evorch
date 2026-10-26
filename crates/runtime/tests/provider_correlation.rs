@@ -74,6 +74,7 @@ impl AgentModel for ProviderCorrelatedModel {
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         let request = ChatRequest {
+            responses_replay: None,
             model: "mock-model".to_string(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),

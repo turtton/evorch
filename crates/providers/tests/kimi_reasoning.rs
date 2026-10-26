@@ -15,6 +15,7 @@ use wiremock::{
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "cli-proxy-api/kimi-k3".into(),
         messages: Vec::new(),
         tools: Vec::new(),
@@ -104,4 +105,77 @@ async fn kimi_is_rejected_before_codex_summary_request() {
     assert!(
         matches!(error, ProviderError::Request(detail) if detail.contains("openai-compatible") && detail.contains("kimi-subscription"))
     );
+}
+
+#[tokio::test]
+async fn b3_kimi_tool_continuation_replays_plain_thinking_but_not_responses_state() {
+    use providers::{FinishReason, Message, Role};
+    use serde_json::json;
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":0,\"id\":\"call1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"), "text/event-stream"))
+        .expect(2).mount(&server).await;
+    let client =
+        OpenAiCompatibleClient::new(server.uri(), "kimi", Duration::from_secs(5), None).unwrap();
+    let auth = ProviderAuth::new("test");
+    let mut input = request();
+    let response = client
+        .stream(&auth, &input)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let StreamEvent::Completed { response } = response else {
+        panic!("completion")
+    };
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    assert_eq!(response.usage.input_tokens, 12);
+    assert_eq!(
+        response.message.content[0],
+        ContentBlock::Reasoning {
+            text: "think".into()
+        }
+    );
+    assert_eq!(
+        response.message.content[1],
+        ContentBlock::Text {
+            text: "answer".into()
+        }
+    );
+    let mut assistant = response.message;
+    let origin = providers::ResolvedResponsesScope::resolve(
+        &input,
+        providers::ResponsesDialect::OpenAi,
+        None,
+        "https://example.test/responses",
+        providers::ResponsesAccount::Unavailable,
+    );
+    assistant.content.push(ContentBlock::ResponsesReasoning {item:json!({"type":"reasoning","id":"rs1","summary":[],"encrypted_content":"secret-cipher"}),origin});
+    input.messages.push(assistant);
+    input.messages.push(Message {role:Role::User,content:vec![serde_json::from_value(json!({"type":"tool_result","tool_call_id":"call1","is_error":false,"content":[{"type":"text","text":"result"}]})).unwrap()]});
+    client
+        .stream(&auth, &input)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(wire["messages"][0]["reasoning_content"], "think");
+    assert_eq!(wire["messages"][0]["tool_calls"][0]["id"], "call1");
+    assert_eq!(wire["messages"][1]["tool_call_id"], "call1");
+    assert!(!wire.to_string().contains("secret-cipher"));
+    assert!(wire.get("include").is_none());
 }

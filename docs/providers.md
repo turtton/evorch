@@ -161,6 +161,28 @@ A `base_url` without `/v1` has it appended, so `https://host` and
 `api_protocol` values are rejected; use `openai-compatible` for Chat
 Completions endpoints.
 
+### Responses encrypted reasoning replay
+
+Normal `openai` and `openai-codex` requests explicitly include
+`reasoning.encrypted_content` and use `store: false`. Confirmed opaque reasoning
+items are distinct from displayable reasoning summaries. Responses endpoints must
+be HTTP(S) URLs without URL credentials, query parameters, or fragments; these
+components cannot provide a non-secret replay identity. Items may only be replayed
+to the same profile, endpoint, route model (including the `+fast` suffix), wire
+model, speed and effective service tier. Returning to an earlier model or forking
+a run must not reactivate older items.
+
+Codex identifies the account using the non-secret ChatGPT account identity from
+the same authentication lease used for the HTTP request. Refreshing tokens for
+the same account does not create a replay boundary. API-key providers cannot
+automatically detect an account replacement within the same profile: use a
+**different profile for each account**, rather than replacing its external key
+in place. API keys and access/refresh/ID tokens are never replay identities.
+
+These items are not sent to Chat Completions or Anthropic wire formats. Official
+Codex compaction uses the same replay eligibility rules; text summarization must
+exclude them. Live API acceptance has not been tested for this feature.
+
 GPT-5 and later models of `openai` and `openai-codex` profiles edit files with
 the Codex-compatible `apply_patch` tool instead of `edit` and `write`. The
 `edit_tool` key of a profile or model entry changes this for any provider; see
@@ -290,7 +312,14 @@ Ordinary checkpoints omit this marker and retain their existing serialized
 bytes and compaction input.
 
 Summaries use official compaction when the run's member supports it, then the
-chain, then the structural summary, which needs no model and always completes.
+chain, then the structural summary, which needs no model. Ordinary structural
+summaries are lossy; when recovering a protected checkpoint, structural fallback
+explicitly retains its readable body verbatim, independently of recent-message
+selection. If that body exceeds the summary byte limit or the prepared context
+cannot fit the target window, preparation stops without committing the candidate
+checkpoint, replay scope/floor, or context-usage baseline. The previous durable
+context remains available for retry; hidden raw tool batches are never restored
+as a fallback.
 A summary skips members whose window cannot hold its input and never moves
 the run's pin. To summarize with a different chain, set
 `agents.roles.compactor`; it is never started as an agent, and without

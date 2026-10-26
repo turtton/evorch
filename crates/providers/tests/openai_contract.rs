@@ -93,6 +93,7 @@ async fn cache_tools_are_byte_stable_when_registration_order_changes() {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {
             role: Role::User,
@@ -597,7 +598,7 @@ async fn requests_use_the_official_responses_endpoint_and_shape() {
                 "max_output_tokens": 512,
                 "temperature": 0.5,
                 "prompt_cache_key": "run-shape",
-                "include": []
+                "include": ["reasoning.encrypted_content"]
             })
         );
     }

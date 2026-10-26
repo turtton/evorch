@@ -215,6 +215,7 @@ async fn ac4_image_generation_preserves_chat_cache_baseline() {
         let client = client(&server, codex, Some(bus), "");
         let request = request();
         let chat = ChatRequest {
+            responses_replay: None,
             model: "chat-model".into(),
             observation: request.observation.clone(),
             messages: vec![providers::Message {

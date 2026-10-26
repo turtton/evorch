@@ -22,6 +22,134 @@ enum ResponseKind {
     },
 }
 
+/// One Responses API `reasoning` output item, streamed before `response.completed`.
+///
+/// Responses SSE renders it at its own `output_index` as `response.output_item.added`
+/// (a provisional item whose `encrypted_content` differs from the final value, or
+/// omits it), the summary part/delta/done events, then `response.output_item.done`
+/// with the confirmed [`Self::done_item`]. Only the done item may be replayed.
+/// Chat Completions has no reasoning item, so it renders nothing for it.
+#[derive(Debug, Clone)]
+pub struct ReasoningItem {
+    output_index: usize,
+    id: String,
+    summary: Vec<String>,
+    added_encrypted_content: Option<String>,
+    encrypted_content: String,
+    extra: serde_json::Map<String, Value>,
+}
+
+impl ReasoningItem {
+    /// A summary-less item whose `output_item.added` carries the provisional
+    /// `provisional-{id}` ciphertext and whose done item carries `encrypted_content`.
+    pub fn new(output_index: usize, id: &str, encrypted_content: &str) -> Self {
+        Self {
+            output_index,
+            id: id.to_owned(),
+            summary: Vec::new(),
+            added_encrypted_content: Some(format!("provisional-{id}")),
+            encrypted_content: encrypted_content.to_owned(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// Streams one `summary_text` part as these `reasoning_summary_text.delta` fragments.
+    #[must_use]
+    pub fn with_summary(mut self, fragments: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.summary = fragments
+            .into_iter()
+            .map(|fragment| fragment.as_ref().to_owned())
+            .collect();
+        self
+    }
+
+    /// Uses `partial` as the provisional `encrypted_content` of `output_item.added`.
+    #[must_use]
+    pub fn with_added_encrypted_content(mut self, partial: &str) -> Self {
+        self.added_encrypted_content = Some(partial.to_owned());
+        self
+    }
+
+    /// Omits `encrypted_content` from `output_item.added`.
+    #[must_use]
+    pub fn without_added_encrypted_content(mut self) -> Self {
+        self.added_encrypted_content = None;
+        self
+    }
+
+    /// Adds a field (for example `status` or an unknown field) to the done item only.
+    #[must_use]
+    pub fn with_extra(mut self, key: &str, value: Value) -> Self {
+        self.extra.insert(key.to_owned(), value);
+        self
+    }
+
+    /// The Responses output index of this item.
+    pub const fn output_index(&self) -> usize {
+        self.output_index
+    }
+
+    /// The confirmed item exactly as `response.output_item.done` sends it.
+    pub fn done_item(&self) -> Value {
+        let summary = if self.summary.is_empty() {
+            json!([])
+        } else {
+            json!([{"type": "summary_text", "text": self.summary.concat()}])
+        };
+        let mut item = json!({"type": "reasoning", "id": self.id, "summary": summary,
+            "encrypted_content": self.encrypted_content});
+        for (key, value) in &self.extra {
+            item[key] = value.clone();
+        }
+        item
+    }
+
+    fn responses_frames(&self) -> Vec<String> {
+        let index = self.output_index;
+        let mut added = json!({"type": "reasoning", "id": self.id, "summary": []});
+        if let Some(partial) = &self.added_encrypted_content {
+            added["encrypted_content"] = json!(partial);
+        }
+        let mut frames = vec![sse_frame(json!({
+            "type": "response.output_item.added", "output_index": index, "item": added,
+        }))];
+        if !self.summary.is_empty() {
+            let part = |text: &str| json!({"type": "summary_text", "text": text});
+            let event = |kind: &str| {
+                json!({"type": kind, "item_id": self.id, "output_index": index,
+                    "summary_index": 0})
+            };
+            let mut started = event("response.reasoning_summary_part.added");
+            started["part"] = part("");
+            frames.push(sse_frame(started));
+            for fragment in &self.summary {
+                let mut delta = event("response.reasoning_summary_text.delta");
+                delta["delta"] = json!(fragment);
+                frames.push(sse_frame(delta));
+            }
+            let text = self.summary.concat();
+            let mut done = event("response.reasoning_summary_text.done");
+            done["text"] = json!(text);
+            frames.push(sse_frame(done));
+            let mut finished = event("response.reasoning_summary_part.done");
+            finished["part"] = part(&text);
+            frames.push(sse_frame(finished));
+        }
+        frames.push(sse_frame(json!({
+            "type": "response.output_item.done", "output_index": index,
+            "item": self.done_item(),
+        })));
+        frames
+    }
+}
+
+fn sse_frame(value: Value) -> String {
+    format!(
+        "event: {}\ndata: {value}\n\n",
+        value["type"].as_str().unwrap_or_default()
+    )
+}
+
 /// An owned, deterministic response script with no transport or clock dependency.
 #[derive(Debug, Clone)]
 pub struct ScriptedResponse {
@@ -31,12 +159,31 @@ pub struct ScriptedResponse {
     model: String,
     fragments: Vec<String>,
     kind: ResponseKind,
+    reasoning: Vec<ReasoningItem>,
+    text_output_index: usize,
     prompt_tokens: u64,
     completion_tokens: u32,
     cached_tokens: Option<u64>,
 }
 
 impl ScriptedResponse {
+    /// Adds a Responses reasoning output item; call repeatedly for several items.
+    ///
+    /// Give each item an output index distinct from the other items and from the
+    /// text ([`Self::with_text_output_index`]) or tool call index.
+    #[must_use]
+    pub fn with_reasoning(mut self, item: ReasoningItem) -> Self {
+        self.reasoning.push(item);
+        self
+    }
+
+    /// Streams Responses text deltas at `output_index` (default 0).
+    #[must_use]
+    pub const fn with_text_output_index(mut self, output_index: usize) -> Self {
+        self.text_output_index = output_index;
+        self
+    }
+
     /// Waits for an explicit test signal before writing this response.
     #[must_use]
     pub fn with_gate(mut self, gate: crate::server::ResponseGate) -> Self {
@@ -64,6 +211,8 @@ impl ScriptedResponse {
                 .map(|fragment| fragment.as_ref().to_owned())
                 .collect(),
             kind: ResponseKind::Text,
+            reasoning: Vec::new(),
+            text_output_index: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: None,
@@ -225,35 +374,42 @@ impl ScriptedResponse {
     /// Text fragments become `response.output_text.delta`. A tool call becomes one
     /// `function_call` output item whose arguments arrive as
     /// `response.function_call_arguments.delta` fragments before `output_item.done`.
+    ///
+    /// Reasoning items ([`Self::with_reasoning`]) and the text or call stream in
+    /// output-index order, each completing before the next begins.
     pub fn responses_frames(&self) -> Vec<String> {
-        let frame = |value: Value| {
-            format!(
-                "event: {}\ndata: {value}\n\n",
-                value["type"].as_str().unwrap_or_default()
-            )
-        };
+        let frame = sse_frame;
         let mut frames = vec![frame(json!({
             "type": "response.created",
             "response": {"id": self.id, "object": "response", "status": "in_progress",
                 "model": self.model, "output": []},
         }))];
-        match &self.kind {
+        let mut items: Vec<_> = self
+            .reasoning
+            .iter()
+            .map(|item| (item.output_index, item.responses_frames()))
+            .collect();
+        let mut main = Vec::new();
+        let main_index = match &self.kind {
             ResponseKind::Text => {
+                let index = self.text_output_index;
                 for fragment in &self.fragments {
-                    frames.push(frame(json!({
-                        "type": "response.output_text.delta", "item_id": "msg_0",
-                        "output_index": 0, "content_index": 0, "delta": fragment,
+                    main.push(frame(json!({
+                        "type": "response.output_text.delta", "item_id": format!("msg_{index}"),
+                        "output_index": index, "content_index": 0, "delta": fragment,
                     })));
                 }
+                index
             }
             ResponseKind::Compaction { encrypted_content } => {
                 let item = json!({"type": "compaction", "id": format!("cmp_{}", self.id),
                     "encrypted_content": encrypted_content});
                 for event in ["response.output_item.added", "response.output_item.done"] {
-                    frames.push(frame(json!({
+                    main.push(frame(json!({
                         "type": event, "output_index": 0, "item": item,
                     })));
                 }
+                0
             }
             ResponseKind::CustomToolCall { index, id, name } => {
                 let item_id = format!("ctc_{id}");
@@ -261,24 +417,25 @@ impl ScriptedResponse {
                     json!({"type": "custom_tool_call", "id": item_id, "call_id": id,
                         "name": name, "input": input})
                 };
-                frames.push(frame(json!({
+                main.push(frame(json!({
                     "type": "response.output_item.added", "output_index": index,
                     "item": item(String::new()),
                 })));
                 for fragment in &self.fragments {
-                    frames.push(frame(json!({
+                    main.push(frame(json!({
                         "type": "response.custom_tool_call_input.delta",
                         "item_id": item_id, "output_index": index, "delta": fragment,
                     })));
                 }
-                frames.push(frame(json!({
+                main.push(frame(json!({
                     "type": "response.custom_tool_call_input.done",
                     "item_id": item_id, "output_index": index, "input": self.fragments.concat(),
                 })));
-                frames.push(frame(json!({
+                main.push(frame(json!({
                     "type": "response.output_item.done", "output_index": index,
                     "item": item(self.fragments.concat()),
                 })));
+                *index
             }
             ResponseKind::ToolCall { index, id, name } => {
                 let item_id = format!("fc_{id}");
@@ -286,22 +443,27 @@ impl ScriptedResponse {
                     json!({"type": "function_call", "id": item_id, "call_id": id,
                         "name": name, "arguments": arguments})
                 };
-                frames.push(frame(json!({
+                main.push(frame(json!({
                     "type": "response.output_item.added", "output_index": index,
                     "item": item(String::new()),
                 })));
                 for fragment in &self.fragments {
-                    frames.push(frame(json!({
+                    main.push(frame(json!({
                         "type": "response.function_call_arguments.delta",
                         "item_id": item_id, "output_index": index, "delta": fragment,
                     })));
                 }
-                frames.push(frame(json!({
+                main.push(frame(json!({
                     "type": "response.output_item.done", "output_index": index,
                     "item": item(self.fragments.concat()),
                 })));
+                *index
             }
-        }
+        };
+        items.push((main_index, main));
+        // Stable: equal indices keep reasoning first, but scripts should not collide.
+        items.sort_by_key(|(index, _)| *index);
+        frames.extend(items.into_iter().flat_map(|(_, item)| item));
         let mut usage = json!({
             "input_tokens": self.prompt_tokens,
             "output_tokens": self.completion_tokens,

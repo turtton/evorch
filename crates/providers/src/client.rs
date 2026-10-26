@@ -15,6 +15,14 @@ use crate::stream::DeltaStream;
 /// クライアントの状態として保持しない。
 #[async_trait]
 pub trait ProviderClient: Send + Sync {
+    /// Resolve a candidate scope. Send validates again against its own auth lease.
+    async fn resolve_responses_scope(
+        &self,
+        _auth: &ProviderAuth,
+        _request: &ChatRequest,
+    ) -> Result<Option<crate::ResolvedResponsesScope>, ProviderError> {
+        Ok(None)
+    }
     /// Native authenticated discovery. `None` uses the legacy catalog adapter.
     async fn list_models(
         &self,
@@ -419,6 +427,7 @@ mod tests {
 
     fn sample_request() -> ChatRequest {
         ChatRequest {
+            responses_replay: None,
             model: "test-model".to_string(),
             messages: vec![Message {
                 role: Role::User,

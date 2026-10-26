@@ -27,6 +27,7 @@ mod model_kinds;
 mod official_compaction;
 mod output_limits;
 mod preference;
+mod responses_replay;
 mod speed;
 mod structured;
 mod switch;

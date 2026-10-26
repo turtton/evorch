@@ -27,6 +27,7 @@ pub(crate) struct RestoredState {
     pub(crate) pending_reference_id: Option<String>,
     pub(crate) boundary_pending: bool,
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
+    pub(crate) responses_replay: crate::ResponsesReplayState,
     pub(crate) trigger: Option<event_bus::AgentMessage>,
     pub(crate) turn_completed: bool,
     /// Boxed so the restore continuations stay small.
@@ -63,6 +64,10 @@ impl RestoredState {
         }
         let descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| fail(error.to_string()))?;
+        let responses_replay = descriptor.responses_replay.clone().unwrap_or_default();
+        responses_replay
+            .validate(&messages, &checkpoints)
+            .map_err(fail)?;
         if descriptor.has_uncertain_effects() {
             return Err(crate::RuntimeError::RunRestoreFailed {
                 run_id: record.run_id.clone(),
@@ -88,6 +93,7 @@ impl RestoredState {
             boundary_pending: descriptor.boundary_pending,
             messages,
             checkpoints,
+            responses_replay,
             trigger: None,
             turn_completed,
             allowed_directories: Box::new(descriptor.allowed_directories),
@@ -132,6 +138,8 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_replay: Option<crate::ResponsesReplayState>,
     /// Identifies one unregistered chat attempt for conditional consumption release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) admission_reservation_id: Option<String>,
@@ -234,6 +242,8 @@ impl RunRestoreDescriptor {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
+    #[error("invalid replay snapshot: {0}")]
+    Replay(String),
     #[error("unobserved shell effects require a durable checkpoint; ownership retained")]
     UnrecordedShellEffects,
     #[error("assistant reference cannot be persisted: {0}")]
@@ -366,6 +376,13 @@ fn write_snapshot_with_context(
     terminal_phase: &str,
     end: usize,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+    context
+        .responses_replay
+        .validate(&context.messages, context.checkpoints())
+        .map_err(SnapshotError::Replay)?;
+    if end > context.messages.len() {
+        return Err(SnapshotError::Replay("saved end outside history".into()));
+    }
     let Some(runtime) = state.runtime() else {
         return Ok(crate::ownership::SnapshotReference::none(
             crate::ownership::SnapshotNoneReason::NoRunStore,
@@ -473,6 +490,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,
         thread_id: state.thread_id.clone(),
         turn: Some(state.turn.clone()),

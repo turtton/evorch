@@ -7,6 +7,11 @@ mod structured_output;
 /// [`std::error::Error`] は thiserror により自動実装される。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ProviderError {
+    /// Re-enter boundary preparation before sending; never retry unchanged.
+    #[error("Responses replay scope changed; request preparation is required")]
+    ResponsesScopeChanged {
+        actual: Box<crate::responses_replay::ResolvedResponsesScope>,
+    },
     /// HTTP 429 (レート制限)。
     #[error(
         "rate limited (429){}",
@@ -82,7 +87,8 @@ impl ProviderError {
         match self {
             Self::RateLimited { .. } => Some(429),
             Self::Http { status, .. } => Some(*status),
-            Self::Timeout
+            Self::ResponsesScopeChanged { .. }
+            | Self::Timeout
             | Self::InvalidSse { .. }
             | Self::InvalidJson { .. }
             | Self::Request(_)

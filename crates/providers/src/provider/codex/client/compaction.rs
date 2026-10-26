@@ -7,17 +7,21 @@ use serde::Deserialize;
 use super::{CodexClient, PROVIDER_LABEL, ResponseMode};
 use crate::http::{UsageEmitter, map_request_error};
 use crate::sse::{SseFrame, SseParser};
-use crate::wire::codex::to_wire_compaction_request;
+
 use crate::{ChatRequest, CompactionResult, Compactor, FinishReason, ProviderError, Usage};
 
 #[async_trait]
 impl Compactor for CodexClient {
     async fn compact(&self, request: &ChatRequest) -> Result<CompactionResult, ProviderError> {
-        let wire = to_wire_compaction_request(request);
+        let token = self.session.current().await?;
+        let scope = self.responses_scope(request, &token);
+        let wire = self
+            .scoped_wire_request(request, &scope)?
+            .with_compaction_trigger();
         let mut observer = self.observer(request, true);
         let result = async {
             let response = self
-                .send_response(&wire, ResponseMode::Compaction, &mut observer)
+                .send_response(&wire, &token, ResponseMode::Compaction, &mut observer)
                 .await?;
             let mut stream = response.bytes_stream();
             let mut parser = SseParser::new();

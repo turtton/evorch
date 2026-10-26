@@ -71,6 +71,7 @@ impl CommandSink for StubSink {
     }
 
     fn run_context_view(&self, run: &str) -> Result<Option<RunContextView>, String> {
+        let messages = saved_messages(run);
         Ok(Some(RunContextView {
             run_id: runtime::RunId::new(run.trim_start_matches("run-").parse().unwrap()),
             role_name: "Worker".into(),
@@ -79,20 +80,7 @@ impl CommandSink for StubSink {
             updated_at_ns: 0,
             selected_model: Some("main/model-x".into()),
             tool_names: vec!["shell".into()],
-            messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: vec![ContentBlock::Text {
-                        text: "SYSTEM TEXT".into(),
-                    }],
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: "TASK TEXT".into(),
-                    }],
-                },
-            ],
+            messages,
             compaction_checkpoint_count: 0,
         }))
     }
@@ -173,6 +161,84 @@ fn run_view_lists_the_saved_messages() {
     assert!(harness.has_label(
         "Worker · deep · main/model-x · 2 messages · 0 compaction checkpoints · saved at Done"
     ));
+}
+
+const NATIVE_RUN: &str = "run-9";
+
+/// The history the stub saved for `run`; [`NATIVE_RUN`] ends with a native-only reply.
+fn saved_messages(run: &str) -> Vec<Message> {
+    let mut messages = vec![
+        Message {
+            role: MessageRole::System,
+            content: vec![ContentBlock::Text {
+                text: "SYSTEM TEXT".into(),
+            }],
+        },
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "TASK TEXT".into(),
+            }],
+        },
+    ];
+    if run == NATIVE_RUN {
+        messages.push(native_only_reply());
+    }
+    messages
+}
+
+/// An assistant reply that holds only Responses native state.
+fn native_only_reply() -> Message {
+    Message {
+        role: MessageRole::Assistant,
+        content: vec![ContentBlock::ResponsesReasoning {
+            item: serde_json::json!({
+                "type": "reasoning", "id": "rs_headless", "summary": [],
+                "encrypted_content": "gAAAAB3-headless-ciphertext"
+            }),
+            origin: providers::ResolvedResponsesScope {
+                dialect: providers::ResponsesDialect::Codex,
+                profile: String::new(),
+                route_model: "gpt-5.1-codex".into(),
+                wire_model: "gpt-5.1-codex".into(),
+                speed: providers::ResponsesSpeed::Standard,
+                service_tier: None,
+                endpoint_fingerprint: "ab".repeat(32),
+                account: providers::ResponsesAccount::Unavailable,
+            },
+        }],
+    }
+}
+
+#[test]
+fn run_view_budgets_native_only_replies_without_listing_an_empty_row() {
+    // Given: a saved history whose last reply is native Responses state only.
+    let mut harness = harness(Requests::default());
+    harness
+        .state_mut()
+        .open_context_tab(InspectorMode::Run, Some(NATIVE_RUN.into()));
+
+    // When: the run view is rendered.
+    settle(&mut harness);
+
+    // Then: header and list both count saved messages; the list states how many
+    // of them it shows, explains the hidden one, and shows no empty row for it.
+    use gui::model::context_inspector::{compact_tokens, message_rows};
+    let rows = message_rows(&saved_messages(NATIVE_RUN));
+    let empty_row = format!("assistant · {} · ", compact_tokens(rows[2].tokens));
+    assert!(harness.has_label(
+        "Worker · deep · main/model-x · 3 messages · 0 compaction checkpoints · saved at Done"
+    ));
+    assert!(harness.has_label("Messages (2 of 3)"));
+    assert!(!harness.has_label("Messages (2)"));
+    assert!(harness.has_label("1 replay-only message hidden · counted in the budget"));
+    assert!(!harness.has_label(&empty_row));
+    assert!(!harness.has_label(empty_row.trim_end()));
+
+    // And: the saved-history budget still includes the hidden reply's tokens.
+    let total: u64 = rows.iter().map(|row| row.tokens).sum();
+    assert!(rows[2].tokens > 0);
+    assert!(harness.has_label(&format!("Saved history {}", compact_tokens(total))));
 }
 
 /// Real runtime composition behind a sink, for screenshots of bundled presets and tools.

@@ -256,7 +256,8 @@ fn map_fetch_error(error: &providers::ProviderError) -> String {
             "Could not fetch Codex models: HTTP {status}: {}",
             body.chars().take(300).collect::<String>(),
         ),
-        ProviderError::Timeout
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::Timeout
         | ProviderError::Request(_)
         | ProviderError::Transport { .. }
         | ProviderError::InvalidJson { .. }

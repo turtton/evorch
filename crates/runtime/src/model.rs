@@ -176,6 +176,48 @@ pub trait AgentModel: Send + Sync {
         Ok(None)
     }
 
+    /// Validate D3 and replay boundaries before estimating the next window.
+    async fn prepare_replay_context(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _replay: &crate::ResponsesReplayState,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Resolve the actual candidate scope before D3/window preparation.
+    ///
+    /// The default is for models without Responses replay. Implementations that
+    /// return `ResponsesReasoning` must participate in replay preparation and
+    /// check the prepared scope before sending (as `RoutedModel` does). Response
+    /// origins alone must never bind durable state or reconstruct its floor.
+    async fn resolve_replay_scope(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _tools: &[ToolSpec],
+    ) -> Result<Option<providers::ResolvedResponsesScope>, RuntimeError> {
+        Ok(None)
+    }
+
+    /// Replay-aware seams keep legacy models source compatible.
+    /// The default does not authorize opaque replay or infer a scope from output.
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &event_bus::EventBus,
+        _replay: &crate::ResponsesReplayState,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_streaming(invocation, role, messages, tools, bus)
+            .await
+    }
+
     /// ロールの会話履歴に対して補完を要求する。
     ///
     /// `invocation` は呼び出し元 run の相関文脈である。実装側は観測相関
@@ -241,6 +283,7 @@ pub trait AgentModel: Send + Sync {
                 | providers::ContentBlock::Text { .. }
                 | providers::ContentBlock::Reasoning { .. }
                 | providers::ContentBlock::Anthropic { .. }
+                | providers::ContentBlock::ResponsesReasoning { .. }
                 | providers::ContentBlock::ToolUse { .. }
                 | providers::ContentBlock::ToolResult { .. } => continue,
             };

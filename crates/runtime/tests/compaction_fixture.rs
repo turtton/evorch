@@ -17,6 +17,7 @@ fn joined_text(message: &Message) -> String {
             }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -38,6 +39,7 @@ fn tool_use_ids(message: &Message) -> Vec<&str> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -57,6 +59,7 @@ fn tool_result_ids(message: &Message) -> Vec<&str> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. } => None,
         })
@@ -85,6 +88,7 @@ fn tool_result_text(message: &Message) -> String {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. } => None,
         })

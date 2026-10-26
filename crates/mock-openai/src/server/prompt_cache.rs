@@ -56,10 +56,18 @@ impl PromptCache {
 
 /// Canonical settings (Responses `instructions` and `tools` included) followed by one
 /// line per Chat Completions `messages` or Responses `input` item.
+///
+/// Like `stream`/`stream_options`, Responses `include` only selects which output
+/// fields come back (`reasoning.encrypted_content`); it is not prompt content, and
+/// provider prompt caching keys on the prompt prefix. Ordinary requests send it while
+/// Codex official compaction keeps `include: []`, so excluding it here keeps the
+/// compaction request on the cached conversation prefix. Whether the real backend
+/// reuses the cache across that difference is unverified. Turn-to-turn stability of
+/// `include` is still enforced by [`crate::cache_contract::assert_append_only`].
 fn prompt_bytes(request: &Value) -> Vec<u8> {
     let mut settings = request.clone();
     if let Some(object) = settings.as_object_mut() {
-        for field in ["messages", "input", "stream", "stream_options"] {
+        for field in ["messages", "input", "stream", "stream_options", "include"] {
             object.remove(field);
         }
     }
@@ -168,6 +176,65 @@ mod tests {
         }
         request["input"].as_array_mut().unwrap().push(json!({
             "type": "custom_tool_call_output", "call_id": "call2", "output": "appended"
+        }));
+        assert!(prompt_bytes(&request).starts_with(&original));
+        assert_eq!(cache.observe(&request).1, input);
+    }
+
+    #[test]
+    fn output_include_is_not_prompt_content() {
+        let ordinary = json!({"model": "m", "include": ["reasoning.encrypted_content"],
+            "input": [{"type": "message", "role": "user", "content": "go"}]});
+        let mut compaction = ordinary.clone();
+        compaction["include"] = json!([]);
+        assert_eq!(prompt_bytes(&ordinary), prompt_bytes(&compaction));
+        let mut cache = PromptCache::default();
+        let (input, _) = cache.observe(&ordinary);
+        assert_eq!(cache.observe(&compaction), (input, input));
+        let mut changed = ordinary.clone();
+        changed["instructions"] = json!("changed");
+        assert!(cache.observe(&changed).1 < input);
+    }
+
+    #[test]
+    fn responses_prompt_counts_replayed_reasoning_items_without_special_casing() {
+        let reasoning = json!({"type": "reasoning", "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "R1"});
+        let mut request = json!({"model": "m", "include": ["reasoning.encrypted_content"],
+        "input": [
+            {"type": "message", "role": "user", "content": "go"},
+            reasoning,
+            {"type": "function_call", "call_id": "call", "name": "read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call", "output": "result"}
+        ]});
+        let mut cache = PromptCache::default();
+        let original = prompt_bytes(&request);
+        assert!(
+            String::from_utf8(original.clone())
+                .unwrap()
+                .contains(r#""encrypted_content":"R1""#)
+        );
+        let (input, cached) = cache.observe(&request);
+        assert_eq!((input, cached), (original.len() as u64, 0));
+        assert_eq!(cache.observe(&request), (input, input));
+        for (field, value) in [
+            ("encrypted_content", json!("R1-reencoded")),
+            ("id", json!("rs_other")),
+            ("summary", json!([])),
+        ] {
+            let mut changed = request.clone();
+            changed["input"][1][field] = value;
+            assert_ne!(prompt_bytes(&changed), original, "{field}");
+            assert!(cache.observe(&changed).1 < input, "{field}");
+        }
+        let mut dropped = request.clone();
+        dropped["input"].as_array_mut().unwrap().remove(1);
+        assert!(cache.observe(&dropped).1 < input);
+        let mut moved = request.clone();
+        moved["input"].as_array_mut().unwrap().swap(1, 2);
+        assert!(cache.observe(&moved).1 < input);
+        request["input"].as_array_mut().unwrap().push(json!({
+            "type": "reasoning", "id": "rs_2", "summary": [], "encrypted_content": "R2"
         }));
         assert!(prompt_bytes(&request).starts_with(&original));
         assert_eq!(cache.observe(&request).1, input);

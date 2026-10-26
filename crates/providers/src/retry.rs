@@ -53,7 +53,8 @@ pub fn is_retryable(error: &ProviderError) -> bool {
                 || (500..=599).contains(status)
                 || (*status == 400 && is_server_overloaded(body))
         }
-        ProviderError::RateLimited { .. }
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::RateLimited { .. }
         | ProviderError::InvalidSse { .. }
         | ProviderError::InvalidJson { .. }
         | ProviderError::Request(_)

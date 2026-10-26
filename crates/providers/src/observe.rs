@@ -278,9 +278,9 @@ fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
         ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => {
             ProviderFailureKind::InvalidResponse
         }
-        ProviderError::Request(_) | ProviderError::Transport { .. } => {
-            ProviderFailureKind::Transport
-        }
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::Request(_)
+        | ProviderError::Transport { .. } => ProviderFailureKind::Transport,
         ProviderError::RetriesExhausted { last, .. } => failure_kind(last),
     }
 }

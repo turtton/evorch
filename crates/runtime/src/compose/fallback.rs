@@ -12,7 +12,8 @@ pub(super) fn eligible(error: &ProviderError) -> bool {
             matches!(status, 400 | 401 | 402 | 403 | 408 | 429 | 500..=599)
         }
         ProviderError::RetriesExhausted { last, .. } => eligible(last),
-        ProviderError::Request(_)
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::Request(_)
         | ProviderError::InvalidSse { .. }
         | ProviderError::InvalidJson { .. } => false,
     }

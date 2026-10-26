@@ -229,6 +229,7 @@ mod review_tests {
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        responses_replay: Default::default(),
                         admission_reservation: None,
                         turn: None,
                         boundary_pending: false,

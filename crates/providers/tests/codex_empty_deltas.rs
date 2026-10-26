@@ -47,6 +47,7 @@ async fn empty_deltas_are_noops_and_reasoning_alone_has_no_ttft() {
     )
     .expect("client");
     let request = ChatRequest {
+        responses_replay: None,
         model: "codex".into(),
         messages: vec![],
         tools: vec![],

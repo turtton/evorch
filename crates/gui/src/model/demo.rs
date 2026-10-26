@@ -382,6 +382,7 @@ fn initial_marker(messages: &[Message]) -> Result<&str, RuntimeError> {
                 }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::Anthropic { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,

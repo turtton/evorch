@@ -15,6 +15,7 @@ use wiremock::{Mock, MockServer};
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "gpt-contract".into(),
         messages: vec![],
         tools: vec![],
