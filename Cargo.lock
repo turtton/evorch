@@ -6429,6 +6429,7 @@ dependencies = [
  "event-bus",
  "providers",
  "rusqlite",
+ "rustix 1.1.4",
  "secret-guard",
  "serde",
  "serde_json",

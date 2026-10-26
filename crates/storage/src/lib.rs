@@ -56,12 +56,14 @@
 pub mod config;
 mod db;
 mod diagnostic;
+pub mod durable_tasks;
 pub mod entity;
 pub mod error;
 pub mod eval_sample;
 pub mod host_input;
 pub mod improvement;
 pub mod inspect;
+pub mod maintenance;
 pub mod memory;
 mod migrations;
 mod projection;

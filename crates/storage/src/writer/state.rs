@@ -32,6 +32,7 @@ struct WriterState {
     next_checkpoint_at: Instant,
     diagnostic_cursor: Option<event::diagnostic::Cursor>,
     reclaim_wal_pending: bool,
+    task_progress_cursor: crate::maintenance::retention::Cursor,
 }
 
 /// All review mutations share the same suspension gate and rollback boundary.
@@ -94,6 +95,7 @@ pub(super) fn run_writer(
         temp_warned,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
+        task_progress_cursor: Default::default(),
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
@@ -547,7 +549,20 @@ fn run_due_work(state: &mut WriterState) {
 /// page budget and checks storage limits against the resulting file sizes.
 fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     let now = std::time::SystemTime::now();
-    let removed = diagnostic::retain_recent(state, now)? + retain_thread_starts(state, now)?;
+    let mut removed = diagnostic::retain_recent(state, now)? + retain_thread_starts(state, now)?;
+    if state.config.retain_terminal_task_progress {
+        let summary =
+            crate::maintenance::retention::tick(&state.conn, &mut state.task_progress_cursor)?;
+        if summary.event_count > 0 {
+            state.accounting = event::EventAccounting::default();
+            removed += summary.event_count;
+            tracing::info!(
+                events_removed = summary.event_count,
+                bytes_removed = summary.payload_bytes,
+                "equivalent terminal task progress removed"
+            );
+        }
+    }
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
@@ -963,6 +978,7 @@ mod tests {
             suspend_logged: false,
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
+            task_progress_cursor: Default::default(),
         }
     }
 

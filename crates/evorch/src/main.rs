@@ -19,6 +19,9 @@ fn main() -> ExitCode {
     if argv.first().is_some_and(|command| command == "benchmark") {
         return benchmark(argv);
     }
+    if argv.first().is_some_and(|command| command == "maintenance") {
+        return maintenance(argv);
+    }
     if argv.first().is_some_and(|command| command == "inspect") {
         return inspect(argv);
     }
@@ -135,6 +138,23 @@ fn evaluate(argv: Vec<String>) -> ExitCode {
 
 fn inspect(argv: Vec<String>) -> ExitCode {
     let result = evorch::inspect::parse_args(argv.into_iter()).and_then(evorch::inspect::run);
+    match result
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(|error| error.to_string()))
+    {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn maintenance(argv: Vec<String>) -> ExitCode {
+    let result =
+        evorch::maintenance::parse_args(argv.into_iter()).and_then(evorch::maintenance::run);
     match result
         .and_then(|value| serde_json::to_string_pretty(&value).map_err(|error| error.to_string()))
     {

@@ -662,6 +662,7 @@ fn run() -> Result<(), GuiError> {
     let storage_config = StorageConfig {
         db_path: storage_db_path,
         usage_retention_days: composition_config.metrics.retention_days,
+        retain_terminal_task_progress: composition_config.diagnostics.retain_terminal_task_progress,
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;

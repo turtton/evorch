@@ -136,6 +136,7 @@ pub struct Storage(StorageHandle, Option<JoinHandle<()>>);
 impl Storage {
     /// ファイル DB を開き、専用 writer スレッドを開始します。
     pub fn open(config: StorageConfig) -> Result<Self, StorageError> {
+        let lease = crate::maintenance::offline::writer_lease(&config.db_path)?;
         let database = Database::open(&config)?;
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;
@@ -152,6 +153,7 @@ impl Storage {
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
+                let _lease = lease;
                 run_writer(
                     database.conn,
                     rx,
