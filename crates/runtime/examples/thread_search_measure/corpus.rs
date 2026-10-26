@@ -51,7 +51,7 @@ impl Case {
             .iter()
             .map(|pattern| {
                 regex::RegexBuilder::new(pattern)
-                    .case_insensitive(true)
+                    .case_insensitive(self.mode != "regex")
                     .size_limit(1 << 20)
                     .dfa_size_limit(1 << 20)
                     .build()
@@ -116,7 +116,13 @@ impl Case {
             vec![regex::escape(&self.query)]
         };
         for expression in expressions {
-            if !Regex::new(&format!("(?i){expression}"))?.is_match(text) {
+            // Production literals ignore case; regex follows its own flags.
+            let expression = if self.mode == "regex" {
+                expression
+            } else {
+                format!("(?i){expression}")
+            };
+            if !Regex::new(&expression)?.is_match(text) {
                 return Ok(false);
             }
         }
@@ -452,7 +458,8 @@ mod tests {
             ("日本", "words", "日本語", true),
             ("alpha beta", "words", "beta ... alpha", true),
             ("alpha beta", "phrase", "alpha ... beta", false),
-            ("a.+b", "regex", "AxxxB", true),
+            ("a.+b", "regex", "AxxxB", false),
+            ("(?i)a.+b", "regex", "AxxxB", true),
         ] {
             let case = Case {
                 class: "test",
@@ -461,6 +468,42 @@ mod tests {
                 tool: false,
             };
             assert_eq!(case.matches(text).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn regex_flags_control_ascii_and_unicode_case_for_oracle_and_diagnostic() {
+        for (query, text, expected) in [
+            ("(?:alpha)", "ALPHA", false),
+            ("(?:alpha)", "alpha", true),
+            ("(?i:alpha)", "ALPHA", true),
+            ("(?i)alpha", "ALPHA", true),
+            ("(?i)(?-i:alpha)", "ALPHA", false),
+            ("éclair", "ÉCLAIR", false),
+            ("éclair", "éclair", true),
+            ("(?i:éclair)", "ÉCLAIR", true),
+            ("(?i)éclair", "ÉCLAIR", true),
+            ("(?i)(?-i:éclair)", "ÉCLAIR", false),
+        ] {
+            let case = Case::fixture(query, "regex");
+            assert_eq!(case.matches(text).unwrap(), expected);
+            assert_eq!(
+                case.diagnostic_patterns()
+                    .unwrap()
+                    .iter()
+                    .all(|pattern| pattern.is_match(text)),
+                expected
+            );
+        }
+        for mode in ["words", "phrase"] {
+            let case = Case::fixture("éclair", mode);
+            assert!(case.matches("ÉCLAIR").unwrap());
+            assert!(
+                case.diagnostic_patterns()
+                    .unwrap()
+                    .iter()
+                    .all(|pattern| pattern.is_match("ÉCLAIR"))
+            );
         }
     }
 }

@@ -274,6 +274,8 @@ This is not exact for rare queries that scan more threads than they return;
 their non-first-page replay windows must be treated as estimates. The current
 replay uses the emitted scanned-position payload, not the last hit. This
 correction does not affect actual runtime timings or canonical equality checks.
+Like production, literal matching ignores case, whereas regex matching is
+case-sensitive unless the query explicitly enables case-insensitive flags.
 
 Supplementary attribution on the same prepared seed found:
 
@@ -363,3 +365,83 @@ filtered redaction/matching took only 23 / 7 µs.
 The corrected observed-cursor replay's second window contained 89 threads /
 325 run slots, agreeing with real coverage, instead of the old last-hit
 estimate of 477 slots.
+
+### Tokenizer prefilter remeasurement and regex oracle correction
+
+At `894b9965be67851eeea30c51f35bdbc5ba20f960`, the release harness was rebuilt
+with the same prepared seed, scope, queries, extraction/accounting versions,
+100 repetitions, five warmups, page limit and strict threshold. The old and
+new manifest protocols differed only in the binary hash:
+
+- Binary SHA-256: `93b6ce79aa5c1209df8e01bcb718e3ee6f9e0e4d88e9344abe10bc666acdb20f`
+- Conditions SHA-256: `c2573b6441db269118a33adbbb3f26b89c534009b5fe0b9c24bdb8ba9d85d514`
+- Private artifacts: `$TMPDIR/s8-phaseb-01m5ta9r-measure/manifest.json`,
+  `s8-phaseb-01m5ta9r-executions.jsonl` and per-cell summaries.
+
+The phrase warm/off prerequisite passed, then the fresh matrix stopped at the
+first regex warmup's `canonical_hit_set_mismatch`:
+
+| Warm/off class | Measured drains / pages | Canonical threads / hits | Page p95 | First-page p95 | Drain p95 | Partial pages |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phrase | 100 / 200 | 8 / 10 | 135.758 ms | 137.066 ms | 157.956 ms | 0 |
+| ASCII trigram | 100 / 800 | 95 / 1166 | 149.648 ms | 152.975 ms | 512.216 ms | 0 |
+| Short | 100 / 900 | 110 / 2221 | 84.815 ms | 87.156 ms | 433.909 ms | 100 |
+| Unicode | 100 / 700 | 68 / 962 | 86.573 ms | 87.710 ms | 356.725 ms | 0 |
+| Regex | 0; first warmup failed | expected 95 / 1166, actual 91 / 1152 | unavailable | unavailable | unavailable | 1 in failed warmup |
+
+Every completed drain's entire map matched its oracle. Maximum output sizes
+were respectively 8,276 / 16,312 / 16,320 / 16,067 bytes. All four off cells
+made zero index steps/commits, with normal capacity. Ending WAL sizes were
+4,157,112 bytes for phrase and 4,268,352 bytes for the other three cells.
+Classification remained 1857 total / 690 indexable / 1154 unprovable /
+13 oversized; the visible scope had 189 threads / 1481 runs / 420 indexable
+runs, and other-project work had 345 targets / 270 indexable runs in two
+projects. CPU/memory PSI `some avg10` was zero during these cells, but IO
+pressure remained high (IO `some avg10` before/after: phrase 83.70/77.73%,
+ASCII 80.46/84.70%, short 81.95/84.33%, Unicode 83.98/82.46%).
+
+The five cell processes took 352.041 seconds in total, including copies and
+preflight. They ran from 2026-10-25 20:02:14 to 20:08:55 UTC including the gap
+between the prerequisite and matrix. The prepared seed's DB/WAL sizes and
+modification timestamps were unchanged. The aggregate command correctly
+failed: **four completed latency cells, one correctness failure, 23 missing**.
+Tool/no-hit, every cold cell and every backfill-on cell were not measured.
+
+Read-only diagnosis of the failed warmup identified an **oracle bug, not
+evidence of a production search bug**. Production regex respects its own flags
+and is case-sensitive by default; the independent harness matcher had
+unconditionally prepended `(?i)`. The frozen regex merely wraps the ASCII
+query in `(?:...)`, without a case-insensitive flag. Supplementary matching
+over canonical metadata and persisted, scoped index text yielded:
+
+- Case-sensitive map: exactly the actual 91 threads / 1152 hits.
+- Case-insensitive map: exactly the old oracle's 95 threads / 1166 hits.
+- The entire 14-hit difference was one title, three conversation blocks and
+  ten notes: four absent threads plus count differences in eight others,
+  with no actual-only thread.
+- Eight requests/results exhausted seven distinct continuation tokens; the
+  first page was partial, the input chain was intact and the final cursor
+  was absent. The resumed source/index/cursor revisions agreed. Snapshot and
+  index revision/state comparisons for 1435 saved member runs found no
+  differences from the prepared seed.
+
+These Python regex/read-only comparisons did not rerun the shared extractor
+or re-redact metadata, so they are supplementary diagnosis, not replacement
+acceptance evidence. Both independently computed full-map hashes matched the
+corresponding persisted result/oracle, and the production/harness flag
+difference explains the full discrepancy.
+
+The local harness correction preserves the regex query and production
+semantics, removes implicit case folding from its oracle and diagnostic
+matcher, and tests ASCII/Unicode with explicit enabled/disabled flags.
+The failed manifest is retained unchanged. **All four old passing cells are
+historical only; acceptance requires a new binary/conditions manifest and all
+28 fresh cells after the correction.**
+
+The existing backfill driver's 1 ms wait on an idle asynchronous extraction
+is not an overlap/completion barrier: the first-ToolUse channel and successful
+progress/interval checks remain mandatory. It does poll more frequently than
+the production CLI's deadline/backoff loop, adding a potentially stricter
+writer-load condition. Its quantitative effect on latency/overlap is
+unmeasured; do not describe these on-cells as identical to the production CLI.
+No on-cell was reached in this stopped run.
