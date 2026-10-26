@@ -326,6 +326,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .iter_mut()
                 .find(|thread| thread.id == previous)
         {
+            if thread.draft_input != self.composer.input {
+                // This boundary may see input before the next UI/logic tick.
+                // Keep it retryable if the immediate atomic save fails, even
+                // when archive leaves no active composer to observe later.
+                self.draft_dirty_at.set(Some(std::time::Instant::now()));
+            }
             thread.draft_input = std::mem::take(&mut self.composer.input);
             self.composer_attachments
                 .insert(previous, std::mem::take(&mut self.composer.attachments));

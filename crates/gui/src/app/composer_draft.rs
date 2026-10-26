@@ -182,3 +182,61 @@ mod shutdown_tests {
         assert_eq!(state.sidebar_write_count.get(), 3);
     }
 }
+
+#[cfg(test)]
+mod switch_failure_tests {
+    use super::*;
+    use crate::app::delivery_tests::state;
+    use workspace_ui::{ProjectId, ThreadId};
+
+    fn retries_unobserved_draft_after_boundary_failure(archive: bool, next: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unavailable/sidebar.json");
+        let mut state = state(&directory.path().join("sidebar.json"));
+        state.sidebar_path = Some(path.clone());
+        if next {
+            state
+                .sidebar
+                .create_thread(ThreadId::new("next"), ProjectId::new("test"), "next")
+                .unwrap();
+            state.sidebar.threads[1].draft_input = "keep next".into();
+        }
+        state.composer.input = "unobserved old input".into();
+        assert!(state.draft_dirty_at.get().is_none());
+        if archive {
+            state.toggle_archive(ThreadId::new("thread")).unwrap();
+        } else {
+            state.switch_thread(ThreadId::new("next")).unwrap();
+        }
+        assert!(state.draft_dirty_at.get().is_some());
+        assert_eq!(state.sidebar_write_count.get(), 0);
+        assert!(!path.exists());
+        assert_eq!(state.composer.input, if next { "keep next" } else { "" });
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        // Only a normal timer tick after recovery; no typing, selection or flush.
+        state.persist_composer_draft_at(Instant::now() + DRAFT_DEBOUNCE);
+        let saved = workspace_ui::load_sidebar(&path).unwrap();
+        assert_eq!(saved.threads[0].draft_input, "unobserved old input");
+        if next {
+            assert_eq!(saved.threads[1].draft_input, "keep next");
+            assert_eq!(saved.active_thread, Some(ThreadId::new("next")));
+        } else {
+            assert!(saved.active_thread.is_none());
+        }
+        assert!(state.draft_dirty_at.get().is_none());
+        assert_eq!(state.sidebar_write_count.get(), 1);
+    }
+
+    #[test]
+    fn ordinary_switch_retries_unobserved_draft_after_save_failure() {
+        retries_unobserved_draft_after_boundary_failure(false, true);
+    }
+    #[test]
+    fn archive_switch_retries_unobserved_draft_after_save_failure() {
+        retries_unobserved_draft_after_boundary_failure(true, true);
+    }
+    #[test]
+    fn archive_last_thread_retries_unobserved_draft_after_save_failure() {
+        retries_unobserved_draft_after_boundary_failure(true, false);
+    }
+}
