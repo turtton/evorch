@@ -2,7 +2,6 @@
 use super::WorkbenchState;
 use super::history::{ComposerDraft, DeliveryStatus, Resolution};
 use crate::model::tasks::AgentRunSource;
-use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn persist_history(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +32,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if message.resolution.is_some() || message.id.is_empty() {
                 continue;
             }
+            let was_delivered = message.status == DeliveryStatus::Delivered;
             if let Some(receipt) = receipts
                 .iter()
                 .find(|receipt| receipt.prompt_id == message.id)
@@ -48,7 +48,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                     | workspace_ui::ThreadRunPhase::Stopped
                             )
                         });
-                        if terminal {
+                        let live = receipt
+                            .run_id
+                            .parse()
+                            .ok()
+                            .is_some_and(|run| self.tasks.host_input_run_is_live(run));
+                        if terminal && !live {
                             DeliveryStatus::Unknown
                         } else {
                             DeliveryStatus::Queued
@@ -63,6 +68,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     reason: "送信前に中断".into(),
                 };
             }
+            if was_delivered && message.status != DeliveryStatus::Delivered {
+                self.transcripts
+                    .remove_host_input(&message.thread_id, &message.id);
+            }
         }
     }
 
@@ -76,7 +85,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 message.resolution.is_none()
                     && matches!(
                         message.status,
-                        DeliveryStatus::Queued | DeliveryStatus::Unknown
+                        DeliveryStatus::Queued
+                            | DeliveryStatus::Unknown
+                            | DeliveryStatus::Delivered
                     )
             })
             .map(|message| message.id.clone())
@@ -98,12 +109,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.apply_receipts(&receipts, false);
         for (old, new) in before.iter().zip(&self.history) {
             if old.status != DeliveryStatus::Delivered && new.status == DeliveryStatus::Delivered {
-                self.transcripts.push_to_thread(
-                    &new.thread_id,
-                    TranscriptEntry::UserMessage {
-                        text: new.prompt.clone(),
-                    },
-                );
+                self.transcripts
+                    .push_host_input(&new.thread_id, &new.id, new.prompt.clone());
             }
         }
         if before

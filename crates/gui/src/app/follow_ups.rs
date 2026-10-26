@@ -7,7 +7,6 @@ use super::WorkbenchState;
 use super::history::Resolution;
 use crate::model::composer::QueuedFollowUp;
 use crate::model::tasks::AgentRunSource;
-use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Whether a chat submitted now would wait in a live run's inbox.
@@ -59,11 +58,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             for mut item in std::mem::take(queue) {
                 if delivered > 0 && !item.undelivered {
                     delivered -= 1;
+                    self.transcripts
+                        .push_host_input(&thread, &item.submission_id, item.prompt);
                     delivered_ids.push(item.submission_id);
-                    self.transcripts.push_to_thread(
-                        &thread,
-                        TranscriptEntry::UserMessage { text: item.prompt },
-                    );
                 } else {
                     item.undelivered |= dropped;
                     if dropped

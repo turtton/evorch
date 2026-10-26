@@ -4,9 +4,12 @@ use super::*;
 use crate::runtime::user_inbox::SendPausePoint;
 use storage::HostInputStatus;
 
+mod restored;
+
 /// Every request waits until released; then the model panics or keeps waiting.
 struct GatedModel {
     release: Arc<tokio::sync::Notify>,
+    entered: Arc<tokio::sync::Notify>,
     panics: bool,
 }
 
@@ -23,6 +26,7 @@ impl AgentModel for GatedModel {
         _messages: &[providers::Message],
         _tools: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
+        self.entered.notify_one();
         self.release.notified().await;
         if self.panics {
             panic!("gated test model panicked");
@@ -37,6 +41,7 @@ struct Fixture {
     runtime: AgentRuntime,
     events: event_bus::EventReceiver,
     release: Arc<tokio::sync::Notify>,
+    entered: Arc<tokio::sync::Notify>,
     run: RunId,
 }
 
@@ -50,11 +55,13 @@ fn fixture(panics: bool) -> Fixture {
     let bus = Arc::new(EventBus::new(1024));
     let events = bus.subscribe();
     let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
     let runtime = AgentRuntime::new(
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
         Arc::new(GatedModel {
             release: release.clone(),
+            entered: entered.clone(),
             panics,
         }),
     )
@@ -76,6 +83,7 @@ fn fixture(panics: bool) -> Fixture {
         runtime,
         events,
         release,
+        entered,
         run,
     }
 }

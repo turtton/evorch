@@ -7,6 +7,8 @@ use crate::model::composer::ProviderStatus;
 use std::sync::{Arc, Mutex};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+mod review;
+
 #[derive(Default)]
 struct Receipts(Arc<Mutex<Vec<storage::HostInputReceipt>>>);
 impl CommandSink for Receipts {

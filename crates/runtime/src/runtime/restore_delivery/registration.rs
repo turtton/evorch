@@ -165,7 +165,12 @@ impl AgentRuntime {
                 to: AgentRunPhase::Pending,
                 reason: Some("registered".into()),
             }));
-        let join = tokio::spawn(run_agent(Arc::downgrade(&self.shared), task, channels));
+        let join = tokio::spawn(Self::run_guarded(
+            Arc::downgrade(&self.shared),
+            task,
+            channels,
+            None,
+        ));
         if let Some(entry) = runs.get_mut(&run_id) {
             entry._join = Some(join);
         }

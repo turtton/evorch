@@ -164,9 +164,10 @@ impl CommandSink for RuntimeCommandSink {
         Some(self.runtime.host_input_receipts(ids))
     }
     fn mark_unreachable_host_inputs(&self, run: &str) -> Result<(), storage::StorageError> {
-        self.runtime
-            .mark_unreachable_host_inputs(run, "orphaned_host")
-            .map(|_| ())
+        if let Ok(run) = run.parse() {
+            self.runtime.reconcile_orphaned_host_inputs(run)?;
+        }
+        Ok(())
     }
 
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {

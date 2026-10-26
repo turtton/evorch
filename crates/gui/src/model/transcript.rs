@@ -113,6 +113,7 @@ pub struct TranscriptModel {
     view_start: usize,
     view_len: usize,
     first_entry_id: usize,
+    host_inputs: std::collections::BTreeMap<String, usize>,
     thinking: std::collections::BTreeMap<Option<String>, usize>,
     streaming_messages: std::collections::BTreeMap<Option<String>, Vec<usize>>,
     completed_messages: std::collections::BTreeMap<String, event_bus::EventMeta>,
@@ -141,6 +142,7 @@ impl TranscriptModel {
             view_start: 0,
             view_len: capacity,
             first_entry_id: 0,
+            host_inputs: Default::default(),
             thinking: std::collections::BTreeMap::new(),
             streaming_messages: std::collections::BTreeMap::new(),
             completed_messages: std::collections::BTreeMap::new(),
@@ -538,6 +540,12 @@ impl TranscriptModel {
     fn remove_entry(&mut self, index: usize) {
         self.entries.remove(index);
         let removed_id = self.first_entry_id + index;
+        self.host_inputs.retain(|_, id| *id != removed_id);
+        for id in self.host_inputs.values_mut() {
+            if *id > removed_id {
+                *id -= 1;
+            }
+        }
         self.thinking.retain(|_, id| *id != removed_id);
         for id in self.thinking.values_mut() {
             if *id > removed_id {
@@ -698,6 +706,29 @@ impl TranscriptModel {
         self.entries.get_mut(index)
     }
 
+    pub(crate) fn push_host_input(&mut self, id: &str, text: String) {
+        if self.capacity == 0 || (!id.is_empty() && self.host_inputs.contains_key(id)) {
+            return;
+        }
+        let entry_id = self.first_entry_id + self.entries.len();
+        self.push(TranscriptEntry::UserMessage { text });
+        if !id.is_empty() {
+            self.host_inputs.insert(id.into(), entry_id);
+        }
+    }
+
+    pub(crate) fn remove_host_input(&mut self, id: &str) {
+        if let Some(entry) = self.host_inputs.get(id).copied()
+            && let Some(index) = entry.checked_sub(self.first_entry_id)
+            && matches!(
+                self.entries.get(index),
+                Some(TranscriptEntry::UserMessage { .. })
+            )
+        {
+            self.remove_entry(index);
+        }
+    }
+
     pub(crate) fn push(&mut self, entry: TranscriptEntry) {
         if self.capacity == 0 {
             return;
@@ -706,6 +737,7 @@ impl TranscriptModel {
         if self.entries.len() > self.capacity {
             self.entries.remove(0);
             self.first_entry_id += 1;
+            self.host_inputs.retain(|_, id| *id >= self.first_entry_id);
             self.thinking.retain(|_, id| *id >= self.first_entry_id);
             self.streaming_messages.retain(|_, ids| {
                 ids.retain(|id| *id >= self.first_entry_id);

@@ -1697,24 +1697,34 @@ impl AgentRuntime {
                     channels.phase_tx.subscribe(),
                 )
             });
-            match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
-                Ok(()) => {
-                    if let Some(learning) = learning {
-                        learning.complete(weak, run_id).await;
-                    }
-                }
-                // No lessons from a run whose loop state is unknown.
-                Err(panic) => {
-                    if let Some(shared) = weak.upgrade() {
-                        AgentRuntime { shared }.run_panicked(run_id, panic).await;
-                    }
-                }
-            }
+            Self::run_guarded(weak, task, channels, learning).await;
         });
         if let Some(entry) = lock_runs(&self.shared.runs).get_mut(&run_id) {
             entry._join = Some(join);
         }
         run_id
+    }
+
+    async fn run_guarded(
+        weak: Weak<Shared>,
+        task: RunTask,
+        channels: LoopChannels,
+        learning: Option<crate::memory_lifecycle::PendingLearning>,
+    ) {
+        let run_id = task.run_id;
+        match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
+            Ok(()) => {
+                if let Some(learning) = learning {
+                    learning.complete(weak, run_id).await;
+                }
+            }
+            // No lessons from a run whose loop state is unknown.
+            Err(panic) => {
+                if let Some(shared) = weak.upgrade() {
+                    AgentRuntime { shared }.run_panicked(run_id, panic).await;
+                }
+            }
+        }
     }
 
     pub(crate) fn spawn_escalated_root(
@@ -2152,6 +2162,55 @@ impl AgentRuntime {
             self.emit_host_input_transitions(run, &applied);
         }
         Ok(changed)
+    }
+
+    /// Admission and registration share the execution identity. An old terminal
+    /// RunEntry must not hide a newer admission that has not registered yet.
+    pub fn host_input_run_is_live(&self, run: RunId) -> bool {
+        let intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        let Some(execution) = cancellation::current_execution(run, &intents, &admissions, &runs)
+        else {
+            return false;
+        };
+        admissions.get(&run).is_some_and(|admission| {
+            Arc::ptr_eq(&admission.execution, &execution) && admission.snapshot().result.is_none()
+        }) || runs.get(&run).is_some_and(|entry| {
+            Arc::ptr_eq(&entry.execution, &execution)
+                && (matches!(
+                    *entry.phase_rx.borrow(),
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                ) || entry._join.as_ref().is_some_and(|join| !join.is_finished()))
+        })
+    }
+
+    /// Only the thread owner may call this after excluding other live owners.
+    /// Serialize the negative liveness check and settlement with explicit
+    /// restoration of this run, without holding global locks during SQLite I/O.
+    pub fn reconcile_orphaned_host_inputs(&self, run: RunId) -> Result<(), storage::StorageError> {
+        let _restore_guard = self.shared.run_store.get().map(|store| {
+            store
+                .restore_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
+        let gate = self.stop_restore_gate(run);
+        let _guard = gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.host_input_run_is_live(run) {
+            self.mark_unreachable_host_inputs(&run.to_string(), "orphaned_host")?;
+        }
+        Ok(())
     }
 
     /// Observe accepted follow-ups that have not entered the agent's context.

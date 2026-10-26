@@ -1,6 +1,5 @@
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
-use crate::model::transcript::TranscriptEntry;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -522,13 +521,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         // Receipt reconciliation also covers runs whose last event already
         // looked terminal (a failed terminal transaction leaves Accepted rows).
-        for thread in &self.sidebar.threads {
-            if protected_threads.contains(&thread.id.to_string()) {
+        let ids: Vec<_> = self
+            .history
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+        let receipts = match db.host_input_receipts(&ids) {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                tracing::warn!(%error, "orphan receipt lookup failed");
+                Vec::new()
+            }
+        };
+        for (thread, runs) in self.history_run_candidates(&receipts) {
+            if protected_threads.contains(&thread) {
                 continue;
             }
-            for run in &thread.run_ids {
-                if !executing(run)
-                    && let Err(error) = self.sink.mark_unreachable_host_inputs(run)
+            for run in runs {
+                if !executing(&run)
+                    && !self.receipt_run_is_live(&run)
+                    && let Err(error) = self.sink.mark_unreachable_host_inputs(&run)
                 {
                     tracing::warn!(%run, %error, "orphan receipt reconciliation failed");
                 }
@@ -553,21 +565,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// checkpoint, instead of keeping the thread running forever.
     pub(super) fn reconcile_claimed_thread(&mut self, thread_id: &str) {
         use workspace_ui::ThreadRunPhase;
-        let Some(thread) = self
-            .sidebar
-            .threads
+        let ids: Vec<_> = self
+            .history
             .iter()
-            .find(|thread| thread.id.to_string() == thread_id)
-        else {
-            return;
+            .filter(|message| message.thread_id == thread_id)
+            .map(|message| message.id.clone())
+            .collect();
+        let receipts = match self.sink.host_input_receipts(&ids) {
+            Some(Ok(receipts)) => receipts,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "claimed receipt lookup failed");
+                Vec::new()
+            }
+            None => Vec::new(),
         };
-        for run_id in &thread.run_ids {
-            let live = run_id
-                .parse::<runtime::RunId>()
-                .ok()
-                .and_then(|run| self.tasks.inspect(run))
-                .is_some();
-            if !live && let Err(error) = self.sink.mark_unreachable_host_inputs(run_id) {
+        let runs = self
+            .history_run_candidates(&receipts)
+            .remove(thread_id)
+            .unwrap_or_default();
+        for run_id in &runs {
+            if self.receipt_run_is_live(run_id) {
+                continue;
+            }
+            if let Err(error) = self.sink.mark_unreachable_host_inputs(run_id) {
                 tracing::warn!(%run_id, %error, "claimed receipt reconciliation failed");
             }
             let Some(phase) = self.phases.get_mut(run_id) else {
@@ -579,27 +599,62 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ) {
                 continue;
             }
-            let live = run_id
-                .parse::<runtime::RunId>()
-                .ok()
-                .and_then(|run| self.tasks.inspect(run))
-                .is_some();
-            if live {
-                continue;
-            }
             tracing::warn!(%run_id, %thread_id, from = ?phase, "reconciled an orphaned run of a claimed thread");
             *phase = ThreadRunPhase::Stopped;
             self.transcripts.interrupt_run_tools(run_id);
         }
+        self.reconcile_receipts();
+    }
+
+    fn receipt_run_is_live(&self, run: &str) -> bool {
+        run.parse()
+            .ok()
+            .is_some_and(|run| self.tasks.host_input_run_is_live(run))
+    }
+
+    fn history_run_candidates(
+        &self,
+        receipts: &[storage::HostInputReceipt],
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut candidates: std::collections::BTreeMap<_, std::collections::BTreeSet<_>> = self
+            .sidebar
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.id.to_string(),
+                    thread.run_ids.iter().cloned().collect(),
+                )
+            })
+            .collect();
+        // Accepted commits before ChatAccepted attaches the run to the sidebar.
+        // The saved submission ID is sufficient to recover that crash window.
+        for message in &self.history {
+            if let Some(receipt) = receipts
+                .iter()
+                .find(|receipt| receipt.prompt_id == message.id)
+            {
+                candidates
+                    .entry(message.thread_id.clone())
+                    .or_default()
+                    .insert(receipt.run_id.clone());
+            }
+        }
+        candidates
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {
+        let message = self
+            .history
+            .iter()
+            .find(|saved| !message.id.is_empty() && saved.id == message.id)
+            .cloned()
+            .unwrap_or(message);
         if !message.shown_as_sent() {
             return;
         }
-        self.transcripts.select_thread(Some(message.thread_id));
         self.transcripts
-            .push_thread(TranscriptEntry::UserMessage { text: message.text });
+            .push_host_input(&message.thread_id, &message.id, message.text);
     }
 
     /// Messages that never reached the agent come back above the composer,
