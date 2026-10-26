@@ -505,7 +505,7 @@ v25 は origin/main（`870a969b`）の時点で空いている（最新は v24�
 - D 以外では新 source 情報（revision、hash、note_seq、provenance version、更新時刻、存在情報）を保存するが、E は通常 discovery・source 更新・version 変更・上限引き上げのどれでも P にしない（B-3）。D は新しい正本らしき行を見つけても source_present=false と tombstone を維持し、`source_after_tombstone` を記録する。同 run_id の再利用は禁止する。
 - P 化する契機は generation を増やし旧 job を失効させる。同 revision の R / B を discovery しただけでは generation / attempt_count をリセットしない。明示 reindex は新しい処理要求としてリセットする。provenance_unknown は再試行しても証拠がなければ B に戻す。
 - 失敗・blocked の保存にも成功 commit と同じ epoch / revision / generation / state / request guard を適用し、旧 job の失敗で新 revision の試行数や state を変えない。
-- extractor 変更は位置・本文が変わり得るため非 E / D を再抽出する。accounting のみの変更は保存済み text_bytes / 属性 / block_count から新係数で再会計し、version・集計・必要な論理 eviction を同一トランザクションで確定する。本文検索を不必要に再抽出しない。再会計中の旧会計値は楽観的に解放せず、完了するまで索引増加を止める。
+- extractor 変更は位置・本文が変わり得るため非 E / D を再抽出する。accounting のみの変更は保存済み text_bytes / 属性 / block_count から新係数で再会計し、version・charge・集計を run ごとに atomic に確定する。全 run の再会計が確定した後、新しい total に基づき必要な最小量だけを oldest-first・最大 1 run / step で論理 evict し、eviction も run ごとに atomic に確定する（「順序 5 job・lease・上限」の 2 段階契約を参照）。本文を不必要に再抽出しない。両段階の調整が完了するまで索引増加を止め、未確定の削減分を物理空きとして先取りしない。
 - evict と D 化は block / FTS / 集計を同時に削除する。D では source_present=false とする。discovery と遅延 commit の両方を tombstone / generation で拒否する。
 
 ### job（M2）
