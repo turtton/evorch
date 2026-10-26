@@ -38,8 +38,9 @@ target/release/examples/thread_search_measure \
 ```
 
 Do not enable shell tracing or runtime text logging. A nonzero exit is a failed
-gate, not permission to reduce repetitions, broaden provenance, relax limits,
-or report a successful latency result.
+blocking check (or incomplete aggregate), not permission to reduce repetitions,
+broaden provenance, relax safety limits, or claim missing measurements.
+Exceeding the latency reference alone does not cause a nonzero exit.
 
 ### Cell scheduling and resume
 
@@ -61,8 +62,17 @@ canonical source/authority metadata, scope, query/oracle sets, extractor and
 accounting versions, repetitions, warmups, limits and timing definition. A
 condition mismatch refuses resume. Completed cells are saved atomically and
 skipped, never silently rerun; failed cells remain failed. Aggregate reports all
-missing cells and cannot pass unless all 28 are present and below threshold.
-If a cell fails, stop and diagnose before spending hours on the rest.
+missing cells and cannot pass unless all 28 have completed the blocking checks.
+Latency alone neither stops subsequent cells nor rejects a completed cell on
+resume. Correctness, coverage and resource failures still stop the run for
+diagnosis.
+
+Manifest protocol version 2 fingerprints the advisory latency policy as well
+as the unchanged measurement conditions. Fresh successful cells record
+`status: "passed"` only after all blocking checks finish. `s8_pass` means all
+28 cells passed those checks, **not** that they met the latency reference.
+`page_p95_lt_300ms` and `first_page_p95_lt_300ms` remain advisory comparisons;
+the aggregate separately counts `latency_reference_exceeded_cells`.
 
 `--import-summary <safe-jsonl>` explicitly imports completed **failed** pre-manifest cells
 from the initial run after checking scope/classification, query/oracle hashes,
@@ -72,6 +82,29 @@ import unrelated measurements or infer a missing cell. A partially measured
 cell cannot be imported. No query or output body is stored in the manifest.
 Because old summaries lack a binary/conditions fingerprint, an import can
 preserve failure evidence but can never grant acceptance.
+
+## Latency policy decision (2026-10-26)
+
+The user explicitly accepted continuing with the safe product candidate
+(tool page p95 approximately 3 seconds, approximately 33 seconds for a
+17-page drain):
+
+> まあ一旦はこの秒数でも問題なさそうだな。そこまで頻繁に検索が実施されるわけでもないだろうし。このまま進めていいよ
+
+The reason is the expected low frequency of searches. Accordingly, **300 ms
+is a reference metric, not a merge-blocking latency gate**. The harness retains
+the original strict `< 300,000 µs` comparison for historical comparability,
+but does not abort, fail resume or reject aggregate acceptance solely for
+exceeding it. This is an explicit user policy change, not a claim that the
+implementation became faster or that prior latency FAILs passed.
+
+Correctness (including authorization, redaction, canonical hit maps and
+complete cursor drains), classification/current index coverage, and resource
+errors remain **blocking**. Capacity checks, output bounds, progress/overlap
+checks and the existing 120-second operation watchdog are not relaxed. The
+28-cell matrix, 100 measured drains per cell, five warmups for warm cells,
+queries, scope and measurement boundaries are unchanged. Incomplete or
+old-binary evidence cannot establish a current matrix pass.
 
 ## Frozen protocol
 
@@ -102,9 +135,10 @@ as a page's execution time.
 
 For sorted samples `x`, nearest-rank p95 is
 `x[ceil(0.95 * n) - 1]`, so 100 drain samples use the 95th value. First-page,
-all-page, and complete-drain p50/p95/max are reported separately. The gate is
-strict **all-page p95 < 300,000 microseconds** in every cell; complete-drain
-latency is separately reported, not concealed as a single-page result.
+all-page, and complete-drain p50/p95/max are reported separately. The reference
+is strict **all-page p95 < 300,000 microseconds** in every cell, advisory under
+the decision above; complete-drain latency is separately reported, not concealed
+as a single-page result.
 2800 measured drains at 300 ms each would already take 14 minutes, excluding
 copying, seed indexing, warmups and additional pages. Actual duration must be
 reported, and repetitions must not be silently reduced.
@@ -166,6 +200,11 @@ or WAL truncation is injected into a measured interval.
 
 ## Current validation status
 
+The following history preserves the original measurements and FAIL labels.
+Latency FAIL/PASS labels before the policy decision describe the **former**
+300 ms blocking gate; they are not current blocking verdicts. Correctness
+failures remain blocking. No new matrix has been run for the policy change.
+
 The first real-copy release cell (ASCII trigram, warm, backfill off) completed
 100 drains / 800 pages with an exact canonical set of 95 threads / 1166 hits:
 
@@ -177,9 +216,9 @@ The first real-copy release cell (ASCII trigram, warm, backfill off) completed
 
 Maximum output was 16,312 bytes and no page was partial. Strict classification
 and nonempty current seed coverage passed. The other 27 cells are **not
-completed**, not passing. Measurement stopped after this actionable failure;
+completed**, not passing. Measurement stopped under the former latency gate;
 the partly started next cell is not counted. This is evidence of an unmet
-latency target, not authorization to relax the threshold.
+latency target; the later user decision above changed its blocking status.
 The recorded host pressure had near-zero CPU/memory pressure but high IO
 pressure (`some avg10` 82.78% → 80.62%, `full avg10` 79.37% → 77.11%).
 The off-cell made zero index steps/commits; capacity remained normal.
@@ -220,7 +259,7 @@ warmups and 100 repetitions were unchanged. Capacity was normal; index
 steps/commits remained zero; WAL ended at 4,243,632 bytes. IO PSI `some avg10`
 was 76.80% → 77.77%, `full avg10` 75.30% → 75.47%. This **does not establish an
 S8 pass**: the other 27 cells must still complete under the same binary manifest.
-The full drain is not subject to the individual-request 300 ms threshold.
+The full drain is not compared with the individual-request 300 ms reference.
 
 Resuming that manifest completed warm/off short and Unicode cells, but stopped
 automatically at the warm/off phrase cell:
@@ -298,7 +337,7 @@ Supplementary attribution on the same prepared seed found:
   looking up current run coverage, then used a temporary ORDER BY B-tree.
   This is not a captured production call trace; the synthetic scope is stated
   explicitly. Production SQL/API changes belong to a separate implementation
-  task, with the 300 ms gate still unmet.
+  task; the then-blocking 300 ms target was still unmet.
 
 A second supplementary diagnostic after the scope-first SQL fix observed a
 384.910 ms first-page dispatch. Public reads over its same 100-thread window
@@ -445,3 +484,42 @@ the production CLI's deadline/backoff loop, adding a potentially stricter
 writer-load condition. Its quantitative effect on latency/overlap is
 unmeasured; do not describe these on-cells as identical to the production CLI.
 No on-cell was reached in this stopped run.
+
+### Later tool/ordered-candidate observations retained at the policy change
+
+After the regex oracle correction, a fresh S8 run at `c33cd88f` (old sort path)
+used binary SHA-256 prefix `cf46d931` and conditions SHA-256 prefix `9957b920`.
+It completed warm/off cells with the unchanged 100 measured drains and five
+warmups, stopping under the former gate at tool:
+
+| Warm/off class | All-page p95 |
+| --- | ---: |
+| ASCII trigram | 246.844 ms (first-page p95 321.842 ms, reported separately) |
+| Short | 89.928 ms |
+| Unicode | 88.282 ms |
+| Phrase | 136.975 ms |
+| Regex | 84.783 ms |
+| Tool | **4801.174 ms — FAIL under the former gate** |
+
+The tool cell completed 100 drains / 1700 pages; every complete map matched
+the canonical 70 threads / 29,173 hits per drain. That run had **five cells
+below the former latency gate, one tool latency FAIL and 22 missing**.
+No no-hit, cold or backfill-on cell ran. These are pre-policy results, not
+fresh evidence for the current binary.
+
+The subsequent ordered-union safe product candidate's **supplementary mini
+drain**, not a 100-drain acceptance cell, observed:
+
+| Observation | All-page p95 | Complete drain |
+| --- | ---: | ---: |
+| Ordered-union tool candidate | **2993.172 ms — above the former gate, not an acceptance measurement** | 32.900396 seconds / 17 pages |
+
+It retained the canonical 70-thread / 29,173-hit map and identical page shapes.
+Both sets of observations are retained from the handoff, not measurements
+rerun for this policy update or a claim that all 28 cells completed. The
+accepted candidate is the scoped ordered-union merge with fail-closed tokenizer
+prefilter (`02906d48`). The private chunk-temp
+FTS prototype (`$TMPDIR/s8-chunk*`) is not part of the product or this acceptance
+policy. The user's decision accepts the candidate's seconds-scale latency
+because searches are expected to be infrequent; it does not waive any remaining
+correctness, coverage or resource validation.

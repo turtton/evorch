@@ -90,11 +90,12 @@ impl Manifest {
         std::io::copy(&mut file, &mut digest)?;
         let binary_hash = format!("{:x}", digest.finalize());
         let protocol = json!({
-            "version": 1, "seed_source_sha256": seed_identity(seed)?,
+            "version": 2, "seed_source_sha256": seed_identity(seed)?,
             "harness_binary_sha256": binary_hash,
             "scope_sha256": corpus::hash(project.to_string_lossy().as_bytes()),
             "repetitions": super::REPETITIONS, "warmups": super::WARMUPS,
-            "page_limit": super::PAGE_LIMIT, "threshold_us_strict": 300000,
+            "page_limit": super::PAGE_LIMIT, "latency_policy": "advisory",
+            "latency_reference_us_strict": super::LATENCY_REFERENCE_US,
             "extractor_version": storage::thread_index::EXTRACTOR_VERSION,
             "accounting_version": storage::thread_index::ACCOUNTING_VERSION,
             "timing": "zero_wait_tool_use_to_complete_entry_v1",
@@ -134,7 +135,10 @@ impl Manifest {
     }
 
     pub fn passed(&self, id: &str) -> bool {
-        self.value["results"][id]["result"]["page_p95_lt_300ms"] == true
+        let result = &self.value["results"][id]["result"];
+        // Only fresh cells that completed every blocking check can pass.
+        // Legacy imports remain historical evidence, regardless of latency.
+        result["status"] == "passed" && result["import_kind"].is_null()
     }
 
     pub fn record(&mut self, id: &str, result: Value) -> Result<()> {
@@ -216,13 +220,17 @@ impl Manifest {
             .filter(|id| !results.contains_key(*id))
             .cloned()
             .collect::<Vec<_>>();
-        let failed = results
+        let failed = results.keys().filter(|id| !self.passed(id)).count();
+        let latency_reference_exceeded = results
             .values()
-            .filter(|entry| entry["result"]["page_p95_lt_300ms"] != true)
+            .filter(|entry| entry["result"]["page_p95_lt_300ms"] == false)
             .count();
         json!({
             "stage": "aggregate", "conditions_sha256": self.conditions,
             "completed_cells": results.len(), "missing_cells": missing,
+            "latency_policy": "advisory",
+            "latency_reference_us_strict": super::LATENCY_REFERENCE_US,
+            "latency_reference_exceeded_cells": latency_reference_exceeded,
             "failed_cells": failed, "complete": missing.is_empty(),
             "s8_pass": missing.is_empty() && failed == 0,
         })
@@ -234,7 +242,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn incomplete_and_failed_cells_never_pass_aggregate() {
+    fn slow_validated_cells_pass_only_when_all_cells_are_complete() {
         let temp = tempfile::tempdir().unwrap();
         let mut manifest = Manifest {
             path: temp.path().join("manifest.json"),
@@ -244,15 +252,45 @@ mod tests {
         };
         assert_eq!(manifest.summary()["s8_pass"], false);
         manifest
-            .record("a", json!({"page_p95_lt_300ms":true}))
+            .record("a", json!({"status":"passed","page_p95_lt_300ms":true}))
             .unwrap();
         assert_eq!(manifest.summary()["complete"], false);
         assert!(manifest.record("a", json!({})).is_err());
         manifest
-            .record("b", json!({"page_p95_lt_300ms":false}))
+            .record("b", json!({"status":"passed","page_p95_lt_300ms":false}))
             .unwrap();
+        assert!(manifest.passed("b"));
         assert_eq!(manifest.summary()["complete"], true);
-        assert_eq!(manifest.summary()["s8_pass"], false);
+        assert_eq!(manifest.summary()["s8_pass"], true);
+        assert_eq!(manifest.summary()["failed_cells"], 0);
+        assert_eq!(manifest.summary()["latency_reference_exceeded_cells"], 1);
         assert!(manifest.record("unknown", json!({})).is_err());
+    }
+
+    #[test]
+    fn blocking_failures_and_unvalidated_evidence_never_pass() {
+        for result in [
+            json!({"status":"failed","error_class":"canonical_hit_set_mismatch"}),
+            json!({"status":"failed","error_class":"seed_current_coverage_missing"}),
+            json!({"status":"failed","error_class":"insufficient_copy_capacity"}),
+            json!({"status":"failed","page_p95_lt_300ms":true}),
+            json!({"page_p95_lt_300ms":true}),
+            json!({"page_p95_lt_300ms":false}),
+            json!({"status":"passed","page_p95_lt_300ms":true,
+                "import_kind":"pre_manifest_fixed_protocol_explicit_import"}),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut manifest = Manifest {
+                path: temp.path().join("manifest.json"),
+                conditions: "fixture".into(),
+                expected: BTreeMap::from([("a".into(), json!({}))]),
+                value: json!({"results":{}}),
+            };
+            manifest.record("a", result.clone()).unwrap();
+            assert!(!manifest.passed("a"), "{result}");
+            assert_eq!(manifest.summary()["complete"], true, "{result}");
+            assert_eq!(manifest.summary()["s8_pass"], false, "{result}");
+            assert_eq!(manifest.summary()["failed_cells"], 1, "{result}");
+        }
     }
 }

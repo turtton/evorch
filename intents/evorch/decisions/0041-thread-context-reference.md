@@ -636,10 +636,24 @@ request 契約（R5、順序 1 で固定）:
 
 - 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ、上限ごとの保持範囲、`provenance_unknown` の理由別件数。各 256 MiB / 512 MiB / 1 GiB で N/全体に加え、索引化可能 run 数（完全な provenance・既知形式）、その対象本文量、保持本文量も併記する。不明な旧データを母集団から黙って落とさない。
 - 確実に hit が存在する固定 fixture と、実 store コピー内で正本走査により hit を確認した dataset の両方を用いる。短語（1/2 scalar）、3 scalar 以上、Unicode、phrase、regex、明示 tool kinds、no-hit を分け、正解 hit 集合を記録する。no-hit だけの速度を合格根拠にしない。
-- 検索 p95 < 300 ms: release ビルド、warm / cold、backfill あり / なし、語の種類別。計測と本番は同一の抽出器・extractor_version / accounting_version・会計係数を用いる。
+- 検索 p95 < 300 ms は参考指標（2026-10-26 の利用者判断により latency 単独ではマージ blocking にしない。下記参照）: release ビルド、warm / cold、backfill あり / なし、語の種類別。計測と本番は同一の抽出器・extractor_version / accounting_version・会計係数を用いる。正確性・カバレッジ・資源エラーは引き続き blocking。
 - 前景の書き込み待ち: 同じ workload / store / 設定で索引無効時を基準に、backfill / 巨大 run / 回収時の p50 / p95 / 最大と増分を測る。順序 2 で基準値と許容する絶対増分・倍率を数値化し、順序 5 前に ADR に固定する（未計測・現時点では未検証）。超過したら step / transaction の分割・予算縮小を行い再計測し、それでも超過なら実装を止め利用者へ判断を求める。基準を後から緩めて合格扱いしない。
 - R3 の F / G / reserve / 停止再開閾値は DB+WAL のピークから検証する。論理 bytes と物理増加量は別々に報告する。
 - 結果は「Phase B 実装状況チェックリスト」の計測の項目に記録する。
+
+#### 検索 latency の受け入れ方針変更（2026-10-26）
+
+利用者は、安全な製品候補の tool 条件 p95 約 3 秒 / 17 ページの drain 約 33 秒を踏まえ、次のように判断した（原文）:
+
+> まあ一旦はこの秒数でも問題なさそうだな。そこまで頻繁に検索が実施されるわけでもないだろうし。このまま進めていいよ
+
+検索はそれほど頻繁に実施されないという理由から、この秒数を許容して進める。従来の「全条件 p95 < 300 ms」をマージ blocking から**参考指標**へ変更する。比較方法（厳密な `< 300 ms`）と計測値は残すが、latency だけで計測を早期打切りにしたり、再開・集計を失敗にしたりしない。これは明示的な利用者判断による方針変更であり、旧計測を高速だったことにするものではない。
+
+過去の FAIL は削除・合格への書換えをしない。初回 warm/off ASCII p95 1,589.601 ms に加え、引継ぎで報告された tool warm/off p95 4,801.174 ms（`c33cd88f` の旧 sort 経路、100 drains / 1,700 pages、各 drain の canonical 70 threads / 29,173 hits 完全一致）は**旧 latency ゲートでは FAIL**だった証拠として保持する。この実行は 5 PASS / tool latency 1 FAIL / 22 missing（no-hit・cold・backfill-on 未計測）。ordered-union 製品候補の補助 mini drain は p95 2,993.172 ms、drain 32.900396 秒 / 17 ページ、canonical 70 threads / 29,173 hits と全 page shape が一致した。これも旧指標超過だが、100-drain 受入計測ではない。後二者は引継ぎの既往観測であり、今回の新たな計測や全条件完了を示さない。詳細な既往計測は `docs/thread-search-benchmark.md` を参照する。
+
+正確性（認可・redaction・正解 hit 集合・cursor 完走を含む）、分類・現行索引のカバレッジ、容量不足などの資源エラーは引き続き blocking とする。出力上限、backfill の進捗・実重複チェック、既存の 120 秒 watchdog は緩めない。前景書き込み待ちなど検索 latency 以外のゲートも変更しない。28 条件 × 100 反復、warm 5 回、query・scope・タイミング境界は維持し、未計測や旧 binary の結果を現在の matrix 合格に読み替えない。
+
+対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。private な chunk-temp FTS プロトタイプ（`$TMPDIR/s8-chunk*`）は製品へ持ち込まない。この方針変更時点で新 matrix は未実行であり、順序 8 全体を完了扱いにはしない。
 
 ### 実装時に確認すること
 
@@ -830,7 +844,7 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
   - 512 MiB が明らかに不適切なら、マージ前に報告する。— 所見: 明らかに不適切ではない（strict 保持 690 run、課金 349,952,179 B（約 333.7 MiB）で妥当。evict 0 で全 690 索引化可能 run を収容）。
 - [x] `provenance_unknown` の数（reason_code 別、全体と索引化可能母集団の差も報告）— 結果: v24 の実 store コピーで `missing_sidecar` 1,857（全 run）、他の reason 0。全体 1,857 に対し索引化可能 0（差 1,857）。不正 JSON 等の保留は 0。v25 migration 後に旧 snapshot に sidecar 行を作る場合は reason が `legacy_unproven` になり得るが、保留であることは変わらない
 - [ ] 同じ抽出器 / 会計 version・係数、短語・regex 含む確実に hit がある dataset / 正解集合 — 結果: 容量計測は `EXTRACTOR_VERSION=1` の共通抽出器を使用。会計は共通 `IndexAccountant` 未実装のため暫定式（accounting_version 未確定）。hit dataset / 正解集合は未作成（順序 6 / 8）
-- [ ] 検索 p95 < 300 ms（release ビルド、warm / cold、backfill あり / なし、語の種類別）— 結果: 未達のため順序 8 は未完了（全 matrix 停止、原因調査へ移行）。off-warm ASCII 100 drains（800 pages、canonical 95 threads / 1,166 hits 完全一致、partial 0、max output 16,312 B）の実測: page p50 494.983 ms / p95 1,589.601 ms / max 1,646.028 ms、first_page p95 1,032.397 ms / drain p95 6,590.899 ms。最初 100 セル未達確定に伴い計測を停止。
+- [ ] 検索 latency の参考計測と正確性・カバレッジ・資源検証（release ビルド、warm / cold、backfill あり / なし、語の種類別）— 2026-10-26 の利用者判断で p95 < 300 ms は参考指標となり、latency 単独では blocking にしない。28 条件の現行 matrix は未完了のため順序 8 は未完了。旧 blocking ゲート下で全 matrix を停止して原因調査へ移行した記録は保持する: off-warm ASCII 100 drains（800 pages、canonical 95 threads / 1,166 hits 完全一致、partial 0、max output 16,312 B）の実測: page p50 494.983 ms / p95 1,589.601 ms / max 1,646.028 ms、first_page p95 1,032.397 ms / drain p95 6,590.899 ms。最初のセルの 100 drains で未達確定に伴い計測を停止。後続の tool warm/off 約 4,801 ms は旧ゲートでの FAIL、ordered 候補約 2,993 ms は旧指標超過の補助観測（100-drain 受入計測ではない）として保持（上記方針変更節参照）。
 - [ ] 前景の書き込み待ち（索引無効との p50 / p95 / 最大・絶対増分 / 倍率比較、許容値と超過時の再計測・判断）— 結果: 前景 copy sync_all 開始前（`EVORCH_INDEX_GATE_SYNC_COPY=1`、release 2,000 ops × 8 runs / 4 対）で固定閾値（Δp50 <= 5 ms, Δp95 <= 50 ms, Δmax <= 250 ms）に対し全 PASS。実測増分 Δ(p50 / p95 / max): 2.500 / 39.307 / 115.706 ms; 2.262 / 40.230 / 80.050 ms; 0.024 / 0.617 / 44.227 ms; 0.024 / 0.901 / 46.083 ms。旧未 sync quiet 4 対 FAIL も併記: 7.107 / 53.883 / -501.086 ms; 6.100 / 47.515 / -4611.315 ms; 0.030 / 0.349 / 739.673 ms; 0.017 / 0.455 / 912.035 ms。dirty copy writeback 混入を支持するが、他因ゼロ断定は禁止。なお本 sync_all は実計測準備のコピー汚染除去のみであり、実計測中の backfill sync や DB 設定を変更するものではない。独立 Reviewer に対し、sync_all が準備 copy 汚染除去だけか、現実 backfill writeback 負荷を除いていないか確認予定（未受入）。
 - [ ] DB+WAL の物理増加上界、reserve・停止/再開閾値と正本余裕の実測 — 結果: 参考値のみ。計測用 DB で索引 1 run commit の DB+WAL 増加最大 8,699,120 B（本文 849,724 B、約 10.2 倍）、WAL 最大 22,721,832 B。前景正本 transaction の F、reserve / J / step 上限は未計測（順序 5 開始前に必要）
 - [ ] 「実装時に確認すること」の全項目の確認結果を記録した — 結果: 一部（a7d12ec5 時点）。v25 の空き（origin/main bc2fa27b で最新 v24）、source を更新・削除する全経路（順序 4 の項）、note しかない run（`run_ledger` だけの run も discovery と note 保存で索引行を作る。binding は従来どおり snapshot 保存時）、bundled SQLite の trigram / dbstat（3.53.2 で利用可）は確認済み。既存の排他の再利用（writer の単一接続上の SAVEPOINT。lease は順序 5）、DB 上限設定の実配線、cursor の互換性は未確認。
