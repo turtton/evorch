@@ -2,9 +2,9 @@
 //!
 //! The caller authorizes first and passes only runs it may read, at most
 //! [`MAX_SEARCH_BATCH_RUNS`] per query. That is a per-query batch bound, not a
-//! total bound: callers page through any number of runs batch by batch. Every
-//! statement materializes the current indexed subset of those runs before
-//! visiting blocks or FTS, so rows, order and keyset positions never depend on
+//! total bound: callers page through any number of runs batch by batch. Each
+//! ordered stream checks its current indexed run before visiting blocks or FTS,
+//! so rows, order and keyset positions never depend on
 //! other runs, nor does the number of block candidates evaluated.
 //!
 //! Text filters are a *superset* prefilter. Callers must verify each candidate
@@ -278,106 +278,90 @@ fn conversation_candidate_sql(
     query: &ConversationQuery<'_>,
     conn: &rusqlite::Connection,
 ) -> (String, Vec<SqlValue>) {
+    // Each arm has one run and one kind fixed. The existing (kind, run_id)
+    // index therefore emits rowids in order, with no candidate-wide sort.
+    // SQLite's ordered UNION ALL merges these streams lazily under the one
+    // global LIMIT. The predicate is evaluated BEFORE that limit: limiting
+    // unfiltered blocks would skip later matches and change the cursor.
+    //
+    // Keep one statement, hence one SQLite read snapshot. Duplicate run IDs
+    // deliberately produce separate arms/seqs; duplicate kinds do not.
+    let mut kinds = Vec::new();
+    for kind in query.kinds {
+        if !kinds.contains(kind) {
+            kinds.push(*kind);
+        }
+    }
     let mut params = Vec::new();
-    let scope = scope_values(query.runs, &mut params);
-    let kinds = query
-        .kinds
-        .iter()
-        .map(|kind| {
-            params.push(SqlValue::Text(kind_text(*kind).into()));
-            "?"
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let (after_seq, after_id) = query
-        .after
-        .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
-    params.push(SqlValue::Integer(after_seq));
-    params.push(SqlValue::Integer(after_id));
-    let prefilter = fts_prefilter(query.filter).filter(|_| tokenizer_prefilter::install(conn));
-    if let Some(prefilter) = &prefilter {
-        params.push(SqlValue::Text(prefilter.clone()));
-    }
-    let filter = filter_sql(query.filter, &mut params);
-    params.push(SqlValue::Integer(to_i64(query.limit)));
-    // MATERIALIZED is an optimization fence for the authorized/current runs.
-    // CROSS JOIN fixes the loop order on both sides of that fence: ordinary
-    // JOIN allowed SQLite to scan the global kind index and probe FTS before
-    // checking scope. The existing (kind, run_id) index now uses BOTH keys.
-    let sql = format!(
-        "WITH scope(run_id, seq) AS (VALUES {scope}), \
-         current_runs AS MATERIALIZED ( \
-             SELECT scope.seq, r.run_id, r.source_revision, r.snapshot_revision \
-             FROM scope CROSS JOIN thread_index_runs r ON r.run_id = scope.run_id \
-             WHERE r.state = 'indexed' AND r.source_present = 1 \
-               AND r.indexed_revision = r.source_revision \
-         )"
-    );
-    let scoped_blocks = format!(
-        "SELECT b.id, r.seq, b.run_id, r.source_revision, r.snapshot_revision, \
-                b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
-                b.tool_name, b.truncated, b.text \
-         FROM current_runs r \
-         CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
-             ON b.run_id = r.run_id \
-         WHERE b.kind IN ({kinds}) \
-           AND (r.seq, b.id) > (?, ?)"
-    );
-    // Fence the cheap necessary condition before the correlated rowid/MATCH
-    // probe, which can otherwise repeat an expensive phrase intersection for
-    // every scoped block. There is deliberately no LIMIT inside this fence.
-    let sql = if prefilter.is_some() {
-        format!(
-            "{sql}, scoped_blocks AS MATERIALIZED ( \
-                 {scoped_blocks} AND evorch_fts5_necessary(b.text, ?) \
-             ) \
-             SELECT b.* FROM scoped_blocks b WHERE ({filter}) \
-             ORDER BY b.seq, b.id LIMIT ?"
-        )
-    } else {
-        format!(
-            "{sql} {scoped_blocks} AND ({filter}) \
-             ORDER BY r.seq, b.id LIMIT ?"
-        )
-    };
-    (sql, params)
-}
-
-/// Encode a necessary condition of the *existing FTS predicate*. Each
-/// generated quoted literal is one phrase: doubling quotes in MATCH syntax
-/// does not change its content. Tokenize that content, not the MATCH syntax.
-///
-/// A phrase accepted by FTS must have its QUERY tokens at consecutive
-/// DOCUMENT positions. The same SQLite trigram tokenizer/settings emit one
-/// token per position (including spaces/quotes/controls, with SQLite's own
-/// Unicode folding and NUL handling). Checking that sequence is necessary,
-/// not a replacement for MATCH. Unknown token flags/API failures pass.
-///
-/// Keep variants OR'ed, terms AND'ed, alternatives OR'ed. LIKE and Scan add
-/// no restriction; an alternative without FTS disables the optimization.
-/// The unchanged old filter then preserves false hits, candidate budgets,
-/// ordering and cursors, not merely the final runtime substring matches.
-fn fts_prefilter(filter: &ConversationFilter) -> Option<String> {
-    let ConversationFilter::Literals(alternatives) = filter else {
-        return None;
-    };
-    let mut clauses = Vec::new();
-    for terms in alternatives {
-        let mut predicates = Vec::new();
-        for term in terms {
-            if let TermRoute::Trigram(variants) = term_route(term) {
-                predicates.push(variants);
+    let exact = tokenizer_prefilter::install(conn);
+    let filter = filter_sql(query.filter, &mut params, exact);
+    // Reuse the same predicate bindings in every arm (including auxdata's
+    // constant QUERY input), rather than multiplying SQLite variable usage.
+    let mut parameter = 0;
+    let filter = filter
+        .split('?')
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part.to_owned()
+            } else {
+                parameter += 1;
+                format!("?{parameter}{part}")
             }
+        })
+        .collect::<String>();
+    let after_id = query.after.map(|after| {
+        params.push(SqlValue::Integer(after.block_id));
+        params.len()
+    });
+    params.push(SqlValue::Integer(to_i64(query.limit)));
+    let limit = params.len();
+    let mut arms = Vec::new();
+    for (seq, run) in query.runs.iter().enumerate() {
+        if query.after.is_some_and(|after| seq < after.seq) {
+            continue;
         }
-        if predicates.is_empty() {
-            return None;
+        params.push(SqlValue::Text(run.clone()));
+        let run_parameter = params.len();
+        let after = if query.after.is_some_and(|after| seq == after.seq) {
+            format!(" AND b.id > ?{}", after_id.unwrap())
+        } else {
+            String::new()
+        };
+        for kind in &kinds {
+            arms.push(format!(
+                "SELECT b.id, {seq} AS seq, b.run_id, r.source_revision, r.snapshot_revision, \
+                        b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
+                        b.tool_name, b.truncated, b.text \
+                 FROM thread_index_runs r \
+                 CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
+                     ON b.run_id = r.run_id \
+                 WHERE r.run_id = ?{run_parameter} AND r.state = 'indexed' \
+                   AND r.source_present = 1 AND r.indexed_revision = r.source_revision \
+                   AND b.kind = '{kind}'{after} AND ({filter})",
+                kind = kind_text(*kind),
+            ));
         }
-        clauses.push(predicates);
     }
-    if clauses.is_empty() {
-        return None;
+    if arms.is_empty() {
+        // A cursor beyond the last seq is exhausted, including usize::MAX.
+        return (
+            format!(
+                "SELECT b.id, 0 AS seq, b.run_id, 0, 0, \
+                        b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
+                        b.tool_name, b.truncated, b.text \
+                 FROM conversation_blocks b WHERE 0 AND ({filter}) LIMIT ?{limit}"
+            ),
+            params,
+        );
     }
-    serde_json::to_string(&clauses).ok()
+    // Five unique kinds * 100 runs is exactly SQLite's bundled default
+    // SQLITE_LIMIT_COMPOUND_SELECT (500). Neither bound is expanded here.
+    let sql = format!(
+        "{} ORDER BY seq, id LIMIT ?{limit}",
+        arms.join(" UNION ALL ")
+    );
+    (sql, params)
 }
 
 fn check_batch(runs: &[String]) -> Result<(), StorageError> {
@@ -404,7 +388,7 @@ fn scope_values(runs: &[String], params: &mut Vec<SqlValue>) -> String {
 /// OR of alternatives, each an AND of per-term predicates. A term without a
 /// SQL guarantee adds no predicate; an alternative without any makes the
 /// whole filter a scan.
-fn filter_sql(filter: &ConversationFilter, params: &mut Vec<SqlValue>) -> String {
+fn filter_sql(filter: &ConversationFilter, params: &mut Vec<SqlValue>, exact: bool) -> String {
     let ConversationFilter::Literals(alternatives) = filter else {
         return "1".into();
     };
@@ -412,18 +396,22 @@ fn filter_sql(filter: &ConversationFilter, params: &mut Vec<SqlValue>) -> String
     let mut clause_params = Vec::new();
     for terms in alternatives {
         let mut phrases = Vec::new();
+        let mut phrase_tokens = Vec::new();
         let mut likes = Vec::new();
         let mut like_params = Vec::new();
         for term in terms {
             match term_route(term) {
-                TermRoute::Trigram(variants) => phrases.push(format!(
-                    "({})",
-                    variants
-                        .iter()
-                        .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
-                        .collect::<Vec<_>>()
-                        .join(" OR ")
-                )),
+                TermRoute::Trigram(variants) => {
+                    phrases.push(format!(
+                        "({})",
+                        variants
+                            .iter()
+                            .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
+                            .collect::<Vec<_>>()
+                            .join(" OR ")
+                    ));
+                    phrase_tokens.push(variants);
+                }
                 TermRoute::Like(variants) => {
                     let any = vec!["b.text LIKE ? ESCAPE '\\'"; variants.len()].join(" OR ");
                     likes.push(format!("({any})"));
@@ -438,10 +426,21 @@ fn filter_sql(filter: &ConversationFilter, params: &mut Vec<SqlValue>) -> String
         }
         let mut predicates = Vec::new();
         if !phrases.is_empty() {
-            predicates.push(
-                "EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?)"
-                    .to_owned(),
-            );
+            let fallback = "EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?)";
+            // Replace only this existing MATCH leaf, never the whole filter:
+            // LIKE and unrestricted Scan alternatives keep their SQL meaning.
+            // NULL (unknown) lazily evaluates the original rowid/MATCH probe.
+            if let Some(json) = exact
+                .then(|| serde_json::to_string(&vec![phrase_tokens]).ok())
+                .flatten()
+            {
+                predicates.push(format!(
+                    "COALESCE(evorch_fts5_exact(b.text, ?), {fallback})"
+                ));
+                clause_params.push(SqlValue::Text(json));
+            } else {
+                predicates.push(fallback.to_owned());
+            }
             clause_params.push(SqlValue::Text(phrases.join(" AND ")));
         }
         predicates.extend(likes);

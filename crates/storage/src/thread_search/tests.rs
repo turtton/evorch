@@ -278,9 +278,64 @@ fn candidate_plan(db: &Database, query: &ConversationQuery<'_>) -> Vec<String> {
         .unwrap()
 }
 
+fn original_filter_sql(filter: &ConversationFilter, params: &mut Vec<SqlValue>) -> String {
+    let ConversationFilter::Literals(alternatives) = filter else {
+        return "1".into();
+    };
+    let mut clauses = Vec::new();
+    let mut clause_params = Vec::new();
+    for terms in alternatives {
+        let mut phrases = Vec::new();
+        let mut likes = Vec::new();
+        let mut like_params = Vec::new();
+        for term in terms {
+            match term_route(term) {
+                TermRoute::Trigram(variants) => phrases.push(format!(
+                    "({})",
+                    variants
+                        .iter()
+                        .map(|variant| format!("\"{}\"", variant.replace('"', "\"\"")))
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                )),
+                TermRoute::Like(variants) => {
+                    let any = vec!["b.text LIKE ? ESCAPE '\\'"; variants.len()].join(" OR ");
+                    likes.push(format!("({any})"));
+                    like_params.extend(
+                        variants
+                            .iter()
+                            .map(|variant| SqlValue::Text(format!("%{}%", like_escape(variant)))),
+                    );
+                }
+                TermRoute::Scan => {}
+            }
+        }
+        let mut predicates = Vec::new();
+        if !phrases.is_empty() {
+            predicates.push(
+                "EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?)"
+                    .to_owned(),
+            );
+            clause_params.push(SqlValue::Text(phrases.join(" AND ")));
+        }
+        predicates.extend(likes);
+        clause_params.extend(like_params);
+        if predicates.is_empty() {
+            return "1".into();
+        }
+        clauses.push(predicates.join(" AND "));
+    }
+    params.extend(clause_params);
+    clauses
+        .into_iter()
+        .map(|clause| format!("({clause})"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// Pre-optimization SQL, intentionally independent of the new CTE builder.
 /// Compare candidates before the runtime matcher (including FTS false hits).
-fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<ConversationCandidate> {
+fn original_candidate_sql(query: &ConversationQuery<'_>) -> (String, Vec<SqlValue>) {
     let mut params = Vec::new();
     let scope = scope_values(query.runs, &mut params);
     let kinds = query
@@ -296,7 +351,7 @@ fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<Conv
         .after
         .map_or((-1, 0), |after| (to_i64(after.seq), after.block_id));
     params.extend([SqlValue::Integer(seq), SqlValue::Integer(id)]);
-    let filter = filter_sql(query.filter, &mut params);
+    let filter = original_filter_sql(query.filter, &mut params);
     params.push(SqlValue::Integer(to_i64(query.limit)));
     let sql = format!(
         "WITH scope(run_id, seq) AS (VALUES {scope}), \
@@ -315,6 +370,11 @@ fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<Conv
          WHERE b.kind IN ({kinds}) AND (r.seq, b.id) > (?, ?) AND ({filter}) \
          ORDER BY r.seq, b.id LIMIT ?"
     );
+    (sql, params)
+}
+
+fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<ConversationCandidate> {
+    let (sql, params) = original_candidate_sql(query);
     db.conn
         .prepare(&sql)
         .unwrap()
@@ -324,33 +384,54 @@ fn original_candidates(db: &Database, query: &ConversationQuery<'_>) -> Vec<Conv
         .unwrap()
 }
 
-#[test]
-fn tokenizer_prefilter_is_only_used_when_every_alternative_has_an_fts_term() {
-    for filter in [
-        ConversationFilter::All,
-        literals(&[&["ab"]]),
-        literals(&[&["Ä"]]),
-        literals(&[&["needle"], &["検索"]]),
-        literals(&[&["needle"], &["%"]]),
-        literals(&[&["needle"], &[]]),
-        literals(&[&["sssss"]]),
-    ] {
-        assert_eq!(fts_prefilter(&filter), None);
-    }
-    let filter = literals(&[&["SKY", "Ä", "%"], &["abc def", "検索語"]]);
-    let variants: Vec<Vec<Vec<String>>> =
-        serde_json::from_str(&fts_prefilter(&filter).unwrap()).unwrap();
-    assert_eq!(
-        variants,
-        vec![
-            vec![vec!["skY", "sKY", "ſkY", "ſKY"]],
-            vec![vec!["abc def"], vec!["検索語"]]
-        ]
-    );
+// The UDF receives generated MATCH content, not MATCH grammar. Kept separate
+// from the production encoder so these primitive tests exercise its input ABI.
+fn fts_prefilter(filter: &ConversationFilter) -> Option<String> {
+    let ConversationFilter::Literals(alternatives) = filter else {
+        return None;
+    };
+    let clauses: Vec<Vec<Vec<String>>> = alternatives
+        .iter()
+        .map(|terms| {
+            terms
+                .iter()
+                .filter_map(|term| match term_route(term) {
+                    TermRoute::Trigram(variants) => Some(variants),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    serde_json::to_string(&clauses).ok()
 }
 
 #[test]
-fn prefilter_preserves_original_fts_candidates_for_every_ascii_scalar() {
+fn exact_evaluation_replaces_only_match_leaves_with_like_and_scan_or_preserved() {
+    let db = db();
+    for filter in [
+        literals(&[&["needle", "%"]]),
+        literals(&[&["needle"], &["検索"]]),
+        literals(&[&["needle"], &["Ä"]]),
+        literals(&[&["needle"], &[]]),
+    ] {
+        let mut params = Vec::new();
+        let sql = filter_sql(
+            &filter,
+            &mut params,
+            tokenizer_prefilter::install_untrusted_for_tests(&db.conn),
+        );
+        let old = original_filter_sql(&filter, &mut Vec::new());
+        if old == "1" {
+            assert_eq!(sql, "1");
+        } else {
+            assert!(sql.contains("COALESCE(evorch_fts5_exact"));
+            assert_eq!(sql.matches("LIKE").count(), old.matches("LIKE").count());
+        }
+    }
+}
+
+#[test]
+fn exact_preserves_original_fts_candidates_for_every_ascii_scalar() {
     let db = db();
     indexed(&db, "run");
     // Trigram treats punctuation/control/space as scalars, not word separators.
@@ -393,9 +474,9 @@ fn prefilter_preserves_original_fts_candidates_for_every_ascii_scalar() {
 }
 
 #[test]
-fn unicode_and_nul_prefilter_prunes_without_changing_fts_false_hits() {
+fn unicode_and_nul_exact_preserves_fts_false_hits() {
     let db = db();
-    assert!(tokenizer_prefilter::install(&db.conn));
+    assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
     for (text, term, expected) in [
         ("日本語 unrelated", "abc", false),
         ("日本語 ABC", "abc", true),
@@ -415,7 +496,7 @@ fn unicode_and_nul_prefilter_prunes_without_changing_fts_false_hits() {
         let actual: bool = db
             .conn
             .query_row(
-                "SELECT evorch_fts5_necessary(?1, ?2)",
+                "SELECT evorch_fts5_exact(?1, ?2)",
                 params![text, json],
                 |row| row.get(0),
             )
@@ -443,8 +524,16 @@ fn sqlite_unicode_folds_and_nul_positions_agree_with_original_fts() {
         ("日本\0語", "日本語"),
         ("a\"bc", "a\"bc"),
         ("a\tbc", "a\tbc"),
+        ("İbc", "İbc"),
+        ("ébc", "ébc"),
+        ("ÉBC", "ébc"),
+        ("e\u{301}bc", "e\u{301}bc"),
+        ("a\u{301}\u{301}bc", "a\u{301}\u{301}bc"),
+        ("æbc", "ÆBC"),
+        ("ﬃbc", "ffibc"),
+        ("😀🦀日 abc", "😀🦀日"),
     ];
-    assert!(tokenizer_prefilter::install(&db.conn));
+    assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
     for (ordinal, (text, term)) in pairs.iter().enumerate() {
         let id = block(&db, "run", ordinal, "text", text);
         let phrase = format!("\"{}\"", term.replace('"', "\"\""));
@@ -461,12 +550,107 @@ fn sqlite_unicode_folds_and_nul_positions_agree_with_original_fts() {
         let actual: bool = db
             .conn
             .query_row(
-                "SELECT evorch_fts5_necessary(?1, ?2)",
+                "SELECT evorch_fts5_exact(?1, ?2)",
                 params![text, json],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(actual, expected, "{text:?}, {term:?}");
+    }
+}
+
+#[test]
+fn exact_sql_short_circuits_old_match_only_for_known_true_or_false() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = db();
+    indexed(&db, "run");
+    let id = block(&db, "run", 0, "text", "ABC");
+    assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    db.conn
+        .create_scalar_function(
+            c"fallback_probe",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |ctx| {
+                count.fetch_add(1, Ordering::Relaxed);
+                ctx.get::<bool>(0)
+            },
+        )
+        .unwrap();
+    let mut statement = db
+        .conn
+        .prepare(
+            "SELECT COALESCE(evorch_fts5_exact(?1, ?2), fallback_probe( \
+             EXISTS(SELECT 1 FROM conversation_fts WHERE rowid = ?3 \
+                    AND conversation_fts MATCH ?4)))",
+        )
+        .unwrap();
+    // Rebinding this SAME statement invalidates auxdata for argument 2.
+    // Unknown (including zero-token/short phrases) delegates to the real FTS.
+    for (text, json, phrase, expected, fallbacks) in [
+        ("ABC", "[[[\"abc\"]]]", "\"absent\"", true, 0),
+        ("unrelated", "[[[\"abc\"]]]", "\"abc\"", false, 0),
+        ("ABC", "[[[\"xyz\"]]]", "\"abc\"", false, 0),
+        ("ABC", "malformed", "\"abc\"", true, 1),
+        ("ABC", "[[[\"ab\"]]]", "\"ab\"", false, 1),
+        ("ABC", "[[[\"\"]]]", "\"\"", false, 1),
+        ("ABC", "[]", "\"abc\"", true, 1),
+        ("ABC", "[[[\"abc\"]]]", "\"absent\"", true, 0),
+    ] {
+        calls.store(0, Ordering::Relaxed);
+        let result: bool = statement
+            .query_row(params![text, json, id, phrase], |row| row.get(0))
+            .unwrap();
+        assert_eq!(result, expected, "{json}");
+        assert_eq!(calls.load(Ordering::Relaxed), fallbacks, "{json}");
+    }
+}
+
+#[test]
+fn unknown_fts_schema_settings_disable_exact_even_after_install() {
+    let db = db();
+    assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
+    for settings in [
+        "text, tokenize = 'trigram case_sensitive 1'",
+        "text, tokenize = 'trigram remove_diacritics 1'",
+        "text, tokenize = 'trigram', detail = none",
+        "text, extra, tokenize = 'trigram'",
+        "text, tokenize = 'unicode61'",
+    ] {
+        db.conn
+            .execute_batch(&format!(
+                "DROP TABLE conversation_fts; \
+                 CREATE VIRTUAL TABLE conversation_fts USING fts5({settings});"
+            ))
+            .unwrap();
+        assert!(
+            !tokenizer_prefilter::install_untrusted_for_tests(&db.conn),
+            "{settings}"
+        );
+        let filter = literals(&[&["abc"]]);
+        let query = ConversationQuery {
+            runs: &["run".into()],
+            kinds: TEXT,
+            filter: &filter,
+            after: None,
+            limit: 1,
+        };
+        let (sql, _) = conversation_candidate_sql(&query, &db.conn);
+        assert!(sql.contains("COALESCE(evorch_fts5_exact"));
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT evorch_fts5_exact('abc', '[[[\"abc\"]]]')",
+                    [],
+                    |row| row.get::<_, Option<bool>>(0)
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -493,7 +677,7 @@ fn tokenizer_api_unavailable_keeps_original_candidate_sql() {
         limit: 1,
     };
     let (sql, _) = conversation_candidate_sql(&query, &db.conn);
-    assert!(!sql.contains("evorch_fts5_necessary"));
+    assert!(sql.contains("COALESCE(evorch_fts5_exact"));
     assert!(!sql.contains("scoped_blocks AS MATERIALIZED"));
     assert_eq!(
         db.conversation_candidates(&query).unwrap(),
@@ -504,14 +688,11 @@ fn tokenizer_api_unavailable_keeps_original_candidate_sql() {
 #[test]
 fn tokenizer_function_auxdata_rebind_connection_move_and_finalize_are_safe() {
     let db = db();
-    assert!(tokenizer_prefilter::install(&db.conn));
+    assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
     let abc = fts_prefilter(&literals(&[&["abc"]])).unwrap();
     let xyz = fts_prefilter(&literals(&[&["xyz"]])).unwrap();
     {
-        let mut statement = db
-            .conn
-            .prepare("SELECT evorch_fts5_necessary(?1, ?2)")
-            .unwrap();
+        let mut statement = db.conn.prepare("SELECT evorch_fts5_exact(?1, ?2)").unwrap();
         for (text, json, expected) in [
             ("日本語 ABC", &abc, true),
             ("日本語 xyz", &abc, false),
@@ -527,11 +708,11 @@ fn tokenizer_function_auxdata_rebind_connection_move_and_finalize_are_safe() {
         }
     } // Finalize clears auxdata before the connection/tokenizer can be dropped.
     std::thread::spawn(move || {
-        assert!(tokenizer_prefilter::install(&db.conn));
+        assert!(tokenizer_prefilter::install_untrusted_for_tests(&db.conn));
         assert!(
             db.conn
                 .query_row(
-                    "SELECT evorch_fts5_necessary(?1, ?2)",
+                    "SELECT evorch_fts5_exact(?1, ?2)",
                     params!["A\0BC", abc],
                     |row| row.get::<_, bool>(0),
                 )
@@ -574,6 +755,7 @@ fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes()
         "aaaaaababaaaa",
         "検索語\0データベース",
         "no match",
+        "aιbc", // SQLite folds U+0345 to iota; final literal matcher can reject.
     ];
     for run in ["a", "b", "invisible", "stale"] {
         for (ordinal, text) in corpus.iter().enumerate() {
@@ -603,6 +785,9 @@ fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes()
         literals(&[&["abc", "\0"]]),
         literals(&[&["abc"], &["Ä"]]),
         literals(&[&["abc"], &[]]),
+        literals(&[&["abc", "ab"], &["alpha", "%"]]),
+        literals(&[&["abc", "missing"], &["alpha", "%"]]),
+        literals(&[&[""]]),
         ConversationFilter::All,
     ];
     for filter in &filters {
@@ -649,6 +834,213 @@ fn differential_pages_preserve_false_hits_unicode_or_kinds_and_budget_prefixes()
 }
 
 #[test]
+fn unknown_oversized_leaf_falls_back_in_production_candidate_pages() {
+    let db = db();
+    indexed(&db, "run");
+    let term = "a".repeat(4100);
+    block(&db, "run", 0, "text", "unrelated");
+    block(&db, "run", 1, "text", &term);
+    let filter = literals(&[&[&term]]);
+    let mut query = ConversationQuery {
+        runs: &["run".into()],
+        kinds: TEXT,
+        filter: &filter,
+        after: None,
+        limit: 1,
+    };
+    let (sql, _) = conversation_candidate_sql(&query, &db.conn);
+    assert!(sql.contains("COALESCE(evorch_fts5_exact"));
+    for _ in 0..2 {
+        let expected = original_candidates(&db, &query);
+        let actual = db.conversation_candidates(&query).unwrap();
+        assert_eq!(actual, expected);
+        query.after = actual.last().map(|row| row.position);
+    }
+}
+
+#[test]
+fn fts_false_hits_keep_count_byte_budget_and_cursor_boundary_candidates() {
+    let db = db();
+    indexed(&db, "run");
+    db.conn.execute_batch("BEGIN").unwrap();
+    for ordinal in 0..2002 {
+        // SQLite removes NULs during trigram tokenization; substring matching
+        // must reject this. Such candidates still consume runtime budgets.
+        block(&db, "run", ordinal, "text", "A\0BC");
+    }
+    db.conn.execute_batch("COMMIT").unwrap();
+    let filter = literals(&[&["abc"]]);
+    let mut query = ConversationQuery {
+        runs: &["run".into()],
+        kinds: TEXT,
+        filter: &filter,
+        after: None,
+        limit: MAX_SEARCH_PAGE_ROWS,
+    };
+    let mut count = 0;
+    let mut bytes = 0;
+    loop {
+        let expected = original_candidates(&db, &query);
+        let actual = db.conversation_candidates(&query).unwrap();
+        assert_eq!(actual, expected);
+        if actual.is_empty() {
+            break;
+        }
+        for (new, old) in actual.iter().zip(&expected) {
+            count += 1;
+            bytes += new.text.len();
+            assert_eq!(bytes, count * old.text.len());
+            assert_eq!(new.position, old.position);
+            assert!(!new.text.to_ascii_lowercase().contains("abc"));
+        }
+        query.after = actual.last().map(|row| row.position);
+        if count == 2000 {
+            assert_eq!(
+                query.after.unwrap().block_id,
+                actual.last().unwrap().position.block_id
+            );
+        }
+    }
+    assert_eq!(count, 2002);
+
+    // Cross the runtime's 4-MiB byte boundary on a false hit as well, without
+    // replacing the candidate sequence with final substring matches.
+    db.conn
+        .execute("DELETE FROM conversation_blocks", [])
+        .unwrap();
+    let padding = " ".repeat(8192);
+    db.conn.execute_batch("BEGIN").unwrap();
+    for ordinal in 0..MAX_SEARCH_PAGE_ROWS + 15 {
+        block(&db, "run", ordinal, "text", &format!("A\0BC{padding}"));
+    }
+    db.conn.execute_batch("COMMIT").unwrap();
+    query.after = None;
+    let mut bytes = 0;
+    let mut reached_boundary = false;
+    loop {
+        let actual = db.conversation_candidates(&query).unwrap();
+        let expected = original_candidates(&db, &query);
+        assert_eq!(actual, expected);
+        if actual.is_empty() {
+            break;
+        }
+        for (new, old) in actual.iter().zip(&expected) {
+            bytes += new.text.len();
+            if bytes >= 4 * 1024 * 1024 && !reached_boundary {
+                assert_eq!(new.position, old.position);
+                reached_boundary = true;
+            }
+        }
+        query.after = actual.last().map(|row| row.position);
+    }
+    assert!(reached_boundary);
+}
+
+#[test]
+fn empty_alternatives_keep_the_original_sql_error_instead_of_changing_semantics() {
+    let db = db();
+    let filter = ConversationFilter::Literals(Vec::new());
+    let mut old_params = Vec::new();
+    let mut new_params = Vec::new();
+    assert_eq!(
+        filter_sql(&filter, &mut new_params, true),
+        original_filter_sql(&filter, &mut old_params)
+    );
+    assert_eq!(new_params, old_params);
+    assert!(
+        db.conversation_candidates(&ConversationQuery {
+            runs: &["run".into()],
+            kinds: TEXT,
+            filter: &filter,
+            after: None,
+            limit: 1,
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn external_content_triggers_integrity_and_revision_share_read_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = crate::StorageConfig {
+        db_path: dir.path().join("snapshot.db"),
+        ..Default::default()
+    };
+    let db = Database::open(&cfg).unwrap();
+    let writer = Database::open(&cfg).unwrap();
+    indexed(&db, "run");
+    let id = block(&db, "run", 0, "text", "old needle");
+    let integrity = |db: &Database| {
+        db.conn
+            .execute(
+                "INSERT INTO conversation_fts(conversation_fts, rank) \
+                 VALUES('integrity-check', 1)",
+                [],
+            )
+            .unwrap();
+    };
+    let compare = |db: &Database, term: &str| {
+        let query = ConversationQuery {
+            runs: &["run".into(), "hidden".into()],
+            kinds: TEXT,
+            filter: &literals(&[&[term]]),
+            after: None,
+            limit: 1,
+        };
+        let rows = db.conversation_candidates(&query).unwrap();
+        assert_eq!(rows, original_candidates(db, &query));
+        rows
+    };
+    integrity(&db); // insert trigger, including external-content comparison
+    db.conn.execute_batch("BEGIN").unwrap();
+    let old = compare(&db, "needle");
+    writer
+        .conn
+        .execute_batch(&format!(
+            "BEGIN; UPDATE conversation_blocks SET text = 'new value' WHERE id = {id}; \
+             UPDATE thread_index_runs SET source_revision = 4, indexed_revision = 4, \
+                    snapshot_revision = 8 WHERE run_id = 'run'; COMMIT;"
+        ))
+        .unwrap();
+    integrity(&writer);
+    assert_eq!(compare(&db, "needle"), old);
+    assert!(compare(&db, "value").is_empty());
+    db.conn.execute_batch("COMMIT").unwrap();
+    assert!(compare(&db, "needle").is_empty());
+    let new = compare(&db, "value");
+    assert_eq!(new[0].source_revision, 4);
+    assert_eq!(new[0].snapshot_revision, 8);
+    // Locator-only and no-op text updates must leave postings intact.
+    db.conn
+        .execute(
+            "UPDATE conversation_blocks SET ordinal = 9, text = text WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    integrity(&db);
+    assert_eq!(
+        compare(&db, "value")[0].locator,
+        BlockLocator::Message {
+            ordinal: 9,
+            block_index: 0,
+        }
+    );
+    db.conn
+        .execute_batch("UPDATE thread_index_runs SET source_revision = 5 WHERE run_id = 'run';")
+        .unwrap();
+    assert!(compare(&db, "value").is_empty()); // stale source fence
+    db.conn
+        .execute_batch("UPDATE thread_index_runs SET indexed_revision = 5 WHERE run_id = 'run';")
+        .unwrap();
+    assert_eq!(compare(&db, "value").len(), 1);
+    db.conn
+        .execute("DELETE FROM conversation_blocks WHERE id = ?1", [id])
+        .unwrap();
+    integrity(&db);
+    assert!(compare(&db, "value").is_empty());
+}
+
+#[test]
 fn plan_checks_current_scope_before_run_blocks_and_correlated_fts() {
     let db = db();
     let filters = [
@@ -675,17 +1067,24 @@ fn plan_checks_current_scope_before_run_blocks_and_correlated_fts() {
                     .position(|step| step.contains(text))
                     .unwrap_or_else(|| panic!("missing {text}: {plan:#?}"))
             };
-            let materialize = position("MATERIALIZE current_runs");
-            let scope = position("SCAN scope");
             let current = position("SEARCH r USING INDEX sqlite_autoindex_thread_index_runs_1");
             let blocks =
                 position("SEARCH b USING INDEX idx_conversation_blocks_kind (kind=? AND run_id=?)");
-            assert!(materialize < scope && scope < current && current < blocks);
+            assert!(
+                current < blocks,
+                "current-run fence must precede blocks: {plan:#?}"
+            );
+            assert!(
+                plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+                "{plan:#?}"
+            );
+            if count > 1 {
+                assert!(plan.iter().any(|step| step == "MERGE (UNION ALL)"));
+            }
             if matches!(filter, ConversationFilter::Literals(terms) if terms[0][0] == "needle") {
-                let fence = position("MATERIALIZE scoped_blocks");
-                let scan = position("SCAN b");
                 let fts = position("SCAN conversation_fts");
-                assert!(fence < materialize && blocks < scan && scan < fts);
+                assert!(blocks < fts);
+                assert!(!plan.iter().any(|step| step.contains("scoped_blocks")));
                 // '=' is the rowid constraint, 'M' the MATCH constraint.
                 assert!(plan[fts].contains("VIRTUAL TABLE INDEX 0:=M"));
             } else {
@@ -793,6 +1192,179 @@ fn invisible_and_noncurrent_blocks_do_not_increase_candidate_vm_work() {
             actual.1
         );
     }
+}
+
+#[test]
+fn ordered_merge_bounds_fts_calls_without_limiting_before_the_predicate() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let db = db();
+    let runs = ["a".into(), "b".into(), "a".into()];
+    for run in ["a", "b"] {
+        indexed(&db, run);
+        for i in 0..240 {
+            block(&db, run, i, "text", if i < 210 { "miss" } else { "needle" });
+            block(&db, run, i + 240, "tool_result", "needle");
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    db.conn
+        .create_scalar_function(
+            c"count_fts",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |ctx| {
+                count.fetch_add(1, Ordering::Relaxed);
+                ctx.get::<bool>(0)
+            },
+        )
+        .unwrap();
+    let filter = literals(&[&["needle"]]);
+    let query = ConversationQuery {
+        runs: &runs,
+        kinds: &[IndexBlockKind::Text, IndexBlockKind::ToolResult],
+        filter: &filter,
+        after: None,
+        limit: 7,
+    };
+    // Wrap the independent old-FTS leaf, not its result after EXISTS, to count
+    // predicate evaluations even when the FTS result is false.
+    let counted = |sql: String| {
+        sql.replace(
+            "EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?2)",
+            "count_fts(EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?2))",
+        )
+    };
+    let (sql, args) = conversation_candidate_sql(&query, &db.conn);
+    // Production NULL always evaluates old MATCH; this wrapping changes no
+    // filtering/order. The test callback is absent from production SQL.
+    let sql = counted(sql);
+    let mut statement = db.conn.prepare(&sql).unwrap();
+    let actual = statement
+        .query_map(params_from_iter(args), candidate)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let new_calls = calls.swap(0, Ordering::Relaxed);
+    let (old_sql, old_args) = original_candidate_sql(&query);
+    let old_sql = old_sql.replace(
+        "EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?)",
+        "count_fts(EXISTS (SELECT 1 FROM conversation_fts WHERE rowid = b.id AND conversation_fts MATCH ?))",
+    );
+    let mut old = db.conn.prepare(&old_sql).unwrap();
+    let expected = old
+        .query_map(params_from_iter(old_args), candidate)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let old_calls = calls.swap(0, Ordering::Relaxed);
+    assert_eq!(actual, expected);
+    assert_eq!(old_calls, 240 * 2 * runs.len());
+    assert_eq!(old.get_status(StatementStatus::Sort), 1);
+    assert_eq!(statement.get_status(StatementStatus::Sort), 0);
+    // Every arm must find its first match (including 210 misses per text
+    // stream), but does not scan all remaining matches to sort them.
+    assert!(new_calls >= 210 * 3 + query.limit);
+    assert!(new_calls < old_calls, "{new_calls} >= {old_calls}");
+    eprintln!("ordered merge: FTS calls={new_calls}, old FTS calls={old_calls}");
+}
+
+#[test]
+fn compound_boundary_deduplicates_kinds_but_preserves_run_sequences() {
+    let db = db();
+    indexed(&db, "run");
+    for (ordinal, kind) in [
+        "text",
+        "working_note",
+        "tool_use",
+        "tool_result",
+        "tool_error",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if *kind != "working_note" {
+            block(&db, "run", ordinal, kind, "needle");
+        }
+    }
+    let runs = vec!["run".to_owned(); MAX_SEARCH_BATCH_RUNS];
+    let kinds = [
+        IndexBlockKind::Text,
+        IndexBlockKind::WorkingNote,
+        IndexBlockKind::ToolUse,
+        IndexBlockKind::ToolResult,
+        IndexBlockKind::ToolError,
+        IndexBlockKind::Text,
+        IndexBlockKind::ToolResult,
+    ];
+    let filter = literals(&[&["needle"]]);
+    for limit in [1, 200, MAX_SEARCH_PAGE_ROWS] {
+        let mut query = ConversationQuery {
+            runs: &runs,
+            kinds: &kinds,
+            filter: &filter,
+            after: None,
+            limit,
+        };
+        let (sql, _) = conversation_candidate_sql(&query, &db.conn);
+        assert_eq!(sql.matches(" UNION ALL ").count(), 499);
+        loop {
+            let actual = db.conversation_candidates(&query).unwrap();
+            assert_eq!(actual, original_candidates(&db, &query));
+            if actual.is_empty() {
+                break;
+            }
+            query.after = actual.last().map(|row| row.position);
+        }
+        for seq in [runs.len(), usize::MAX] {
+            query.after = Some(CandidatePosition {
+                seq,
+                block_id: i64::MAX,
+            });
+            assert_eq!(
+                db.conversation_candidates(&query).unwrap(),
+                original_candidates(&db, &query)
+            );
+        }
+        query.kinds = &[];
+        assert!(db.conversation_candidates(&query).is_err());
+    }
+}
+
+#[test]
+fn untrusted_production_udf_is_null_even_for_same_name_successful_function() {
+    let db = db();
+    db.conn
+        .create_scalar_function(
+            c"evorch_fts5_exact",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(true),
+        )
+        .unwrap();
+    // fts5() itself may also be shadowed. Neither name nor success is trusted.
+    db.conn
+        .create_scalar_function(
+            c"fts5",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| -> rusqlite::Result<bool> { panic!("must not discover unknown tokenizer") },
+        )
+        .unwrap();
+    assert!(tokenizer_prefilter::install(&db.conn));
+    assert_eq!(
+        db.conn
+            .query_row(
+                "SELECT evorch_fts5_exact('abc', '[[[\"abc\"]]]')",
+                [],
+                |row| row.get::<_, Option<bool>>(0)
+            )
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
