@@ -26,7 +26,7 @@ impl AgentModel for AdmissionGate {
     }
 }
 
-fn receipt(status: storage::HostInputStatus) -> storage::HostInputReceipt {
+pub(super) fn receipt(status: storage::HostInputStatus) -> storage::HostInputReceipt {
     storage::HostInputReceipt {
         prompt_id: "old".into(),
         run_id: "run-1".into(),
@@ -253,7 +253,10 @@ fn delivered_to_unknown_with_or_without_notification_retracts_only_matching_bubb
                 },
             )]);
         } else {
-            state.reconcile_follow_ups();
+            // No notification: repair on the next broad periodic pass.
+            state.reconcile_receipts_at(
+                std::time::Instant::now() + std::time::Duration::from_secs(3),
+            );
         }
         assert_eq!(state.history[0].status, DeliveryStatus::Unknown);
         assert_eq!(

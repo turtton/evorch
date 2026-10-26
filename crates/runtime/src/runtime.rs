@@ -2196,7 +2196,12 @@ impl AgentRuntime {
     /// Only the thread owner may call this after excluding other live owners.
     /// Serialize the negative liveness check and settlement with explicit
     /// restoration of this run, without holding global locks during SQLite I/O.
-    pub fn reconcile_orphaned_host_inputs(&self, run: RunId) -> Result<(), storage::StorageError> {
+    /// Returns the submission IDs storage actually changed to Unknown, allowing
+    /// callers to update an existing receipt batch without a second read.
+    pub fn reconcile_orphaned_host_inputs(
+        &self,
+        run: RunId,
+    ) -> Result<Vec<String>, storage::StorageError> {
         let _restore_guard = self.shared.run_store.get().map(|store| {
             store
                 .restore_gate
@@ -2208,9 +2213,9 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.host_input_run_is_live(run) {
-            self.mark_unreachable_host_inputs(&run.to_string(), "orphaned_host")?;
+            return self.mark_unreachable_host_inputs(&run.to_string(), "orphaned_host");
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// Observe accepted follow-ups that have not entered the agent's context.

@@ -1,14 +1,27 @@
 //! Durable receipts, rather than inbox counts or event arrival, decide delivery.
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
 use super::WorkbenchState;
 use super::history::{ComposerDraft, DeliveryStatus, Resolution};
 use crate::model::tasks::AgentRunSource;
 
+pub(super) const RECEIPT_REPAIR_INTERVAL: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+pub(super) struct ReceiptReconciliation {
+    pub dirty: bool,
+    pub notified: HashSet<String>,
+    pub last_repair: Option<Instant>,
+}
+
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn persist_history(&self) -> Result<(), Box<dyn std::error::Error>> {
-        match &self.sidebar_path {
-            Some(path) => self.write_history_sidebar(path),
-            None => Ok(()), // in-memory fixtures
+        if let Some(path) = &self.sidebar_path {
+            self.write_history_sidebar(path)?;
         }
+        self.draft_dirty_at.set(None);
+        Ok(())
     }
 
     pub(super) fn mark_delivered(&mut self, ids: &[String]) -> bool {
@@ -26,19 +39,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         changed
     }
 
-    pub(super) fn apply_receipts(&mut self, receipts: &[storage::HostInputReceipt], startup: bool) {
+    /// Only changed rows are projected; prompts and the history are never cloned
+    /// for comparison. Startup builds the transcript separately after recovery.
+    pub(super) fn apply_receipts(
+        &mut self,
+        receipts: &[storage::HostInputReceipt],
+        startup: bool,
+    ) -> bool {
         use storage::HostInputStatus;
+        let receipts: HashMap<_, _> = receipts
+            .iter()
+            .map(|receipt| (receipt.prompt_id.as_str(), receipt))
+            .collect();
+        let mut changed = false;
         for message in &mut self.history {
             if message.resolution.is_some() || message.id.is_empty() {
                 continue;
             }
             let was_delivered = message.status == DeliveryStatus::Delivered;
-            if let Some(receipt) = receipts
-                .iter()
-                .find(|receipt| receipt.prompt_id == message.id)
-            {
-                message.image_count = receipt.image_count as usize;
-                message.status = match receipt.status {
+            let status = if let Some(receipt) = receipts.get(message.id.as_str()) {
+                if message.image_count != receipt.image_count as usize {
+                    message.image_count = receipt.image_count as usize;
+                    changed = true;
+                }
+                match receipt.status {
                     HostInputStatus::Accepted => {
                         let terminal = self.phases.get(&receipt.run_id).is_some_and(|phase| {
                             matches!(
@@ -62,66 +86,130 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     HostInputStatus::Delivered => DeliveryStatus::Delivered,
                     HostInputStatus::Dropped => DeliveryStatus::Dropped,
                     HostInputStatus::Unknown => DeliveryStatus::Unknown,
-                };
+                }
             } else if startup && message.status == DeliveryStatus::Queued {
-                message.status = DeliveryStatus::Rejected {
+                DeliveryStatus::Rejected {
                     reason: "送信前に中断".into(),
-                };
+                }
+            } else {
+                continue;
+            };
+            if message.status != status {
+                message.status = status;
+                changed = true;
+                if was_delivered {
+                    self.transcripts
+                        .remove_host_input(&message.thread_id, &message.id);
+                } else if !startup && message.status == DeliveryStatus::Delivered {
+                    self.transcripts.push_host_input(
+                        &message.thread_id,
+                        &message.id,
+                        message.prompt.clone(),
+                    );
+                }
             }
-            if was_delivered && message.status != DeliveryStatus::Delivered {
-                self.transcripts
-                    .remove_host_input(&message.thread_id, &message.id);
-            }
+        }
+        changed
+    }
+
+    pub(super) fn note_receipt_event(&mut self, event: &event_bus::Event) {
+        use event_bus::{EventKind, LifecycleEvent};
+        if let EventKind::Ownership(event_bus::OwnershipEvent {
+            owner_id,
+            action: event_bus::OwnershipAction::Claimed | event_bus::OwnershipAction::Handoff,
+            ..
+        }) = &event.kind
+            && self
+                .ownership
+                .as_ref()
+                .is_some_and(|host| host.owner_id() == owner_id)
+        {
+            self.receipt_reconciliation.last_repair = None;
+        }
+        if matches!(event.kind, EventKind::Lifecycle(_) | EventKind::Provider(_)) {
+            self.receipt_reconciliation.dirty = true;
+        }
+        if let EventKind::Lifecycle(
+            LifecycleEvent::HostInputDelivered { prompt_id, .. }
+            | LifecycleEvent::HostInputDropped { prompt_id, .. }
+            | LifecycleEvent::HostInputUnknown { prompt_id, .. },
+        ) = &event.kind
+        {
+            self.receipt_reconciliation
+                .notified
+                .insert(prompt_id.clone());
         }
     }
 
-    /// A notification is just a reason to re-read the receipts. Missing/lagged
-    /// notifications are repaired by the same reconciliation on each frame.
-    pub(super) fn reconcile_receipts(&mut self) -> bool {
+    /// At most one lookup per event batch/frame. The periodic broad pass repairs
+    /// lost notifications, including Delivered -> Unknown snapshot invalidation.
+    pub(super) fn read_receipts_if_due(
+        &mut self,
+        now: Instant,
+    ) -> Option<Vec<storage::HostInputReceipt>> {
+        let state = &mut self.receipt_reconciliation;
+        let repair = state
+            .last_repair
+            .is_none_or(|last| now.saturating_duration_since(last) >= RECEIPT_REPAIR_INTERVAL);
+        if !state.dirty && !repair {
+            return None;
+        }
+        state.dirty = false;
+        if repair {
+            state.last_repair = Some(now);
+        }
         let ids: Vec<_> = self
             .history
             .iter()
             .filter(|message| {
                 message.resolution.is_none()
-                    && matches!(
+                    && !message.id.is_empty()
+                    && (matches!(
                         message.status,
-                        DeliveryStatus::Queued
-                            | DeliveryStatus::Unknown
-                            | DeliveryStatus::Delivered
-                    )
+                        DeliveryStatus::Queued | DeliveryStatus::Unknown
+                    ) || (message.status == DeliveryStatus::Delivered
+                        && (repair || state.notified.contains(&message.id))))
             })
             .map(|message| message.id.clone())
             .collect();
+        state.notified.clear();
         if ids.is_empty() {
-            return self.sink.host_input_receipts(&[]).is_some();
+            return None;
         }
-        let Some(result) = self.sink.host_input_receipts(&ids) else {
-            return false;
-        };
-        let receipts = match result {
-            Ok(receipts) => receipts,
+        match self.sink.host_input_receipts(&ids)? {
+            Ok(mut receipts) => {
+                let requested: HashSet<_> = ids.iter().map(String::as_str).collect();
+                receipts.retain(|receipt| requested.contains(receipt.prompt_id.as_str()));
+                Some(receipts)
+            }
             Err(error) => {
                 tracing::warn!(%error, "receipt lookup failed");
-                return true;
-            }
-        };
-        let before = self.history.clone();
-        self.apply_receipts(&receipts, false);
-        for (old, new) in before.iter().zip(&self.history) {
-            if old.status != DeliveryStatus::Delivered && new.status == DeliveryStatus::Delivered {
-                self.transcripts
-                    .push_host_input(&new.thread_id, &new.id, new.prompt.clone());
+                None // The periodic pass retries even without another notification.
             }
         }
-        if before
-            .iter()
-            .zip(&self.history)
-            .any(|(old, new)| old.status != new.status)
-        {
+    }
+
+    pub(super) fn finish_receipt_reconciliation(&mut self, changed: bool) {
+        if changed {
             self.rebuild_delivery_rows();
             self.save_sidebar();
         }
-        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn reconcile_receipts_at(&mut self, now: Instant) -> bool {
+        if let Some(receipts) = self.read_receipts_if_due(now) {
+            let changed = self.apply_receipts(&receipts, false);
+            self.finish_receipt_reconciliation(changed);
+        }
+        self.sink.has_host_input_receipts()
+    }
+
+    /// Explicit recovery/claim boundary, also used by focused receipt fixtures.
+    #[cfg(test)]
+    pub(super) fn reconcile_receipts(&mut self) -> bool {
+        self.receipt_reconciliation.last_repair = None;
+        self.reconcile_receipts_at(Instant::now())
     }
 
     pub(super) fn rebuild_delivery_rows(&mut self) {

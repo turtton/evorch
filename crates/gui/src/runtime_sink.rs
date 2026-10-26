@@ -157,17 +157,24 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn has_host_input_receipts(&self) -> bool {
+        true
+    }
+
     fn host_input_receipts(
         &self,
         ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
         Some(self.runtime.host_input_receipts(ids))
     }
-    fn mark_unreachable_host_inputs(&self, run: &str) -> Result<(), storage::StorageError> {
+    fn mark_unreachable_host_inputs(
+        &self,
+        run: &str,
+    ) -> Result<Vec<String>, storage::StorageError> {
         if let Ok(run) = run.parse() {
-            self.runtime.reconcile_orphaned_host_inputs(run)?;
+            return self.runtime.reconcile_orphaned_host_inputs(run);
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {

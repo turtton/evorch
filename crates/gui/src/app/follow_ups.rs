@@ -39,7 +39,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// run dropped, and mirror the active thread's queue into the composer.
     pub(super) fn reconcile_follow_ups(&mut self) {
         self.refresh_draft_banner();
-        if self.reconcile_receipts() {
+        // The event-drain boundary has already reconciled this frame. Rendering
+        // must not perform a second lookup, even if the frame takes seconds.
+        if self.sink.has_host_input_receipts() {
             self.mirror_active_queue();
             return;
         }

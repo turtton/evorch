@@ -249,6 +249,17 @@ fn edit_from_a_message_rewinds_before_it_and_returns_it_to_the_composer() {
     // Then: history ends at the first turn and the message is ready to resend.
     assert_eq!(texts(gui.transcript()), ["first", "answer one", "<branch>"]);
     assert_eq!(gui.composer().input, "second");
+    let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    let active = saved.active_thread.as_ref().unwrap();
+    assert_eq!(
+        saved
+            .threads
+            .iter()
+            .find(|thread| &thread.id == active)
+            .unwrap()
+            .draft_input,
+        "second"
+    );
     gui.submit_composer();
     assert_eq!(
         last_seed(&gui),

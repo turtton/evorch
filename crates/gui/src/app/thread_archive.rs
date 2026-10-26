@@ -1,6 +1,6 @@
 use workspace_ui::{ThreadError, ThreadId, ThreadRecord};
 
-use super::{ConversationFocus, WorkbenchError, WorkbenchState};
+use super::{WorkbenchError, WorkbenchState};
 use crate::model::tasks::AgentRunSource;
 use crate::panes::sidebar::threads::{family_has_running_runs, thread_family};
 
@@ -39,16 +39,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .as_ref()
                 .is_some_and(|active| family.contains(active))
         {
-            self.sidebar.active_thread =
-                self.sidebar.selected_project.as_ref().and_then(|project| {
-                    ThreadRecord::partition_for_project(&self.sidebar.threads, project)
-                        .0
-                        .first()
-                        .map(|thread| thread.id.clone())
-                });
-            self.transcripts
-                .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
-            self.focus = ConversationFocus::Thread;
+            let next = self.sidebar.selected_project.as_ref().and_then(|project| {
+                ThreadRecord::partition_for_project(&self.sidebar.threads, project)
+                    .0
+                    .first()
+                    .map(|thread| thread.id.clone())
+            });
+            if let Some(next) = next {
+                self.switch_thread(next)?;
+            } else {
+                let previous = self.sidebar.active_thread.take();
+                self.finish_thread_switch(previous);
+            }
+            return Ok(());
         }
         self.save_sidebar();
         Ok(())

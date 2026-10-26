@@ -279,6 +279,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if ui.button("Keep open").clicked() {
                         self.shutdown_requested = false;
                         self.shutdown_confirmed = false;
+                        self.shutdown_draft_flushed = false;
                         if self.ownership_action_error.as_ref().is_some_and(|error| error.operation == SHUTDOWN) {
                             self.ownership_action_error = None;
                         }
@@ -294,6 +295,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn quiesce_ownership(&mut self, host: &OwnerHost, ctx: &egui::Context) {
+        self.flush_shutdown_draft_at(Instant::now());
         let result = host.begin_quiesce();
         match &result {
             Ok(false) => {
