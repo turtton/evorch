@@ -51,6 +51,7 @@ pub(crate) use tool_calls::{
 };
 
 pub(crate) struct RunTask {
+    pub(crate) publication: crate::runtime::PublicationToken,
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
     pub(crate) prompt: String,
@@ -129,6 +130,7 @@ pub(crate) struct LoopState {
     pub(crate) channels: LoopChannels,
     pub(crate) run_state: RunState,
     pub(crate) context: AgentContext,
+    pub(crate) image_model: Arc<dyn AgentModel>,
     policy: ExecutionPolicy,
     pub(crate) tool_specs: Vec<ToolSpec>,
     pub(crate) rules_session: Option<RulesSession>,
@@ -194,9 +196,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let Some(runtime) = crate::AgentRuntime::from_weak(&shared) else {
         return;
     };
+    let image_model = loop_shared
+        .model
+        .invocation_snapshot()
+        .unwrap_or_else(|| Arc::clone(&loop_shared.model));
     let mut policy = runtime
         .execution_policy(task.role)
-        .for_run_config(&task.config, task.parent.is_none());
+        .for_run_config(&task.config, task.parent.is_none())
+        .with_image_generation(image_model.image_generation_enabled());
     // Trusted host binding is checked once for the fixed tool set, and again
     // on every dispatch in case this conversation hands off its ownership.
     if runtime.goal_thread(task.run_id).is_none() {
@@ -274,6 +281,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             task.role,
             checkpoint.messages.clone(),
             Vec::new(),
+            crate::ResponsesReplayState::reset(checkpoint.messages.len()),
         )
     } else {
         match restored {
@@ -283,6 +291,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     task.role,
                     restored.messages,
                     restored.checkpoints,
+                    restored.responses_replay,
                 );
                 match restored.trigger {
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
@@ -320,6 +329,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         channels,
         run_state: RunState::new(),
         context,
+        image_model,
         policy,
         tool_specs: Vec::new(),
         rules_session: None,
@@ -850,6 +860,81 @@ impl LoopState {
             }
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
+            // Resolve D3 and scope before manual/automatic/window compaction so
+            // no preparation request can see the previous route's reasoning.
+            let preparation_invocation = AgentInvocationContext {
+                turn: Some(self.turn.clone()),
+                category: self.task.config.category.clone(),
+                run_id: self.task.run_id.to_string(),
+                model_preference: self.channels.model_preference_rx.borrow().clone(),
+                purpose: event_bus::RequestPurpose::Agent,
+            };
+            let preparation_model = self
+                .shared
+                .model
+                .invocation_snapshot()
+                .unwrap_or_else(|| Arc::clone(&self.shared.model));
+            let visible = self.context.visible_messages();
+            let preparation = tokio::select! {
+                biased;
+                changed = self.channels.cancel_rx.changed() => {
+                    if changed.is_ok() && let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
+                        return;
+                    }
+                    continue;
+                }
+                result = preparation_model.prepare_replay_context(
+                    &preparation_invocation, self.task.role, &visible,
+                    &self.tool_specs, &self.context.responses_replay,
+                ) => result,
+            };
+            match preparation {
+                Ok(()) => {}
+                Err(crate::RuntimeError::ModelSwitch {
+                    selected,
+                    resummarize,
+                }) if self.model_switches < MAX_MODEL_SWITCHES => {
+                    self.model_switches += 1;
+                    if let Err(error) =
+                        compaction::prepare_model_switch(self, &selected, resummarize).await
+                    {
+                        if let Some(kind) = self.interrupted() {
+                            self.finish_interrupted(kind);
+                        } else {
+                            self.finish_error(error.to_string());
+                        }
+                        return;
+                    }
+                    preparation_model.model_switch_prepared(
+                        &preparation_invocation,
+                        self.task.role,
+                        &selected,
+                    );
+                    continue;
+                }
+                Err(crate::RuntimeError::ResponsesScopeChanged { actual, selected })
+                    if self.model_switches < MAX_MODEL_SWITCHES =>
+                {
+                    self.model_switches += 1;
+                    if let Err(error) =
+                        compaction::prepare_responses_scope(self, &selected, actual.map(|s| *s))
+                            .await
+                    {
+                        if let Some(kind) = self.interrupted() {
+                            self.finish_interrupted(kind);
+                        } else {
+                            self.finish_error(error.to_string());
+                        }
+                        return;
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.finish_error(error.to_string());
+                    return;
+                }
+            }
             let requested_gen = *self.channels.compact_rx.borrow();
             if !self.todo_context_deferred && requested_gen > self.compaction.last_handled_gen {
                 if self.benchmark.is_some() {
@@ -975,12 +1060,13 @@ impl LoopState {
                     }
                     continue;
                 }
-                result = invocation_model.complete_streaming(
+                result = invocation_model.complete_streaming_with_replay(
                     &invocation,
                     self.task.role,
                     &visible_messages,
                     &self.tool_specs,
                     &self.shared.bus,
+                    &self.context.responses_replay,
                 ) => result,
             };
             self.activity(event_bus::RunActivity::Idle);
@@ -988,6 +1074,23 @@ impl LoopState {
                 Ok(response) => {
                     self.model_switches = 0;
                     response
+                }
+                Err(crate::RuntimeError::ResponsesScopeChanged { actual, selected })
+                    if self.model_switches < MAX_MODEL_SWITCHES =>
+                {
+                    self.model_switches += 1;
+                    if let Err(error) =
+                        compaction::prepare_responses_scope(self, &selected, actual.map(|s| *s))
+                            .await
+                    {
+                        if let Some(kind) = self.interrupted() {
+                            self.finish_interrupted(kind);
+                        } else {
+                            self.finish_error(error.to_string());
+                        }
+                        return;
+                    }
+                    continue;
                 }
                 Err(crate::RuntimeError::ModelSwitch {
                     selected,
@@ -998,7 +1101,11 @@ impl LoopState {
                     if let Err(error) =
                         compaction::prepare_model_switch(self, &selected, resummarize).await
                     {
-                        self.finish_error(error.to_string());
+                        if let Some(kind) = self.interrupted() {
+                            self.finish_interrupted(kind);
+                        } else {
+                            self.finish_error(error.to_string());
+                        }
                         return;
                     }
                     invocation_model.model_switch_prepared(&invocation, self.task.role, &selected);
@@ -1041,6 +1148,7 @@ impl LoopState {
                     | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::Anthropic { .. }
+                    | ContentBlock::ResponsesReasoning { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
                 .collect();
@@ -1578,6 +1686,7 @@ impl LoopState {
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::Anthropic { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })

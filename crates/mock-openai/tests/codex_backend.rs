@@ -128,6 +128,15 @@ async fn codex_backend_serves_catalog_custom_calls_and_compaction_with_prompt_ca
     let mut replayed = posts[1].body.clone();
     let trigger = replayed["input"].as_array_mut().unwrap().pop().unwrap();
     assert_eq!(trigger, json!({"type": "compaction_trigger"}));
+    // B-3: ordinary generation always asks for encrypted reasoning; the official
+    // compaction request keeps its own `include: []` contract. Pin both, then compare
+    // every other setting and the replayed input as one prefix.
+    assert_eq!(
+        posts[0].body["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    assert_eq!(replayed["include"], json!([]));
+    replayed["include"] = posts[0].body["include"].clone();
     let input = replayed["input"].as_array().unwrap();
     let call = input.len() - 2;
     assert_eq!(

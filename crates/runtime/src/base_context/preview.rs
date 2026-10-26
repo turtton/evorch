@@ -129,7 +129,8 @@ impl AgentRuntime {
         };
         let policy = self
             .execution_policy(request.role)
-            .for_run_config(&config, !request.child);
+            .for_run_config(&config, !request.child)
+            .with_image_generation(shared.model.image_generation_enabled());
         let (tools, excluded_tools) =
             self.preview_tools(&shared, &policy, &request, &selected_model);
         let sandbox_root = self

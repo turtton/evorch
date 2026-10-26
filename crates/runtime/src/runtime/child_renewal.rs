@@ -18,7 +18,7 @@ impl AgentRuntime {
         entry
             .is_some_and(|entry| {
                 matches!(
-                    *entry.cancel_tx.borrow(),
+                    *entry.execution.cancel_tx.borrow(),
                     crate::state::RunInterrupt::Cancel
                 ) || entry.terminal_reason.as_deref() == Some(event_bus::CANCELLED_REASON)
             })

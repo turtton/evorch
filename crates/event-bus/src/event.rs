@@ -843,6 +843,8 @@ pub enum RequestPurpose {
     EscalationReview,
     /// Provider-hosted web search invoked by a tool.
     WebSearch,
+    /// Provider image generation/editing invoked by a tool.
+    ImageGeneration,
     /// The model playing the user while an evaluation replays a thread.
     UserSimulation,
     /// The model grading or comparing evaluation results.
@@ -859,6 +861,7 @@ impl RequestPurpose {
             Self::Routing => "routing",
             Self::EscalationReview => "escalation_review",
             Self::WebSearch => "web_search",
+            Self::ImageGeneration => "image_generation",
             Self::UserSimulation => "user_simulation",
             Self::Judging => "judging",
         }
@@ -2902,6 +2905,7 @@ mod tests {
             RequestPurpose::Routing,
             RequestPurpose::EscalationReview,
             RequestPurpose::WebSearch,
+            RequestPurpose::ImageGeneration,
             RequestPurpose::UserSimulation,
             RequestPurpose::Judging,
         ];
@@ -2913,6 +2917,7 @@ mod tests {
                 serde_json::from_str(&json).expect("deserialize RequestPurpose");
             assert_eq!(restored, purpose);
         }
+        assert_eq!(RequestPurpose::ImageGeneration.as_str(), "image_generation");
         assert_eq!(RequestPurpose::UserSimulation.as_str(), "user_simulation");
         assert_eq!(RequestPurpose::Judging.as_str(), "judging");
     }

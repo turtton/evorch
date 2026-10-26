@@ -3,6 +3,8 @@
 //! 公式 OpenAI API へは Responses API (`POST {base_url}/responses`) で接続します。
 //! wire 変換と SSE 解釈は Codex と共有する [`crate::wire::responses`] が担います。
 
+mod images;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,12 +16,15 @@ use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
 use crate::error::ProviderError;
 use crate::http::stream::adapt_sse_stream;
-use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
+use crate::http::{
+    UsageEmitter, build_http_client, build_http_client_with_read_timeout, map_request_error,
+    map_response_error,
+};
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::responses::{
-    ResponsesDialect, ResponsesRequestOptions, ResponsesStreamInterpreter, to_wire_request,
+    ResponsesDialect, ResponsesRequestOptions, ResponsesStreamInterpreter,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -50,6 +55,7 @@ impl Default for OpenAiConfig {
 /// OpenAI Responses API を呼び出す provider クライアント。
 pub struct OpenAiClient {
     http: reqwest::Client,
+    image_http: reqwest::Client,
     endpoint: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
@@ -62,8 +68,13 @@ impl OpenAiClient {
     /// # Errors
     /// HTTP クライアントを構築できない場合 [`ProviderError`] を返す。
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
+        crate::responses_replay::validate_endpoint(&config.base_url)?;
         Ok(Self {
             http: build_http_client(None)?,
+            image_http: build_http_client_with_read_timeout(
+                Some(crate::image_generation::IMAGE_TIMEOUT),
+                crate::image_generation::IMAGE_TIMEOUT,
+            )?,
             endpoint: format!("{}/responses", config.base_url.trim_end_matches('/')),
             timeout: config.timeout,
             event_bus: config.event_bus,
@@ -89,7 +100,14 @@ impl OpenAiClient {
         request: &ChatRequest,
         streaming: bool,
     ) -> Result<DeltaStream, ProviderError> {
-        let wire_request = to_wire_request(
+        let scope = crate::ResolvedResponsesScope::resolve(
+            request,
+            ResponsesDialect::OpenAi,
+            self.profile.as_deref(),
+            &self.endpoint,
+            crate::ResponsesAccount::Unavailable,
+        );
+        let wire_request = crate::wire::responses::to_wire_request_with_scope(
             request,
             &ResponsesRequestOptions {
                 dialect: ResponsesDialect::OpenAi,
@@ -98,7 +116,8 @@ impl OpenAiClient {
                     .as_ref()
                     .map(|context| context.run_id.clone()),
             },
-        );
+            &scope,
+        )?;
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             OPENAI_PROVIDER_LABEL,
@@ -136,7 +155,7 @@ impl OpenAiClient {
         }
         Ok(adapt_sse_stream(
             response.bytes_stream(),
-            ResponsesStreamInterpreter::new(),
+            ResponsesStreamInterpreter::with_origin(scope),
             UsageEmitter::new(self.event_bus.clone(), OPENAI_PROVIDER_LABEL),
             request.model.clone(),
             observer,
@@ -146,6 +165,23 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ProviderClient for OpenAiClient {
+    fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
+        Some(self)
+    }
+
+    async fn resolve_responses_scope(
+        &self,
+        _: &ProviderAuth,
+        request: &ChatRequest,
+    ) -> Result<Option<crate::ResolvedResponsesScope>, ProviderError> {
+        Ok(Some(crate::ResolvedResponsesScope::resolve(
+            request,
+            ResponsesDialect::OpenAi,
+            self.profile.as_deref(),
+            &self.endpoint,
+            crate::ResponsesAccount::Unavailable,
+        )))
+    }
     fn supports_structured_output(&self) -> bool {
         true
     }

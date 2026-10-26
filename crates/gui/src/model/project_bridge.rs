@@ -1,11 +1,18 @@
 use runtime::{AgentInspection, ProjectTrust};
-use workspace_ui::{Membership, SidebarState, TrustState};
+use workspace_ui::{Membership, ProjectRecord, SidebarState, TrustState};
 
 pub const fn to_project_trust(trust: TrustState) -> ProjectTrust {
     match trust {
         TrustState::Approved => ProjectTrust::Approved,
         TrustState::Unapproved => ProjectTrust::Unapproved,
     }
+}
+
+/// Whether the runtime gives `project`'s runs its repository skills, the ones
+/// an `@name` mention may then inline. The GUI declares every project's trust
+/// before its runs start, so the runtime judges by the recorded trust.
+pub fn repo_skills_admitted(project: Option<&ProjectRecord>) -> bool {
+    ProjectTrust::admits_repo_skills(project.map(|project| to_project_trust(project.trust)))
 }
 
 pub fn run_membership(sidebar: &SidebarState, inspection: &AgentInspection) -> Membership {
@@ -69,6 +76,24 @@ mod tests {
             to_project_trust(TrustState::Unapproved),
             ProjectTrust::Unapproved
         );
+    }
+
+    #[test]
+    fn only_an_untrusted_project_withholds_its_repo_skills() {
+        // Given: an approved and an unapproved project record
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut sidebar = SidebarState::default();
+        let project_id = ProjectId::new("demo");
+        sidebar
+            .add_project(project_id.clone(), "demo", temp.path())
+            .expect("project can be added");
+        let mut project = sidebar.projects[0].clone();
+
+        // When/Then: the runtime's rule decides; no project means nothing to withhold
+        assert!(!repo_skills_admitted(Some(&project)));
+        project.trust = TrustState::Approved;
+        assert!(repo_skills_admitted(Some(&project)));
+        assert!(repo_skills_admitted(None));
     }
 
     #[test]

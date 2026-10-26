@@ -12,6 +12,18 @@ pub enum ProjectTrust {
     Unapproved,
 }
 
+impl ProjectTrust {
+    /// ホストが宣言した信頼状態 `declared` のもとで、プロジェクトのリポジトリ
+    /// skill (`.evorch/skills`・`.agents/skills`) が run に届くかを返す。
+    ///
+    /// 宣言のないプロジェクトは信頼状態の導入前と同じく届く。runtime の run と
+    /// ホスト側の `@name` 展開が同じ判定に従うよう、ここを唯一の判定とする。
+    #[must_use]
+    pub fn admits_repo_skills(declared: Option<Self>) -> bool {
+        declared.is_none_or(|trust| trust == Self::Approved)
+    }
+}
+
 /// ルール注入時の予算設定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RulesSettings {
@@ -140,5 +152,18 @@ mod tests {
     #[test]
     fn trust_defaults_to_unapproved() {
         assert_eq!(ProjectTrust::default(), ProjectTrust::Unapproved);
+    }
+
+    // Given: 各宣言状態 / When: リポジトリ skill の可否を問う
+    // Then: 未承認だけが除外し、未宣言は承認と同じく届ける
+    #[test]
+    fn only_an_unapproved_declaration_withholds_repo_skills() {
+        assert!(ProjectTrust::admits_repo_skills(None));
+        assert!(ProjectTrust::admits_repo_skills(Some(
+            ProjectTrust::Approved
+        )));
+        assert!(!ProjectTrust::admits_repo_skills(Some(
+            ProjectTrust::Unapproved
+        )));
     }
 }

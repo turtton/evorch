@@ -113,6 +113,12 @@ impl SkillCatalogSource {
 
     /// [`Self::snapshot`] with repository skills discovered under `repo_root`
     /// instead of the configured repository, for runs bound to another project.
+    ///
+    /// Without `repo_skills` (an untrusted project) the repository scopes are not
+    /// discovered. The registry only remembers `repo_root`, so a load of a name
+    /// the project has can say why it is unavailable; that check looks at the one
+    /// requested name when it fails, never here. Without `repo_root` the load
+    /// stays an unknown skill.
     pub fn snapshot_for(&self, repo_root: Option<&Path>, repo_skills: bool) -> SourceSnapshot {
         let (snapshot, diagnostics, error) = {
             let mut state = self
@@ -129,7 +135,11 @@ impl SkillCatalogSource {
             } else if let Some(repo_root) = repo_root {
                 replace_repo_dirs(&mut skill_dirs, repo_root);
             }
-            let registry = Arc::new(discover_with_builtin(&skill_dirs));
+            let mut registry = discover_with_builtin(&skill_dirs);
+            if !repo_skills && let Some(repo_root) = repo_root {
+                registry.withhold_untrusted_project(repo_root.to_path_buf());
+            }
+            let registry = Arc::new(registry);
             let catalog = build_catalog(&CatalogBuildInput {
                 config: &self.config,
                 user_presets_dir: self.user_presets_dir.as_deref(),

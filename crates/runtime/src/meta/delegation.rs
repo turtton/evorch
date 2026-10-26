@@ -121,7 +121,8 @@ fn misplaced_target_error(input: &serde_json::Value) -> String {
 ///
 /// 空ならそのまま空を返す (レジストリ参照も行わない)。空でない場合は、
 /// 子 run の生成・モデル呼び出しより前に fail-closed で検証する: レジストリ
-/// 未接続なら "not configured"、未知の名前なら "unknown skill" を運ぶエラー。
+/// 未接続なら "not configured"、未知の名前なら "unknown skill" (未信頼プロジェクトで
+/// 除外した名前ならその理由と対処) を運ぶエラー。
 /// 重複は最初の出現位置を保持して除去する。
 fn validate_load_skills(state: &LoopState, names: &[String]) -> Result<Vec<String>, String> {
     let mut unique: Vec<String> = Vec::with_capacity(names.len());
@@ -138,7 +139,7 @@ fn validate_load_skills(state: &LoopState, names: &[String]) -> Result<Vec<Strin
     };
     for name in &unique {
         if registry.get(name).is_none() {
-            return Err(format!("unknown skill: {name}"));
+            return Err(registry.unknown_skill_message(name));
         }
         if let Some(reason) = state.revoked_skill(name) {
             return Err(reason);

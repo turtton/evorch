@@ -17,7 +17,9 @@ pub(super) fn sanitize(error: ProviderError) -> ProviderError {
             status,
             body: "Codex web search request was rejected".into(),
         },
-        ProviderError::RateLimited { .. } | ProviderError::Timeout => error,
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::RateLimited { .. }
+        | ProviderError::Timeout => error,
         ProviderError::InvalidSse { .. } => invalid("Codex web search SSE is invalid"),
         ProviderError::InvalidJson { .. } => ProviderError::InvalidJson {
             detail: "Codex web search response JSON is invalid".into(),

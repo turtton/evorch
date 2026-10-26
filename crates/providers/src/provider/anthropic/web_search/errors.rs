@@ -15,7 +15,9 @@ pub(crate) fn sanitize(error: ProviderError) -> ProviderError {
             status,
             body: "Anthropic web search request was rejected".into(),
         },
-        ProviderError::RateLimited { .. } | ProviderError::Timeout => error,
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::RateLimited { .. }
+        | ProviderError::Timeout => error,
         ProviderError::InvalidJson { .. } | ProviderError::InvalidSse { .. } => {
             invalid("Anthropic web search response is invalid")
         }

@@ -43,6 +43,7 @@ fn oauth(server: &MockServer) -> CursorOAuthClient {
 }
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "model-1".into(),
         messages: vec![
             Message {

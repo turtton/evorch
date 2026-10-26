@@ -18,6 +18,7 @@ const SUCCESS_SSE: &str = include_str!("fixtures/codex/responses_success.sse");
 
 fn request() -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: "gpt-5.1-codex".to_string(),
         messages: vec![Message {
             role: Role::User,
@@ -202,5 +203,46 @@ async fn refresh_failure_surfaces_error_and_zero_usage() {
     assert!(
         event.is_err(),
         "refresh failure must emit neither Started nor Usage: {event:?}"
+    );
+}
+
+#[tokio::test]
+async fn b3_refresh_binds_received_reasoning_to_the_exact_http_account() {
+    use providers::{ResponsesAccount, ResponsesReplayContext, ResponsesSpeed};
+    let server = MockServer::start().await;
+    mount_refresh(&server, refreshed_token_response(), 1).await;
+    let item = json!({"type":"reasoning","id":"rs1","summary":[],"encrypted_content":"final"});
+    Mock::given(method("POST")).and(path("/backend-api/codex/responses"))
+        .and(header("authorization","Bearer access-tok-2"))
+        .and(header("chatgpt-account-id","acc-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(format!("data: {}\n\ndata: {}\n\n",json!({"type":"response.output_item.done","output_index":0,"item":item}),json!({"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}})),"text/event-stream"))
+        .expect(1).mount(&server).await;
+    let client = client(&server, seeded_store(60), None);
+    let mut request = request();
+    request.responses_replay = Some(ResponsesReplayContext {
+        route_model: request.model.clone(),
+        speed: ResponsesSpeed::Standard,
+        expected_scope: None,
+    });
+    let auth = ProviderAuth::new("");
+    let scope = client
+        .resolve_responses_scope(&auth, &request)
+        .await
+        .unwrap()
+        .unwrap();
+    request.responses_replay.as_mut().unwrap().expected_scope = Some(scope.clone());
+    let response = client.send(&auth, &request).await.unwrap();
+    assert_eq!(
+        scope.account,
+        ResponsesAccount::Codex {
+            identity: "acc-123".into()
+        }
+    );
+    assert_eq!(
+        response.message.content[0],
+        ContentBlock::ResponsesReasoning {
+            item,
+            origin: scope
+        }
     );
 }

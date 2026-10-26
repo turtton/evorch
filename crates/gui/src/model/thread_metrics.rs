@@ -123,13 +123,14 @@ impl TelemetryOverlay {
         let mut cache_reuse = CacheReuseSummary::default();
         for row in roots.iter().copied() {
             has_usage |= row.latest_context.is_some();
-            usage.input = usage.input.saturating_add(row.usage.input);
-            usage.output = usage.output.saturating_add(row.usage.output);
+            usage.input = usage.input.saturating_add(row.conversation_usage.input);
             ttft_sum_ms = ttft_sum_ms.saturating_add(row.ttft_sum_ms);
             ttft_count = ttft_count.saturating_add(row.ttft_count);
             rated_tokens = rated_tokens.saturating_add(row.rated_output_tokens);
             rated_duration = rated_duration.saturating_add(row.rated_duration);
-            usage.cache_read = usage.cache_read.saturating_add(row.usage.cache_read);
+            usage.cache_read = usage
+                .cache_read
+                .saturating_add(row.conversation_usage.cache_read);
             cache_reuse.add_totals(&row.cache_reuse);
         }
         let latest = roots.into_iter().max_by_key(|row| row.context_order);

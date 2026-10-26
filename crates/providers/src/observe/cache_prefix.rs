@@ -144,3 +144,32 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod responses_reasoning_tests {
+    use super::WireInput;
+    use serde_json::json;
+
+    #[test]
+    fn encrypted_content_is_part_of_the_actual_wire_prefix() {
+        let mut wire = json!({"model":"m","include":["reasoning.encrypted_content"],"input":[{"type":"reasoning","id":"rs1","summary":[],"encrypted_content":"A"}]});
+        let previous = WireInput::new(&wire, "openai-responses")
+            .unwrap()
+            .prefix()
+            .unwrap();
+        wire["input"].as_array_mut().unwrap().push(
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}),
+        );
+        assert!(
+            WireInput::new(&wire, "openai-responses")
+                .unwrap()
+                .extends(&previous)
+        );
+        wire["input"][0]["encrypted_content"] = json!("B");
+        assert!(
+            !WireInput::new(&wire, "openai-responses")
+                .unwrap()
+                .extends(&previous)
+        );
+    }
+}

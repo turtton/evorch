@@ -46,6 +46,7 @@ fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::Anthropic { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

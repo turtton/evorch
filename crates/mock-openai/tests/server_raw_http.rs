@@ -378,3 +378,80 @@ fn prompt_cache_includes_tool_definitions_and_other_request_settings() {
         assert!(prompt_cache_usage(&server, &request).1 < input);
     }
 }
+
+fn post_raw(
+    server: &StreamingMockOpenAi,
+    path: &str,
+    headers: &str,
+    body: &Value,
+) -> (String, Value) {
+    let mut stream = TcpStream::connect(address(server)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let body = body.to_string();
+    write!(stream, "POST {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    (headers.to_owned(), serde_json::from_str(body).unwrap())
+}
+
+// Given: a Codex fixture with one response script and no token response yet
+// When: the token endpoint is called before and after a token response is set, and a
+// Responses request names an account
+// Then: the refresh is 401 until set, then answers the set token every time, neither
+// consumes the response script, and the account header is recorded on each request
+#[test]
+fn oauth_refreshes_answer_the_set_token_and_requests_record_the_account() {
+    let server = StreamingMockOpenAi::spawn_with_prompt_cache(vec![ScriptedResponse::text_stream(
+        "resp",
+        "m",
+        ["ok"],
+    )]);
+    let token = mock_openai::codex_auth::token_bundle(
+        "access-2",
+        "refresh-2",
+        "acc",
+        mock_openai::codex_auth::FAR_FUTURE_EXP,
+    );
+    let refresh = json!({"grant_type": "refresh_token", "refresh_token": "refresh-1"});
+    let path = "/backend-api/codex/oauth/token";
+    let (headers, _) = post_raw(&server, path, "", &refresh);
+    assert!(headers.starts_with("HTTP/1.1 401"), "{headers}");
+    server.set_oauth_token_response(token.clone());
+    for _ in 0..2 {
+        let (headers, body) = post_raw(&server, path, "", &refresh);
+        assert!(headers.starts_with("HTTP/1.1 200 OK"), "{headers}");
+        assert_eq!(body, token);
+    }
+    assert_eq!(server.remaining_scripts(), 1);
+
+    let request = json!({"model": "m", "instructions": "i", "input": []});
+    let account = "chatgpt-account-id: acc\r\nAuthorization: Bearer access-2\r\n";
+    let (headers, _) = {
+        let mut stream = TcpStream::connect(address(&server)).unwrap();
+        let body = request.to_string();
+        write!(stream, "POST /backend-api/codex/responses HTTP/1.1\r\nHost: localhost\r\n{account}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        (headers.to_owned(), body.to_owned())
+    };
+    assert!(headers.contains("text/event-stream"), "{headers}");
+    assert_eq!(server.remaining_scripts(), 0);
+    let recorded = server.recorded_requests();
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|request| (request.path.as_str(), request.chatgpt_account_id.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (path, None),
+            (path, None),
+            (path, None),
+            ("/backend-api/codex/responses", Some("acc")),
+        ]
+    );
+    assert_eq!(recorded[0].body, refresh);
+}

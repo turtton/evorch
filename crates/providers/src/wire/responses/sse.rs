@@ -1,4 +1,5 @@
 mod custom;
+mod ordering;
 
 use std::collections::BTreeMap;
 
@@ -17,6 +18,8 @@ use crate::stream::StreamEvent;
 /// Codex backend と公式 OpenAI API で共有します。
 #[derive(Debug, Clone, Default)]
 pub struct ResponsesStreamInterpreter {
+    origin: Option<crate::ResponsesReplayOrigin>,
+    ordering: ordering::OutputOrdering,
     tool_indices: BTreeMap<String, usize>,
     tool_arguments: BTreeMap<usize, String>,
     custom_tools: BTreeMap<String, CustomToolState>,
@@ -30,6 +33,14 @@ impl ResponsesStreamInterpreter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind confirmed items to the scope used by this HTTP attempt.
+    pub fn with_origin(origin: crate::ResponsesReplayOrigin) -> Self {
+        Self {
+            origin: Some(origin),
+            ..Self::default()
+        }
     }
 
     fn tool_index(&mut self, item_id: &str, output_index: usize) -> usize {
@@ -114,6 +125,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 })
             }
             "response.output_text.delta" => {
+                self.ordering.text(&value)?;
                 let event: TextDelta = parse(value)?;
                 if event.delta.is_empty() {
                     return Ok(FrameInterpretation::default());
@@ -130,6 +142,13 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
             }
             "response.output_item.added" | "response.output_item.done" => {
                 let done = event_type == "response.output_item.done";
+                self.ordering.item(&value, done)?;
+                if !matches!(
+                    value["item"]["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    return Ok(FrameInterpretation::default());
+                }
                 let event: OutputItemEvent = parse(value)?;
                 match event.item {
                     OutputItem::FunctionCall {
@@ -303,6 +322,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 }
             });
         }
+        self.ordering.finalize(message, self.origin.as_ref());
     }
 }
 
@@ -347,9 +367,8 @@ struct OutputItemEvent {
     item: OutputItem,
 }
 
-/// 回収する出力項目。それ以外 (message、hosted tool、未知の種別) は無視します。
-///
-/// B-3 の encrypted reasoning は `Reasoning` variant を追加して回収します。
+/// Typed tool parsing preserves existing argument validation. Native reasoning and
+/// message ordering are captured separately from raw confirmed output items.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutputItem {

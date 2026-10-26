@@ -28,6 +28,7 @@ const CODEX_MODEL: &str = "gpt-codex-contract";
 
 fn request(model: &str) -> ChatRequest {
     ChatRequest {
+        responses_replay: None,
         model: model.to_string(),
         messages: vec![Message {
             role: Role::User,

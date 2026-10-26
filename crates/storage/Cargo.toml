@@ -17,6 +17,8 @@ tracing = { workspace = true }
 event-bus = { path = "../event-bus" }
 
 [dev-dependencies]
+# Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
+providers = { path = "../providers" }
 rusqlite = { workspace = true, features = ["hooks"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

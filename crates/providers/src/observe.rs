@@ -43,6 +43,7 @@ pub(crate) struct AttemptObserver {
     model: String,
     streaming: bool,
     observation: Option<ObservationContext>,
+    purpose_override: Option<event_bus::RequestPurpose>,
     service_tier: Option<ServiceTier>,
     reasoning_effort: Option<String>,
     started_at: tokio::time::Instant,
@@ -74,6 +75,7 @@ impl AttemptObserver {
             model: model.into(),
             streaming,
             observation,
+            purpose_override: None,
             service_tier: None,
             reasoning_effort: None,
             started_at: tokio::time::Instant::now(),
@@ -83,6 +85,12 @@ impl AttemptObserver {
             cache: None,
             known_secret: None,
         }
+    }
+
+    /// Dedicated capabilities attest their purpose even without a run context.
+    pub(crate) fn with_purpose(mut self, purpose: event_bus::RequestPurpose) -> Self {
+        self.purpose_override = Some(purpose);
+        self
     }
 
     /// 失敗詳細から伏せる credential を登録する。空文字列は無視する。
@@ -235,7 +243,8 @@ impl AttemptObserver {
     }
 
     fn observation_purpose(&self) -> Option<event_bus::RequestPurpose> {
-        self.observation.as_ref().map(|context| context.purpose)
+        self.purpose_override
+            .or_else(|| self.observation.as_ref().map(|context| context.purpose))
     }
 
     fn emit(&self, event: ProviderEvent) {
@@ -269,9 +278,9 @@ fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
         ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => {
             ProviderFailureKind::InvalidResponse
         }
-        ProviderError::Request(_) | ProviderError::Transport { .. } => {
-            ProviderFailureKind::Transport
-        }
+        ProviderError::ResponsesScopeChanged { .. }
+        | ProviderError::Request(_)
+        | ProviderError::Transport { .. } => ProviderFailureKind::Transport,
         ProviderError::RetriesExhausted { last, .. } => failure_kind(last),
     }
 }

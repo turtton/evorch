@@ -34,6 +34,8 @@ pub(crate) enum SummarizeError {
     IdleTimeout { seconds: u64 },
     #[error("summary exceeded its {seconds}-second deadline")]
     Deadline { seconds: u64 },
+    #[error("protected summary body needs {required} bytes, exceeding the {limit}-byte limit")]
+    ProtectedContent { required: usize, limit: u64 },
 }
 
 #[async_trait]
@@ -139,7 +141,12 @@ impl ModelSummarizer {
                 .filter_map(|block| {
                     if text_tool_history {
                         summary_block(block)
-                    } else if matches!(block, ContentBlock::Anthropic { .. }) {
+                    } else if matches!(
+                        block,
+                        ContentBlock::Anthropic { .. }
+                            | ContentBlock::ResponsesReasoning { .. }
+                            | ContentBlock::Compaction { .. }
+                    ) {
                         None
                     } else {
                         Some(block.clone())
@@ -205,7 +212,9 @@ impl ModelSummarizer {
 // Ordinary compaction, agent replay and persisted raw history stay unchanged.
 fn summary_block(block: &ContentBlock) -> Option<ContentBlock> {
     let text = match block {
-        ContentBlock::Anthropic { .. } => return None,
+        ContentBlock::Anthropic { .. }
+        | ContentBlock::ResponsesReasoning { .. }
+        | ContentBlock::Compaction { .. } => return None,
         ContentBlock::ToolUse { id, name, input } => {
             format!("[tool call {name} id={id}]\n{input}")
         }
@@ -250,6 +259,7 @@ fn summary_text(response: &ChatResponse) -> Result<String, SummarizeError> {
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -293,6 +303,7 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -312,6 +323,7 @@ fn assistant_lines(messages: &[Message], predicate: impl Fn(&str) -> bool) -> Ve
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -396,6 +408,7 @@ fn verification_lines(messages: &[Message]) -> Vec<&str> {
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. } => None,
         })
         .flatten()
@@ -421,6 +434,7 @@ fn recent_context(messages: &[Message]) -> Vec<String> {
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -452,6 +466,7 @@ fn agent_messages(messages: &[Message]) -> Vec<&str> {
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Anthropic { .. }
+            | ContentBlock::ResponsesReasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -518,7 +533,10 @@ mod tests {
                 messages
                     .iter()
                     .flat_map(|message| &message.content)
-                    .all(|block| !matches!(block, ContentBlock::Anthropic { .. })),
+                    .all(|block| !matches!(
+                        block,
+                        ContentBlock::Anthropic { .. } | ContentBlock::ResponsesReasoning { .. }
+                    )),
                 "summary requests must not contain provider signatures or opaque state"
             );
             let last_user_text = messages
@@ -578,6 +596,7 @@ mod tests {
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::Anthropic { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
@@ -638,6 +657,7 @@ mod tests {
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::Anthropic { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
@@ -661,6 +681,7 @@ mod tests {
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::Anthropic { .. }
+                | ContentBlock::ResponsesReasoning { .. }
                 | ContentBlock::ToolUse { .. } => None,
             })
         {
@@ -1234,3 +1255,80 @@ mod tests {
 #[cfg(test)]
 #[path = "summary_timing_tests.rs"]
 mod timing_tests;
+
+#[cfg(test)]
+mod responses_tests {
+    use super::*;
+    use crate::context::responses_replay_tests::{opaque, scope};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Capture(Mutex<Vec<Vec<Message>>>);
+    #[async_trait]
+    impl AgentModel for Capture {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "summary".into()
+        }
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            messages: &[Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            self.0.lock().unwrap().push(messages.to_vec());
+            Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "safe summary".into(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn b3_both_text_summary_paths_exclude_opaque_and_empty_messages() {
+        let capture = Arc::new(Capture::default());
+        let summarizer = ModelSummarizer {
+            turn: None,
+            model: capture.clone(),
+            role: Role::Worker,
+            run_id: "summary".into(),
+            category: None,
+            model_preference: None,
+            idle_timeout: Duration::from_secs(90),
+            timeout: Duration::from_secs(300),
+        };
+        let mut mixed = opaque("mixed", scope("A"));
+        mixed.content.push(ContentBlock::Text {
+            text: "visible evidence".into(),
+        });
+        let messages = [opaque("only-opaque", scope("A")), mixed];
+        for switching in [false, true] {
+            summarizer
+                .summarize_with_usage_for_switch(
+                    &SummaryInput {
+                        goal: Some("task"),
+                        compacted: &messages,
+                    },
+                    switching,
+                )
+                .await
+                .0
+                .unwrap();
+        }
+        let recorded = capture.0.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        for request in recorded.iter() {
+            assert!(request.iter().all(|m| !m.content.is_empty()));
+            let serialized = serde_json::to_string(request).unwrap();
+            assert!(!serialized.contains("cipher-"));
+            assert!(!serialized.contains("responses_reasoning"));
+            assert!(serialized.contains("visible evidence"));
+        }
+        assert_eq!(messages[0].content.len(), 1, "raw history stays unchanged");
+    }
+}

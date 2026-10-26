@@ -120,6 +120,12 @@ pub struct MentionIndex {
     /// [`Self::retain_allowed`] has not dropped. Allowed-directory entries lie
     /// only within these.
     retained: Vec<PathBuf>,
+    /// Whether the skills it was built from include the project's repository
+    /// skills, as its trust then admitted. Like `allowed`, this keeps what it
+    /// was built for after [`Self::withhold_repo_skills`] drops skills.
+    pub repo_skills: bool,
+    /// Whether [`Self::withhold_repo_skills`] dropped the skill entries.
+    skills_withheld: bool,
     pub entries: Vec<MentionEntry>,
 }
 
@@ -132,8 +138,15 @@ pub struct MentionQuery<'a> {
 
 impl MentionIndex {
     /// Indexes `root`, then each of `allowed` within the remaining path budget.
-    pub fn build(root: &Path, allowed: &[PathBuf], skills: &SkillRegistry) -> Self {
-        Self::build_within(root, allowed, skills, MAX_INDEXED_PATHS)
+    /// `skills` are what a mention in `root` reaches, which include its
+    /// repository skills when `repo_skills` (see [`mention_skills`]).
+    pub fn build(
+        root: &Path,
+        allowed: &[PathBuf],
+        skills: &SkillRegistry,
+        repo_skills: bool,
+    ) -> Self {
+        Self::build_within(root, allowed, skills, repo_skills, MAX_INDEXED_PATHS)
     }
 
     /// [`Self::build`] with at most `limit` files across all directories.
@@ -141,6 +154,7 @@ impl MentionIndex {
         root: &Path,
         allowed: &[PathBuf],
         skills: &SkillRegistry,
+        repo_skills: bool,
         limit: usize,
     ) -> Self {
         let skills = skills
@@ -164,6 +178,7 @@ impl MentionIndex {
         }
         index.allowed = allowed.to_vec();
         index.retained = allowed.to_vec();
+        index.repo_skills = repo_skills;
         index
     }
 
@@ -228,11 +243,30 @@ impl MentionIndex {
         });
     }
 
-    /// Whether this is what [`Self::build`] gives for `root` and `allowed`,
-    /// short of files changed since: built for exactly them, with no
-    /// directory's entries dropped afterwards.
-    pub fn is_built_for(&self, root: &Path, allowed: &[PathBuf]) -> bool {
-        self.root.as_deref() == Some(root) && self.allowed == allowed && self.retained == allowed
+    /// Drops every skill once the project no longer admits its repository
+    /// skills, so none of them completes before the rebuild lands. Which
+    /// skills came from the repository is not recorded, and a user skill one
+    /// of them shadowed only returns with the rebuild anyway, so the user and
+    /// builtin skills wait for it too. [`Self::is_built_for`] then calls for
+    /// that rebuild whichever trust it is asked about.
+    pub fn withhold_repo_skills(&mut self) {
+        if !self.repo_skills || self.skills_withheld {
+            return;
+        }
+        self.entries
+            .retain(|entry| entry.kind != CompletionKind::Skill);
+        self.skills_withheld = true;
+    }
+
+    /// Whether this is what [`Self::build`] gives for `root`, `allowed` and
+    /// `repo_skills`, short of files changed since: built for exactly them,
+    /// with no directory's entries or skills dropped afterwards.
+    pub fn is_built_for(&self, root: &Path, allowed: &[PathBuf], repo_skills: bool) -> bool {
+        self.root.as_deref() == Some(root)
+            && self.allowed == allowed
+            && self.retained == allowed
+            && self.repo_skills == repo_skills
+            && !self.skills_withheld
     }
 
     /// Folders are derived from file paths; `skills` are `(name, description)`.
@@ -268,6 +302,8 @@ impl MentionIndex {
             root,
             allowed: Vec::new(),
             retained: Vec::new(),
+            repo_skills: false,
+            skills_withheld: false,
             entries,
         }
     }
@@ -367,6 +403,19 @@ fn mentioned_names(text: &str) -> Vec<&str> {
     names
 }
 
+/// The skills an `@name` mention in `root` reaches: those the runtime gives
+/// the project's runs, so its repository skills only when its trust admits
+/// them (`repo_skills`, see `project_bridge::repo_skills_admitted`).
+pub fn mention_skills(root: Option<&Path>, repo_skills: bool) -> SkillRegistry {
+    runtime::skill::build_standard_registry(root.filter(|_| repo_skills))
+}
+
+/// Whether `@name` inlines one of `skills`. A project path with the same name
+/// wins, keeping `@docs` a folder reference.
+fn inlines(name: &str, root: Option<&Path>, skills: &SkillRegistry) -> bool {
+    skills.get(name).is_some() && !root.is_some_and(|root| root.join(name).exists())
+}
+
 /// Appends the body of every mentioned skill so the agent follows it this turn.
 ///
 /// A project path with the same name wins, keeping `@docs` a folder reference.
@@ -380,7 +429,7 @@ pub fn expand_skill_mentions(
 ) -> Result<String, String> {
     let mut expanded = text.to_owned();
     for name in mentioned_names(text) {
-        if skills.get(name).is_none() || root.is_some_and(|root| root.join(name).exists()) {
+        if !inlines(name, root, skills) {
             continue;
         }
         let body = skills.load_body(name).map_err(|_| name.to_owned())?;
@@ -390,6 +439,22 @@ pub fn expand_skill_mentions(
         ));
     }
     Ok(expanded)
+}
+
+/// The mentioned names, once each in first-seen order, that
+/// [`expand_skill_mentions`] leaves as text with `skills` yet would inline
+/// with `trusted`, the skills the same project reaches once trusted: its
+/// repository skills that its trust withholds.
+pub fn withheld_skill_mentions<'a>(
+    text: &'a str,
+    root: Option<&Path>,
+    skills: &SkillRegistry,
+    trusted: &SkillRegistry,
+) -> Vec<&'a str> {
+    mentioned_names(text)
+        .into_iter()
+        .filter(|name| !inlines(name, root, skills) && inlines(name, root, trusted))
+        .collect()
 }
 
 /// Splits trailing skill blocks added by [`expand_skill_mentions`] from the typed text.

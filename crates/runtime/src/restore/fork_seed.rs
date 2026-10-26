@@ -69,6 +69,13 @@ impl RestoredState {
         let checkpoints: Vec<crate::CompactionCheckpoint> =
             serde_json::from_str(&record.checkpoints_json)
                 .map_err(|error| corrupt(error.to_string()))?;
+        descriptor
+            .responses_replay
+            .clone()
+            .unwrap_or_default()
+            .validate(&messages, &checkpoints)
+            .map_err(corrupt)?;
+        descriptor.responses_replay = Some(crate::ResponsesReplayState::reset(end));
         // Interrupted calls belong to a batch after the boundary.
         descriptor.thread_id = None;
         descriptor.interrupted_tool_calls.clear();

@@ -330,3 +330,56 @@ fn receipt_digest_is_computed_after_secret_redaction() {
     assert!(receipt.matches(&saved));
     assert!(!receipt.matches(&input));
 }
+
+#[test]
+fn terminal_summary_text_omits_responses_native_items() {
+    // Given: a final assistant message with a reasoning summary, a native item and text.
+    let temp = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: temp.path().join("summary.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let sentinel = "gAAAAB3-terminal-summary-ciphertext";
+    let message = providers::Message {
+        role: providers::Role::Assistant,
+        content: vec![
+            providers::ContentBlock::Reasoning {
+                text: "summary only".into(),
+            },
+            providers::ContentBlock::ResponsesReasoning {
+                item: serde_json::json!({
+                    "type": "reasoning", "id": "rs_terminal",
+                    "summary": [{"type": "summary_text", "text": "summary only"}],
+                    "encrypted_content": sentinel
+                }),
+                origin: providers::ResolvedResponsesScope {
+                    dialect: providers::ResponsesDialect::OpenAi,
+                    profile: String::new(),
+                    route_model: "gpt-5.1".into(),
+                    wire_model: "gpt-5.1".into(),
+                    speed: providers::ResponsesSpeed::Standard,
+                    service_tier: None,
+                    endpoint_fingerprint: "cd".repeat(32),
+                    account: providers::ResponsesAccount::Unavailable,
+                },
+            },
+            providers::ContentBlock::Text {
+                text: "final result".into(),
+            },
+        ],
+    };
+    let mut record = record();
+    record.messages_json = serde_json::to_string(&[message]).unwrap();
+
+    // When: the snapshot is saved and summarized for the thread view.
+    storage.handle().upsert_run_context(&record).unwrap();
+    let summaries = Database::open(&config)
+        .unwrap()
+        .terminal_summaries(&["run".into()])
+        .unwrap();
+
+    // Then: only the published text is projected, never the native item.
+    assert_eq!(summaries[0].final_text.as_deref(), Some("final result"));
+    assert_eq!(summaries[0].message_count, 1);
+}

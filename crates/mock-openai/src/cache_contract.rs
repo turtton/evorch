@@ -237,6 +237,7 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
                 return Ok(());
             }
             Some("compaction") => return required_string(item, "encrypted_content"),
+            Some("reasoning") => return validate_reasoning(item),
             Some("message") => {}
             _ => return Err("unsupported or missing Codex input type".to_owned()),
         }
@@ -267,6 +268,39 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
         return Ok(());
     }
     Err("message requires string/block content or assistant tool calls".to_owned())
+}
+
+/// A replayed Responses reasoning item must be the complete confirmed output item:
+/// unknown fields pass through, but an unconfirmed status, missing or empty
+/// ciphertext, or evorch's internal replay origin must never reach the wire.
+fn validate_reasoning(item: &Value) -> Result<(), String> {
+    for field in ["id", "encrypted_content"] {
+        required_string(item, field)?;
+    }
+    let summary_ok = item["summary"].as_array().is_some_and(|parts| {
+        parts
+            .iter()
+            .all(|part| part["type"] == "summary_text" && part["text"].is_string())
+    });
+    if !summary_ok {
+        return Err("reasoning summary must be an array of summary_text parts".to_owned());
+    }
+    if item
+        .get("status")
+        .is_some_and(|status| *status != "completed")
+    {
+        return Err("only completed reasoning items may be replayed".to_owned());
+    }
+    if item
+        .get("content")
+        .is_some_and(|content| !content.is_array())
+    {
+        return Err("reasoning content must be an array".to_owned());
+    }
+    if item.get("origin").is_some() {
+        return Err("reasoning replay origin is internal and must not be sent".to_owned());
+    }
+    Ok(())
 }
 
 fn message_texts(item: &Value) -> Vec<&str> {
@@ -643,5 +677,176 @@ mod official_compaction_tests {
                     .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(input: Value) -> Value {
+        json!({"model": "codex", "instructions": "fixed", "tools": [],
+            "include": ["reasoning.encrypted_content"], "input": input})
+    }
+    fn user(text: &str) -> Value {
+        json!({"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]})
+    }
+    fn reasoning(id: &str, ciphertext: &str) -> Value {
+        json!({"type": "reasoning", "id": id,
+            "summary": [{"type": "summary_text", "text": "plan"}],
+            "encrypted_content": ciphertext})
+    }
+    fn round(id: &str) -> [Value; 2] {
+        [
+            json!({"type": "function_call", "call_id": id, "name": "read", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": id, "output": "result"}),
+        ]
+    }
+    /// `user, R1, C1, C1 output`, then the second turn appending `R2, answer, user`.
+    fn turns() -> (Value, Value) {
+        let [call, output] = round("call-1");
+        let first = vec![user("go"), reasoning("rs_1", "R1"), call, output];
+        let mut second = first.clone();
+        second.extend([
+            reasoning("rs_2", "R2"),
+            json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}]}),
+            user("next"),
+        ]);
+        (request(Value::Array(first)), request(Value::Array(second)))
+    }
+
+    // Given: Responses requests that replay reasoning items before and after a tool round
+    // When: the next request appends R2 and later turns
+    // Then: the replayed items are an ordinary part of the append-only prefix
+    #[test]
+    fn replayed_reasoning_is_part_of_the_append_only_prefix() {
+        let (first, second) = turns();
+        assert_append_only(CacheProtocol::Codex, &request(json!([user("go")])), &first).unwrap();
+        assert_append_only(CacheProtocol::Codex, &first, &second).unwrap();
+        assert_append_only(CacheProtocol::Codex, &second, &second).unwrap();
+    }
+
+    // Given: a replayed reasoning item already sent in the previous request
+    // When: its ciphertext, id, summary or status changes, it moves, or it is dropped
+    // Then: the prefix contract fails at that item; reasoning has no reset exception
+    #[test]
+    fn rewriting_moving_or_dropping_replayed_reasoning_breaks_the_prefix() {
+        let (first, second) = turns();
+        let changed = |mutate: &dyn Fn(&mut Vec<Value>)| {
+            let mut current = second.clone();
+            mutate(current["input"].as_array_mut().unwrap());
+            assert_append_only(CacheProtocol::Codex, &first, &current)
+        };
+        let at = |index: usize| Err(format!("previous conversation item {index} changed"));
+        assert_eq!(
+            changed(&|input| input[1]["encrypted_content"] = json!("R1-reencoded")),
+            at(1)
+        );
+        assert_eq!(changed(&|input| input[1]["id"] = json!("rs_other")), at(1));
+        assert_eq!(changed(&|input| input[1]["summary"] = json!([])), at(1));
+        assert_eq!(
+            changed(&|input| input[1]["status"] = json!("completed")),
+            at(1)
+        );
+        assert_eq!(changed(&|input| input.swap(1, 2)), at(1));
+        assert_eq!(
+            changed(&|input| {
+                input.remove(1);
+            }),
+            at(1)
+        );
+        let mut truncated = first.clone();
+        truncated["input"].as_array_mut().unwrap().remove(1);
+        assert_eq!(
+            assert_append_only(CacheProtocol::Codex, &first, &truncated),
+            Err("conversation history shrank without a compaction boundary".to_owned())
+        );
+    }
+
+    // Given: Responses input items typed `reasoning`
+    // When: their shape is validated
+    // Then: only a complete replayable item (unknown fields kept) passes; partial,
+    // unconfirmed, wrapper-shaped or non-Responses uses are rejected
+    #[test]
+    fn only_complete_replayable_reasoning_items_are_valid_responses_input() {
+        let valid = [
+            reasoning("rs_1", "R1"),
+            json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "R1"}),
+            json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "R1",
+                "status": "completed", "content": [{"type": "reasoning_text", "text": "t"}],
+                "future_field": {"kept": true}}),
+        ];
+        for item in valid {
+            validate_item(CacheProtocol::Codex, &item)
+                .unwrap_or_else(|error| panic!("{item}: {error}"));
+        }
+        let mut invalid = Vec::new();
+        for (key, value) in [
+            ("id", json!("")),
+            ("id", json!(7)),
+            ("encrypted_content", json!("")),
+            ("encrypted_content", json!(null)),
+            ("encrypted_content", json!({"ciphertext": "R1"})),
+            ("summary", json!("plan")),
+            ("summary", json!([{"type": "summary_text"}])),
+            ("summary", json!([{"type": "output_text", "text": "plan"}])),
+            ("status", json!("in_progress")),
+            ("status", json!("incomplete")),
+            ("content", json!("t")),
+            ("origin", json!({"dialect": "codex"})),
+        ] {
+            let mut item = reasoning("rs_1", "R1");
+            item[key] = value;
+            invalid.push(item);
+        }
+        for key in ["id", "summary", "encrypted_content"] {
+            let mut item = reasoning("rs_1", "R1");
+            item.as_object_mut().unwrap().remove(key);
+            invalid.push(item);
+        }
+        invalid.push(
+            json!({"type": "responses_reasoning", "item": reasoning("rs_1", "R1"),
+            "origin": {"dialect": "codex"}}),
+        );
+        for item in &invalid {
+            assert!(
+                validate_item(CacheProtocol::Codex, item).is_err(),
+                "accepted {item}"
+            );
+        }
+        for protocol in [CacheProtocol::OpenAi, CacheProtocol::Anthropic] {
+            assert!(validate_item(protocol, &reasoning("rs_1", "R1")).is_err());
+        }
+        assert!(validate_item(CacheProtocol::Codex, &json!({"type": "unknown_item"})).is_err());
+    }
+
+    // Given: an ordinary turn after a request that asked for encrypted reasoning
+    // When: the next request drops or changes `include`
+    // Then: the wire contract rejects it, although the mock cache ignores include
+    #[test]
+    fn include_must_stay_fixed_between_ordinary_turns() {
+        let (first, second) = turns();
+        for include in [json!([]), json!(null), json!(["other"])] {
+            let mut current = second.clone();
+            current["include"] = include;
+            assert!(assert_append_only(CacheProtocol::Codex, &first, &current).is_err());
+        }
+    }
+
+    // Given: an official compaction whose new history keeps only a new reasoning item
+    // When: the boundary request and the next ordinary request are checked
+    // Then: the single new blob permits the replacement and the new prefix is append-only
+    #[test]
+    fn official_compaction_boundary_may_carry_new_reasoning_then_append_only() {
+        let (_, previous) = turns();
+        let blob = json!({"type": "compaction", "encrypted_content": "blob"});
+        let current = request(json!([blob, reasoning("rs_3", "R3")]));
+        assert_compaction_transition(CacheProtocol::Codex, &previous, &current, "ckpt-1").unwrap();
+        let mut next = current.clone();
+        next["input"].as_array_mut().unwrap().push(user("after"));
+        assert_append_only(CacheProtocol::Codex, &current, &next).unwrap();
     }
 }

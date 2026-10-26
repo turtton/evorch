@@ -251,3 +251,28 @@ mod tests {
         assert_eq!(estimate_visible(&messages, Some(&usage)), 130);
     }
 }
+
+#[cfg(test)]
+mod responses_tests {
+    use super::*;
+    use crate::context::responses_replay_tests::{opaque, scope};
+
+    #[test]
+    fn b3_opaque_estimate_counts_utf8_json_bytes_rounding_and_images() {
+        for length in [0, 1, 2, 3, 4, 5, 100_001] {
+            let mut message = opaque("R1", scope("A"));
+            if let ContentBlock::ResponsesReasoning { item, .. } = &mut message.content[0] {
+                item["encrypted_content"] = serde_json::json!("a".repeat(length));
+                item["summary"] = serde_json::json!([{"type":"summary_text","text":"日本語\\\""}]);
+            }
+            let bytes = serde_json::to_vec(&[&message]).unwrap().len() as u64;
+            assert_eq!(estimate_tokens(&[message.clone()]), bytes.div_ceil(4));
+            message.content.push(ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abcdef".into(),
+            });
+            let bytes = serde_json::to_vec(&[&message]).unwrap().len() as u64;
+            assert_eq!(estimate_tokens(&[message]), (bytes - 6).div_ceil(4) + 1600);
+        }
+    }
+}

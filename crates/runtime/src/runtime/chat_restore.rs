@@ -164,6 +164,13 @@ impl AgentRuntime {
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         self.validate_history_restore(&record, &descriptor, &authority)?;
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.execution_hook(
+                super::cancellation::HookPoint::RootRestoreValidated,
+                &execution,
+            );
+        }
         let role = Role::from_name(&descriptor.role)
             .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
         if previous.is_some_and(|(previous_role, _)| previous_role != role)
@@ -407,6 +414,10 @@ impl AgentRuntime {
         }
         if let Some(prompt) = prompt {
             self.goal_user_input(run_id, prompt);
+        }
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.execution_hook(super::cancellation::HookPoint::RootGoalUpdated, &execution);
         }
         if let Some(request) = pending_request {
             self.remember_thread_request(run_id, &request);

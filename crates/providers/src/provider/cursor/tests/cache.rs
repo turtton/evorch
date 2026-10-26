@@ -10,8 +10,11 @@ use tokio::{
 
 type Mailbox = (mpsc::Sender<Vec<u8>>, Option<mpsc::Receiver<Vec<u8>>>);
 type ObservedInput = (Vec<u8>, Vec<Vec<u8>>, u64);
+type NativeTurn = (Vec<u8>, Vec<Vec<u8>>);
+type NativeInput = (Vec<NativeTurn>, Option<Vec<u8>>);
 #[derive(Default)]
 struct ServerState {
+    native: Mutex<Vec<NativeInput>>,
     mailboxes: Mutex<HashMap<String, Mailbox>>,
     cache: Mutex<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
     inputs: Mutex<Vec<ObservedInput>>,
@@ -175,12 +178,45 @@ async fn handle(mut socket: TcpStream, state: Arc<ServerState>) {
         let blob = rx.recv().await.unwrap();
         input.push(child(child(child(&blob, 3), 2), 1).to_vec());
     }
+    let mut native = Vec::new();
+    for field in wire::fields(child(run, 1))
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.number == 8)
+    {
+        let turn = fetch_blob(&mut socket, &mut rx, field.data).await;
+        let turn = child(&turn, 1);
+        let user = fetch_blob(&mut socket, &mut rx, child(turn, 1)).await;
+        let mut steps = Vec::new();
+        for step in wire::fields(turn)
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.number == 2)
+        {
+            steps.push(fetch_blob(&mut socket, &mut rx, step.data).await);
+        }
+        native.push((user, steps));
+    }
+    let active = wire::nested(child(run, 2), 1)
+        .unwrap()
+        .map(|a| child(a, 1).to_vec());
+    state.native.lock().await.push((native, active));
     if let Some(user) = wire::nested(child(run, 2), 1).unwrap() {
-        let text = wire::string(child(user, 1), 1).unwrap();
-        input.push(
-            serde_json::to_vec(&json!({"role":"user","content":[{"type":"text","text":text}]}))
-                .unwrap(),
-        );
+        let user = child(user, 1);
+        let text = wire::string(user, 1).unwrap();
+        let mut content = vec![json!({"type":"text","text":text})];
+        if let Some(images) = wire::nested(user, 3).unwrap() {
+            for image in wire::fields(images)
+                .unwrap()
+                .into_iter()
+                .filter(|f| f.number == 1)
+            {
+                let mime = wire::string(image.data, 7).unwrap();
+                let data = base64::engine::general_purpose::STANDARD.encode(child(image.data, 8));
+                content.push(json!({"type":"image", "mediaType":mime, "image":format!("data:{mime};base64,{data}")}));
+            }
+        }
+        input.push(serde_json::to_vec(&json!({"role":"user","content":content})).unwrap());
     }
     let cached = {
         let mut cache = state.cache.lock().await;
@@ -261,13 +297,38 @@ async fn handle(mut socket: TcpStream, state: Arc<ServerState>) {
     socket.write_all(b"0\r\n\r\n").await.unwrap();
 }
 
-#[tokio::test]
-async fn cursor_cache_prefix_survives_tool_handoff_and_later_user_turn() {
-    assert_cursor_cache_prefix(false).await;
-    assert_cursor_cache_prefix(true).await;
+async fn fetch_blob(
+    socket: &mut TcpStream,
+    rx: &mut mpsc::Receiver<Vec<u8>>,
+    id: &[u8],
+) -> Vec<u8> {
+    send_frame(
+        socket,
+        Proto::new().message(
+            4,
+            Proto::new()
+                .integer(1, 900)
+                .message(2, Proto::new().bytes(1, id)),
+        ),
+    )
+    .await;
+    let blob = rx.recv().await.unwrap();
+    child(child(child(&blob, 3), 2), 1).to_vec()
 }
 
-async fn assert_cursor_cache_prefix(api_key: bool) {
+#[tokio::test]
+async fn cursor_cache_prefix_survives_tool_handoff_and_later_user_turn() {
+    assert_cursor_cache_prefix(false, false).await;
+    assert_cursor_cache_prefix(true, false).await;
+}
+
+#[tokio::test]
+async fn ac12_cursor_preview_survives_native_handoff_and_cache_prefix() {
+    assert_cursor_cache_prefix(false, true).await;
+    assert_cursor_cache_prefix(true, true).await;
+}
+
+async fn assert_cursor_cache_prefix(api_key: bool, image: bool) {
     let harness = Harness::start().await;
     let store = Arc::new(InMemoryCursorTokenStore::new());
     let mut bundle = token();
@@ -297,20 +358,53 @@ async fn assert_cursor_cache_prefix(api_key: bool) {
     )
     .unwrap();
     let mut request = request();
-    let first = client.send(&ProviderAuth::new(""), &request).await.unwrap();
+    if image {
+        request.messages[1].content.push(ContentBlock::Image {
+            media_type: "image/jpeg".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"existing-user-image"),
+        });
+    }
+    let mut first = client.send(&ProviderAuth::new(""), &request).await.unwrap();
     assert_eq!(first.finish_reason, FinishReason::ToolUse);
     assert_eq!(first.usage.cache_read_tokens, 0);
+    if image {
+        first.message.content.push(ContentBlock::ToolUse {
+            id: "cache_call_2".into(),
+            name: "lookup".into(),
+            input: json!({"query":"second"}),
+        });
+    }
     request.messages.push(first.message);
     request.messages.push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "cache_call".into(),
-            content: vec![ToolResultContent::Text {
+            content: std::iter::once(ToolResultContent::Text {
                 text: "cache result".into(),
-            }],
+            })
+            .chain(image.then(|| ToolResultContent::Image {
+                media_type: "image/png".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"preview-bytes"),
+                source: Some("material.png".into()),
+            }))
+            .collect(),
             is_error: false,
         }],
     });
+    if image {
+        request
+            .messages
+            .last_mut()
+            .unwrap()
+            .content
+            .push(ContentBlock::ToolResult {
+                tool_call_id: "cache_call_2".into(),
+                content: vec![ToolResultContent::Text {
+                    text: "second result".into(),
+                }],
+                is_error: false,
+            });
+    }
     let second = client.send(&ProviderAuth::new(""), &request).await.unwrap();
     assert!(second.usage.cache_read_tokens > 0);
     request.messages.push(second.message);
@@ -322,8 +416,52 @@ async fn assert_cursor_cache_prefix(api_key: bool) {
     });
     let third = client.send(&ProviderAuth::new(""), &request).await.unwrap();
     assert!(third.usage.cache_read_tokens > second.usage.cache_read_tokens);
+    if image {
+        request.messages.push(third.message.clone());
+        request.messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Fourth turn".into(),
+            }],
+        });
+        client.send(&ProviderAuth::new(""), &request).await.unwrap();
+        let native = harness.state.native.lock().await;
+        assert_eq!(native.len(), 4);
+        assert_eq!(
+            native[0].1.as_ref().unwrap(),
+            &native[1].0[0].0,
+            "active user bytes and ID survive becoming history"
+        );
+        assert_eq!(native[1].0[0].0, native[2].0[0].0);
+        let original_image = child(child(&native[1].0[0].0, 3), 1);
+        assert_eq!(wire::string(original_image, 7).unwrap(), "image/jpeg");
+        assert_eq!(child(original_image, 8), b"existing-user-image");
+        let steps = &native[1].0[0].1;
+        assert_eq!(steps.len(), 2);
+        for (step, id) in steps.iter().zip(["cache_call", "cache_call_2"]) {
+            let call = child(child(step, 2), 15);
+            assert_eq!(wire::string(child(call, 1), 3).unwrap(), id);
+            assert!(
+                wire::nested(call, 2).unwrap().is_some(),
+                "tool results precede image turn"
+            );
+        }
+        let preview = &native[1].0[1].0;
+        let preview_image = child(child(preview, 3), 1);
+        assert_eq!(wire::string(preview_image, 7).unwrap(), "image/png");
+        assert_eq!(child(preview_image, 8), b"preview-bytes");
+        assert_eq!(
+            preview, &native[2].0[1].0,
+            "native preview and ID remain stable"
+        );
+        assert_eq!(
+            native[2].1.as_ref().unwrap(),
+            &native[3].0[2].0,
+            "later user message ID is stable after expanded image turns"
+        );
+    }
     let inputs = harness.state.inputs.lock().await;
-    assert_eq!(inputs.len(), 3);
+    assert_eq!(inputs.len(), if image { 4 } else { 3 });
     for pair in inputs.windows(2) {
         assert_eq!(
             pair[0].0, pair[1].0,
@@ -344,5 +482,24 @@ async fn assert_cursor_cache_prefix(api_key: bool) {
         .map(|bytes| serde_json::from_slice(bytes).unwrap())
         .collect();
     assert_eq!(second[2]["content"][0]["toolCallId"], "cache_call");
-    assert_eq!(second[3]["content"][0]["result"], "cache result");
+    if image {
+        assert!(
+            second[3]["content"][0]["result"]
+                .as_str()
+                .unwrap()
+                .contains("material.png")
+        );
+        assert_eq!(second[4]["content"][0]["toolCallId"], "cache_call_2");
+        assert_eq!(second[5]["role"], "user");
+        assert_eq!(second[5]["content"][0]["type"], "image");
+        assert_eq!(
+            second[5]["content"][0]["image"],
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(b"preview-bytes")
+            )
+        );
+    } else {
+        assert_eq!(second[3]["content"][0]["result"], "cache result");
+    }
 }
