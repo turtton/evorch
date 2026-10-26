@@ -216,13 +216,6 @@ impl Corpus {
                 .collect::<Vec<_>>();
             visible_runs.extend(ids.iter().cloned());
             let summaries = db.terminal_summaries(&ids)?;
-            let primary = runs
-                .iter()
-                .filter(|run| run.depth == 0)
-                .filter_map(|run| summaries.iter().find(|s| s.run_id == run.run_id))
-                .max_by_key(|s| (s.updated_at_ns, &s.run_id))
-                .map(|s| s.run_id.as_str())
-                .or(thread.root_run_id.as_deref());
             let mut thread_items = Vec::new();
             let mut add = |text: &str, tool, conversation| {
                 thread_items.push(Item {
@@ -248,9 +241,7 @@ impl Corpus {
                 }
             }
             for run in &runs {
-                if !(run.depth > 0 || Some(run.run_id.as_str()) == primary)
-                    || !summaries.iter().any(|s| s.run_id == run.run_id)
-                {
+                if !summaries.iter().any(|s| s.run_id == run.run_id) {
                     continue;
                 }
                 if let Some(input) = extracted.get(&run.run_id) {

@@ -238,6 +238,7 @@ struct Examined {
     visible: Option<(ThreadRow, Members)>,
     resumed: bool,
     slots: Range<usize>,
+    revision: String,
 }
 
 #[derive(Default)]
@@ -314,6 +315,9 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         if !runs.contains(&resume.run) {
             return Err(CURSOR_STALE.into());
         }
+        if revisions_key(&runs, &coverage(scope, &runs)?) != resume.thread_revision {
+            return Err(CURSOR_STALE.into());
+        }
         let start = slots.len();
         slots.extend(runs.into_iter().filter(|run| *run >= resume.run));
         resume_block = Some(resume.from_block);
@@ -322,6 +326,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             visible: Some((resumed.clone(), members)),
             resumed: true,
             slots: start..slots.len(),
+            revision: resume.thread_revision.clone(),
         });
     }
     for candidate in found.iter().take(MAX_SCAN) {
@@ -344,9 +349,13 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             visible,
             resumed: false,
             slots: start..slots.len(),
+            revision: String::new(),
         });
     }
     let coverage = coverage(scope, &slots)?;
+    for item in examined.iter_mut().filter(|item| !item.resumed) {
+        item.revision = revisions_key(&slots[item.slots.clone()], &coverage[item.slots.clone()]);
+    }
     if let (Some((_, _, Some(resume))), Some(first)) = (&position, coverage.first())
         && *first != (RunCoverage::Indexed, Some(resume.revision))
     {
@@ -394,6 +403,12 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         {
             for meta in metadata(scope, row, members, args.include_children, &kinds)? {
                 if let Some(span) = matcher.find(&meta.text) {
+                    if meta.kind == SearchKind::FinalReport
+                        && kinds.contains(&SearchKind::Conversation)
+                        && indexed_final_report(scope, &meta, matcher)?
+                    {
+                        continue;
+                    }
                     hits.push(Hit {
                         kind: meta.kind,
                         run_id: meta.run_id,
@@ -417,6 +432,7 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
                         run: candidate.run_id.clone(),
                         from_block: candidate.position.block_id,
                         revision: candidate.source_revision,
+                        thread_revision: item.revision.clone(),
                     });
                     break;
                 }
@@ -437,7 +453,6 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             }
         }
         let partial = cut.is_some();
-        dedup_final_reports(scope, &mut hits)?;
         if matcher.is_none() || !hits.is_empty() {
             results.push(entry(scope, row, members, &hits, partial)?);
             positions.push(Position {
@@ -494,62 +509,53 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
     })
 }
 
-/// The final report is a projection of the last assistant message, not another
-/// utterance. Deduplicate by canonical position, never by equal text (which
-/// could erase an earlier, identical native utterance).
-fn dedup_final_reports(scope: &Scope<'_>, hits: &mut Vec<Hit>) -> Result<(), String> {
-    let mut duplicate_runs = HashSet::new();
-    for hit in hits
+/// Decide ownership before paging, not from this page's hits. Only a verified
+/// native text at the report's canonical position can replace metadata; equal
+/// text elsewhere, copies and unavailable indexes cannot suppress the fallback.
+fn indexed_final_report(scope: &Scope<'_>, item: &Item, matcher: &Matcher) -> Result<bool, String> {
+    let Some(run) = &item.run_id else {
+        return Ok(false);
+    };
+    let current = coverage(scope, std::slice::from_ref(run))?;
+    let Some((RunCoverage::Indexed, Some(revision))) = current.first() else {
+        return Ok(false);
+    };
+    let bundle = scope
+        .store
+        .with_database(|db| Ok(db.snapshot_bundle(run)))
+        .map_err(|_| STORE_ERROR.to_owned())?
+        .map_err(|_| STORE_ERROR.to_owned())?;
+    let Some(bundle) = bundle.filter(|bundle| bundle.source_revision == *revision) else {
+        return Ok(false);
+    };
+    let Ok(input) = storage::thread_index::extract_snapshot_bundle(&bundle, &scope.redactor) else {
+        return Ok(false);
+    };
+    let Some(last) = bundle
+        .provenance
+        .as_ref()
+        .and_then(|p| p.map.messages.last())
+    else {
+        return Ok(false);
+    };
+    Ok(input.blocks.iter().any(|block| {
+        block.kind == IndexBlockKind::Text && block.role == IndexRole::Assistant && matches!(
+            block.locator,
+            storage::thread_index::BlockLocator::Message { ordinal, .. } if ordinal == last.ordinal
+        ) && matcher.find(&scope.redact(&block.text)).is_some()
+    }))
+}
+
+/// Bind metadata/conversation ownership to every authorized run, including
+/// later runs not yet visited by the bounded stream. A digest keeps cursor
+/// size constant even for threads with thousands of roots or delegated runs.
+fn revisions_key(runs: &[String], coverage: &[(RunCoverage, Option<u64>)]) -> String {
+    let parts: Vec<String> = runs
         .iter()
-        .filter(|hit| hit.kind == SearchKind::FinalReport)
-    {
-        let Some(run_id) = &hit.run_id else { continue };
-        let candidates: Vec<_> = hits
-            .iter()
-            .filter_map(|hit| match &hit.source {
-                HitSource::Conversation(candidate) if candidate.run_id == *run_id => {
-                    Some(candidate)
-                }
-                _ => None,
-            })
-            .collect();
-        if candidates.is_empty() {
-            continue;
-        }
-        let Some(record) = scope
-            .store
-            .run_contexts_for(std::slice::from_ref(run_id))
-            .map_err(|_| STORE_ERROR.to_owned())?
-            .pop()
-        else {
-            continue;
-        };
-        let messages: Vec<providers::Message> =
-            serde_json::from_str(&record.messages_json).map_err(|_| STORE_ERROR.to_owned())?;
-        let visible: Vec<_> = messages
-            .iter()
-            .filter(|message| message.role != providers::Role::System)
-            .collect();
-        let Some(last) = visible.len().checked_sub(1) else {
-            continue;
-        };
-        if candidates.iter().any(|candidate| {
-            matches!(
-                candidate.locator,
-                storage::thread_index::BlockLocator::Message { ordinal, .. } if ordinal == last
-            )
-        }) {
-            duplicate_runs.insert(run_id.clone());
-        }
-    }
-    hits.retain(|hit| {
-        hit.kind != SearchKind::FinalReport
-            || hit
-                .run_id
-                .as_ref()
-                .is_none_or(|run| !duplicate_runs.contains(run))
-    });
-    Ok(())
+        .zip(coverage)
+        .map(|(run, (state, revision))| format!("{run}:{state:?}:{revision:?}"))
+        .collect();
+    cursor::digest(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 type DecodedPosition = ((ThreadCursor, String), ThreadRow, Option<Resume>);

@@ -35,6 +35,9 @@ pub(super) struct Resume {
     pub(super) run: String,
     pub(super) from_block: i64,
     pub(super) revision: u64,
+    /// Fixed-size digest of this thread's run set and index revisions. Metadata
+    /// ownership must remain valid even when its canonical position is on a later page.
+    pub(super) thread_revision: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,6 +162,7 @@ mod tests {
                 run: "run-7".into(),
                 from_block: 42,
                 revision: 3,
+                thread_revision: "thread-revisions".into(),
             }),
         }
     }

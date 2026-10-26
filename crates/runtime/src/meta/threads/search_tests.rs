@@ -105,6 +105,366 @@ fn count(value: &Value) -> u64 {
         .sum()
 }
 
+#[tokio::test]
+async fn same_thread_continuation_searches_original_native_positions_after_restart() {
+    let f = Fixture::with_script(vec![
+        reply(
+            vec![
+                text("oldmidneedle"),
+                ContentBlock::ToolUse {
+                    id: "inspect-history".into(),
+                    name: "thread_search".into(),
+                    input: json!({"query": "no-match", "kinds": ["title"]}),
+                },
+            ],
+            FinishReason::ToolUse,
+        ),
+        reply(vec![text("old final")], FinishReason::Stop),
+        reply(vec![text("next final")], FinishReason::Stop),
+    ]);
+    let config = RunConfig {
+        project_root: Some(f.project.path().into()),
+        ..Default::default()
+    };
+    let first = f
+        .runtime
+        .delegate_chat("history", Role::Worker, "first".into(), config.clone())
+        .unwrap();
+    f.runtime.wait(first).await.unwrap();
+    f.index(&first.to_string());
+    let second = f
+        .runtime
+        .delegate_chat("history", Role::Worker, "second".into(), config.clone())
+        .unwrap();
+    f.runtime.wait(second).await.unwrap();
+    f.index(&second.to_string());
+    let own = f.own();
+    for include_children in [false, true] {
+        let result = f.call(own, "thread_search", json!({
+            "query": "oldmidneedle", "kinds": ["conversation"], "include_children": include_children
+        })).unwrap();
+        assert_eq!(count(&result), 1, "{result}");
+        assert!(
+            result["threads"][0]["snippets"][0]["ref"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{first}#"))
+        );
+    }
+
+    // Recreate both runtime and storage, using only the persisted continuation.
+    let storage_config = storage::StorageConfig {
+        db_path: f.store().db_path.clone(),
+        ..Default::default()
+    };
+    let Fixture {
+        runtime,
+        _storage,
+        _db,
+        project,
+        other,
+    } = f;
+    drop(runtime);
+    drop(_storage);
+    let bus = Arc::new(event_bus::EventBus::new(4096));
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        Arc::new(ScriptModel(Mutex::new(VecDeque::new()))),
+    )
+    .with_run_store(RunStore::open(&storage_config, storage.handle()).unwrap());
+    let f = Fixture {
+        runtime,
+        _storage: storage,
+        _db,
+        project,
+        other,
+    };
+    let third = f
+        .runtime
+        .delegate_chat("history", Role::Worker, "third".into(), config)
+        .unwrap();
+    f.runtime.wait(third).await.unwrap();
+    f.index(&third.to_string());
+    let result = f
+        .call(
+            ("run-100", Some("own"), Some(f.project.path())),
+            "thread_search",
+            json!({"query": "oldmidneedle", "kinds": ["conversation"]}),
+        )
+        .unwrap();
+    assert_eq!(count(&result), 1, "{result}");
+    assert!(
+        result["threads"][0]["snippets"][0]["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{first}#"))
+    );
+    let denied = f
+        .call(
+            ("run-100", Some("own"), Some(f.other.path())),
+            "thread_search",
+            json!({"query": "oldmidneedle", "kinds": ["conversation"]}),
+        )
+        .unwrap();
+    assert_eq!(
+        count(&denied),
+        0,
+        "history is not in the foreign caller's project"
+    );
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute(
+        "UPDATE thread_index_runs SET state = 'evicted', evicted_reason = 'logical_budget' WHERE run_id = ?1",
+        [first.to_string()],
+    )
+    .unwrap();
+    let evicted = f
+        .call(
+            ("run-100", Some("own"), Some(f.project.path())),
+            "thread_search",
+            json!({"query": "oldmidneedle", "kinds": ["conversation"]}),
+        )
+        .unwrap();
+    assert_eq!(
+        count(&evicted),
+        0,
+        "copies must not resurrect an evicted original"
+    );
+}
+
+#[test]
+fn final_report_after_candidate_budget_is_counted_once_across_cursor_drain() {
+    let f = Fixture::new();
+    let own = f.own();
+    let mut messages: Vec<_> = (0..search::MAX_CANDIDATES)
+        .map(|ordinal| user(vec![text(&format!("boundaryneedle {ordinal}"))]))
+        .collect();
+    messages.push(assistant(vec![text(&format!(
+        "boundaryneedle {}",
+        search::MAX_CANDIDATES
+    ))]));
+    f.native_run("run-100", Some("own"), None, messages);
+    f.index("run-100");
+    let caller = Caller::new(
+        "run-100".parse().unwrap(),
+        Some("own".into()),
+        Some(f.project.path()),
+    );
+    let scope = Scope::new(
+        f.store(),
+        &f.runtime,
+        caller,
+        SecretRedactor::with_known_values([SECRET.into()]),
+    );
+    let mut stream = super::super::conversation::Stream::new(
+        &scope,
+        vec!["run-100".into()],
+        vec![storage::thread_index::IndexBlockKind::Text],
+        storage::thread_search::ConversationFilter::All,
+        None,
+    );
+    let mut positions = std::collections::BTreeSet::new();
+    while stream.peek().unwrap().is_some() {
+        let (_, candidate) = stream.pop().unwrap();
+        assert!(positions.insert(match candidate.locator {
+            BlockLocator::Message {
+                ordinal,
+                block_index,
+            } => (ordinal, block_index),
+            _ => panic!("unexpected note"),
+        }));
+    }
+    assert_eq!(
+        positions,
+        (0..=search::MAX_CANDIDATES)
+            .map(|ordinal| (ordinal, 0))
+            .collect()
+    );
+    for kinds in [None, Some(json!(["conversation", "final_report"]))] {
+        let mut args = json!({"query": "boundaryneedle"});
+        if let Some(kinds) = kinds {
+            args["kinds"] = kinds;
+        }
+        let mut total = 0;
+        let mut pages = 0;
+        let mut last_ref = None;
+        loop {
+            let page = f.call(own, "thread_search", args.clone()).unwrap();
+            total += count(&page);
+            pages += 1;
+            if let Some(thread) = page["threads"].as_array().unwrap().first() {
+                last_ref = thread["snippets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|s| s["ref"].as_str().map(str::to_owned))
+                    .next_back();
+            }
+            let Some(cursor) = page["next_cursor"].as_str() else {
+                break;
+            };
+            assert!(pages < 4, "{page}");
+            args["cursor"] = json!(cursor);
+        }
+        assert_eq!(total, search::MAX_CANDIDATES as u64 + 1);
+        assert_eq!(pages, 2);
+        assert!(
+            last_ref
+                .unwrap()
+                .starts_with(&format!("run-100#{}.0@", search::MAX_CANDIDATES))
+        );
+    }
+    // Regex visits every candidate but matches only three on the first page,
+    // making the entire returned position union observable despite snippet bounds.
+    let mut args = json!({
+        "query": "^boundaryneedle (?:0|1998|1999|2000)$", "match": "regex",
+        "kinds": ["conversation", "final_report"]
+    });
+    let mut actual = std::collections::BTreeSet::new();
+    let mut total = 0;
+    let mut pages = 0;
+    loop {
+        let page = f.call(own, "thread_search", args.clone()).unwrap();
+        total += count(&page);
+        pages += 1;
+        for snippet in page["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|thread| thread["snippets"].as_array().unwrap())
+        {
+            assert!(
+                actual.insert(
+                    snippet["ref"]
+                        .as_str()
+                        .unwrap()
+                        .split('@')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                )
+            );
+        }
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        assert!(pages < 4);
+        args["cursor"] = json!(cursor);
+    }
+    assert_eq!(total, 4);
+    assert_eq!(pages, 2);
+    assert_eq!(
+        actual,
+        [0, 1998, 1999, 2000]
+            .map(|ordinal| format!("run-100#{ordinal}.0"))
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn report_ownership_keeps_fallback_and_distinct_native_positions() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.native_run(
+        "run-100",
+        Some("own"),
+        None,
+        vec![
+            assistant(vec![text("sameutterance")]),
+            user(vec![text("other")]),
+            assistant(vec![text("sameutterance"), text("sameutterance")]),
+        ],
+    );
+    let args = json!({"query": "sameutterance", "kinds": ["conversation", "final_report"]});
+    assert_eq!(
+        count(&f.call(own, "thread_search", args.clone()).unwrap()),
+        1,
+        "pending fallback"
+    );
+    f.index("run-100");
+    assert_eq!(
+        count(
+            &f.call(
+                own,
+                "thread_search",
+                json!({
+                    "query": "sameutterance", "kinds": ["tool_result", "final_report"]
+                })
+            )
+            .unwrap()
+        ),
+        1,
+        "a tool-only stream cannot own the final text position"
+    );
+    let indexed = f.call(own, "thread_search", args.clone()).unwrap();
+    assert_eq!(
+        count(&indexed),
+        3,
+        "same text at three native positions is three hits"
+    );
+    let positions: std::collections::BTreeSet<_> = indexed["threads"][0]["snippets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|snippet| snippet["ref"].as_str().unwrap().split('@').next().unwrap())
+        .collect();
+    assert_eq!(
+        positions,
+        ["run-100#0.0", "run-100#2.0", "run-100#2.1"]
+            .into_iter()
+            .collect()
+    );
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute(
+        "UPDATE thread_index_runs SET state = 'evicted', evicted_reason = 'logical_budget' WHERE run_id = 'run-100'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        count(&f.call(own, "thread_search", args).unwrap()),
+        1,
+        "evicted metadata fallback"
+    );
+}
+
+#[test]
+fn report_on_a_later_run_invalidates_cursor_when_its_revision_changes() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.native_run(
+        "run-100",
+        Some("own"),
+        None,
+        vec![user(vec![text("laterreport")]); search::MAX_CANDIDATES + 1],
+    );
+    f.native_run(
+        "run-101",
+        Some("own"),
+        None,
+        vec![assistant(vec![text("laterreport")])],
+    );
+    f.index("run-100");
+    f.index("run-101");
+    let first = f
+        .call(
+            own,
+            "thread_search",
+            json!({
+                "query": "laterreport", "kinds": ["conversation", "final_report"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(count(&first), search::MAX_CANDIDATES as u64);
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute("UPDATE thread_index_runs SET source_revision = source_revision + 1 WHERE run_id = 'run-101'", []).unwrap();
+    let error = f.call(own, "thread_search", json!({
+        "query": "laterreport", "kinds": ["conversation", "final_report"], "cursor": first["next_cursor"]
+    })).unwrap_err();
+    assert!(error.starts_with("thread_cursor_stale:"), "{error}");
+}
+
 #[test]
 fn header_only_search_does_not_decode_saved_payloads() {
     let f = Fixture::new();

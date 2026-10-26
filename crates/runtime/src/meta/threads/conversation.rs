@@ -22,15 +22,17 @@ use super::{Members, STORE_ERROR, Scope};
 /// Candidate rows fetched per statement.
 const PAGE_ROWS: usize = 200;
 
-/// Runs whose conversation a thread contributes: the current root (whose
-/// history contains the earlier turns) and, with `include_children`, every
-/// delegated run. Ordered by run ID so a cursor can resume inside the thread.
+/// All saved roots own their native positions. Continued roots contain copies,
+/// which extraction excludes; selecting only the latest root would lose the
+/// original positions. Delegated runs are optional, never roots from other threads.
+/// Ordered by run ID so a cursor can resume inside the thread.
 pub(super) fn scan_runs(members: &Members, include_children: bool) -> Vec<String> {
     let mut runs: Vec<String> = members
-        .default_scan()
-        .into_iter()
-        .filter(|run| include_children || members.primary.as_ref() == Some(run))
-        .filter(|run| members.is_saved_member(run))
+        .runs
+        .iter()
+        .filter(|run| include_children || run.depth == 0)
+        .filter(|run| members.is_saved_member(&run.run_id))
+        .map(|run| run.run_id.clone())
         .collect();
     runs.sort();
     runs.dedup();

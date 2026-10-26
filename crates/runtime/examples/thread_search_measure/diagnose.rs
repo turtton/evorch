@@ -161,16 +161,8 @@ pub fn candidates(
                     .map(|run| run.run_id.clone())
                     .collect::<Vec<_>>();
                 let summaries = db.run_context_headers(&ids)?;
-                let primary = runs
-                    .iter()
-                    .filter(|run| run.depth == 0)
-                    .filter_map(|run| summaries.iter().find(|s| s.run_id == run.run_id))
-                    .max_by_key(|s| (s.updated_at_ns, &s.run_id))
-                    .map(|s| s.run_id.as_str())
-                    .or(thread.root_run_id.as_deref());
                 let mut selected = runs
                     .iter()
-                    .filter(|run| run.depth > 0 || Some(run.run_id.as_str()) == primary)
                     .filter(|run| summaries.iter().any(|s| s.run_id == run.run_id))
                     .map(|run| run.run_id.clone())
                     .collect::<Vec<_>>();

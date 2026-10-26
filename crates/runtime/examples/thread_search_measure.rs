@@ -591,6 +591,13 @@ mod tests {
         }
         native(
             &handle,
+            "thread-1",
+            "run-97",
+            &project,
+            messages("fixtureword earlierroot"),
+        );
+        native(
+            &handle,
             "hidden",
             "run-99",
             &other,
@@ -613,7 +620,7 @@ mod tests {
         let db = Database::open(&cfg).unwrap();
         let sources = (1..=21)
             .map(|n| format!("run-{n}"))
-            .chain(["run-99".into(), "run-98".into()])
+            .chain(["run-99".into(), "run-98".into(), "run-97".into()])
             .collect();
         job::preindex_project(&handle, &db, &sources, project.to_str().unwrap()).unwrap();
         job::preindex_project(&handle, &db, &sources, other.to_str().unwrap()).unwrap();
@@ -626,6 +633,7 @@ mod tests {
             .map(|n| (format!("thread-{n}"), 1))
             .collect::<BTreeMap<_, _>>();
         expected.insert("partial".into(), 2001);
+        expected.insert("thread-1".into(), 2);
         let sample = harness
             .search(
                 &project,
