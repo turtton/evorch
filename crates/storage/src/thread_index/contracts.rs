@@ -308,6 +308,16 @@ pub enum IndexAdjustmentPhase {
     Evicting,
 }
 
+/// Writer operation whose physical growth was measured at admission.
+/// Contains no source identities, text or SQL parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexOperation {
+    Adjustment,
+    Eviction,
+    Commit,
+    Merge,
+}
+
 /// Stop at P+G+R >= H or WAL+G_wal >= max_wal; resume only with +J strictly
 /// below BOTH limits and source writes resumed. IndexPaused does not imply
 /// source suspension. R/J/step bounds require measurements before job work.
@@ -321,6 +331,10 @@ pub struct IndexCapacityStatus {
     pub shm_bytes: u64,
     pub reserve_bytes: u64,
     pub resume_hysteresis_bytes: u64,
+    pub operation: Option<IndexOperation>,
+    pub growth: PlannedGrowth,
+    pub max_db_bytes: u64,
+    pub max_wal_bytes: u64,
 }
 
 pub trait IndexCapacity {

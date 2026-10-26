@@ -19,10 +19,10 @@ use crate::thread_index::{
     AccountingPolicy, CapacityState, CommitRejection, DEFAULT_ACCOUNTING_POLICY, EXTRACTOR_VERSION,
     ExtractedIndexInput, ExtractionError, IndexAccounting, IndexAdjustmentPhase,
     IndexBlockedReason, IndexCapacityStatus, IndexCommitGuard, IndexCommitResult,
-    IndexEvictionReason, IndexFailure, IndexLease, IndexPauseReason, IndexSettingsReceipt,
-    IndexState, IndexTarget, PlannedGrowth, RequestGapReason, RequestGuard, SnapshotProvenance,
-    SnapshotRepository as _, ThreadIndexRepository as _, ThreadIndexSettings, account_index_input,
-    extract_snapshot_bundle, reaccount_index,
+    IndexEvictionReason, IndexFailure, IndexLease, IndexOperation, IndexPauseReason,
+    IndexSettingsReceipt, IndexState, IndexTarget, PlannedGrowth, RequestGapReason, RequestGuard,
+    SnapshotProvenance, SnapshotRepository as _, ThreadIndexRepository as _, ThreadIndexSettings,
+    account_index_input, extract_snapshot_bundle, reaccount_index,
 };
 use crate::{HardLimits, LimitKind, StorageError};
 
@@ -145,6 +145,76 @@ fn immediate<T>(
     let value = body(&transaction)?;
     transaction.commit()?;
     Ok(value)
+}
+
+/// Retry only a WAL-only admission refusal, once, before publishing a pause or
+/// terminal request gap. Every attempt reopens IMMEDIATE and reruns the whole
+/// guarded decision (lease, revision/generation, growth and measured capacity).
+/// The refused transaction has performed no index writes. TRUNCATE never waits
+/// for readers and is always outside that transaction, even on its busy path.
+fn admitted_transaction<T>(
+    env: Env<'_>,
+    rt: &mut IndexRuntime,
+    operation: IndexOperation,
+    mut body: impl FnMut(
+        &Connection,
+        &mut IndexRuntime,
+    ) -> Result<Result<T, IndexCapacityStatus>, StorageError>,
+) -> Result<Result<T, IndexCapacityStatus>, StorageError> {
+    #[cfg(not(test))]
+    let _ = operation;
+    for attempt in 0..2 {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let transaction =
+            rusqlite::Transaction::new_unchecked(env.conn, TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        let begin_us = started.elapsed().as_micros();
+        #[cfg(test)]
+        let body_started = std::time::Instant::now();
+        let result = body(&transaction, rt)?;
+        #[cfg(test)]
+        let body_us = body_started.elapsed().as_micros();
+        #[cfg(test)]
+        let finish_started = std::time::Instant::now();
+        transaction.commit()?;
+        #[cfg(test)]
+        if operation == IndexOperation::Commit
+            && std::env::var_os("EVORCH_INDEX_GATE_WORK").is_some()
+        {
+            rt.commit_timings_us.extend([
+                ("begin", begin_us),
+                ("body", body_us),
+                ("finish", finish_started.elapsed().as_micros()),
+            ]);
+        }
+        if attempt == 0
+            && matches!(&result, Err(status)
+            if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit))
+        {
+            let before = env.measure()?.sizes;
+            let checkpointed = capacity::checkpoint_truncate(env.conn)?;
+            let after = env.measure()?.sizes;
+            tracing::debug!(
+                checkpointed,
+                before_db_bytes = before.db,
+                before_wal_bytes = before.wal,
+                before_shm_bytes = before.shm,
+                after_db_bytes = after.db,
+                after_wal_bytes = after.wal,
+                after_shm_bytes = after.shm,
+                operation = ?operation,
+                "thread index WAL admission checkpoint"
+            );
+            continue;
+        }
+        if result.is_ok() && rt.pause.is_none() {
+            rt.paused_growth = None;
+            rt.paused_work = None;
+        }
+        return Ok(result);
+    }
+    unreachable!("at most one checkpoint retry")
 }
 
 /// Moves FTS merges out of commit transactions (ADR 0041 順序 5 gate): the
@@ -321,7 +391,7 @@ fn adjustment_step(
     if !adjustment_pending(env.conn, rt)? {
         return Ok(None);
     }
-    let outcome = immediate(env.conn, |conn| {
+    let outcome = admitted_transaction(env, rt, IndexOperation::Adjustment, |conn, rt| {
         if !lease::is_valid(conn, lease, now_ns)? {
             return Ok(Ok(()));
         }
@@ -357,7 +427,7 @@ fn adjustment_step(
                 .next()
         {
             let growth = deletion_growth(conn, rt, &run_id)?;
-            let status = admit(env, rt, growth)?;
+            let status = admit(env, rt, growth, IndexOperation::Adjustment)?;
             if status.state != CapacityState::Normal {
                 return Ok(Err(status));
             }
@@ -380,7 +450,7 @@ fn adjustment_step(
             capacity::freelist_bytes(conn, page_size)?,
             false,
         );
-        let status = admit(env, rt, growth)?;
+        let status = admit(env, rt, growth, IndexOperation::Adjustment)?;
         if status.state != CapacityState::Normal {
             return Ok(Err(status));
         }
@@ -464,6 +534,8 @@ fn physical_capacity_status(
         status.wal_bytes = measured.sizes.wal;
         status.shm_bytes = measured.sizes.shm;
         status.adjustment = adjustment;
+        status.max_db_bytes = env.limits.max_db_bytes;
+        status.max_wal_bytes = env.limits.max_wal_bytes;
         return Ok(status);
     }
     let mut status = capacity::evaluate(
@@ -482,8 +554,10 @@ fn admit(
     env: Env<'_>,
     rt: &mut IndexRuntime,
     growth: PlannedGrowth,
+    operation: IndexOperation,
 ) -> Result<IndexCapacityStatus, StorageError> {
-    let status = physical_capacity_status(env, rt, growth)?;
+    let mut status = physical_capacity_status(env, rt, growth)?;
+    status.operation = Some(operation);
     if status.state != CapacityState::Normal {
         rt.paused_growth = Some(growth);
     }
@@ -496,6 +570,7 @@ fn pause(
     status: IndexCapacityStatus,
     now_ns: i64,
 ) -> Result<IndexCapacityStatus, StorageError> {
+    let refused_operation = status.operation;
     let status = match status.state {
         CapacityState::IndexPaused(IndexPauseReason::ReserveInsufficient)
         | CapacityState::SourceSuspended(LimitKind::DbSize)
@@ -504,6 +579,10 @@ fn pause(
             reclaim(env, rt)?
         }
         _ => status,
+    };
+    let status = IndexCapacityStatus {
+        operation: refused_operation,
+        ..status
     };
     if status.state == CapacityState::Normal {
         rt.pause = None;
@@ -658,6 +737,10 @@ fn sticky(
     Ok(IndexCapacityStatus {
         state: CapacityState::IndexPaused(reason),
         adjustment: adjustment_phase(env.conn, rt)?,
+        operation: rt.pause.and_then(|status| status.operation),
+        growth: rt.paused_growth.unwrap_or(PlannedGrowth::Unbounded),
+        max_db_bytes: env.limits.max_db_bytes,
+        max_wal_bytes: env.limits.max_wal_bytes,
         db_bytes: measured.sizes.db,
         wal_bytes: measured.sizes.wal,
         shm_bytes: measured.sizes.shm,
@@ -722,6 +805,7 @@ pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool,
         true,
     );
     status.adjustment = adjustment_phase(env.conn, rt)?;
+    status.operation = rt.pause.and_then(|status| status.operation);
     if status.state == CapacityState::Normal {
         tracing::info!(db_bytes = status.db_bytes, "thread index resumed");
         rt.pause = None;
@@ -953,7 +1037,7 @@ pub(crate) fn prepare(
         Ok(())
     })?;
     if rt.merge_pending {
-        return merge_step(env, rt, now_ns);
+        return merge_step(env, rt, lease, now_ns);
     }
     if !rt.discovery_complete {
         let batch = SqliteThreadIndex::new(env.conn).discover_batch(DISCOVERY_BATCH, now_ns)?;
@@ -971,15 +1055,23 @@ pub(crate) fn prepare(
     }
 }
 
-fn merge_step(env: Env<'_>, rt: &mut IndexRuntime, now_ns: i64) -> Result<Action, StorageError> {
-    let page_size = capacity::page_size(env.conn)?;
-    let growth = PlannedGrowth::Bounded {
-        db: MERGE_GROWTH_PAGES * page_size,
-        wal: MERGE_GROWTH_PAGES * (page_size + 24) + 32,
-        shm: 32 * 1024 * (MERGE_GROWTH_PAGES / 4096 + 1),
-    };
-    let more = immediate(env.conn, |conn| {
-        let status = admit(Env { conn, ..env }, rt, growth)?;
+fn merge_step(
+    env: Env<'_>,
+    rt: &mut IndexRuntime,
+    lease: &IndexLease,
+    now_ns: i64,
+) -> Result<Action, StorageError> {
+    let more = admitted_transaction(env, rt, IndexOperation::Merge, |conn, rt| {
+        if !lease::is_valid(conn, lease, now_ns)? {
+            return Ok(Ok(None));
+        }
+        let page_size = capacity::page_size(conn)?;
+        let growth = PlannedGrowth::Bounded {
+            db: MERGE_GROWTH_PAGES * page_size,
+            wal: MERGE_GROWTH_PAGES * (page_size + 24) + 32,
+            shm: 32 * 1024 * (MERGE_GROWTH_PAGES / 4096 + 1),
+        };
+        let status = admit(Env { conn, ..env }, rt, growth, IndexOperation::Merge)?;
         if status.state != CapacityState::Normal {
             return Ok(Err(status));
         }
@@ -991,10 +1083,11 @@ fn merge_step(env: Env<'_>, rt: &mut IndexRuntime, now_ns: i64) -> Result<Action
             "INSERT INTO conversation_fts(conversation_fts, rank) VALUES('merge', ?1)",
             [MERGE_STEP_PAGES],
         )?;
-        Ok(Ok(changes(conn)? - before >= 2))
+        Ok(Ok(Some(changes(conn)? - before >= 2)))
     })?;
     match more {
-        Ok(more) => {
+        Ok(None) => Ok(Action::LeaseLost),
+        Ok(Some(more)) => {
             rt.counters.merges += 1;
             rt.merge_pending = more;
             Ok(Action::Progress)
@@ -1012,19 +1105,19 @@ fn evict_self(
     code: Option<&str>,
     now_ns: i64,
 ) -> Result<Budget, StorageError> {
-    immediate(env.conn, |conn| {
+    let result = admitted_transaction(env, rt, IndexOperation::Eviction, |conn, rt| {
         if SqliteThreadIndex::new(conn)
             .check_guard(&guard(lease, work), now_ns)?
             .is_some()
         {
             rt.counters.discarded += 1;
-            return Ok(Budget::EvictedSelf);
+            return Ok(Ok(Budget::EvictedSelf));
         }
         let growth = deletion_growth(conn, rt, &work.target.run_id)?;
-        let status = admit(Env { conn, ..env }, rt, growth)?;
+        let status = admit(Env { conn, ..env }, rt, growth, IndexOperation::Eviction)?;
         if status.state != CapacityState::Normal {
             rt.paused_work = Some(work.clone());
-            return Ok(Budget::Paused(status));
+            return Ok(Err(status));
         }
         SqliteThreadIndex::new(conn).evict_index(&work.target.run_id, reason)?;
         if let Some(code) = code {
@@ -1037,8 +1130,9 @@ fn evict_self(
         rt.merge_pending = true;
         requests::sync(conn)?;
         requests::finalize(conn, now_ns)?;
-        Ok(Budget::EvictedSelf)
-    })
+        Ok(Ok(Budget::EvictedSelf))
+    })?;
+    Ok(result.unwrap_or_else(Budget::Paused))
 }
 
 fn oversized(
@@ -1216,30 +1310,50 @@ fn budget_step(
     accounting: &IndexAccounting,
     now_ns: i64,
 ) -> Result<Budget, StorageError> {
-    let conn = env.conn;
-    let own: u64 = conn
-        .query_row(
-            "SELECT charged_bytes FROM thread_index_runs WHERE run_id = ?1",
-            [&work.target.run_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    let needed = charged_total(conn)?.saturating_sub(own) + accounting.charged_bytes;
-    if needed <= rt.settings.max_bytes {
-        return Ok(Budget::Fits);
-    }
-    let older: Option<(String, u64)> = conn
-        .query_row(
-            "SELECT run_id, charged_bytes FROM thread_index_runs WHERE charged_bytes > 0 \
+    let result = admitted_transaction(env, rt, IndexOperation::Eviction, |conn, rt| {
+        if SqliteThreadIndex::new(conn)
+            .check_guard(&guard(lease, work), now_ns)?
+            .is_some()
+        {
+            return Ok(Ok(Some(Budget::Fits)));
+        }
+        let own: u64 = conn
+            .query_row(
+                "SELECT charged_bytes FROM thread_index_runs WHERE run_id = ?1",
+                [&work.target.run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let needed = charged_total(conn)?.saturating_sub(own) + accounting.charged_bytes;
+        if needed <= rt.settings.max_bytes {
+            return Ok(Ok(Some(Budget::Fits)));
+        }
+        let older: Option<(String, u64)> = conn
+            .query_row(
+                "SELECT run_id, charged_bytes FROM thread_index_runs WHERE charged_bytes > 0 \
              AND run_id <> ?1 AND (retention_at_ns < ?2 OR (retention_at_ns = ?2 AND run_id < ?1)) \
              ORDER BY retention_at_ns ASC, run_id ASC LIMIT 1",
-            params![work.target.run_id, work.retention_at_ns],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((run_id, _)) = older else {
-        return evict_self(
+                params![work.target.run_id, work.retention_at_ns],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((run_id, _)) = older else {
+            return Ok(Ok(None));
+        };
+        let growth = deletion_growth(conn, rt, &run_id)?;
+        let status = admit(Env { conn, ..env }, rt, growth, IndexOperation::Eviction)?;
+        if status.state != CapacityState::Normal {
+            rt.paused_work = Some(work.clone());
+            return Ok(Err(status));
+        }
+        SqliteThreadIndex::new(conn).evict_index(&run_id, IndexEvictionReason::LogicalBudget)?;
+        rt.counters.evictions += 1;
+        rt.merge_pending = true;
+        Ok(Ok(Some(Budget::EvictedOlder)))
+    })?;
+    match result {
+        Ok(None) => evict_self(
             env,
             rt,
             lease,
@@ -1247,26 +1361,10 @@ fn budget_step(
             IndexEvictionReason::LogicalBudget,
             None,
             now_ns,
-        );
-    };
-    immediate(conn, |conn| {
-        let growth = deletion_growth(conn, rt, &run_id)?;
-        let status = admit(Env { conn, ..env }, rt, growth)?;
-        if status.state != CapacityState::Normal {
-            rt.paused_work = Some(work.clone());
-            return Ok(Budget::Paused(status));
-        }
-        if SqliteThreadIndex::new(conn)
-            .check_guard(&guard(lease, work), now_ns)?
-            .is_some()
-        {
-            return Ok(Budget::Fits);
-        }
-        SqliteThreadIndex::new(conn).evict_index(&run_id, IndexEvictionReason::LogicalBudget)?;
-        rt.counters.evictions += 1;
-        rt.merge_pending = true;
-        Ok(Budget::EvictedOlder)
-    })
+        ),
+        Ok(Some(budget)) => Ok(budget),
+        Err(status) => Ok(Budget::Paused(status)),
+    }
 }
 
 fn commit(
@@ -1278,23 +1376,27 @@ fn commit(
     accounting: IndexAccounting,
     now_ns: i64,
 ) -> Result<Action, StorageError> {
-    let conn = env.conn;
-    #[cfg(test)]
-    let started = std::time::Instant::now();
-    let transaction = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    #[cfg(test)]
-    let begin_us = started.elapsed().as_micros();
-    #[cfg(test)]
-    let body_started = std::time::Instant::now();
-    let outcome = (|conn: &Connection| -> Result<Result<IndexCommitResult, IndexCapacityStatus>, StorageError> {
+    let outcome = admitted_transaction(env, rt, IndexOperation::Commit, |conn, rt| {
+        if let Some(rejection) =
+            SqliteThreadIndex::new(conn).check_guard(&guard(lease, &work), now_ns)?
+        {
+            return Ok(Ok(IndexCommitResult::Discarded(rejection)));
+        }
         let page_size = capacity::page_size(conn)?;
         let freelist = capacity::freelist_bytes(conn, page_size)?;
         let measured_charge = reaccount_index(
-            accounting.text_bytes, accounting.attribute_bytes, accounting.block_count, DEFAULT_ACCOUNTING_POLICY,
-        ).map_err(|error| StorageError::Serialization(format!("{error:?}")))?;
-        let growth = rt.policy.planned_growth(measured_charge.charged_bytes, page_size, freelist, false);
+            accounting.text_bytes,
+            accounting.attribute_bytes,
+            accounting.block_count,
+            DEFAULT_ACCOUNTING_POLICY,
+        )
+        .map_err(|error| StorageError::Serialization(format!("{error:?}")))?;
+        let growth =
+            rt.policy
+                .planned_growth(measured_charge.charged_bytes, page_size, freelist, false);
         let old = stored_accounting(conn, &work.target.run_id)?;
-        let growth = if old.text_bytes.saturating_add(accounting.text_bytes) > rt.policy.step_max_text_bytes
+        let growth = if old.text_bytes.saturating_add(accounting.text_bytes)
+            > rt.policy.step_max_text_bytes
             || old.block_count.saturating_add(accounting.block_count) > rt.policy.step_max_blocks
         {
             PlannedGrowth::Unbounded
@@ -1303,7 +1405,7 @@ fn commit(
         } else {
             growth
         };
-        let status = admit(Env { conn, ..env }, rt, growth)?;
+        let status = admit(Env { conn, ..env }, rt, growth, IndexOperation::Commit)?;
         if status.state != CapacityState::Normal {
             rt.paused_work = Some(work.clone());
             return Ok(Err(status));
@@ -1319,20 +1421,7 @@ fn commit(
             requests::finalize(conn, now_ns)?;
         }
         Ok(Ok(result))
-    })(&transaction)?;
-    #[cfg(test)]
-    let body_us = body_started.elapsed().as_micros();
-    #[cfg(test)]
-    let finish_started = std::time::Instant::now();
-    transaction.commit()?;
-    #[cfg(test)]
-    if std::env::var_os("EVORCH_INDEX_GATE_WORK").is_some() {
-        rt.commit_timings_us.extend([
-            ("begin", begin_us),
-            ("body", body_us),
-            ("finish", finish_started.elapsed().as_micros()),
-        ]);
-    }
+    })?;
     match outcome {
         Ok(IndexCommitResult::Committed) => {
             rt.counters.commits += 1;

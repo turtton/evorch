@@ -155,6 +155,10 @@ pub(crate) fn evaluate(
     let status = |state| IndexCapacityStatus {
         state,
         adjustment: None,
+        operation: None,
+        growth,
+        max_db_bytes: limits.max_db_bytes,
+        max_wal_bytes: limits.max_wal_bytes,
         db_bytes: measured.sizes.db,
         wal_bytes: measured.sizes.wal,
         shm_bytes: measured.sizes.shm,
@@ -195,6 +199,11 @@ pub(crate) fn evaluate(
 /// a reader keeps frames that could not be checkpointed. The busy handler is
 /// suspended for the call so a pinned WAL never stalls the writer thread.
 pub(crate) fn checkpoint_truncate(conn: &Connection) -> Result<bool, StorageError> {
+    // A checkpoint on the writer's own transaction cannot recover capacity.
+    debug_assert!(
+        conn.is_autocommit(),
+        "checkpoint must be outside a transaction"
+    );
     conn.busy_timeout(std::time::Duration::ZERO)?;
     let result = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
         Ok((

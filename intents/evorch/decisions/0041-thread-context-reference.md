@@ -529,6 +529,8 @@ v25 は origin/main（`870a969b`）の時点で空いている（最新は v24�
 - `H=hard_limits.max_db_bytes`、`P=file_sizes().total()`（現状 `storage/src/db.rs:114–124` では DB+WAL+SHM）、`F=計測で得る前景正本 transaction の増加量の保守的上界` とする。snapshot / note / event のうち最大を F とし、`R=max(R_floor, ceil(safety_factor × F))` を正本用物理 reserve とする。`R_floor>0`、`safety_factor>=1`、再開用ヒステリシス `J>0`、書き込み 1 step の上限は順序 2 の計測で数値案を得て、**順序 5 の開始前**に W1/W2/W6 が ADR に値・根拠を記録する。実測最大は普遍的上界と断定せず、上界外入力は索引を止めて再評価する。
 - 各索引 commit の直前、writer 内で他書き込みと直列化し、SQLite の write transaction を確保して P を再計測する（別プロセスの writer とも競合させない）。予定差分の text / 属性 / FTS / page 丸めと WAL frame の増加（旧 page の書き換えも含む）から `G_db` / `G_wal` / `G_shm` を保守的に見積もり、`G=G_db+G_wal+G_shm` とする。削除予定の論理バイトを物理空きとして先取りしない。安全な増加上界を算出できなければ `growth_unbounded` として admission を拒否する。論理会計係数を物理増加量そのものと見なさない。
 - `P+G+R >= H` または `WAL+G_wal >= hard_limits.max_wal_bytes` で索引の書き込みを停止する。境界の等号も停止側とする。再計測で `P+G+R+J < H` かつ `WAL+G_wal+J < hard_limits.max_wal_bytes`、正本書き込み停止が解除されたときだけ再開する。H が reserve を満たせなければ索引無効相当とし正本を優先する。上限変更は writer の設定取り込み時から判定に使う。
+- admission が **WAL だけ**を理由に拒否された場合、pause / request gap の終端化前に、拒否した IMMEDIATE transaction を終了し、reader を待たない `wal_checkpoint(TRUNCATE)`（busy timeout 0、呼出後は通常値へ復元）を最大 1 回試す。新しい IMMEDIATE transaction で WAL / DB / SHM を再計測し、lease epoch・source revision・work generation・request guard と対象操作の G を再検証してから admission をやり直す。PASSIVE checkpoint 後に high-water だけが残る場合は安全に進めるが、reader の pin 等で条件を満たせなければ従来どおり pause する。H / max_wal / G / R / J は緩めない。pause 後の容量通知による再判定にも両方の厳密な +J 条件を適用し、既に終端化した request の gap は後の成功に書き換えない。
+- Paused の診断は返却時点の reason / adjustment、DB / WAL / SHM、R / J、対象操作と G_db / G_wal / G_shm、適用中の物理上限を保存する。計測ハーネスは失敗時も最後の反復番号、完了検索数、backfill 成功数とそれまでの観測を残す。後からの `thread_index_capacity()` をこの診断の代わりに使わず、本文・SQL パラメータは記録しない。
 - reserve / J は索引への admission 制限であって正本の停止閾値ではない。`IndexPaused` 中も snapshot / note / event は残る物理余裕を利用でき、正本の停止は共通判定の hard limit 側で決める。索引停止をそのまま writes_suspended に伝播しない。
 - 共通 `capacity_status(planned_growth)` API（W2 所有）は `Normal` / `IndexPaused(reason)` / `SourceSuspended(reason)` と DB/WAL 実測・reserve を返す。snapshot / note / event と索引 job はこの容量圧迫判定に接続する。現状 `writer/state.rs:190–207` は容量停止中の snapshot / note に `StorageError::Serialization` を返すため、エラー型のパターン一致や文字列解析を回収開始条件にしない。共通判定と容量変化通知で接続し、正本 API のエラー型変更は本設計の前提にしない。
 - **論理予算 eviction** は max_bytes を守るための索引削除であり、即座のファイル縮小を保証しない。**物理回収**は共通判定の DbSize 圧迫（reserve 不足による予防停止を含む）だけで開始し、他の LimitKind では行わない。論理予算に空きがあっても物理 admission を省略しない。
@@ -652,6 +654,14 @@ request 契約（R5、順序 1 で固定）:
 過去の FAIL は削除・合格への書換えをしない。初回 warm/off ASCII p95 1,589.601 ms に加え、引継ぎで報告された tool warm/off p95 4,801.174 ms（`c33cd88f` の旧 sort 経路、100 drains / 1,700 pages、各 drain の canonical 70 threads / 29,173 hits 完全一致）は**旧 latency ゲートでは FAIL**だった証拠として保持する。この実行は 5 PASS / tool latency 1 FAIL / 22 missing（no-hit・cold・backfill-on 未計測）。ordered-union 製品候補の補助 mini drain は p95 2,993.172 ms、drain 32.900396 秒 / 17 ページ、canonical 70 threads / 29,173 hits と全 page shape が一致した。これも旧指標超過だが、100-drain 受入計測ではない。後二者は引継ぎの既往観測であり、今回の新たな計測や全条件完了を示さない。詳細な既往計測は `docs/thread-search-benchmark.md` を参照する。
 
 正確性（認可・redaction・正解 hit 集合・cursor 完走を含む）、分類・現行索引のカバレッジ、容量不足などの資源エラーは引き続き blocking とする。出力上限、backfill の進捗・実重複チェック、既存の 120 秒 watchdog は緩めない。前景書き込み待ちなど検索 latency 以外のゲートも変更しない。28 条件 × 100 反復、warm 5 回、query・scope・タイミング境界は維持し、未計測や旧 binary の結果を現在の matrix 合格に読み替えない。
+
+#### S8 WAL 回復修正後の再計測範囲（利用者判断）
+
+利用者の判断の原文: 「①（推奨）索引作業ありの14条件だけ ×100回（約3〜4時間）。索引作業なしの13条件は今回の結果を引き継ぐ」。ここで原文の「13条件」は実際の matrix では 7 クラス × warm / cold = **14 セル**を指す。
+
+- backfill **on の 14 セル**は checkpoint 回復修正を含む新 binary で各 100 回を再計測する。資源エラーを含む旧 on セルは継承しない。
+- backfill **off の 14 セル**は `3ca7f672` binary で全セル PASS 済みの結果を継承する。ただし `3ca7f672` から新 HEAD までの差分が検索経路（`crates/storage/src/thread_search*`、`crates/runtime/src/meta/threads` 等）に触れていないことの確認を必須条件とする。今回の修正は writer の WAL admission と診断・計測結果保持であり、索引作業なしの検索経路は変更しないことが継承の根拠である。
+- これは上記の「旧 binary の結果を現在の matrix 合格に読み替えない」に対する、検索経路不変を条件とした明示的な例外である。on の再計測と off の差分確認・証拠集計が完了するまでは S8 全体を完了扱いにしない。
 
 対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。private な chunk-temp FTS プロトタイプ（`$TMPDIR/s8-chunk*`）は製品へ持ち込まない。この方針変更時点で新 matrix は未実行であり、順序 8 全体を完了扱いにはしない。
 

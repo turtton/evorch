@@ -164,6 +164,41 @@ fn pressure() -> Value {
     })
 }
 
+/// Persisted on failure as well as success. Contains aggregate counters and
+/// hashes only; source bodies and SQL parameters never enter this structure.
+#[derive(Default)]
+struct CellEvidence {
+    repetition: Option<usize>,
+    completed_searches: usize,
+    backfill_progress: Vec<Value>,
+    before: Option<Value>,
+    observations: Value,
+}
+
+impl CellEvidence {
+    fn failure(&self, error: &(dyn std::error::Error + 'static)) -> Value {
+        let mut evidence = job::error_evidence(error);
+        let backfill_successes = self
+            .backfill_progress
+            .iter()
+            .map(|progress| progress["succeeded_delta"].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            + evidence["backfill_attempt"]["succeeded_delta"]
+                .as_u64()
+                .unwrap_or(0);
+        evidence["status"] = json!("failed");
+        evidence["error_class"] = json!(error_class(error));
+        evidence["error_sha256"] = json!(corpus::hash(error.to_string().as_bytes()));
+        evidence["last_repetition"] = json!(self.repetition);
+        evidence["completed_searches"] = json!(self.completed_searches);
+        evidence["backfill_successes"] = json!(backfill_successes);
+        evidence["backfill_progress"] = json!(self.backfill_progress);
+        evidence["before"] = json!(self.before);
+        evidence["observations"] = self.observations.clone();
+        evidence
+    }
+}
+
 async fn cell(
     seed: &Path,
     path: &Path,
@@ -173,94 +208,119 @@ async fn cell(
     cold: bool,
     backfill: bool,
 ) -> Result<Value> {
-    copy::backup(seed, path)?;
-    let cfg = config(path);
-    let storage = Storage::open(cfg.clone())?;
-    let handle = storage.handle();
-    let before = job::observation(&handle, path)?;
-    let load_before = pressure();
-    let expected = corpus.expected(case)?;
-    require(
-        case.class == "nohit" || !expected.is_empty(),
-        "empty_positive_oracle",
-    )?;
-    let mut pages = Vec::new();
-    let mut first_pages = Vec::new();
-    let mut drains = Vec::new();
-    let mut partial_pages = 0;
-    let mut max_bytes = 0;
-    let mut output_hashes = BTreeMap::<String, usize>::new();
-    let mut progress = Vec::new();
-    let mut warm = None;
-    if !cold {
-        warm = Some(driver::Harness::new(&cfg, handle.clone())?);
-        for _ in 0..WARMUPS {
-            warm.as_ref()
-                .unwrap()
-                .search(project, case, &expected)
-                .await?;
+    let mut evidence = CellEvidence::default();
+    let result: Result<Value> = async {
+        copy::backup(seed, path)?;
+        let cfg = config(path);
+        let storage = Storage::open(cfg.clone())?;
+        let handle = storage.handle();
+        let before = job::observation(&handle, path)?;
+        evidence.before = Some(before.clone());
+        let load_before = pressure();
+        let expected = corpus.expected(case)?;
+        require(
+            case.class == "nohit" || !expected.is_empty(),
+            "empty_positive_oracle",
+        )?;
+        let mut pages = Vec::new();
+        let mut first_pages = Vec::new();
+        let mut drains = Vec::new();
+        let mut partial_pages = 0;
+        let mut max_bytes = 0;
+        let mut output_hashes = BTreeMap::<String, usize>::new();
+        let mut warm = None;
+        if !cold {
+            warm = Some(driver::Harness::new(&cfg, handle.clone())?);
+            for _ in 0..WARMUPS {
+                warm.as_ref()
+                    .unwrap()
+                    .search(project, case, &expected)
+                    .await?;
+            }
         }
-    }
-    let mut worker = if backfill {
-        Some(job::Parallel::new(handle.clone(), &corpus.other_projects)?)
-    } else {
-        None
-    };
-    for repetition in 0..REPETITIONS {
-        let fresh;
-        let harness = if cold {
-            fresh = driver::Harness::new(&cfg, handle.clone())?;
-            &fresh
+        let mut worker = if backfill {
+            Some(job::Parallel::new(handle.clone(), &corpus.other_projects)?)
         } else {
-            warm.as_ref().unwrap()
+            None
         };
-        // The worker waits for this exact search's first ToolUse. No index step
-        // or progress-barrier wait is inserted into the timed model response.
-        if let Some(worker) = &mut worker {
-            harness.arm_backfill(worker.arm()?);
+        for repetition in 0..REPETITIONS {
+            evidence.repetition = Some(repetition);
+            let fresh;
+            let harness = if cold {
+                fresh = driver::Harness::new(&cfg, handle.clone())?;
+                &fresh
+            } else {
+                warm.as_ref().unwrap()
+            };
+            // The worker waits for this exact search's first ToolUse. No index step
+            // or progress-barrier wait is inserted into the timed model response.
+            if let Some(worker) = &mut worker {
+                harness.arm_backfill(worker.arm()?);
+            }
+            let sample = match harness.search(project, case, &expected).await {
+                Ok(sample) => sample,
+                Err(error) => return Err(match &mut worker {
+                    Some(worker) => worker.search_failed(error),
+                    None => error,
+                }),
+            };
+            evidence.completed_searches += 1;
+            first_pages.push(sample.pages_us[0]);
+            pages.extend(sample.pages_us.iter().copied());
+            drains.push(sample.drain_us);
+            partial_pages += sample.partial_pages;
+            max_bytes = max_bytes.max(sample.max_bytes);
+            *output_hashes.entry(sample.hash.clone()).or_default() += 1;
+            evidence.observations = json!({
+                "first_page":timing(&first_pages), "all_pages":timing(&pages), "full_drain":timing(&drains),
+                "partial_pages":partial_pages, "max_output_bytes":max_bytes, "output_hash_counts":output_hashes,
+            });
+            if let Some(worker) = &mut worker {
+                evidence.backfill_progress.push(worker.finish(repetition, &sample)?);
+            }
+            if repetition % 10 == 9 {
+                println!(
+                    "{}",
+                    json!({
+                        "stage": "progress", "class": case.class, "cold": cold,
+                        "backfill": backfill, "completed_drains": repetition + 1,
+                        "pages": pages.len(),
+                    })
+                );
+            }
         }
-        let sample = harness.search(project, case, &expected).await?;
-        if let Some(worker) = &mut worker {
-            progress.push(worker.finish(repetition, &sample)?);
+        if let Some(worker) = worker {
+            worker.close()?;
         }
-        first_pages.push(sample.pages_us[0]);
-        pages.extend(sample.pages_us);
-        drains.push(sample.drain_us);
-        partial_pages += sample.partial_pages;
-        max_bytes = max_bytes.max(sample.max_bytes);
-        *output_hashes.entry(sample.hash).or_default() += 1;
-        if repetition % 10 == 9 {
-            println!(
-                "{}",
-                json!({
-                    "stage": "progress", "class": case.class, "cold": cold,
-                    "backfill": backfill, "completed_drains": repetition + 1,
-                    "pages": pages.len(),
-                })
-            );
+        let after = job::observation(&handle, path)?;
+        Ok(json!({
+            "status": "passed", "latency_policy": "advisory",
+            "class": case.class, "query_sha256": case.hash(),
+            "cache": if cold {"new_sqlite_connection_not_os_cold"} else {"same_connection_warm"},
+            "backfill": backfill, "repetitions": REPETITIONS,
+            "warmup_drains": if cold {0} else {WARMUPS},
+            "first_page": timing(&first_pages), "all_pages": timing(&pages),
+            "full_drain": timing(&drains),
+            "page_p95_lt_300ms": percentile(&pages, 95) < LATENCY_REFERENCE_US,
+            "first_page_p95_lt_300ms": percentile(&first_pages, 95) < LATENCY_REFERENCE_US,
+            "canonical_threads": expected.len(), "canonical_hits": expected.values().sum::<u64>(),
+            "canonical_sha256": corpus::set_hash(&expected),
+            "partial_pages": partial_pages, "max_output_bytes": max_bytes,
+            "output_hash_counts": output_hashes, "backfill_progress": evidence.backfill_progress,
+            "before": before, "after": after,
+            "pressure_before": load_before, "pressure_after": pressure(),
+        }))
+    }.await;
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut value = evidence.failure(error.as_ref());
+            value["class"] = json!(case.class);
+            value["cold"] = json!(cold);
+            value["backfill"] = json!(backfill);
+            Ok(value)
         }
     }
-    if let Some(worker) = worker {
-        worker.close()?;
-    }
-    let after = job::observation(&handle, path)?;
-    Ok(json!({
-        "status": "passed", "latency_policy": "advisory",
-        "class": case.class, "query_sha256": case.hash(),
-        "cache": if cold {"new_sqlite_connection_not_os_cold"} else {"same_connection_warm"},
-        "backfill": backfill, "repetitions": REPETITIONS,
-        "warmup_drains": if cold {0} else {WARMUPS},
-        "first_page": timing(&first_pages), "all_pages": timing(&pages),
-        "full_drain": timing(&drains),
-        "page_p95_lt_300ms": percentile(&pages, 95) < LATENCY_REFERENCE_US,
-        "first_page_p95_lt_300ms": percentile(&first_pages, 95) < LATENCY_REFERENCE_US,
-        "canonical_threads": expected.len(), "canonical_hits": expected.values().sum::<u64>(),
-        "canonical_sha256": corpus::set_hash(&expected),
-        "partial_pages": partial_pages, "max_output_bytes": max_bytes,
-        "output_hash_counts": output_hashes, "backfill_progress": progress,
-        "before": before, "after": after,
-        "pressure_before": load_before, "pressure_after": pressure(),
-    }))
 }
 
 async fn run() -> Result<()> {
@@ -447,6 +507,7 @@ async fn main() {
             "{}",
             json!({
                 "stage": "fatal", "error_sha256": corpus::hash(error.to_string().as_bytes()),
+                "evidence": job::error_evidence(error.as_ref()),
             "error_class": error_class(error.as_ref()),
                 "status": "failed",
             })
@@ -668,6 +729,64 @@ mod tests {
                 )
                 .await
                 .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn failed_cell_keeps_last_iteration_progress_and_paused_payload_without_body() {
+        let mut evidence = CellEvidence::default();
+        evidence.repetition = Some(99);
+        evidence.completed_searches = 100;
+        evidence
+            .backfill_progress
+            .push(json!({"succeeded_delta": 3}));
+        let paused = storage::thread_index::IndexCapacityStatus {
+            state: storage::thread_index::CapacityState::IndexPaused(
+                storage::thread_index::IndexPauseReason::WalLimit,
+            ),
+            adjustment: Some(storage::thread_index::IndexAdjustmentPhase::Evicting),
+            db_bytes: 10,
+            wal_bytes: 58_671_072,
+            shm_bytes: 32_768,
+            reserve_bytes: 67_108_864,
+            resume_hysteresis_bytes: 16_777_216,
+            operation: Some(storage::thread_index::IndexOperation::Merge),
+            growth: storage::thread_index::PlannedGrowth::Bounded {
+                db: 8_388_608,
+                wal: 8_437_792,
+                shm: 32_768,
+            },
+            max_db_bytes: 1 << 30,
+            max_wal_bytes: 64 << 20,
+        };
+        let error = job::paused_error(paused);
+        let value = evidence.failure(error.as_ref());
+        assert_eq!(value["last_repetition"], 99);
+        assert_eq!(value["completed_searches"], 100);
+        assert_eq!(value["backfill_successes"], 3);
+        assert_eq!(value["paused"]["reason"], "IndexPaused(WalLimit)");
+        assert_eq!(value["paused"]["adjustment"], "Some(Evicting)");
+        assert_eq!(value["paused"]["operation"], "Some(Merge)");
+        assert_eq!(value["paused"]["growth"]["wal"], 8_437_792);
+        assert_eq!(value["paused"]["max_wal_bytes"], 64 << 20);
+        let encoded = value.to_string();
+        for forbidden in ["messages_json", "parameters", "private body", "SELECT"] {
+            assert!(!encoded.contains(forbidden));
+        }
+        // Arbitrary library error text (possibly including source/SQL) is hashed,
+        // never copied into the evidence.
+        let secret: Box<dyn std::error::Error + Send + Sync> =
+            "private body SELECT parameters".into();
+        assert!(
+            !evidence
+                .failure(secret.as_ref())
+                .to_string()
+                .contains("private body")
         );
     }
 }

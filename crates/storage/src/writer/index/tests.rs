@@ -1989,3 +1989,232 @@ fn stopping_an_owner_never_joins_a_worker_blocked_on_a_full_writer_queue() {
     drop(receiver);
     extractor._handle.join().unwrap();
 }
+
+// Keep a real WAL high-water, not a mocked file size. Autocheckpoint must not
+// hide the distinction between checkpointable high-water and a pinned reader.
+fn wal_high_water(fx: &Fixture) {
+    fx.conn()
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
+    fx.conn().execute_batch("CREATE TABLE wal_pressure(payload BLOB); INSERT INTO wal_pressure VALUES(zeroblob(1048576));").unwrap();
+}
+
+#[test]
+fn wal_admission_recovers_high_water_before_terminalizing_a_request() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "private body never diagnostic", 1));
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease")
+    };
+    wal_high_water(&fx);
+    // Enough for the fixed merge bound only after truncation.
+    fx.config.hard_limits.max_wal_bytes = 8_437_792 + fx.sizes().wal;
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    assert_eq!(fx.rt.counters.pauses, 0);
+    assert!(matches!(terminal(&mut fx, &submitted.request_id, 2*S),
+        ReindexResult::Completed { summary, .. } if summary.succeeded == 1));
+}
+
+#[test]
+fn wal_admission_pinned_reader_pauses_without_index_writes_and_gap_stays_terminal() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "private body never diagnostic", 1));
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease")
+    };
+    let reader = Connection::open(&fx.config.db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM run_contexts;")
+        .unwrap();
+    wal_high_water(&fx);
+    let before = fx.sizes();
+    fx.config.hard_limits.max_wal_bytes = 8_437_792 + before.wal;
+    let IndexStepResult::Paused(status) = fx.drive(&lease, 2 * S) else {
+        panic!("pause")
+    };
+    assert_eq!(
+        status.state,
+        CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    );
+    assert_eq!(fx.rt.counters.merges, 0);
+    assert_eq!(fx.rt.counters.commits, 0);
+    assert_eq!(fx.row("run-a").attempts, 0);
+    let terminal_before = terminal(&mut fx, &submitted.request_id, 2 * S);
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    // At equality with +J even a truncated WAL must remain paused.
+    fx.config.hard_limits.max_wal_bytes = 8_437_792 + MEASURED_POLICY.hysteresis_bytes;
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(!work::recheck_pause(env, &mut fx.rt).unwrap());
+    fx.config.hard_limits.max_wal_bytes += 1;
+    // Total (+R+J) is independently required.
+    let PlannedGrowth::Bounded { db, wal, shm } = fx.rt.paused_growth.unwrap() else {
+        panic!("bounded")
+    };
+    fx.config.hard_limits.max_db_bytes = fx.sizes().total()
+        + db
+        + wal
+        + shm
+        + MEASURED_POLICY.reserve_bytes()
+        + MEASURED_POLICY.hysteresis_bytes;
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(!work::recheck_pause(env, &mut fx.rt).unwrap());
+    fx.config.hard_limits.max_db_bytes += 1;
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(work::recheck_pause(env, &mut fx.rt).unwrap());
+    assert_eq!(fx.drive(&lease, 3 * S), idle());
+    assert_eq!(fx.row("run-a").state, "indexed");
+    assert_eq!(
+        terminal(&mut fx, &submitted.request_id, 3 * S),
+        terminal_before
+    );
+}
+
+#[test]
+fn wal_merge_exact_stop_and_resume_boundaries() {
+    let growth = PlannedGrowth::Bounded {
+        db: 8_388_608,
+        wal: 8_437_792,
+        shm: 32_768,
+    };
+    let limits = HardLimits::default();
+    assert_eq!(limits.max_wal_bytes, 64 * MIB);
+    for (wal, paused, normal) in [
+        (58_671_071, false, true),
+        (58_671_072, false, false),
+        (41_893_856, true, false),
+        (41_893_855, true, true),
+    ] {
+        let status = capacity::evaluate(
+            &MEASURED_POLICY,
+            &limits,
+            true,
+            Measurement {
+                sizes: FileSizes { db: 0, wal, shm: 0 },
+                source_suspended: false,
+            },
+            growth,
+            paused,
+        );
+        assert_eq!(
+            status.state == CapacityState::Normal,
+            normal,
+            "wal={wal} paused={paused}"
+        );
+    }
+}
+
+#[test]
+fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for pinned in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "private body", 1));
+        let lease = fx.lease(&gui(), S);
+        let reader = Connection::open(&fx.config.db_path).unwrap();
+        if pinned {
+            reader
+                .execute_batch("BEGIN; SELECT count(*) FROM run_contexts;")
+                .unwrap();
+        }
+        wal_high_water(&fx);
+        fx.config.hard_limits.max_wal_bytes = 8_437_792 + fx.sizes().wal;
+        let checkpoints = Arc::new(AtomicUsize::new(0));
+        let observed = checkpoints.clone();
+        fx.conn()
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if let AuthAction::Pragma {
+                    pragma_name: "wal_checkpoint",
+                    pragma_value,
+                } = ctx.action
+                {
+                    assert_eq!(pragma_value, Some("TRUNCATE"));
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    // checkpoint_truncate asserts is_autocommit immediately before
+                    // this PRAGMA, so moving it into IMMEDIATE fails this test too.
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        let outcome = fx.control(2 * S).step(&lease, 2 * S).unwrap();
+        assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+        assert_eq!(matches!(outcome, IndexStepResult::Paused(_)), pinned);
+        if pinned {
+            reader.execute_batch("COMMIT").unwrap();
+        }
+    }
+}
+
+#[test]
+fn wal_retry_rechecks_frozen_revision_generation_and_lease_before_commit() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    for mutation in [
+        "UPDATE thread_index_runs SET source_revision = source_revision + 1 WHERE run_id='run-a'",
+        "UPDATE thread_index_runs SET work_generation = work_generation + 1 WHERE run_id='run-a'",
+        "UPDATE thread_index_lease SET epoch = epoch + 1 WHERE id=1",
+    ] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "private body", 1));
+        let lease = fx.lease(&gui(), S);
+        for _ in 0..10 {
+            if fx.rt.ready.is_some() {
+                break;
+            }
+            assert_eq!(
+                fx.control(2 * S).step(&lease, 2 * S).unwrap(),
+                IndexStepResult::Progress
+            );
+        }
+        assert!(fx.rt.ready.is_some());
+        wal_high_water(&fx);
+        // A normal commit bound is smaller than the merge bound.
+        fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
+        let peer = Connection::open(&fx.config.db_path).unwrap();
+        fx.conn()
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if let AuthAction::Pragma {
+                    pragma_name: "wal_checkpoint",
+                    ..
+                } = ctx.action
+                {
+                    peer.execute_batch(mutation).unwrap();
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        let result = fx.control(3 * S).step(&lease, 3 * S).unwrap();
+        assert!(matches!(
+            result,
+            IndexStepResult::Progress | IndexStepResult::LeaseLost
+        ));
+        assert_eq!(fx.rt.counters.commits, 0);
+        assert_eq!(fx.row("run-a").blocks, 0);
+    }
+}

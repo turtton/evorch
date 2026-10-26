@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use storage::thread_index::{
-    IndexLease, IndexOwner, IndexOwnerKind, IndexStepResult, LeaseResult, ReindexRequest,
-    ReindexResult, RequestProgress, RequestSummary,
+    IndexCapacityStatus, IndexLease, IndexOwner, IndexOwnerKind, IndexStepResult, LeaseResult,
+    PlannedGrowth, ReindexRequest, ReindexResult, RequestProgress, RequestSummary,
 };
 use storage::{Database, StorageHandle, THREAD_INDEX_LEASE_NS};
 
@@ -46,6 +46,59 @@ fn heartbeat(handle: &StorageHandle, lease: &mut IndexLease) -> Result<()> {
     Ok(())
 }
 
+/// Admission evidence travels with the exact Paused result. Never replace it
+/// with a later capacity query (the bound/operation may already have changed).
+#[derive(Debug)]
+struct EvidenceError {
+    code: String,
+    evidence: Value,
+}
+
+impl std::fmt::Display for EvidenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.code)
+    }
+}
+impl std::error::Error for EvidenceError {}
+
+pub fn error_evidence(error: &(dyn std::error::Error + 'static)) -> Value {
+    error
+        .downcast_ref::<EvidenceError>()
+        .map(|error| error.evidence.clone())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn with_evidence(
+    error: Box<dyn std::error::Error + Send + Sync>,
+    key: &str,
+    value: Value,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    let mut evidence = error_evidence(error.as_ref());
+    evidence[key] = value;
+    Box::new(EvidenceError {
+        code: super::error_class(error.as_ref()),
+        evidence,
+    })
+}
+
+pub fn paused_error(status: IndexCapacityStatus) -> Box<dyn std::error::Error + Send + Sync> {
+    let growth = match status.growth {
+        PlannedGrowth::Bounded { db, wal, shm } => json!({"db":db, "wal":wal, "shm":shm}),
+        PlannedGrowth::Unbounded => json!({"unbounded":true}),
+    };
+    Box::new(EvidenceError {
+        code: "index_capacity_paused".into(),
+        evidence: json!({"paused": {
+            "reason":format!("{:?}", status.state),
+            "adjustment":format!("{:?}", status.adjustment),
+            "db_bytes":status.db_bytes, "wal_bytes":status.wal_bytes, "shm_bytes":status.shm_bytes,
+            "reserve_bytes":status.reserve_bytes, "resume_hysteresis_bytes":status.resume_hysteresis_bytes,
+            "operation":format!("{:?}", status.operation), "growth":growth,
+            "max_db_bytes":status.max_db_bytes, "max_wal_bytes":status.max_wal_bytes,
+        }}),
+    })
+}
+
 fn step(handle: &StorageHandle, lease: &IndexLease) -> Result<()> {
     match failure(handle.step_thread_index(lease, now()))? {
         IndexStepResult::Progress => Ok(()),
@@ -54,7 +107,7 @@ fn step(handle: &StorageHandle, lease: &IndexLease) -> Result<()> {
             thread::sleep(Duration::from_millis(1));
             Ok(())
         }
-        IndexStepResult::Paused(_) => Err("index_capacity_paused".into()),
+        IndexStepResult::Paused(status) => Err(paused_error(status)),
         IndexStepResult::LeaseLost => Err("index_lease_lost".into()),
     }
 }
@@ -243,20 +296,31 @@ impl Parallel {
                     };
                     heartbeat(&handle, &mut lease)?;
                     let before = totals(&handle, &ids)?;
+                    let mut started = Instant::now();
+                    let mut steps = 0;
+                    let mut after = before;
                     let result = (|| {
                         require(before.2 > 0, "backfill_exhausted")?;
                         let _ = ready.send(());
                         trigger
                             .recv_timeout(DEADLINE)
                             .map_err(|_| "backfill_trigger_timeout")?;
-                        let started = Instant::now();
-                        let mut steps = 0;
+                        started = Instant::now();
                         loop {
                             require(started.elapsed() < DEADLINE, "backfill_progress_deadline")?;
                             heartbeat(&handle, &mut lease)?;
-                            step(&handle, &lease)?;
+                            let outcome = step(&handle, &lease);
                             steps += 1;
-                            let after = totals(&handle, &ids)?;
+                            // Even the final (paused/failed) step can terminalize
+                            // targets. Preserve progress before propagating it.
+                            let measured = totals(&handle, &ids);
+                            if let Ok(totals) = &measured {
+                                after = *totals;
+                            }
+                            outcome?;
+                            // A progress-read failure must still fail the cell;
+                            // fallback counters only preserve failure evidence.
+                            after = measured?;
                             if after.1 > before.1 {
                                 return Ok(Progress {
                                     before,
@@ -281,6 +345,11 @@ impl Parallel {
                             }
                         }
                     })();
+                    let result = result.map_err(|error| with_evidence(error, "backfill_attempt", json!({
+                        "targets":before.0, "pending_before":before.2, "pending_after":after.2,
+                        "succeeded_before":before.1, "succeeded_after":after.1,
+                        "succeeded_delta":after.1.saturating_sub(before.1), "steps":steps,
+                    })));
                     let failed = result.is_err();
                     let _ = done.send(result);
                     if failed {
@@ -320,18 +389,52 @@ impl Parallel {
             .recv_timeout(DEADLINE)
             .map_err(|_| "backfill_completion_timeout")??;
         let overlaps = progress.started < sample.finished && progress.ended > sample.started;
-        require(
-            overlaps && progress.steps > 0 && progress.after.1 > progress.before.1,
-            "backfill_did_not_overlap",
-        )?;
-        Ok(json!({
+        let observed = json!({
             "repetition": repetition, "targets": progress.before.0,
             "pending_before": progress.before.2, "pending_after": progress.after.2,
             "succeeded_delta": progress.after.1 - progress.before.1,
             "steps": progress.steps, "overlap": overlaps,
             "background_us": progress.ended.duration_since(progress.started).as_micros(),
             "commit_observed_after_search": progress.ended > sample.finished,
-        }))
+        });
+        require(
+            overlaps && progress.steps > 0 && progress.after.1 > progress.before.1,
+            "backfill_did_not_overlap",
+        )
+        .map_err(|error| with_evidence(error, "backfill_attempt", observed.clone()))?;
+        Ok(observed)
+    }
+
+    /// Search validation can fail before `finish` is reached. Still collect the
+    /// armed worker's last result so a simultaneous Paused is not discarded.
+    pub fn search_failed(
+        &mut self,
+        error: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        let Some(receive) = self.receive.take() else {
+            return error;
+        };
+        match receive.recv_timeout(DEADLINE) {
+            Ok(Err(index_error)) => {
+                let mut evidence = error_evidence(index_error.as_ref());
+                evidence["search_error_class"] = json!(super::error_class(error.as_ref()));
+                evidence["search_error_sha256"] =
+                    json!(super::corpus::hash(error.to_string().as_bytes()));
+                Box::new(EvidenceError {
+                    code: super::error_class(index_error.as_ref()),
+                    evidence,
+                })
+            }
+            Ok(Ok(progress)) => with_evidence(
+                error,
+                "backfill_attempt",
+                json!({
+                    "targets":progress.before.0, "pending_before":progress.before.2, "pending_after":progress.after.2,
+                    "succeeded_delta":progress.after.1.saturating_sub(progress.before.1), "steps":progress.steps,
+                }),
+            ),
+            Err(_) => error,
+        }
     }
 
     pub fn close(mut self) -> Result<()> {
@@ -375,4 +478,58 @@ pub fn observation(handle: &StorageHandle, path: &Path) -> Result<Value> {
         "in_flight": status.in_flight, "idle_steps": status.idle_steps,
         "forced_steps": status.forced_steps,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use storage::thread_index::{CapacityState, IndexPauseReason, ThreadIndexSettings};
+    use storage::{Storage, StorageConfig};
+
+    #[test]
+    fn paused_step_and_search_failure_keep_the_exact_writer_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = StorageConfig {
+            db_path: dir.path().join("paused.db"),
+            thread_index: ThreadIndexSettings {
+                enabled: true,
+                max_bytes: 512 << 20,
+            },
+            ..StorageConfig::default()
+        };
+        cfg.hard_limits.max_wal_bytes = 1;
+        let storage = Storage::open(cfg).unwrap();
+        let handle = storage.handle();
+        let lease = acquired(
+            handle
+                .acquire_thread_index_lease(&owner(), now(), THREAD_INDEX_LEASE_NS)
+                .unwrap(),
+        )
+        .unwrap();
+        let error = step(&handle, &lease).unwrap_err();
+        let expected = error_evidence(error.as_ref());
+        assert_eq!(
+            expected["paused"]["reason"],
+            format!(
+                "{:?}",
+                CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+            )
+        );
+        assert_eq!(expected["paused"]["operation"], "Some(Adjustment)");
+        assert_eq!(expected["paused"]["growth"]["wal"], 1_054_752);
+        assert_eq!(expected["paused"]["max_wal_bytes"], 1);
+        let (done, receive) = mpsc::channel();
+        let (commands, _unused) = mpsc::channel();
+        done.send(Err(error)).unwrap();
+        let mut parallel = Parallel {
+            commands,
+            receive: Some(receive),
+            job: None,
+        };
+        let error = parallel.search_failed("private body SQL parameters".into());
+        let evidence = error_evidence(error.as_ref());
+        assert_eq!(evidence["paused"], expected["paused"]);
+        assert!(evidence["search_error_sha256"].is_string());
+        assert!(!evidence.to_string().contains("private body"));
+    }
 }
