@@ -105,6 +105,78 @@ fn count(value: &Value) -> u64 {
         .sum()
 }
 
+#[test]
+fn obsolete_extractor_preserves_report_fallback_but_hides_conversation_hits_and_counts() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.native_run(
+        "run-100",
+        Some("own"),
+        None,
+        vec![
+            assistant(vec![text("oldextractorneedle intermediate")]),
+            assistant(vec![text("oldextractorneedle final")]),
+        ],
+    );
+    f.index("run-100");
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute("UPDATE thread_index_runs SET extractor_version = 0, indexed_extractor_version = 0 WHERE run_id = 'run-100'", []).unwrap();
+    let result = f
+        .call(
+            own,
+            "thread_search",
+            json!({
+                "query": "oldextractorneedle", "kinds": ["conversation"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(count(&result), 0, "{result}");
+    assert_eq!(result["index"]["indexed"], 0);
+    assert_eq!(result["index"]["pending"], 1);
+    let result = f
+        .call(
+            own,
+            "thread_search",
+            json!({
+                "query": "oldextractorneedle", "kinds": ["conversation", "final_report"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        count(&result),
+        1,
+        "only metadata fallback, not old extracted text: {result}"
+    );
+    assert_eq!(result["threads"][0]["snippets"][0]["kind"], "final_report");
+}
+
+#[test]
+fn extractor_currentness_change_makes_a_conversation_cursor_stale() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.native_run(
+        "run-100",
+        Some("own"),
+        None,
+        (0..2001)
+            .map(|_| assistant(vec![text("versioncursorneedle")]))
+            .collect(),
+    );
+    f.index("run-100");
+    let mut args = json!({"query": "versioncursorneedle", "kinds": ["conversation"]});
+    let page = f.call(own, "thread_search", args.clone()).unwrap();
+    assert!(!page["next_cursor"].is_null());
+    args["cursor"] = page["next_cursor"].clone();
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    conn.execute(
+        "UPDATE thread_index_runs SET indexed_extractor_version = 0 WHERE run_id = 'run-100'",
+        [],
+    )
+    .unwrap();
+    let error = f.call(own, "thread_search", args).unwrap_err();
+    assert!(error.contains("thread_cursor_stale"), "{error}");
+}
+
 #[tokio::test]
 async fn same_thread_continuation_searches_original_native_positions_after_restart() {
     let f = Fixture::with_script(vec![

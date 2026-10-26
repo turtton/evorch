@@ -210,7 +210,8 @@ fn stored(model: Arc<dyn AgentModel>, project: &Path) -> Stored {
     }
     conn.execute(
         "UPDATE thread_index_runs SET state = 'indexed', \
-        indexed_revision = source_revision WHERE run_id = 'run-50'",
+        indexed_revision = source_revision, \
+        indexed_extractor_version = extractor_version WHERE run_id = 'run-50'",
         [],
     )
     .unwrap();

@@ -512,6 +512,8 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
 /// Decide ownership before paging, not from this page's hits. Only a verified
 /// native text at the report's canonical position can replace metadata; equal
 /// text elsewhere, copies and unavailable indexes cannot suppress the fallback.
+/// Coverage also enforces the binary's extractor version, even before an owner
+/// has reached the run in its deferred version-adjustment steps.
 fn indexed_final_report(scope: &Scope<'_>, item: &Item, matcher: &Matcher) -> Result<bool, String> {
     let Some(run) = &item.run_id else {
         return Ok(false);
@@ -549,6 +551,8 @@ fn indexed_final_report(scope: &Scope<'_>, item: &Item, matcher: &Matcher) -> Re
 /// Bind metadata/conversation ownership to every authorized run, including
 /// later runs not yet visited by the bounded stream. A digest keeps cursor
 /// size constant even for threads with thousands of roots or delegated runs.
+/// `Indexed -> Pending` on an obsolete extractor invalidates this key even
+/// when its source revision has not changed.
 fn revisions_key(runs: &[String], coverage: &[(RunCoverage, Option<u64>)]) -> String {
     let parts: Vec<String> = runs
         .iter()
