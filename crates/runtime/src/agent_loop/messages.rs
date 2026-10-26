@@ -31,11 +31,12 @@ impl LoopState {
         self.flush_user_messages_through(cut)
     }
 
-    pub(super) fn flush_scheduled_user_messages(&mut self) {
+    pub(super) fn flush_scheduled_user_messages(&mut self) -> bool {
         let (cut, requested) = self.channels.user_inbox.seal_for_next_request();
         if self.has_pending_user_messages() || requested {
-            self.flush_user_messages_through(cut);
+            return self.flush_user_messages_through(cut);
         }
+        false
     }
 
     fn flush_user_messages_through(&mut self, cut: u64) -> bool {
@@ -177,5 +178,55 @@ mod shell_handoff_tests {
         let history = serde_json::to_string(&state.context.messages).unwrap();
         assert_eq!(history.matches("before cut").count(), 1);
         assert_eq!(history.matches("after cut").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod waiting_cut_tests {
+    use super::super::delegate_cleanup_tests;
+    use crate::runtime::user_inbox::SendPausePoint;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_between_cut_and_drain_resumes_local_pending_without_another_event() {
+        let (_cancel, cancelled) = tokio::sync::watch::channel(crate::RunInterrupt::None);
+        let (runtime, mut state) = delegate_cleanup_tests::started_fixture(cancelled).await;
+        state
+            .transition(event_bus::AgentRunPhase::Running, None)
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        state.channels.inbox_rx = receiver;
+        let inbox = state.channels.user_inbox.clone();
+        let pause = inbox.pause_next_send(SendPausePoint::AfterRequestCut);
+        let enqueuer = std::thread::spawn(move || {
+            pause.reached.recv().unwrap();
+            inbox
+                .enqueue(|seq| {
+                    sender.try_send((
+                        "after last cut".into(),
+                        vec![],
+                        true,
+                        Some("late".into()),
+                        seq,
+                    ))
+                })
+                .unwrap();
+            pause.resume.send(()).unwrap();
+            sender // Keep the channel open without sending another event.
+        });
+        assert!(!state.flush_aside());
+        let _sender = enqueuer.join().unwrap();
+        assert_eq!(state.pending_user_messages.len(), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), state.wait_for_input())
+                .await
+                .unwrap()
+        );
+        assert!(state.pending_user_messages.is_empty());
+        assert_eq!(state.channels.user_inbox.status().pending, 0);
+        assert!(state.host_inputs().contains("late"));
+        let next_request = serde_json::to_string(&state.context.messages).unwrap();
+        assert_eq!(next_request.matches("after last cut").count(), 1);
+        runtime.cancel(state.caller_run_id()).unwrap();
+        runtime.wait(state.caller_run_id()).await.unwrap();
     }
 }

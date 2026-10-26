@@ -233,7 +233,7 @@ async fn full_unobserved_retention_refuses_sync_spawn_and_keeps_every_outcome() 
     .unwrap();
     assert!(result.is_error);
     assert!(result.content.contains("32/32"));
-    assert!(result.content.contains("60-second completion wait"));
+    assert!(result.content.contains("finished, unobserved"));
     assert_eq!(result.content.matches("Poll your ").count(), 3);
     assert!(!directory.path().join("must-not-start").exists());
     assert_eq!(shell.jobs.jobs.lock().unwrap().len(), MAX_RETAINED);

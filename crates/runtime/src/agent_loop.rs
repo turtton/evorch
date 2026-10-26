@@ -1341,6 +1341,15 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        if let Some(kind) = self.interrupted() {
+            self.finish_interrupted(kind);
+            return false;
+        }
+        // A previous cut may have drained newer channel input into local
+        // pending storage. There need not be another channel event to wake us.
+        if self.has_pending_user_messages() && self.flush_user_messages() {
+            return true;
+        }
         // Resume can arrive after the final goal boundary but before Waiting.
         // Keep the scheduling bit when the post-boundary inbox drain sees it.
         if self.goal_wake_pending {

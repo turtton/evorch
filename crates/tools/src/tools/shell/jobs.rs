@@ -332,6 +332,10 @@ impl JobRegistry {
                 if let Some(reason) = reason {
                     result.content.push_str(&format!("\n{reason} The command was not restarted. Stdin is closed. Continue with shell action:poll, job_id:{} (omit yield_ms to wait up to 60 seconds for completion), or action:stop to cancel. The ten-second boundary releases this shell wait; other tools may still delay the next model request.\n", job.handle));
                 }
+                // Wake event forwarding only once a continuing handle is
+                // exposed. Short synchronous results must not create GUI jobs.
+                job.changed
+                    .send_modify(|version| *version = version.wrapping_add(1));
                 launch.delivered = true;
                 return Ok(result);
             }
@@ -608,6 +612,17 @@ fn capacity_error(
         .values()
         .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id)
         .collect();
+    visible.retain(|job| {
+        let state = job
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if running {
+            state.completion.is_none()
+        } else {
+            state.completion.is_some() && !state.observed
+        }
+    });
     visible.sort_by(|a, b| a.handle.cmp(&b.handle));
     let mut message = if running {
         format!(
@@ -619,10 +634,18 @@ fn capacity_error(
         )
     };
     if visible.is_empty() {
-        message.push_str(" No jobs are visible to this owner; another owner must observe completed results or stop/wait for its jobs before retrying.");
+        message.push_str(if running {
+            " No running jobs capable of freeing this slot are visible to this owner; another owner must finish or stop its running jobs."
+        } else {
+            " No finished, unobserved results are visible to this owner. Running jobs must reach terminal and their outcomes must be observed, possibly by another owner, before retrying."
+        });
     } else {
         for job in visible.into_iter().take(3) {
-            message.push_str(&format!(" Poll your {} to completion (omit yield_ms for a 60-second completion wait), or stop it and observe its terminal outcome before retrying.", job.handle));
+            if running {
+                message.push_str(&format!(" Poll your running {} to completion (omit yield_ms for a 60-second completion wait), or stop it and observe its terminal outcome before retrying.", job.handle));
+            } else {
+                message.push_str(&format!(" Poll your finished, unobserved {} to observe its outcome and free retained capacity before retrying.", job.handle));
+            }
         }
     }
     ToolResult::error(message)
@@ -653,6 +676,22 @@ async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
     let mut changed = job.changed.subscribe();
     let mut sent = 0;
     loop {
+        let exposed = {
+            let state = job
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.exposed && state.completion.is_some() {
+                return;
+            }
+            state.exposed
+        };
+        if !exposed {
+            if changed.changed().await.is_err() {
+                return;
+            }
+            continue;
+        }
         loop {
             let (offset, chunk, completion) = job.output_since(sent);
             sent = offset + chunk.len() as u64;

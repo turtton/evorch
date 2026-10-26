@@ -374,3 +374,55 @@ async fn completion_poll_returns_on_terminal_not_new_output() {
     assert!(result.is_error);
     assert_eq!(result.detail.unwrap()["shell_job"]["exit_code"], 7);
 }
+
+#[test]
+fn capacity_hints_only_name_jobs_that_can_release_the_exhausted_resource() {
+    fn diagnostic_job(handle: &str, terminal: bool, observed: bool, foreign: bool) -> Arc<Job> {
+        let (registry, mut job, _input) = fixture();
+        drop(registry);
+        let mutable = Arc::get_mut(&mut job).unwrap();
+        mutable.handle = handle.into();
+        if foreign {
+            mutable.thread = Some("foreign-thread".into());
+        }
+        let state = mutable.state.get_mut().unwrap();
+        state.observed = observed;
+        if terminal {
+            state.completion = Some(Completion {
+                status: "completed",
+                exit_code: Some(0),
+                error: None,
+            });
+        }
+        job
+    }
+    let jobs: HashMap<_, _> = [
+        diagnostic_job("job-1", true, true, false),
+        diagnostic_job("job-2", true, false, false),
+        diagnostic_job("job-3", false, false, false),
+        diagnostic_job("job-4", true, false, true),
+        diagnostic_job("job-5", false, false, true),
+    ]
+    .into_iter()
+    .map(|job| (job.handle.clone(), job))
+    .collect();
+    let running = capacity_error(&jobs, &owner(), true).content;
+    assert!(running.contains("running job-3"));
+    for hidden in ["job-1", "job-2", "job-4", "job-5"] {
+        assert!(!running.contains(hidden));
+    }
+    let retained = capacity_error(&jobs, &owner(), false).content;
+    assert!(retained.contains("finished, unobserved job-2"));
+    for hidden in ["job-1", "job-3", "job-4", "job-5"] {
+        assert!(!retained.contains(hidden));
+    }
+    let other = ToolExecutionContext {
+        run_id: "no-visible-jobs".into(),
+        ..Default::default()
+    };
+    for resource in [true, false] {
+        let unavailable = capacity_error(&jobs, &other, resource).content;
+        assert!(unavailable.contains("No "));
+        assert!(!unavailable.contains("job-"));
+    }
+}

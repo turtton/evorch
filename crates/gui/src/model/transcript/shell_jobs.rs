@@ -459,3 +459,52 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod synchronous_job_events_tests {
+    use crate::model::transcript::TranscriptModel;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn short_sync_shell_never_leaves_an_unavailable_job_but_explicit_jobs_stream() {
+        for explicit in [false, true] {
+            let bus = Arc::new(event_bus::EventBus::new(256));
+            let mut events = bus.subscribe();
+            let executor = tools::ToolExecutor::with_standard_tools(
+                bus,
+                Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            );
+            let ctx = tools::ToolExecutionContext {
+                run_id: "sync-gui".into(),
+                ..Default::default()
+            };
+            let mut args = serde_json::json!({"command":"printf 'short output\\n'"});
+            if explicit {
+                args["yield_ms"] = serde_json::json!(60_000);
+            }
+            executor
+                .execute(&ctx, "shell", "sync-call", args)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mut model = TranscriptModel::new();
+            let mut live_count = 0;
+            for event in events.drain_pending_snapshot() {
+                live_count += usize::from(matches!(
+                    &event.kind,
+                    event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput { .. })
+                ));
+                model.apply(&event);
+            }
+            if explicit {
+                assert!(live_count > 0);
+                let job = model.shell_jobs().iter().next().unwrap();
+                assert_eq!(job.command.as_deref(), Some("printf 'short output\\n'"));
+                assert!(job.log().contains("short output"));
+            } else {
+                assert_eq!(live_count, 0);
+                assert_eq!(model.shell_jobs().iter().count(), 0);
+            }
+        }
+    }
+}

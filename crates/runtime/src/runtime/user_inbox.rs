@@ -168,12 +168,16 @@ impl UserInbox {
     /// open. The lock linearizes this cut against successful enqueue and keeps
     /// the reservation alive after every shell receiver has gone away.
     pub(crate) fn seal_for_next_request(&self) -> (u64, bool) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.handoff = false;
-        (state.accepted, state.status.next_turn_requested)
+        let cut = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.handoff = false;
+            (state.accepted, state.status.next_turn_requested)
+        };
+        self.pause_point(SendPausePoint::AfterRequestCut);
+        cut
     }
 
     /// A test stop in a host send; no-op outside tests.
@@ -195,6 +199,8 @@ impl UserInbox {
 /// Where a test may stop a host send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SendPausePoint {
+    /// The request cut is fixed, before draining the channel. No state lock held.
+    AfterRequestCut,
     /// After the phase check, before taking the trusted-send lock.
     BeforeLock,
     /// Holding the lock with a reserved channel permit, before persistence.
