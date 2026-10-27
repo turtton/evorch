@@ -159,7 +159,7 @@ pub(super) async fn delegate(
     };
     // A child may ask for a decision before it can finish. Use the same
     // attention-aware wait exposed to the model, so the parent can answer it.
-    let result = super::runs::waiting::wait(
+    let result = super::runs::waiting::wait_for_delegates(
         state,
         runtime,
         serde_json::json!({"run_id": child.to_string()}),
@@ -256,7 +256,7 @@ pub(crate) async fn wait_delegates(
     }
     // One wait covers the whole wave and returns when any child needs a
     // decision, while preserving each delegate call's own tool result.
-    let waited = super::runs::waiting::wait(
+    let waited = super::runs::waiting::wait_for_delegates(
         state,
         runtime,
         serde_json::json!({"run_ids":run_ids, "mode":"all"}),
@@ -315,7 +315,6 @@ pub(crate) async fn wait_delegates(
                         "has_pending_question": run["has_pending_question"],
                         "inbox_ready": snapshot["inbox_ready"],
                         "user_input_ready": snapshot["user_input_ready"],
-                        "timed_out": snapshot["timed_out"],
                     })),
                     None => error(format!("missing child wait result for {run_id}")),
                 }

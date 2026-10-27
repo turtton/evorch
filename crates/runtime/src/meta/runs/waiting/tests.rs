@@ -98,14 +98,19 @@ fn spawn(runtime: &AgentRuntime) -> (RunId, RunId, RunId) {
     (parent, first, second)
 }
 
+/// A request with an internal deadline, so tests can also observe a wait that
+/// ends without an event. Model waits have no deadline.
 fn request(runs: Vec<RunId>, mode: WaitMode, timeout_ms: u64) -> WaitRequest {
     WaitRequest {
         runs,
         mode,
-        timeout: Duration::from_millis(timeout_ms),
+        deadline: Some(Duration::from_millis(timeout_ms)),
         legacy: false,
+        reported: HashSet::new(),
     }
 }
+
+const LONG_MS: u64 = 600_000;
 
 async fn cleanup(runtime: &AgentRuntime) {
     for run in runtime.list_agents() {
@@ -122,9 +127,8 @@ fn wait_schema_and_argument_validation_agree() {
         jsonschema::validator_for(&crate::meta::tool_spec("wait").input_schema).unwrap();
     for input in [
         json!({"run_id":"run-1"}),
-        json!({"run_ids":["run-1","run-2"],"mode":"all","timeout_ms":0}),
-        json!({"run_ids":["run-1"],"timeout_ms":60001}),
-        json!({"run_ids":["run-1"],"timeout_ms":600000}),
+        json!({"run_ids":["run-1","run-2"],"mode":"all"}),
+        json!({"run_ids":["run-1"],"mode":"any"}),
     ] {
         assert!(validator.is_valid(&input));
         assert!(parse::<WaitArgs>(input).unwrap().validate().is_ok());
@@ -134,8 +138,9 @@ fn wait_schema_and_argument_validation_agree() {
         json!({"run_id":"run-1","run_ids":["run-2"]}),
         json!({"run_ids":[]}),
         json!({"run_ids":["run-1","run-1"]}),
-        json!({"run_id":"run-1","timeout_ms":600001}),
-        json!({"run_id":"run-1","timeout_ms":-1}),
+        // A wait has no deadline; the agent loop drops a legacy timeout_ms
+        // before validation, so it never reaches the schema or the handler.
+        json!({"run_id":"run-1","timeout_ms":600000}),
         json!({"run_id":"run-1","mode":"some"}),
         json!({"run_id":"run-1","poll_interval":1}),
         json!({"run_ids":["run-1","run-2","run-3","run-4","run-5","run-6","run-7","run-8","run-9"]}),
@@ -522,25 +527,69 @@ async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn default_wait_suspends_for_ten_minutes_without_polling_or_cancelling() {
-    let (runtime, _) = fixture(None);
+async fn model_wait_has_no_deadline_and_ends_on_completion() {
+    let (runtime, model) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
     let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = parse::<WaitArgs>(json!({"run_ids":[first.to_string()]}))
         .unwrap()
         .validate()
         .unwrap();
+    assert!(request.deadline.is_none());
     let began = tokio::time::Instant::now();
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
     assert!(poll!(&mut wait).is_pending());
-    tokio::time::advance(Duration::from_secs(60)).await;
+    // Hours without an event keep waiting.
+    tokio::time::advance(Duration::from_secs(5 * 60 * 60)).await;
     assert!(poll!(&mut wait).is_pending());
+    model.first.notify_one();
     let result = wait.await.unwrap();
-    assert_eq!(began.elapsed(), Duration::from_secs(600));
-    assert_eq!(result["timed_out"], true);
-    assert_eq!(result["inbox_ready"], false);
-    assert_eq!(result["runs"][0]["status"], "still_running");
+    assert_eq!(began.elapsed(), Duration::from_secs(5 * 60 * 60));
+    assert!(result.get("timed_out").is_none(), "{result}");
+    assert_eq!(result["completed_run_ids"], json!([first.to_string()]));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reported_questions_do_not_end_a_later_wait() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("questions.sqlite3"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (runtime, model) = fixture(None);
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let (parent, first, _) = spawn(&runtime);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let question = runtime
+        .request_user_question(first, "Optional preference".into(), vec![], false)
+        .unwrap();
+    let mut request = parse::<WaitArgs>(json!({"run_ids":[first.to_string()]}))
+        .unwrap()
+        .validate()
+        .unwrap();
+    // Unreported, the pending question ends the wait at once.
+    let result = observe(&runtime, parent, &request, receiver.clone())
+        .await
+        .unwrap();
+    assert_eq!(result["attention_run_ids"], json!([first.to_string()]));
+    // Once reported, it no longer does; the wait lasts until the target finishes.
+    request.reported.insert(question.id.clone());
+    let wait = observe(&runtime, parent, &request, receiver.clone());
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    tokio::time::advance(Duration::from_secs(60 * 60)).await;
+    assert!(poll!(&mut wait).is_pending());
+    // A second, new question ends it again.
+    runtime
+        .request_user_question(first, "Another choice".into(), vec![], false)
+        .unwrap();
+    let result = wait.await.unwrap();
+    assert_eq!(result["attention_run_ids"], json!([first.to_string()]));
+    assert_eq!(result["runs"][0]["has_pending_question"], true);
+    model.first.notify_one();
     cleanup(&runtime).await;
 }
 
@@ -549,7 +598,7 @@ async fn message_interrupts_all_wait_without_consuming_or_copying_the_inbox() {
     let (runtime, _) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
     let (_cancel, receiver) = watch::channel(RunInterrupt::None);
-    let request = request(vec![first, second], WaitMode::All, MAX_WAIT_MS);
+    let request = request(vec![first, second], WaitMode::All, LONG_MS);
     let began = tokio::time::Instant::now();
     let wait = observe(&runtime, parent, &request, receiver.clone());
     tokio::pin!(wait);
@@ -601,7 +650,7 @@ async fn messages_from_children_outside_wait_targets_interrupt_wait() {
     let (runtime, _) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
     let (_cancel, receiver) = watch::channel(RunInterrupt::None);
-    let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
+    let request = request(vec![first], WaitMode::Any, LONG_MS);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
     assert!(poll!(&mut wait).is_pending());
@@ -620,7 +669,7 @@ async fn cancellation_wins_over_a_simultaneous_inbox_message() {
     let (runtime, _) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
     let (cancel, receiver) = watch::channel(RunInterrupt::None);
-    let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
+    let request = request(vec![first], WaitMode::Any, LONG_MS);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
     assert!(poll!(&mut wait).is_pending());

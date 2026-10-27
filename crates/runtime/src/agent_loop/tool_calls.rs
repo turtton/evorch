@@ -733,7 +733,11 @@ impl LoopState {
             thread_id: None,
             call_id: None,
             shell_wait_policy: tools::executor::ShellWaitPolicy::AutoYield,
-            shell_input: Some(self.channels.user_inbox.clone()),
+            shell_input: Some(Arc::new(crate::runtime::user_inbox::RunShellInput {
+                inbox: self.channels.user_inbox.clone(),
+                mailbox: Arc::clone(&self.task.mailbox),
+                parent: self.task.parent.map(|parent| parent.to_string()),
+            })),
         };
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();
@@ -761,7 +765,8 @@ impl LoopState {
                 }
             }
             let mut validated = Vec::with_capacity(segment.len());
-            for (id, name, input) in segment {
+            for (id, name, mut input) in segment {
+                meta::drop_ignored_arguments(&name, &mut input);
                 if let Err(error) = self.validate_owner_mutation().await {
                     self.finish_owner_error("validate", error);
                     return false;
@@ -1102,7 +1107,7 @@ impl LoopState {
                 // wave's results are recorded.
                 let mut stalled = None;
                 for (_, id, name, input, ready) in completed {
-                    let reports_progress = self.shared.executor.reports_progress(&name, &input);
+                    let reports_progress = self.reports_progress(&name, &input);
                     if !reports_progress {
                         self.identical_calls.end_stalled();
                     }
@@ -1125,65 +1130,70 @@ impl LoopState {
                         }
                         _ => None,
                     };
-                    let result =
-                        if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
-                            result
-                        } else if let ReadyCall::Failed(error) = ready {
-                            ToolResult::error(error.agent_message())
-                        } else if let ReadyCall::Invalid(error) = ready {
-                            self.shared.executor.report_invalid_call(
-                                &ctx,
-                                &name,
-                                &id,
-                                input.clone(),
-                                &error,
-                            );
-                            ToolResult::error(error.agent_message())
-                        } else if matches!(
-                            name.as_str(),
-                            "task_claim" | "task_complete" | "finding_append"
-                        ) {
-                            self.team_tool(&name, input.clone()).await
-                        } else if let Err(error) = self.guard_team_artifact(&name, &input) {
-                            ToolResult::error(error)
-                        } else if let Err(error) = self.policy.authorize(&name) {
-                            ToolResult::error(error.to_string())
-                        } else if is_meta_op(&name) {
-                            let dispatch = meta::dispatch(self, &name, input).await;
-                            self.ledger_tool_completed(&name, &id, &dispatch.result);
-                            self.record_tool_outcome(&name, &dispatch.result, None);
-                            self.context.push_tool_result(id, dispatch.result);
-                            self.publish_message_count();
-                            match dispatch.terminal {
-                                meta::Terminal::Continue => continue,
-                                meta::Terminal::Finish(result) => {
-                                    return self.finish_tool_batch(&result, remaining).await;
-                                }
-                                meta::Terminal::Escalate(memo) => {
-                                    // 終端指示を返した時点で残りのバッチ tool call は
-                                    // 実行しない (新規 tool call 受付の停止)。
-                                    self.finish_escalated(*memo);
-                                    return false;
-                                }
+                    let result = if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) =
+                        ready
+                    {
+                        result
+                    } else if let ReadyCall::Failed(error) = ready {
+                        ToolResult::error(error.agent_message())
+                    } else if let ReadyCall::Invalid(error) = ready {
+                        self.shared.executor.report_invalid_call(
+                            &ctx,
+                            &name,
+                            &id,
+                            input.clone(),
+                            &error,
+                        );
+                        ToolResult::error(error.agent_message())
+                    } else if matches!(
+                        name.as_str(),
+                        "task_claim" | "task_complete" | "finding_append"
+                    ) {
+                        self.team_tool(&name, input.clone()).await
+                    } else if let Err(error) = self.guard_team_artifact(&name, &input) {
+                        ToolResult::error(error)
+                    } else if let Err(error) = self.policy.authorize(&name) {
+                        ToolResult::error(error.to_string())
+                    } else if is_meta_op(&name) {
+                        let progress_input = reports_progress.then(|| input.clone());
+                        let dispatch = meta::dispatch(self, &name, input).await;
+                        self.ledger_tool_completed(&name, &id, &dispatch.result);
+                        let error_class = self.record_tool_outcome(&name, &dispatch.result, None);
+                        if let Some(input) = progress_input
+                            && self.observe_progress(&name, &input, &dispatch.result)
+                            && stalled.is_none()
+                        {
+                            stalled = Some((id.clone(), name.clone(), input, error_class));
+                        }
+                        self.context.push_tool_result(id, dispatch.result);
+                        self.publish_message_count();
+                        match dispatch.terminal {
+                            meta::Terminal::Continue => continue,
+                            meta::Terminal::Finish(result) => {
+                                return self.finish_tool_batch(&result, remaining).await;
                             }
-                        } else {
-                            ToolResult::error("invalid prepared local call")
-                        };
+                            meta::Terminal::Escalate(memo) => {
+                                // 終端指示を返した時点で残りのバッチ tool call は
+                                // 実行しない (新規 tool call 受付の停止)。
+                                self.finish_escalated(*memo);
+                                return false;
+                            }
+                        }
+                    } else {
+                        ToolResult::error("invalid prepared local call")
+                    };
                     let result = meta::bound_thread_result(&name, result);
                     self.ledger_tool_completed(&name, &id, &result);
                     let error_class = self.record_tool_outcome(&name, &result, typed_error_class);
-                    if reports_progress {
-                        let limit = self.task.config.budget.max_identical_tool_call_repeats;
-                        // Failed, denied or cancelled calls never count as progress.
-                        let advanced =
-                            !result.is_error && result.progress == Some(tools::Progress::Advanced);
-                        if self
-                            .identical_calls
-                            .observe_result(&name, &input, advanced, limit)
-                            && stalled.is_none()
-                        {
-                            stalled = Some((id.clone(), name.clone(), input.clone(), error_class));
-                        }
+                    if result.idle_wait_ms > 0 {
+                        self.budget
+                            .exclude_idle(Duration::from_millis(result.idle_wait_ms));
+                    }
+                    if reports_progress
+                        && self.observe_progress(&name, &input, &result)
+                        && stalled.is_none()
+                    {
+                        stalled = Some((id.clone(), name.clone(), input.clone(), error_class));
                     }
                     let rule_targets_for_call = call_rule_targets(&name, &input);
                     // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed

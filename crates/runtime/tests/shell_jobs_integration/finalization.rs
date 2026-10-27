@@ -301,7 +301,7 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
     next(&mut calls).await.respond(tool_response(
         "start",
         "shell",
-        json!({"command":"read first; read second", "yield_ms":0}),
+        json!({"command":"echo ready; read first; read second", "yield_ms":0}),
     ));
     let call = next(&mut calls).await;
     let job = call.job("start");
@@ -329,6 +329,11 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
     assert!(!call.result("read").1);
     for action in ["poll", "stdin", "stop"] {
         let mut input = json!({"action":action, "job_id":job, "yield_ms":0});
+        if action == "poll" {
+            // A poll waits for the running job to finish unless it asks for output;
+            // re-reading from cursor 0 returns the retained line at once.
+            input = json!({"action":action, "job_id":job, "cursor":0, "return_on":"output"});
+        }
         if action == "stdin" {
             input["input"] = json!("first\n");
         }

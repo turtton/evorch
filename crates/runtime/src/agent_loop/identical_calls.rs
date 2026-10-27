@@ -95,12 +95,33 @@ fn input_digest(input: &Value) -> String {
 }
 
 impl LoopState {
+    /// Calls judged by their results rather than their inputs: an explicit
+    /// shell poll, and `wait`, which blocks until something happens.
+    pub(super) fn reports_progress(&self, name: &str, input: &Value) -> bool {
+        name == "wait" || self.shared.executor.reports_progress(name, input)
+    }
+
+    /// Records the result of a call that reports progress. Returns true when
+    /// identical calls stalled the configured number of times in a row.
+    pub(super) fn observe_progress(
+        &mut self,
+        name: &str,
+        input: &Value,
+        result: &tools::ToolResult,
+    ) -> bool {
+        let limit = self.task.config.budget.max_identical_tool_call_repeats;
+        // Failed, denied or cancelled calls never count as progress.
+        let advanced = !result.is_error && result.progress == Some(tools::Progress::Advanced);
+        self.identical_calls
+            .observe_result(name, input, advanced, limit)
+    }
+
     pub(super) fn guard_identical_calls(&mut self, calls: &[(String, String, Value)]) -> bool {
         let limit = self.task.config.budget.max_identical_tool_call_repeats;
         let executor = std::sync::Arc::clone(&self.shared.executor);
         let Some((call_id, name, input)) = self.identical_calls.observe(
             calls,
-            |name, input| executor.reports_progress(name, input),
+            |name, input| name == "wait" || executor.reports_progress(name, input),
             limit,
         ) else {
             return true;

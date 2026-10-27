@@ -270,10 +270,6 @@ async fn yield_limits_are_enforced_without_schema_validation() {
             "1800000",
         ),
         (
-            json!({"action":"poll", "job_id":"unused", "yield_ms":1800001}),
-            "1800000",
-        ),
-        (
             json!({"action":"stdin", "job_id":"unused", "input":"a", "yield_ms":60001}),
             "60000",
         ),

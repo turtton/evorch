@@ -18,6 +18,7 @@ pub(crate) use registry::MetaOp;
 #[cfg(test)]
 mod role_tests;
 mod runs;
+pub(crate) use runs::drop_ignored_arguments;
 mod skills;
 mod specs;
 pub(crate) use specs::tool_spec;

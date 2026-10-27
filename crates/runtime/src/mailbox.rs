@@ -194,6 +194,31 @@ impl RunMailbox {
     pub fn subscribe_version(&self) -> watch::Receiver<u64> {
         self.version.subscribe()
     }
+
+    /// `sender` からの、自動完了通知以外の未読メッセージがあるか返す。
+    pub(crate) fn has_interrupting_message_from(&self, sender: &str) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|queued| queued.interrupts_wait && queued.message.sender_run_id == sender)
+    }
+
+    /// 自動完了通知以外の未読メッセージを FIFO 順で取り出し、完了通知は残す。
+    pub(crate) fn drain_interrupting(&self) -> Vec<AgentMessage> {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (taken, kept): (VecDeque<_>, VecDeque<_>) =
+            queue.drain(..).partition(|queued| queued.interrupts_wait);
+        *queue = kept;
+        drop(queue);
+        if !taken.is_empty() {
+            self.version.send_modify(|value| *value += 1);
+        }
+        taken.into_iter().map(|queued| queued.message).collect()
+    }
 }
 
 impl Default for RunMailbox {

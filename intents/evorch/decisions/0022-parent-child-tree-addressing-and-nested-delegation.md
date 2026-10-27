@@ -38,6 +38,7 @@ oh-my-pi 型 flat peer DM（registry 上の running/idle peer への任意 DM）
 - tool visibility に messaging 用の capability 次元を新設しない。可視化は従来どおり capability 行列（`RoleCapabilities`）による tool filtering で制御する。
 - ADR 0002 との関係: boundary 自体の設計は変更せず、`can_delegate` の適用範囲（どの Role が持ち得るか）を拡大する。capability 強制は引き続き runtime が `RoleCapabilities` のみを消費する構造で行う。
 - Q1 の親子ルールにより、ネスト委譲で N 階層になっても sibling へのアクセス経路は増えず、topology 上の安全性は depth に依らず保たれる。相互 await の deadlock cycle はツリー規則上構造的に不可能になる（wait timeout は二重の安全網）。
+  - 2026-10-27 追記: [ADR 0042](0042-event-driven-waits.md) で `wait` の timeout を廃止した。安全網は無くなったが、相互 await が起きない根拠は上の親子ツリー規則のままである。
 - herdr-opencode-loop で「worker からの再委譲は未検証」とされていた運用上の未解決が、evorch 内では構造として解決する。
 - 影響先: `crates/agents/src/capability.rs`（`RoleCapabilities.can_delegate` の意味拡張。現行は Orchestrator のみ true）、`policy.rs` の tool filtering（delegate 系 meta-op を capability を持つ Role に可視化）、`crates/runtime/src/meta.rs` の宛先検証（sender → target が親子関係であること）。
 - メッセージング op 構成・配送语义・workspace 绑定の詳細設計（grill Q3/Q4）は本 ADR ではなく feature overview の v0.2 計画に記す。[agent-runtime-kernel](../features/agent-runtime-kernel/overview.md)、[orchestration](../features/orchestration/overview.md) を参照。

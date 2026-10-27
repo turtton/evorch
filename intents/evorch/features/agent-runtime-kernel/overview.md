@@ -28,6 +28,7 @@ Agent Kernel
 - Runtime 内部は event-driven とする（Started / MessageDelta / ReasoningDelta / ToolStarted / ToolCompleted / Delegated / BackgroundTaskStarted / BackgroundTaskCompleted / Usage / CacheStats / ProviderFallback / Completed / Failed）
 - GUI は Event Stream を購読する。UI と runtime が密結合しない
 - background agent を一級機能とする（delegate（`background: bool` で背景起動を切替、既定 false は完了を待つ同期実行）/ send_message / wait / cancel）
+- **出来事まで待つ待機（2026-10-27）**: Orchestrator の `wait` と shell の `poll` は待機時間の上限を持たず、子の完了・未通知の質問・メッセージ・入力など、何かが起きたときだけ戻る。`wait` は届いたメッセージを結果に含め、待機時間は実行時間の予算に数えない。何も新しくない即時の戻りはループ検出の対象に残す。[ADR 0042](../../decisions/0042-event-driven-waits.md)参照。
 - Session より下に Task 境界を持ち、1 conversation = 1 task に固定しない長寿命 workspace とする
 
 ## v0.1 role 実行 runtime の実装確定（2026-08-30）

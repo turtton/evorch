@@ -142,12 +142,8 @@ fn delegate(index: usize, background: bool) -> Result<ChatResponse, runtime::Run
     ))
 }
 
-fn wait(call: &str, run_id: &str, timeout_ms: u64) -> Result<ChatResponse, runtime::RuntimeError> {
-    Ok(tool_response(
-        call,
-        "wait",
-        json!({"run_ids": [run_id], "timeout_ms": timeout_ms}),
-    ))
+fn wait(call: &str, run_id: &str) -> Result<ChatResponse, runtime::RuntimeError> {
+    Ok(tool_response(call, "wait", json!({"run_ids": [run_id]})))
 }
 
 fn run_output(index: usize, run_id: &str) -> Result<ChatResponse, runtime::RuntimeError> {
@@ -165,7 +161,7 @@ async fn background_delegate_then_wait_rounds_exceeding_limit_finish_done() {
     let mut script = Vec::new();
     for index in 0..cycles {
         script.push(delegate(index, true));
-        script.push(wait(&format!("wait-{index}"), &child_id(index), 600_000));
+        script.push(wait(&format!("wait-{index}"), &child_id(index)));
     }
     script.push(finish());
     let (_model, runtime, bus) = harness(script, cycles).await;
@@ -195,7 +191,7 @@ async fn awaited_delegate_followed_by_waits_on_the_same_child_finishes_done() {
     let mut script = Vec::new();
     for index in 0..cycles {
         script.push(delegate(index, false));
-        script.push(wait(&format!("wait-{index}"), &child_id(index), 0));
+        script.push(wait(&format!("wait-{index}"), &child_id(index)));
     }
     script.push(finish());
     let (_model, runtime, bus) = harness(script, cycles).await;
@@ -260,7 +256,7 @@ async fn repeated_run_output_of_completed_child_reaches_no_progress() {
 #[tokio::test]
 async fn run_output_after_counted_wait_is_not_progress() {
     // Given: the child completion was already received through wait.
-    let mut script = vec![delegate(0, true), wait("wait", &child_id(0), 600_000)];
+    let mut script = vec![delegate(0, true), wait("wait", &child_id(0))];
     let repeats = usize::try_from(LIMIT).unwrap() + 1;
     script.extend((0..repeats).map(|index| run_output(index, &child_id(0))));
     script.push(finish());
@@ -291,170 +287,53 @@ async fn repeated_list_agents_reaches_no_progress() {
 }
 
 #[tokio::test]
-async fn repeated_zero_timeout_wait_reaches_no_progress() {
-    // Given: a background child that never finishes and zero-timeout polling.
+async fn repeated_waits_on_an_already_observed_child_reach_no_progress() {
+    // Given: a child whose completion the first wait already received.
     let repeats = usize::try_from(LIMIT).unwrap() + 1;
-    let mut script = vec![delegate(0, true)];
-    script.extend((0..repeats).map(|index| wait(&format!("wait-{index}"), &child_id(0), 0)));
+    let mut script = vec![delegate(0, true), wait("wait-first", &child_id(0))];
+    script.extend((0..repeats).map(|index| wait(&format!("wait-{index}"), &child_id(0))));
     script.push(finish());
-    let (model, runtime, bus) = harness(script, 1).await;
-    model.gate_key(&child(0), Arc::new(Notify::new())).await;
-    // When: every wait times out immediately.
+    let (_model, runtime, bus) = harness(script, 1).await;
+    // When: later waits return at once with the same finished child.
     let outcome = run_parent(&runtime, &bus).await;
-    // Then: timed-out waits are not progress.
+    // Then: re-observing a completion is not progress.
     outcome.assert_no_progress();
 }
 
-fn wait_all(call: &str, run_ids: &[String]) -> Result<ChatResponse, runtime::RuntimeError> {
+fn wait_any(call: &str, run_ids: &[String]) -> Result<ChatResponse, runtime::RuntimeError> {
     Ok(tool_response(
         call,
         "wait",
-        json!({"run_ids": run_ids, "mode": "all", "timeout_ms": 0}),
+        json!({"run_ids": run_ids, "mode": "any"}),
     ))
 }
 
-/// Parent model requests issued so far; each is recorded before its gate wait.
-async fn parent_requests(model: &ScriptedModel) -> usize {
-    model
-        .observed()
-        .await
-        .iter()
-        .filter(|messages| {
-            messages
-                .iter()
-                .find(|message| message.role == providers::Role::User)
-                .and_then(|message| {
-                    message.content.iter().find_map(|block| match block {
-                        providers::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                })
-                .is_some_and(|text| text.starts_with("PARENT"))
-        })
-        .count()
-}
-
-/// Lets exactly the `nth` (1-based) parent model request proceed.
-async fn release_parent_request(model: &ScriptedModel, gate: &Notify, nth: usize) {
-    while parent_requests(model).await < nth {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    gate.notify_one();
-}
-
-async fn complete_child(runtime: &AgentRuntime, gate: &Notify, index: usize) {
-    gate.notify_one();
-    let child = child_id(index).parse::<RunId>().expect("run id");
-    assert_eq!(
-        runtime.wait(child).await.expect("child wait"),
-        AgentRunPhase::Done
-    );
-}
-
 #[tokio::test]
-async fn timed_out_all_waits_reporting_new_completions_finish_done() {
-    // Given: LIMIT + 2 children, the last of which never finishes, and LIMIT + 1
-    // all-mode waits that each time out after exactly one more child finished.
-    let waits = usize::try_from(LIMIT).unwrap() + 1;
-    let children = waits + 1;
-    let ids: Vec<String> = (0..children).map(child_id).collect();
-    let mut script: Vec<_> = (0..children).map(|index| delegate(index, true)).collect();
-    script.extend((0..waits).map(|index| wait_all(&format!("wait-all-{index}"), &ids)));
-    script.push(finish());
-    let (model, runtime, bus) = harness(script, children).await;
-    let parent_gate = Arc::new(Notify::new());
-    model.gate_key("PARENT", Arc::clone(&parent_gate)).await;
-    let child_gates: Vec<_> = (0..children).map(|_| Arc::new(Notify::new())).collect();
-    for (index, gate) in child_gates.iter().enumerate() {
-        model.gate_key(&child(index), Arc::clone(gate)).await;
-    }
-    let mut receiver = bus.subscribe();
-    let parent = runtime.delegate_background(Role::Orchestrator, "PARENT".into(), config());
-    let driver = tokio::spawn({
-        let (model, runtime) = (Arc::clone(&model), runtime.clone());
-        async move {
-            for nth in 1..=children {
-                release_parent_request(&model, &parent_gate, nth).await;
-            }
-            for (index, gate) in child_gates.iter().enumerate().take(waits) {
-                // The request returning wait-all-{index} is issued only after the
-                // previous wait ran, so each wait observes one new completion.
-                let nth = children + index + 1;
-                while parent_requests(&model).await < nth {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                complete_child(&runtime, gate, index).await;
-                release_parent_request(&model, &parent_gate, nth).await;
-            }
-            release_parent_request(&model, &parent_gate, children + waits + 1).await;
-        }
-    });
-    // When: every all-mode wait times out but reports a newly finished child.
-    let outcome = collect(&runtime, parent, &mut receiver).await;
-    driver.abort();
-    // Then: the newly received completions are progress despite timed_out.
-    outcome.assert_done();
-    for index in 0..waits {
-        let result = tool_result(&model, &format!("wait-all-{index}")).await;
-        assert_eq!(result["timed_out"], true, "{result}");
-        assert_eq!(
-            result["completed_run_ids"],
-            json!(ids[..=index]),
-            "{result}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn timed_out_all_waits_reobserving_the_same_completion_reach_no_progress() {
+async fn any_waits_reobserving_the_same_completion_reach_no_progress() {
     // Given: child 0 finishes and is received once; child 1 never finishes.
     let ids = vec![child_id(0), child_id(1)];
     let repeats = usize::try_from(LIMIT).unwrap() + 1;
     let mut script = vec![
         delegate(0, true),
         delegate(1, true),
-        wait("wait-first", &child_id(0), 600_000),
+        wait("wait-first", &child_id(0)),
     ];
-    script.extend((0..repeats).map(|index| wait_all(&format!("wait-all-{index}"), &ids)));
+    script.extend((0..repeats).map(|index| wait_any(&format!("wait-any-{index}"), &ids)));
     script.push(finish());
     let (model, runtime, bus) = harness(script, 2).await;
     model.gate_key(&child(1), Arc::new(Notify::new())).await;
-    // When: all-mode waits time out and report only the already received child.
+    // When: any-mode waits return at once, reporting only the received child.
     let outcome = run_parent(&runtime, &bus).await;
     // Then: re-observed completions are not progress.
     outcome.assert_no_progress();
     // The breaching round ends the run before its result reaches the model.
     for index in 0..repeats - 1 {
-        let result = tool_result(&model, &format!("wait-all-{index}")).await;
-        assert_eq!(result["timed_out"], true, "{result}");
+        let result = tool_result(&model, &format!("wait-any-{index}")).await;
         assert_eq!(
             result["completed_run_ids"],
             json!([child_id(0)]),
             "{result}"
         );
-    }
-}
-
-#[tokio::test]
-async fn timed_out_all_waits_without_completions_reach_no_progress() {
-    // Given: two background children that never finish.
-    let ids = vec![child_id(0), child_id(1)];
-    let repeats = usize::try_from(LIMIT).unwrap() + 1;
-    let mut script = vec![delegate(0, true), delegate(1, true)];
-    script.extend((0..repeats).map(|index| wait_all(&format!("wait-all-{index}"), &ids)));
-    script.push(finish());
-    let (model, runtime, bus) = harness(script, 2).await;
-    for index in 0..2 {
-        model.gate_key(&child(index), Arc::new(Notify::new())).await;
-    }
-    // When: every all-mode wait times out without any completion.
-    let outcome = run_parent(&runtime, &bus).await;
-    // Then: timed-out waits without completions are not progress.
-    outcome.assert_no_progress();
-    for index in 0..repeats - 1 {
-        let result = tool_result(&model, &format!("wait-all-{index}")).await;
-        assert_eq!(result["timed_out"], true, "{result}");
-        assert_eq!(result["completed_run_ids"], json!([]), "{result}");
     }
 }
 
@@ -505,7 +384,7 @@ async fn observed_completion_restores_spawn_credits() {
     let mut script: Vec<_> = (0..SPAWN_CREDITS)
         .map(|index| delegate(index, true))
         .collect();
-    script.push(wait("wait-first", &child_id(0), 600_000));
+    script.push(wait("wait-first", &child_id(0)));
     script.extend((SPAWN_CREDITS..2 * SPAWN_CREDITS).map(|index| delegate(index, true)));
     script.push(finish());
     let (_model, runtime, bus) = harness(script, 2 * SPAWN_CREDITS).await;
@@ -547,11 +426,17 @@ fn interactive_delegate(index: usize) -> Result<ChatResponse, runtime::RuntimeEr
 }
 
 #[tokio::test]
-async fn waits_returning_only_for_inbox_reach_no_progress() {
-    // Given: an interactive child that messages the parent and then idles without finishing.
-    let repeats = usize::try_from(LIMIT).unwrap() + 1;
-    let mut script = vec![interactive_delegate(0)];
-    script.extend((0..repeats).map(|index| wait(&format!("wait-{index}"), &child_id(0), 30_000)));
+async fn a_wait_that_delivers_a_message_is_progress() {
+    // Given: an interactive child that messages the parent and then idles, and
+    // a parent that inspects LIMIT more rounds after receiving the message.
+    let mut script = vec![interactive_delegate(0), wait("wait-message", &child_id(0))];
+    script.extend((0..LIMIT).map(|index| {
+        Ok(tool_response(
+            &format!("list-{index}"),
+            "list_agents",
+            json!({}),
+        ))
+    }));
     script.push(finish());
     let (model, runtime, bus) = harness(script, 0).await;
     model
@@ -567,32 +452,34 @@ async fn waits_returning_only_for_inbox_reach_no_progress() {
             ],
         )
         .await;
-    // When: every wait returns because the unread inbox message interrupts it.
+    // When: the wait returns with the message.
     let outcome = run_parent(&runtime, &bus).await;
-    // Then: inbox-only waits are not progress.
-    outcome.assert_no_progress();
-    // The breaching round ends the run before its result reaches the model.
-    for index in 0..repeats - 1 {
-        let result = tool_result(&model, &format!("wait-{index}")).await;
-        assert_eq!(result["inbox_ready"], true, "{result}");
-        assert_eq!(result["timed_out"], false, "{result}");
-        assert_eq!(result["completed_run_ids"], json!([]), "{result}");
-    }
+    // Then: the message reset the no-progress streak, and arrived in the result.
+    outcome.assert_done();
+    let result = tool_result(&model, "wait-message").await;
+    assert_eq!(
+        result["messages"][0]["content"], "status update",
+        "{result}"
+    );
+    assert_eq!(result["completed_run_ids"], json!([]), "{result}");
+    runtime.cancel(child_id(0).parse().unwrap()).unwrap();
 }
 
 #[tokio::test]
-async fn waits_returning_only_for_attention_reach_no_progress() {
-    // Given: an interactive child with a pending question that never finishes.
+async fn a_reported_question_does_not_end_the_next_wait() {
+    // Given: a child that asks a required question and finishes once answered.
     let dir = tempfile::tempdir().unwrap();
-    let config = storage::StorageConfig {
+    let storage_config = storage::StorageConfig {
         db_path: dir.path().join("questions.db"),
         ..Default::default()
     };
-    let storage = storage::Storage::open(config.clone()).unwrap();
-    let repeats = usize::try_from(LIMIT).unwrap() + 1;
-    let mut script = vec![interactive_delegate(0)];
-    script.extend((0..repeats).map(|index| wait(&format!("wait-{index}"), &child_id(0), 30_000)));
-    script.push(finish());
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let script = vec![
+        delegate(0, true),
+        wait("wait-question", &child_id(0)),
+        wait("wait-answer", &child_id(0)),
+        finish(),
+    ];
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("PARENT", script).await;
     model
@@ -604,7 +491,7 @@ async fn waits_returning_only_for_attention_reach_no_progress() {
                     "ask_user",
                     json!({"title": "Which scope?", "blocking": true}),
                 )),
-                Ok(text_response("Waiting for input", FinishReason::Stop)),
+                Ok(text_response("answered", FinishReason::Stop)),
             ],
         )
         .await;
@@ -615,22 +502,37 @@ async fn waits_returning_only_for_attention_reach_no_progress() {
         model.clone(),
     )
     .with_sequential_run_ids()
-    .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-    // When: every wait returns because the child needs attention.
-    let outcome = run_parent(&runtime, &bus).await;
-    // Then: attention-only waits are not progress.
-    outcome.assert_no_progress();
-    // The breaching round ends the run before its result reaches the model.
-    for index in 0..repeats - 1 {
-        let result = tool_result(&model, &format!("wait-{index}")).await;
-        assert_eq!(
-            result["attention_run_ids"],
-            json!([child_id(0)]),
-            "{result}"
-        );
-        assert_eq!(result["timed_out"], false, "{result}");
-        assert_eq!(result["completed_run_ids"], json!([]), "{result}");
+    .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let mut receiver = bus.subscribe();
+    let mut phases = bus.subscribe();
+    let parent = runtime.delegate_background(Role::Orchestrator, "PARENT".into(), config());
+    // When: the second wait is suspended before the question is answered.
+    let mut waits = 0;
+    while waits < 2 {
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+            phases.recv().await.expect("event").kind
+            && run_id == parent.to_string()
+            && to == AgentRunPhase::Waiting
+        {
+            waits += 1;
+        }
     }
+    let child = child_id(0).parse::<RunId>().unwrap();
+    let question = runtime.user_answers(child).unwrap().remove(0);
+    runtime.answer_user_question(&question.id, "All").unwrap();
+    let outcome = collect(&runtime, parent, &mut receiver).await;
+    // Then: the first wait reported the question; the second, instead of
+    // returning at once for it again, lasted until the child finished.
+    outcome.assert_done();
+    let first = tool_result(&model, "wait-question").await;
+    assert_eq!(first["attention_run_ids"], json!([child_id(0)]), "{first}");
+    let second = tool_result(&model, "wait-answer").await;
+    assert_eq!(second["attention_run_ids"], json!([]), "{second}");
+    assert_eq!(
+        second["completed_run_ids"],
+        json!([child_id(0)]),
+        "{second}"
+    );
 }
 
 #[tokio::test]

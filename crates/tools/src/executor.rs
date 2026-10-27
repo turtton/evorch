@@ -79,6 +79,18 @@ pub enum ShellWaitPolicy {
 /// signal only releases a shell wait, never cancels or acknowledges input.
 pub trait ShellInputControl: std::fmt::Debug + Send + Sync {
     fn begin_wait(&self) -> tokio::sync::watch::Receiver<bool>;
+
+    /// Resolves once input that should end a blocking `poll` is pending: host
+    /// input by default, plus whatever else the runtime routes to the caller
+    /// (a parent's message). Like [`Self::begin_wait`] it consumes nothing.
+    fn wait_for_input(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let mut input = self.begin_wait();
+        Box::pin(async move {
+            if input.wait_for(|pending| *pending).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        })
+    }
 }
 
 /// ツール実行時の文脈情報。
@@ -902,6 +914,7 @@ impl ToolExecutor {
                     detail,
                     origin: result.origin,
                     progress: result.progress,
+                    idle_wait_ms: result.idle_wait_ms,
                     images: result.images,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
@@ -1219,6 +1232,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::ToolTrusted,
                 progress: None,
+                idle_wait_ms: 0,
                 images: Vec::new(),
             })
         }

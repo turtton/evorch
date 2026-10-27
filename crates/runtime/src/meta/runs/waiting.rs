@@ -1,5 +1,7 @@
-//! Bounded, event-driven observation of directly related runs. Waiting never
-//! consumes mailboxes, restores runs, or cancels the observed work.
+//! Event-driven observation of directly related runs. A wait has no deadline:
+//! it returns when a target finishes (per mode), a target asks a question this
+//! caller has not been told about, an agent message or user input arrives, or
+//! the caller is cancelled. Waiting never restores or cancels the observed work.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -15,7 +17,6 @@ use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, RunId, RunInterrupt};
 
 pub(in crate::meta) const MAX_WAIT_RUNS: usize = 8;
-pub(in crate::meta) const MAX_WAIT_MS: u64 = 600_000;
 const OUTPUT_BYTES: usize = 4096;
 const REASON_BYTES: usize = 1024;
 
@@ -33,32 +34,38 @@ pub(in crate::meta) struct WaitArgs {
     run_id: Option<String>,
     run_ids: Option<Vec<String>>,
     mode: Option<WaitMode>,
-    timeout_ms: Option<u64>,
+}
+
+/// Removes arguments that older transcripts taught models to send and that a
+/// wait now ignores, before schema validation: `timeout_ms`, from the time a
+/// wait had a deadline. The recorded tool call keeps the original input.
+pub(crate) fn drop_ignored_arguments(name: &str, input: &mut Value) {
+    if name == "wait"
+        && let Some(object) = input.as_object_mut()
+    {
+        object.remove("timeout_ms");
+    }
 }
 
 struct WaitRequest {
     runs: Vec<RunId>,
     mode: WaitMode,
-    timeout: Duration,
+    /// Internal bound for tests and snapshots; model and delegate waits have none.
+    deadline: Option<Duration>,
     legacy: bool,
+    /// Question IDs already reported to the caller; only others end the wait.
+    reported: HashSet<String>,
 }
 
 impl WaitArgs {
     fn validate(self) -> Result<WaitRequest, String> {
-        let legacy = self.run_id.is_some()
-            && self.run_ids.is_none()
-            && self.mode.is_none()
-            && self.timeout_ms.is_none();
+        let legacy = self.run_id.is_some() && self.run_ids.is_none() && self.mode.is_none();
         let runs = match (self.run_id, self.run_ids) {
             (Some(run), None) => vec![run],
             (None, Some(runs)) if (1..=MAX_WAIT_RUNS).contains(&runs.len()) => runs,
             (None, Some(_)) => return Err("run_ids must contain 1 to 8 runs".into()),
             _ => return Err("provide exactly one of run_id or run_ids".into()),
         };
-        let timeout_ms = self.timeout_ms.unwrap_or(MAX_WAIT_MS);
-        if timeout_ms > MAX_WAIT_MS {
-            return Err(format!("timeout_ms must be between 0 and {MAX_WAIT_MS}"));
-        }
         let runs = runs
             .iter()
             .map(|id| parse_run_id(id))
@@ -69,18 +76,40 @@ impl WaitArgs {
         Ok(WaitRequest {
             runs,
             mode: self.mode.unwrap_or_default(),
-            timeout: Duration::from_millis(timeout_ms),
+            deadline: None,
             legacy,
+            reported: HashSet::new(),
         })
     }
 }
 
+/// The model's `wait`: agent messages that end it are returned in the result
+/// and consumed, so no separate `inbox` call is needed.
 pub(in crate::meta) async fn wait(
     state: &mut LoopState,
     runtime: &AgentRuntime,
     input: Value,
 ) -> DispatchResult {
-    let request = match parse::<WaitArgs>(input).and_then(WaitArgs::validate) {
+    wait_with(state, runtime, input, true).await
+}
+
+/// A `delegate` wait: each delegate call returns its own child's result, so an
+/// agent message only sets `inbox_ready` and stays queued for `inbox`.
+pub(in crate::meta) async fn wait_for_delegates(
+    state: &mut LoopState,
+    runtime: &AgentRuntime,
+    input: Value,
+) -> DispatchResult {
+    wait_with(state, runtime, input, false).await
+}
+
+async fn wait_with(
+    state: &mut LoopState,
+    runtime: &AgentRuntime,
+    input: Value,
+    deliver_messages: bool,
+) -> DispatchResult {
+    let mut request = match parse::<WaitArgs>(input).and_then(WaitArgs::validate) {
         Ok(request) => request,
         Err(message) => return error(message),
     };
@@ -88,6 +117,7 @@ pub(in crate::meta) async fn wait(
     if let Err(message) = snapshots(runtime, state.caller_run_id(), &request.runs) {
         return error(message);
     }
+    request.reported.clone_from(&state.reported_questions);
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
@@ -119,48 +149,86 @@ pub(in crate::meta) async fn wait(
         }
         if state.has_pending_user_messages() {
             result["user_input_ready"] = Value::Bool(true);
-            result["timed_out"] = Value::Bool(false);
+        }
+        if deliver_messages {
+            deliver(runtime, caller, result);
         }
     }
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }
-    if let Ok(result) = &result {
-        record_completions(state, result);
-    }
-    match result {
-        Ok(result)
-            if request.legacy
-                && result["timed_out"] == false
-                && result["inbox_ready"] == false
-                && result["user_input_ready"] == false
-                && result["attention_run_ids"]
-                    .as_array()
-                    .is_some_and(Vec::is_empty) =>
-        {
-            // Preserve the established single-run success result.
-            success(result["runs"][0]["phase"].as_str().unwrap_or("Error"))
-        }
-        Ok(result) => serialize(&result),
-        Err(message) => error(message),
-    }
+    let result = match result {
+        Ok(result) => result,
+        Err(message) => return error(message),
+    };
+    let advanced = record_observations(state, runtime, &request, &result);
+    let mut dispatch = if request.legacy
+        && result["inbox_ready"] != true
+        && result["user_input_ready"] == false
+        && result["messages"].as_array().is_none_or(Vec::is_empty)
+        && result["attention_run_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && result["completed_run_ids"]
+            .as_array()
+            .is_some_and(|runs| !runs.is_empty())
+    {
+        // Preserve the established single-run success result.
+        success(result["runs"][0]["phase"].as_str().unwrap_or("Error"))
+    } else {
+        serialize(&result)
+    };
+    dispatch.result.progress = Some(if advanced {
+        tools::Progress::Advanced
+    } else {
+        tools::Progress::Stalled
+    });
+    dispatch
 }
 
-/// Counts each newly received child result as progress, regardless of why the
-/// wait returned: a `mode="all"` wait can time out while still reporting
-/// children that finished for the first time. Waits whose completions were all
-/// observed before, or that returned only for a timeout, inbox, user input or
-/// attention, do not reset the no-progress counter, so polling loops are still
-/// detected. Deduplication by run ID lives in `mark_child_completed`.
-fn record_completions(state: &mut LoopState, result: &Value) {
+/// Moves the caller's queued agent messages into the result. Automatic child
+/// completion notices stay queued: the run snapshots already carry them.
+fn deliver(runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
+    let messages = match runtime.run_mailbox(caller) {
+        Ok(mailbox) => mailbox.drain_interrupting(),
+        Err(_) => Vec::new(),
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.remove("inbox_ready");
+    }
+    result["messages"] = serde_json::to_value(messages).unwrap_or_else(|_| json!([]));
+}
+
+/// Remembers the questions now reported to the caller and reports whether this
+/// wait brought anything new: a first observed completion, a new question, an
+/// agent message or user input. Only such waits reset the loop guards, so a
+/// wait that keeps returning the same finished child is still detected.
+fn record_observations(
+    state: &mut LoopState,
+    runtime: &AgentRuntime,
+    request: &WaitRequest,
+    result: &Value,
+) -> bool {
+    let mut advanced = false;
     for run_id in result["completed_run_ids"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
     {
-        state.budget.mark_child_completed(run_id);
+        advanced |= state.budget.mark_child_completed(run_id);
     }
+    let questions = unanswered_questions(runtime, &request.runs);
+    let asked = questions.iter().any(|id| !request.reported.contains(id));
+    state.reported_questions.extend(questions);
+    let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
+        || result["inbox_ready"] == true
+        || result["user_input_ready"] == true;
+    if asked || received {
+        state.budget.mark_progress();
+        advanced = true;
+    }
+    advanced
 }
 
 fn user_input_response(
@@ -172,8 +240,8 @@ fn user_input_response(
     let mailbox = runtime
         .run_mailbox(caller)
         .map_err(|error| error.to_string())?;
-    let mut result = response(runs, request.mode, mailbox.has_interrupting_message());
-    result["timed_out"] = Value::Bool(false);
+    let attention = new_question_runs(runtime, &request.runs, &request.reported);
+    let mut result = response(runs, attention, mailbox.has_interrupting_message(), None);
     result["user_input_ready"] = Value::Bool(true);
     Ok(result)
 }
@@ -197,12 +265,22 @@ async fn observe(
     // also change the mailbox version, and completion relays must respect mode.
     let mut inbox_changes = mailbox.subscribe_version();
     let inbox_ready = mailbox.has_interrupting_message();
+    let attention = new_question_runs(runtime, &request.runs, &request.reported);
+    let answer = |runs, attention, inbox_ready, timed_out| {
+        Ok(response(
+            runs,
+            attention,
+            inbox_ready,
+            request.deadline.map(|_| timed_out),
+        ))
+    };
     if satisfied(&initial, request.mode)
-        || needs_attention(&initial)
+        || !attention.is_empty()
         || inbox_ready
-        || request.timeout.is_zero()
+        || request.deadline.is_some_and(|deadline| deadline.is_zero())
     {
-        return Ok(response(initial, request.mode, inbox_ready));
+        let timed_out = !satisfied(&initial, request.mode) && attention.is_empty() && !inbox_ready;
+        return answer(initial, attention, inbox_ready, timed_out);
     }
     // AgentRuntime::wait subscribes to each run's existing watch channel. A
     // completion between this snapshot and subscription is read immediately.
@@ -211,7 +289,12 @@ async fn observe(
         .iter()
         .map(|run| runtime.wait(*run))
         .collect::<FuturesUnordered<_>>();
-    let deadline = tokio::time::sleep(request.timeout);
+    let deadline = async {
+        match request.deadline {
+            Some(deadline) => tokio::time::sleep(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -221,21 +304,24 @@ async fn observe(
                     return Err("wait cancelled".into());
                 }
             }
-            _ = &mut deadline => {
-                return snapshots(runtime, caller, &request.runs)
-                    .map(|runs| response(runs, request.mode, mailbox.has_interrupting_message()));
+            () = &mut deadline => {
+                let runs = snapshots(runtime, caller, &request.runs)?;
+                let attention = new_question_runs(runtime, &request.runs, &request.reported);
+                return answer(runs, attention, mailbox.has_interrupting_message(), true);
             }
             changed = inbox_changes.changed() => {
                 if changed.is_ok() && mailbox.has_interrupting_message() {
-                    return snapshots(runtime, caller, &request.runs)
-                        .map(|runs| response(runs, request.mode, true));
+                    let runs = snapshots(runtime, caller, &request.runs)?;
+                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
+                    return answer(runs, attention, true, false);
                 }
             }
             changed = questions.changed() => {
                 if changed.is_ok() {
-                    let runs = snapshots(runtime, caller, &request.runs)?;
-                    if needs_attention(&runs) {
-                        return Ok(response(runs, request.mode, mailbox.has_interrupting_message()));
+                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
+                    if !attention.is_empty() {
+                        let runs = snapshots(runtime, caller, &request.runs)?;
+                        return answer(runs, attention, mailbox.has_interrupting_message(), false);
                     }
                 }
             }
@@ -244,8 +330,9 @@ async fn observe(
                 // outcomes of the target run rather than failures of this wait.
                 let _ = completed;
                 let runs = snapshots(runtime, caller, &request.runs)?;
-                if satisfied(&runs, request.mode) || needs_attention(&runs) || pending.is_empty() {
-                    return Ok(response(runs, request.mode, mailbox.has_interrupting_message()));
+                let attention = new_question_runs(runtime, &request.runs, &request.reported);
+                if satisfied(&runs, request.mode) || !attention.is_empty() || pending.is_empty() {
+                    return answer(runs, attention, mailbox.has_interrupting_message(), false);
                 }
             }
         }
@@ -266,20 +353,51 @@ fn satisfied(runs: &[Value], mode: WaitMode) -> bool {
     }
 }
 
-fn needs_attention(runs: &[Value]) -> bool {
+/// IDs of the targets' unanswered questions, blocking or not.
+fn unanswered_questions(runtime: &AgentRuntime, runs: &[RunId]) -> Vec<String> {
     runs.iter()
-        .any(|run| run["needs_user_input"] == true || run["has_pending_question"] == true)
+        .filter_map(|run| runtime.user_answers(*run).ok())
+        .flatten()
+        .filter(|question| question.answer.is_none())
+        .map(|question| question.id)
+        .collect()
 }
 
-fn response(runs: Vec<Value>, mode: WaitMode, inbox_ready: bool) -> Value {
-    json!({
-        "timed_out": !satisfied(&runs, mode) && !needs_attention(&runs) && !inbox_ready,
+/// Targets with an unanswered question that was not yet reported to the caller.
+fn new_question_runs(
+    runtime: &AgentRuntime,
+    runs: &[RunId],
+    reported: &HashSet<String>,
+) -> Vec<RunId> {
+    runs.iter()
+        .copied()
+        .filter(|run| {
+            runtime.user_answers(*run).is_ok_and(|questions| {
+                questions
+                    .iter()
+                    .any(|question| question.answer.is_none() && !reported.contains(&question.id))
+            })
+        })
+        .collect()
+}
+
+fn response(
+    runs: Vec<Value>,
+    attention: Vec<RunId>,
+    inbox_ready: bool,
+    timed_out: Option<bool>,
+) -> Value {
+    let mut result = json!({
         "inbox_ready": inbox_ready,
         "user_input_ready": false,
-        "attention_run_ids": runs.iter().filter(|run| run["needs_user_input"] == true || run["has_pending_question"] == true).map(|run| &run["run_id"]).collect::<Vec<_>>(),
+        "attention_run_ids": attention.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "completed_run_ids": runs.iter().filter(|run| terminal(run)).map(|run| &run["run_id"]).collect::<Vec<_>>(),
         "runs": runs,
-    })
+    });
+    if let Some(timed_out) = timed_out {
+        result["timed_out"] = Value::Bool(timed_out);
+    }
+    result
 }
 
 fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Vec<Value>, String> {

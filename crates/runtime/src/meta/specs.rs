@@ -13,7 +13,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Start a child agent with the selected role and task. By default, wait and return its terminal phase or a snapshot on attention or timeout. Resolve questions with subagent_questions and answer_subagent_question; retrieve completed results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
+        description: "Start a child agent with the selected role and task. By default, wait without a deadline and return its terminal phase, or a snapshot when it asks a question or an agent message or user input arrives. Resolve questions with subagent_questions and answer_subagent_question; read messages with inbox; retrieve completed results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use wait's attention fields and subagent_questions to identify unanswered questions.".into(),
+        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,12 +56,11 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. Either mode returns early for a target's unanswered question (including nonblocking questions), an agent message in your inbox, or new user input. Completion notifications follow mode. Returns {timed_out, inbox_ready, user_input_ready, completed_run_ids, attention_run_ids, runs}; timed_out is false on completion or attention. Use inbox to consume queued agent messages; user input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion without attention, otherwise a snapshot. Does not consume inboxes or cancel targets on timeout. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives. Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are the agent messages that arrived, consumed as by inbox (automatic completion notices stay in the inbox); attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion with nothing else to report, otherwise the object. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
-            "mode":{"type":"string", "enum":["any","all"], "default":"any", "description":"any returns when one target terminates; all waits for every target. Both return early for attention."},
-            "timeout_ms":{"type":"integer", "minimum":0, "maximum":super::runs::waiting::MAX_WAIT_MS, "default":super::runs::waiting::MAX_WAIT_MS, "description":"Maximum wait in milliseconds; 0 returns a snapshot. Completion or attention returns immediately."}
+            "mode":{"type":"string", "enum":["any","all"], "default":"any", "description":"any returns when one target terminates; all waits for every target. Both return early for new questions, agent messages and user input."}
         }),
         &[],
         true,
@@ -340,7 +339,7 @@ pub(super) fn user_answers(name: &str) -> ToolSpec {
 pub(super) fn subagent_questions(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Read questions from one direct child run, including pending state and original requester. Use after wait reports attention for that child. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
+        "Read questions from one direct child run, including pending state and original requester. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
         json!({"run_id":run_id()}),
         &["run_id"],
         true,

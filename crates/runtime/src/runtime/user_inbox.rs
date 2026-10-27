@@ -79,6 +79,47 @@ impl tools::executor::ShellInputControl for UserInbox {
     }
 }
 
+/// What ends a run's blocking shell poll: host input, or a message from its
+/// parent. Both reach the next model request at the post-tools boundary
+/// (host input through the handoff cut, parent messages by injection), so
+/// waking for them never leaves input unread.
+#[derive(Debug)]
+pub(crate) struct RunShellInput {
+    pub(crate) inbox: std::sync::Arc<UserInbox>,
+    pub(crate) mailbox: std::sync::Arc<crate::mailbox::RunMailbox>,
+    pub(crate) parent: Option<String>,
+}
+
+impl tools::executor::ShellInputControl for RunShellInput {
+    fn begin_wait(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inbox.begin_wait()
+    }
+
+    fn wait_for_input(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let host = tools::executor::ShellInputControl::wait_for_input(&*self.inbox);
+        let mailbox = std::sync::Arc::clone(&self.mailbox);
+        let parent = self.parent.clone();
+        Box::pin(async move {
+            let from_parent = async move {
+                let Some(parent) = parent else {
+                    return std::future::pending::<()>().await;
+                };
+                // Subscribe before checking so a delivery in between still wakes.
+                let mut version = mailbox.subscribe_version();
+                while !mailbox.has_interrupting_message_from(&parent) {
+                    if version.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            };
+            tokio::select! {
+                () = host => {}
+                () = from_parent => {}
+            }
+        })
+    }
+}
+
 impl UserInbox {
     pub(crate) fn serialize_trusted_send<E>(
         &self,
