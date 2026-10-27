@@ -82,6 +82,7 @@ async fn client_stream_text_yields_text_deltas_then_completed() {
                         }],
                     },
                     usage: Usage {
+                        context_tokens: None,
                         input_tokens: 0,
                         output_tokens: 0,
                         cache_read_tokens: 0,

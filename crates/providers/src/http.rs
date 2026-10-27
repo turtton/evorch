@@ -298,6 +298,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let emitter = UsageEmitter::new(Some(bus), "anthropic");
         let usage = Usage {
+            context_tokens: None,
             input_tokens: 10,
             output_tokens: 5,
             cache_read_tokens: 3,

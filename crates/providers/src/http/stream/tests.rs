@@ -56,6 +56,7 @@ impl FakeInterpreter {
             events: Vec::new(),
             completion: Some((
                 Usage {
+                    context_tokens: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     cache_read_tokens: 0,
@@ -194,6 +195,7 @@ async fn sse_chunks_flow_as_ordered_events_then_completed() {
     let items = collect(stream).await;
 
     let usage = Usage {
+        context_tokens: None,
         input_tokens: 10,
         output_tokens: 5,
         cache_read_tokens: 0,

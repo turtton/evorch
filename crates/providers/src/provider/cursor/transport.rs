@@ -98,7 +98,9 @@ pub(super) async fn start(
         true,
         request.observation.clone(),
     )
-    .with_known_secret(&token);
+    .with_known_secret(&token)
+    // The effort actually on the wire, which a fixed model variant may override.
+    .with_reasoning_effort(route.reasoning());
     let request_id = uuid::Uuid::new_v4().to_string();
     let run_request = rpc(
         &http,
@@ -246,7 +248,7 @@ impl Run {
                         let end: serde_json::Value = serde_json::from_slice(&payload)
                             .map_err(|_| protocol_error("Invalid Cursor Connect end frame"))?;
                         if let Some(error) = end.get("error").filter(|error| !error.is_null()) {
-                            return Err(connect_error(error));
+                            return Err(super::connect_error::connect_error(error));
                         }
                         if !self.buffer.is_empty() {
                             return Err(protocol_error("Cursor data after Connect end frame"));
@@ -282,10 +284,17 @@ impl Run {
                 3 => {
                     wire::fields(field.data)?;
                     self.conversation.checkpoint = Proto(field.data.to_vec());
-                    if let Some(tokens) = wire::nested(field.data, 5)?
-                        && self.usage.input_tokens == 0
-                    {
-                        self.usage.input_tokens = wire::integer(tokens, 1)?.unwrap_or(0);
+                    // tokenDetails.usedTokens is the conversation's occupancy. The turn's
+                    // reported input sums every model call of the turn, so only this one
+                    // measures the context (OMP handleConversationCheckpointUpdate).
+                    if let Some(tokens) = wire::nested(field.data, 5)? {
+                        let used = wire::integer(tokens, 1)?.unwrap_or(0);
+                        if used > 0 {
+                            self.usage.context_tokens = Some(used);
+                        }
+                        if self.usage.input_tokens == 0 {
+                            self.usage.input_tokens = used;
+                        }
                     }
                 }
                 4 => self.kv(field.data).await?,
@@ -355,45 +364,4 @@ fn protocol_error(detail: &str) -> ProviderError {
     ProviderError::InvalidSse {
         detail: detail.into(),
     }
-}
-/// Maps a Connect end-frame error to the error its HTTP equivalent would produce.
-///
-/// The server already answered, so this is a remote failure of this profile, never a
-/// local request error: the router must be able to fall back on it like on an HTTP
-/// status. Codes follow the Connect protocol's HTTP mapping; a code outside it counts
-/// as `unknown` (500).
-fn connect_error(value: &serde_json::Value) -> ProviderError {
-    // Server error text is untrusted and may echo authentication or prompts, so only a
-    // recognized code is reported, never the server's own words.
-    let (code, status) = value
-        .get("code")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|code| connect_status(code).map(|status| (code, status)))
-        .unwrap_or(("unknown", 500));
-    match code {
-        "resource_exhausted" => ProviderError::RateLimited { retry_after: None },
-        "deadline_exceeded" => ProviderError::Timeout,
-        _ => ProviderError::Http {
-            status,
-            body: format!("Cursor Connect request failed (code {code})"),
-        },
-    }
-}
-
-/// The HTTP status the Connect protocol assigns to `code`, or `None` if it is not one.
-fn connect_status(code: &str) -> Option<u16> {
-    Some(match code {
-        "canceled" => 499,
-        "unknown" | "internal" | "data_loss" => 500,
-        "invalid_argument" | "failed_precondition" | "out_of_range" => 400,
-        "deadline_exceeded" => 504,
-        "not_found" => 404,
-        "already_exists" | "aborted" => 409,
-        "permission_denied" => 403,
-        "resource_exhausted" => 429,
-        "unimplemented" => 501,
-        "unavailable" => 503,
-        "unauthenticated" => 401,
-        _ => return None,
-    })
 }

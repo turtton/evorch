@@ -95,6 +95,7 @@ fn stream_interpreter_emits_deltas_and_captures_completion_parts() {
         interpreter.take_result(),
         (
             Some(Usage {
+                context_tokens: None,
                 input_tokens: 10,
                 output_tokens: 3,
                 cache_read_tokens: 2,
@@ -188,6 +189,7 @@ fn assert_chunk_is_skipped_without_state_change(chunk: serde_json::Value) {
         interpreter.take_result(),
         (
             Some(Usage {
+                context_tokens: None,
                 input_tokens: 10,
                 output_tokens: 3,
                 cache_read_tokens: 2,

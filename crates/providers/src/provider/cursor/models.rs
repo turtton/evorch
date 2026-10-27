@@ -26,10 +26,7 @@ impl ModelRoute {
         // fast price lane while moving the effort into requestedModel.parameters.
         let (stem, lane) = id.strip_suffix("-fast").map_or((id, ""), |s| (s, "-fast"));
         if let Some((base, effort)) = stem.rsplit_once('-')
-            && (base.starts_with("gpt-")
-                || ["o1", "o3", "o4"]
-                    .iter()
-                    .any(|p| base == *p || base.starts_with(&format!("{p}-"))))
+            && openai_family(base)
             && matches!(
                 effort,
                 "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -44,8 +41,20 @@ impl ModelRoute {
             // Cursor defaults this bare ID to Fast; OMP pins the Standard lane.
             route.parameters.push(("fast".into(), "false".into()));
             route.fixed_parameters = true;
+        } else if !openai_family(stem) {
+            // Other legacy IDs pass through unchanged, as in OMP resolveCursorWireModel:
+            // their name may already fix an effort (`claude-…-xhigh`), and a guessed
+            // `reasoning` parameter would contradict it.
+            route.fixed_parameters = true;
         }
         route
+    }
+    /// The effort this route sends, from its `reasoning` parameter.
+    pub(super) fn reasoning(&self) -> Option<&str> {
+        self.parameters
+            .iter()
+            .find(|(id, _)| id == "reasoning")
+            .map(|(_, value)| value.as_str())
     }
     fn with_effort(mut self, effort: Option<&str>) -> Self {
         if !self.fixed_parameters
@@ -55,6 +64,14 @@ impl ModelRoute {
         }
         self
     }
+}
+
+/// Cursor's OpenAI families, the only legacy IDs that carry effort as a parameter.
+fn openai_family(base: &str) -> bool {
+    base.starts_with("gpt-")
+        || ["o1", "o3", "o4"]
+            .iter()
+            .any(|p| base == *p || base.starts_with(&format!("{p}-")))
 }
 
 impl CursorClient {
@@ -107,25 +124,69 @@ impl CursorClient {
         }
         Ok(routes)
     }
+    /// Resolves `id` to its wire route, with why it is a guessed legacy route when the
+    /// account catalog did not provide it.
     pub(super) async fn model_route(
         &self,
         token: &str,
         id: &str,
         effort: Option<&str>,
-    ) -> Result<ModelRoute, ProviderError> {
+    ) -> Result<(ModelRoute, Option<RouteFallback>), ProviderError> {
         let mut routes = self.model_routes.lock().await;
         if !routes.contains_key(id) {
             match self.discover_models(token).await {
                 Ok(discovered) => routes.extend(discovered),
                 Err(error) if matches!(error.status(), Some(401 | 403)) => return Err(error),
-                Err(_) => {} // Older/custom endpoints may expose only RunSSE.
+                // Older/custom endpoints may expose only RunSSE. The guess is not cached,
+                // so the next conversation asks the catalog again.
+                Err(error) => {
+                    let route = ModelRoute::legacy(id, false).with_effort(effort);
+                    return Ok((
+                        route,
+                        Some(RouteFallback::DiscoveryFailed(failure_kind(&error))),
+                    ));
+                }
             }
         }
-        Ok(routes
+        let fallback = (!routes.contains_key(id)).then_some(RouteFallback::NotListed);
+        let route = routes
             .entry(id.into())
             .or_insert_with(|| ModelRoute::legacy(id, false))
             .clone()
-            .with_effort(effort))
+            .with_effort(effort);
+        Ok((route, fallback))
+    }
+}
+
+/// Why a model was sent on a legacy route guessed from its ID alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RouteFallback {
+    /// The account catalog answered without this ID.
+    NotListed,
+    /// The account catalog could not be read; holds the failure kind.
+    DiscoveryFailed(&'static str),
+}
+
+impl std::fmt::Display for RouteFallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotListed => f.write_str("model not listed in the account catalog"),
+            Self::DiscoveryFailed(kind) => write!(f, "account catalog unavailable ({kind})"),
+        }
+    }
+}
+
+/// The failure class only: catalog errors may carry server text.
+fn failure_kind(error: &ProviderError) -> &'static str {
+    match error {
+        ProviderError::Http { status, .. } if *status >= 500 => "server error",
+        ProviderError::Http { .. } => "http error",
+        ProviderError::RateLimited { .. } => "rate limited",
+        ProviderError::Timeout => "timeout",
+        ProviderError::Transport { .. } => "transport",
+        ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => "invalid response",
+        ProviderError::RetriesExhausted { last, .. } => failure_kind(last),
+        ProviderError::Request(_) | ProviderError::ResponsesScopeChanged { .. } => "request",
     }
 }
 

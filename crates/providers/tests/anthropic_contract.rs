@@ -193,6 +193,7 @@ fn assert_usage_event(event: UsageEvent, expected: Usage) {
             assert_eq!(model, MODEL);
             assert_eq!(
                 Usage {
+                    context_tokens: None,
                     input_tokens,
                     output_tokens,
                     cache_read_tokens,
@@ -232,6 +233,7 @@ async fn send_text_maps_response_usage_and_capabilities() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 15,
             output_tokens: 5,
             cache_read_tokens: 2,
@@ -321,6 +323,7 @@ async fn stream_text_emits_deltas_and_completed_response() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 15,
             output_tokens: 5,
             cache_read_tokens: 2,
@@ -404,6 +407,7 @@ async fn send_emits_usage_event() {
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         Usage {
+            context_tokens: None,
             input_tokens: 15,
             output_tokens: 5,
             cache_read_tokens: 2,
@@ -455,6 +459,7 @@ async fn stream_emits_usage_event() {
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         Usage {
+            context_tokens: None,
             input_tokens: 15,
             output_tokens: 5,
             cache_read_tokens: 2,

@@ -2,6 +2,7 @@
 //! run here: MCP calls are handed to the canonical evorch tool loop.
 //!
 //! Protocol adapted from can1357/oh-my-pi at 602b6c8. See OMP-LICENSE.
+mod connect_error;
 mod history;
 mod models;
 mod oauth;
@@ -74,6 +75,63 @@ impl CursorClient {
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.profile = Some(profile.into());
         self
+    }
+    /// Reports a conversation's newly pinned route when it is not what was asked for:
+    /// the requested effort is not the one sent, or the route was guessed.
+    fn report_route(
+        &self,
+        request: &ChatRequest,
+        route: &models::ModelRoute,
+        fallback: Option<&models::RouteFallback>,
+    ) {
+        let requested = request.reasoning_effort.as_deref();
+        let sent = route.reasoning();
+        let effort_ignored = requested.is_some() && requested != sent;
+        let Some(bus) = self.config.event_bus.as_ref() else {
+            return;
+        };
+        if fallback.is_none() && !effort_ignored {
+            return;
+        }
+        let mut reasons = Vec::new();
+        if let Some(fallback) = fallback {
+            reasons.push(fallback.to_string());
+        }
+        if effort_ignored {
+            reasons.push("requested reasoning effort not applied".to_owned());
+        }
+        let parameters = route
+            .parameters
+            .iter()
+            .map(|(id, value)| format!("{id}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+            source: "providers.cursor".into(),
+            // A guessed route can be why Cursor rejects the model, so keep it; an
+            // effort a fixed variant overrides is expected and only informs.
+            severity: if fallback.is_some() {
+                event_bus::DiagnosticSeverity::Warning
+            } else {
+                event_bus::DiagnosticSeverity::Info
+            },
+            code: event_bus::event::diagnostic_codes::PROVIDER_MODEL_ROUTE.into(),
+            detail: format!(
+                "provider=cursor profile={:?} model={} sent_model={} model_details={} parameters=[{parameters}] max_mode={} requested_effort={requested:?} sent_effort={sent:?} reason={}",
+                self.profile,
+                request.model,
+                route.model_id,
+                route.details_id,
+                route.max_mode,
+                reasons.join("; "),
+            ),
+            run_id: request
+                .observation
+                .as_ref()
+                .map(|observation| observation.run_id.clone()),
+            thread_id: None,
+            call_id: None,
+        }));
     }
     pub fn with_oauth_config(mut self, config: CursorOAuthConfig) -> Result<Self, ProviderError> {
         self.oauth = CursorOAuthClient::new(config)?;
@@ -192,13 +250,14 @@ impl ProviderClient for CursorClient {
         let route = match &state.model_route {
             Some(route) => route.clone(),
             None => {
-                let route = self
+                let (route, fallback) = self
                     .model_route(
                         &token.access_token,
                         &request.model,
                         request.reasoning_effort.as_deref(),
                     )
                     .await?;
+                self.report_route(request, &route, fallback.as_ref());
                 state.model_route = Some(route.clone());
                 route
             }

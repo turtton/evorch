@@ -311,3 +311,162 @@ async fn connect_error_rate_limit_and_deadline_keep_their_retry_classes() {
         assert_eq!(error, expected, "code={code}");
     }
 }
+
+/// Sends `error` as the Connect end frame of a RunSSE stream and returns the failure.
+async fn end_frame_error(error: Value) -> ProviderError {
+    let server = MockServer::start().await;
+    Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let mut bytes = wire::frame(json!({ "error": error }).to_string().as_bytes());
+    bytes[0] = 2;
+    Mock::given(path("/agent.v1.AgentService/RunSSE"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(bytes, "application/connect+proto"))
+        .mount(&server)
+        .await;
+    client(&server)
+        .send(&ProviderAuth::new(""), &request())
+        .await
+        .unwrap_err()
+}
+
+/// Cursor's binary `aiserver.v1.ErrorDetails` with server text that must never surface.
+fn error_details(error: u64, retryable: Option<bool>) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    let mut custom = Proto::new()
+        .string(1, "secret title")
+        .string(2, "secret detail");
+    if let Some(retryable) = retryable {
+        custom = custom.integer(4, u64::from(retryable));
+    }
+    STANDARD.encode(Proto::new().integer(1, error).message(2, custom).0)
+}
+
+#[tokio::test]
+async fn cursor_error_details_classify_over_the_connect_code_without_server_text() {
+    for (connect, error, retryable, expected) in [
+        // A live provider outage: `resource_exhausted` carrying PROVIDER_ERROR.
+        (
+            "resource_exhausted",
+            57,
+            None,
+            ProviderError::Http {
+                status: 503,
+                body: "Cursor Connect request failed (code resource_exhausted, cursor PROVIDER_ERROR)"
+                    .into(),
+            },
+        ),
+        (
+            "invalid_argument",
+            43,
+            Some(false),
+            ProviderError::Http {
+                status: 413,
+                body: "Cursor Connect request failed (code invalid_argument, cursor CONVERSATION_TOO_LONG, not retryable)"
+                    .into(),
+            },
+        ),
+        (
+            "invalid_argument",
+            50,
+            Some(true),
+            ProviderError::RateLimited { retry_after: None },
+        ),
+        (
+            "internal",
+            36,
+            None,
+            ProviderError::Http {
+                status: 400,
+                body: "Cursor Connect request failed (code internal, cursor BAD_REQUEST)".into(),
+            },
+        ),
+        (
+            "internal",
+            99,
+            Some(true),
+            ProviderError::Http {
+                status: 503,
+                body: "Cursor Connect request failed (code internal, cursor ERROR_99, retryable)"
+                    .into(),
+            },
+        ),
+        (
+            "canceled",
+            21,
+            None,
+            ProviderError::Http {
+                status: 499,
+                body: "Cursor Connect request failed (code canceled, cursor USER_ABORTED_REQUEST)"
+                    .into(),
+            },
+        ),
+    ] {
+        for kind in [
+            "aiserver.v1.ErrorDetails",
+            "type.googleapis.com/aiserver.v1.ErrorDetails",
+        ] {
+            // Given
+            let detail = json!({"type": kind, "value": error_details(error, retryable)});
+            // When
+            let failure = end_frame_error(json!({
+                "code": connect,
+                "message": "secret message",
+                "details": [{"type": "google.rpc.ErrorInfo", "value": "secret"}, detail],
+            }))
+            .await;
+            // Then
+            assert_eq!(failure, expected, "error={error} type={kind}");
+            assert!(!failure.to_string().contains("secret"), "{failure}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cursor_debug_detail_is_read_when_no_binary_value_is_present() {
+    // Given: a live outage shape with the verdict only in the detail's debug JSON.
+    let failure = end_frame_error(json!({
+        "code": "unavailable",
+        "message": "Error",
+        "details": [{
+            "type": "aiserver.v1.ErrorDetails",
+            "debug": {
+                "error": "ERROR_OPENAI",
+                "details": {"title": "secret", "detail": "secret", "isRetryable": true},
+            },
+        }],
+    }))
+    .await;
+    // Then
+    assert_eq!(
+        failure,
+        ProviderError::Http {
+            status: 503,
+            body: "Cursor Connect request failed (code unavailable, cursor OPENAI, retryable)"
+                .into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn unrecognized_debug_error_names_are_not_echoed() {
+    // Given: a debug detail naming an error outside the known enum.
+    let failure = end_frame_error(json!({
+        "code": "invalid_argument",
+        "details": [{
+            "type": "aiserver.v1.ErrorDetails",
+            "debug": {"error": "ERROR_secret-sentinel", "details": {"isRetryable": false}},
+        }],
+    }))
+    .await;
+    // Then: the Connect code decides, and the name is not reported.
+    assert_eq!(
+        failure,
+        ProviderError::Http {
+            status: 400,
+            body: "Cursor Connect request failed (code invalid_argument, cursor unrecognized, not retryable)"
+                .into(),
+        }
+    );
+}

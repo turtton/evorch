@@ -135,6 +135,7 @@ async fn mount(server: &MockServer, response: ResponseTemplate) {
 
 fn expected_usage() -> Usage {
     Usage {
+        context_tokens: None,
         input_tokens: 11,
         output_tokens: 7,
         cache_read_tokens: 3,

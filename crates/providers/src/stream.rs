@@ -175,6 +175,7 @@ mod tests {
 
     fn usage() -> Usage {
         Usage {
+            context_tokens: None,
             input_tokens: 1,
             output_tokens: 2,
             cache_read_tokens: 0,

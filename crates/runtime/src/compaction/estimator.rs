@@ -70,8 +70,8 @@ pub(crate) fn estimate_projected(
     let current_estimate = estimate_tokens(messages);
     let usage_tokens = last_usage.map_or(0, |usage| {
         usage
-            .input_tokens
-            .saturating_add(usage.output_tokens)
+            .context_tokens
+            .unwrap_or_else(|| usage.input_tokens.saturating_add(usage.output_tokens))
             .saturating_add(
                 baseline_estimate.map_or(0, |baseline| current_estimate.saturating_sub(baseline)),
             )
@@ -241,6 +241,7 @@ mod tests {
             }],
         )];
         let usage = Usage {
+            context_tokens: None,
             input_tokens: 100,
             output_tokens: 30,
             cache_read_tokens: 20,
@@ -249,6 +250,27 @@ mod tests {
         };
 
         assert_eq!(estimate_visible(&messages, Some(&usage)), 130);
+    }
+
+    // Given: a turn whose input sums several model calls (Cursor) next to the
+    // conversation's reported occupancy / When: the context is projected /
+    // Then: the occupancy is used, so the summed input cannot force compaction.
+    #[test]
+    fn reported_context_occupancy_replaces_summed_turn_input() {
+        let messages = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "short".to_string(),
+            }],
+        )];
+        let usage = Usage {
+            input_tokens: 272_377,
+            output_tokens: 3_914,
+            context_tokens: Some(31_000),
+            ..Usage::default()
+        };
+
+        assert_eq!(estimate_visible(&messages, Some(&usage)), 31_000);
     }
 }
 
