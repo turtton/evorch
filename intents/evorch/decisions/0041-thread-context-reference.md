@@ -665,6 +665,24 @@ request 契約（R5、順序 1 で固定）:
 
 対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。private な chunk-temp FTS プロトタイプ（`$TMPDIR/s8-chunk*`）は製品へ持ち込まない。この方針変更時点で新 matrix は未実行であり、順序 8 全体を完了扱いにはしない。
 
+#### S8 の既知の制約: 遅い検索と background backfill の重複による WAL 一時停止
+
+遅い検索（phrase・tool kinds、1 ページ約 3 秒）と background backfill が重なると、検索の読み取りが WAL を pin し、`wal_checkpoint(TRUNCATE)` でも WAL が縮まらない。この状態では merge step の admission が `IndexPaused(WalLimit)` で止まる。既往の観測値は `phrase-true-true` が WAL **59,089,072 B**、`phrase-false-true` が **58,936,632 B** で、planned `G_wal` は **8,437,792 B**、`max_wal_bytes` は **64 MiB** である。WAL 単体は上限未満でも、次の step の `G_wal` を加えると上限を超えるため admission が停止する。
+
+この停止は容量上限を守る安全な停止であり、データの破損や消失はない。容量が回復すれば background backfill は再開する。ただし、停止中に出た request は待機して継続するのではなく、`capacity_paused` の gap で終端化する。
+
+利用者は次のように判断した（原文をそれぞれ保持）:
+
+> 1（推奨）: 今回は既知の制約として記録し、残り13条件を測って問題なければマージ。「待機して自動再開」は別 PR で対応
+
+> 1: 「遅い検索（phrase・tool）＋索引作業あり」での WAL 一時停止をまとめて既知の制約にし、他のクエリが PASS ならマージ。待機・自動再開は別 PR
+
+この判断により、「遅い検索（phrase・tool kinds）＋索引作業あり」での上記 WAL 一時停止を今回の既知の制約として扱う。それ以外の正確性・カバレッジ・資源エラーのゲートは変更しない。過去の FAIL はすべて保持し、PASS に書き換えない。
+
+今後の対応は別 PR とする。容量の上限と `G` を維持したまま、期限付きの非同期容量待機によって待機・自動再開する方式を実装し、request の終端化の契約を変更する。今回はこの待機方式を実装しない。
+
+**S8 の最終セル結果: 計測中。** 残りの条件の計測と集計が終わってから追記する。上記の制約の記録だけで S8 全体を完了扱いにしない。
+
 ### 実装時に確認すること
 
 実装直前に再確認する項目: v25 の空き、source を更新・削除する全経路の棚卸し、note しかない run の binding、既存の排他の再利用可否、bundled SQLite の trigram / dbstat、DB 全体の上限設定の出所と reload / 再起動の実配線、cursor の互換性。
