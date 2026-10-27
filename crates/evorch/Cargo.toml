@@ -34,3 +34,8 @@ tracing-subscriber = { workspace = true }
 test-support = { path = "../test-support" }
 mock-openai = { path = "../mock-openai" }
 rusqlite = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "test-util",
+] }
