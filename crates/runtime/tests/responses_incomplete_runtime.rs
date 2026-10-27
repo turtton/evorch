@@ -305,6 +305,7 @@ fn assert_partial(backend: Backend, response: &ChatResponse, reason: FinishReaso
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 9,
             output_tokens: 4,
             cache_read_tokens: 2,

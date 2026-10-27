@@ -190,6 +190,7 @@ async fn factory_builds_codex_client_from_profile() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 12,
             output_tokens: 2,
             cache_read_tokens: 0,

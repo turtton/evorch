@@ -142,6 +142,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         ESCALATION_ADMISSION_FAILED => TransientOrExternal,
         // compose: no verified provider, which is provider/auth/config dependent.
         PROVIDER_UNAVAILABLE => TransientOrExternal,
+        // providers/cursor: the configured effort does not fit the model's fixed
+        // variant, or the account catalog was unavailable; config/provider dependent.
+        PROVIDER_MODEL_ROUTE => TransientOrExternal,
         // budget_tracker: user-configured execution limits, not harness defects.
         BUDGET_WARNING | BUDGET_EXHAUSTED => TransientOrExternal,
         // providers/cache: unchanged wire prefix but reduced provider cache retention.

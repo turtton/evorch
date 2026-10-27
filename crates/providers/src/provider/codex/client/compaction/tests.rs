@@ -39,6 +39,7 @@ fn captures_blob_usage_and_ignores_other_output() {
     assert_eq!(
         result.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 42,
             output_tokens: 7,
             cache_read_tokens: 30,

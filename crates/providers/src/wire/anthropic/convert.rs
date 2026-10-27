@@ -147,6 +147,7 @@ pub fn to_finish_reason(stop_reason: Option<&str>) -> FinishReason {
 
 pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
     Usage {
+        context_tokens: None,
         input_tokens: usage
             .input_tokens
             .saturating_add(usage.cache_read_input_tokens.unwrap_or_default())

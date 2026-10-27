@@ -221,3 +221,34 @@ async fn native_connect_handoff_preserves_tool_results_rules_and_conversation_ch
         *next += 1;
     }
 }
+
+#[tokio::test]
+async fn checkpoint_token_details_report_context_occupancy_apart_from_turn_input() {
+    // Given: a turn whose reported input (100) sums its model calls, and a
+    // checkpoint whose tokenDetails.usedTokens (31) is the conversation's occupancy.
+    let server = MockServer::start().await;
+    let text = Proto::new().message(1, Proto::new().message(1, Proto::new().string(1, "Hi")));
+    let checkpoint = Proto::new().message(
+        3,
+        Proto::new().message(5, Proto::new().integer(1, 31).integer(2, 200)),
+    );
+    Mock::given(path("/agent.v1.AgentService/RunSSE"))
+        .respond_with(response(vec![text, checkpoint, end()]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // When
+    let result = client(&server)
+        .send(&ProviderAuth::new("unused"), &request())
+        .await
+        .unwrap();
+
+    // Then: the turn's usage is kept for accounting and the occupancy is reported apart.
+    assert_eq!(result.usage.input_tokens, 100);
+    assert_eq!(result.usage.context_tokens, Some(31));
+}

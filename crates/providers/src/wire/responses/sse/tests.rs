@@ -102,6 +102,7 @@ fn incomplete_fixture_completes_partial_output_as_length() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 21,
             output_tokens: 16,
             cache_read_tokens: 5,

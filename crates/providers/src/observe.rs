@@ -522,6 +522,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let mut observer = observer(Some(bus), false);
         let usage = Usage {
+            context_tokens: None,
             input_tokens: 2,
             output_tokens: 3,
             cache_read_tokens: 4,

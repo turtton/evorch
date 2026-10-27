@@ -222,6 +222,7 @@ pub(super) fn completed_usage(body: &Value) -> Result<(Usage, &str), ProviderErr
         .map_err(|_| invalid("Anthropic web search usage is invalid"))?;
     Ok((
         Usage {
+            context_tokens: None,
             input_tokens: usage
                 .input_tokens
                 .saturating_add(usage.cache_read_input_tokens)

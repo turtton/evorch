@@ -128,12 +128,8 @@ async fn listed_legacy_effort_siblings_and_rich_routes_send_distinct_wire_identi
             vec![("reasoning", "xhigh")],
             false,
         ),
-        (
-            "claude-opus-high",
-            "claude-opus-high",
-            vec![("reasoning", "low")],
-            true,
-        ),
+        // A legacy non-OpenAI ID passes through: its name may already fix an effort.
+        ("claude-opus-high", "claude-opus-high", vec![], true),
         (
             "composer-2.5",
             "composer-2.5",
@@ -329,4 +325,182 @@ async fn fresh_client_discovers_default_parameters_and_pins_them_across_catalog_
             false
         )
     );
+}
+
+fn observed_client(server: &MockServer) -> (CursorClient, event_bus::EventReceiver) {
+    let store = Arc::new(InMemoryCursorTokenStore::new());
+    store.save(&token()).unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let receiver = bus.subscribe();
+    let client = CursorClient::new(
+        CursorConfig {
+            base_url: server.uri(),
+            event_bus: Some(bus),
+        },
+        store,
+    )
+    .unwrap()
+    .with_profile("cursor");
+    (client, receiver)
+}
+
+/// Route diagnostics and the efforts `RequestStarted` reported, in emission order.
+fn route_observations(
+    receiver: &mut event_bus::EventReceiver,
+) -> (Vec<event_bus::DiagnosticEvent>, Vec<Option<String>>) {
+    use futures_util::FutureExt;
+    let (mut diagnostics, mut efforts) = (Vec::new(), Vec::new());
+    while let Some(Ok(event)) = receiver.recv().now_or_never() {
+        match event.kind {
+            event_bus::EventKind::Diagnostic(diagnostic)
+                if diagnostic.code == event_bus::event::diagnostic_codes::PROVIDER_MODEL_ROUTE =>
+            {
+                diagnostics.push(diagnostic);
+            }
+            event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
+                reasoning_effort,
+                ..
+            }) => efforts.push(reasoning_effort),
+            _ => {}
+        }
+    }
+    (diagnostics, efforts)
+}
+
+#[tokio::test]
+async fn role_effort_is_not_added_to_a_legacy_model_whose_name_fixes_it() {
+    // Given: Cursor lists `claude-fable-5-1-xhigh` only as a legacy usable row, and the
+    // role asks for `max`.
+    let server = MockServer::start().await;
+    let usable = Proto::new().message(1, Proto::new().string(1, "claude-fable-5-1-xhigh"));
+    catalog(&server, usable, Proto::new()).await;
+    let (client, mut receiver) = observed_client(&server);
+    let mut request = request();
+    request.model = "claude-fable-5-1-xhigh".into();
+    request.reasoning_effort = Some("max".into());
+    // When
+    client.send(&ProviderAuth::new(""), &request).await.unwrap();
+    // Then: the model goes out as named, with no contradicting `reasoning` parameter,
+    // and the unapplied effort is reported once as information.
+    assert_eq!(
+        sent_routes(&server).await,
+        [(
+            "claude-fable-5-1-xhigh".to_string(),
+            "claude-fable-5-1-xhigh".to_string(),
+            vec![],
+            false
+        )]
+    );
+    let (diagnostics, efforts) = route_observations(&mut receiver);
+    assert_eq!(efforts, [None]);
+    let [diagnostic] = diagnostics.as_slice() else {
+        panic!("{diagnostics:?}");
+    };
+    assert_eq!(diagnostic.severity, event_bus::DiagnosticSeverity::Info);
+    assert_eq!(diagnostic.run_id.as_deref(), Some("cursor-contract"));
+    assert!(
+        diagnostic
+            .detail
+            .contains("requested_effort=Some(\"max\") sent_effort=None")
+            && diagnostic
+                .detail
+                .contains("reason=requested reasoning effort not applied"),
+        "{}",
+        diagnostic.detail
+    );
+}
+
+#[tokio::test]
+async fn sent_effort_comes_from_the_route_and_a_matching_request_reports_nothing() {
+    // Given: a rich variant fixed at xhigh, requested once at xhigh and once at low.
+    let server = MockServer::start().await;
+    let available = Proto::new().message(
+        2,
+        Proto::new().string(1, "rich-base").message(
+            30,
+            Proto::new()
+                .string(11, "rich-xhigh")
+                .message(1, parameter("reasoning", "xhigh")),
+        ),
+    );
+    catalog(&server, Proto::new(), available).await;
+    let (client, mut receiver) = observed_client(&server);
+    for (prompt, effort) in [("first", "xhigh"), ("second", "low")] {
+        let mut request = request();
+        request.model = "rich-xhigh".into();
+        request.reasoning_effort = Some(effort.into());
+        // A new first user message starts a new conversation, so the route resolves again.
+        request.messages[1].content = vec![ContentBlock::Text {
+            text: prompt.into(),
+        }];
+        // When
+        client.send(&ProviderAuth::new(""), &request).await.unwrap();
+    }
+    // Then: both requests report the effort on the wire; only the overridden one is noted.
+    let (diagnostics, efforts) = route_observations(&mut receiver);
+    assert_eq!(efforts, [Some("xhigh".into()), Some("xhigh".into())]);
+    let [diagnostic] = diagnostics.as_slice() else {
+        panic!("{diagnostics:?}");
+    };
+    assert!(
+        diagnostic
+            .detail
+            .contains("requested_effort=Some(\"low\") sent_effort=Some(\"xhigh\")"),
+        "{}",
+        diagnostic.detail
+    );
+}
+
+#[tokio::test]
+async fn unavailable_catalog_is_reported_and_its_guessed_route_is_not_cached() {
+    // Given: both catalog RPCs fail with a server error that echoes secret text.
+    let server = MockServer::start().await;
+    for endpoint in [
+        "/agent.v1.AgentService/GetUsableModels",
+        "/aiserver.v1.AiService/AvailableModels",
+    ] {
+        Mock::given(path(endpoint))
+            .respond_with(ResponseTemplate::new(503).set_body_string("secret"))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(path("/agent.v1.AgentService/RunSSE"))
+        .respond_with(response(vec![end()]))
+        .mount(&server)
+        .await;
+    let (client, mut receiver) = observed_client(&server);
+    for prompt in ["first", "second"] {
+        let mut request = request();
+        request.messages[1].content = vec![ContentBlock::Text {
+            text: prompt.into(),
+        }];
+        // When
+        client.send(&ProviderAuth::new(""), &request).await.unwrap();
+    }
+    // Then: each new conversation asks the catalog again and warns about its guess.
+    let catalog_calls = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/GetUsableModels"))
+        .count();
+    assert_eq!(catalog_calls, 2);
+    let (diagnostics, _) = route_observations(&mut receiver);
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    for diagnostic in diagnostics {
+        assert_eq!(diagnostic.severity, event_bus::DiagnosticSeverity::Warning);
+        assert!(
+            diagnostic
+                .detail
+                .contains("reason=account catalog unavailable (server error)")
+                && !diagnostic.detail.contains("secret"),
+            "{}",
+            diagnostic.detail
+        );
+    }
 }

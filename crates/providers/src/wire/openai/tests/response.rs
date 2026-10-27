@@ -48,6 +48,7 @@ fn wire_response_maps_to_canonical_response() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 12,
             output_tokens: 4,
             cache_read_tokens: 7,

@@ -340,6 +340,7 @@ fn cumulative_budget_includes_cached_input_exactly_once() {
     let mut counters = BudgetCounters::default();
     for _ in 0..2 {
         counters.usage(Usage {
+            context_tokens: None,
             input_tokens: 100,
             output_tokens: 10,
             cache_read_tokens: 60,

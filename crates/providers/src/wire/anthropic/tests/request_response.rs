@@ -243,6 +243,7 @@ fn wire_response_converts_to_canonical_response() {
                 ]
             },
             usage: Usage {
+                context_tokens: None,
                 input_tokens: 19,
                 output_tokens: 7,
                 cache_read_tokens: 3,
@@ -294,6 +295,7 @@ fn canonical_input_includes_cache_reads_and_writes_once() {
         assert_eq!(
             usage,
             Usage {
+                context_tokens: None,
                 input_tokens: expected,
                 output_tokens: 7,
                 cache_read_tokens: read,

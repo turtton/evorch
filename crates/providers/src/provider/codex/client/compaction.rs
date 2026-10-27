@@ -102,6 +102,7 @@ impl CompactionStream {
                         .take()
                         .ok_or_else(|| invalid("Codex response に compaction item がありません"))?,
                     usage: Usage {
+                        context_tokens: None,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                         cache_read_tokens: usage.input_tokens_details.cached_tokens,

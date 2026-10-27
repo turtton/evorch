@@ -246,6 +246,12 @@ pub struct Usage {
     /// 報告しない場合は `None` (0 と区別する)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Tokens the conversation occupies after this response, when the provider
+    /// reports it separately because `input_tokens + output_tokens` is not the
+    /// context size. Cursor sums every model call of an agent turn into the
+    /// turn's input, which far exceeds the context it actually holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
 }
 
 /// 応答の終了理由。
@@ -442,6 +448,7 @@ mod tests {
     #[test]
     fn usage_round_trip_uses_canonical_field_names() {
         let usage = Usage {
+            context_tokens: None,
             input_tokens: 10,
             output_tokens: 5,
             cache_read_tokens: 3,

@@ -446,6 +446,7 @@ struct OutputTokenDetails {
 impl From<ResponseUsage> for Usage {
     fn from(value: ResponseUsage) -> Self {
         Self {
+            context_tokens: None,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
             cache_read_tokens: value.input_tokens_details.cached_tokens,

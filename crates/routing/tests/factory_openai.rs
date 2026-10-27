@@ -124,6 +124,7 @@ async fn factory_builds_openai_responses_client() {
     assert_eq!(
         response.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 12,
             output_tokens: 2,
             cache_read_tokens: 0,

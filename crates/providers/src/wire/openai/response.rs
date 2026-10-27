@@ -86,6 +86,7 @@ pub fn to_finish_reason(reason: &str) -> FinishReason {
 
 pub(super) fn to_usage(usage: &WireUsage) -> Usage {
     Usage {
+        context_tokens: None,
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
         cache_read_tokens: usage
@@ -137,6 +138,7 @@ mod tests {
             assert_eq!(
                 to_usage(&wire),
                 Usage {
+                    context_tokens: None,
                     input_tokens: 100,
                     output_tokens: 10,
                     cache_read_tokens: read,

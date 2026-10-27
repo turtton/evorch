@@ -163,6 +163,10 @@ pub mod diagnostic_codes {
     pub const DELEGATION_RETRACTED: &str = "DelegationRetracted";
     /// No verified provider is available for execution.
     pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
+    /// A provider sent a model on wire settings other than requested: the role's
+    /// reasoning effort was not applied, or the model's route was guessed because
+    /// the account catalog did not provide it.
+    pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
@@ -221,6 +225,7 @@ pub mod diagnostic_codes {
         IDENTICAL_TOOL_CALLS,
         DELEGATION_RETRACTED,
         PROVIDER_UNAVAILABLE,
+        PROVIDER_MODEL_ROUTE,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,

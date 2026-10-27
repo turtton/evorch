@@ -42,6 +42,7 @@ async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
     assert_eq!(
         result.usage,
         Usage {
+            context_tokens: None,
             input_tokens: 42,
             output_tokens: 7,
             cache_read_tokens: 30,
