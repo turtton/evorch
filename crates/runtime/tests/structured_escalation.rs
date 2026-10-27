@@ -3,6 +3,9 @@
 #[path = "structured_escalation/support.rs"]
 mod support;
 
+#[path = "support/mod.rs"]
+mod runtime_support;
+
 use std::time::Duration;
 
 use event_bus::EventBus;
@@ -465,10 +468,12 @@ async fn invalid_verdict_or_denial_is_final_in_both_response_modes() {
     }
 }
 
-fn codex_completion() -> ResponseTemplate {
+fn codex_completion(text: &str) -> ResponseTemplate {
     let events = [
-        json!({"type":"response.reasoning_summary_text.delta","delta":"Consider effects."}),
-        json!({"type":"response.output_text.delta","item_id":"review","content_index":0,"delta":APPROVE}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs-review","delta":"Consider effects."}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs-review","summary":[{"type":"summary_text","text":"Consider effects."}],"encrypted_content":"dummy-encrypted-review"}}),
+        json!({"type":"response.output_text.delta","output_index":1,"item_id":"review","content_index":0,"delta":text}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"review","role":"assistant","content":[{"type":"output_text","text":text}],"status":"completed"}}),
         json!({"type":"response.completed","response":{"id":"review","status":"completed","usage":{"input_tokens":10,"output_tokens":3}}}),
     ];
     let body = events
@@ -500,7 +505,7 @@ async fn codex_sse_review_uses_text_format_and_falls_back_without_changing_affin
                 {
                     unsupported(400, "text.format")
                 } else {
-                    codex_completion()
+                    codex_completion(APPROVE)
                 }
             })
             .expect(if legacy { 2 } else { 1 })
@@ -530,6 +535,125 @@ async fn codex_sse_review_uses_text_format_and_falls_back_without_changing_affin
             assert_eq!(original, requests[1]);
         }
     }
+}
+
+#[tokio::test]
+async fn codex_sse_file_review_accepts_encrypted_reasoning() {
+    use runtime::escalation_review::SandboxEscalationGate;
+    use std::sync::{Arc, Mutex};
+    use tools::tools::shell_escalation::{
+        EscalationDecision, FileAccessRequest, ShellEscalationGate,
+    };
+
+    let server = server(true).await;
+    Mock::given(method("POST"))
+        .respond_with(codex_completion(
+            r#"{"approve":true,"reason":"safe read","risk_level":"low","authorization_level":"high"}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let harness = harness(&server.uri(), true, Duration::from_secs(3600));
+    let gate = SandboxEscalationGate::new(
+        Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
+        Some(Arc::new(QuickModelReviewer::new(harness.model))),
+        Arc::new(EventBus::new(32)),
+    );
+    let decision = gate
+        .decide_file_access(
+            &tools::ToolExecutionContext {
+                run_id: "file-review".into(),
+                ..Default::default()
+            },
+            &FileAccessRequest {
+                tool: "read".into(),
+                paths: vec!["/outside/docs.txt".into()],
+                write: false,
+                justification: "inspect requested documentation".into(),
+                change: None,
+            },
+        )
+        .await;
+    assert!(matches!(decision, EscalationDecision::Approve));
+    assert_schema(&requests(&server).await[0]["text"]["format"]);
+}
+
+#[tokio::test]
+async fn codex_sse_web_review_accepts_encrypted_reasoning() {
+    use event_bus::{AgentRunPhase, EventKind, LifecycleEvent, ToolEvent};
+    use providers::FinishReason;
+    use runtime::{AgentRuntime, RunConfig};
+    use runtime_support::{ScriptedModel, text_response, tool_response};
+    use std::sync::Arc;
+
+    let server = server(true).await;
+    Mock::given(method("POST"))
+        .respond_with(codex_completion(
+            r#"{"approve":true,"reason":"requested page","risk_level":"low","authorization_level":"high"}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let harness = harness(&server.uri(), true, Duration::from_secs(3600));
+    let model = support::ReviewAdapterModel {
+        reviewer: harness.model,
+        conversation: ScriptedModel::new([
+            // NetworkGuard rejects loopback after review; no external fetch is needed.
+            Ok(tool_response(
+                "web-review",
+                "web_fetch",
+                json!({"url":"http://127.0.0.1/"}),
+            )),
+            Ok(text_response("finished", FinishReason::Stop)),
+        ]),
+    };
+    let bus = Arc::new(EventBus::new(128));
+    let executor = tools::ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    )
+    .with_web_tools()
+    .expect("web tools");
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(executor), Arc::new(model));
+    let mut events = bus.subscribe();
+    let run = runtime
+        .delegate_chat(
+            "web-review",
+            Role::Orchestrator,
+            "Read the requested page".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let mut observed = Vec::new();
+    loop {
+        let event = events.recv().await.expect("run event");
+        let done = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Done, ..
+            }) if *run_id == run.to_string()
+        );
+        observed.push(event);
+        if done {
+            break;
+        }
+    }
+    let audit = observed
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Diagnostic(diag) if diag.code == "tool_call_access" => {
+                Some(serde_json::from_str::<Value>(&diag.detail).expect("audit"))
+            }
+            _ => None,
+        })
+        .expect("web review audit");
+    assert_eq!(audit["decision"], "allow");
+    assert_eq!(audit["reviewer"], "auto_review");
+    assert!(!observed.iter().any(|event| matches!(
+        event.kind,
+        EventKind::Tool(ToolEvent::ApprovalRequested { .. })
+    )));
+    assert_schema(&requests(&server).await[0]["text"]["format"]);
 }
 
 fn message(role: MessageRole, text: &str) -> Message {

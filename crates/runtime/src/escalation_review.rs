@@ -540,6 +540,9 @@ impl QuickModelReviewer {
         }
         let mut answer = response.message.content.iter().filter(|block| {
             !block.is_reasoning()
+                // Opaque Responses state is retained for replay, not verdict text.
+                // Keep this local: is_reasoning() has a separate provider contract.
+                && !matches!(block, ContentBlock::ResponsesReasoning { .. })
                 && !matches!(block, ContentBlock::Anthropic { block, .. } if block["type"] == "text")
         });
         let Some(ContentBlock::Text { text }) = answer.next() else {
