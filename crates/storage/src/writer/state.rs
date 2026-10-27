@@ -32,6 +32,7 @@ struct WriterState {
     next_checkpoint_at: Instant,
     diagnostic_cursor: Option<event::diagnostic::Cursor>,
     reclaim_wal_pending: bool,
+    index: super::index::IndexJob,
     task_progress_cursor: crate::maintenance::retention::Cursor,
 }
 
@@ -71,6 +72,35 @@ fn upsert_run_context_with_receipts(
     Ok((receipt, applied))
 }
 
+/// One SQLite transaction around a bundle save; the receipt leaves the writer
+/// only after commit (ADR 0041 R1).
+fn snapshot_transaction<T>(
+    state: &WriterState,
+    kind: &str,
+    operation: impl FnOnce(&Connection) -> Result<T, crate::thread_index::SnapshotApiError>,
+) -> Result<T, crate::thread_index::SnapshotApiError> {
+    if state.writes_suspended {
+        return Err(StorageError::Serialization(format!(
+            "{kind} writes suspended by storage limit"
+        ))
+        .into());
+    }
+    let transaction = state.conn.unchecked_transaction()?;
+    let value = operation(&transaction)?;
+    transaction.commit()?;
+    Ok(value)
+}
+
+/// Size-state flags measured by `Storage::open` before the writer starts.
+pub(super) struct StartState {
+    pub writes_suspended: bool,
+    pub soft_warned: bool,
+    pub suspend_logged: bool,
+    pub temp_warned: bool,
+}
+
+/// Writer without a thread index job (writer unit-test fixtures).
+#[cfg(test)]
 pub(super) fn run_writer(
     conn: Connection,
     rx: Receiver<Command>,
@@ -80,6 +110,33 @@ pub(super) fn run_writer(
     suspend_logged: bool,
     temp_warned: bool,
 ) {
+    run_writer_with_index(
+        conn,
+        rx,
+        config,
+        super::index::IndexJob::inert(),
+        StartState {
+            writes_suspended,
+            soft_warned,
+            suspend_logged,
+            temp_warned,
+        },
+    );
+}
+
+pub(super) fn run_writer_with_index(
+    conn: Connection,
+    rx: Receiver<Command>,
+    config: StorageConfig,
+    index: super::index::IndexJob,
+    start: StartState,
+) {
+    let StartState {
+        writes_suspended,
+        soft_warned,
+        suspend_logged,
+        temp_warned,
+    } = start;
     let now = Instant::now();
     let mut state = WriterState {
         conn,
@@ -95,11 +152,26 @@ pub(super) fn run_writer(
         temp_warned,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
+        index,
         task_progress_cursor: Default::default(),
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let deadline = state
+            .index
+            .deadline(Instant::now())
+            .map_or(deadline, |index| index.min(deadline));
+        let received = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let idle = matches!(received, Err(RecvTimeoutError::Timeout));
+        let ordinary = matches!(&received, Ok(command) if !matches!(command, Command::Index(_)));
+        match received {
+            Ok(Command::Index(command)) => super::index::handle(
+                &mut state.index,
+                &state.conn,
+                &state.config,
+                state.writes_suspended,
+                command,
+            ),
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
             Ok(Command::RecordUsageRequests(records, reply)) => {
                 let result = if state.writes_suspended {
@@ -227,6 +299,50 @@ pub(super) fn run_writer(
                 } else {
                     upsert_run_context(&state.conn, &record)
                 };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AppendIndexedNote(run_id, body, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "run ledger writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now| {
+                        crate::repo::thread_index::append_note(&state.conn, &run_id, &body, now)
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::SaveSnapshotBundle(write, reply)) => {
+                let result = snapshot_transaction(&state, "run context", |conn| {
+                    crate::repo::thread_index::stage_snapshot(conn, &write)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::SaveSnapshotBundleWithEvidence(
+                write,
+                rows,
+                edges,
+                reference_id,
+                host_inputs,
+                reply,
+            )) => {
+                let result = snapshot_transaction(&state, "review", |conn| {
+                    use crate::thread_index::SnapshotTransaction as _;
+                    crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
+                    let receipt = crate::repo::thread_index::StagedSnapshot(conn)
+                        .stage_snapshot_bundle(&write)?;
+                    crate::repo::review_evidence::insert(conn, &rows)?;
+                    crate::repo::review_lineage::insert(conn, &edges)?;
+                    let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+                    let applied = crate::repo::host_input_receipt::apply(
+                        conn,
+                        Some(&write.record),
+                        &host_inputs,
+                        now_ns,
+                    )?;
+                    Ok((receipt, applied))
+                });
                 let _ = reply.send(result);
             }
             Ok(Command::LatestRunLedger(run_id, reply)) => {
@@ -467,8 +583,10 @@ pub(super) fn run_writer(
             }
             Ok(Command::ReclaimDiagnosticSpace(pages, reply)) => {
                 let _ = reply.send(diagnostic::reclaim_step(&mut state, pages));
+                notify_index_capacity(&mut state);
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                super::index::shutdown(&mut state.index, &state.conn);
                 if let Err(error) = flush_usage(&mut state) {
                     tracing::warn!(error = %error, "storage final usage flush failed");
                 }
@@ -479,8 +597,20 @@ pub(super) fn run_writer(
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
-        run_due_work(&mut state);
+        if ordinary {
+            state.index.note_command();
+        }
+        run_due_work(&mut state, idle);
     }
+}
+
+fn notify_index_capacity(state: &mut WriterState) {
+    super::index::on_capacity_change(
+        &mut state.index,
+        &state.conn,
+        &state.config,
+        state.writes_suspended,
+    );
 }
 
 fn save_thread_start(
@@ -526,7 +656,7 @@ fn merge_usage(pending: &mut HashMap<BucketKey, UsageBucket>, buckets: Vec<Usage
     }
 }
 
-fn run_due_work(state: &mut WriterState) {
+fn run_due_work(state: &mut WriterState, idle: bool) {
     let now = Instant::now();
     if (state.pending.len() >= state.config.flush_max_pending
         || (now >= state.next_flush_at && !state.pending.is_empty()))
@@ -543,6 +673,13 @@ fn run_due_work(state: &mut WriterState) {
         }
         state.next_checkpoint_at = now + state.config.checkpoint_interval;
     }
+    super::index::run_due(
+        &mut state.index,
+        &state.conn,
+        &state.config,
+        state.writes_suspended,
+        idle,
+    );
 }
 
 /// Maintenance scans one bounded diagnostic batch, then reclaims a bounded
@@ -573,6 +710,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         diagnostic::reclaim_wal(state)?;
     }
     checkpoint(state)?;
+    notify_index_capacity(state);
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
@@ -978,6 +1116,7 @@ mod tests {
             suspend_logged: false,
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
+            index: crate::writer::index::IndexJob::inert(),
             task_progress_cursor: Default::default(),
         }
     }

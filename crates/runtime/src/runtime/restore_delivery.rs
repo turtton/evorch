@@ -160,7 +160,13 @@ impl AgentRuntime {
                                 .unwrap_or_else(|| "実行設定".into()),
                         )))
                     } else {
-                        RestoredState::from_record(&record)
+                        RestoredState::from_record(&record).map(|mut restored| {
+                            restored.provenance =
+                                store.restore_provenance(&record).unwrap_or_else(|_| {
+                                    crate::restore::provenance::ConversationProvenance::unknown()
+                                });
+                            restored
+                        })
                     };
                     match disk {
                         Ok(restored) => (restored, None),
@@ -244,8 +250,13 @@ impl AgentRuntime {
             }
             let execution = Self::prepare_restored_execution(recipient, parent, &intents)?;
             // The writer only upserts the already-read record; no storage read holds runs.
-            store.handle.upsert_run_context(&record).map_err(|error| {
+            let write = restored.provenance.write(record.clone()).map_err(|error| {
                 fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
+            })?;
+            store.handle.save_snapshot_bundle(&write).map_err(|error| {
+                fail(RunRestoreFailure::SnapshotConsumeFailed(format!(
+                    "{error:?}"
+                )))
             })?;
             Self::install_restored_execution(
                 recipient,

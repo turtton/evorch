@@ -6,8 +6,8 @@ Accepted（2026-10-24）。利用者との相談で、以下の設計判断（a�
 
 この ADR は、evorch の再起動で作業が失われても、次の担当がこの ADR だけを読んで再開できるように、承認済みの仕様をすべて書く。
 
-- 着手順は Phase 0（ADR と計測）→ Phase A（storage / runtime / GUI）である。Phase B（本文の全文索引）は Phase 0 の計測を見て別途決める。Phase C（ポインタ注入・GUI 添付）は今回の範囲外である。
-- Phase 0 の計測結果は、以下の「Phase 0 計測」節に記録する。計測は完了している。Phase B の採否は別途判断する。
+- 着手順は Phase 0（ADR と計測）→ Phase A（storage / runtime / GUI）である。Phase A は PR #351 として squash マージ済み（merge commit `5d23cab4`、2026-10-25）。Phase B（本文の全文索引）は、Phase 0 の計測と利用者との相談を経て着手が決まり、設計を下の「Phase B の設計」に記録した。Phase C（ポインタ注入・GUI 添付）は今回の範囲外である。
+- Phase 0 の計測結果は、以下の「Phase 0 計測」節に記録する。計測は完了している。Phase B の実装の進捗は末尾の「Phase B 実装状況チェックリスト」に記録する。
 
 ## Context
 
@@ -76,8 +76,8 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 #### 決定 d: 検索方式
 
-- 本文検索（Phase B）は FTS5 の trigram を使う。2 文字以下の語は trigram で引けないため、`LIKE` で代用する。
-- Phase A では FTS を使わない。
+- 本文検索（Phase B）は FTS5 の trigram を使う。2 文字以下の語は trigram で引けないため、`LIKE` で代用する（Phase B の設計では「3 scalar 未満の語」と定義する）。
+- Phase A では FTS を使わない。Phase B の詳細は「Phase B の設計」を参照。
 - `thread_grep` はスレッド内の正規化したテキストを線形に走査する。
 - `thread_search` はメタデータ（title、人間の発話、working note、最終報告）だけを対象にする。
 
@@ -113,7 +113,7 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 |---|---|
 | Phase 0 | ADR と計測 |
 | Phase A | storage / runtime / GUI。FTS なし。thread_search はメタデータのみ |
-| Phase B | 本文の全文索引（FTS5 trigram）。Phase 0 の計測を見て別途決める |
+| Phase B | 本文の全文索引（FTS5 trigram）。設計は「Phase B の設計」、進捗は「Phase B 実装状況チェックリスト」 |
 | Phase C | ポインタ注入、GUI 添付による ID 指定。今回の範囲外 |
 
 ## Phase 0 計測
@@ -133,6 +133,85 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 ### 手法・注記
 
 実 store は Python `sqlite3`（SQLite 3.53.3）の読み取り専用接続で調査した。本文は `messages_json` から thinking / reasoning / 画像 / 非表示・opaque block を除いて正規化した。FTS5 trigram は seed=410 で無作為抽出した 164 run の一時 SQLite DB ファイルのサイズ（DB 管理 overhead を含む）を測定し、全量値はその単純 10 倍である。正規化時間は Python の JSON parse・除外・テキスト化を `perf_counter` で測った参考値。補完は確定的な根拠のみを採用した。
+
+### Phase 0 計測の要約（Phase B 向け）
+
+出所は上の表と手法・注記のみである。計測用スクリプトや別の計測記録はリポジトリ内に見つからなかった（`Phase 0` / `phase0` / `phase_0` を grep したところ、この ADR だけが該当した）。そのため、以下はこの ADR の数値から導いた要約であり、新しい計測ではない。
+
+- 除外後の本文量は 294,648,246 bytes（1,638 run、135,511 messages）で、DB 全体（約 1.99 GiB）の約 14% にあたる。
+- 本文の大半は tool 由来である。tool_result が 229,295,607 bytes（約 77.8%）、tool_use が 39,031,050 bytes（約 13.2%）で、合わせて約 91.0%。user（10,062,617 bytes）と assistant text（8,556,912 bytes）は合計 18,619,529 bytes（約 6.3%）、system は 7,702,060 bytes（約 2.6%）である。
+- そのため、tool_use と tool_result を切り詰める（Phase B の抽出契約）だけで索引対象の本文は大きく減る。切り詰め後の kind 別バイト数と索引サイズは、Phase B の計測で改めて測る（現時点の数値は未取得）。
+- FTS5 trigram の索引サイズは、10% サンプル（164 run）で本文量の 3.4165 倍だった。全量（切り詰めなし）に単純外挿すると約 834 MiB になる。サンプルの DB ファイル実測値であり、管理 overhead を含む。
+- 1 run の正規化は Python 参考値で median 0.72 ms、p95 8.5 ms、最大 59 ms。最大の run は本文 約 1.49 MB / 666 messages。Rust 実装の性能ではない。
+- `project_root` が null の旧 run は 687 件で、確定的に補完できたものは 0 件。Phase B の可視性は Phase A の `threads` / `thread_runs` に従い、索引側で可視性を再定義しない。
+- 上の 3.4165 倍は、切り詰めなしの本文に対する値である。切り詰め後の容量と、`max_bytes` の候補（256 MiB / 512 MiB / 1 GiB）ごとの保持範囲は Phase B の計測項目として残す（決定 B-2）。
+
+### Phase B 順序 2 の計測（切り詰め後、W6）
+
+実 store を `mode=ro`（`is_readonly` で確認）で開き、SQLite online backup API（`sqlite3_backup_step(-1)`、1 つの読み取りスナップショット）で `$TMPDIR` にコピーし、以後はコピーだけを読んだ。原本には書き込んでいない。ハーネスは `crates/storage/examples/thread_index_measure.rs` で、本文は W1 の `extract_snapshot_bundle`（`EXTRACTOR_VERSION=1`）だけで抽出し、出力に本文を含めない。FTS は ADR の v25 形（`conversation_blocks` + fts5 `trigram`・external content・`columnsize=0` + `thread_index_runs` と 2 索引）を `storage::db` と同じ pragma（WAL・`synchronous=NORMAL`・`wal_autocheckpoint=1000`・`auto_vacuum=INCREMENTAL`）の新規 DB に run ごとの transaction で全件（サンプルではなく 100%）作り、`dbstat` で測った。同じコピーへの再実行（`--reuse-copy`）で全数値が一致した（build 時間のみ差）。
+
+再現: `cargo build --release -p storage --example thread_index_measure` の後、`target/release/examples/thread_index_measure --source <store.db> --copy <新規 copy.db> --work-dir <新規 dir>`（既存コピーの再計測は `--reuse-copy --copy <copy.db>`）。
+
+| 項目 | 値 |
+|---|---|
+| コピー | 2026-10-25 12:56:43Z 開始、34.3 s。2,463,387,648 B（page 4096 × 601,413、freelist 907 page、`auto_vacuum=2`、`user_version=24`）。`events` 1,759,113,216 B（71.4%）、`run_contexts` 577,069,056 B（23.4%） |
+| 母集団 | run 1,857（`run_contexts`。note だけの run は 0）。作成時刻の出所: run_id の時刻部 1,170、旧連番 run は最初の note / usage の時刻 608、どちらもない旧 run は snapshot の `updated_at_ns` 79（近似）。fork / rewind の root run（継承 prefix あり）8 |
+| 厳密（構造化メタデータによる導出を含む、2026-10-25 再計測） | 索引化可能 **703 / 1,857 run**。保留 1,154 はすべて `provenance_unknown:legacy_unproven`。詳細: `continuity_missing` 944、`continuity_boundary_unverifiable` 14、`fork_boundary_unverifiable` 3、`lineage_unverifiable` 193、`invalid_snapshot` 0。不明データは native と仮定しない |
+| 容量の仮定（索引化可能母集団ではない） | `upper_bound` = 全 block を native とみなした上界。`fork_prefix_excluded` = さらに fork / rewind root run の継承 prefix（`threads.fork_point_context_len`）を除いた推定。continuity のコピーは識別できないため両方に含む。不正 JSON 等の保留は 0 |
+| 切り詰め後の本文（上界、kind 別） | 計 188,372,892 B / 202,506 block。tool_result 108,927,938 B（57.8%、86,123 block、うち切り詰め 39,537）、tool_use 44,210,546 B（23.5%、92,990、切り詰め 1,887）、user text 16,521,379 B（8.8%、8,097）、assistant text 10,769,753 B（5.7%、7,959）、tool_error 7,116,533 B（3.8%、6,867、全文保持）、working note 826,743 B（0.4%、470）。fork 除外推定の本文は 186,456,948 B |
+| FTS（全件） | `conversation_fts_*` 449,568,768 B = 本文の 2.3866 倍（`optimize` 後 442,462,208 B = 2.3489 倍）。内訳 `_data` 448,610,304、`_idx` 954,368、`_config` 4,096。`integrity-check`（rank=1）成功 |
+| 補助テーブル | `conversation_blocks`+UNIQUE 索引 292,671,488 B（本文 188,372,892 と属性 28,161,569 を除くと 376 B/block）。`thread_index_runs`+3 索引（PK を含む）602,112 B（325 B/run）。索引 3 種の合計 742,842,368 B（約 708.4 MiB、本文の 3.94 倍） |
+| 物理（参考値） | 構築中の DB+WAL 最大 767,345,960 B（optimize 前）。WAL ファイル最大 22,721,832 B（`max_wal_bytes` 64 MiB 未満）。1 run の commit による DB+WAL 増加の最大 8,699,120 B（本文 849,724 B の run、約 10.2 倍）。全件構築 75.0 s（再実行 34.5 s）。普遍的な上界ではない |
+| 抽出時間（Rust release、redaction 込み） | 1 run あたり median 0.87 ms、p95 6.83 ms、最大 18.7 ms |
+| 論理会計の係数案 | `AccountingPolicy { per_block_bytes: 376, per_run_bytes: 325, fts_numerator: 2387, fts_denominator: 1000 }`（上の実測から切り上げ）。この係数で全件の課金合計は 742,927,254 B となり、構築直後の物理索引量 742,842,368 B と 0.01% で一致する。再計測では共通 `index_attribute_bytes` / `charge_index_bytes` を使い、既定係数と一致することも確認した |
+| 最大の run | `run-01m5hq577mqemk417aetfsh9f1`、課金 3,812,201 B。どの候補でも oversized は 0 |
+
+上限ごとの保持（保持順は作成時刻の新しい順、同時刻は run_id の大きい方から。最古側から evict する結果と同じ）。以下は当初の容量の仮定（上界、括弧内は fork 除外推定）での値。構造化メタデータ導出後の厳密値はその下に分けて記録する。
+
+| `max_bytes` | 保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻 | 予算 evict | 保留 | oversized |
+|---|---|---|---|---|---|---|
+| 256 MiB | 416 / 1,857（421） | 68,517,705 / 267,583,740 | 2026-10-23T23:42:24Z（16:54:37Z）。コピー時点から約 1.6 日 | 1,441 | 0 | 0 |
+| 512 MiB | 950 / 1,857（972） | 136,888,956 / 536,523,197 | 2026-10-14T12:35:11Z（11:49:07Z）。約 11.0 日 | 907 | 0 | 0 |
+| 1 GiB | 1,857 / 1,857（1,857） | 188,372,892 / 742,927,254 | 2026-09-06T08:04:46Z（全履歴、約 49 日。旧 run の時刻は近似） | 0 | 0 | 0 |
+
+古い小さい run で隙間を埋めた場合の保持数は 419 / 960 / 1,857 で、上の値とほぼ同じである。
+
+2026-10-25 再計測（W4、構造化メタデータ導出後の厳密値）: 上と同じ `w6-measure-20261025T215631/store-copy.db` を `--reuse-copy` で read-only 再利用した。共通 `derive_legacy_provenance` → `extract_snapshot_bundle` → 共通会計 API の経路を使う。最終出力は作業領域の `w4-measure-current.json`、FTS は全件の上界で再構築して同じ係数（376 / 325 / 2387 / 1000）を得た。`w4-measure-legacy-final.json` および初回導出計測との厳密数値も一致した。原本は開いていない。
+
+| `max_bytes` | 厳密保持 run（N / 全体） | 保持本文 / 課金（B） | 最古の保持 run の作成時刻（UTC） | 予算 evict | 保留 | oversized |
+|---|---|---|---|---|---|---|
+| 256 MiB | **456 / 1,857** | 68,781,749 / 268,371,322 | 2026-10-22T13:04:55Z | 247 | 1,154 | 0 |
+| 512 MiB | **703 / 1,857** | 97,691,227 / 382,060,708 | 2026-10-16T00:55:36Z | 0 | 1,154 | 0 |
+| 1 GiB | **703 / 1,857** | 97,691,227 / 382,060,708 | 2026-10-16T00:55:36Z | 0 | 1,154 | 0 |
+
+厳密最大 run は課金 3,322,132 B。保留 1,154 のうち、continuity 欄なし 944、fork 境界検証不能 3、その他 207（continuity 境界 14 + lineage 193）。0 件から 703 件を確定できたが、未知の出所を native に格上げしてはいない。
+
+fork 境界検証不能の 3 件は、rewind lineage に source/boundary が保存されていない `thread-160-v161` / `thread-163-v166` の 2 件と、コピー元の thread root と run binding の root が不一致な `thread-182-v210` の 1 件。保存済み境界を持つ残り 7 root は構造検証に通る。continuity 欄なし 944 件はコード履歴から一律 native とする提案も採らない。`8def627d`（2026-09-13、#105）で既に復元時の `[run-ledger]` User 注入があり、`6b6aac67`（2026-10-16、#246）が continuity 形式へ置換したため、旧形式は「continuity 注入以前だからコピーなし」とは証明できない。
+
+所見（512 MiB の妥当性）: 512 MiB は明らかに不適切ではない。確定できた旧 run 703 件（課金約 364.4 MiB）をすべて保持し、oversized は 0。全件 native 上界でも約 51%（直近約 11 日）を保持でき、DB 全体の上限 10 GiB に対して余裕がある。未確定分を含む上界は約 708.5 MiB なので、今後の生成頻度によって保持期間は縮む。既定値は変更していない。
+
+### Phase B 順序 5 開始ゲートの計測（W2）
+
+手法: W6 の store コピー（`store-copy.db`、原本ではない）を新しい作業ディレクトリへ複製し、`storage::db` で v25 へ移行したコピーだけを読み書きした。ハーネスは `crates/storage/src/writer/index/gate_measure.rs`（`#[ignore]`。release で `EVORCH_INDEX_GATE_SOURCE` / `EVORCH_INDEX_GATE_WORK`、任意で `EVORCH_INDEX_GATE_MERGE_PAGES` を与えて `cargo test --release -p storage --lib gate_measure -- --ignored --nocapture`）。出力に本文は含めない。各書き込みの直前に `wal_checkpoint(TRUNCATE)` で WAL を空にし、書き込み直後の WAL（frame 数）と checkpoint 後の DB 増加を測った。`worst = WAL + DB 増加 + SHM` は、WAL が新しい frame をすべて抱えたまま DB も伸びる場合の P の増分で、admission が上から抑えるべき値である。索引 commit は全 1,858 run を全 block native とみなした上界（W6 の `upper_bound` と同じ仮定）で、job と同じ順（作成時刻の新しい順）に `SqliteThreadIndex::commit_index_input` で 1 run 1 transaction として入れた。計測中は同じマシンで並行担当のビルドも動いていたため、時間の外れ値（数百 ms）には CPU / I/O の干渉が含まれる。
+
+| 項目 | 値 |
+|---|---|
+| 前景の正本 transaction（F の根拠） | 最大 snapshot（JSON 9,684,989 B）の再保存: WAL 9,986,912 + DB 9,846,784 + SHM 32,768 = **19,866,464 B**（同じ内容の新規 run の保存は 16,274,464 B）。所要 129–140 ms。最大 note（8,141 B）の追記は 78,120 B。event は `max_event_bytes`（262,144 B、保存済みの最大 255,956 B）で上限があり snapshot より小さい |
+| 索引 commit（FTS 既定 = automerge 4、run 1） | p50 18 ms / p95 164 ms / p99 347 ms / 最大 1,192 ms。FTS5 の自動 merge が commit の中で走り、1,855 件中 614 件で WAL が入力の 3 倍を超えた（最大 11,696 frame = 48.2 MB、本文 966 KB の run）。小さい run でも課金の 337 倍の増加があり、`max_wal_bytes`（64 MiB）に対して G の上界を置けない |
+| 索引 commit（`automerge=0`・`crisismerge=64`、merge は commit 後の別 transaction で `merge` 64 page を no-op まで、run 2） | p50 10.5 ms / p95 80.6 ms / p99 211 ms / 最大 501 ms。本文の大きさ別の p95: 16 KB 未満 8.5 ms、16–64 KB 23 ms、64–128 KB 37 ms、128–256 KB 77 ms、256–512 KB 147 ms、512 KB–1 MB 241 ms（最大 252 ms）。WAL 最大 1,310 frame（5.4 MB）、DB 増加最大 4.16 MB、worst 最大 9.31 MB。merge step は 11,711 回（commit 1 回あたり約 6.3 回）で p50 2.8 ms / p95 11.7 ms / 最大 515 ms、最大 1,115 frame。全件後の FTS は 451,768,320 B（W6 の全件構築 449,568,768 B と同程度） |
+| evict（課金の大きい 40 run） | 最大 3,064 frame、WAL / 課金は最大 6.55 倍、最大 338 ms |
+| 規模 | 本文 > 256 KiB は 179 run、> 512 KiB は 27 run、> 1 MiB は 0 run。block は最大 1,169（> 2,000 は 0） |
+
+決めた値（`crates/storage/src/writer/index/capacity.rs` の `MEASURED_POLICY` と merge 定数）:
+
+- FTS: 索引 job の開始時に `automerge=0`・`crisismerge=64` を設定し、merge は job の別 step（`merge` 64 page）で行う。commit の transaction では merge しない。run 1 のとおり、既定のままでは G の上界も前景待ちも保証できないためである。
+- `F = 19,866,464 B`、`safety_factor = 2`、`R_floor = 64 MiB`。よって `R = max(64 MiB, 39,732,928 B) = 67,108,864 B`。safety 2 は最大 snapshot の約 2 倍までの成長を見込む。R_floor は `max_wal_bytes` と同じ 64 MiB とし、event / note の連続にも余裕を残す。
+- G（commit）: `pages = ceil(1.5 × charged / page_size) + 256`、`G_wal = pages × (page_size + 24) + 32`、`G_db = max(0, pages × page_size − freelist)`、`G_shm = 32 KiB × (⌊pages / 4096⌋ + 1)`。run 2 の全 1,858 commit が上界内だった（最大使用率は WAL 88.5%、DB 67.5%、合計 75.4%）。freelist は実測済みの空きとして G_db から引くが、削除予定の論理 bytes は引かない。
+- G（evict）: `pages = ceil(7 × charged / page_size) + 256`（実測は最大 6.55 倍）。G（merge step）: 2,048 page 固定（実測は最大 1,115 frame）。
+- `J = 16 MiB`。最大 step の worst（9.31 MB）を上回り、WAL 側も約 40 MB 以下の WAL なら再開できる。
+- step 上限: 本文 1 MiB かつ 2,048 block。実測で超える run は 0（oversized_step 0 件）。超えた run は `evicted(oversized)` とし、`last_error_code` を `oversized_step` にする（max_bytes 超えは `oversized_budget`）。request の gap 理由も `oversized_step` / `oversized_budget` で分ける。
+- 論理予算の evict は commit とは別の step で 1 run ずつ行い、1 step の前景待ちを commit 1 回分か evict 1 回分に抑える。
+- 前景の書き込み待ちの許容値（索引無効・同じ workload を基準とし、E2E 計測の前に固定）: Δp50 ≤ 5 ms、Δp95 ≤ 50 ms、Δmax ≤ 250 ms。step 上限 1 MiB の commit は p95 241 ms で、Δmax の許容内に収まる見込みである。順序 5 実装後の E2E 計測で超えた場合は step 上限を 512 KiB に下げて（27 run が oversized_step になる。256–512 KB の p95 は 147 ms）再計測し、それでも超える場合は実装を止めて報告する。
 
 ## Phase A の設計
 
@@ -300,6 +379,326 @@ Phase A の検索対象はメタデータ（title、人間の発話、working no
 
 `evorch inspect thread <id>` と `inspect_e2e.rs` のテスト。
 
+## Phase B の設計
+
+Phase B は `thread_search` に本文の全文検索を足す。2026-10-25 に Phase A が `5d23cab4`（PR #351）としてマージされた後に、計画を作った。初回 plan review の M1〜M6 に加え、追加レビューの R1〜R5・S1〜S2 を以下の契約に反映した。改訂後の独立 Reviewer の合格判定はまだ得ていない。以降、この節を Phase B の正本とする。実装の途中で前提が変わった場合は、この節を更新してから実装を変える。
+
+### 確定した決定
+
+利用者に確認した決定は次の 4 つである。
+
+1. **B-1 既定の kinds**: `thread_search` の既定 `kinds` は、従来のメタデータ（title / user / working_note / final_report）に `conversation`（user と assistant の text）を加えたものにする。`tool_use` と `tool_result` は明示的に指定したときだけ検索する。
+2. **B-2 容量の上限**: `[storage.thread_index] max_bytes` は暫定で 512 MiB とする。切り詰め後の容量を計測し、256 MiB / 512 MiB / 1 GiB のそれぞれについて、次を ADR に記録する: 保持できる run の数（N / 全体）、最古の時刻、保留（pending）の数、oversized の数。512 MiB が明らかに不適切なら、マージ前に報告する。
+3. **B-3 evicted の扱い**: 上限を引き上げても、evicted の索引を自動で作り直さない。作り直すのは `reindex-threads --include-evicted` を実行したときだけである。新しい上限は、writer が設定を取り込んだ時点で有効になる。
+4. **B-4 「古い」の基準**: run の作成時刻とする。同時刻なら `run_id` の辞書順とする。
+
+### 抽出の契約（M1）
+
+- 抽出器は W1 が storage に新設し、snapshot の入力は `serde_json::Value` とする。storage は providers に依存しないためである。provenance と最新 note は型付きの別入力にする。W6 の計測器も同じ抽出・会計 API を呼び、独自実装を作らない。
+- runtime の normalize との一致は W4 の契約テストで確認する。normalize の表示文字列をそのまま比較しない。共通の比較表現は、画像表示用 note を除外し、`is_error` を `tool_error` に分類し、同じ redaction・UTF-8 切り詰めを適用した `(ordinal, block_index, kind, text, truncated)` とする。画像 note の除外は元の構造化 content の種別で行い、同じ文字列の本物の text を削らない。ordinal / block_index は加工せず一致させ、hash だけ・text の先頭だけの比較では済ませない。
+- 種類ごとの扱い:
+
+| 種類 | 索引に入れる内容 |
+|---|---|
+| user / assistant の text | 全文 |
+| working note | 正本は `run_ledger`。各 run の最新 `seq` を全文で入れる。空本文は block を作らない。位置は `note_seq` |
+| tool_use の input | redaction してから JSON 化し、先頭 4096 B |
+| 成功した tool_result | 既知の text 部分の先頭 2048 B |
+| エラーの tool_result | 全文（kind は `tool_error`） |
+| System、reasoning、thinking、画像、anthropic の生ブロック、compaction、未知の block | 入れない |
+| 不正な JSON | その run を保留する |
+
+- ordinal は snapshot の System 以外の全メッセージを数えた 0 始まり、block_index は元の content 配列の 0 始まりとする。コピー・画像などの除外後も両方の番号を詰めない。
+- 処理の順序: 構造化入力を redaction → text 化 → 全文を再度 redaction → UTF-8 境界で切り詰め → hash → 保存。`truncated` は実際に切ったときだけ true にする。診断やイベントに secret を含めない。
+- 成功した tool_result は画像を除いた既知の text 部分を改行で連結して 2048 B までとする。エラーは同じ text 抽出だが 2048 B を超えても全文を保存する。画像の代替表示文字列は本文に含めない。
+- 公開 `kinds: ["tool_result"]` は内部 `tool_result` と `tool_error` の和集合とする。どちらも既定の `conversation` には含めず、tool_use も明示指定だけにする（B-1）。
+
+### provenance の保存・更新（R1）
+
+確認した現状（HEAD `517c980e`）と、新設する契約を区別する。
+
+- `storage/src/run.rs:14–25` の `RunContextRecord` にメッセージ別 provenance はない。`runtime/src/restore.rs:517–540` は raw messages と checkpoints を別 JSON にして保存し、`storage/src/repo/run_context.rs` が redaction する。`writer/state.rs:410–418` の既存トランザクションは snapshot と thread binding の境界であり、sidecar / source_revision はまだない。
+- continuity は `agent_loop.rs:609–618` で User メッセージとして追加され、escalation の保存経路も `restore/escalation.rs:74–105` で同じ形式を保存する。descriptor に continuity 情報はあるが、それだけで各メッセージ位置の出所を証明できるものではない。
+- resume の `runtime/chat_restore.rs:274` は evidence / reference consumption 付き保存を使い、`writer/state.rs:275–282` の別分岐で snapshot を保存する。この分岐も通常 snapshot と同じ sidecar 保存境界に統合し、書き込み経路を取り残さない。
+- fork は `restore/fork_seed.rs:54–86` で `context_len`（System を除いたメッセージ数）を raw 配列の終端へ変換し、完了ターンで切る。範囲内の checkpoints もコピーする。`thread_lineage.rs:45–46` は `fork_point_run_id` / `fork_point_context_len` を記録するが、snapshot revision と対応した位置マップではない。
+- compaction の `AgentContext::apply_checkpoint`（`context.rs:180–188`）は raw messages を消さず checkpoint を追加する。モデル向けだけ `project` / `visible_messages` で投影する。`compaction/mod.rs:540–560` は prepared context を先に永続化し、成功後にメモリへ設置する。したがって fork 境界を compaction 後の表示窓の ordinal に再適用してはならない。
+
+保存契約:
+
+- 同じ SQLite DB に `run_context_provenance(run_id PRIMARY KEY, snapshot_revision, snapshot_sha256, format_version, status, reason_code, map_json)` を設ける。外部ファイルではなく snapshot の sidecar テーブルであり、現行 snapshot に対応する 1 行を持つ。`run_contexts.snapshot_revision` は run ごとの単調増加整数（新規は 1、旧 snapshot は migration 時に 0）とし、成功した snapshot 保存ごとに増やす。時刻だけでは revision を識別しない。migration で旧 snapshot を provenance 確定済みにしない。
+- `map_json` は version 付き JSON object とする。各 non-System メッセージの raw_index / ordinal と各 block_index、origin（`native` / `continuity_copy` / `fork_copy`）、コピー元、fork の元境界を記録する。コピー元は tagged source とし、会話なら `(run_id, snapshot_revision, ordinal, block_index)`、note なら `(run_id, note_seq)`、凍結 history なら `(history_source_id, record_index)` とする。生成した案内・境界 block は `excluded_reason=generated_boundary` で明示する。checkpoint summary は別配列であり会話 block として抽出しない。本文・secret をマップに複製しない。
+- `snapshot_sha256` は storage が redaction 後に保存する messages_json と checkpoints_json を長さ付きで連結したバイト列の SHA-256 とする。マップの位置・配列長を検証し、`snapshot_revision` と hash の両方を照合する。`format_version` は出所形式、`source_revision` は snapshot / note / provenance の索引入力更新の世代であり別物である。
+- W2 の snapshot 保存コマンド 1 回を原子性の境界にする。W1 の repo API が、redaction 後 snapshot・thread binding・sidecar・`source_revision` 増分・R2 の state 遷移を**同じトランザクション**で保存する。evidence / reference consumption 付き分岐もこの API を既存 transaction 内で呼び、evidence 等とともに commit する。receipt は commit 後にだけ返す。途中障害なら全部 rollback し、prepared context / provenance も設置しない。note append / clear も note と source_revision / state を同一トランザクションで保存するが、snapshot_revision は変えない。
+
+位置対応の更新規則:
+
+| 経路 | W4 が作る対応と W1 / W2 の保存規則 |
+|---|---|
+| 通常追記・continuity | 既存マップを維持し、新規発言は native、continuity を挿入した正確な位置だけ continuity_copy とする。元 note / history source の識別子も保持する。文面一致で判定しない |
+| fork / rewind seed | 読んだ元 snapshot_revision に固定し、raw prefix とマップを同じ終端で切る。コピーした全 block を fork_copy とし元の位置・元 origin も保持する。fork 境界の外に追記する native は除外しない |
+| compaction / model switch | 現状の raw 履歴維持なら既存位置マップは不変、checkpoint の追加と同時保存する。生成境界の追記位置は明示する。将来 raw を置換する経路は旧位置→新位置の全対応を必須とし、不明なら確定扱いしない |
+| restore / 再起動 | snapshot と sidecar を同じ read transaction で読み、revision / hash / 全位置を検証して一緒に復元する。System の追加でも raw_index を更新し non-System ordinal は維持する。安全な prefix に切る場合も同じ切断をマップへ適用する |
+
+コピー除外は**抽出時のフィルタだけ**であり、保存 messages を削除せず ordinal / block_index を詰めない。同じ文の native な別発言は別位置として必ず残す。
+
+- 旧データを確定扱いできるのは、(a) 対応 revision と完全な位置マップが検証できる、または (b) 当該 snapshot に結び付く構造化された生成記録から、全位置の native / copy と変換履歴を一意に証明できる場合だけとする。検証した証拠を sidecar に記録する。fork metadata があるだけ、ないだけ、本文が一致するだけ、現在の境界値だけでは足りない。
+  - 旧 snapshot（revision 0、sidecar なし）の導出は storage 内で行い、計測も同じ API を使う。descriptor に **明示的な空の continuity**（`inherited_note=null`、`sources=[]`）があり、run の thread binding と root の lineage が整合している場合に限る。continuity 欄なしは今回は確定しない。非空 continuity は挿入位置の生成記録がないため保留する。
+  - 導出 API 自体も DB の snapshot_revision を確認し、新形式（revision > 0）や unknown sidecar を旧メタデータで再昇格しない。既に materialize された revision 0 の verified sidecar は hash・完全位置を再検証して再利用し、fork source の先行 discovery によって結果が変わらないようにする。
+  - 同スレッド followup が新 run に全履歴を引き継ぐ経路もある。root に `review_lineage_edges.child_run_id` があるのに保存済みコピー境界がない run は `lineage_unverifiable` とする。root thread の不在情報だけでは native と判定しない。子 run は全親リンクと thread/depth/root の整合を要求する。
+  - fork / rewind root は保存済み `fork_point_run_id` と `fork_point_context_len` を検証する。境界は raw の non-System 数で数え、正の範囲内かつ completed assistant turn であること、checkpoint の range が raw 内であること、source run が存在することを要求する。raw-preserving compaction なので prefix を fork_copy、suffix を native とできる。source revision は旧形式の 0 と明示し、元 origin を証明できなければ run 全体を保留する。境界欠損・範囲外・途中 tool turn・lineage 不整合は `legacy_unproven`。子 run に root の fork 境界は再適用しない。
+  - 不明理由の計測は `continuity_missing` / `fork_boundary_unverifiable` / `continuity_boundary_unverifiable` / `lineage_unverifiable` / `invalid_snapshot` を分ける（索引の公開 reason_code は `legacy_unproven`）。検証証拠は snapshot hash と構造化レコード ID に結び付け、discovery の writer transaction で sidecar と source_revision を更新する。読み取りだけでは DB を変更しない。
+- 証明不能は sidecar `status=unknown`、索引 `blocked(reason=provenance_unknown)` とする。詳細 reason_code は `missing_sidecar` / `snapshot_mismatch` / `incomplete_map` / `legacy_unproven` / `unsupported_version`。本文を推定で除外せず run の会話索引を保留し、理由別件数を計測する。新 snapshot でも不明な既存位置を native に格上げしない。証拠による sidecar 修正は source_revision を進める。
+- 受け渡し API（順序 1 で型・エラー・fixture を固定）: W1 は `SnapshotProvenance` / `SnapshotWrite` / `SnapshotBundle` と原子的 `save_snapshot_bundle`・`load_snapshot_bundle`、共通 `extract_index_input` を所有する。W4 は全生成・変換経路で対応マップを作り `SnapshotWrite` を渡す。W2 は単一 writer コマンドで W1 を呼び、receipt の snapshot_revision / source_revision を W4 へ返す。W4 の restore と W2 の抽出 job は同じ `SnapshotBundle` を読む。W2 が本文から provenance を再推定する実装は禁止する。
+- この保存形式、変換規則、W1/W2/W4 の API、障害時の振る舞いを順序 1 の完了条件とし、順序 2・3 の開始条件とする。実装前の fixture に fork 後の compaction → 再起動と保存途中の障害を含める。
+
+#### 順序 1 の Rust 共有境界（storage 担当分）
+
+型は公開 `storage::thread_index` に置く。以下は契約の定義であり、migration / writer / job / 検索を実装済みとは扱わない。
+
+- `SnapshotProvenance` は run / snapshot_revision / snapshot_sha256 / format_version / status / map を持つ。`ProvenanceMap.version=1`、raw メッセージ数・checkpoint 数、全 non-System メッセージと全 block の位置を保持する。`BlockOrigin` は native / continuity_copy / fork_copy（元 origin と `ForkBoundary` を含む）、`CopySource` は message / working_note / frozen_history の tagged enum。本文は複製しない。SQL sidecar の status / reason_code / map_json はこれらから W1 が分解保存し、unknown の理由は `ProvenanceUnknownReason` を使う。
+- hash の framing は **u64 big-endian の messages_json バイト長 → messages_json の保存バイト列 → u64 big-endian の checkpoints_json バイト長 → checkpoints_json の保存バイト列** と固定する（SHA-256、小文字 hex）。再シリアライズ前後の同一性を仮定しない。`snapshot_sha256` を W1 の保存側・抽出器で共有する。
+- `SnapshotWrite` は runtime が作る map / status、従来 record、thread binding、期待する旧 snapshot_revision を渡す。storage が redaction 後に revision / hash を割り当てる。`SnapshotRepository::{save_snapshot_bundle,load_snapshot_bundle,append_indexed_note}` が原子的保存・同一 read transaction・note append/clear の境界、`SnapshotTransaction::stage_snapshot_bundle` が evidence / reference-consumption の既存 transaction 内で使う境界。`SnapshotReceipt` は commit 後のみ公開し、障害時は prepared context を設置しない。
+- `IndexInput` は Value と別入力の provenance / 最新 `RunLedgerEntry`、同一 transaction の revision / hash / checkpoint 数を受ける。Value を取得しただけでは出所の証明にならない。`extract_snapshot_bundle` は正本 JSON の parse と保存バイト hash を検証する便宜入口、`extract_index_input` が共通抽出 API。全文を持つ `IndexBlock` / `ExtractedIndexInput` と固定理由だけの `ExtractionError` を返す。不正 JSON / 既知 block の壊れた shape は run 全体を保留し、未知 block は除外する。画像のみの tool_result は block を作らない。
+- `BlockLocator` / version 付き `GuardedReference`・`GuardedSource` は message と working_note を別 variant にする。`SnapshotRepository::resolve_guarded_reference` は認可後に正本を読み、`GuardedResolution::{Message,WorkingNote,StaleReference,SourceDeleted,UnsupportedVersion}` を返す契約。Message は FTS text ではなく bundle と元位置、note は最新の非空 seq だけを返す。
+- `IndexState` / `IndexEvent` / `IndexRunStatus` は R2 の状態と入力を表す。`ThreadIndexRepository` はヘッダ discovery・成功/失敗 commit・evict・正本削除を所有する。`IndexCommitGuard` は lease / epoch / 有効期限・source revision / version・generation・Pending・source_present・request target の全照合を固定する。SQL 遷移表の実装・各セルの受け入れは順序 3 以降。
+- `ThreadIndexControl::{submit_request,request_status,cancel_request,acquire_lease,heartbeat,release_lease,step}` が W2/W5 共通入口。`IndexTarget` / `RequestGuard` で revision・version・generation を固定し、`ReindexResult` / `RequestGapReason` / `RequestSummary` / `RequestSubmission` / `LeaseResult` で R5 の受付・終端・理由別件数と owner 動作を区別する。時計は明示的に渡す。取消・待機中断・target 処理不能を制御系 failed と混同しない。
+- `IndexCapacity::capacity_status(PlannedGrowth)` と `apply_index_settings(ThreadIndexSettings)` が W2 の取り込み境界。後者の receipt は適用世代を返し、writer のコマンド順に有効になる。`IndexCapacityStatus` は Normal / IndexPaused / SourceSuspended と DB/WAL/SHM・reserve・J を返す。W3 の strict 設定型・検証は別途合流が必要。
+- `AccountingPolicy` / `IndexAccountant::account_index_input` は共通会計のシグネチャ（実装・係数選定は後続）。`text_bytes` は抽出後の厳密な UTF-8 バイト数。論理 `charged_bytes = text + attribute + per_block × count + per_run + ceil(text × fts_numerator / fts_denominator)`、attribute の集計対象は型コメントに固定する。分母ゼロ・overflow は `AccountingError`。これは物理 G の見積りではない。
+- fixture は抽出器の `fork_compaction_restart_fixture_keeps_native_duplicate_and_original_positions` と `snapshot_save_fault_fixture_accepts_only_complete_old_or_new_bundle` に置く。後者は各保存境界の **旧/新 bundle と混在拒否の契約 oracle** であり、DB への障害注入・rollback 検証そのものは順序 3 の担当が追加する。
+
+### スキーマ（v25）と原子性（M3）
+
+v25 は origin/main（`870a969b`）の時点で空いている（最新は v24）。この時点の open PR（#354 / #358 / #361 / #362）は migration を変更していない。実装時に再確認する。
+
+- migration はテーブル・索引・トリガーだけを作る。本文は処理しない。
+- `thread_index_runs`: `run_id` PK、`state`、`source_revision`、`indexed_revision`、`source_context_sha256`、`source_note_seq`、`source_provenance_version`、`extractor_version`、`accounting_version`、`source_updated_at_ns`、`retention_at_ns`（run の作成時刻）、`indexed_at_ns`、`text_bytes`、`block_count`、`charged_bytes`、`priority`、`attempt_count`、`next_attempt_at_ns`、`blocked_reason`、`last_error_code`、`source_present`。`state` は `pending` / `indexed` / `retry_wait` / `blocked` / `evicted` / `deleted`。
+- `conversation_blocks`: `id` INTEGER PK、`run_id`、`source_kind`（`message` / `working_note`）、`source_key`、`ordinal`?、`block_index`?、`note_seq`?、`role`、`kind`（`text` / `working_note` / `tool_use` / `tool_result` / `tool_error`）、`tool_name`?、`truncated`、`hash`、`text`。`UNIQUE(run_id, source_kind, source_key)`。書き込みは `ON CONFLICT DO UPDATE` で行い、`INSERT OR REPLACE` は使わない。消えた key は削除する。
+- `conversation_fts`: fts5、external content、trigram、`columnsize=0`。`memory_fts`（`crates/storage/src/migrations/v3.sql` の 52〜62 行付近）と同様に、トリガーで同期する。
+- 制御用に `thread_index_lease`（owner、期限、fencing epoch）、`thread_index_requests`、`thread_index_request_targets`、discovery の再開位置を持つ。run ごとの `work_generation` と、索引が使用した extractor / accounting version を保存する。
+- 正本保存は R1 の原子性境界に従う。「常に pending 化」ではなく、evicted / deleted / retry 等を含む以下の遷移表を正本とする。
+- 索引の置換は、lease の epoch と有効期限、source_revision、work_generation、現在 state が pending、source_present、適用 version、request target が未完了かつ有効（request 起因の場合）を commit transaction 内で確認する。どれかが変われば結果を破棄する。差分・FTS・集計・state・request target 結果を同一トランザクションで更新する。evict / 削除 / 明示 reindex は generation を進め、遅延 commit を無効化する。
+- source の削除は、共通 API で block・FTS・集計を消して tombstone を残す。discovery では復活させない。
+- hash が一致しても、位置（ordinal、block_index、note_seq など）の更新は省かない。
+- 受け入れ条件に FTS の `integrity-check`（rank=1）を含める。
+
+### 状態遷移表（R2: イベント × 現在 state）
+
+`P=pending`、`I=indexed`、`R=retry_wait`、`B=blocked`、`E=evicted`、`D=deleted`。「維持」は attempt_count / next_attempt_at / 理由も保持することを含む。新しい revision は正本保存または証拠更新の transaction で確定した世代、同 revision の再発見は更新ではない。行がない source の初回 discovery は P を作るが、tombstone は「行がない」と見なさない。
+
+| イベント | P | I | R | B | E | D |
+|---|---|---|---|---|---|---|
+| 同 revision の通常 discovery / 再起動 | 維持 | 維持 | 維持 | 維持 | 維持 | 維持 |
+| 上限引き上げ・設定再取り込み | 維持 | 維持 | 維持 | 維持 | 維持 | 維持 |
+| snapshot / note / provenance の新 revision | P・試行を 0 | P・試行を 0 | P・試行を 0 | P・試行を 0 | source 情報のみ更新、E 維持 | D 維持 |
+| 明示 reindex（include-evicted なし） | P・試行を 0 | P・試行を 0 | P・試行を 0 | P・試行を 0 | 維持・対象外 | 維持・削除済み |
+| 明示 reindex（include-evicted あり） | P・試行を 0 | P・試行を 0 | P・試行を 0 | P・試行を 0 | P・試行を 0 | 維持・削除済み |
+| extractor_version 変更 | P・試行を 0 | P・再抽出 | P・試行を 0 | P・試行を 0 | E 維持 | D 維持 |
+| accounting_version のみ変更 | 新係数で処理 | 本文再抽出せず再会計 | R 維持・会計 version 更新 | B 維持・会計 version 更新 | E 維持・対象 version 更新のみ | D 維持 |
+| retry 時刻到達 | 維持 | 維持 | P・試行数を維持 | 維持 | 維持 | 維持 |
+| 有効な抽出結果の commit | I | 拒否 | 拒否 | 拒否 | 拒否 | 拒否 |
+| 抽出の一時失敗 | 試行 +1、5 未満なら R、5 回目は B | 適用なし | 適用なし | 適用なし | 適用なし | 適用なし |
+| provenance 不明などの確定的処理不能 | B・理由保存 | 適用なし | 適用なし | 維持 | 維持 | 維持 |
+| 容量不足 / 索引停止 | P 維持・試行を増やさない | 維持 | 維持 | 維持 | 維持 | 維持 |
+| 論理 eviction / oversized / 物理回収の対象 | E・索引削除 | E・索引削除 | E・索引削除 | E・索引削除 | 維持 | 維持 |
+| 正本削除 | D | D | D | D | D | 維持 |
+
+- D 以外では新 source 情報（revision、hash、note_seq、provenance version、更新時刻、存在情報）を保存するが、E は通常 discovery・source 更新・version 変更・上限引き上げのどれでも P にしない（B-3）。D は新しい正本らしき行を見つけても source_present=false と tombstone を維持し、`source_after_tombstone` を記録する。同 run_id の再利用は禁止する。
+- P 化する契機は generation を増やし旧 job を失効させる。同 revision の R / B を discovery しただけでは generation / attempt_count をリセットしない。明示 reindex は新しい処理要求としてリセットする。provenance_unknown は再試行しても証拠がなければ B に戻す。
+- 失敗・blocked の保存にも成功 commit と同じ epoch / revision / generation / state / request guard を適用し、旧 job の失敗で新 revision の試行数や state を変えない。
+- extractor 変更は位置・本文が変わり得るため非 E / D を再抽出する。accounting のみの変更は保存済み text_bytes / 属性 / block_count から新係数で再会計し、version・charge・集計を run ごとに atomic に確定する。全 run の再会計が確定した後、新しい total に基づき必要な最小量だけを oldest-first・最大 1 run / step で論理 evict し、eviction も run ごとに atomic に確定する（「順序 5 job・lease・上限」の 2 段階契約を参照）。本文を不必要に再抽出しない。両段階の調整が完了するまで索引増加を止め、未確定の削減分を物理空きとして先取りしない。
+- evict と D 化は block / FTS / 集計を同時に削除する。D では source_present=false とする。discovery と遅延 commit の両方を tombstone / generation で拒否する。
+
+### job（M2）
+
+- 起動時の discovery: `run_contexts` などのヘッダを keyset で走査し、本文は読まない。状態変更は R2 に従い、R / B の試行数・E / D を保存する。新しい run から処理する。
+- アイドル時を優先する。ただし、通常コマンドが 32 件、または 100 ms 経過したら、必ず 1 step を実行する（`writer/state.rs:390–396` の `run_due_work` に組み込む）。
+- 抽出は writer の外で 1 並列で行う。同じ read transaction の SnapshotBundle を入力にし、commit 時は上記の epoch / revision / state / generation / request の全条件を再確認する。
+- pending がない、無効、容量不足、retry 待ちのときは、10 ms ごとに writer を起こさない。
+- retry: 1 秒から始め、最大 5 分の指数 backoff とする。同じ revision で 5 回失敗したら blocked にし、後続の run は進める。
+- 巨大な run が前景の書き込みを待たせる時間を計測する。
+
+### 上限と容量（M4）
+
+- `max_bytes` は論理会計に対する予算である。論理会計は、text のバイト数に、属性と索引のコスト、FTS の係数を加えたものとする。`accounting_version` を持たせ、係数は計測で決める。
+- 物理サイズ（dbstat、freelist、DB と WAL）は別途計測する。
+- 超過したら `retention_at_ns ASC, run_id ASC` の順に evict する。古い run の backfill のために、新しい索引を evict しない。
+- 1 つの run だけで上限を超えるときは `evicted(oversized)` とする。
+
+物理 reserve と admission（R3）:
+
+- `H=hard_limits.max_db_bytes`、`P=file_sizes().total()`（現状 `storage/src/db.rs:114–124` では DB+WAL+SHM）、`F=計測で得る前景正本 transaction の増加量の保守的上界` とする。snapshot / note / event のうち最大を F とし、`R=max(R_floor, ceil(safety_factor × F))` を正本用物理 reserve とする。`R_floor>0`、`safety_factor>=1`、再開用ヒステリシス `J>0`、書き込み 1 step の上限は順序 2 の計測で数値案を得て、**順序 5 の開始前**に W1/W2/W6 が ADR に値・根拠を記録する。実測最大は普遍的上界と断定せず、上界外入力は索引を止めて再評価する。
+- 各索引 commit の直前、writer 内で他書き込みと直列化し、SQLite の write transaction を確保して P を再計測する（別プロセスの writer とも競合させない）。予定差分の text / 属性 / FTS / page 丸めと WAL frame の増加（旧 page の書き換えも含む）から `G_db` / `G_wal` / `G_shm` を保守的に見積もり、`G=G_db+G_wal+G_shm` とする。削除予定の論理バイトを物理空きとして先取りしない。安全な増加上界を算出できなければ `growth_unbounded` として admission を拒否する。論理会計係数を物理増加量そのものと見なさない。
+- `P+G+R >= H` または `WAL+G_wal >= hard_limits.max_wal_bytes` で索引の書き込みを停止する。境界の等号も停止側とする。再計測で `P+G+R+J < H` かつ `WAL+G_wal+J < hard_limits.max_wal_bytes`、正本書き込み停止が解除されたときだけ再開する。H が reserve を満たせなければ索引無効相当とし正本を優先する。上限変更は writer の設定取り込み時から判定に使う。
+- admission が **WAL だけ**を理由に拒否された場合、pause / request gap の終端化前に、拒否した IMMEDIATE transaction を終了し、reader を待たない `wal_checkpoint(TRUNCATE)`（busy timeout 0、呼出後は通常値へ復元）を最大 1 回試す。新しい IMMEDIATE transaction で WAL / DB / SHM を再計測し、lease epoch・source revision・work generation・request guard と対象操作の G を再検証してから admission をやり直す。PASSIVE checkpoint 後に high-water だけが残る場合は安全に進めるが、reader の pin 等で条件を満たせなければ従来どおり pause する。H / max_wal / G / R / J は緩めない。pause 後の容量通知による再判定にも両方の厳密な +J 条件を適用し、既に終端化した request の gap は後の成功に書き換えない。
+- Paused の診断は返却時点の reason / adjustment、DB / WAL / SHM、R / J、対象操作と G_db / G_wal / G_shm、適用中の物理上限を保存する。計測ハーネスは失敗時も最後の反復番号、完了検索数、backfill 成功数とそれまでの観測を残す。後からの `thread_index_capacity()` をこの診断の代わりに使わず、本文・SQL パラメータは記録しない。
+- reserve / J は索引への admission 制限であって正本の停止閾値ではない。`IndexPaused` 中も snapshot / note / event は残る物理余裕を利用でき、正本の停止は共通判定の hard limit 側で決める。索引停止をそのまま writes_suspended に伝播しない。
+- 共通 `capacity_status(planned_growth)` API（W2 所有）は `Normal` / `IndexPaused(reason)` / `SourceSuspended(reason)` と DB/WAL 実測・reserve を返す。snapshot / note / event と索引 job はこの容量圧迫判定に接続する。現状 `writer/state.rs:190–207` は容量停止中の snapshot / note に `StorageError::Serialization` を返すため、エラー型のパターン一致や文字列解析を回収開始条件にしない。共通判定と容量変化通知で接続し、正本 API のエラー型変更は本設計の前提にしない。
+- **論理予算 eviction** は max_bytes を守るための索引削除であり、即座のファイル縮小を保証しない。**物理回収**は共通判定の DbSize 圧迫（reserve 不足による予防停止を含む）だけで開始し、他の LimitKind では行わない。論理予算に空きがあっても物理 admission を省略しない。
+- 1 圧迫イベントにつき最大 2 サイクル（予算付き索引削除 → checkpoint → 可能なら incremental vacuum → DB+WAL 再計測）。削除・回収自身の WAL 増加にも admission を適用し、正本 reserve を使い切らない。`auto_vacuum=NONE` では incremental vacuum の効果を期待せず、full VACUUM は自動実行しない。
+- 2 サイクル後も再開条件未達なら `reclaim_exhausted`、reader が WAL を保持しているなら `wal_reader_pinned` を永続的な停止理由として記録し、索引作成を止める。短周期で回収を再試行しない。reader 解放 / 容量設定変更 / cleanup による実測空き増加の通知後に再判定し、条件を満たした場合だけ停止を解除する。P / R / G / 回収前後を診断に残すが本文は残さない。
+
+### runtime の検索（M5）
+
+- kinds は、既存の title / user / working_note / final_report に、`conversation` / `tool_use` / `tool_result` を加える。既定は決定 B-1 のとおり。同じ位置の複数の一致は 1 つにまとめる。
+- 既存の意味を保つ: query 配列は OR、`words` / `phrase` / `regex`、`include_children`、`updated_after`。
+- visibility を先に確定し、scoped relation か keyset batch で storage の API に問い合わせる。100 はバッチの上限であり、総数の上限ではない。「FTS を先に引いてから可視性で絞る」方式（S2）は使わない。
+- 3 scalar 未満の語や、Unicode で一致が保証されない場合は、`LIKE`（エスケープしてバインド）か scan を使う。regex は可視範囲を走査する。予算を超えたら `partial` と続きの情報を返す。
+- cursor は version 付きで、caller、scope、正規化した条件、keyset の位置、regex の位置、revision、改ざん検出を含む。毎回、再認可する。run が 101 件以上あるスレッドでも続きを取れる。
+- `source_revision` が一致しない古い索引は、hit にも件数にも出さない。
+- hit に `truncated` と source_revision を付ける。guarded reference は version と source_kind を持つ tagged locator とし、毎回再認可する。従来の unguarded ref は従来どおり使える。
+- 会話の locator は `(run_id, snapshot_revision, source_revision, ordinal, block_index)` とする。`thread_read view=messages` は現状も正本 snapshot を normalize する経路（`read.rs:466–477`）なので、FTS の text を返す経路に変えない。同一 read transaction で revision と位置を検証し、異なれば `stale_reference`、一致すれば元 snapshot の該当 block を従来の表示・応答上限で返す。
+- working_note の locator は `(run_id, source_revision, note_seq)` とし、会話の ordinal / block に偽装しない。W4 が `thread_read` の guarded note 解決分岐を追加し、run_ledger の**最新** seq が一致し本文が空でない場合だけ note と seq を返す。snapshot の messages から note を探さない。更新・clear 後は旧 note を再表示せず `stale_reference`、source 削除後は `source_deleted` とする。clear は空本文の新 seq を append して source_revision を進める。
+- 統計は可視範囲だけを対象にする: indexed / pending（retry と blocked を含む）/ evicted / missing。`unindexed = pending + evicted + missing`。`backfill_in_progress` も返す。
+- `thread_grep` は正本の走査のままにする（索引に依存しない）。
+- tool description を更新し、`crates/runtime/tests/thread_tools_cache.rs` のフィクスチャを更新する。
+
+### CLI と所有権（M6）
+
+- `evorch reindex-threads [--db] [--project] [--since] [--include-evicted] [--wait]`
+- GUI と CLI は、共通の request / lease / step API を使う。CLI 専用の更新処理は作らない。
+- DB 単位の lease と fencing epoch、heartbeat、期限切れ lease の引き継ぎを持つ。
+- `--include-evicted` でも、上限は守る（決定 B-3）。
+
+request 契約（R5、順序 1 で固定）:
+
+| 受付時の有効な GUI owner | `--wait` | 動作・応答・継続主体 |
+|---|---|---|
+| あり | なし | request を永続化し `accepted` と request_id を返す。GUI owner が共通 step で継続 |
+| あり | あり | request を永続化し CLI が terminal 結果まで待機。GUI owner が処理し、CLI は二重に実行しない |
+| なし | なし | CLI が lease を取り同じ step を foreground で terminal まで進め、結果を返す。早期終了して処理主体を失う accepted-only にはしない |
+| なし | あり | 同じく CLI が owner として terminal まで実行・待機する |
+
+「owner なし」は他の CLI owner もいない場合とする。別 CLI が有効 lease を持つ場合は GUI owner ありと同じ扱いにする。受付と lease 取得の競合は fencing 付き API で解決する。
+
+- `submit_request` transaction が受付時の `--project` / `--since` 条件に合う source ヘッダから対象 `(run_id, source_revision, extractor_version, accounting_version)` を `thread_index_request_targets` に物理化し、対象集合を固定する。since は source_updated_at_ns の下限（以上）、project は canonical project 一致とする。E は include-evicted 時だけ含む。D は対象外として削除済み件数を報告し、固定後に削除された target は gap とする。0 件なら completed。
+- 受付後の新 run は追加しない。request の terminal 化前に target の source が更新されたら旧 snapshot の再現を要求せず `superseded` gap に確定し、新 revision は通常 job に任せる。処理済み target も未完了には戻さず、終了 transaction の再検証で成功か gap を確定する。version が変更された場合も `version_superseded` gap とし、固定 target の内容を書き換えない。terminal request の結果はその後の source 更新では変えない。
+- target は新規に処理するか、同 revision / version の既存索引 commit を確認すれば成功にできる。B / R の明示再試行と E の復帰は R2 に従う。`request_id + target + work_generation` を有効性 token に含め、取消済み・terminal・superseded target 向けの遅延 commit を拒否する。通常 job の成功を同じ target の完了に利用してよいが、上記照合を省かない。
+- 複数 request が同じ run / revision / version を対象にするときは work を共有する。明示 reindex で generation を進めるなら、有効な全 target の generation 対応も同じ transaction で更新し、旧 job を拒否する。1 request の取消を他 request の取消と見なさない。
+
+| request 結果 | 条件と理由の扱い |
+|---|---|
+| accepted | request が永続化され、別 owner に処理を委ねた非待機応答だけ。完了を意味しない |
+| completed | 固定 target がすべて同 revision / version で成功（または対象 0 件） |
+| completed_with_gaps | 全 target が成功または理由付き終端に到達し、gap が 1 件以上。blocked（provenance_unknown / 5 回失敗等）、capacity_paused、oversized、evicted_by_budget、固定後の deleted、superseded を gap として件数・理由を返す。全件 gap でも failed とはしない |
+| failed | 不正引数、DB 利用不能、request/lease 永続化不能、回復不能な制御処理障害。target の通常の処理不能とは分ける。受付前なら request_id なし、受付後は failed を記録する |
+
+- request は容量不足の解消を無期限には待たず、物理 admission が拒否した target を `capacity_paused` gap にする。通常の P は残し、容量通知で job が再開しても terminal request の結果は変更しない。oversized は E、blocked は B、削除済みは D を維持する。別 target の論理 eviction が起きた場合は request 終了時にも保持 revision を再確認し、未保持を evicted_by_budget gap にする。
+- 待機中に owner が異常終了した場合、request / target / 試行数は DB に残す。待機 CLI は lease 期限到達後に CAS で引き継ぎ候補となり、勝者（新 GUI または CLI）が新 epoch で未完了 target から再開する。旧 epoch の commit は拒否し、結果を二重計上しない。待機 CLI が停止しても request は取消さず、次の GUI/CLI owner が継続する。
+- accepted-only 応答後に唯一の owner が落ち、待機 CLI もいなければ、隠れた daemon は起動しない。request は永続的に待機し、次回 owner 起動時に再開する。CLI は request_id と owner 不在状態を診断で確認できる共通 status API を持つ。待機の中断は request の failed / completed と混同しない。
+
+### 担当（ファイル所有）と順序
+
+共有ファイルも単独 owner を置く。別担当は API / fixture の提案を渡し、同じファイルを同時編集しない（S1）。
+
+| 単独 owner | ファイル / 責務 |
+|---|---|
+| W1 storage-core | `crates/storage/src/{run.rs,thread_index.rs,thread_index/*,read.rs,lib.rs}`、`migrations/*`、`repo/{thread_index.rs,run_context.rs,run_ledger.rs,mod.rs}`。provenance 型・schema・抽出/会計・状態 SQL・request 永続化 API。storage の `read.rs`（同一 read transaction の bundle / guarded reference 読み取り配線）も W1 の単独所有 |
+| W2 writer | `crates/storage/src/{writer.rs,writer/state.rs}` と新設 job module。writer コマンド、容量 API、lease/step、設定取り込み。storage 内 wiring は W2 だけが編集 |
+| W3 config | `crates/storage/src/config.rs` と `crates/config/src/*` の設定型・strict・既定値・保存。設定値と適用時点の API は順序 1、実配線は順序 7 |
+| W4 runtime | `crates/runtime/src/meta/threads/*`（`read.rs` / `normalize.rs` 含む）、`meta/specs.rs`、`agent_loop.rs`、`context.rs`、`continuity.rs`、`restore.rs` / `restore/*`、`runtime/chat_restore.rs`、`thread_lineage.rs`、`compaction/*` と runtime の契約テスト。生成側 provenance と guarded note 解決 |
+| W5 CLI / app wiring | `crates/evorch/src/{main.rs,reindex_threads.rs,lib.rs}`、実際の GUI storage 起動経路 `crates/gui/src/bin/evorch-gui.rs:661–667`、GUI の `app/{state.rs,storage_settings.rs}`。W3 の設定型→W2 の取り込み API の配線も W5 が単独所有する。別配線ファイルが必要なら順序 1 で表に追記してから着手 |
+| W6 計測 / ADR | 計測ハーネスと本 ADR。W1 の `extract_index_input` / 共通会計関数を呼び、別の抽出器・係数は作らない |
+
+順序（チェックリストの 1〜9 に対応）:
+
+1. 契約の固定 — R1 の保存形式・revision・全変換経路・W1/W2/W4 API と fixture、R2 の遷移・commit guard、R3 の容量 API / 算出式、R4 の比較表現 / locator、R5 の request / owner 動作表、設定型・API・単独 owner を固定する。未決事項が残れば完了にしない
+2. 最小の抽出器で計測 — 順序 1 完了が開始条件。W1 の抽出器と W6 の呼び出しを先に作り、索引化可能な母集団を確定。順序 3 の provenance 保存実装が済むまでは検証済み fixture / 証明可能な旧データだけで測り、不明データを native と仮定しない
+3. migration・抽出・状態遷移 — 順序 1 完了が開始条件。R1 の原子的保存 / restore と R2 の遷移を実装し障害注入で検証
+4. 不可分な置換
+5. job・lease・上限 — 開始前に順序 2 の実測から物理 reserve / G の上界係数 / J / step 上限 / 前景待ち許容値を ADR に記録する。裏付け不足なら順序 2 に戻り、値未決のまま開始しない
+6. 検索・cursor・ref
+7. CLI・設定・spec の配線 — 順序 1 で固定した型・request 契約を配線する（この段階まで API 設計を先送りしない）
+8. 実 store のコピーで検証
+9. ADR の仕上げ
+
+### テスト方針
+
+固定の sleep は使わない。時計を注入し、step を明示的に進め、commit 通知・barrier・channel で待つ。
+
+- 抽出: 境界値（4096 B と 2048 B の手前・ちょうど・超え）、UTF-8、切り詰め境界をまたぐ secret、古いデータの secret。除外、同じ文の別発言、note の変更と clear。
+- 索引: 差分（追加・更新・削除、compaction）、障害注入と rollback、再起動、FTS の integrity-check、source の削除と tombstone。
+- job と容量: コマンドが続く間の進行、busy-loop しないこと、retry、容量の境界、巨大な run、逆転しないこと、reader が WAL を回収できない場合。
+- 検索: run が 101 件以上のスレッド、短い語、`LIKE` のエスケープ、Unicode、regex の続き、16 KiB での打ち切り。
+- cursor: 改ざんと条件の変更。不可視の run を大量に足しても、応答（件数・統計・partial・cursor）が変わらないこと。guarded ref が stale になること。
+- 所有権: GUI と CLI の同時起動、二重起動、異常終了、lease を奪った後に古い owner の結果が commit されないこと。
+- CLI: `--project` / `--since` / `--include-evicted`、accepted と completed の区別。
+- 回帰: Phase A の回帰、grep が索引に依存しないこと、spec のバイト一致。
+
+追加レビューの必須受け入れケース（実装時に結果をチェックリストへ記録）:
+
+- R1: 同文の copy / native を含む fork → compaction → 再起動でも native な別発言を誤って除外しない。snapshot 保存の各境界に障害を注入し、旧 snapshot+旧 sidecar か新 snapshot+新 sidecar だけが見え、部分保存で位置がずれない。restore / safe prefix / System 追加でも ordinal が合う。不明な旧データは理由付き B になる。
+- R2: evict → 上限引き上げ → snapshot/note 更新 → 再起動でも E のまま。blocked 後の再起動・同 revision discovery で attempt_count がリセットされない。version 変更 / 明示 reindex の例外、削除と遅延 commit の競合、request 取消・世代変更の commit 拒否を表の各セルに対応させる。
+- R3: 論理予算に空きがあるが物理 reserve 不足なら索引 commit を止める。停止後にも reserve 内の snapshot/note 正本書き込み余裕を維持できる。P+G+R の手前・ちょうど・超え、2 サイクル不成功、reader の WAL 保持、auto_vacuum=NONE、再開ヒステリシスを検証する。
+- R4: 画像+text の tool_result、2048 B 超の error、明示 tool_result 検索で成功/エラーの両方が出て既定 conversation には出ないこと。note 更新・clear 前後の guarded ref が snapshot の同 ordinal の発言へ誤解決されず stale になること。
+- R5: GUI owner あり/なし × wait あり/なしの 4 ケース、受付後の source 更新/削除、blocked / 容量不足 / oversized / 全件 gap / 0 件の結果、待機中の owner 異常終了→lease 引き継ぎ、accepted 後の owner 不在→次回起動で継続を検証する。
+
+### 計測計画
+
+実 store `/home/turtton/.config/evorch/evorch-events.db` は `mode=ro` で開き、backup API でコピーしたものを使う。原本には書き込まない。
+
+- 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ、上限ごとの保持範囲、`provenance_unknown` の理由別件数。各 256 MiB / 512 MiB / 1 GiB で N/全体に加え、索引化可能 run 数（完全な provenance・既知形式）、その対象本文量、保持本文量も併記する。不明な旧データを母集団から黙って落とさない。
+- 確実に hit が存在する固定 fixture と、実 store コピー内で正本走査により hit を確認した dataset の両方を用いる。短語（1/2 scalar）、3 scalar 以上、Unicode、phrase、regex、明示 tool kinds、no-hit を分け、正解 hit 集合を記録する。no-hit だけの速度を合格根拠にしない。
+- 検索 p95 < 300 ms は参考指標（2026-10-26 の利用者判断により latency 単独ではマージ blocking にしない。下記参照）: release ビルド、warm / cold、backfill あり / なし、語の種類別。計測と本番は同一の抽出器・extractor_version / accounting_version・会計係数を用いる。正確性・カバレッジ・資源エラーは引き続き blocking。
+- 前景の書き込み待ち: 同じ workload / store / 設定で索引無効時を基準に、backfill / 巨大 run / 回収時の p50 / p95 / 最大と増分を測る。順序 2 で基準値と許容する絶対増分・倍率を数値化し、順序 5 前に ADR に固定する（未計測・現時点では未検証）。超過したら step / transaction の分割・予算縮小を行い再計測し、それでも超過なら実装を止め利用者へ判断を求める。基準を後から緩めて合格扱いしない。
+- R3 の F / G / reserve / 停止再開閾値は DB+WAL のピークから検証する。論理 bytes と物理増加量は別々に報告する。
+- 結果は「Phase B 実装状況チェックリスト」の計測の項目に記録する。
+
+#### 検索 latency の受け入れ方針変更（2026-10-26）
+
+利用者は、安全な製品候補の tool 条件 p95 約 3 秒 / 17 ページの drain 約 33 秒を踏まえ、次のように判断した（原文）:
+
+> まあ一旦はこの秒数でも問題なさそうだな。そこまで頻繁に検索が実施されるわけでもないだろうし。このまま進めていいよ
+
+検索はそれほど頻繁に実施されないという理由から、この秒数を許容して進める。従来の「全条件 p95 < 300 ms」をマージ blocking から**参考指標**へ変更する。比較方法（厳密な `< 300 ms`）と計測値は残すが、latency だけで計測を早期打切りにしたり、再開・集計を失敗にしたりしない。これは明示的な利用者判断による方針変更であり、旧計測を高速だったことにするものではない。
+
+過去の FAIL は削除・合格への書換えをしない。初回 warm/off ASCII p95 1,589.601 ms に加え、引継ぎで報告された tool warm/off p95 4,801.174 ms（`c33cd88f` の旧 sort 経路、100 drains / 1,700 pages、各 drain の canonical 70 threads / 29,173 hits 完全一致）は**旧 latency ゲートでは FAIL**だった証拠として保持する。この実行は 5 PASS / tool latency 1 FAIL / 22 missing（no-hit・cold・backfill-on 未計測）。ordered-union 製品候補の補助 mini drain は p95 2,993.172 ms、drain 32.900396 秒 / 17 ページ、canonical 70 threads / 29,173 hits と全 page shape が一致した。これも旧指標超過だが、100-drain 受入計測ではない。後二者は引継ぎの既往観測であり、今回の新たな計測や全条件完了を示さない。詳細な既往計測は `docs/thread-search-benchmark.md` を参照する。
+
+正確性（認可・redaction・正解 hit 集合・cursor 完走を含む）、分類・現行索引のカバレッジ、容量不足などの資源エラーは引き続き blocking とする。出力上限、backfill の進捗・実重複チェック、既存の 120 秒 watchdog は緩めない。前景書き込み待ちなど検索 latency 以外のゲートも変更しない。28 条件 × 100 反復、warm 5 回、query・scope・タイミング境界は維持し、未計測や旧 binary の結果を現在の matrix 合格に読み替えない。
+
+#### S8 WAL 回復修正後の再計測範囲（利用者判断）
+
+利用者の判断の原文: 「①（推奨）索引作業ありの14条件だけ ×100回（約3〜4時間）。索引作業なしの13条件は今回の結果を引き継ぐ」。ここで原文の「13条件」は実際の matrix では 7 クラス × warm / cold = **14 セル**を指す。
+
+- backfill **on の 14 セル**は checkpoint 回復修正を含む binary `8bffe9d0` で計測した。資源エラーを含む旧 on セルは継承しない。tool cold は並行負荷下で 1 回のみの計測であり、全セルが 100 回完了したという意味ではない。
+- backfill **off の 14 セル**は `3ca7f672` binary で全セル PASS 済みの結果を継承する。`3ca7f672` から計測した binary `8bffe9d0` までの差分では検索経路に変更がないことを確認した。今回の修正は writer の WAL admission と診断・計測結果保持であり、索引作業なしの検索経路は変更しないことが継承の根拠である。
+- これは上記の「旧 binary の結果を現在の matrix 合格に読み替えない」に対する、検索経路不変を条件とした明示的な例外である。on の再計測、off の差分確認、証拠集計は完了した。
+
+対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。計測用の一時的な FTS プロトタイプは製品へ持ち込まない。
+
+#### S8 の既知の制約: 遅い検索と background backfill の重複
+
+遅い検索（phrase・tool）と background backfill が重なると、検索の読み取りが WAL を pin し、`wal_checkpoint(TRUNCATE)` でも WAL が縮まらず、merge step の admission が `IndexPaused(WalLimit)` で止まることがある。また tool 検索はハーネスの 1 drain あたり 120 秒 watchdog に達し、検索を完了できないことがある。利用上は、索引作業中に tool の出力を頻出語で検索すると、1 ページに数秒〜十数秒かかり得る。
+
+phrase の cold / warm `IndexPaused(WalLimit)` セルの WAL は、それぞれ **59,089,072 B** / **58,936,632 B** で、どちらも merge の `G_wal` は **8,437,792 B**、`max_wal_bytes` は **64 MiB** である。WAL 単体は上限未満でも、次の step の `G_wal` を加えると上限を超えるため admission が停止する。この停止は容量上限を守る安全な停止であり、データの破損や消失はない。容量が回復すれば background backfill は再開する。ただし、停止中に出た request は待機して継続するのではなく、`capacity_paused` の gap で終端化する。
+
+tool warm / cold はハーネスの 1 drain あたり 120 秒 watchdog に達して `runtime_deadline` で失敗し、検索完了は **0/100**。warm は CPU に負荷のない状態で再計測しても同じ結果だった。backfill off の約 **43 秒**に対し、on は watchdog の **120 秒**に達した。単純比較では少なくとも約 **2.8 倍**に相当する下限だが、drain が完了していないため完了した drain での実測倍率は得られていない。計測時は I/O PSI が高く、`some avg10` は約 **85〜90**だった。遅くなった原因は特定できていない。cold は並行負荷がある中での 1 回だけの計測である。今回の最終計測で観測した範囲では正確性の不一致は観測されていない。ただし、未完了の tool 検索については不一致の記録はないが、完全な正解集合と coverage は検証できていない。
+
+利用者は次のように判断した（原文をそれぞれ保持）:
+
+> 1（推奨）: 今回は既知の制約として記録し、残り13条件を測って問題なければマージ。「待機して自動再開」は別 PR で対応
+
+> 1: 「遅い検索（phrase・tool）＋索引作業あり」での WAL 一時停止をまとめて既知の制約にし、他のクエリが PASS ならマージ。待機・自動再開は別 PR
+
+> 1（推奨）: tool の索引作業あり2条件も「遅い検索＋索引作業あり」の既知の制約に含めて記録し、push・CI・マージへ進む。改善は別 PR
+
+この判断により、既知の制約の範囲を「遅い検索（phrase・tool）＋background backfill」に広げ、WAL の一時停止と検索遅延（`runtime_deadline`）の両方を含める。それ以外の正確性・カバレッジ・資源エラーのゲートは変更しない。過去の FAIL はすべて保持し、PASS に書き換えない。
+
+今後の対応は別 PR とする。期限付きの非同期待機と自動再開を実装し、容量の上限と `G` を維持したまま request を待機・継続できるようにする。また、backfill と並行したときの遅い検索を改善する。今回はこれらを実装しない。
+
+**S8 の最終セル結果:**
+
+- backfill off の 14 セル（ascii_trigram / short / unicode / phrase / regex / tool / nohit の warm / cold）は binary `3ca7f672`（SHA `122acfaa…`）ですべて PASS。利用者の判断により、この結果を引き継ぐ。`3ca7f672` から計測した binary `8bffe9d0`（SHA `da7f2b13…`）まで、検索経路の差分は空である。
+- backfill on の 10 セル（ascii_trigram / short / unicode / regex / nohit の warm / cold）は binary `8bffe9d0`（SHA `da7f2b13…`）で PASS。
+- backfill on の phrase warm / cold の 2 セルは `IndexPaused(WalLimit)` で FAIL。
+- backfill on の tool warm / cold の 2 セルは `runtime_deadline` で FAIL。warm は CPU 負荷なしでも同じ結果、cold は並行負荷下の 1 回のみの計測。
+- 今回の最終計測で観測した範囲では正確性の不一致は観測されていない。ただし未完了の tool 検索は、不一致の記録はないが、完全な正解集合と coverage を検証できていない。既往の FAIL およびこの計測の FAIL はすべて失敗として残し、PASS に読み替えない。
+
+### 実装時に確認すること
+
+実装直前に再確認する項目: v25 の空き、source を更新・削除する全経路の棚卸し、note しかない run の binding、既存の排他の再利用可否、bundled SQLite の trigram / dbstat、DB 全体の上限設定の出所と reload / 再起動の実配線、cursor の互換性。
+
+HEAD `517c980e` で確認済みの現状は R1（provenance 不在・continuity / fork / compaction / restore の保存）と R3（容量停止エラー・DB/WAL/SHM 集計）に記録した。sidecar 保存先・位置対応・新設定の有効時点は上の新設契約で固定した。v25 の空きは起点時の確認であり、実装時に取り直す。reserve と前景許容値の数値・契約の実装成立性は未計測 / 未検証で、順序 5 の開始ゲートを省略しない。
+
 ## Alternatives
 
 - ID の形式が正しければ許可する: 推測可能な ID による越境閲覧を招く。
@@ -354,7 +753,7 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
   - 環境起因の失敗: rebase した結果での最初の実行（sandbox の長い `TMPDIR`）では、上の 4 crate のうち 4 件が失敗し 1 件がタイムアウトした。3 件は `path must be shorter than SUN_LEN`（Unix ソケットのパスが長すぎる）で失敗した。残りの 2 件（ownership IPC を使う `headless_layout` の 1 件と、端末の `terminal_headless` の 1 件）も `TMPDIR=/tmp/evt` では成功したため、同じソケットパス長の問題と判断した。
   - コード起因の失敗はなかった。
 - [x] 受け入れレビュー — 独立 Reviewer 合格（対象 HEAD: `51c6ba50`、must / should / nit なし）
-- [ ] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: [#351](https://github.com/turtton/evorch/pull/351)、PR 作成時 head: `e7b79534`
+- [x] PR 作成とマージ（ユーザー許可: CI 成功と独立レビュー合格後に squash マージ）— PR: [#351](https://github.com/turtton/evorch/pull/351)、PR 作成時 head: `e7b79534`。squash マージ済み。merge commit: `5d23cab4`（`feat: reference other threads' conversations with thread_search, thread_grep and thread_read (ADR 0041) (#351)`、2026-10-25 04:51:57 +09:00）。
 
 ### 受け入れレビュー 1 回目の指摘への対応
 
@@ -403,3 +802,103 @@ Phase 0 の計測は完了した。正規化時間は Python の JSON parse・�
 3. `git log --oneline -- intents/evorch/decisions/0041-thread-context-reference.md crates/storage crates/runtime/src/meta crates/gui/src/app` などで、チェック済みでもコミットが残っているか確かめる。
 4. マイグレーション番号、`HistoryRead` の位置、`capabilities()` の形などは、実装前に現行のコードで確認する（この ADR の番号は 2026-10-24 時点）。
 5. コミットは署名つきで、`type(scope): subject` 形式にする。マージは「実装状況」の PR の行の条件（CI 成功と独立レビュー合格）を満たしてから squash で行う。
+
+## Phase B 実装状況チェックリスト
+
+Phase B の進捗を記録する。各項目の完了時に `[x]` にして、commit SHA と検証結果を記入する。設計は「Phase B の設計」に従う。
+
+- 作業場所: worktree `/home/turtton/.ghr/github.com/turtton/evorch/.worktrees/thread-conversation-search`、ブランチ `feat/thread-conversation-search`（起点は origin/main の `870a969b`）。メインのチェックアウトと他の worktree の `target` には触らない。
+- コミットは署名つきで、`type(scope): subject` 形式にする。force push はしない。区切りごとに commit と push を行う。
+- ユーザー許可（原文）:「推奨で、マージまでOK」。worktree で作業 → 計画の独立レビュー → 実装 → 別の Reviewer による受け入れ → push と PR → CI 成功で squash マージ（`--match-head-commit`）。
+
+### 計画と契約
+
+- [x] ADR に計画記載 — commit: この節を書いたコミット（`git log -- intents/evorch/decisions/0041-thread-context-reference.md` で確認）。Phase A の merge commit（`5d23cab4`）と Phase 0 計測の要約も同じコミットで記録した。
+- [x] plan review 指摘 R1–R5 反映 — provenance の保存・変換 API、状態遷移表、物理 reserve / admission、normalize / guarded note、CLI request / owner の契約と受け入れケースを追加。S1 の単独ファイル owner と S2 の計測条件も反映。commit: 本項目を追加した `docs(adr): address Phase B plan review contracts`（SHA は `git log` で確認）。コード変更なし。差分範囲・B-1〜B-4 不変・必須契約の記載を確認（実装テストは未実施）。
+- [x] 計画の独立レビュー（plan review）— M1〜M6 と R1〜R5 / S1〜S2 を反映済み。独立 Reviewer による再レビューで合格（must 0 件）。判定: 合格
+- [x] 順序 1 契約の固定 — R1 の保存形式・全変換・W1/W2/W4 API / fixture、R2–R5、設定型・API とファイル所有表を固定。順序 2 / 3 の開始ゲート。storage 共有契約は `crates/storage/src/thread_index.rs` / `thread_index/contracts.rs` に型・trait として定義（SQL / writer / job の実装ではない）。`read.rs` は W1 単独所有。W3 の strict 設定型・検証の合流が完了し、契約固定完了。commit: `6f632712` および設定コミット
+  - [x] storage 共有型・API・所有表 — `6f632712`（`feat(storage): define Phase B conversation index contracts`、GitHub Verified）。抽出/commit 補助契約と fixture は後続の最小抽出器コミットに含む。
+  - [x] W3 strict 設定型・検証の合流（順序 1 全体の残ゲート）— `crates/config/src/types/storage.rs` に `[storage.thread_index]` の `StorageConfig { thread_index: ThreadIndexConfig }`（`serde(default, deny_unknown_fields)`）を新設。既定は `enabled = true`（統括判断）、`max_bytes = 536_870_912`（512 MiB、確定決定）。`max_bytes` は 1 MiB..=10 GiB（storage 既定の `hard_limits.max_db_bytes` と同じ上限）で、無効時も検証して丸めない（`0` で無効化する書き方は拒否）。`ThreadIndexConfig::validate` を読み込み（通常・strict）と保存前検証から呼ぶ。strict は `storage.*` / `storage.thread_index.*` の未知キーを完全 path で拒否し、通常読み込みは警告して除去する。project 層は既存規則どおり無視（DB はユーザー単位）。storage 側は `StorageConfig.thread_index: ThreadIndexSettings`（既定 有効・`DEFAULT_THREAD_INDEX_MAX_BYTES`）を `Storage::open` 時の初期値として追加した。JSON Schema（`docs/config/evorch-config-v3.schema.json`）を再生成し、`operations/config-reference.md` に追記。
+    - 反映方式の調査結果: 現状の storage 系設定は GUI 起動時に `StorageConfig` を組み立てて `Storage::open` に渡すだけである（`gui/src/bin/evorch-gui.rs:661–667`。既存の `metrics.retention_days` → `usage_retention_days` も同じ）。GUI の `reload_config`（同 `:426`、`:959–964` で `model::production::reload_models` を登録）と設定保存後の再読込はモデル routing だけを再構成し、storage は再読込しない。CLI（`crates/evorch`）は現時点で Storage を開かない。したがって既存体系と一致するのは「起動時反映（変更は再起動で有効）」であり、順序 7 の W5 はまず起動時に `config::ThreadIndexConfig` → `StorageConfig.thread_index` を写す。実行中の反映が必要なら、W5 が reload 経路から W2 の `apply_index_settings` を呼ぶ（writer コマンド順、R2 表の「上限引き上げ・設定再取り込み」は state 維持）。
+    - config crate は storage に依存しないため、512 MiB は `config::DEFAULT_THREAD_INDEX_MAX_BYTES` と `storage::thread_index::DEFAULT_THREAD_INDEX_MAX_BYTES` の両方に定義した。一致は W5 の配線テストで確認する。
+    - 検証: `cargo nextest run -p config --locked -j 4` 421 件成功（新規 11 件: 型の単体 5 件、読み込み統合 6 件）、storage の `storage_config_default_uses_documented_values` 成功。commit: 本項目更新コミット（`feat(config): add strict [storage.thread_index] settings`、SHA は `git log` で確認）
+- [ ] 順序 2 最小の抽出器で計測 — W1 の抽出 / 会計関数を W6 から呼ぶ。provenance 不明を native と仮定しない。commit:
+  - [x] storage の最小抽出器・境界/除外/provenance fixture と runtime normalize の共通比較契約テスト — commit: 本項目追加コミット（`git log` で確認）。**当時の状態:** 本契約テストの追加時点では計測ハーネス・実 store 計測・共通会計実装/係数は未実施だった。その後の実施状況と確定したセル結果は「S8 の最終セル結果」を参照する。順序 2 全体のチェックは維持する。現在も未検証の検索正確性・coverage とその他の検証事項は、下記の各未チェック項目に分けて記録する。
+  - [x] W6 計測ハーネスと実 store コピーの容量計測 — `crates/storage/examples/thread_index_measure.rs`（`mode=ro` + backup API でコピー、W1 の `extract_snapshot_bundle` だけで抽出）。結果は「Phase B 順序 2 の計測」節と下の計測項目。係数案 `per_block=376, per_run=325, fts=2387/1000`。commit: 本項目追加コミット（`feat(storage): add Phase B index capacity measurement harness`、SHA は `git log` で確認）
+  - [ ] 順序 2 の残り — 共通 `SharedIndexAccountant` / `charge_index_bytes` とハーネスへの配線は実装済み（`ACCOUNTING_VERSION=1`、下記参照）。順序 5 開始ゲートの F / 前景待ち基準値は同ゲート節の実測を参照。順序 2 全体の完了とはしない。S8 の確定したセル結果は「S8 の最終セル結果」を参照する。未完了の tool 検索の完全な正解集合・coverage と、その他の未検証事項はそれぞれの未チェック項目に記載する。
+- [x] 順序 3 migration（v25）・抽出・状態遷移 — provenance 原子的保存・復元を含む。commit: a7d12ec5
+  - `migrations/v25.sql`: `run_contexts.snapshot_revision`（既存行は 0）、sidecar `run_context_provenance`（`evidence_json` を追加）、`thread_index_runs`（ADR の列に `snapshot_revision` / `indexed_{extractor,accounting}_version` / `attribute_bytes` / `evicted_reason` / `work_generation` / `source_after_tombstone` を追加）、`conversation_blocks`（`source_key` は message が `"<ordinal>:<block_index>"`、note が `"working_note"`）、`conversation_fts`（trigram・external content・`columnsize=0`、更新トリガーは `WHEN old.text IS NOT new.text` で位置だけの更新では FTS を触らない）、`thread_index_state`（新規行の適用 version と discovery の再開位置）、`thread_index_lease`（epoch 減少を trigger で拒否）、`thread_index_requests` / `_targets`（target の識別子を trigger で不変化）。v25 は実装時も origin/main（bc2fa27b、最新 v24）で空きだった。
+  - bundled SQLite は 3.53.2（libsqlite3-sys 0.38.2、`SQLITE_ENABLE_FTS5` / `SQLITE_ENABLE_DBSTAT_VTAB` 付き）。trigram と dbstat が使えることを `bundled_sqlite_supports_trigram_fts_and_dbstat` で確認した。
+  - `repo/thread_index.rs`: `SqliteSnapshotStore`（`SnapshotRepository`）と `StagedSnapshot`（`SnapshotTransaction`）。redaction 後 snapshot・binding・sidecar・`source_revision`・R2 の状態を SAVEPOINT 1 つで保存し、呼び出し側の transaction（evidence / reference consumption 分岐）にもそのまま参加する。`load_snapshot_bundle` / `resolve_guarded_reference` も同じ read transaction で読む。R2 表は純関数 `index_transition` に集約し、全セルを `transition_matrix_matches_adr_r2` で固定した。
+  - 実装判断: (1) runtime が渡した Verified の map が保存後の snapshot と合わなければ、保存は拒否せず sidecar を `unknown`（`incomplete_map` 等）に格下げする（正本を優先し、native とは扱わない）。(2) provenance を渡さない従来 API（`upsert_run_context*`、`run_context::upsert`）は `unknown(legacy_unproven)` の sidecar を書く。(3) tombstone 後に同じ run の正本が保存された場合、正本は保存するが D と source 情報を維持し `source_after_tombstone` を立てる。(4) message の guarded ref は M5 本文を優先し、両 source / snapshot の一致を要求する（note の更新で進んだ source_revision でも stale とする）。(5) `retention_at_ns` は行の作成時に確定し、ULID の run_id の時刻部（`thread_index::run_id_created_at_ns`、W6 の計測と同じ規則）・既存 snapshot / 最初の note の時刻のうち最も古いものとする。(6) u64 の revision / 件数のため storage の rusqlite に `fallible_uint` を有効にした。
+- [x] 順序 4 不可分な置換（索引の置換・evict・source 削除の tombstone）— commit: a7d12ec5（storage / writer の SQL 側。job ループへの組み込み・lease の取得と heartbeat・上限運用は順序 5）
+  - `repo/thread_index/index.rs` の `SqliteThreadIndex`（`ThreadIndexRepository`）: ヘッダだけの keyset discovery（索引行のない run を新しい順、`discover_batch`）、lease epoch・期限・revision・generation・state・version・request target を確認してからの差分 commit（`ON CONFLICT DO UPDATE`、消えた key の削除、FTS・集計・state・request target を同一 transaction）、同じ guard 付きの失敗 commit（1 s から 2 倍・上限 5 分、同 revision 5 回目で `blocked(attempts_exhausted)`）、`promote_due_retries`（試行数は維持）、`evict_index`（block・FTS・集計を削除、generation を進める）、`eviction_candidates`（`retention_at_ns ASC, run_id ASC`）、`delete_index_source`（tombstone、pending の request target を `deleted` gap）。
+  - writer: `SaveSnapshotBundle` / `SaveSnapshotBundleWithEvidence` / `AppendIndexedNote` コマンドと `StorageHandle::{save_snapshot_bundle, save_snapshot_bundle_with_evidence_and_reference_consumption, append_indexed_note}`。receipt は commit 後にだけ返す。reader に `Database::{snapshot_bundle, resolve_guarded_reference, thread_index_run_status}`。
+  - source を更新する全経路の棚卸し: snapshot は `run_context::upsert`（writer の `UpsertRunContext` と `UpsertRunContextWithEvidence`）と新しい bundle コマンド、note は `run_ledger::append`（`AppendRunLedger`）と `AppendIndexedNote`。いずれも bundle / note の保存関数を通るようにした。`compare_and_swap_restore_state` と `invalidate` は `config_json` / `restorable` だけを変え、索引の入力（messages / checkpoints / note）を変えない。本番コードに `run_contexts` / `run_ledger` を削除する経路はない（`run_ledger` は v7 の trigger で置換も拒否）。そのため `delete_index_source` の呼び出し元は現時点でなく、正本削除を追加するときは同じ transaction で呼ぶ。
+- [x] 順序 5 開始ゲート — reserve の R_floor / safety_factor / F、G の上界係数、再開 J、step 上限、前景待ちの絶対増分・倍率を実測から ADR に数値で固定。結果: 「Phase B 順序 5 開始ゲートの計測（W2）」節に記録（F 19,866,464 B、R 64 MiB、J 16 MiB、G 係数、step 1 MiB / 2,048 block、許容 Δp50 5 ms / Δp95 50 ms / Δmax 250 ms）。E2E の前景待ちの検証は順序 5 の項目で行う。commit: 本項目更新コミット（`git log` で確認）
+- [x] 順序 5 job・lease・上限 — commit: b4949841, a623415a, 61d2db12（全 commit push 済み・GitHub Verified）
+  - 独立レビュー M2 および再レビュー R1 / R2 / S1 修正時の運用契約: 設定 receipt は writer 順の新設定世代の受理を表し、全 run の再会計 / 予算調整の完了を意味しない。設定調整は 2 段階とする。第 1 段の `Reaccounting` で全 run を最大 1 run / step で再会計し、run ごとに atomic に確定する。この間は物理回収の削除も保留する。全 run の再会計が確定した後にだけ第 2 段の `Evicting` へ進み、新しい total のみを用いて予算を満たすために必要な最小量を oldest-first（作成時刻 ASC・同時刻は run_id ASC）・最大 1 run / step で evict する。eviction も run ごとに atomic とし、再会計と eviction を同じ run の 1 transaction にまとめない。
+  - 両段階とも run の保存済み version / charge を再開位置として途中再起動後に再開できる。段階は `IndexCapacityStatus.adjustment = Reaccounting / Evicting / None` で観測でき、物理 pause の理由とは独立である。調整中は新規索引 / ready commit / backfill を先行させない。各削除は旧 block の固定計測会計から FTS delete を含む G を評価し、IMMEDIATE transaction 内で P を再計測して P+G+R / WAL 境界を守る。旧索引そのものが step 上限を超える場合は `growth_unbounded` で旧索引を保持して停止する。物理回収も最大 1 run / step かつ R を保護する。正本削除の `delete_index_source` は foreground 正本 transaction の原子的削除を維持するため、索引 job admission とは別扱いとする。
+  - 停止中の bound は対象の revision / generation に結び付ける。対象が stale になったら ready・bound・pause を破棄して再評価し、古い対象の停止理由を新しい対象へ引き継がない。
+- [x] 順序 6 検索・cursor・ref — commit: 2a8cde4a（push 済み・GitHub Verified）
+  - 再レビューでの検索現行性の契約: 候補 SQL と coverage は共通の条件を用い、run の extractor version と indexed extractor version の両方が binary の extractor version に一致する行だけを現行の `Indexed` とする。旧 extractor の索引は `Pending` として扱い、final_report の metadata fallback を維持する。その旧索引に依存する cursor は stale として扱う。
+- [x] 順序 7 CLI（`reindex-threads`）・設定・spec — commit: c2ad8521（push 済み・GitHub Verified）
+- [ ] 順序 8 実 store のコピーで検証 — commit:
+- [ ] 順序 9 ADR の仕上げ — commit:
+
+### 検証・レビュー・公開
+
+- [ ] 検証（`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo nextest run`、`scripts/check-cache-contracts.sh`）— 対象 HEAD と結果:
+  - 契約・最小抽出器の担当範囲（`6f632712` + 最小抽出器コミットの変更内容）: `CARGO_BUILD_JOBS=4 cargo nextest run -p storage -p runtime --locked -j 4` は **2,115 件成功、8 件 skip**（抽出器 14 件、normalize 共通比較 2 件、型の契約 3 件を含む）。`cargo test -p storage -p runtime --doc --locked -j 4` は storage 8 件成功、runtime 0 件。`cargo clippy --workspace --all-targets --locked -- -D warnings` は警告なしで成功、`cargo fmt --all --check` / `git diff --check` も成功。
+  - すべて指定 worktree の target・権限昇格・並列度 4 で実施。SUN_LEN 等の環境起因失敗なし。実装中の test assertion（`context_len` と本文キーの誤判定）・helper の borrow 型注釈・provider image fixture の `source` 不足は修正後に再検証済み。固定 sleep の追加なし。
+  - `scripts/check-cache-contracts.sh` はこの区切りでは未実施（runtime の production normalize / provider 入力は変更せず、テスト module の追加だけ）。Phase B 全体の cache 契約検証・受け入れ・検索/CLI/FTS は後続のため本項目全体は未完了。
+  - 順序 5〜7 の各実装検証: F storage 403 pass 2 ignored、G focused 56 pass、cache 288 pass 248 skip、S7 CLI 10 pass / GUI 16 pass。全最終回帰・独立受入レビュー・PR CI マージは未実施（未維持）。
+  - 独立レビュー M1 / M3 / S1 の runtime 修正（`230a659b` を基点とする本更新）: 先行回帰は M1 が期待 1 件に対し 0 件、M3 が期待 2001 件に対し 2002 件で失敗した。修正後は `cargo test -p runtime --lib meta::threads --locked` 48 件、provenance 単体 3 件、`--test chat_restore` 9 件、`--example thread_search_measure` 11 件成功。`scripts/check-cache-contracts.sh -j 4` は最終 runtime 差分で 372 pass / 239 skip。`cargo fmt --all --check` / `git diff --check` も成功。固定 sleep や cache 契約の緩和なし。**当時の状態:** この記録時点では matrix と独立最終再レビューが未完了で、修正後に再実行する予定だった。確定した S8 のセル結果は「S8 の最終セル結果」を参照する。独立最終再レビューは引き続き未完了である。
+  - 同修正の `cargo clippy --workspace --all-targets --locked -- -D warnings`: 初回は並行編集中の storage `work.rs` の `collapsible_if` で失敗。storage Worker 修正の `2cd5fced` が入った後に同コマンドを再実行し、警告なしで成功した。runtime Worker は storage を編集していない。
+- [x] FTS の `integrity-check`（rank=1）が受け入れテストで成功する — 結果: `repo/thread_index_tests.rs` の差分 commit・note の位置更新・evict・tombstone・note clear の後に毎回 `integrity-check` を実行し、すべて成功（a7d12ec5）。
+- [ ] R1: fork → compaction → 再起動 / 保存途中障害で native な別発言を誤って除外しない。snapshot / sidecar / revision の原子性と未知理由 — storage 原子性は検証済み（a7d12ec5）。`snapshot_and_note_faults_at_every_boundary_leave_the_old_bundle` は各書き込み境界の障害後に旧 bundle / binding / state を保持し、`staged_snapshot_participates_in_the_callers_transaction` は外側 transaction の rollback を確認する。
+  - **実装済み／テスト定義あり**: runtime `restore/provenance.rs` の fork / continuity / generated-boundary map 保存・復元、`restore/provenance/tests.rs` の `fork_compaction_restart_and_failed_save_keep_native_duplicate_positions` / unknown 理由保持。全生成経路の組合せを検証済みとするものではない。
+  - **今回の実行検証済み**: `same_thread_continuation_searches_original_native_positions_after_restart` は実際の `delegate_chat` 継続、runtime / storage の再起動後の継続、途中 assistant の元 native ref 一件、別プロジェクト非可視、evicted 元位置をコピーから復活させないことを確認。索引検索は同スレッドの全 saved root と（指定時のみ）delegated run を走査し、復元コピーの非 native 扱いを維持する。fork → compaction → 実 runtime 再起動と全保存障害の組合せは **未検証** のため R1 全体は未完了。
+- [ ] R2: evict → 上限引き上げ → snapshot/note 更新 → 再起動で復活しない。blocked の試行数保持・全遷移・tombstone / 遅延 commit — storage 原子性・遷移は検証済み（a7d12ec5）。evict 後の設定取り込み / source 更新 / 再起動 / discovery で E を維持し、retry の backoff・5 回目の blocked・同 revision の試行数維持、旧 guard の遅延 commit 拒否、tombstone 非復活を確認した。
+  - **実装済み／テスト定義あり**: 順序 5 / 7 の明示 reindex、extractor / accounting version 適用、request target の世代・revision 固定。`writer/index/tests.rs` に startup version 適用・include_evicted・request superseded / owner 引継ぎ等のテストがある。順序 5 / 7 の過去実行結果は上記記録を参照。独立レビュー must M2 の容量 admission 修正は別 Worker の `2cd5fced` に含まれる。storage 専用テストの結果は同 Worker の報告を参照し、本 runtime 作業による実行検証や R2 全体の完了判定には読み替えない。
+- [ ] R3: 論理空きあり / 物理 reserve 不足で索引停止、正本書き込み余裕維持、2 サイクル失敗 / WAL reader / 再開境界 — 結果:
+- [ ] R4: 画像+text、2048 B 超 error、明示 tool_result、note 更新・clear 後の guarded reference — 結果:
+  - **実装済み／テスト定義あり**: kinds 和集合、message / note の guarded ref 正本解決・認可・revision stale。抽出と normalize 比較には画像+text・画像 note と同文の native text・2048 B 超 error の全文保持・note clear のテストがある。
+  - **今回の実行検証済み**: runtime thread tools 48 件（`default_conversation_explicit_tools_and_position_dedup`、`guarded_message_note_staleness_and_legacy_refs_use_the_canonical_source`、`note_only_refs_and_deleted_sources_stay_authorized_without_a_snapshot` 等）成功。final_report と conversation の位置所有をページ走査前に決め、未索引時の metadata fallback を維持。2000 候補の後ろに final_report がある 2001 位置を default / 明示 kinds の両方で 2 ページ完走し計 2001 件、native 位置集合・同文別位置・後続 run revision 変更による stale を確認。全受入 matrix は **未検証** のため本項目のチェックは維持する。
+- [x] R5: owner × wait の動作表、対象 revision 固定、各 gap / failed、owner 異常終了・lease 引き継ぎ — 結果: 順序 5・7 で実装・検証済み。legacy 証拠の revision++ 初回は Superseded gaps とし、別 request で再要求。自動 rebind は禁止（Advisor R1/R5 根拠、決定的テスト済み）。owner × wait 動作表、対象 revision 固定、各 gap / failed、owner 異常終了時の lease 引き継ぎを検証。
+- [ ] 受け入れレビュー（実装者とは別の独立した Reviewer）— 対象 HEAD と判定:
+- [ ] PR 作成 — PR:、head:
+- [ ] CI 成功（PR の最新 head SHA に対する必須 check）— head と結果:
+- [ ] マージ（squash、`--match-head-commit`）— merge commit:
+- [ ] 後片付け（マージ確認後の worktree とブランチの削除）— 結果:
+
+### 計測
+
+計測は実 store のコピー（`mode=ro` で開き backup API でコピー。原本には書き込まない）で行う。
+
+- [ ] 切り詰め後の本文（kind 別）、FTS、補助テーブル、WAL のピーク、回収後のサイズ — 結果: 「Phase B 順序 2 の計測」節。切り詰め後の本文 188,372,892 B（上界）、FTS 449,568,768 B（本文の 2.3866 倍）、補助テーブル 292,671,488 + 602,112 B、構築中の WAL 最大 22,721,832 B。計測用 DB への構築値であり、writer 経由の WAL ピークと evict 後の回収後サイズは未計測（順序 5 / 8）
+- [x] `max_bytes` ごとの保持範囲（決定 B-2）— 結果: 実 store のコピー（2026-10-25 12:56Z、1,857 run）。
+  - 容量 strict 計測（実 store 全 1,857 run = 索引化対象適格 690 run + provenance 保留 pending 1,154 run + step_oversized 13 run の coverage 制約、budget_oversized 0）:
+    - 256 MiB: 保持 481 run、最古 2026-10-22T10:10:14Z、evict 209 run
+    - 512 MiB: 保持 690 run、最古 2026-10-16T00:55:36Z、evict 0 run、課金 349,952,179 B（妥当、512 MiB 予算で evict 0）
+    - 1 GiB: 保持 690 run、最古 2026-10-16T00:55:36Z、evict 0 run（同上）
+  - 暫定会計上界（参考）:
+    | `max_bytes` | 保持できる run（N / 全体） | 索引化可能 run 数 | 対象 / 保持本文量（B） | 最古の時刻 | 保留（pending）の数 | oversized の数 |
+    |---|---|---|---|---|---|---|
+    | 256 MiB | 厳密 0 / 1,857。上界 416 / 1,857（421） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 68,517,705（課金 267,583,740） | 上界 2026-10-23T23:42:24Z（推定 16:54:37Z） | 厳密 1,857（provenance_unknown）、上界 0 | 0 |
+    | 512 MiB | 厳密 0 / 1,857。上界 950 / 1,857（972） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 136,888,956（課金 536,523,197） | 上界 2026-10-14T12:35:11Z（推定 11:49:07Z） | 厳密 1,857、上界 0 | 0 |
+    | 1 GiB | 厳密 0 / 1,857。上界 1,857 / 1,857（1,857） | 厳密 0（仮定では抽出可能 1,857） | 対象: 厳密 0 / 上界 188,372,892。保持: 上界 188,372,892（課金 742,927,254） | 上界 2026-09-06T08:04:46Z（全履歴、旧 run の時刻は近似） | 厳密 1,857、上界 0 | 0 |
+  - 512 MiB が明らかに不適切なら、マージ前に報告する。— 所見: 明らかに不適切ではない（strict 保持 690 run、課金 349,952,179 B（約 333.7 MiB）で妥当。evict 0 で全 690 索引化可能 run を収容）。
+- [x] `provenance_unknown` の数（reason_code 別、全体と索引化可能母集団の差も報告）— 結果: v24 の実 store コピーで `missing_sidecar` 1,857（全 run）、他の reason 0。全体 1,857 に対し索引化可能 0（差 1,857）。不正 JSON 等の保留は 0。v25 migration 後に旧 snapshot に sidecar 行を作る場合は reason が `legacy_unproven` になり得るが、保留であることは変わらない
+- [ ] 同じ抽出器 / 会計 version・係数、短語・regex 含む確実に hit がある dataset / 正解集合 — **実装済み／テスト定義あり**: 共通抽出器 `EXTRACTOR_VERSION=1`、`SharedIndexAccountant` / `charge_index_bytes`、`ACCOUNTING_VERSION=1`（per_block 376 B、per_run 325 B、FTS 2387/1000）。容量計測 harness と writer は共通会計を使用する。runtime `thread_search_measure/corpus.rs` は短語・regex 等の確実な hit を持つ case と正本 oracle を生成し、production と同じ全 saved root / delegated run 集合を対象にするよう修正した。S8 の確定したセル結果は「S8 の最終セル結果」を参照する。**未検証**: 未完了の tool 検索については不一致の記録はないが、完全な正解集合と coverage は検証できていない。旧 dataset / 正解集合や過去 FAIL を現行 PASS に読み替えない。
+- [ ] 検索 latency の参考計測と正確性・カバレッジ・資源検証（release ビルド、warm / cold、backfill あり / なし、語の種類別）— 2026-10-26 の利用者判断で p95 < 300 ms は参考指標となり、latency 単独では blocking にしない。**当時の状態:** 旧 blocking ゲート下では off-warm ASCII の最初のセルを 100 drains まで測定した時点で全 matrix の計測を停止して原因調査へ移行した。その後の確定した S8 セル結果と、利用者の判断により既知の制約として受け入れた例外は「S8 の最終セル結果」を参照する。旧時点の記録は保持する: off-warm ASCII 100 drains（800 pages、canonical 95 threads / 1,166 hits 完全一致、partial 0、max output 16,312 B）の実測: page p50 494.983 ms / p95 1,589.601 ms / max 1,646.028 ms、first_page p95 1,032.397 ms / drain p95 6,590.899 ms。最初のセルの 100 drains で未達確定に伴い計測を停止した。後続の tool warm/off 約 4,801 ms は旧ゲートでの FAIL、ordered 候補約 2,993 ms は旧指標超過の補助観測（100-drain 受入計測ではない）として保持（上記方針変更節参照）。このチェック項目は未完了の tool 検索の正確性・coverage、および別記の未検証事項が残るため維持する。
+- [ ] 前景の書き込み待ち（索引無効との p50 / p95 / 最大・絶対増分 / 倍率比較、許容値と超過時の再計測・判断）— 結果: 前景 copy sync_all 開始前（`EVORCH_INDEX_GATE_SYNC_COPY=1`、release 2,000 ops × 8 runs / 4 対）で固定閾値（Δp50 <= 5 ms, Δp95 <= 50 ms, Δmax <= 250 ms）に対し全 PASS。実測増分 Δ(p50 / p95 / max): 2.500 / 39.307 / 115.706 ms; 2.262 / 40.230 / 80.050 ms; 0.024 / 0.617 / 44.227 ms; 0.024 / 0.901 / 46.083 ms。旧未 sync quiet 4 対 FAIL も併記: 7.107 / 53.883 / -501.086 ms; 6.100 / 47.515 / -4611.315 ms; 0.030 / 0.349 / 739.673 ms; 0.017 / 0.455 / 912.035 ms。dirty copy writeback 混入を支持するが、他因ゼロ断定は禁止。なお本 sync_all は実計測準備のコピー汚染除去のみであり、実計測中の backfill sync や DB 設定を変更するものではない。独立 Reviewer に対し、sync_all が準備 copy 汚染除去だけか、現実 backfill writeback 負荷を除いていないか確認予定（未受入）。
+- [ ] DB+WAL の物理増加上界、reserve・停止/再開閾値と正本余裕の実測 — 順序 2 の初期容量計測時点の参考値: 計測用 DB で索引 1 run commit の DB+WAL 増加最大 8,699,120 B（本文 849,724 B、約 10.2 倍）、WAL 最大 22,721,832 B。この時点では F / reserve / J / step 上限は未計測だった。その後「Phase B 順序 5 開始ゲートの計測（W2）」で実測し、F = 19,866,464 B、R = 64 MiB、J = 16 MiB、step 上限 1 MiB / 2,048 block と G の係数を固定済み。**未検証**: S8 の確定したセル結果は「S8 の最終セル結果」を参照する。実 store の検証でも未完了の tool 検索の完全な正解集合・coverage は検証できていない。さらに writer 経由の物理資源条件、正本余裕など、残る未検証事項は各チェック項目に個別に記載しており、この項目全体のチェックは維持する。
+- [ ] 「実装時に確認すること」の全項目の確認結果を記録した — 結果: 一部（a7d12ec5 時点）。v25 の空き（origin/main bc2fa27b で最新 v24）、source を更新・削除する全経路（順序 4 の項）、note しかない run（`run_ledger` だけの run も discovery と note 保存で索引行を作る。binding は従来どおり snapshot 保存時）、bundled SQLite の trigram / dbstat（3.53.2 で利用可）は確認済み。既存の排他の再利用（writer の単一接続上の SAVEPOINT。lease は順序 5）、DB 上限設定の実配線、cursor の互換性は未確認。
+
+### Phase B の再開手順
+
+1. 上の worktree に移動する。メインのチェックアウトには触らない。
+2. 「Phase B の設計」と、このチェックリストの最初の未チェック項目から再開する。
+3. マイグレーション番号（v25）、`writer/state.rs` の行番号などは、実装前に現行のコードで確認する（この ADR の番号は `870a969b` の時点）。
+4. 実 store を使う作業は、原本を `mode=ro` で開いて backup API でコピーしたものだけに行う。

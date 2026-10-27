@@ -73,6 +73,8 @@ mod review;
 mod run;
 pub mod task_queue;
 pub mod team;
+pub mod thread_index;
+pub mod thread_search;
 pub mod thread_start;
 pub mod threads;
 pub mod usage;
@@ -85,8 +87,11 @@ pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
 pub use host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
 pub use projection::{ReconcileSummary, SessionSnapshot};
-pub use read::StoredAgentMessage;
+pub use read::{RunContextHeader, StoredAgentMessage};
 pub use repo::event::StoredEvent;
 pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
-pub use writer::{Storage, StorageHandle, StorageStatistics};
+pub use writer::{
+    Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
+    ThreadIndexJobStatus,
+};

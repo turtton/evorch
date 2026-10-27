@@ -18,6 +18,19 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    /// One read on the shared connection. Thread search composes its scoped
+    /// queries here; callers authorize before reading anything.
+    pub(crate) fn with_database<T>(
+        &self,
+        read: impl FnOnce(&Database) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        read(&database)
+    }
+
     /// Thread definition by exact ID; no visibility check is performed here.
     pub(crate) fn thread(
         &self,
@@ -128,6 +141,17 @@ impl RunStore {
             .terminal_summaries(ids)
     }
 
+    /// Saved state without parsing configuration or conversation JSON.
+    pub(crate) fn run_context_headers(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<storage::RunContextHeader>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .run_context_headers(ids)
+    }
+
     /// Questions delivered to these runs, deduplicated by durable question ID.
     pub(crate) fn user_questions_for_runs(
         &self,
@@ -221,10 +245,57 @@ impl RunStore {
         &self,
         run_id: RunId,
     ) -> Result<Option<RunContextRecord>, StorageError> {
+        Ok(self.restore_bundle(run_id)?.map(|bundle| bundle.record))
+    }
+
+    pub(crate) fn restore_bundle(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<storage::thread_index::SnapshotBundle>, StorageError> {
         self.database
             .lock()
             .map_err(|error| StorageError::Io(error.to_string()))?
-            .run_context(&run_id.to_string())
+            .snapshot_bundle(&run_id.to_string())
+            .map_err(crate::restore::provenance::storage_error)
+    }
+
+    pub(crate) fn restore_provenance(
+        &self,
+        record: &RunContextRecord,
+    ) -> Result<crate::restore::provenance::ConversationProvenance, StorageError> {
+        let run = record
+            .run_id
+            .parse::<RunId>()
+            .map_err(|error| StorageError::Serialization(error.to_string()))?;
+        Ok(self
+            .restore_bundle(run)?
+            .filter(|bundle| {
+                bundle.record.messages_json == record.messages_json
+                    && bundle.record.checkpoints_json == record.checkpoints_json
+            })
+            .map_or_else(
+                crate::restore::provenance::ConversationProvenance::unknown,
+                |bundle| crate::restore::provenance::ConversationProvenance::from_bundle(&bundle),
+            ))
+    }
+
+    pub(crate) fn restore_conversation(
+        &self,
+        record: &RunContextRecord,
+    ) -> Result<crate::restore::RestoredState, crate::RuntimeError> {
+        let mut restored = crate::restore::RestoredState::for_conversation(record)?;
+        restored.provenance = self.restore_provenance(record).map_err(|error| {
+            crate::RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: crate::RunRestoreFailure::CorruptContext(error.to_string()),
+            }
+        })?;
+        let saved_messages: Vec<serde_json::Value> = serde_json::from_str(&record.messages_json)
+            .expect("conversation restore validated JSON");
+        restored
+            .provenance
+            .generated_since(&restored.messages, saved_messages.len());
+        Ok(restored)
     }
 
     pub(crate) fn restore_parent(

@@ -14,15 +14,24 @@ use crate::{
 };
 
 mod cleanup;
+mod index;
+use crate::thread_index::{
+    IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,
+    LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
+    ThreadIndexSettings,
+};
+pub use index::{THREAD_INDEX_LEASE_NS, ThreadIndexCounters, ThreadIndexJobStatus};
 #[cfg(test)]
 mod manual_cleanup_tests;
 mod state;
 #[cfg(test)]
 mod stream_tests;
 
-use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
+use state::{StartState, log_size_state, log_temp_state, run_writer_with_index, temp_exceeded};
 
 type ReplyTx<T = ()> = mpsc::Sender<Result<T, StorageError>>;
+type SnapshotReplyTx<T = crate::thread_index::SnapshotReceipt> =
+    mpsc::Sender<Result<T, crate::thread_index::SnapshotApiError>>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
 // AgentRunStarted 追加で Event が大型化。Box 化は append hot path に alloc を
@@ -63,6 +72,19 @@ enum Command {
     AnswerUserQuestion(String, String, ReplyTx),
     AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
     UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
+    AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
+    SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
+    SaveSnapshotBundleWithEvidence(
+        Box<crate::thread_index::SnapshotWrite>,
+        Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
+        Option<String>,
+        crate::HostInputWrite,
+        SnapshotReplyTx<(
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        )>,
+    ),
     RecordReviewEvidenceWithEdges(
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
@@ -102,6 +124,7 @@ enum Command {
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
+    Index(index::IndexCommand),
     Statistics(ReplyTx<StorageStatistics>),
     DiagnosticCleanupStatus(DiagnosticCleanupScope, ReplyTx<cleanup::CleanupStatus>),
     CleanupDiagnosticBatch(
@@ -150,18 +173,23 @@ impl Storage {
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
         let max_event_bytes = config.hard_limits.max_event_bytes;
         let reader_config = Arc::new(config.clone());
+        // Settings are applied (and versions recorded) before any command runs.
+        let index = index::IndexJob::new(&database.conn, &config, writes_suspended);
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
                 let _lease = lease;
-                run_writer(
+                run_writer_with_index(
                     database.conn,
                     rx,
                     config,
-                    writes_suspended,
-                    soft_warned,
-                    writes_suspended,
-                    temp_warned,
+                    index,
+                    StartState {
+                        writes_suspended,
+                        soft_warned,
+                        suspend_logged: writes_suspended,
+                        temp_warned,
+                    },
                 )
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
@@ -353,6 +381,112 @@ impl StorageHandle {
         record: &crate::RunContextRecord,
     ) -> Result<crate::RunContextReceipt, StorageError> {
         self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
+    }
+
+    /// Append a note revision (empty clears) and advance the run's index source
+    /// in the same transaction; the receipt is returned after commit.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bodies, suspended writes, SQLite failure or a closed writer.
+    pub fn append_indexed_note(
+        &self,
+        run_id: &str,
+        body: &str,
+    ) -> Result<crate::thread_index::NoteReceipt, StorageError> {
+        self.request(|reply| Command::AppendIndexedNote(run_id.into(), body.into(), reply))
+    }
+
+    /// Atomically save a redacted snapshot with its binding, provenance sidecar,
+    /// source revision and index state (ADR 0041 R1). The receipt exists only
+    /// after commit; on error nothing was saved.
+    ///
+    /// # Errors
+    /// Rejects revision conflicts, invalid JSON, suspended writes, SQLite failure or a closed writer.
+    pub fn save_snapshot_bundle(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.snapshot_request(|reply| Command::SaveSnapshotBundle(Box::new(write.clone()), reply))
+    }
+
+    /// [`Self::save_snapshot_bundle`] in the same transaction as evidence,
+    /// lineage and an optional one-time reference consumption.
+    ///
+    /// # Errors
+    /// Rejects consumed references, invalid snapshots or evidence, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_evidence_and_reference_consumption(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.save_snapshot_bundle_with_evidence_and_host_inputs(
+            write,
+            rows,
+            edges,
+            consumed_reference_id,
+            &crate::HostInputWrite::default(),
+        )
+        .map(|(receipt, _)| receipt)
+    }
+
+    /// Save provenance and host-input delivery receipts in the same transaction.
+    ///
+    /// # Errors
+    /// Rejects invalid snapshots or receipts, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_host_inputs(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
+        self.save_snapshot_bundle_with_evidence_and_host_inputs(write, &[], &[], None, host_inputs)
+    }
+
+    /// Atomically save provenance, evidence, lineage, reference consumption and receipts.
+    ///
+    /// # Errors
+    /// Rejects consumed references, invalid snapshots or receipts, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_evidence_and_host_inputs(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
+        self.snapshot_request(|reply| {
+            Command::SaveSnapshotBundleWithEvidence(
+                Box::new(write.clone()),
+                rows.to_vec(),
+                edges.to_vec(),
+                consumed_reference_id.map(String::from),
+                host_inputs.clone(),
+                reply,
+            )
+        })
+    }
+
+    fn snapshot_request<T>(
+        &self,
+        command: impl FnOnce(SnapshotReplyTx<T>) -> Command,
+    ) -> Result<T, crate::thread_index::SnapshotApiError> {
+        let closed = || crate::thread_index::SnapshotApiError::Storage(StorageError::WriterClosed);
+        let (reply, result) = mpsc::channel();
+        self.0.send(command(reply)).map_err(|_| closed())?;
+        result.recv().map_err(|_| closed())?
     }
 
     /// Persist an idempotent evidence batch without truncating or redacting user text.
@@ -874,6 +1008,183 @@ impl StorageHandle {
             .send(command(reply))
             .map_err(|_| StorageError::WriterClosed)?;
         result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    fn index_request<T>(
+        &self,
+        command: impl FnOnce(index::ReplySender<T, StorageError>) -> index::IndexCommand,
+    ) -> Result<T, StorageError> {
+        self.request(|reply| Command::Index(command(reply)))
+    }
+
+    fn index_control<T>(
+        &self,
+        command: impl FnOnce(index::ReplySender<T, RequestFailure>) -> index::IndexCommand,
+    ) -> Result<T, RequestFailure> {
+        let (reply, result) = mpsc::channel();
+        self.0
+            .send(Command::Index(command(reply)))
+            .map_err(|_| RequestFailure::DatabaseUnavailable)?;
+        result
+            .recv()
+            .map_err(|_| RequestFailure::DatabaseUnavailable)?
+    }
+
+    /// Makes this process's writer the long-lived (GUI) index owner: it takes
+    /// the DB lease when free, renews it, and steps the index in the
+    /// background. A CLI must not call this; it submits a request and, when
+    /// the submission elected it, steps in the foreground.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn start_thread_index_owner(&self, owner: IndexOwner) -> Result<LeaseResult, StorageError> {
+        let sender = self.0.clone();
+        self.index_request(|reply| index::IndexCommand::StartOwner(owner, sender, reply))
+    }
+
+    /// Stops the background owner and releases its lease.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn stop_thread_index_owner(&self) -> Result<(), StorageError> {
+        self.index_request(index::IndexCommand::StopOwner)
+    }
+
+    /// Persists a reindex request with its frozen targets and elects the owner
+    /// in the same transaction (ADR 0041 R5).
+    /// All index-control `now_ns` arguments must be Unix-epoch wall-clock nanoseconds (`SystemTime`), matching admission's resampled clock.
+    ///
+    /// # Errors
+    /// `InvalidArguments` before acceptance, `PersistenceUnavailable` /
+    /// `DatabaseUnavailable` when the request could not be stored.
+    pub fn submit_thread_index_request(
+        &self,
+        request: &ReindexRequest,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<RequestSubmission, RequestFailure> {
+        let request = Box::new(request.clone());
+        let owner = owner.clone();
+        self.index_control(|reply| {
+            index::IndexCommand::Submit(request, owner, now_ns, lease_duration_ns, reply)
+        })
+    }
+
+    /// Shared request status, including the current lease holder (if any).
+    ///
+    /// # Errors
+    /// `InvalidArguments` for an unknown id.
+    pub fn thread_index_request_status(
+        &self,
+        request_id: &str,
+        now_ns: i64,
+    ) -> Result<RequestStatus, RequestFailure> {
+        let request_id = request_id.to_owned();
+        self.index_control(|reply| index::IndexCommand::Status(request_id, now_ns, reply))
+    }
+
+    /// Cancels only this request; shared work for other requests continues.
+    ///
+    /// # Errors
+    /// `InvalidArguments` for an unknown id.
+    pub fn cancel_thread_index_request(
+        &self,
+        request_id: &str,
+        now_ns: i64,
+    ) -> Result<RequestStatus, RequestFailure> {
+        let request_id = request_id.to_owned();
+        self.index_control(|reply| index::IndexCommand::Cancel(request_id, now_ns, reply))
+    }
+
+    /// Fenced lease election (new epoch for a new owner).
+    ///
+    /// # Errors
+    /// Returns an error when the lease row cannot be written.
+    pub fn acquire_thread_index_lease(
+        &self,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<LeaseResult, RequestFailure> {
+        let owner = owner.clone();
+        self.index_control(|reply| {
+            index::IndexCommand::Acquire(owner, now_ns, lease_duration_ns, reply)
+        })
+    }
+
+    /// Renews only the exact live lease.
+    ///
+    /// # Errors
+    /// Returns an error when the lease row cannot be written.
+    pub fn heartbeat_thread_index_lease(
+        &self,
+        lease: &IndexLease,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<LeaseResult, RequestFailure> {
+        let lease = lease.clone();
+        self.index_control(|reply| {
+            index::IndexCommand::Heartbeat(lease, now_ns, lease_duration_ns, reply)
+        })
+    }
+
+    /// Releases the lease if it is still this epoch's.
+    ///
+    /// # Errors
+    /// Returns an error when the lease row cannot be written.
+    pub fn release_thread_index_lease(&self, lease: &IndexLease) -> Result<(), RequestFailure> {
+        let lease = lease.clone();
+        self.index_control(|reply| index::IndexCommand::Release(lease, reply))
+    }
+
+    /// One foreground step of the shared index work (CLI owner).
+    ///
+    /// # Errors
+    /// `UnrecoverableControlFailure` when the step could not run.
+    pub fn step_thread_index(
+        &self,
+        lease: &IndexLease,
+        now_ns: i64,
+    ) -> Result<IndexStepResult, RequestFailure> {
+        let lease = lease.clone();
+        let sender = self.0.clone();
+        self.index_control(|reply| index::IndexCommand::Step(lease, now_ns, sender, reply))
+    }
+
+    /// The shared capacity decision (`capacity_status`) with measured sizes.
+    ///
+    /// # Errors
+    /// Returns an error for a file-size or SQLite failure.
+    pub fn thread_index_capacity(&self) -> Result<IndexCapacityStatus, StorageError> {
+        self.index_request(index::IndexCommand::Capacity)
+    }
+
+    /// Applies index settings in writer order; the new limit is effective from
+    /// this point. Raising the limit never revives evicted runs.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn apply_thread_index_settings(
+        &self,
+        settings: ThreadIndexSettings,
+    ) -> Result<IndexSettingsReceipt, StorageError> {
+        self.index_request(|reply| index::IndexCommand::ApplySettings(settings, reply))
+    }
+
+    /// Diagnostics of the background index job (no index content).
+    ///
+    /// # Errors
+    /// Returns an error for a closed writer.
+    pub fn thread_index_job_status(&self) -> Result<ThreadIndexJobStatus, StorageError> {
+        self.index_request(index::IndexCommand::JobStatus)
+    }
+
+    #[cfg(test)]
+    fn block_writer(&self, release: mpsc::Receiver<()>) -> Result<(), StorageError> {
+        self.0
+            .send(Command::Index(index::IndexCommand::Block(release)))
+            .map_err(|_| StorageError::WriterClosed)
     }
 }
 

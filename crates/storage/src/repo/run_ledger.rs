@@ -5,12 +5,25 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::entity::SecretGuard;
 use crate::{RunLedgerEntry, StorageError, system_time_to_ns};
 
+/// Appends a note revision and advances the run's index source in one
+/// transaction (ADR 0041 R1/R2), so no note write bypasses the index state.
 pub fn append(conn: &Connection, run_id: &str, body: &str) -> Result<u64, StorageError> {
+    let created_at_ns = system_time_to_ns(SystemTime::now())?;
+    crate::repo::thread_index::append_note(conn, run_id, body, created_at_ns)
+        .map(|receipt| receipt.note.seq)
+}
+
+/// Raw ledger insert; callers must also record the source change.
+pub(crate) fn append_at(
+    conn: &Connection,
+    run_id: &str,
+    body: &str,
+    created_at_ns: i64,
+) -> Result<u64, StorageError> {
     if body.len() > 8192 {
         return Err(StorageError::InvalidRunLedgerBody { bytes: body.len() });
     }
     SecretGuard::from_env().check_text("ledger", "body", body)?;
-    let created_at_ns = system_time_to_ns(SystemTime::now())?;
     let seq: i64 = conn.query_row(
         "INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES (?1, ?2, ?3) RETURNING seq",
         params![run_id, body, created_at_ns],

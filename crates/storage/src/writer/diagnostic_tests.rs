@@ -21,6 +21,7 @@ fn fixture() -> WriterState {
         next_checkpoint_at: Instant::now(),
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
+        index: crate::writer::index::IndexJob::inert(),
         task_progress_cursor: Default::default(),
     }
 }

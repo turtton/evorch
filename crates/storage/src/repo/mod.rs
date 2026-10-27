@@ -18,6 +18,9 @@ pub mod run_context;
 pub mod run_ledger;
 pub mod session;
 pub mod task;
+pub(crate) mod thread_index;
+#[cfg(test)]
+mod thread_index_tests;
 pub(crate) mod thread_start;
 pub(crate) mod threads;
 pub(crate) mod usage;

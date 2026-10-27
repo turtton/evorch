@@ -86,20 +86,27 @@ pub(crate) fn persist_escalation_seed(
             content: blocks,
         });
     }
+    let mut provenance = super::provenance::ConversationProvenance::default();
+    if messages.len() == 2 {
+        provenance.continuity(&messages, continuity);
+    }
+    let record = storage::RunContextRecord {
+        run_id: run_id.to_string(),
+        role: descriptor.role.clone(),
+        name: descriptor.name.clone().expect("handoff name"),
+        parent_run_id: None,
+        config_json: serde_json::to_string(&descriptor)?,
+        messages_json: serde_json::to_string(&messages)?,
+        checkpoints_json: "[]".into(),
+        terminal_phase: "Error".into(),
+        restorable: true,
+        updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
+        host_inputs_json: "[]".into(),
+    };
+    let write = provenance.write(record)?;
     store
         .handle
-        .upsert_run_context(&storage::RunContextRecord {
-            run_id: run_id.to_string(),
-            role: descriptor.role.clone(),
-            name: descriptor.name.clone().expect("handoff name"),
-            parent_run_id: None,
-            config_json: serde_json::to_string(&descriptor)?,
-            messages_json: serde_json::to_string(&messages)?,
-            checkpoints_json: "[]".into(),
-            terminal_phase: "Error".into(),
-            restorable: true,
-            updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
-            host_inputs_json: "[]".into(),
-        })?;
+        .save_snapshot_bundle(&write)
+        .map_err(super::provenance::storage_error)?;
     Ok(())
 }

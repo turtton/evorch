@@ -189,6 +189,31 @@ async fn completed_resume_preserves_history_goal_request_and_current_review_auth
     }
     runtime.stop(run, StopScope::SelfOnly).unwrap();
     runtime.wait(run).await.unwrap();
+    let bundle = runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_bundle(run)
+        .unwrap()
+        .unwrap();
+    let indexed = storage::thread_index::extract_snapshot_bundle(
+        &bundle,
+        &secret_guard::SecretRedactor::from_env(),
+    )
+    .unwrap();
+    assert!(
+        indexed
+            .blocks
+            .iter()
+            .any(|block| block.text == "real followup")
+    );
+    assert!(
+        indexed
+            .blocks
+            .iter()
+            .any(|block| block.text == "original request")
+    );
 }
 
 #[tokio::test]

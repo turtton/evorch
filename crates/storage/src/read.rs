@@ -18,6 +18,14 @@ pub struct StoredAgentMessage {
     pub disposition: DeliveryDisposition,
 }
 
+/// Saved identity and state, without reading configuration or conversation JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContextHeader {
+    pub run_id: String,
+    pub terminal_phase: String,
+    pub updated_at_ns: i64,
+}
+
 impl Database {
     pub fn user_question(&self, id: &str) -> Result<Option<event_bus::UserQuestion>, StorageError> {
         crate::repo::user_questions::get(&self.conn, id)
@@ -216,6 +224,18 @@ impl Database {
     /// Returns an error if SQLite access or row decoding fails.
     pub fn run_context(&self, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
         run_context::get(&self.conn, run_id)
+    }
+
+    /// Saved headers in requested order, once per ID, skipping unsaved runs.
+    /// This does not parse or return any configuration or conversation payload.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_context_headers(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<RunContextHeader>, StorageError> {
+        run_context::headers(&self.conn, run_ids)
     }
 
     /// Delivery receipts for the given prompt IDs, in request order; IDs
@@ -556,5 +576,46 @@ impl Database {
     /// SQLite 操作またはイベントの復元に失敗した場合にエラーを返します。
     pub fn restore_sessions(&self) -> Result<Vec<SessionSnapshot>, StorageError> {
         projection::restore_sessions(&self.conn)
+    }
+}
+
+/// ADR 0041 Phase B reads. Each call reads in one transaction.
+impl Database {
+    /// The run's snapshot, provenance sidecar, revisions and latest note.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn snapshot_bundle(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::thread_index::SnapshotBundle>, crate::thread_index::SnapshotApiError>
+    {
+        use crate::thread_index::SnapshotRepository as _;
+        crate::repo::thread_index::SqliteSnapshotStore::new(&self.conn).load_snapshot_bundle(run_id)
+    }
+
+    /// Validates a guarded locator against the canonical source. Authorization
+    /// must already have been checked by the caller.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn resolve_guarded_reference(
+        &self,
+        reference: &crate::thread_index::GuardedReference,
+    ) -> Result<crate::thread_index::GuardedResolution, crate::thread_index::SnapshotApiError> {
+        use crate::thread_index::SnapshotRepository as _;
+        crate::repo::thread_index::SqliteSnapshotStore::new(&self.conn)
+            .resolve_guarded_reference(reference)
+    }
+
+    /// The index state of one run, if it has been seen.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure.
+    pub fn thread_index_run_status(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::thread_index::IndexRunStatus>, StorageError> {
+        crate::repo::thread_index::index_run_status(&self.conn, run_id)
     }
 }

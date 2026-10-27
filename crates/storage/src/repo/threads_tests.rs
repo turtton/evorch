@@ -150,7 +150,7 @@ fn v23_database_migrates_backfills_and_opens_read_only() {
     let database = Database::open_read_only(&path).unwrap();
 
     // Then: runs are bound by name, thread start, GUI attribution and parent links.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 26);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 27);
     assert_eq!(
         bindings(&database.conn),
         [

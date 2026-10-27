@@ -181,10 +181,14 @@ impl AgentRuntime {
         record.restorable = false;
         record.config_json =
             serde_json::to_string(&descriptor).map_err(|error| error.to_string())?;
+        let write = restored
+            .provenance
+            .write(record.clone())
+            .map_err(|error| error.to_string())?;
         store
             .handle
-            .upsert_run_context(&record)
-            .map_err(|error| error.to_string())?;
+            .save_snapshot_bundle(&write)
+            .map_err(|error| format!("{error:?}"))?;
         Self::install_restored_execution(
             child,
             Some(caller),

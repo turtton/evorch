@@ -20,6 +20,54 @@ fn record() -> RunContextRecord {
 }
 
 #[test]
+fn headers_preserve_order_and_state_without_decoding_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("headers.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut first = record();
+    first.run_id = "run-headers-a".into();
+    first.terminal_phase = "Done".into();
+    first.updated_at_ns = i64::MAX;
+    storage.handle().upsert_run_context(&first).unwrap();
+    let mut second = first.clone();
+    second.run_id = "run-headers-b".into();
+    second.terminal_phase = "Checkpoint".into();
+    second.updated_at_ns = i64::MIN;
+    storage.handle().upsert_run_context(&second).unwrap();
+
+    // Corrupt/legacy payloads must not affect a header-only read.
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    conn.execute(
+        "UPDATE run_contexts SET config_json = x'ff', messages_json = x'ff', \
+         checkpoints_json = x'ff'",
+        [],
+    )
+    .unwrap();
+    let db = Database::open_read_only(&config.db_path).unwrap();
+    let ids = ["run-headers-b", "missing", "run-headers-a", "run-headers-b"].map(str::to_owned);
+    assert_eq!(
+        db.run_context_headers(&ids).unwrap(),
+        [
+            storage::RunContextHeader {
+                run_id: second.run_id,
+                terminal_phase: "Checkpoint".into(),
+                updated_at_ns: i64::MIN,
+            },
+            storage::RunContextHeader {
+                run_id: first.run_id,
+                terminal_phase: "Done".into(),
+                updated_at_ns: i64::MAX,
+            },
+        ]
+    );
+    assert!(db.run_context_headers(&[]).unwrap().is_empty());
+    assert!(db.run_context("run-headers-a").is_err());
+}
+
+#[test]
 fn restore_state_cas_preserves_payloads_and_rejects_replaced_reservations() {
     let temp = TempDir::new().unwrap();
     let config = StorageConfig {

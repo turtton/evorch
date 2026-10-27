@@ -92,6 +92,7 @@ mod tests {
     #[test]
     fn compaction_summaries_outside_raw_messages_are_reserved_too() {
         let restored = crate::restore::RestoredState {
+            provenance: Default::default(),
             responses_replay: Default::default(),
             admission_reservation: None,
             turn: None,

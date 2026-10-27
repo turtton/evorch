@@ -196,7 +196,7 @@ impl AgentRuntime {
             self.validate_new_thread_goal(thread, objective, criteria)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
-        let mut restored = RestoredState::for_conversation(&record)?;
+        let mut restored = store.restore_conversation(&record)?;
         let mut host_input = storage::HostInputWrite {
             reconcile_reason: Some("restored".into()),
             ..Default::default()
@@ -329,10 +329,12 @@ impl AgentRuntime {
                 .user_requests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let reconciled = store
+            let (_, reconciled) = store
                 .handle
-                .upsert_run_context_with_evidence_and_host_inputs(
-                    &record,
+                .save_snapshot_bundle_with_evidence_and_host_inputs(
+                    &restored.provenance.write(record.clone()).map_err(|error| {
+                        fail(RunRestoreFailure::CorruptContext(error.to_string()))
+                    })?,
                     &evidence,
                     &[],
                     prompt
@@ -340,7 +342,9 @@ impl AgentRuntime {
                         .map(|pending| pending.reference_id.as_str()),
                     &host_input,
                 )
-                .map_err(|error| Self::review_error(run_id, error))?;
+                .map_err(|error| {
+                    Self::review_error(run_id, crate::restore::provenance::storage_error(error))
+                })?;
             for row in evidence {
                 shared.add_request(crate::run_store::request_from_evidence(row));
             }
@@ -565,7 +569,35 @@ impl AgentRuntime {
                             Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
                                 fail(RunRestoreFailure::CorruptContext(reason))
                             })?);
-                        Some(RestoredState::for_conversation(&record)?)
+                        let mut restored = store.restore_conversation(&record)?;
+                        let source = crate::meta::parse_run_id(&record.run_id)
+                            .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+                        if let Some(bundle) = store.restore_bundle(source).map_err(|error| {
+                            fail(RunRestoreFailure::CorruptContext(error.to_string()))
+                        })? {
+                            if bundle.record.messages_json == record.messages_json
+                                && bundle.record.checkpoints_json == record.checkpoints_json
+                            {
+                                let messages: Vec<providers::Message> = serde_json::from_str(
+                                    &record.messages_json,
+                                )
+                                .map_err(|error| {
+                                    fail(RunRestoreFailure::CorruptContext(error.to_string()))
+                                })?;
+                                let context_len = messages
+                                    .iter()
+                                    .filter(|message| message.role != providers::Role::System)
+                                    .count();
+                                restored.provenance.fork(&bundle, context_len);
+                                restored
+                                    .provenance
+                                    .generated_since(&restored.messages, messages.len());
+                            } else {
+                                restored.provenance =
+                                    crate::restore::provenance::ConversationProvenance::unknown();
+                            }
+                        }
+                        Some(restored)
                     }
                 }
             }
@@ -848,6 +880,18 @@ impl AgentRuntime {
                 "fork_seed: chat role differs from the source conversation".into(),
             )));
         }
-        RestoredState::for_fork_seed(&record, seed.context_len)
+        let mut restored = RestoredState::for_fork_seed(&record, seed.context_len)?;
+        let bundle = store
+            .restore_bundle(source)
+            .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
+            .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
+        if bundle.record.messages_json == record.messages_json
+            && bundle.record.checkpoints_json == record.checkpoints_json
+        {
+            restored.provenance =
+                crate::restore::provenance::ConversationProvenance::from_bundle(&bundle);
+            restored.provenance.fork(&bundle, seed.context_len as usize);
+        }
+        Ok(restored)
     }
 }

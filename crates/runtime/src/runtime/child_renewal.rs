@@ -54,7 +54,10 @@ impl AgentRuntime {
                     run_id: record.run_id.clone(),
                 })?;
         }
-        RestoredState::for_conversation(record)
+        match self.shared.run_store.get() {
+            Some(store) => store.restore_conversation(record),
+            None => RestoredState::for_conversation(record),
+        }
     }
 
     /// Whether `parent` could continue its finished `child` with a message now,

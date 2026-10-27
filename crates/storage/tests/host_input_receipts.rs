@@ -70,6 +70,82 @@ fn status(database: &Database, id: &str) -> Option<HostInputStatus> {
 }
 
 #[test]
+fn provenance_snapshot_and_receipts_commit_or_roll_back_together() {
+    use storage::thread_index::*;
+
+    let (_dir, storage, database, _config) = fixture();
+    let handle = storage.handle();
+    let write = SnapshotWrite {
+        record: context("run-bundle", r#"["prompt-bundle"]"#),
+        expected_snapshot_revision: None,
+        binding: None,
+        status: ProvenanceStatus::Verified {
+            evidence: ProvenanceEvidence::CompletePositionMap,
+        },
+        map: ProvenanceMap {
+            version: PROVENANCE_FORMAT_VERSION,
+            raw_message_count: 1,
+            checkpoint_count: 0,
+            messages: vec![MessageProvenance {
+                raw_index: 0,
+                ordinal: 0,
+                blocks: vec![BlockProvenance {
+                    block_index: 0,
+                    origin: BlockOrigin::Native,
+                    excluded_reason: None,
+                }],
+            }],
+        },
+    };
+    let host_inputs = HostInputWrite {
+        inserts: vec![receipt(
+            "prompt-bundle",
+            "run-bundle",
+            HostInputStatus::Delivered,
+        )],
+        ..Default::default()
+    };
+    let (saved, _) = handle
+        .save_snapshot_bundle_with_host_inputs(&write, &host_inputs)
+        .unwrap();
+    assert_eq!(
+        status(&database, "prompt-bundle"),
+        Some(HostInputStatus::Delivered)
+    );
+    assert_eq!(
+        database
+            .run_context("run-bundle")
+            .unwrap()
+            .unwrap()
+            .host_inputs_json,
+        r#"["prompt-bundle"]"#
+    );
+    let bundle = database.snapshot_bundle("run-bundle").unwrap().unwrap();
+    assert_eq!(bundle.snapshot_revision, saved.snapshot_revision);
+    assert_eq!(bundle.provenance.unwrap().status, write.status);
+    let saved_messages = bundle.record.messages_json;
+
+    // Duplicate receipt insertion fails after snapshot staging: neither the new
+    // snapshot revision nor its sidecar may escape the transaction.
+    let mut replacement = write.clone();
+    replacement.expected_snapshot_revision = Some(saved.snapshot_revision);
+    replacement.record.updated_at_ns += 1;
+    replacement.record.messages_json = replacement.record.messages_json.replace("hi", "new");
+    assert!(
+        handle
+            .save_snapshot_bundle_with_host_inputs(&replacement, &host_inputs)
+            .is_err()
+    );
+    let bundle = database.snapshot_bundle("run-bundle").unwrap().unwrap();
+    assert_eq!(bundle.snapshot_revision, saved.snapshot_revision);
+    assert_eq!(bundle.record.messages_json, saved_messages);
+    assert_eq!(
+        status(&database, "prompt-bundle"),
+        Some(HostInputStatus::Delivered)
+    );
+}
+
+#[test]
 fn accepted_input_commits_evidence_reference_and_receipt_together() {
     let (_dir, storage, database, _config) = fixture();
     let handle = storage.handle();

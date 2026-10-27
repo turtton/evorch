@@ -2,16 +2,40 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{RunContextRecord, StorageError};
 
+/// Legacy entry point without runtime provenance: the snapshot is saved as an
+/// atomic bundle whose sidecar is `unknown(legacy_unproven)` (ADR 0041 R1).
 pub fn upsert(
     conn: &Connection,
     record: &RunContextRecord,
 ) -> Result<crate::RunContextReceipt, StorageError> {
-    use sha2::{Digest, Sha256};
+    crate::repo::thread_index::stage_legacy_snapshot(conn, record)
+        .map(|(_, receipt)| receipt)
+        .map_err(crate::repo::thread_index::into_storage_error)
+}
+
+/// A snapshot after credential redaction, serialized exactly as it is stored.
+pub(crate) struct RedactedSnapshot {
+    pub messages: serde_json::Value,
+    pub messages_json: String,
+    pub checkpoints_json: String,
+    pub checkpoint_count: usize,
+}
+
+impl RedactedSnapshot {
+    pub(crate) fn messages_end(&self) -> usize {
+        self.messages.as_array().map_or(0, Vec::len)
+    }
+}
+
+/// Unparseable JSON is reported as `Ok(None)` so callers can map it to their API.
+pub(crate) fn redact(record: &RunContextRecord) -> Result<Option<RedactedSnapshot>, StorageError> {
     let redactor = secret_guard::SecretRedactor::from_env();
-    let mut messages: serde_json::Value = serde_json::from_str(&record.messages_json)
-        .map_err(|error| StorageError::Serialization(error.to_string()))?;
-    let mut checkpoints: serde_json::Value = serde_json::from_str(&record.checkpoints_json)
-        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let (Ok(mut messages), Ok(mut checkpoints)) = (
+        serde_json::from_str::<serde_json::Value>(&record.messages_json),
+        serde_json::from_str::<serde_json::Value>(&record.checkpoints_json),
+    ) else {
+        return Ok(None);
+    };
     let mut count = 0;
     if let Some(messages) = messages.as_array_mut() {
         for message in messages {
@@ -35,40 +59,54 @@ pub fn upsert(
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let checkpoints_json = serde_json::to_string(&checkpoints)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    if count > 0 {
+        tracing::info!(run_id = %record.run_id, redacted_spans = count, "run context saved with credential redactions");
+    }
+    Ok(Some(RedactedSnapshot {
+        checkpoint_count: checkpoints.as_array().map_or(0, Vec::len),
+        messages,
+        messages_json,
+        checkpoints_json,
+    }))
+}
+
+/// Writes only the snapshot row; the bundle API owns binding, sidecar and state.
+pub(crate) fn write(
+    conn: &Connection,
+    record: &RunContextRecord,
+    redacted: &RedactedSnapshot,
+    snapshot_revision: u64,
+) -> Result<(), StorageError> {
+    let snapshot_revision = i64::try_from(snapshot_revision)
+        .map_err(|_| StorageError::OutOfRange("snapshot revision"))?;
     let host_inputs_json =
         crate::repo::host_input_receipt::normalized_ids(&record.host_inputs_json)?;
     conn.execute(
         "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
          ON CONFLICT(run_id) DO UPDATE SET role = excluded.role, name = excluded.name, \
          parent_run_id = excluded.parent_run_id, config_json = excluded.config_json, \
          messages_json = excluded.messages_json, checkpoints_json = excluded.checkpoints_json, \
          terminal_phase = excluded.terminal_phase, restorable = excluded.restorable, \
-         updated_at_ns = excluded.updated_at_ns, host_inputs_json = excluded.host_inputs_json",
+         updated_at_ns = excluded.updated_at_ns, snapshot_revision = excluded.snapshot_revision, \
+         host_inputs_json = excluded.host_inputs_json",
         params![
             record.run_id,
             record.role,
             record.name,
             record.parent_run_id,
             record.config_json,
-            messages_json,
-            checkpoints_json,
+            redacted.messages_json,
+            redacted.checkpoints_json,
             record.terminal_phase,
             record.restorable,
             record.updated_at_ns,
+            snapshot_revision,
             host_inputs_json
         ],
     )?;
-    crate::repo::threads::bind_saved_run(conn, record)?;
-    if count > 0 {
-        tracing::info!(run_id = %record.run_id, redacted_spans = count, "run context saved with credential redactions");
-    }
-    Ok(crate::RunContextReceipt {
-        updated_at_ns: record.updated_at_ns,
-        messages_end: messages.as_array().map_or(0, Vec::len),
-        sha256: format!("{:x}", Sha256::digest(messages_json.as_bytes())),
-    })
+    Ok(())
 }
 
 /// Only payloads are redacted: roles, tool IDs/names, and checkpoint ranges stay intact.
@@ -204,6 +242,29 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, 
             from_row,
         )
         .optional()?)
+}
+
+pub(crate) fn headers(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<Vec<crate::RunContextHeader>, StorageError> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<_> = run_ids.iter().filter(|id| seen.insert(*id)).collect();
+    let ids = serde_json::to_string(&ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "SELECT c.run_id, c.terminal_phase, c.updated_at_ns \
+         FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
+         ORDER BY requested.key",
+    )?;
+    let rows = statement.query_map([ids], |row| {
+        Ok(crate::RunContextHeader {
+            run_id: row.get(0)?,
+            terminal_phase: row.get(1)?,
+            updated_at_ns: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRecord> {

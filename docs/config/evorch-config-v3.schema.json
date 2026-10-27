@@ -213,6 +213,16 @@
         "max_candidates": 200
       }
     },
+    "storage": {
+      "description": "ストレージ層の設定（会話全文索引、ADR 0041）。",
+      "$ref": "#/$defs/StorageConfig",
+      "default": {
+        "thread_index": {
+          "enabled": true,
+          "max_bytes": 536870912
+        }
+      }
+    },
     "team": {
       "$ref": "#/$defs/TeamConfig",
       "default": {
@@ -1669,6 +1679,21 @@
       },
       "additionalProperties": false
     },
+    "StorageConfig": {
+      "description": "ストレージ層の利用者設定。",
+      "type": "object",
+      "properties": {
+        "thread_index": {
+          "description": "会話全文索引（`thread_grep` の索引）の設定。",
+          "$ref": "#/$defs/ThreadIndexConfig",
+          "default": {
+            "enabled": true,
+            "max_bytes": 536870912
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "SummarizerKind": {
       "description": "コンテキスト要約の方式。",
       "oneOf": [
@@ -1697,6 +1722,25 @@
           "default": 3,
           "maximum": 3,
           "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThreadIndexConfig": {
+      "description": "会話全文索引の設定（ADR 0041 Phase B）。\n\n`max_bytes` は物理ファイルサイズではなく、索引本文・属性・FTS 係数を含む\n論理会計に対する予算です。超過すると古い run（作成時刻の昇順）から索引を外します。",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "会話全文索引を作成・更新する。既定 true。false でも正本（会話・note）は保存される。",
+          "type": "boolean",
+          "default": true
+        },
+        "max_bytes": {
+          "description": "索引の論理予算（バイト）。1 MiB..=10 GiB、既定 512 MiB。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 536870912,
+          "minimum": 0
         }
       },
       "additionalProperties": false

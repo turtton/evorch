@@ -235,6 +235,7 @@ mod review_tests {
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        provenance: Default::default(),
                         responses_replay: Default::default(),
                         host_inputs: Vec::new(),
                         admission_reservation: None,

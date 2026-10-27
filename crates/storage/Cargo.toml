@@ -9,7 +9,8 @@ name = "storage"
 
 [dependencies]
 secret-guard = { path = "../secret-guard" }
-rusqlite = { workspace = true }
+# Phase B revisions/counters are u64; out-of-range values fail instead of wrapping.
+rusqlite = { workspace = true, features = ["fallible_uint", "functions", "pointer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

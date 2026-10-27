@@ -16,6 +16,7 @@ pub mod role_profile;
 pub mod routing;
 pub mod rules;
 pub mod sandbox;
+pub mod storage;
 pub mod team;
 pub mod tools;
 
@@ -54,6 +55,10 @@ pub use routing::{
 };
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
+pub use storage::{
+    DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES, MIN_THREAD_INDEX_MAX_BYTES,
+    StorageConfig, ThreadIndexConfig,
+};
 pub use team::TeamConfig;
 pub use tools::{BrowserToolsConfig, ToolsConfig};
 
@@ -112,6 +117,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     /// Thread replay evaluation (ADR 0036).
     pub eval: EvalConfig,
+    /// ストレージ層の設定（会話全文索引、ADR 0041）。
+    pub storage: StorageConfig,
 }
 
 impl Default for Config {
@@ -139,6 +146,7 @@ impl Default for Config {
             comment_checker: CommentCheckerConfig::default(),
             tools: ToolsConfig::default(),
             eval: EvalConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
