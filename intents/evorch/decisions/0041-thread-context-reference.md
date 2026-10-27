@@ -659,17 +659,19 @@ request 契約（R5、順序 1 で固定）:
 
 利用者の判断の原文: 「①（推奨）索引作業ありの14条件だけ ×100回（約3〜4時間）。索引作業なしの13条件は今回の結果を引き継ぐ」。ここで原文の「13条件」は実際の matrix では 7 クラス × warm / cold = **14 セル**を指す。
 
-- backfill **on の 14 セル**は checkpoint 回復修正を含む新 binary で各 100 回を再計測する。資源エラーを含む旧 on セルは継承しない。
-- backfill **off の 14 セル**は `3ca7f672` binary で全セル PASS 済みの結果を継承する。ただし `3ca7f672` から新 HEAD までの差分が検索経路（`crates/storage/src/thread_search*`、`crates/runtime/src/meta/threads` 等）に触れていないことの確認を必須条件とする。今回の修正は writer の WAL admission と診断・計測結果保持であり、索引作業なしの検索経路は変更しないことが継承の根拠である。
-- これは上記の「旧 binary の結果を現在の matrix 合格に読み替えない」に対する、検索経路不変を条件とした明示的な例外である。on の再計測と off の差分確認・証拠集計が完了するまでは S8 全体を完了扱いにしない。
+- backfill **on の 14 セル**は checkpoint 回復修正を含む binary `8bffe9d0` で計測した。資源エラーを含む旧 on セルは継承しない。tool cold は並行負荷下で 1 回のみの計測であり、全セルが 100 回完了したという意味ではない。
+- backfill **off の 14 セル**は `3ca7f672` binary で全セル PASS 済みの結果を継承する。`3ca7f672` から計測した binary `8bffe9d0` までの差分では検索経路に変更がないことを確認した。今回の修正は writer の WAL admission と診断・計測結果保持であり、索引作業なしの検索経路は変更しないことが継承の根拠である。
+- これは上記の「旧 binary の結果を現在の matrix 合格に読み替えない」に対する、検索経路不変を条件とした明示的な例外である。on の再計測、off の差分確認、証拠集計は完了した。
 
-対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。private な chunk-temp FTS プロトタイプ（`$TMPDIR/s8-chunk*`）は製品へ持ち込まない。この方針変更時点で新 matrix は未実行であり、順序 8 全体を完了扱いにはしない。
+対象の製品候補は scoped ordered-union merge と fail-closed tokenizer prefilter（`02906d48`）。計測用の一時的な FTS プロトタイプは製品へ持ち込まない。
 
-#### S8 の既知の制約: 遅い検索と background backfill の重複による WAL 一時停止
+#### S8 の既知の制約: 遅い検索と background backfill の重複
 
-遅い検索（phrase・tool kinds、1 ページ約 3 秒）と background backfill が重なると、検索の読み取りが WAL を pin し、`wal_checkpoint(TRUNCATE)` でも WAL が縮まらない。この状態では merge step の admission が `IndexPaused(WalLimit)` で止まる。既往の観測値は `phrase-true-true` が WAL **59,089,072 B**、`phrase-false-true` が **58,936,632 B** で、planned `G_wal` は **8,437,792 B**、`max_wal_bytes` は **64 MiB** である。WAL 単体は上限未満でも、次の step の `G_wal` を加えると上限を超えるため admission が停止する。
+遅い検索（phrase・tool）と background backfill が重なると、検索の読み取りが WAL を pin し、`wal_checkpoint(TRUNCATE)` でも WAL が縮まらず、merge step の admission が `IndexPaused(WalLimit)` で止まることがある。また tool 検索はハーネスの 1 drain あたり 120 秒 watchdog に達し、検索を完了できないことがある。利用上は、索引作業中に tool の出力を頻出語で検索すると、1 ページに数秒〜十数秒かかり得る。
 
-この停止は容量上限を守る安全な停止であり、データの破損や消失はない。容量が回復すれば background backfill は再開する。ただし、停止中に出た request は待機して継続するのではなく、`capacity_paused` の gap で終端化する。
+phrase の cold / warm `IndexPaused(WalLimit)` セルの WAL は、それぞれ **59,089,072 B** / **58,936,632 B** で、どちらも merge の `G_wal` は **8,437,792 B**、`max_wal_bytes` は **64 MiB** である。WAL 単体は上限未満でも、次の step の `G_wal` を加えると上限を超えるため admission が停止する。この停止は容量上限を守る安全な停止であり、データの破損や消失はない。容量が回復すれば background backfill は再開する。ただし、停止中に出た request は待機して継続するのではなく、`capacity_paused` の gap で終端化する。
+
+tool warm / cold はハーネスの 1 drain あたり 120 秒 watchdog による `runtime_deadline` で失敗し、検索完了は **0/100**。warm は CPU に負荷のない状態で再計測しても同じ結果だった。backfill off では 1 drain が約 **43 秒**であり、backfill と並行すると 3 倍以上遅くなる。cold は並行負荷がある中での 1 回だけの計測である。これらの失敗は検索の正確性不一致ではなく、正確性の不一致は一度も出ていない。
 
 利用者は次のように判断した（原文をそれぞれ保持）:
 
@@ -677,11 +679,19 @@ request 契約（R5、順序 1 で固定）:
 
 > 1: 「遅い検索（phrase・tool）＋索引作業あり」での WAL 一時停止をまとめて既知の制約にし、他のクエリが PASS ならマージ。待機・自動再開は別 PR
 
-この判断により、「遅い検索（phrase・tool kinds）＋索引作業あり」での上記 WAL 一時停止を今回の既知の制約として扱う。それ以外の正確性・カバレッジ・資源エラーのゲートは変更しない。過去の FAIL はすべて保持し、PASS に書き換えない。
+> 1（推奨）: tool の索引作業あり2条件も「遅い検索＋索引作業あり」の既知の制約に含めて記録し、push・CI・マージへ進む。改善は別 PR
 
-今後の対応は別 PR とする。容量の上限と `G` を維持したまま、期限付きの非同期容量待機によって待機・自動再開する方式を実装し、request の終端化の契約を変更する。今回はこの待機方式を実装しない。
+この判断により、既知の制約の範囲を「遅い検索（phrase・tool）＋background backfill」に広げ、WAL の一時停止と検索遅延（`runtime_deadline`）の両方を含める。それ以外の正確性・カバレッジ・資源エラーのゲートは変更しない。過去の FAIL はすべて保持し、PASS に書き換えない。
 
-**S8 の最終セル結果: 計測中。** 残りの条件の計測と集計が終わってから追記する。上記の制約の記録だけで S8 全体を完了扱いにしない。
+今後の対応は別 PR とする。期限付きの非同期待機と自動再開を実装し、容量の上限と `G` を維持したまま request を待機・継続できるようにする。また、backfill と並行したときの遅い検索を改善する。今回はこれらを実装しない。
+
+**S8 の最終セル結果:**
+
+- backfill off の 14 セル（ascii_trigram / short / unicode / phrase / regex / tool / nohit の warm / cold）は binary `3ca7f672`（SHA `122acfaa…`）ですべて PASS。利用者の判断により、この結果を引き継ぐ。`3ca7f672` から計測した binary `8bffe9d0`（SHA `da7f2b13…`）まで、検索経路の差分は空である。
+- backfill on の 10 セル（ascii_trigram / short / unicode / regex / nohit の warm / cold）は binary `8bffe9d0`（SHA `da7f2b13…`）で PASS。
+- backfill on の phrase warm / cold の 2 セルは `IndexPaused(WalLimit)` で FAIL。
+- backfill on の tool warm / cold の 2 セルは `runtime_deadline` で FAIL。warm は CPU 負荷なしでも同じ結果、cold は並行負荷下の 1 回のみの計測。
+- 正確性の不一致は一度もなかった。既往の FAIL およびこの計測の FAIL はすべて失敗として残し、PASS に読み替えない。
 
 ### 実装時に確認すること
 
