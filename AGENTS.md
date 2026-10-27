@@ -1,26 +1,30 @@
-# AGENTS.md — host repo working policy
+# AGENTS.md — working policy
 
-This is an **intent host repository**. It owns durable parent state for the
-`evorch` domain under `.intent-cli/` and `intents/evorch/`.
-Child implementation repos do NOT own this state.
+This repository (`turtton/evorch`) is both the **intent host** for the
+`evorch` domain and its **implementation repository**. It owns the durable
+intent host state under `.intent-cli/` and `intents/evorch/` and also contains
+the evorch code (`crates/` etc.).
 
-- Target repo (child implementation): `turtton/evorch`
+- Target repo (implementation): `turtton/evorch` (same repository as the host)
 - Domain: `evorch`
 - Bootstrapped by `intent-cli intent init` (G293 / G301).
 
-## Host repo working policy
+## Working policy
 
-- Work directly on `main`. Do NOT open a PR for routine host-state updates
-  (queue-state, runs.jsonl, packets, intents/) unless the operator explicitly
-  asks for one.
+- **Host state and operating docs** — `.intent-cli/` (queue-state, runs.jsonl,
+  packets), `intents/`, `docs/`, `AGENTS.md`/`CLAUDE.md`: work directly on
+  `main` and do NOT open a PR unless the operator explicitly asks for one.
+- **evorch code changes** (`crates/` etc.): work in a worktree and open a PR
+  (worktree-pr skill). The "directly on `main`" rule above does not apply.
 - Real commits must use an email verified on the committer's GitHub account
   and must be signed with the configured signing method and key. Signing
   failures must not be bypassed. GitHub must report the pushed commits as
   verified. The `git-best-practices` skill documents the general identity
   and signature checks; these requirements also apply when that skill is
   unavailable.
-- `git pull --ff-only` before edits. Commit and push to `main` after each
-  coherent change.
+- `git pull --ff-only` before edits. Commit and push after each coherent
+  change (to `main` for host state / operating docs, to the PR branch for
+  code).
 - All workflow label transitions go through installed `intent-cli automation`
   / `intent-cli worker` commands. Never edit GitHub labels by hand.
 - Routine collaboration uses `intent-cli guide ...`. Do NOT read
@@ -43,93 +47,12 @@ Child implementation repos do NOT own this state.
   are durable G-numbered guides owned by the CLI, not by this repo. The CLI is
   the single source of truth; a stale recalled summary is a bug, re-fetching
   from the CLI is the fix.
-- When compressing long sessions, keep at most this one pointer in the
-  summary; do NOT copy command catalogs into summaries (they go stale).
-
-## intent-cli known drifts & verified interfaces (ledger)
-
-Hard-won operational findings that compression must NOT lose. Each entry is
-pinned to the verified binary version + date. Entries are append-only;
-remove an entry only after verifying against a newer binary.
-
-- **Dual-check rule** (verified 0.26.0, 2026-08-30): for any unfamiliar
-  intent-cli workflow, consult BOTH `intent-cli <cmd> --help` (what the
-  binary implements) AND `intent-cli guide <topic>` / `intent-cli grill`
-  (the documented protocol). A contradiction between them is a real finding:
-  the binary wins for execution, and the drift is a bug-report candidate.
-  Neither source alone reveals the contradiction.
-- **interview record-answer** (verified 0.26.0, 2026-08-30): the binary
-  rejects the guide-documented `--question-id <id> --answer "..."` form.
-  Implemented form: `record-answer --session <id> --question <q> --from-file
-  <path> --write` (new questions additionally need `--prompt <text>`;
-  re-answering an existing id does not). `next-question` requires
-  `--session` (the guide-documented `--domain`-only form errors).
-  `interview answer --domain <d> [--from-file <path>]` answers the next
-  pending question.
-- **grill protocol** (verified 0.26.0, 2026-08-30): `intent-cli grill` is
-  persistent interview mode — the agent owns semantic questioning; one
-  focused question per turn (never batch); dependency-ordered backlog;
-  record every answer durably before proceeding; stop only at a structured
-  stop condition (backlog empty + rediscovery finds nothing →
-  `今のところ追加質問はありません`).
-- **stack: queue seed path** (verified 0.26.0, 2026-08-30): `queue enqueue`
-  is NOT the entry for new packets — it errors ("Projection packet YAML must
-  contain root field 'execution_unit'") because it expects an existing
-  `publish.yaml`. Correct seed: `automation queue-seed-from-packet
-  --execution-unit <id> --domain <d> --target-repo <r> --write` (refuses
-  without `--target-repo`; default priority `high`). Reprioritize needs
-  `--reason` AND `--write` (run without `--write` for a preview). The CLI
-  leaves an empty `.intent-cli/queue-state.reprioritize.lock` behind — do
-  not commit it.
-- **stack: issue publish flow** (verified 0.26.0, 2026-08-30): G337 four
-  stages — `issue draft <unit>` (read-only) → `issue create <unit>` →
-  `issue publish-flow <unit> --repo <r> --domain <d> --write` (advances
-  publish.yaml + queue-state + runs.jsonl; run WITHOUT `--write` first as
-  the canonical preflight) → `automation issue-publish --repo <r> --issue
-  <n> --write` (the ONLY `intent-target` applier). Known quirk: publish-flow
-  ignores `issue_title` in packet.yaml and falls back to `<unit>
-  (untitled)` (v0.1 identical) — correct the title with `gh issue edit`
-  after publish-flow. `publish-recovery` without `--domain` reports
-  domain-underivable unsafe_stops; with `--domain`, queued-but-unpublished
-  units report missing-publish-artifact which is normal pre-publish state,
-  not a blocker. WIP cap G288: one `intent-target` issue/PR per domain.
-  Claims store is not configured (`claim verify` → not-configured), so no
-  G717 handoff is needed in this environment.
-- **issue draft** (verified 0.26.0, 2026-09-10): the binary uses a
-  restricted line-based "projection packet" parser that rejects YAML block
-  scalars (`description: |`, `placement_rationale: |`) AND requires a root
-  `execution_unit:` key. The `intent-cli packet` scaffold emits
-  `implementation_issue_packet:` at root and never that shape, so
-  `issue draft` fails on EVERY packet in this repo, including
-  already-published ones (error text varies: `"field line is missing ':'"`
-  for block scalars, `"must contain root field 'execution_unit'"`
-  otherwise). The packets are valid YAML (`yq` parses them); packet.yaml is
-  NOT the projection packet. Do not "fix" packet.yaml for this — the
-  read-only preflight is `intent-cli issue publish-flow <unit> --repo <r>
-  --domain <d>` WITHOUT `--write`. `issue draft` / `issue create` /
-  `enqueue` all expect the publish.yaml projection shape (root
-  `execution_unit`).
-- **queue transition has no dry-run** (verified 0.26.0, 2026-09-10):
-  `queue transition <unit> <state>` applies IMMEDIATELY and appends to
-  runs.jsonl; there is no `--write` gate, `--reason`, or preview mode
-  (unlike `reprioritize` / `queue-seed-from-packet`). Never run it as an
-  argument probe; inspect with `queue show <unit>` first and `git diff`
-  after.
-- **direct-to-main units show missing-publish-artifact** (verified 0.26.0,
-  2026-09-11): units implemented directly on `main` without the issue/PR
-  publish flow (v05-image-attachment-ui, v06-model-catalog-preset, and the
-  2026-09-11 wave units v06-a/v06-b/v06-c/v07-d/v07-e2/v07-e4/v07-browser)
-  permanently report `missing-publish-artifact` unsafe_stops in
-  `automation publish-recovery`. This is expected, not a blocker.
-  `metadata update` supports only `--mode completed-closeout` and REQUIRES
-  `--linked-pr`, so there is no CLI-supported way to mark a no-publish unit
-  as closed-out; do not hand-edit queue-state to silence it.
-- **queue enqueue is not a free-form entry** (verified 0.26.0, 2026-09-11):
-  `queue enqueue` expects an existing publish.yaml projection (errors
-  "Queue enqueue command requires an execution unit" for bare names). To
-  seed a new unit: `packet draft --execution-unit <id> --target-repo <r>`
-  → fill packet.yaml → `automation queue-seed-from-packet --execution-unit
-  <id> --domain <d> --target-repo <r> --write`.
+- When operating `intent-cli`, always read `docs/intent-cli-ledger.md` first.
+  It is the append-only ledger of verified interfaces and known drifts that
+  `--help` and the guides do not reveal.
+- When compressing long sessions, keep only the pointers to the CLI and to
+  `docs/intent-cli-ledger.md`; do NOT copy command catalogs or ledger entries
+  into summaries (they go stale).
 
 ## Compatibility policy (pre-v1)
 
