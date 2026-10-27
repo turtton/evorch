@@ -32,7 +32,6 @@ const MAX_INPUT_BYTES: usize = 16 * 1024;
 pub(super) const MAX_WAIT_YIELD_MS: u64 = 30 * 60 * 1000;
 pub(super) const MAX_CONTROL_YIELD_MS: u64 = 60_000;
 pub(super) const AUTO_YIELD_MS: u64 = 10_000;
-pub(super) const DEFAULT_POLL_MS: u64 = 60_000;
 const DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 // A poll that blocked at least this long waited for the job rather than
 // immediately re-reading an unchanged result.
@@ -184,7 +183,10 @@ impl JobRegistry {
         if let Some(ms) = yield_ms {
             validate_yield(ms, "start")?;
         }
-        let timeout_ms = timeout_ms.or((!synchronous).then_some(DEFAULT_TIMEOUT_MS));
+        let auto_yield = ctx.shell_wait_policy == crate::executor::ShellWaitPolicy::AutoYield;
+        // A model start may become a continuing job that polls wait on until it
+        // ends, so it gets the same default lifetime as an explicit-yield job.
+        let timeout_ms = timeout_ms.or((!synchronous || auto_yield).then_some(DEFAULT_TIMEOUT_MS));
         let started = tokio::time::Instant::now();
         let mut host_input = if synchronous
             && ctx.shell_wait_policy == crate::executor::ShellWaitPolicy::AutoYield
@@ -294,7 +296,7 @@ impl JobRegistry {
             delivered: false,
         };
         let reason = if let Some(ms) = yield_ms {
-            job.wait_for_completion(ms).await;
+            job.wait(ms, None).await;
             None
         } else if ctx.shell_wait_policy == crate::executor::ShellWaitPolicy::UntilTerminal {
             job.until_terminal().await;
@@ -330,7 +332,7 @@ impl JobRegistry {
                 state.exposed = true;
                 let (mut result, _) = job.snapshot_locked(&mut state, 0, false);
                 if let Some(reason) = reason {
-                    result.content.push_str(&format!("\n{reason} The command was not restarted. Stdin is closed. Continue with shell action:poll, job_id:{} (omit yield_ms to wait up to 60 seconds for completion), or action:stop to cancel. The ten-second boundary releases this shell wait; other tools may still delay the next model request.\n", job.handle));
+                    result.content.push_str(&format!("\n{reason} The command was not restarted. Stdin is closed. Continue with shell action:poll, job_id:{} (it waits until the command finishes or new input arrives), or action:stop to cancel. The ten-second boundary releases this shell wait; other tools may still delay the next model request.\n", job.handle));
                 }
                 // Wake event forwarding only once a continuing handle is
                 // exposed. Short synchronous results must not create GUI jobs.
@@ -359,12 +361,15 @@ impl JobRegistry {
         ctx: &ToolExecutionContext,
         args: ControlArgs,
     ) -> Result<ToolResult, ToolError> {
-        let yield_ms = args.yield_ms.unwrap_or(if args.action == "poll" {
-            DEFAULT_POLL_MS
-        } else {
-            0
-        });
-        validate_yield(yield_ms, &args.action)?;
+        // Poll ignores yield_ms: it waits for the job (or, with return_on:output,
+        // its output) or for new input, so an unfinished job never costs a turn.
+        let yield_ms = match args.action.as_str() {
+            "poll" => None,
+            _ => Some(args.yield_ms.unwrap_or(0)),
+        };
+        if let Some(ms) = yield_ms {
+            validate_yield(ms, &args.action)?;
+        }
         if args.action != "poll" && args.return_on != ReturnOn::Completion {
             return Err(invalid("return_on is only supported for poll"));
         }
@@ -439,25 +444,33 @@ impl JobRegistry {
             _ => return Err(invalid("shell action must be start, poll, stdin, or stop")),
         }
         let cursor = args.cursor.unwrap_or_else(|| job.delivered_cursor());
-        let waited = if args.action == "stdin" || args.return_on == ReturnOn::Output {
-            job.wait_for_change(cursor, yield_ms).await
-        } else {
-            job.wait_for_completion(yield_ms).await
+        let output_cursor =
+            (args.action == "stdin" || args.return_on == ReturnOn::Output).then_some(cursor);
+        let (waited, interrupted) = match yield_ms {
+            Some(ms) => (job.wait(ms, output_cursor).await, false),
+            None => {
+                job.wait_for_event(output_cursor, ctx.shell_input.as_deref())
+                    .await
+            }
         };
         let (mut result, changed) = job.snapshot_preview(
             cursor,
             args.action == "poll"
                 && args.cursor.is_none()
-                && yield_ms > 0
-                && waited >= Duration::from_millis(yield_ms)
+                && args.return_on == ReturnOn::Completion
+                && interrupted
                 && job.running(),
         );
         if args.action == "poll" {
-            result.progress = Some(if changed || waited >= MEANINGFUL_WAIT {
+            if interrupted && job.running() {
+                result.content.push_str("\nNew input arrived; control returned while the command continues. Poll again to keep waiting.\n");
+            }
+            result.progress = Some(if changed || interrupted || waited >= MEANINGFUL_WAIT {
                 Progress::Advanced
             } else {
                 Progress::Stalled
             });
+            result.idle_wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
         }
         Ok(result)
     }
@@ -642,7 +655,7 @@ fn capacity_error(
     } else {
         for job in visible.into_iter().take(3) {
             if running {
-                message.push_str(&format!(" Poll your running {} to completion (omit yield_ms for a 60-second completion wait), or stop it and observe its terminal outcome before retrying.", job.handle));
+                message.push_str(&format!(" Poll your running {} until it finishes, or stop it and observe its terminal outcome before retrying.", job.handle));
             } else {
                 message.push_str(&format!(" Poll your finished, unobserved {} to observe its outcome and free retained capacity before retrying.", job.handle));
             }
@@ -822,49 +835,68 @@ impl Job {
             }
         }
     }
-    async fn wait_for_change(&self, cursor: u64, ms: u64) -> Duration {
-        self.wait(ms, Some(cursor)).await
-    }
-    async fn wait_for_completion(&self, ms: u64) -> Duration {
-        self.wait(ms, None).await
-    }
     fn delivered_cursor(&self) -> u64 {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .delivered_cursor
     }
-    // Subscribe before inspecting state, and keep one deadline across output
-    // notifications. Start/stop/default poll wait for teardown; stdin/output poll yield on
-    // retained output beyond their cursor. Returns how long the call blocked.
+    /// Whether the job finished or, with an output cursor, retained output
+    /// beyond it.
+    fn reached(&self, output_cursor: Option<u64>) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.completion.is_some()
+            || output_cursor
+                .is_some_and(|cursor| state.output.offset + state.output.text.len() as u64 > cursor)
+    }
+    /// Resolves once [`Self::reached`] holds. Subscribes before checking state.
+    async fn until_reached(&self, output_cursor: Option<u64>) {
+        let mut changed = self.changed.subscribe();
+        while !self.reached(output_cursor) {
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+    // Keep one deadline across output notifications. Start/stop wait for
+    // teardown; stdin yields on retained output beyond its cursor. Returns how
+    // long the call blocked.
     async fn wait(&self, ms: u64, output_cursor: Option<u64>) -> Duration {
         if ms == 0 {
             return Duration::ZERO;
         }
         let started = tokio::time::Instant::now();
-        let mut changed = self.changed.subscribe();
-        let _ = tokio::time::timeout(Duration::from_millis(ms), async {
-            loop {
-                {
-                    let state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if state.completion.is_some()
-                        || output_cursor.is_some_and(|cursor| {
-                            state.output.offset + state.output.text.len() as u64 > cursor
-                        })
-                    {
-                        return;
-                    }
-                }
-                if changed.changed().await.is_err() {
-                    return;
+        let _ = tokio::time::timeout(Duration::from_millis(ms), self.until_reached(output_cursor))
+            .await;
+        started.elapsed()
+    }
+    /// Waits without a deadline for [`Self::reached`] or for pending input.
+    /// The job wins a tie with input. Returns how long the call blocked and
+    /// whether input ended it.
+    async fn wait_for_event(
+        &self,
+        output_cursor: Option<u64>,
+        input: Option<&dyn crate::executor::ShellInputControl>,
+    ) -> (Duration, bool) {
+        let started = tokio::time::Instant::now();
+        let interrupted = match input {
+            Some(input) => {
+                let input = input.wait_for_input();
+                tokio::select! {
+                    biased;
+                    () = self.until_reached(output_cursor) => false,
+                    () = input => !self.reached(output_cursor),
                 }
             }
-        })
-        .await;
-        started.elapsed()
+            None => {
+                self.until_reached(output_cursor).await;
+                false
+            }
+        };
+        (started.elapsed(), interrupted)
     }
     /// Retained output from `cursor` (or the oldest retained byte), bounded to
     /// one event, with the completion observed under the same lock.

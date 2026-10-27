@@ -69,7 +69,7 @@ pub(super) fn user_answers(
 }
 
 pub(super) fn subagent_questions(
-    state: &LoopState,
+    state: &mut LoopState,
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
@@ -82,7 +82,16 @@ pub(super) fn subagent_questions(
         Err(e) => return error(e),
     };
     match runtime.subagent_questions(state.caller_run_id(), child) {
-        Ok(questions) => serialize(&questions),
+        Ok(questions) => {
+            // Listing a question reports it, so a later wait does not wake for it.
+            state.reported_questions.extend(
+                questions
+                    .iter()
+                    .filter(|question| question.answer.is_none())
+                    .map(|question| question.id.clone()),
+            );
+            serialize(&questions)
+        }
         Err(e) => error(e),
     }
 }

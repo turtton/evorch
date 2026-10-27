@@ -19,26 +19,34 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   releases the shell wait, not necessarily the next model request: other tools
   in the batch can still be waiting. Direct callers and the benchmark verifier
   use `ShellWaitPolicy::UntilTerminal` and never judge a running job as success.
-  Omitted-yield starts close stdin (pipe null input / PTY EOF) and have no
-  default timeout, even after auto-yield. Use an explicit `yield_ms` to retain
-  stdin; these jobs keep the existing one-hour default lifetime. `timeout_ms`
-  applies to the original process lifetime and has no new upper limit.
+  Omitted-yield starts close stdin (pipe null input / PTY EOF). Model starts
+  (`ShellWaitPolicy::AutoYield`) and explicit-yield jobs default to a one-hour
+  lifetime, so a job that a poll waits on cannot run unattended forever; direct
+  `UntilTerminal` callers keep no default timeout. Use an explicit `yield_ms` to
+  retain stdin. `timeout_ms` applies to the original process lifetime and has no
+  upper limit.
 - Explicit start `yield_ms: 0..1800000` waits for completion or its deadline,
   ignoring intermediate output, then returns a `job_id` and cursor. `poll`
-  defaults to **60,000 ms**, waiting for completion or the wait deadline, **not
-  new output**. Sixty seconds avoids repeated provider turns during noisy builds
-  while bounding each default wait to one minute; callers can choose up to the
-  existing 1,800,000 ms maximum. For an interactive prompt with no input to send,
-  explicitly use `return_on: "output"` on poll. `stdin` preserves its previous
+  **ignores `yield_ms` and has no deadline**: it waits until the job finishes or
+  new input arrives for the run (host input, or a message from its parent), and
+  never returns for new output alone. One poll therefore covers a long, noisy
+  build in one provider turn; the earlier sixty-second default cost a turn per
+  minute, and models often polled every second. Input ends the poll without
+  stopping the job, and the result says so. For an interactive prompt with no
+  input to send, explicitly use `return_on: "output"` on poll; that poll also
+  returns once retained output exists beyond its cursor. `stdin` preserves its
   output-or-completion wait and defaults to zero; `stop` also defaults to zero
   and waits for teardown/deadline. Both have the existing 60,000 ms maximum.
-  Zero always returns immediately. Output never extends the wait deadline.
+  Zero returns immediately. Output never extends a deadline.
+- Time a poll spends blocked (`ToolResult::idle_wait`, runtime-only) is excluded
+  from `max_elapsed`, like the Waiting phase of `wait`, so a long build no longer
+  exhausts a Worker's elapsed budget while it only waits.
   Use `{"action":"stop","job_id":"...","yield_ms":1000}` to stop the process
   group and wait up to one second for teardown, then poll to terminal if needed.
   Stop does not roll back prior filesystem effects.
 - Output cursors remain redacted UTF-8 byte offsets. An omitted cursor continues
-  after the highest cursor returned. When a completion-oriented poll reaches
-  its deadline while still running, its omitted-cursor preview favors the last
+  after the highest cursor returned. When input ends a completion-oriented
+  poll while the job still runs, its omitted-cursor preview favors the last
   8 KiB / 200 lines of new retained output; skipped bytes are flagged with
   `output_gap`. Explicit cursors (including zero) keep ordered paging and allow
   re-reading retained skipped output. Completion artifacts preserve bounded
@@ -62,9 +70,12 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
 - The identical-call guard stops a run after
   `max_identical_tool_call_repeats` consecutive identical calls. Ordinary calls
   are checked by input before the batch runs. Calls whose tool reports progress
-  (currently only an explicit shell `poll`) run and are judged by their result:
-  new output, a status change, or at least 100 ms of real waiting resets the
-  count, while an immediate unchanged or failed result counts toward it. The
+  (an explicit shell `poll` and `wait`) run and are judged by their result. A
+  poll advances with new output, a status change, input that ended it, or at
+  least 100 ms of real waiting; a `wait` advances with a first observed child
+  completion, a question not yet reported to the caller, an agent message or
+  user input. An immediate unchanged or failed result counts toward the limit,
+  so repeated waits on an already finished child are still stopped. The
   call that reaches the limit has already run; its wave is recorded before the
   run stops. Each kind of call ends the other kind's streak.
   The stop reason, like the `NoProgress` one, keeps its code first and then
@@ -109,9 +120,20 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
 - Secret filtering buffers incomplete output lines. A PTY prompt without a newline
   may not become visible until the line completes or the process exits. PTY output
   capture is bounded and cursor-based; this does not promise terminal emulation.
-- `wait` accepts at most 8 related runs, `any`/`all`, a bounded timeout (0..60 s),
-  cancellation, and attention for required user questions. A timeout does not
-  cancel children. Provider admission retains parent identity before registration.
+- `wait` accepts at most 8 related runs and `any`/`all`, and has **no deadline**
+  (the agent loop drops a `timeout_ms` copied from older transcripts before
+  validation; `run_output` is the non-waiting snapshot). See ADR 0042. It returns when targets finish per mode, a target
+  asks a question this caller has not been told about (a wait or
+  `subagent_questions` reports it), an agent message or user input arrives, or
+  the caller is cancelled. Agent messages that end a model `wait` are returned
+  in its `messages` field and consumed, so no `inbox` call follows; automatic
+  completion notices stay queued. A `delegate` wait leaves messages queued and
+  sets `inbox_ready`. The ten-minute deadline it replaces cost a turn per wake
+  and stopped Orchestrators after nine identical waits on a long child; and an
+  unanswered nonblocking question turned every wait into an immediate return.
+  New messages, new questions and newly observed completions are progress for
+  `max_no_progress_rounds`. Provider admission retains parent identity before
+  registration.
 - `ask_user` persists a question and immediately returns its ID; options are
   suggestions and free text is supported. The model can continue independent work.
   A required unanswered question blocks completion; answer delivery wakes the loop.

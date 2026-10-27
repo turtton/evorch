@@ -95,7 +95,9 @@ async fn multi_run_wait_delivers_one_structured_completion_batch_to_model() {
     let (result, failed) = execute_wait(json!({"run_ids":["run-2","run-3"],"mode":"all"})).await;
     assert!(!failed, "{result}");
     let result: Value = serde_json::from_str(&result).unwrap();
-    assert_eq!(result["timed_out"], false);
+    // A wait has no deadline, so there is nothing to time out.
+    assert!(result.get("timed_out").is_none(), "{result}");
+    assert_eq!(result["messages"], json!([]));
     assert_eq!(result["completed_run_ids"], json!(["run-2", "run-3"]));
     assert_eq!(result["runs"][0]["output"], "first completed");
     assert_eq!(result["runs"][1]["output"], "second completed");
@@ -112,10 +114,14 @@ async fn invalid_self_wait_returns_error_and_keeps_parent_running() {
 }
 
 #[tokio::test]
-async fn legacy_wait_returns_a_structured_snapshot_for_an_inbox_message() {
+async fn legacy_wait_delivers_an_agent_message_in_a_structured_snapshot() {
     let (result, failed) = execute_wait_with_message(json!({"run_id":"run-2"}), true).await;
     assert!(!failed, "{result}");
     let result: Value = serde_json::from_str(&result).unwrap();
-    assert_eq!(result["timed_out"], false);
-    assert_eq!(result["inbox_ready"], true);
+    // The message is in the result itself, so no inbox call is needed.
+    assert!(result.get("inbox_ready").is_none(), "{result}");
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["sender_run_id"], "run-2");
+    assert_eq!(messages[0]["content"], "Review this finding");
 }

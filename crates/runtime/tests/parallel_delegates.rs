@@ -238,7 +238,7 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
     assert_eq!(result["user_input_ready"], true);
     assert_eq!(result["needs_user_input"], false);
     assert_eq!(result["has_pending_question"], false);
-    assert_eq!(result["timed_out"], false);
+    assert!(result.get("timed_out").is_none(), "{result}");
 }
 
 #[tokio::test]

@@ -219,8 +219,8 @@ async fn scenario(delivery: Delivery, batch: bool) {
                 };
                 let result: Value = serde_json::from_str(text).unwrap();
                 assert_eq!(result["user_input_ready"], true);
-                assert_eq!(result["inbox_ready"], false);
-                assert_eq!(result["timed_out"], false);
+                assert_eq!(result["messages"], serde_json::json!([]));
+                assert!(result.get("timed_out").is_none(), "{result}");
                 assert_eq!(
                     result["runs"][0]["status"],
                     if matches!(delivery, Delivery::WithCompletion) {

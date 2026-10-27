@@ -207,11 +207,8 @@ async fn terminal_root_resumes_with_live_child_and_collects_its_result() {
                     Ok(tool_responses([
                         ("agents", "list_agents", serde_json::json!({})),
                         ("pending", "run_output", serde_json::json!({"run_id":child})),
-                        (
-                            "poll",
-                            "wait",
-                            serde_json::json!({"run_ids":[child], "timeout_ms":0}),
-                        ),
+                        // wait has no deadline; run_output is the snapshot.
+                        ("poll", "run_output", serde_json::json!({"run_id":child})),
                     ])),
                     Ok(tool_responses([
                         (

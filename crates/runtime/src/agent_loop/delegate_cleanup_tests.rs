@@ -156,6 +156,7 @@ fn fixture_with_model(
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        reported_questions: std::collections::HashSet::new(),
         last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,

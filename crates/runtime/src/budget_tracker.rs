@@ -131,6 +131,12 @@ impl BudgetCounters {
         }
     }
 
+    /// ツール呼び出しが外部の出来事 (shell job の終了・新しい入力) を待って
+    /// ブロックしていた時間を、Waiting 位相と同じく max_elapsed から除く。
+    pub(crate) fn exclude_idle(&mut self, idle: Duration) {
+        self.paused_total = self.paused_total.saturating_add(idle);
+    }
+
     /// max_elapsed 判定に使う、待機時間を除いた実行経過時間。
     fn active_elapsed(&self) -> Duration {
         let paused = match self.paused_at {

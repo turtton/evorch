@@ -151,7 +151,7 @@ pub(super) async fn wait_reply(
 }
 
 pub(super) fn inbox(
-    state: &LoopState,
+    state: &mut LoopState,
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
@@ -159,7 +159,13 @@ pub(super) fn inbox(
         return error(message);
     }
     match runtime.take_inbox(state.caller_run_id()) {
-        Ok(messages) => serialize(&messages),
+        Ok(messages) => {
+            // Received messages are new input, like a wait that returned them.
+            if !messages.is_empty() {
+                state.budget.mark_progress();
+            }
+            serialize(&messages)
+        }
         Err(runtime_error) => error(runtime_error.to_string()),
     }
 }

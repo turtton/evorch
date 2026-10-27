@@ -52,6 +52,7 @@ pub(super) fn run_output(
 }
 
 pub(in crate::meta) mod waiting;
+pub(crate) use waiting::drop_ignored_arguments;
 pub(super) use waiting::wait;
 
 pub(super) fn cancel(runtime: &AgentRuntime, input: serde_json::Value) -> DispatchResult {

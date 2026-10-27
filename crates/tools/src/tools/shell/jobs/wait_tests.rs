@@ -88,7 +88,7 @@ async fn start_wait_ignores_output_and_keeps_its_original_deadline() {
     for yield_ms in [1000, MAX_WAIT_YIELD_MS] {
         let (_registry, job, _input) = fixture();
         job.push(0, b"ready\n");
-        let mut waiting = std::pin::pin!(job.wait_for_completion(yield_ms));
+        let mut waiting = std::pin::pin!(job.wait(yield_ms, None));
         pending(waiting.as_mut()).await;
         tokio::time::advance(Duration::from_millis(yield_ms - 1)).await;
         job.push(0, b"more\n");
@@ -104,7 +104,7 @@ async fn start_wait_ignores_output_and_keeps_its_original_deadline() {
 async fn every_terminal_status_ends_start_wait_early() {
     for status in ["completed", "failed", "timed_out", "cancelled"] {
         let (_registry, job, _input) = fixture();
-        let mut waiting = std::pin::pin!(job.wait_for_completion(60_000));
+        let mut waiting = std::pin::pin!(job.wait(60_000, None));
         pending(waiting.as_mut()).await;
         job.push(0, b"partial\n");
         pending(waiting.as_mut()).await;
@@ -114,7 +114,7 @@ async fn every_terminal_status_ends_start_wait_early() {
             error: None,
         });
         ready(waiting.as_mut()).await;
-        let mut already_finished = std::pin::pin!(job.wait_for_completion(60_000));
+        let mut already_finished = std::pin::pin!(job.wait(60_000, None));
         ready(already_finished.as_mut()).await;
         assert_eq!(
             job.snapshot(0).0.detail.unwrap()["shell_job"]["status"],
@@ -156,7 +156,7 @@ async fn stop_wait_ignores_output_and_returns_on_teardown_or_deadline() {
 #[tokio::test(start_paused = true)]
 async fn zero_start_and_zero_or_omitted_stop_return_immediately() {
     let (registry, job, _input) = fixture();
-    let mut starting = std::pin::pin!(job.wait_for_completion(0));
+    let mut starting = std::pin::pin!(job.wait(0, None));
     ready(starting.as_mut()).await;
     let owner = owner();
     for value in [
@@ -208,19 +208,21 @@ async fn omitted_cursor_continues_after_returned_output_and_explicit_cursor_rere
     // The start response already returned the first line.
     assert!(job.snapshot(0).0.content.contains("first\n"));
     job.push(0, b"second\n");
-    let poll = serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms":0});
+    let poll = serde_json::json!({"action": "poll", "job_id": "job-0", "return_on":"output"});
     let next = control(&registry, poll.clone()).await;
     assert!(next.content.contains("second\n"));
     assert!(!next.content.contains("first\n"));
     let reread = control(
         &registry,
-        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0, "yield_ms":0}),
+        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0, "return_on":"output"}),
     )
     .await;
     assert!(reread.content.contains("first\nsecond\n"));
     // A re-read does not move the continuation point backwards.
-    let empty = control(&registry, poll).await;
-    assert!(!empty.content.contains("first\n") && !empty.content.contains("second\n"));
+    job.push(0, b"third\n");
+    let later = control(&registry, poll).await;
+    assert!(later.content.contains("third\n"));
+    assert!(!later.content.contains("first\n") && !later.content.contains("second\n"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -240,52 +242,41 @@ async fn omitted_cursor_poll_waits_for_output_after_the_returned_cursor() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn poll_reports_progress_only_for_changes_or_real_waits() {
+async fn poll_reports_progress_only_for_changes_waits_or_input() {
     let (registry, job, _input) = fixture();
     let owner = owner();
-    let poll = |yield_ms: u64| serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms": yield_ms});
+    let output = serde_json::json!({"action": "poll", "job_id": "job-0", "return_on":"output"});
     job.push(0, b"line\n");
     assert_eq!(
-        control(&registry, poll(0)).await.progress,
+        control(&registry, output.clone()).await.progress,
         Some(Progress::Advanced)
     );
-    // An immediate identical result, even when re-read explicitly, is a stall.
-    assert_eq!(
-        control(&registry, poll(0)).await.progress,
-        Some(Progress::Stalled)
-    );
-    let reread =
-        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0, "yield_ms":0});
-    assert_eq!(
-        control(&registry, reread).await.progress,
-        Some(Progress::Stalled)
-    );
-    // Waiting for a quiet job is progress from the threshold on.
-    for (yield_ms, expected) in [(99, Progress::Stalled), (100, Progress::Advanced)] {
-        let mut waiting = std::pin::pin!(
-            registry.control(&owner, serde_json::from_value(poll(yield_ms)).unwrap())
-        );
-        pending(waiting.as_mut()).await;
-        tokio::time::advance(Duration::from_millis(yield_ms)).await;
-        assert_eq!(
-            ready(waiting.as_mut()).await.unwrap().progress,
-            Some(expected)
-        );
-    }
+    // A poll that waited for the job to finish is progress.
+    let poll = serde_json::json!({"action": "poll", "job_id": "job-0"});
+    let mut waiting =
+        std::pin::pin!(registry.control(&owner, serde_json::from_value(poll.clone()).unwrap()));
+    pending(waiting.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(5)).await;
     job.complete(Completion {
         status: "completed",
         exit_code: Some(0),
         error: None,
     });
-    // A long poll of a finished job returns at once: progress once, then a stall.
-    assert_eq!(
-        control(&registry, poll(60_000)).await.progress,
-        Some(Progress::Advanced)
-    );
-    assert_eq!(
-        control(&registry, poll(60_000)).await.progress,
-        Some(Progress::Stalled)
-    );
+    let finished = ready(waiting.as_mut()).await.unwrap();
+    assert_eq!(finished.progress, Some(Progress::Advanced));
+    assert_eq!(finished.idle_wait_ms, 5);
+    // Re-polling the finished job returns at once with nothing new: a stall,
+    // even when re-read explicitly or with a long yield_ms that poll ignores.
+    for repeat in [
+        poll,
+        serde_json::json!({"action": "poll", "job_id": "job-0", "yield_ms": MAX_WAIT_YIELD_MS}),
+        serde_json::json!({"action": "poll", "job_id": "job-0", "cursor": 0}),
+    ] {
+        assert_eq!(
+            control(&registry, repeat).await.progress,
+            Some(Progress::Stalled)
+        );
+    }
     let stop = serde_json::json!({"action": "stop", "job_id": "job-0"});
     assert_eq!(control(&registry, stop).await.progress, None);
 }
@@ -321,19 +312,61 @@ async fn paging_through_retained_output_is_progress() {
     );
 }
 
+/// Host or parent input the test releases by hand.
+#[derive(Debug)]
+struct TestInput(watch::Sender<bool>);
+
+impl crate::executor::ShellInputControl for TestInput {
+    fn begin_wait(&self) -> watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+}
+
 #[tokio::test(start_paused = true)]
-async fn default_poll_waits_sixty_seconds_despite_output_and_returns_tail() {
-    assert_eq!(DEFAULT_POLL_MS, 60_000);
+async fn poll_ignores_yield_ms_and_waits_past_output_until_the_job_finishes() {
     assert_eq!(AUTO_YIELD_MS, 10_000);
+    for value in [
+        serde_json::json!({"action":"poll","job_id":"job-0"}),
+        serde_json::json!({"action":"poll","job_id":"job-0","yield_ms":1000}),
+        serde_json::json!({"action":"poll","job_id":"job-0","yield_ms":0}),
+    ] {
+        let (registry, job, _input) = fixture();
+        let owner = owner();
+        let mut waiting =
+            std::pin::pin!(registry.control(&owner, serde_json::from_value(value).unwrap()));
+        pending(waiting.as_mut()).await;
+        job.push(0, b"early output\n");
+        pending(waiting.as_mut()).await;
+        // Hours of quiet do not end the poll either.
+        tokio::time::advance(Duration::from_secs(3 * 60 * 60)).await;
+        pending(waiting.as_mut()).await;
+        job.complete(Completion {
+            status: "completed",
+            exit_code: Some(0),
+            error: None,
+        });
+        let result = ready(waiting.as_mut()).await.unwrap();
+        assert!(result.content.contains("early output\n"));
+        assert_eq!(result.detail.unwrap()["shell_job"]["status"], "completed");
+        assert_eq!(result.idle_wait_ms, 3 * 60 * 60 * 1000);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_input_ends_a_poll_of_a_running_job_with_its_latest_output() {
     let (registry, job, _input) = fixture();
-    let owner = owner();
+    let (input, _) = watch::channel(false);
+    let input = Arc::new(TestInput(input));
+    let owner = ToolExecutionContext {
+        shell_input: Some(input.clone()),
+        ..owner()
+    };
     let args =
         serde_json::from_value(serde_json::json!({"action":"poll","job_id":"job-0"})).unwrap();
     let mut waiting = std::pin::pin!(registry.control(&owner, args));
     pending(waiting.as_mut()).await;
     job.push(0, b"early output\n");
-    pending(waiting.as_mut()).await;
-    tokio::time::advance(Duration::from_millis(59_999)).await;
+    tokio::time::advance(Duration::from_secs(90)).await;
     job.push(
         0,
         (0..1000)
@@ -342,26 +375,54 @@ async fn default_poll_waits_sixty_seconds_despite_output_and_returns_tail() {
             .as_bytes(),
     );
     pending(waiting.as_mut()).await;
-    tokio::time::advance(Duration::from_millis(1)).await;
+    input.0.send_replace(true);
     let result = ready(waiting.as_mut()).await.unwrap();
+    // The job keeps running; the poll returns the newest output and says why.
+    assert!(job.running());
     assert!(result.content.contains("line 999\n"));
+    assert!(result.content.contains("New input arrived"));
+    assert_eq!(result.progress, Some(Progress::Advanced));
+    assert_eq!(result.idle_wait_ms, 90_000);
     let detail = &result.detail.as_ref().unwrap()["shell_job"];
     assert_eq!(detail["status"], "running");
     assert_eq!(detail["cursor"], detail["output_end"]);
     assert_eq!(detail["output_gap"], true);
     let reread = control(
         &registry,
-        serde_json::json!({"action":"poll","job_id":"job-0","cursor":0,"yield_ms":0}),
+        serde_json::json!({"action":"poll","job_id":"job-0","cursor":0,"return_on":"output"}),
     )
     .await;
     assert!(reread.content.contains("early output"));
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_finished_job_wins_over_simultaneous_input() {
+    let (registry, job, _input) = fixture();
+    let (input, _) = watch::channel(false);
+    let owner = ToolExecutionContext {
+        shell_input: Some(Arc::new(TestInput(input.clone()))),
+        ..owner()
+    };
+    let args =
+        serde_json::from_value(serde_json::json!({"action":"poll","job_id":"job-0"})).unwrap();
+    let mut waiting = std::pin::pin!(registry.control(&owner, args));
+    pending(waiting.as_mut()).await;
+    input.send_replace(true);
+    job.complete(Completion {
+        status: "completed",
+        exit_code: Some(0),
+        error: None,
+    });
+    let result = ready(waiting.as_mut()).await.unwrap();
+    assert!(!result.content.contains("New input arrived"));
+    assert_eq!(result.detail.unwrap()["shell_job"]["status"], "completed");
+}
+
+#[tokio::test(start_paused = true)]
 async fn completion_poll_returns_on_terminal_not_new_output() {
     let (registry, job, _input) = fixture();
     let owner = owner();
-    let mut waiting = std::pin::pin!(registry.control(&owner, args("poll", MAX_WAIT_YIELD_MS)));
+    let mut waiting = std::pin::pin!(registry.control(&owner, args("poll", 0)));
     pending(waiting.as_mut()).await;
     job.push(1, b"compiler progress\n");
     pending(waiting.as_mut()).await;

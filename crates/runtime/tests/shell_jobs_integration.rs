@@ -565,3 +565,102 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
     observed.respond(text_response("done", FinishReason::Stop));
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_poll_waits_for_a_long_job_without_spending_the_elapsed_budget() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor, model);
+    // The job outlasts the whole elapsed budget by a margin that tolerates a
+    // loaded test host; only the poll waits for it.
+    let mut config = RunConfig::default();
+    config.budget.max_elapsed = Duration::from_secs(2);
+    let run = runtime.delegate_background(Role::Worker, "long build".into(), config);
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"sleep 4; printf built", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    call.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job, "yield_ms":100}),
+    ));
+    // One poll covers the job however long it runs, ignoring yield_ms.
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("poll");
+    assert!(!error, "{result}");
+    assert_eq!(field(&result, "status: "), "completed");
+    assert!(result.contains("built"));
+    call.respond(text_response("built", FinishReason::Stop));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_message_ends_a_child_poll_without_stopping_the_job() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let release = root.join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let parent_call = next(&mut calls).await;
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value < release; printf finished", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    call.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job}),
+    ));
+    runtime
+        .send_agent_message(
+            parent,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "Stop and report what you have",
+            None,
+        )
+        .unwrap();
+    // The poll returns while the job keeps running, and the message reaches the
+    // child's next request.
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("poll");
+    assert!(!error, "{result}");
+    assert_eq!(field(&result, "status: "), "running");
+    assert!(result.contains("New input arrived"), "{result}");
+    assert!(executor.has_running_shell_jobs(&child.to_string()));
+    let text = serde_json::to_string(&call.messages).unwrap();
+    assert!(text.contains("Stop and report what you have"), "{text}");
+    // Cancellation stops both runs and reaps the job still reading the FIFO.
+    for run in [child, parent] {
+        runtime.cancel(run).unwrap();
+    }
+    drop((call, parent_call, release));
+    for run in [child, parent] {
+        assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
+    }
+    assert!(!executor.has_running_shell_jobs(&child.to_string()));
+}

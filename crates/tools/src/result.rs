@@ -21,6 +21,11 @@ pub struct ToolResult {
     /// 反復呼び出しの停滞判定に使う runtime 専用の観測。本文・detail・イベントには
     /// 出さない。進捗を報告しない呼び出しでは `None`。
     pub progress: Option<Progress>,
+    /// Time the call spent blocked on an outside event (a shell job finishing,
+    /// new input). Runtime-only like `progress`: the run's elapsed-time budget
+    /// excludes it, and it never reaches the content, detail or events.
+    /// In whole milliseconds; zero when the call never waited.
+    pub idle_wait_ms: u64,
     /// Images returned to the model with `content`.
     pub images: Vec<ToolImage>,
 }
@@ -53,6 +58,7 @@ impl ToolResult {
             detail: None,
             origin: ContentOrigin::WebUntrusted,
             progress: None,
+            idle_wait_ms: 0,
             images: Vec::new(),
         }
     }
@@ -65,6 +71,7 @@ impl ToolResult {
             detail: None,
             origin: ContentOrigin::WebUntrusted,
             progress: None,
+            idle_wait_ms: 0,
             images: Vec::new(),
         }
     }
@@ -97,6 +104,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
+                idle_wait_ms: 0,
                 images: Vec::new(),
             }
         );
@@ -115,6 +123,7 @@ mod tests {
                 detail: None,
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
+                idle_wait_ms: 0,
                 images: Vec::new(),
             }
         );

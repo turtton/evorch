@@ -140,25 +140,29 @@ async fn observe_waiting_child(question: Option<bool>) {
     let model = Arc::new(ScriptedModel::new([]));
     let parent_gate = Arc::new(Notify::new());
     model.gate_key("PARENT", parent_gate.clone()).await;
-    model
-        .add_keyed(
-            "PARENT",
-            [
-                Ok(tool_response(
-                    "spawn",
-                    "delegate",
-                    json!({"target":{"role":"worker"}, "background":true, "interactive":true, "prompt":"CHILD"}),
-                )),
-                Ok(output("run-2")),
-                Ok(tool_response(
-                    "wait-snapshot",
-                    "wait",
-                    json!({"run_ids":["run-2"], "timeout_ms":0}),
-                )),
-                Ok(tool_response("finish", "finish", json!({"result":"done"}))),
-            ],
-        )
-        .await;
+    // A wait returns at once only for the question; without one it would wait
+    // for the idle child to finish, so only run_output observes that case.
+    let mut parent = vec![
+        Ok(tool_response(
+            "spawn",
+            "delegate",
+            json!({"target":{"role":"worker"}, "background":true, "interactive":true, "prompt":"CHILD"}),
+        )),
+        Ok(output("run-2")),
+    ];
+    if question.is_some() {
+        parent.push(Ok(tool_response(
+            "wait-snapshot",
+            "wait",
+            json!({"run_ids":["run-2"]}),
+        )));
+    }
+    parent.push(Ok(tool_response(
+        "finish",
+        "finish",
+        json!({"result":"done"}),
+    )));
+    model.add_keyed("PARENT", parent).await;
     let mut child = Vec::new();
     if let Some(blocking) = question {
         child.push(Ok(tool_response(
@@ -192,11 +196,14 @@ async fn observe_waiting_child(question: Option<bool>) {
         }
     }
     let first_parent_follow_up = if question.is_some() { 3 } else { 2 };
-    for index in first_parent_follow_up..first_parent_follow_up + 2 {
+    let observations = if question.is_some() { 2 } else { 1 };
+    for index in first_parent_follow_up..first_parent_follow_up + observations {
         model.wait_for_request(index).await;
         parent_gate.notify_one();
     }
-    model.wait_for_request(first_parent_follow_up + 2).await;
+    model
+        .wait_for_request(first_parent_follow_up + observations)
+        .await;
     runtime.cancel(child).unwrap();
     runtime.wait(child).await.unwrap();
     parent_gate.notify_one();
@@ -224,25 +231,22 @@ async fn observe_waiting_child(question: Option<bool>) {
             .unwrap()
     };
     let output = result("output");
-    let wait = result("wait-snapshot");
-    for snapshot in [&output, &wait["runs"][0]] {
+    let mut snapshots = vec![output];
+    if question.is_some() {
+        let wait = result("wait-snapshot");
+        assert_eq!(wait["completed_run_ids"], json!([]));
+        assert_eq!(wait["runs"][0]["needs_user_input"], question == Some(true));
+        assert_eq!(wait["runs"][0]["has_pending_question"], true);
+        assert!(wait.get("timed_out").is_none(), "{wait}");
+        assert_eq!(wait["attention_run_ids"], json!(["run-2"]));
+        snapshots.push(wait["runs"][0].clone());
+    }
+    for snapshot in snapshots {
         assert_eq!(snapshot["phase"], "Waiting");
         assert_eq!(snapshot["status"], "waiting");
         assert_eq!(snapshot["output"], Value::Null);
         assert_eq!(snapshot["reason"], Value::Null);
     }
-    assert_eq!(wait["completed_run_ids"], json!([]));
-    assert_eq!(wait["runs"][0]["needs_user_input"], question == Some(true));
-    assert_eq!(wait["runs"][0]["has_pending_question"], question.is_some());
-    assert_eq!(wait["timed_out"], question.is_none());
-    assert_eq!(
-        wait["attention_run_ids"],
-        if question.is_some() {
-            json!(["run-2"])
-        } else {
-            json!([])
-        }
-    );
 }
 
 #[tokio::test]
