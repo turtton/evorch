@@ -1052,6 +1052,7 @@ impl StorageHandle {
 
     /// Persists a reindex request with its frozen targets and elects the owner
     /// in the same transaction (ADR 0041 R5).
+    /// All index-control `now_ns` arguments must be Unix-epoch wall-clock nanoseconds (`SystemTime`), matching admission's resampled clock.
     ///
     /// # Errors
     /// `InvalidArguments` before acceptance, `PersistenceUnavailable` /

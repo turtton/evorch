@@ -7,8 +7,6 @@ use storage::thread_index::{
     ProvenanceEvidence, ProvenanceMap, ProvenanceStatus, RequestGapReason, SnapshotWrite,
 };
 
-const NOW: i64 = 1_000_000_000;
-
 fn owner(id: &str, kind: IndexOwnerKind) -> IndexOwner {
     IndexOwner {
         id: id.into(),
@@ -98,7 +96,7 @@ fn foreground(handle: &StorageHandle, request: &ReindexRequest, wait: bool) -> R
         request,
         &owner("cli", IndexOwnerKind::Cli),
         wait,
-        || NOW,
+        now_ns,
         |_| {
             polls.set(polls.get() + 1);
             assert!(polls.get() < 100_000, "request must reach terminal");
@@ -238,7 +236,7 @@ fn other_gui_or_cli_owner_returns_accepted_and_wait_never_steps_twice() {
         source(&handle, "native", "/project", 20, true);
         let other = owner("other", kind);
         let LeaseResult::Acquired(other_lease) = peer_handle
-            .acquire_thread_index_lease(&other, NOW, THREAD_INDEX_LEASE_NS)
+            .acquire_thread_index_lease(&other, now_ns(), THREAD_INDEX_LEASE_NS)
             .unwrap()
         else {
             panic!("lease");
@@ -249,7 +247,7 @@ fn other_gui_or_cli_owner_returns_accepted_and_wait_never_steps_twice() {
         };
         assert!(matches!(
             handle
-                .thread_index_request_status(&request_id, NOW)
+                .thread_index_request_status(&request_id, now_ns())
                 .unwrap()
                 .progress,
             RequestProgress::Pending(_)
@@ -260,11 +258,13 @@ fn other_gui_or_cli_owner_returns_accepted_and_wait_never_steps_twice() {
             &all(),
             &owner("waiting", IndexOwnerKind::Cli),
             true,
-            || NOW,
+            now_ns,
             |_| {
                 calls.set(calls.get() + 1);
                 assert!(calls.get() < 100_000);
-                peer_handle.step_thread_index(&other_lease, NOW).unwrap();
+                peer_handle
+                    .step_thread_index(&other_lease, now_ns())
+                    .unwrap();
                 std::thread::yield_now();
             },
         ));
@@ -272,7 +272,7 @@ fn other_gui_or_cli_owner_returns_accepted_and_wait_never_steps_twice() {
         assert!(matches!(result, ReindexResult::Completed { .. }));
         assert_eq!(
             handle
-                .thread_index_request_status(&request_id, NOW)
+                .thread_index_request_status(&request_id, now_ns())
                 .unwrap()
                 .owner
                 .unwrap()
@@ -287,21 +287,26 @@ fn waiter_takes_over_only_after_expiry() {
     let (_dir, _config, storage) = fixture();
     let handle = storage.handle();
     source(&handle, "native", "/project", 20, true);
+    let initial_now = now_ns();
     let LeaseResult::Acquired(old) = handle
-        .acquire_thread_index_lease(&owner("dead-gui", IndexOwnerKind::Gui), NOW, 10)
+        .acquire_thread_index_lease(
+            &owner("dead-gui", IndexOwnerKind::Gui),
+            initial_now,
+            THREAD_INDEX_LEASE_NS,
+        )
         .unwrap()
     else {
         panic!("lease");
     };
-    let now = Cell::new(NOW);
+    let now = Cell::new(initial_now);
     let result = unwrap_outcome(execute(
         &handle,
         &all(),
         &owner("waiter", IndexOwnerKind::Cli),
         true,
-        || now.get(),
+        || now.get().max(now_ns()),
         |_| {
-            now.set(NOW + 10);
+            now.set(old.expires_at_ns);
             std::thread::yield_now();
         },
     ));
@@ -451,13 +456,13 @@ fn external_cancel_is_not_reported_as_failed() {
     handle
         .acquire_thread_index_lease(
             &owner("gui", IndexOwnerKind::Gui),
-            NOW,
+            now_ns(),
             THREAD_INDEX_LEASE_NS,
         )
         .unwrap();
     let waiting = owner("waiting", IndexOwnerKind::Cli);
     let submitted = handle
-        .submit_thread_index_request(&all(), &waiting, NOW, THREAD_INDEX_LEASE_NS)
+        .submit_thread_index_request(&all(), &waiting, now_ns(), THREAD_INDEX_LEASE_NS)
         .unwrap();
     let id = submitted.request_id;
     let outcome = drive(
@@ -466,15 +471,15 @@ fn external_cancel_is_not_reported_as_failed() {
         &id,
         submitted.progress,
         &mut None,
-        &mut || NOW,
+        &mut now_ns,
         &mut |_| {
-            handle.cancel_thread_index_request(&id, NOW).unwrap();
+            handle.cancel_thread_index_request(&id, now_ns()).unwrap();
         },
     );
     assert!(matches!(outcome, ReindexOutcome::Cancelled { request_id } if request_id == id));
     assert!(matches!(
         handle
-            .thread_index_request_status(&id, NOW)
+            .thread_index_request_status(&id, now_ns())
             .unwrap()
             .progress,
         RequestProgress::Cancelled
