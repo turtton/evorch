@@ -217,8 +217,97 @@ async fn unknown_connect_error_code_does_not_echo_credentials() {
         .send(&ProviderAuth::new(""), &request())
         .await
         .unwrap_err();
+    // An unrecognized code is a server failure like `unknown`, so the router may fall back.
     assert_eq!(
         error,
-        ProviderError::Request("Cursor Connect request failed".into())
+        ProviderError::Http {
+            status: 500,
+            body: "Cursor Connect request failed (code unknown)".into(),
+        }
     );
+}
+
+#[tokio::test]
+async fn connect_error_codes_map_to_their_http_status_without_server_text() {
+    for (code, expected) in [
+        ("canceled", 499),
+        ("unknown", 500),
+        ("internal", 500),
+        ("data_loss", 500),
+        ("invalid_argument", 400),
+        ("failed_precondition", 400),
+        ("out_of_range", 400),
+        ("not_found", 404),
+        ("already_exists", 409),
+        ("aborted", 409),
+        ("permission_denied", 403),
+        ("unimplemented", 501),
+        ("unavailable", 503),
+        ("unauthenticated", 401),
+    ] {
+        // Given
+        let server = MockServer::start().await;
+        Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let payload = json!({"error": {"code": code, "message": "secret"}}).to_string();
+        let mut bytes = wire::frame(payload.as_bytes());
+        bytes[0] = 2;
+        Mock::given(path("/agent.v1.AgentService/RunSSE"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(bytes, "application/connect+proto"),
+            )
+            .mount(&server)
+            .await;
+        // When
+        let error = client(&server)
+            .send(&ProviderAuth::new(""), &request())
+            .await
+            .unwrap_err();
+        // Then
+        assert_eq!(
+            error,
+            ProviderError::Http {
+                status: expected,
+                body: format!("Cursor Connect request failed (code {code})"),
+            },
+            "code={code}"
+        );
+        assert!(!error.to_string().contains("secret"), "code={code}");
+    }
+}
+
+#[tokio::test]
+async fn connect_error_rate_limit_and_deadline_keep_their_retry_classes() {
+    for (code, expected) in [
+        (
+            "resource_exhausted",
+            ProviderError::RateLimited { retry_after: None },
+        ),
+        ("deadline_exceeded", ProviderError::Timeout),
+    ] {
+        // Given
+        let server = MockServer::start().await;
+        Mock::given(path("/aiserver.v1.BidiService/BidiAppend"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let payload = json!({"error": {"code": code}}).to_string();
+        let mut bytes = wire::frame(payload.as_bytes());
+        bytes[0] = 2;
+        Mock::given(path("/agent.v1.AgentService/RunSSE"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(bytes, "application/connect+proto"),
+            )
+            .mount(&server)
+            .await;
+        // When
+        let error = client(&server)
+            .send(&ProviderAuth::new(""), &request())
+            .await
+            .unwrap_err();
+        // Then
+        assert_eq!(error, expected, "code={code}");
+    }
 }

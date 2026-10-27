@@ -356,28 +356,44 @@ fn protocol_error(detail: &str) -> ProviderError {
         detail: detail.into(),
     }
 }
+/// Maps a Connect end-frame error to the error its HTTP equivalent would produce.
+///
+/// The server already answered, so this is a remote failure of this profile, never a
+/// local request error: the router must be able to fall back on it like on an HTTP
+/// status. Codes follow the Connect protocol's HTTP mapping; a code outside it counts
+/// as `unknown` (500).
 fn connect_error(value: &serde_json::Value) -> ProviderError {
-    let code = value
+    // Server error text is untrusted and may echo authentication or prompts, so only a
+    // recognized code is reported, never the server's own words.
+    let (code, status) = value
         .get("code")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    // Server error text is untrusted and may echo authentication or prompts.
-    let message = "Cursor Connect request failed";
+        .and_then(|code| connect_status(code).map(|status| (code, status)))
+        .unwrap_or(("unknown", 500));
     match code {
         "resource_exhausted" => ProviderError::RateLimited { retry_after: None },
-        "unauthenticated" => ProviderError::Http {
-            status: 401,
-            body: message.into(),
-        },
-        "permission_denied" => ProviderError::Http {
-            status: 403,
-            body: message.into(),
-        },
-        "unavailable" => ProviderError::Http {
-            status: 503,
-            body: message.into(),
-        },
         "deadline_exceeded" => ProviderError::Timeout,
-        _ => ProviderError::Request(message.into()),
+        _ => ProviderError::Http {
+            status,
+            body: format!("Cursor Connect request failed (code {code})"),
+        },
     }
+}
+
+/// The HTTP status the Connect protocol assigns to `code`, or `None` if it is not one.
+fn connect_status(code: &str) -> Option<u16> {
+    Some(match code {
+        "canceled" => 499,
+        "unknown" | "internal" | "data_loss" => 500,
+        "invalid_argument" | "failed_precondition" | "out_of_range" => 400,
+        "deadline_exceeded" => 504,
+        "not_found" => 404,
+        "already_exists" | "aborted" => 409,
+        "permission_denied" => 403,
+        "resource_exhausted" => 429,
+        "unimplemented" => 501,
+        "unavailable" => 503,
+        "unauthenticated" => 401,
+        _ => return None,
+    })
 }
