@@ -991,6 +991,7 @@ fn main() -> Result<()> {
                     terminal_phase: row.get(7)?,
                     restorable: row.get(8)?,
                     updated_at_ns: row.get(9)?,
+                    host_inputs_json: "[]".into(),
                 };
                 seen.insert(record.run_id.clone());
                 let note = latest_notes.get(&record.run_id).cloned();
@@ -1015,6 +1016,7 @@ fn main() -> Result<()> {
                 terminal_phase: String::new(),
                 restorable: false,
                 updated_at_ns: entry.created_at_ns,
+                host_inputs_json: "[]".into(),
             };
             process(record, Some(entry.clone()), &mut summaries, &mut fts)?;
         }

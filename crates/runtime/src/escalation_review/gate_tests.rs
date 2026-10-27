@@ -10,6 +10,7 @@ fn context() -> ToolExecutionContext {
         run_id: "run-review".into(),
         thread_id: None,
         call_id: Some("call-review".into()),
+        ..Default::default()
     }
 }
 

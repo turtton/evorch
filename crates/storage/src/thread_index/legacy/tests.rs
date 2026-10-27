@@ -23,9 +23,10 @@ fn seed(conn: &Connection, run: &str, continuity: Option<Value>) -> RunContextRe
         terminal_phase: "Done".into(),
         restorable: true,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     };
     conn.execute(
-        "INSERT INTO run_contexts VALUES (?1,'worker','worker',NULL,?2,?3,'[]','Done',1,1,0)",
+        "INSERT INTO run_contexts (run_id,role,name,parent_run_id,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,snapshot_revision) VALUES (?1,'worker','worker',NULL,?2,?3,'[]','Done',1,1,0)",
         rusqlite::params![run, record.config_json, record.messages_json],
     )
     .unwrap();

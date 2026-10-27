@@ -91,7 +91,8 @@
       "$ref": "#/$defs/DiagnosticsConfig",
       "default": {
         "log_level": "info",
-        "persistence": "warnings"
+        "persistence": "warnings",
+        "retain_terminal_task_progress": true
       }
     },
     "eval": {
@@ -776,6 +777,11 @@
           "description": "診断のDB保存。既定はwarning/errorのみ。stderrのログレベルとは独立。",
           "$ref": "#/$defs/DiagnosticPersistence",
           "default": "warnings"
+        },
+        "retain_terminal_task_progress": {
+          "description": "Safely reduce terminal task progress during storage maintenance.",
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false

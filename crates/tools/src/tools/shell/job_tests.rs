@@ -10,6 +10,7 @@ fn context(run_id: &str) -> ToolExecutionContext {
         run_id: run_id.into(),
         thread_id: Some("thread".into()),
         call_id: Some("call".into()),
+        ..Default::default()
     }
 }
 async fn invoke(shell: &Shell, owner: &str, value: Value) -> ToolResult {
@@ -231,6 +232,8 @@ fn job_schema_distinguishes_start_and_control() {
         json!({"command":"true", "yield_ms":1800000}),
         json!({"action":"start", "command":"true", "yield_ms":1800000}),
         json!({"action":"poll", "job_id":"x", "cursor":3}),
+        json!({"action":"poll", "job_id":"x", "return_on":"output"}),
+        json!({"action":"poll", "job_id":"x", "return_on":"completion"}),
         json!({"action":"poll", "job_id":"x", "yield_ms":1800000}),
         json!({"action":"stdin", "job_id":"x", "input":"a"}),
         json!({"action":"stdin", "job_id":"x", "input":"a", "yield_ms":60000}),
@@ -241,6 +244,10 @@ fn job_schema_distinguishes_start_and_control() {
     for input in [
         json!({}),
         json!({"action":"poll"}),
+        json!({"command":"true", "return_on":"output"}),
+        json!({"action":"stdin", "job_id":"x", "return_on":"output"}),
+        json!({"action":"stop", "job_id":"x", "return_on":"completion"}),
+        json!({"action":"poll", "job_id":"x", "return_on":"invalid"}),
         json!({"action":"poll", "job_id":"x", "command":"pwd"}),
         json!({"action":"poll", "job_id":"x", "yield_ms":1800001}),
         json!({"command":"true", "yield_ms":1800001}),
@@ -618,4 +625,183 @@ fn only_explicit_polls_report_progress() {
     ] {
         assert!(!shell.reports_progress(&input), "{input}");
     }
+}
+
+// Drive the model wait with virtual time while the real child is held behind a
+// filesystem barrier. No ten-second wall-clock sleep and no respawn fixture.
+#[tokio::test(start_paused = true)]
+async fn auto_yield_threshold_keeps_same_pipe_process() {
+    auto_yield_process(false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn auto_yield_threshold_keeps_same_pty_process() {
+    auto_yield_process(true).await;
+}
+async fn auto_yield_process(interactive: bool) {
+    use std::future::Future;
+    use std::task::Poll;
+    {
+        let shell = shell();
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = ToolExecutionContext {
+            shell_wait_policy: crate::executor::ShellWaitPolicy::AutoYield,
+            ..context("auto")
+        };
+        let command = "printf '%s\n' $$ >> starts; while ! test -e release; do sleep 0.01; done; printf '%s\n' $$; exit 7";
+        let mut starting = std::pin::pin!(shell.execute_with_context(
+            &ctx,
+            json!({"command":command, "cwd":directory.path(), "interactive":interactive})
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(starting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        for _ in 0..2000 {
+            tokio::task::yield_now().await;
+            // Opening the redirected file precedes printf's write. Wait for
+            // its completed line, not mere file existence (especially PTY).
+            if std::fs::read_to_string(directory.path().join("starts"))
+                .is_ok_and(|text| text.ends_with('\n') && !text.trim().is_empty())
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pid = std::fs::read_to_string(directory.path().join("starts")).unwrap();
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        std::future::poll_fn(|cx| {
+            assert!(starting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let yielded = starting.await.unwrap();
+        assert_eq!(job(&yielded)["status"], "running");
+        assert!(yielded.content.contains("10000 ms"));
+        assert!(yielded.content.contains("not restarted"));
+        assert!(yielded.content.contains("Stdin is closed"));
+        tokio::time::resume();
+        std::fs::write(directory.path().join("release"), "").unwrap();
+        let end = invoke(
+            &shell,
+            "auto",
+            json!({"action":"poll","job_id":id(&yielded)}),
+        )
+        .await;
+        assert_eq!(job(&end)["exit_code"], 7);
+        assert!(end.content.contains(pid.trim()));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("starts")).unwrap(),
+            pid
+        );
+        shell.drain_shell_jobs("auto").await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn until_terminal_ignores_auto_yield_threshold_and_cleans_unexposed_handle() {
+    use std::future::Future;
+    use std::task::Poll;
+    let shell = shell();
+    let directory = tempfile::tempdir().unwrap();
+    let ctx = context("verifier");
+    let mut running = std::pin::pin!(shell.execute_with_context(&ctx, json!({"command":"echo started > started; while ! test -e release; do sleep 0.01; done; exit 7", "cwd":directory.path()})));
+    std::future::poll_fn(|cx| {
+        assert!(running.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    for _ in 0..2000 {
+        tokio::task::yield_now().await;
+        if directory.path().join("started").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(directory.path().join("started").exists());
+    tokio::time::advance(Duration::from_millis(20_000)).await;
+    std::future::poll_fn(|cx| {
+        assert!(running.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::resume();
+    std::fs::write(directory.path().join("release"), "").unwrap();
+    let result = running.await.unwrap();
+    assert!(result.is_error);
+    assert_eq!(result.content, "exit_code: 7\n");
+    assert!(!shell.has_unobserved_shell_jobs("verifier"));
+    assert!(shell.take_shell_job_notifications("verifier").is_empty());
+}
+
+#[derive(Debug)]
+struct HostWake(tokio::sync::watch::Sender<bool>);
+impl crate::executor::ShellInputControl for HostWake {
+    fn begin_wait(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_input_yields_without_cancelling_and_contextless_jobs_remain_owned() {
+    use std::future::Future;
+    use std::task::Poll;
+    let shell = shell();
+    let (wake, _) = tokio::sync::watch::channel(false);
+    let ctx = ToolExecutionContext {
+        shell_wait_policy: crate::executor::ShellWaitPolicy::AutoYield,
+        shell_input: Some(Arc::new(HostWake(wake.clone()))),
+        ..Default::default()
+    };
+    let mut starting =
+        std::pin::pin!(shell.execute_with_context(&ctx, json!({"command":"sleep 100"})));
+    std::future::poll_fn(|cx| {
+        assert!(starting.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    wake.send_replace(true);
+    let result = starting.await.unwrap();
+    assert!(result.content.contains("User input arrived"));
+    assert_eq!(job(&result)["status"], "running");
+    tokio::time::resume();
+    let end = shell
+        .execute(json!({"action":"stop","job_id":id(&result),"yield_ms":60_000}))
+        .await
+        .unwrap();
+    assert_eq!(job(&end)["status"], "cancelled");
+    let other = super::Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    assert!(
+        other
+            .execute(json!({"action":"poll","job_id":id(&result)}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn synchronous_capacity_failure_is_immediate_without_spawning_or_leaking_other_handles() {
+    let shell = shell();
+    for _ in 0..8 {
+        invoke(
+            &shell,
+            "private-owner",
+            json!({"command":"read value", "yield_ms":0}),
+        )
+        .await;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        shell.execute(json!({"command":"touch must-not-start", "cwd":directory.path()})),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("8/8"));
+    assert!(!result.content.contains("job-"));
+    assert!(!directory.path().join("must-not-start").exists());
+    shell.drain_shell_jobs("private-owner").await.unwrap();
 }

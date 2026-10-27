@@ -218,6 +218,7 @@ mod rework_tests {
                         run_id: "run".into(),
                         thread_id: None,
                         call_id: None,
+                        ..Default::default()
                     },
                     "read".into(),
                     "id".into(),
@@ -263,6 +264,7 @@ mod rework_tests {
                         run_id: run.into(),
                         thread_id: None,
                         call_id: None,
+                        ..Default::default()
                     },
                     "read".into(),
                     "duplicate".into(),

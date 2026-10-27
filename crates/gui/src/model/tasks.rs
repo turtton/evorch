@@ -240,6 +240,10 @@ pub trait AgentRunSource: Send {
     fn inspect(&self, _run_id: RunId) -> Option<AgentInspection> {
         None
     }
+
+    fn host_input_run_is_live(&self, run: RunId) -> bool {
+        self.inspect(run).is_some()
+    }
 }
 
 impl AgentRunSource for AgentRuntime {
@@ -252,6 +256,10 @@ impl AgentRunSource for AgentRuntime {
 
     fn inspect(&self, run_id: RunId) -> Option<AgentInspection> {
         self.inspect_agent(run_id).ok()
+    }
+
+    fn host_input_run_is_live(&self, run: RunId) -> bool {
+        self.host_input_run_is_live(run)
     }
 }
 
@@ -328,6 +336,10 @@ impl<S: AgentRunSource> TasksModel<S> {
 
     pub fn inspect(&self, run_id: RunId) -> Option<AgentInspection> {
         self.source.inspect(run_id)
+    }
+
+    pub fn host_input_run_is_live(&self, run: RunId) -> bool {
+        self.source.host_input_run_is_live(run)
     }
 
     pub fn refresh(&mut self) {

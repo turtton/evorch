@@ -68,6 +68,7 @@ async fn approved_execution_still_routes_through_sandbox() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "shell",
             "call-record",
@@ -102,6 +103,7 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "shell",
             "call-outside",
@@ -125,6 +127,7 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "shell",
             "call-inside",
@@ -165,6 +168,7 @@ async fn interactive_shell_runs_inside_bwrap() {
                 run_id: "run-1".to_string(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "shell",
             "call-pty",

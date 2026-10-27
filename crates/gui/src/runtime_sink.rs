@@ -157,6 +157,26 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn has_host_input_receipts(&self) -> bool {
+        true
+    }
+
+    fn host_input_receipts(
+        &self,
+        ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
+        Some(self.runtime.host_input_receipts(ids))
+    }
+    fn mark_unreachable_host_inputs(
+        &self,
+        run: &str,
+    ) -> Result<Vec<String>, storage::StorageError> {
+        if let Ok(run) = run.parse() {
+            return self.runtime.reconcile_orphaned_host_inputs(run);
+        }
+        Ok(Vec::new())
+    }
+
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
         let run = self
             .chat_runs
@@ -838,6 +858,16 @@ impl RuntimeCommandSink {
         resume_only: bool,
         mut initial: RunConfig,
     ) -> Vec<LoopEvent> {
+        if !resume_only {
+            // Host-generated goal/answer chats have no GUI submission row; give
+            // them their own ID rather than storing the empty string.
+            initial.initial_prompt_id = Some(if submission.submission_id.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                submission.submission_id.clone()
+            });
+        }
+
         let thread_id = submission.thread_id;
         // New runs of a thread work in its project, even after the active project moved.
         if let Some(root) = submission.project_root {

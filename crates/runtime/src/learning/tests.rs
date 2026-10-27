@@ -37,6 +37,7 @@ fn record(id: &str, parent: Option<&str>, text: &str) -> storage::RunContextReco
             {"role":"user","content":[{"type":"text","text":text}]},
             {"role":"assistant","content":[{"type":"reasoning","text":"hidden reasoning"},{"type":"image","media_type":"image/png","data":"hidden image"}]}
         ]).to_string(), checkpoints_json:"[]".into(), terminal_phase:"Done".into(), restorable:false, updated_at_ns:42,
+        host_inputs_json: "[]".into(),
     }
 }
 

@@ -48,6 +48,7 @@ fn record(run_id: &str, messages: &Value, checkpoints: usize, at: i64) -> RunCon
         terminal_phase: "Done".into(),
         restorable: true,
         updated_at_ns: at,
+        host_inputs_json: "[]".into(),
     }
 }
 

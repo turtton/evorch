@@ -128,7 +128,10 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             | LifecycleEvent::TaskPromptPublished { .. } => {}
             LifecycleEvent::AgentRunRestored { .. }
             | LifecycleEvent::RootWakeRequested { .. }
-            | LifecycleEvent::AutoContinuationPaused { .. } => {}
+            | LifecycleEvent::AutoContinuationPaused { .. }
+            | LifecycleEvent::HostInputDelivered { .. }
+            | LifecycleEvent::HostInputDropped { .. }
+            | LifecycleEvent::HostInputUnknown { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
             LifecycleEvent::EscalationRequested { .. } => {}

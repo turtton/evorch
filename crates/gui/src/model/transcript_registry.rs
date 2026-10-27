@@ -367,6 +367,19 @@ impl TranscriptRegistry {
         self.threads.entry(thread.into()).or_default().push(entry);
     }
 
+    pub(crate) fn push_host_input(&mut self, thread: &str, id: &str, text: String) {
+        self.threads
+            .entry(thread.into())
+            .or_default()
+            .push_host_input(id, text);
+    }
+
+    pub(crate) fn remove_host_input(&mut self, thread: &str, id: &str) {
+        if let Some(model) = self.threads.get_mut(thread) {
+            model.remove_host_input(id);
+        }
+    }
+
     /// Adopt output that may arrive before the escalation event names its owner.
     pub(crate) fn adopt_thread_root(&mut self, thread: &str, run: &str) {
         if !self.thread_roots.contains_key(thread) {

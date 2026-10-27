@@ -169,7 +169,7 @@ fn refused_chat_goes_back_to_the_composer_instead_of_the_transcript() {
         saved["status"],
         serde_json::json!({"state": "rejected", "reason": "provider unavailable"})
     );
-    assert_eq!(saved["resolution"], "restored");
+    assert!(saved["resolution"]["moved_to_composer"]["draft_id"].is_string());
 
     // When: the runtime accepts it on the next try.
     runtime.accept();
@@ -226,10 +226,7 @@ fn late_refusal_fills_an_empty_composer() {
     assert!(!gui.has_label("Queued: also check the docs"));
     assert!(!gui.has_label("Not delivered: also check the docs"));
     assert_eq!(user_messages(&gui), ["start the task"]);
-    assert_eq!(
-        saved_message(temp.path(), "also check the docs")["resolution"],
-        "restored"
-    );
+    assert!(saved_message(temp.path(), "also check the docs")["resolution"]["moved_to_composer"]["draft_id"].is_string());
     // A verdict arrives once.
     assert!(!gui.state_mut().reject_submission(&id, "again"));
 }
@@ -270,10 +267,7 @@ fn late_refusal_keeps_a_newer_draft_and_offers_the_message_above_the_composer() 
         "a newer draft\n\nalso check the docs"
     );
     assert!(!gui.has_label("Not delivered: also check the docs"));
-    assert_eq!(
-        saved_message(temp.path(), "also check the docs")["resolution"],
-        "restored"
-    );
+    assert!(saved_message(temp.path(), "also check the docs")["resolution"]["moved_to_composer"]["draft_id"].is_string());
 }
 
 #[test]

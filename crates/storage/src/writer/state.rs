@@ -33,22 +33,43 @@ struct WriterState {
     diagnostic_cursor: Option<event::diagnostic::Cursor>,
     reclaim_wal_pending: bool,
     index: super::index::IndexJob,
+    task_progress_cursor: crate::maintenance::retention::Cursor,
 }
 
 /// All review mutations share the same suspension gate and rollback boundary.
-fn review_transaction(
+fn review_transaction<T>(
     state: &WriterState,
-    operation: impl FnOnce(&Connection) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
+    operation: impl FnOnce(&Connection) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
     if state.writes_suspended {
         return Err(StorageError::Serialization(
             "review writes suspended by storage limit".into(),
         ));
     }
     let transaction = state.conn.unchecked_transaction()?;
-    operation(&transaction)?;
+    let value = operation(&transaction)?;
     transaction.commit()?;
-    Ok(())
+    Ok(value)
+}
+
+/// The snapshot and its receipt changes commit together or not at all.
+fn upsert_run_context_with_receipts(
+    state: &WriterState,
+    record: &crate::RunContextRecord,
+    write: &crate::HostInputWrite,
+) -> Result<(crate::RunContextReceipt, Vec<crate::HostInputTransition>), StorageError> {
+    if state.writes_suspended {
+        return Err(StorageError::Serialization(
+            "run context writes suspended by storage limit".into(),
+        ));
+    }
+    let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+    let transaction = state.conn.unchecked_transaction()?;
+    let receipt = crate::repo::run_context::upsert(&transaction, record)?;
+    let applied =
+        crate::repo::host_input_receipt::apply(&transaction, Some(record), write, now_ns)?;
+    transaction.commit()?;
+    Ok((receipt, applied))
 }
 
 /// One SQLite transaction around a bundle save; the receipt leaves the writer
@@ -132,6 +153,7 @@ pub(super) fn run_writer_with_index(
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
         index,
+        task_progress_cursor: Default::default(),
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
@@ -302,6 +324,7 @@ pub(super) fn run_writer_with_index(
                 rows,
                 edges,
                 reference_id,
+                host_inputs,
                 reply,
             )) => {
                 let result = snapshot_transaction(&state, "review", |conn| {
@@ -311,7 +334,14 @@ pub(super) fn run_writer_with_index(
                         .stage_snapshot_bundle(&write)?;
                     crate::repo::review_evidence::insert(conn, &rows)?;
                     crate::repo::review_lineage::insert(conn, &edges)?;
-                    Ok(receipt)
+                    let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+                    let applied = crate::repo::host_input_receipt::apply(
+                        conn,
+                        Some(&write.record),
+                        &host_inputs,
+                        now_ns,
+                    )?;
+                    Ok((receipt, applied))
                 });
                 let _ = reply.send(result);
             }
@@ -381,14 +411,78 @@ pub(super) fn run_writer_with_index(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::UpsertRunContextWithEvidence(record, rows, edges, reference_id, reply)) => {
+            Ok(Command::UpsertRunContextWithEvidence(
+                record,
+                rows,
+                edges,
+                reference_id,
+                host_inputs,
+                reply,
+            )) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::assistant_reference::consume(
+                                conn,
+                                reference_id.as_deref(),
+                            )?;
+                            crate::repo::run_context::upsert(conn, &record)?;
+                            crate::repo::review_evidence::insert(conn, &rows)?;
+                            crate::repo::review_lineage::insert(conn, &edges)?;
+                            crate::repo::host_input_receipt::apply(
+                                conn,
+                                Some(&record),
+                                &host_inputs,
+                                now_ns,
+                            )
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpsertRunContextWithReceipts(record, host_inputs, reply)) => {
+                let _ = reply.send(upsert_run_context_with_receipts(
+                    &state,
+                    &record,
+                    &host_inputs,
+                ));
+            }
+            Ok(Command::AppendHostInputAccepted(rows, edges, reference_id, receipt, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
-                    crate::repo::run_context::upsert(conn, &record)?;
+                    crate::repo::review_lineage::insert(conn, &edges)?;
                     crate::repo::review_evidence::insert(conn, &rows)?;
-                    crate::repo::review_lineage::insert(conn, &edges)
+                    crate::repo::host_input_receipt::insert(conn, &receipt)
                 });
                 let _ = reply.send(result);
+            }
+            Ok(Command::TransitionHostInputs(transitions, reply)) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::host_input_receipt::transition(conn, &transitions, now_ns)
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpdateHostInputReceipts(run_id, reason, reply)) => {
+                let result =
+                    crate::system_time_to_ns(std::time::SystemTime::now()).and_then(|now_ns| {
+                        review_transaction(&state, |conn| {
+                            crate::repo::host_input_receipt::mark_unknown(
+                                conn, &run_id, &reason, now_ns,
+                            )
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(Command::HostInputReceipts(ids, reply)) => {
+                let _ = reply.send(crate::repo::host_input_receipt::for_ids(&state.conn, &ids));
+            }
+            Ok(Command::HostInputReceiptsForRun(run_id, reply)) => {
+                let _ = reply.send(crate::repo::host_input_receipt::for_run(
+                    &state.conn,
+                    &run_id,
+                ));
             }
             Ok(Command::CompareAndSwapRunContextRestoreState(
                 run_id,
@@ -592,7 +686,20 @@ fn run_due_work(state: &mut WriterState, idle: bool) {
 /// page budget and checks storage limits against the resulting file sizes.
 fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     let now = std::time::SystemTime::now();
-    let removed = diagnostic::retain_recent(state, now)? + retain_thread_starts(state, now)?;
+    let mut removed = diagnostic::retain_recent(state, now)? + retain_thread_starts(state, now)?;
+    if state.config.retain_terminal_task_progress {
+        let summary =
+            crate::maintenance::retention::tick(&state.conn, &mut state.task_progress_cursor)?;
+        if summary.event_count > 0 {
+            state.accounting = event::EventAccounting::default();
+            removed += summary.event_count;
+            tracing::info!(
+                events_removed = summary.event_count,
+                bytes_removed = summary.payload_bytes,
+                "equivalent terminal task progress removed"
+            );
+        }
+    }
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
@@ -1010,6 +1117,7 @@ mod tests {
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
             index: crate::writer::index::IndexJob::inert(),
+            task_progress_cursor: Default::default(),
         }
     }
 

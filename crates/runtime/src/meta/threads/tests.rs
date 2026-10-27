@@ -162,6 +162,7 @@ impl Fixture {
                 terminal_phase: "Done".into(),
                 restorable: false,
                 updated_at_ns: crate::run_store::review_time_ns(),
+                host_inputs_json: "[]".into(),
             })
             .unwrap();
     }

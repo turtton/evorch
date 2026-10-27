@@ -22,6 +22,7 @@ fn fixture() -> WriterState {
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
         index: crate::writer::index::IndexJob::inert(),
+        task_progress_cursor: Default::default(),
     }
 }
 

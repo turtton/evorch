@@ -157,6 +157,7 @@ fn foreground_run(
                         terminal_phase: "Running".into(),
                         restorable: true,
                         updated_at_ns: crate::system_time_to_ns(std::time::SystemTime::now())?,
+                        host_inputs_json: "[]".into(),
                     },
                     expected_snapshot_revision: None,
                     binding: None,

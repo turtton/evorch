@@ -505,6 +505,7 @@ fn persisted_archive_run(
                 terminal_phase: snapshot.into(),
                 restorable,
                 updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
             })
             .unwrap();
     }
@@ -964,4 +965,52 @@ fn claiming_a_thread_stops_its_orphaned_runs() {
         );
         assert_eq!(state.thread_phases()["run-target"], P::Done);
     }
+}
+
+#[test]
+fn archiving_active_thread_before_debounce_saves_its_draft_and_restores_the_next() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = fixture_state(directory.path(), false, false);
+    let next = state.create_thread("Next").unwrap();
+    state.composer_mut().input = "next draft".into();
+    state.switch_thread(ThreadId::new("target")).unwrap();
+    state.composer_mut().input = "archive draft before debounce".into();
+    state.toggle_archive(ThreadId::new("target")).unwrap();
+    assert_eq!(state.sidebar().active_thread.as_ref(), Some(&next));
+    assert_eq!(state.composer().input, "next draft");
+    let saved = workspace_ui::load_sidebar(&directory.path().join("sidebar.json")).unwrap();
+    assert_eq!(
+        saved
+            .threads
+            .iter()
+            .find(|thread| thread.id == ThreadId::new("target"))
+            .unwrap()
+            .draft_input,
+        "archive draft before debounce"
+    );
+    assert_eq!(
+        saved
+            .threads
+            .iter()
+            .find(|thread| thread.id == next)
+            .unwrap()
+            .draft_input,
+        "next draft"
+    );
+}
+
+#[test]
+fn archiving_last_active_thread_before_debounce_preserves_draft_without_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = fixture_state(directory.path(), false, false);
+    state.composer_mut().input = "last draft before debounce".into();
+    state.toggle_archive(ThreadId::new("target")).unwrap();
+    assert!(state.sidebar().active_thread.is_none());
+    assert!(state.composer().input.is_empty());
+    let saved = workspace_ui::load_sidebar(&directory.path().join("sidebar.json")).unwrap();
+    assert!(saved.active_thread.is_none());
+    assert_eq!(saved.threads[0].draft_input, "last draft before debounce");
+    state.toggle_archive(ThreadId::new("target")).unwrap();
+    state.switch_thread(ThreadId::new("target")).unwrap();
+    assert_eq!(state.composer().input, "last draft before debounce");
 }

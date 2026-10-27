@@ -697,6 +697,7 @@ fn run() -> Result<(), GuiError> {
         db_path: storage_db_path,
         usage_retention_days: composition_config.metrics.retention_days,
         thread_index: thread_index_settings(&composition_config),
+        retain_terminal_task_progress: composition_config.diagnostics.retain_terminal_task_progress,
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;
@@ -1228,6 +1229,10 @@ impl Drop for GuiStorageResources {
 }
 
 impl eframe::App for GuiApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.workbench.logic(ctx, frame);
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.workbench.raw_input_hook(ctx, raw_input);
     }
@@ -1243,7 +1248,7 @@ impl eframe::App for GuiApp {
 
 impl Drop for GuiApp {
     fn drop(&mut self) {
-        self.workbench.0.save_sidebar();
+        self.workbench.0.flush_composer_draft();
     }
 }
 
@@ -2003,3 +2008,7 @@ mod storage_shutdown_tests {
         assert!(permit.validate_generation().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "support/gui_app_tests.rs"]
+mod gui_app_tests;

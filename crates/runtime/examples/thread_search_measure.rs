@@ -609,6 +609,7 @@ mod tests {
                     terminal_phase: "Done".into(),
                     restorable: false,
                     updated_at_ns: 2,
+                    host_inputs_json: "[]".into(),
                 },
                 expected_snapshot_revision: None,
                 binding: Some(ThreadRunRow {

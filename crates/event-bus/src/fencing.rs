@@ -327,6 +327,9 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             | LifecycleEvent::AgentRunRestored { run_id, .. }
             | LifecycleEvent::RootWakeRequested { run_id }
             | LifecycleEvent::AutoContinuationPaused { run_id, .. }
+            | LifecycleEvent::HostInputDelivered { run_id, .. }
+            | LifecycleEvent::HostInputDropped { run_id, .. }
+            | LifecycleEvent::HostInputUnknown { run_id, .. }
             | LifecycleEvent::AgentRunStateChanged { run_id, .. }
             | LifecycleEvent::TurnCompleted { run_id, .. }
             | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
@@ -474,6 +477,32 @@ mod question_tests {
             ];
             for event in events {
                 assert_eq!(fences.accepts(&event), run == "run-current");
+            }
+        }
+    }
+
+    #[test]
+    fn host_input_notices_preserve_the_run_fence() {
+        let fences = MutationFences::default();
+        assert!(fences.register("run-stale".into(), Arc::new(|| false)));
+        for run in ["run-current", "run-stale"] {
+            for event in [
+                LifecycleEvent::HostInputDelivered {
+                    run_id: run.into(),
+                    prompt_id: "prompt".into(),
+                },
+                LifecycleEvent::HostInputDropped {
+                    run_id: run.into(),
+                    prompt_id: "prompt".into(),
+                    reason: None,
+                },
+                LifecycleEvent::HostInputUnknown {
+                    run_id: run.into(),
+                    prompt_id: "prompt".into(),
+                    reason: None,
+                },
+            ] {
+                assert_eq!(fences.accepts(&Event::new(event)), run == "run-current");
             }
         }
     }

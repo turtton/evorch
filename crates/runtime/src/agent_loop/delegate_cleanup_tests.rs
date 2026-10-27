@@ -117,6 +117,7 @@ fn fixture_with_model(
             mailbox: mailbox.clone(),
             handoff: None,
             restored: None,
+            initial_prompt_id: None,
         },
         shared: loop_shared(&Arc::downgrade(&runtime.shared), None).expect("runtime"),
         channels: LoopChannels {
@@ -143,6 +144,8 @@ fn fixture_with_model(
         resumed: false,
         completed_turn_end: None,
         pending_user_messages: Vec::new(),
+        host_input_ledger: Default::default(),
+        initial_prompt_pending: None,
         goal_wake_pending: false,
         todo_context_pending: false,
         todo_context_deferred: false,
@@ -375,6 +378,7 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
         Vec::new(),
         false,
         None,
+        0,
     ));
     assert!(!state.flush_aside());
     assert!(state.goal_wake_pending);

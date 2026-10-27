@@ -12,21 +12,53 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
 
 - Runtime meta tools expose concrete JSON schemas. Schema acceptance and argument
   deserialization are checked together, including roles and structured failures.
-- `shell` without `yield_ms` retains synchronous execution. `yield_ms: 0..1800000`
-  (30 minutes) starts a bounded background job; `action: poll | stdin | stop` uses its `job_id`
-  and output cursor. For start and stop, a positive `yield_ms` waits until
-  completion or the specified deadline; intermediate output neither returns
-  control nor extends the deadline. Start with `yield_ms: 1000` for commands the
-  agent may need to monitor or cancel. Use
-  `{"action":"stop","job_id":"...","yield_ms":1000}` to stop the process
-  group and wait up to one second for teardown. If it is still running, poll
-  for its terminal result. Stop does not roll back prior filesystem effects.
-  Zero returns immediately; omitted control yields default to zero. Poll and
-  stdin still return early on new output or completion. A poll can also wait up
-  to 1,800,000 ms; stdin and stop yields remain capped at 60,000 ms. An omitted
-  control cursor continues after the highest cursor already returned for the
-  job, so a repeated poll neither resends old output nor returns early on it;
-  an explicit cursor, including 0, re-reads from that point.
+- Every `shell` start is supervised as an owner-scoped job from launch. With
+  omitted `yield_ms`, short commands retain the `exit_code` result format.
+  Model tool calls automatically return a continuing job after **10,000 ms** or
+  accepted host input, without restarting or reapproving the command. This
+  releases the shell wait, not necessarily the next model request: other tools
+  in the batch can still be waiting. Direct callers and the benchmark verifier
+  use `ShellWaitPolicy::UntilTerminal` and never judge a running job as success.
+  Omitted-yield starts close stdin (pipe null input / PTY EOF) and have no
+  default timeout, even after auto-yield. Use an explicit `yield_ms` to retain
+  stdin; these jobs keep the existing one-hour default lifetime. `timeout_ms`
+  applies to the original process lifetime and has no new upper limit.
+- Explicit start `yield_ms: 0..1800000` waits for completion or its deadline,
+  ignoring intermediate output, then returns a `job_id` and cursor. `poll`
+  defaults to **60,000 ms**, waiting for completion or the wait deadline, **not
+  new output**. Sixty seconds avoids repeated provider turns during noisy builds
+  while bounding each default wait to one minute; callers can choose up to the
+  existing 1,800,000 ms maximum. For an interactive prompt with no input to send,
+  explicitly use `return_on: "output"` on poll. `stdin` preserves its previous
+  output-or-completion wait and defaults to zero; `stop` also defaults to zero
+  and waits for teardown/deadline. Both have the existing 60,000 ms maximum.
+  Zero always returns immediately. Output never extends the wait deadline.
+  Use `{"action":"stop","job_id":"...","yield_ms":1000}` to stop the process
+  group and wait up to one second for teardown, then poll to terminal if needed.
+  Stop does not roll back prior filesystem effects.
+- Output cursors remain redacted UTF-8 byte offsets. An omitted cursor continues
+  after the highest cursor returned. When a completion-oriented poll reaches
+  its deadline while still running, its omitted-cursor preview favors the last
+  8 KiB / 200 lines of new retained output; skipped bytes are flagged with
+  `output_gap`. Explicit cursors (including zero) keep ordered paging and allow
+  re-reading retained skipped output. Completion artifacts preserve bounded
+  stdout-then-stderr output for omitted-yield starts (explicit jobs retain
+  interleaved capture); live events continue to stream redacted lines.
+- The shared limit is 8 running / 32 retained jobs, including synchronous
+  starts. At capacity commands fail immediately **without spawning**, never
+  wait for a slot or fall back to an unsupervised process. Diagnostics show at
+  most three jobs matching this registry, run and thread; `None` is not a
+  wildcard. Completed starts that never exposed a handle are observed and
+  removed from both indexes immediately. Exposed handles retain normal paging
+  and outcome-observation semantics.
+- Accepted host input wakes omitted-yield model shell waits without cancelling
+  their jobs. A shared run-incarnation handoff reservation survives the last
+  shell receiver. At the post-tools boundary, `seal_for_next_request` fixes a
+  sequence cut under the enqueue lock; inputs through the cut enter history
+  once via `take_user_input`, while newer input stays pending. This cut does not
+  close host acceptance (unlike permanent PR4b `seal`). No additional receipt
+  or replay path is introduced: Delivered still requires the PR4b committed
+  snapshot, and Stop / Unknown / Dropped keep that implementation's contract.
 - The identical-call guard stops a run after
   `max_identical_tool_call_repeats` consecutive identical calls. Ordinary calls
   are checked by input before the batch runs. Calls whose tool reports progress
@@ -61,7 +93,7 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
 - At most 8 running jobs / 32 retained handles per executor registry, 64 KiB live output per job, and
   an 8 MiB output artifact bound resource usage. Large output uses the existing
   private `/var/tmp` artifact facility. Truncation and the file path remain visible.
-  An async job defaults to a one-hour lifetime unless a timeout is supplied.
+  An explicit-yield job defaults to a one-hour lifetime unless a timeout is supplied.
 - Process groups are stopped and reaped before a job reports completion. There is
   no workspace lock: `write` / `edit` / `shell` never wait for a running job, in
   another run or in the run that owns it. (The run that owned a job used to have

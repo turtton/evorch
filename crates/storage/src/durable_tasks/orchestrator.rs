@@ -1,5 +1,5 @@
+use crate::entity::TaskContinuation;
 use event_bus::OrchestratorEvent;
-use storage::entity::TaskContinuation;
 
 use super::DurableTasksModel;
 

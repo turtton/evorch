@@ -11,6 +11,7 @@ mod continuity_tests;
 mod delegate_cleanup_tests;
 mod durable;
 mod finalization;
+mod host_inputs;
 mod identical_calls;
 mod messages;
 mod observability;
@@ -62,6 +63,8 @@ pub(crate) struct RunTask {
     pub(crate) handoff: Option<RunHandoff>,
     pub(crate) restored: Option<crate::restore::RestoredState>,
     pub(crate) turn: providers::RequestTurnContext,
+    /// Receipt ID of `prompt` when it is host input whose delivery is tracked.
+    pub(crate) initial_prompt_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,6 +140,10 @@ pub(crate) struct LoopState {
     resumed: bool,
     pub(crate) completed_turn_end: Option<usize>,
     pending_user_messages: Vec<crate::runtime::user_inbox::UserInput>,
+    /// Tracked host inputs appended and committed; shared with snapshot writes.
+    host_input_ledger: std::sync::Mutex<host_inputs::HostInputLedger>,
+    /// The run's own prompt while it waits to be appended at setup.
+    initial_prompt_pending: Option<String>,
     pub(crate) goal_wake_pending: bool,
     pub(crate) todo_context_pending: bool,
     pub(crate) todo_context_deferred: bool,
@@ -263,6 +270,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let completed_turn_end = restored.as_ref().and_then(|restored| {
         (history_only && restored.turn_completed).then_some(restored.messages.len())
     });
+    let mut restored_prompt_index = None;
+    let restored_host_inputs = restored
+        .as_ref()
+        .map(|restored| restored.host_inputs.clone())
+        .unwrap_or_default();
     let context = if let Some(checkpoint) = &benchmark {
         AgentContext::from_restored(
             task.run_id,
@@ -286,6 +298,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
                     None if !history_only => {
                         context.push_user(&task.prompt);
+                        restored_prompt_index = Some(context.messages.len() - 1);
                         if let Some(message) = context.messages.last_mut() {
                             message
                                 .content
@@ -327,6 +340,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         resumed: is_restored,
         completed_turn_end,
         pending_user_messages: Vec::new(),
+        host_input_ledger: std::sync::Mutex::new(host_inputs::HostInputLedger::restored(
+            restored_host_inputs,
+        )),
+        initial_prompt_pending: None,
         goal_wake_pending: false,
         todo_context_pending: true,
         todo_context_deferred,
@@ -350,6 +367,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         allowed_instructions,
         allowed_skill_origins: Default::default(),
     };
+    // The run's own host prompt: already in a restored context (and committed
+    // there when the same run resumed), or appended by setup below.
+    if let Some(prompt_id) = state.task.initial_prompt_id.clone() {
+        let known = state.host_inputs().contains(&prompt_id);
+        match restored_prompt_index {
+            Some(index) => state.host_inputs().append(prompt_id, index),
+            None if !known && !is_restored && !benchmark_replay && !history_only => {
+                state.initial_prompt_pending = Some(prompt_id);
+            }
+            None => {}
+        }
+    }
     // One boundary covers legacy completion, streaming and official compaction without
     // changing the authorized tools persisted in checkpoints.
     if !state.shared.model.narrows_edit_tools() {
@@ -600,22 +629,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             if benchmark_mode {
                 state.append_benchmark_instructions();
             }
-            state.context.push_user(&state.task.prompt);
-            if let Some(message) = state.context.messages.last_mut() {
-                message
-                    .content
-                    .extend(
-                        state
-                            .task
-                            .config
-                            .images
-                            .iter()
-                            .map(|image| ContentBlock::Image {
-                                media_type: image.media_type.clone(),
-                                data: image.data.clone(),
-                            }),
-                    );
-            }
+            let prompt = state.task.prompt.clone();
+            let images = state.task.config.images.clone();
+            let tracked = state.initial_prompt_pending.clone();
+            state.append_user_message(&prompt, images, tracked);
         }
         if state.task.handoff.is_some() && !is_restored {
             match state
@@ -823,11 +840,7 @@ impl LoopState {
             }
             // Ordinary follow-ups wait for Stop unless the host explicitly
             // requests delivery at this safe (post-tools) turn boundary.
-            if self.has_pending_user_messages()
-                || self.channels.user_inbox.status().next_turn_requested
-            {
-                self.flush_user_messages();
-            }
+            self.flush_scheduled_user_messages();
             if let Err(error) = self.flush_user_answers() {
                 self.finish_error(error);
                 return;
@@ -1009,7 +1022,7 @@ impl LoopState {
                 self.finish_error(format!("ContextWindowExhausted: compaction could not reduce the projected context ({estimated} tokens) below model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
             }
-            if self.boundary_pending {
+            if self.boundary_pending || self.host_inputs().unrecorded().next().is_some() {
                 self.boundary_pending = false;
                 if let Err(error) = crate::restore::persist_checkpoint(self) {
                     self.boundary_pending = true;
@@ -1333,6 +1346,15 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        if let Some(kind) = self.interrupted() {
+            self.finish_interrupted(kind);
+            return false;
+        }
+        // A previous cut may have drained newer channel input into local
+        // pending storage. There need not be another channel event to wake us.
+        if self.has_pending_user_messages() && self.flush_user_messages() {
+            return true;
+        }
         // Resume can arrive after the final goal boundary but before Waiting.
         // Keep the scheduling bit when the post-boundary inbox drain sees it.
         if self.goal_wake_pending {
@@ -1394,15 +1416,9 @@ impl LoopState {
                         }
                         continue;
                     }
-                    self.accept_input_identity(message.2, message.3);
-                        self.context.push_user(&message.0);
-                        if let Some(user) = self.context.messages.last_mut() {
-                            user.content.extend(message.1.into_iter().map(|image| ContentBlock::Image {
-                                media_type: image.media_type,
-                                data: image.data,
-                            }));
-                        }
-                    if message.2 { self.channels.user_inbox.consumed(1); }
+                    let seq = message.4;
+                    self.take_user_input(message);
+                    self.channels.user_inbox.consumed_through(seq);
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();

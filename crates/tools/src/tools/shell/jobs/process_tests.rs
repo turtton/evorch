@@ -18,8 +18,12 @@ fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
         owner: "owner".into(),
         call_id: None,
         thread: None,
+        synchronous: false,
+        timeout_ms: None,
         state: Mutex::new(State {
             output: LiveOutput::default(),
+            final_result: None,
+            exposed: true,
             completion: None,
             observed: false,
             completion_notified: false,
@@ -92,9 +96,9 @@ async fn run(
     let task = tokio::spawn(async move {
         let timeout = Duration::from_secs(60);
         if interactive {
-            run_pty(&wrapped, &worker, input, cancel, timeout).await
+            run_pty(&wrapped, &worker, input, cancel, Some(timeout)).await
         } else {
-            run_pipe(&wrapped, &worker, input, cancel, timeout).await
+            run_pipe(&wrapped, &worker, input, cancel, Some(timeout)).await
         }
     });
     let pid_file = dir.join("helper.pid");

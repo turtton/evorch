@@ -145,6 +145,26 @@ pub type ContextPreviewReceiver =
     std::sync::mpsc::Receiver<Result<runtime::base_context::BaseContextReport, String>>;
 
 pub trait CommandSink: Send {
+    /// Capability check without a storage query (in particular, no empty-ID probe).
+    fn has_host_input_receipts(&self) -> bool {
+        false
+    }
+
+    /// None only for non-runtime sinks/fixtures. Production uses durable receipts.
+    fn host_input_receipts(
+        &self,
+        _ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
+        None
+    }
+    /// Return only IDs that the generation-guarded storage operation changed.
+    fn mark_unreachable_host_inputs(
+        &self,
+        _run: &str,
+    ) -> Result<Vec<String>, storage::StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Runtime receipt observation, not an acknowledgement of command acceptance.
     fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
         None

@@ -126,6 +126,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         LEARNING_PIPELINE_FAILED => HarnessImprovement,
         // run_context: failed to persist restoration context; previous checkpoint retained.
         CONTEXT_SNAPSHOT_FAILED => HarnessImprovement,
+        // host input receipts: storage refused settling them; the host shows the
+        // inputs as of unknown delivery until it reconciles them.
+        HOST_INPUT_RECEIPT_FAILED => HarnessImprovement,
         // escalation/handoff: terminal direct -> orchestrator ownership/question transfer failed.
         ESCALATION_HANDOFF_FAILED => HarnessImprovement,
         // The durable panic spool, ingested on the next start rather than emitted on the bus.

@@ -176,6 +176,7 @@ fn context(run_id: &str) -> ToolExecutionContext {
         run_id: run_id.into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     }
 }
 

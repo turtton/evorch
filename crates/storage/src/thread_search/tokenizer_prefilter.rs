@@ -178,7 +178,7 @@ impl Tokenizer {
         methods.xTokenize?;
         let mut instance = ptr::null_mut();
         // SAFETY: These are the methods/context returned together by SQLite.
-        // No args is exactly v25.sql's tokenize='trigram': defaults
+        // No args is exactly v27.sql's tokenize='trigram': defaults
         // case_sensitive=0, remove_diacritics=0. Keep these in sync.
         let rc = unsafe { create(context, ptr::null_mut(), 0, &mut instance) };
         if rc != ffi::SQLITE_OK || instance.is_null() {

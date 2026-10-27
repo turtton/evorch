@@ -375,6 +375,7 @@ fn known_credential_is_protected_only_inside_responses_ciphertext() {
         terminal_phase: "Checkpoint".into(),
         restorable: true,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     };
 
     // When: the value appears once inside the ciphertext and once in the summary.

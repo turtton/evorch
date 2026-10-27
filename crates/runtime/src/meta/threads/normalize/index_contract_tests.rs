@@ -40,6 +40,7 @@ fn fixture(messages: &[Message]) -> (RunContextRecord, SnapshotProvenance) {
         terminal_phase: "Done".into(),
         restorable: true,
         updated_at_ns: 0,
+        host_inputs_json: "[]".into(),
     };
     let provenance = SnapshotProvenance {
         run_id: record.run_id.clone(),

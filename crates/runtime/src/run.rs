@@ -159,6 +159,10 @@ pub enum RunPurpose {
 pub struct RunConfig {
     /// Explicit host /goal input, consumed before starting a chat root.
     pub initial_thread_goal: Option<(String, Vec<String>)>,
+    /// The host's submission ID for this run's new prompt. When set, the
+    /// runtime records the prompt's delivery receipt under this ID. Consumed
+    /// when the run starts, so delegated children never inherit it.
+    pub initial_prompt_id: Option<String>,
     pub budget: crate::budget_tracker::BudgetSettings,
     /// Durable task identity when this run is attached to a task.
     pub task_id: Option<String>,

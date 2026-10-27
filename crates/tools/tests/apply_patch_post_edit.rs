@@ -30,6 +30,7 @@ fn context() -> ToolExecutionContext {
         run_id: "run-1".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     }
 }
 

@@ -87,6 +87,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
         "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+         DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_count;
@@ -325,6 +326,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
         "DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+         DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
          ALTER TABLE improvement_candidates DROP COLUMN reopened_count;

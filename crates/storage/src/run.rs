@@ -22,9 +22,13 @@ pub struct RunContextRecord {
     pub terminal_phase: String,
     pub restorable: bool,
     pub updated_at_ns: i64,
+    /// JSON array of the prompt IDs of host inputs this snapshot's messages
+    /// contain, kept after a compaction summarizes them. `[]` when none.
+    pub host_inputs_json: String,
 }
 
 /// Identity of the redacted, committed snapshot (not an authority token).
+/// Host input IDs are left out: they never change the restored messages.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunContextReceipt {
     pub updated_at_ns: i64,

@@ -2,6 +2,7 @@ use super::*;
 
 mod admission_retry;
 mod fork_seed;
+mod host_receipts;
 mod invalidation;
 mod registration;
 mod resume;
@@ -292,7 +293,7 @@ async fn goal_restore_emits_restored_event_before_execution() {
         .continue_goal(run, "continue".into(), RunConfig::default())
         .unwrap();
     // Then: observers can distinguish the restore before execution starts.
-    assert!(matches!(events.recv().await.unwrap().kind,
+    assert!(matches!(next_run_event(&mut events).await.kind,
         event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunRestored { run_id, message_id, .. })
         if run_id == run.to_string() && !message_id.is_empty()));
 }
@@ -467,3 +468,25 @@ async fn rejected_manual_goal_preserves_the_existing_restorable_checkpoint() {
 }
 
 mod advisor;
+
+/// The next event other than a host input receipt notice, which the restore
+/// emits for the prompt its snapshot commit delivers.
+pub(super) async fn next_run_event(events: &mut event_bus::EventReceiver) -> event_bus::Event {
+    loop {
+        let event = events.recv().await.unwrap();
+        if !is_host_input_notice(&event) {
+            return event;
+        }
+    }
+}
+
+pub(super) fn is_host_input_notice(event: &event_bus::Event) -> bool {
+    matches!(
+        event.kind,
+        event_bus::EventKind::Lifecycle(
+            LifecycleEvent::HostInputDelivered { .. }
+                | LifecycleEvent::HostInputDropped { .. }
+                | LifecycleEvent::HostInputUnknown { .. }
+        )
+    )
+}

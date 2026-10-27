@@ -121,6 +121,7 @@ impl AgentRuntime {
             mailbox: Arc::clone(&mailbox),
             handoff: None,
             restored: None,
+            initial_prompt_id: None,
         });
         let completion_relayed = !history_only
             && runs
@@ -164,7 +165,12 @@ impl AgentRuntime {
                 to: AgentRunPhase::Pending,
                 reason: Some("registered".into()),
             }));
-        let join = tokio::spawn(run_agent(Arc::downgrade(&self.shared), task, channels));
+        let join = tokio::spawn(Self::run_guarded(
+            Arc::downgrade(&self.shared),
+            task,
+            channels,
+            None,
+        ));
         if let Some(entry) = runs.get_mut(&run_id) {
             entry._join = Some(join);
         }
@@ -231,6 +237,7 @@ mod review_tests {
                     RestoredState {
                         provenance: Default::default(),
                         responses_replay: Default::default(),
+                        host_inputs: Vec::new(),
                         admission_reservation: None,
                         turn: None,
                         boundary_pending: false,

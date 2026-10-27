@@ -79,15 +79,18 @@ pub(crate) fn write(
 ) -> Result<(), StorageError> {
     let snapshot_revision = i64::try_from(snapshot_revision)
         .map_err(|_| StorageError::OutOfRange("snapshot revision"))?;
+    let host_inputs_json =
+        crate::repo::host_input_receipt::normalized_ids(&record.host_inputs_json)?;
     conn.execute(
         "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
          ON CONFLICT(run_id) DO UPDATE SET role = excluded.role, name = excluded.name, \
          parent_run_id = excluded.parent_run_id, config_json = excluded.config_json, \
          messages_json = excluded.messages_json, checkpoints_json = excluded.checkpoints_json, \
          terminal_phase = excluded.terminal_phase, restorable = excluded.restorable, \
-         updated_at_ns = excluded.updated_at_ns, snapshot_revision = excluded.snapshot_revision",
+         updated_at_ns = excluded.updated_at_ns, snapshot_revision = excluded.snapshot_revision, \
+         host_inputs_json = excluded.host_inputs_json",
         params![
             record.run_id,
             record.role,
@@ -99,7 +102,8 @@ pub(crate) fn write(
             record.terminal_phase,
             record.restorable,
             record.updated_at_ns,
-            snapshot_revision
+            snapshot_revision,
+            host_inputs_json
         ],
     )?;
     Ok(())
@@ -227,7 +231,8 @@ fn reject_secret_bearing_responses_item(
 
 /// Columns decoded by [`from_row`], in order.
 pub(crate) const COLUMNS: &str = "run_id, role, name, parent_run_id, config_json, messages_json, \
-                                  checkpoints_json, terminal_phase, restorable, updated_at_ns";
+                                  checkpoints_json, terminal_phase, restorable, updated_at_ns, \
+                                  host_inputs_json";
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
     Ok(conn
@@ -274,6 +279,7 @@ pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRe
         terminal_phase: row.get(7)?,
         restorable: row.get(8)?,
         updated_at_ns: row.get(9)?,
+        host_inputs_json: row.get(10)?,
     })
 }
 
@@ -381,6 +387,7 @@ mod tests {
             terminal_phase: "Checkpoint".into(),
             restorable: true,
             updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
         }
     }
 

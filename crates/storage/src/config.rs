@@ -83,6 +83,8 @@ pub struct StorageConfig {
     /// `Storage::open` 時点の値が初期世代になり、実行中の変更は writer の
     /// `IndexCapacity::apply_index_settings` で writer コマンド順に反映します。
     pub thread_index: ThreadIndexSettings,
+    /// Compact only terminal tasks with exactly equivalent projection and GUI replay.
+    pub retain_terminal_task_progress: bool,
 }
 
 impl Default for StorageConfig {
@@ -103,6 +105,7 @@ impl Default for StorageConfig {
                 enabled: true,
                 max_bytes: DEFAULT_THREAD_INDEX_MAX_BYTES,
             },
+            retain_terminal_task_progress: true,
         }
     }
 }

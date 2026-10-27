@@ -422,6 +422,7 @@ fn snapshot_save_fault_fixture_accepts_only_complete_old_or_new_bundle() {
                 terminal_phase: "Done".into(),
                 restorable: true,
                 updated_at_ns: 0,
+                host_inputs_json: "[]".into(),
             },
             snapshot_revision: revision,
             source_revision,

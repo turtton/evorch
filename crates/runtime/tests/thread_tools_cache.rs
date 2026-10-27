@@ -148,6 +148,7 @@ fn stored(model: Arc<dyn AgentModel>, project: &Path) -> Stored {
             terminal_phase: "Done".into(),
             restorable: false,
             updated_at_ns: 2,
+            host_inputs_json: "[]".into(),
         })
         .unwrap();
     let record = storage::Database::open(&config)

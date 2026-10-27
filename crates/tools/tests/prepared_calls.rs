@@ -49,6 +49,7 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
         run_id: "run-2".into(),
         thread_id: None,
         call_id: None,
+        ..Default::default()
     };
     assert!(
         executor
@@ -119,6 +120,7 @@ async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
                 run_id: "run-2".into(),
                 thread_id: None,
                 call_id: None,
+                ..Default::default()
             },
             "counter".into(),
             "call-1".into(),

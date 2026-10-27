@@ -42,6 +42,7 @@ fn source(handle: &StorageHandle, id: &str, project: &str, at: i64, verified: bo
                 terminal_phase: "Done".into(),
                 restorable: true,
                 updated_at_ns: at,
+                host_inputs_json: "[]".into(),
             },
             expected_snapshot_revision: None,
             binding: None,

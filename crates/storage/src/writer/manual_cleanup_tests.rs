@@ -41,6 +41,7 @@ fn context() -> RunContextRecord {
         terminal_phase: "running".into(),
         restorable: true,
         updated_at_ns: 1,
+        host_inputs_json: "[]".into(),
     }
 }
 

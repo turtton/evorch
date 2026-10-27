@@ -63,6 +63,7 @@ fn write(run_id: &str, body: &str, at: i64, status: ProvenanceStatus) -> Snapsho
             terminal_phase: "Done".into(),
             restorable: true,
             updated_at_ns: at,
+            host_inputs_json: "[]".into(),
         },
         expected_snapshot_revision: None,
         binding: None,
@@ -1755,7 +1756,7 @@ fn paused_and_disabled_jobs_do_not_wake_and_canonical_writes_continue() {
 fn legacy_proof_supersedes_a_frozen_request_and_a_new_request_completes() {
     let mut fx = Fixture::new(512 * MIB);
     fx.conn().execute(
-        "INSERT INTO run_contexts VALUES ('legacy','worker','worker',NULL, \
+        "INSERT INTO run_contexts (run_id,role,name,parent_run_id,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,snapshot_revision) VALUES ('legacy','worker','worker',NULL, \
          '{\"thread_id\":\"legacy\",\"parent_run_id\":null,\"continuity\":{\"inherited_note\":null,\"sources\":[]}}', \
          '[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"legacy native\"}]}]', \
          '[]','Done',1,1,0)", [],

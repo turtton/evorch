@@ -639,7 +639,12 @@ fn load_bundle(conn: &Connection, run_id: &str) -> Result<Option<SnapshotBundle>
                 run_context::COLUMNS
             ),
             [run_id],
-            |row| Ok((run_context::from_row(row)?, row.get::<_, u64>(10)?)),
+            |row| {
+                Ok((
+                    run_context::from_row(row)?,
+                    row.get::<_, u64>("snapshot_revision")?,
+                ))
+            },
         )
         .optional()?;
     let Some((record, snapshot_revision)) = row else {

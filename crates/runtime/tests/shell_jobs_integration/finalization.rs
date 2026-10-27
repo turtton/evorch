@@ -217,6 +217,7 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
                     run_id: run.to_string(),
                     thread_id: None,
                     call_id: None,
+                    ..Default::default()
                 },
                 "shell",
                 "expired",

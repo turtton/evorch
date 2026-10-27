@@ -44,6 +44,7 @@ impl AgentRuntime {
         config: &RunConfig,
         reason: String,
     ) {
+        self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
         let execution = self.reserve_admission(run_id, parent, config.ownership.clone());
         let mut admissions = self
             .shared
@@ -199,6 +200,7 @@ impl AgentRuntime {
                 intents,
             );
         } else {
+            self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
             drop(continuation);
         }
         if let Some(admission) = admissions.get_mut(&run_id)
@@ -318,6 +320,7 @@ impl AgentRuntime {
                     &intents,
                 );
             } else {
+                runtime.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
                 // Release before notifying waiters; retries must observe the durable seed.
                 drop(continuation);
             }
@@ -384,6 +387,21 @@ impl AgentRuntime {
             }
         });
         run_id
+    }
+
+    /// No loop will append this input. A restored prompt was already delivered
+    /// in its snapshot transaction, so the accepted-only update leaves it alone.
+    pub(super) fn drop_unstarted_host_input(&self, run_id: RunId, prompt_id: Option<&str>) {
+        if let Some(prompt_id) = prompt_id {
+            self.settle_host_inputs(
+                run_id,
+                &[storage::HostInputTransition::new(
+                    prompt_id,
+                    storage::HostInputStatus::Dropped,
+                    Some("spawn_failed"),
+                )],
+            );
+        }
     }
 
     /// Preserve the parent boundary before provider admission registers the run.

@@ -30,9 +30,8 @@ mod stream_tests;
 use state::{StartState, log_size_state, log_temp_state, run_writer_with_index, temp_exceeded};
 
 type ReplyTx<T = ()> = mpsc::Sender<Result<T, StorageError>>;
-type SnapshotReplyTx = mpsc::Sender<
-    Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError>,
->;
+type SnapshotReplyTx<T = crate::thread_index::SnapshotReceipt> =
+    mpsc::Sender<Result<T, crate::thread_index::SnapshotApiError>>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
 // AgentRunStarted 追加で Event が大型化。Box 化は append hot path に alloc を
@@ -80,7 +79,11 @@ enum Command {
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
         Option<String>,
-        SnapshotReplyTx,
+        crate::HostInputWrite,
+        SnapshotReplyTx<(
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        )>,
     ),
     RecordReviewEvidenceWithEdges(
         Vec<crate::ReviewEvidenceRow>,
@@ -94,8 +97,28 @@ enum Command {
         Vec<crate::ReviewEvidenceRow>,
         Vec<crate::LineageEdge>,
         Option<String>,
+        crate::HostInputWrite,
+        ReplyTx<Vec<crate::HostInputTransition>>,
+    ),
+    UpsertRunContextWithReceipts(
+        crate::RunContextRecord,
+        crate::HostInputWrite,
+        ReplyTx<(crate::RunContextReceipt, Vec<crate::HostInputTransition>)>,
+    ),
+    AppendHostInputAccepted(
+        Vec<crate::ReviewEvidenceRow>,
+        Vec<crate::LineageEdge>,
+        Option<String>,
+        crate::HostInputReceipt,
         ReplyTx,
     ),
+    TransitionHostInputs(
+        Vec<crate::HostInputTransition>,
+        ReplyTx<Vec<crate::HostInputTransition>>,
+    ),
+    UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
+    HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
+    HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
@@ -136,6 +159,7 @@ pub struct Storage(StorageHandle, Option<JoinHandle<()>>);
 impl Storage {
     /// ファイル DB を開き、専用 writer スレッドを開始します。
     pub fn open(config: StorageConfig) -> Result<Self, StorageError> {
+        let lease = crate::maintenance::offline::writer_lease(&config.db_path)?;
         let database = Database::open(&config)?;
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;
@@ -154,6 +178,7 @@ impl Storage {
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
+                let _lease = lease;
                 run_writer_with_index(
                     database.conn,
                     rx,
@@ -396,21 +421,68 @@ impl StorageHandle {
         edges: &[crate::LineageEdge],
         consumed_reference_id: Option<&str>,
     ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.save_snapshot_bundle_with_evidence_and_host_inputs(
+            write,
+            rows,
+            edges,
+            consumed_reference_id,
+            &crate::HostInputWrite::default(),
+        )
+        .map(|(receipt, _)| receipt)
+    }
+
+    /// Save provenance and host-input delivery receipts in the same transaction.
+    ///
+    /// # Errors
+    /// Rejects invalid snapshots or receipts, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_host_inputs(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
+        self.save_snapshot_bundle_with_evidence_and_host_inputs(write, &[], &[], None, host_inputs)
+    }
+
+    /// Atomically save provenance, evidence, lineage, reference consumption and receipts.
+    ///
+    /// # Errors
+    /// Rejects consumed references, invalid snapshots or receipts, suspended writes or persistence failure.
+    pub fn save_snapshot_bundle_with_evidence_and_host_inputs(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
         self.snapshot_request(|reply| {
             Command::SaveSnapshotBundleWithEvidence(
                 Box::new(write.clone()),
                 rows.to_vec(),
                 edges.to_vec(),
                 consumed_reference_id.map(String::from),
+                host_inputs.clone(),
                 reply,
             )
         })
     }
 
-    fn snapshot_request(
+    fn snapshot_request<T>(
         &self,
-        command: impl FnOnce(SnapshotReplyTx) -> Command,
-    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        command: impl FnOnce(SnapshotReplyTx<T>) -> Command,
+    ) -> Result<T, crate::thread_index::SnapshotApiError> {
         let closed = || crate::thread_index::SnapshotApiError::Storage(StorageError::WriterClosed);
         let (reply, result) = mpsc::channel();
         self.0.send(command(reply)).map_err(|_| closed())?;
@@ -495,15 +567,127 @@ impl StorageHandle {
         edges: &[crate::LineageEdge],
         consumed_reference_id: Option<&str>,
     ) -> Result<(), StorageError> {
+        self.upsert_run_context_with_evidence_and_host_inputs(
+            record,
+            rows,
+            edges,
+            consumed_reference_id,
+            &crate::HostInputWrite::default(),
+        )
+        .map(drop)
+    }
+
+    /// [`Self::upsert_run_context_with_evidence_and_reference_consumption`] that
+    /// also applies receipt changes, returning the transitions that took effect.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, invalid snapshots, evidence or
+    /// receipts, a duplicate prompt ID, suspended writes or persistence failure.
+    pub fn upsert_run_context_with_evidence_and_host_inputs(
+        &self,
+        record: &crate::RunContextRecord,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<Vec<crate::HostInputTransition>, StorageError> {
         self.request(|reply| {
             Command::UpsertRunContextWithEvidence(
                 record.clone(),
                 rows.to_vec(),
                 edges.to_vec(),
                 consumed_reference_id.map(String::from),
+                host_inputs.clone(),
                 reply,
             )
         })
+    }
+
+    /// Replace a snapshot and apply receipt changes in one transaction.
+    /// Returns the snapshot identity and the transitions that took effect.
+    ///
+    /// # Errors
+    /// Rejects invalid snapshots or receipts, suspended writes, SQLite failure
+    /// or a closed writer; nothing is written then.
+    pub fn upsert_run_context_with_receipts(
+        &self,
+        record: &crate::RunContextRecord,
+        host_inputs: &crate::HostInputWrite,
+    ) -> Result<(crate::RunContextReceipt, Vec<crate::HostInputTransition>), StorageError> {
+        self.request(|reply| {
+            Command::UpsertRunContextWithReceipts(record.clone(), host_inputs.clone(), reply)
+        })
+    }
+
+    /// Record that the runtime accepted a host submission: its evidence and
+    /// lineage, the approval it consumes and its receipt commit together.
+    ///
+    /// # Errors
+    /// Rejects missing or consumed references, oversized or secret-bearing
+    /// text, a duplicate prompt ID, suspended writes or persistence failure.
+    pub fn append_host_input_accepted(
+        &self,
+        rows: &[crate::ReviewEvidenceRow],
+        edges: &[crate::LineageEdge],
+        consumed_reference_id: Option<&str>,
+        receipt: &crate::HostInputReceipt,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AppendHostInputAccepted(
+                rows.to_vec(),
+                edges.to_vec(),
+                consumed_reference_id.map(String::from),
+                receipt.clone(),
+                reply,
+            )
+        })
+    }
+
+    /// Move `Accepted` receipts to a final state without a snapshot; returns
+    /// the transitions that took effect.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn transition_host_inputs(
+        &self,
+        transitions: &[crate::HostInputTransition],
+    ) -> Result<Vec<crate::HostInputTransition>, StorageError> {
+        self.request(|reply| Command::TransitionHostInputs(transitions.to_vec(), reply))
+    }
+
+    /// Mark every `Accepted` receipt of a run that can no longer read it as
+    /// `Unknown`; returns the changed prompt IDs.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn mark_host_inputs_unknown(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.request(|reply| Command::UpdateHostInputReceipts(run_id.into(), reason.into(), reply))
+    }
+
+    /// Receipts for the given prompt IDs after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_input_receipts(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        self.request(|reply| Command::HostInputReceipts(prompt_ids.to_vec(), reply))
+    }
+
+    /// One run's receipts, oldest first, after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_input_receipts_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
+        self.request(|reply| Command::HostInputReceiptsForRun(run_id.into(), reply))
     }
 
     /// Change restore bookkeeping only if the exact reserved descriptor still owns it.

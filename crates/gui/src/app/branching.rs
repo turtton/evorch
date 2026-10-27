@@ -76,6 +76,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(WorkbenchError::Branch("このメッセージからは編集できません"))?;
         let id = self.branch_thread(&thread, point, LineageKind::Rewind)?;
         self.composer.input = text;
+        self.flush_composer_draft();
         Ok(id)
     }
 

@@ -15,6 +15,7 @@ fn record() -> RunContextRecord {
         terminal_phase: "completed".into(),
         restorable: true,
         updated_at_ns: 10,
+        host_inputs_json: "[]".into(),
     }
 }
 
@@ -166,6 +167,7 @@ fn upsert_latest_wins_and_round_trips() {
         terminal_phase: "failed".into(),
         restorable: false,
         updated_at_ns: 20,
+        host_inputs_json: "[]".into(),
     };
     // When: replacing the snapshot and reopening after writer shutdown.
     handle.upsert_run_context(&latest).unwrap();
