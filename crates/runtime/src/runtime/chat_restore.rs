@@ -186,7 +186,12 @@ impl AgentRuntime {
             let (saved_role, thread) = name.strip_prefix("chat:")?.split_once(':')?;
             (Role::from_name(saved_role) == Ok(role)).then(|| thread.to_owned())
         });
-        let thread = self.goal_thread(run_id).or_else(|| named_thread.clone());
+        // Escalated roots retain thread_id in ordinary snapshots, but their
+        // display name is not a chat identity. Rebind even without a saved goal.
+        let thread = self
+            .goal_thread(run_id)
+            .or_else(|| descriptor.thread_id.clone())
+            .or_else(|| named_thread.clone());
         if let Some((objective, criteria)) = &authority.initial_thread_goal {
             let thread = thread.as_deref().ok_or_else(|| {
                 fail(RunRestoreFailure::CorruptContext(
