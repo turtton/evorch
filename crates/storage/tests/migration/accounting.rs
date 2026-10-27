@@ -41,7 +41,10 @@ fn v12_backfills_bytes_once_including_streams_null_sessions_and_utc_boundaries()
     drop(conn);
 
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 27);
+    assert_eq!(
+        db.pragma_i64("user_version").unwrap(),
+        i64::from(LATEST_SCHEMA)
+    );
     let conn = Connection::open(&path).unwrap();
     let session_rows = || {
         conn.prepare(

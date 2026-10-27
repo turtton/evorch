@@ -3023,6 +3023,116 @@ async fn paused_goal_restore_and_idle_checks_resume_preserve_the_wire_cache() {
     harness.runtime.wait(root).await.unwrap();
 }
 
+#[tokio::test]
+async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
+    let mut harness = harness(vec![
+        text_response("Prepared requested report"),
+        ScriptedResponse::tool_call("check", MODEL, 0, "check", "submit_goal_check", [
+            json!({"epoch":1,"checks":[{"criterion":0,"met":true,"evidence":"Report and sources verified"}]}).to_string()
+        ]),
+        text_response("Verified report"),
+        ScriptedResponse::tool_call("inspect", MODEL, 0, "inspect", "inspect_learning_source", ["{}"]),
+        text_response("No reusable lesson"),
+        text_response("Follow-up answer"),
+    ], 1_000_000);
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("goal-learning.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap())
+        .with_learning(runtime::memory_queue::LearningSettings {
+            writer: storage.handle(),
+            storage: config,
+            project: "test".into(),
+            quick: runtime::ModelPreference {
+                profile: "local".into(),
+                model: None,
+                reasoning_effort: None,
+            },
+        });
+    let root = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("learning-cache", root)
+        .unwrap();
+    harness
+        .runtime
+        .create_thread_goal(
+            "learning-cache",
+            root,
+            "Research options".into(),
+            vec!["Verified report".into()],
+        )
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        root,
+        None,
+        Role::Worker,
+        "Research options",
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await;
+    assert_eq!(
+        harness.runtime.thread_goal("learning-cache").unwrap().phase,
+        event_bus::ThreadGoalPhase::Complete
+    );
+    harness.runtime.wait_learning(root).await.unwrap().unwrap();
+    harness
+        .runtime
+        .send_message(root, "Clarify the conclusion".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 6);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    // The internal extraction occupies wire calls 3/4, not the conversation.
+    // Independent wire assertions and input-derived mock hits both guard reuse.
+    for (before, after) in [(0, 1), (1, 2), (2, 5), (3, 4)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[before], &requests[after]).unwrap();
+    }
+    assert_ne!(requests[2]["tools"], requests[3]["tools"]);
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if run == &root.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage.len(), 4);
+    for pair in usage.windows(2) {
+        assert!(
+            pair[1].1 >= pair[0].0,
+            "conversation input prefix must remain cached"
+        );
+    }
+    assert_eq!(
+        harness
+            .runtime
+            .list_agents()
+            .iter()
+            .filter(|run| run.category.as_deref() == Some("lesson"))
+            .count(),
+        1
+    );
+    harness
+        .runtime
+        .stop(root, runtime::StopScope::SelfOnly)
+        .unwrap();
+    harness.runtime.wait(root).await.unwrap();
+}
+
 struct DirectFactory;
 impl runtime::SandboxFactory for DirectFactory {
     fn build(

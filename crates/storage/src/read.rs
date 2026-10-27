@@ -261,20 +261,33 @@ impl Database {
         &self,
         root: &str,
     ) -> Result<Vec<RunContextRecord>, StorageError> {
+        self.learning_lineage_contexts(&[root.to_owned()])
+    }
+
+    /// Capture several root trees in one bounded read transaction.
+    pub fn learning_lineage_contexts(
+        &self,
+        roots: &[String],
+    ) -> Result<Vec<RunContextRecord>, StorageError> {
         const MAX_RUNS: usize = 128;
         const MAX_BYTES: i64 = 16 * 1024 * 1024;
         let transaction = self.conn.unchecked_transaction()?;
         let ids = {
             let mut statement = transaction.prepare(
-                "WITH RECURSIVE tree(run_id) AS (SELECT run_id FROM run_contexts WHERE run_id = ?1 \
+                "WITH RECURSIVE tree(run_id) AS (SELECT run_id FROM run_contexts WHERE run_id IN (SELECT value FROM json_each(?1)) \
                  UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id) \
                  SELECT context.run_id, (length(CAST(context.messages_json AS BLOB)) + length(CAST(context.checkpoints_json AS BLOB)) + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
                  ORDER BY CAST(substr(context.run_id, 5) AS INTEGER) LIMIT ?2",
             )?;
             statement
-                .query_map(rusqlite::params![root, (MAX_RUNS + 1) as i64], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?
+                .query_map(
+                    rusqlite::params![
+                        serde_json::to_string(roots)
+                            .map_err(|error| StorageError::Serialization(error.to_string()))?,
+                        (MAX_RUNS + 1) as i64
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )?
                 .collect::<Result<Vec<_>, _>>()?
         };
         if ids.len() > MAX_RUNS || ids.iter().map(|(_, bytes)| *bytes).sum::<i64>() > MAX_BYTES {

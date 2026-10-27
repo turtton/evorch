@@ -183,6 +183,16 @@ impl RunStore {
             .learning_source_contexts(&root.to_string())
     }
 
+    pub(crate) fn learning_lineage_contexts(
+        &self,
+        roots: &[String],
+    ) -> Result<Vec<RunContextRecord>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|error| StorageError::Io(error.to_string()))?
+            .learning_lineage_contexts(roots)
+    }
+
     pub(crate) fn user_question(
         &self,
         id: &str,

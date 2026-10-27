@@ -28,6 +28,7 @@ struct Model {
     child: Mutex<VecDeque<Step>>,
     runtime: OnceLock<Weak<crate::runtime::Shared>>,
     requests: Mutex<Vec<ObservedRequest>>,
+    inspect_lessons: std::sync::atomic::AtomicBool,
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
@@ -45,6 +46,34 @@ impl AgentModel for Model {
             .lock()
             .unwrap()
             .push((ctx.run_id.clone(), messages.to_vec(), specs.to_vec()));
+        if ctx.category.as_deref() == Some("lesson") {
+            let content = if !self
+                .inspect_lessons
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || messages
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            {
+                vec![ContentBlock::Text {
+                    text: "No reusable lessons".into(),
+                }]
+            } else {
+                vec![ContentBlock::ToolUse {
+                    id: "learning-list".into(),
+                    name: "inspect_learning_source".into(),
+                    input: json!({}),
+                }]
+            };
+            return Ok(ChatResponse {
+                message: Message {
+                    role: providers::Role::Assistant,
+                    content,
+                },
+                finish_reason: FinishReason::Stop,
+                usage: Usage::default(),
+            });
+        }
         let step = if role == Role::Reviewer {
             self.reviewer.lock().unwrap().pop_front()
         } else if role == Role::Explorer {
@@ -158,6 +187,7 @@ fn harness(
         child: Mutex::new(VecDeque::new()),
         runtime: OnceLock::new(),
         requests: Mutex::new(vec![]),
+        inspect_lessons: std::sync::atomic::AtomicBool::new(true),
     });
     let bus = Arc::new(event_bus::EventBus::new(4096));
     let events = bus.subscribe();
@@ -1437,3 +1467,5 @@ async fn completing_a_procedure_does_not_complete_a_goal_with_paused_checks() {
     runtime.stop(root, StopScope::SelfOnly).unwrap();
     assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Stopped);
 }
+
+mod learning;

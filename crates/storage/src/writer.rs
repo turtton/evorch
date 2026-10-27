@@ -64,6 +64,7 @@ enum Command {
     LatestRunLedger(String, ReplyTx<Option<crate::RunLedgerEntry>>),
     SaveAssistantReference(crate::AssistantReferenceRow, ReplyTx),
     AssistantReference(String, ReplyTx<Option<crate::AssistantReferenceRow>>),
+    ClaimLearning(String, Vec<String>, bool, u32, ReplyTx<bool>),
     SaveThreadStartState(crate::thread_start::ThreadStartState, ReplyTx<bool>),
     SaveEvalSample(crate::eval_sample::EvalSample, ReplyTx),
     DeleteEvalSample(String, ReplyTx<bool>),
@@ -326,6 +327,24 @@ impl StorageHandle {
         id: &str,
     ) -> Result<Option<crate::AssistantReferenceRow>, StorageError> {
         self.request(|reply| Command::AssistantReference(id.into(), reply))
+    }
+
+    /// Atomically admit a pipeline once, with UTC daily quota and source deduplication.
+    /// Goal pipelines may reuse roots of earlier goals, but never roots already learned
+    /// through the legacy run-completion path. Claims are not retried after a crash.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn claim_learning(
+        &self,
+        task: &str,
+        roots: &[String],
+        goal: bool,
+        daily_limit: u32,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| {
+            Command::ClaimLearning(task.into(), roots.to_vec(), goal, daily_limit, reply)
+        })
     }
 
     /// Record a thread's start state; the first state of a thread wins and later

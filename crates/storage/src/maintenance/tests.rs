@@ -499,7 +499,7 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
     let expected = preview_task_progress_retention(&path).unwrap();
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision; DROP INDEX idx_events_durable_retention; DROP INDEX idx_events_task_lifecycle; PRAGMA user_version=25;").unwrap();
+        conn.execute_batch("DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision; DROP INDEX idx_events_durable_retention; DROP INDEX idx_events_task_lifecycle; PRAGMA user_version=25;").unwrap();
     }
     let before = fs::read(&path).unwrap();
     let actual = preview_task_progress_retention(&path).unwrap();
@@ -512,7 +512,7 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
             .unwrap()
             .pragma_i64("user_version")
             .unwrap(),
-        27
+        i64::try_from(crate::migrations::MIGRATIONS.len()).unwrap()
     );
 }
 

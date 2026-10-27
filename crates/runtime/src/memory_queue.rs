@@ -93,10 +93,26 @@ impl LearningQueue {
         task: &QueuedTask<'_>,
         source_run_id: RunId,
     ) -> Result<Vec<Lesson>, LearningError> {
-        let extractor = self.runtime.delegate_background(
+        self.complete_source(task, source_run_id, None).await
+    }
+
+    pub(crate) async fn complete_source(
+        &self,
+        task: &QueuedTask<'_>,
+        source_run_id: RunId,
+        snapshot: Option<std::sync::Arc<crate::learning::SourceSnapshot>>,
+    ) -> Result<Vec<Lesson>, LearningError> {
+        let extractor = self.runtime.reserve_run_id();
+        if let Some(snapshot) = snapshot {
+            self.runtime
+                .seed_learning_snapshot(extractor, source_run_id, snapshot);
+        }
+        self.runtime.spawn_reserved(
+            extractor,
+            None,
             Role::Worker,
             format!(
-                "Extract reusable lessons for future tasks from the completed source run {source_run_id}. Read its persisted history and relevant descendants with inspect_learning_source. For each specific, actionable lesson with concrete source evidence, call stack_lesson_candidate with its scope: project for knowledge about this project, user for the user's cross-project preferences, harness for shortcomings of evorch's own tools, prompts or runtime. Do not modify the completed task or use the final message as a submission. Original task: {}",
+                "Extract reusable lessons for future tasks from source run {source_run_id} and its completed goal lineage (if supplied). Read all roots and relevant descendants in the fixed evidence snapshot with inspect_learning_source. For each specific, actionable lesson with concrete source evidence, call stack_lesson_candidate with its scope: project for knowledge about this project, user for the user's cross-project preferences, harness for shortcomings of evorch's own tools, prompts or runtime. Do not modify the completed task or use the final message as a submission. Original task: {}",
                 task.prompt
             ),
             RunConfig {
