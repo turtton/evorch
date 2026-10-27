@@ -63,6 +63,7 @@ pub mod eval_sample;
 pub mod host_input;
 pub mod improvement;
 pub mod inspect;
+mod learning;
 pub mod maintenance;
 pub mod memory;
 mod migrations;

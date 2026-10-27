@@ -53,6 +53,7 @@ pub(crate) struct LearningStaging {
 struct Extraction {
     source_run_id: RunId,
     snapshot: Arc<SourceSnapshot>,
+    source_inspected: bool,
     inspected: BTreeSet<String>,
     candidates: Vec<LessonCandidate>,
 }
@@ -64,7 +65,7 @@ struct ReviewStaging {
     submissions: BTreeMap<String, LessonReview>,
 }
 
-struct SourceSnapshot {
+pub(crate) struct SourceSnapshot {
     runs: BTreeMap<String, SourceRun>,
 }
 
@@ -128,6 +129,7 @@ impl AgentRuntime {
         Ok(staging
             .extractions
             .get(&extraction)
+            .filter(|entry| entry.source_inspected)
             .ok_or("extraction did not inspect a persisted learning source")?
             .candidates
             .clone())
@@ -157,6 +159,58 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         staging.extractions.remove(&run);
         staging.reviews.remove(&run);
+    }
+
+    /// Capture evidence before the completed conversation can accept another turn.
+    pub(crate) fn freeze_goal_learning(
+        &self,
+        goal: &event_bus::ThreadGoalSnapshot,
+    ) -> Result<Arc<SourceSnapshot>, String> {
+        let mut roots = goal.related_root_run_ids.clone();
+        roots.push(goal.root_run_id.clone());
+        roots.sort();
+        roots.dedup();
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or("persisted run context is required for learning")?;
+        let records = store
+            .learning_lineage_contexts(&roots)
+            .map_err(|error| error.to_string())?;
+        for root in &roots {
+            let record = records
+                .iter()
+                .find(|record| &record.run_id == root)
+                .ok_or("goal root has no persisted context")?;
+            if record.parent_run_id.is_some() {
+                return Err("goal learning source must be a root run".into());
+            }
+        }
+        Ok(Arc::new(SourceSnapshot::from_contexts(records)?))
+    }
+
+    pub(crate) fn seed_learning_snapshot(
+        &self,
+        extraction: RunId,
+        source: RunId,
+        snapshot: Arc<SourceSnapshot>,
+    ) {
+        self.shared
+            .lesson_staging
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extractions
+            .insert(
+                extraction,
+                Extraction {
+                    source_run_id: source,
+                    snapshot,
+                    source_inspected: false,
+                    inspected: BTreeSet::new(),
+                    candidates: Vec::new(),
+                },
+            );
     }
 
     fn require_learning_done(&self, run: RunId) -> Result<(), String> {
@@ -218,6 +272,7 @@ impl AgentRuntime {
             .or_insert_with(|| Extraction {
                 source_run_id: source,
                 snapshot,
+                source_inspected: false,
                 inspected: BTreeSet::new(),
                 candidates: Vec::new(),
             });
@@ -241,11 +296,14 @@ impl AgentRuntime {
         let inspected = if review {
             &mut staging.reviews.entry(caller).or_default().inspected
         } else {
-            &mut staging
+            let entry = staging
                 .extractions
                 .get_mut(&extraction)
-                .ok_or("extraction stage is unavailable")?
-                .inspected
+                .ok_or("extraction stage is unavailable")?;
+            // A prepared snapshot grants authority, not proof of inspection.
+            // Successful listings count even though they return no evidence refs.
+            entry.source_inspected = true;
+            &mut entry.inspected
         };
         inspected.extend(references);
         Ok(output)
@@ -439,6 +497,10 @@ impl SourceSnapshot {
         if root.parent_run_id.is_some() || root.terminal_phase != "Done" {
             return Err("learning source must be a successfully completed root run".into());
         }
+        Self::from_contexts(records)
+    }
+
+    fn from_contexts(records: Vec<storage::RunContextRecord>) -> Result<Self, String> {
         let mut runs = BTreeMap::new();
         for record in records {
             // Learning stages cannot become the evidence of another learning stage.

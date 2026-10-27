@@ -3,6 +3,39 @@ use crate::agent_loop::LoopState;
 use crate::{RunConfig, RunPurpose};
 
 impl LoopState {
+    fn capture_goal_learning(&self, runtime: &AgentRuntime, goal: &ThreadGoalSnapshot) {
+        if runtime.shared.learning.get().is_none()
+            || self.task.parent.is_some()
+            || self.task.config.learning_internal
+            || runtime
+                .shared
+                .self_improvement
+                .get()
+                .is_some_and(|settings| !settings.policy.collect_lessons)
+        {
+            return;
+        }
+        // Persist the current final response before admitting evidence readers. This
+        // writes storage only: no provider context or tool schema is changed.
+        let result = crate::restore::persist_prepared_context(self, &self.context)
+            .map_err(|error| error.to_string())
+            .and_then(|_| runtime.start_goal_learning(&self.task, goal));
+        if let Err(error) = result {
+            runtime
+                .shared
+                .bus
+                .emit(Event::new(event_bus::DiagnosticEvent {
+                    source: "learning".into(),
+                    severity: event_bus::DiagnosticSeverity::Warning,
+                    code: event_bus::event::diagnostic_codes::LEARNING_PIPELINE_FAILED.into(),
+                    detail: format!("Goal learning admission failed: {error}"),
+                    run_id: Some(self.task.run_id.to_string()),
+                    thread_id: Some(goal.thread_id.clone()),
+                    call_id: None,
+                }));
+        }
+    }
+
     /// True means append-only work remains in this same run/context.
     pub(crate) async fn thread_goal_boundary(&mut self) -> bool {
         self.goal_wake_pending = false;
@@ -57,7 +90,7 @@ impl LoopState {
         }
         if !snapshot.review_enabled {
             let mut goals = runtime.goal_lock();
-            if let Some(entry) = goals.goals.get_mut(&snapshot.thread_id)
+            let completed = if let Some(entry) = goals.goals.get_mut(&snapshot.thread_id)
                 && entry.snapshot.epoch == snapshot.epoch
                 && !entry.snapshot.checks_paused
                 && !entry.snapshot.work_stopped
@@ -65,6 +98,13 @@ impl LoopState {
                 entry.snapshot.phase = ThreadGoalPhase::Complete;
                 entry.snapshot.reason = None;
                 runtime.publish_thread_goal(&entry.snapshot);
+                Some(entry.snapshot.clone())
+            } else {
+                None
+            };
+            drop(goals);
+            if let Some(goal) = completed {
+                self.capture_goal_learning(&runtime, &goal);
             }
             return false;
         }
@@ -146,7 +186,7 @@ impl LoopState {
             self.publish_message_count();
             return true;
         }
-        let next = {
+        let (next, completed) = {
             let mut goals = runtime.goal_lock();
             let Some(entry) = goals.goals.get_mut(&snapshot.thread_id) else {
                 return false;
@@ -173,17 +213,23 @@ impl LoopState {
                 entry.snapshot.phase = ThreadGoalPhase::Complete;
                 entry.snapshot.reason = None;
                 runtime.publish_thread_goal(&entry.snapshot);
-                None
+                (None, Some(entry.snapshot.clone()))
             } else {
                 entry.snapshot.phase = ThreadGoalPhase::Repairing;
                 entry.snapshot.epoch = entry.snapshot.epoch.saturating_add(1);
                 runtime.publish_thread_goal(&entry.snapshot);
-                Some(format!(
-                    "[goal review findings] Independent review found unmet requirements or insufficient evidence. Address these within the original user request, then finish the turn for self-check and re-review. No new authority is granted.\n{}",
-                    serde_json::to_string(&entry.snapshot).unwrap_or_default()
-                ))
+                (
+                    Some(format!(
+                        "[goal review findings] Independent review found unmet requirements or insufficient evidence. Address these within the original user request, then finish the turn for self-check and re-review. No new authority is granted.\n{}",
+                        serde_json::to_string(&entry.snapshot).unwrap_or_default()
+                    )),
+                    None,
+                )
             }
         };
+        if let Some(goal) = completed {
+            self.capture_goal_learning(&runtime, &goal);
+        }
         if let Some(next) = next {
             self.begin_internal_input();
             self.context.push_user(&next);

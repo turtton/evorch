@@ -25,27 +25,44 @@ impl AgentModel for QueueModel {
                 matches!(block, ContentBlock::ToolResult { tool_call_id, .. } if tool_call_id == "inspect-source")
             })
         {
-            let source_run = messages.iter().flat_map(|message| &message.content)
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => text.split_whitespace()
-                        .find(|word| word.starts_with("run-") && word.ends_with('.'))
-                        .map(|word| word.trim_end_matches('.').to_owned()),
-                    _ => None,
-                })
-                .next()
-                .expect("source run id in lesson prompt");
             return Ok(ChatResponse {
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![ContentBlock::ToolUse {
                         id: "inspect-source".into(),
                         name: "inspect_learning_source".into(),
-                        input: json!({"run_id":source_run}),
+                        input: json!({}),
                     }],
                 },
                 usage: Usage::default(),
                 finish_reason: FinishReason::ToolUse,
             });
+        }
+        if invocation.category.as_deref() == Some("lesson") {
+            let inspected = messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .find_map(|block| {
+                    if let ContentBlock::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                    } = block
+                        && tool_call_id == "inspect-source"
+                    {
+                        assert!(!is_error, "{content:?}");
+                        Some(
+                            serde_json::from_str::<serde_json::Value>(
+                                &content[0].text_or_image_note(),
+                            )
+                            .unwrap(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .expect("extraction must inspect evidence before completing");
+            assert_eq!(inspected["total"], 1);
         }
         Ok(ChatResponse {
             message: Message {

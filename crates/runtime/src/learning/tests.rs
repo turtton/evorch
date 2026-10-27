@@ -106,6 +106,103 @@ fn inspect(run: Option<&str>) -> InspectSourceArgs {
     }
 }
 
+#[tokio::test]
+async fn goal_lineage_snapshot_is_frozen_before_first_inspection() {
+    let fixture = Fixture::new();
+    let root = RunId::new(4);
+    fixture.runtime.bind_thread_root("goal", root).unwrap();
+    let mut goal = fixture
+        .runtime
+        .create_thread_goal(
+            "goal",
+            root,
+            "Complete the lineage".into(),
+            vec!["Verified evidence".into()],
+        )
+        .unwrap();
+    goal.related_root_run_ids = vec!["run-1".into()];
+    goal.phase = event_bus::ThreadGoalPhase::Complete;
+    let mut active = record("run-4", None, "completion-time evidence");
+    active.terminal_phase = "Checkpoint".into();
+    fixture
+        .storage
+        .handle()
+        .upsert_run_context(&active)
+        .unwrap();
+    let snapshot = fixture.runtime.freeze_goal_learning(&goal).unwrap();
+    // Later context replacement must not shift either contents or evidence refs,
+    // even when no extraction tool has been called yet.
+    active.messages_json = record("run-4", None, "later unrelated turn").messages_json;
+    active.updated_at_ns = 99;
+    fixture
+        .storage
+        .handle()
+        .upsert_run_context(&active)
+        .unwrap();
+    let config = RunConfig {
+        learning_internal: true,
+        purpose: RunPurpose::LessonExtract {
+            source_run_id: root,
+        },
+        ..Default::default()
+    };
+    let extraction = fixture.runtime.reserve_run_id();
+    fixture
+        .runtime
+        .seed_learning_snapshot(extraction, root, snapshot);
+    fixture
+        .runtime
+        .spawn_reserved(extraction, None, Role::Worker, "extract", config.clone());
+    fixture.runtime.wait(extraction).await.unwrap();
+    assert!(fixture.runtime.learning_candidates(extraction).is_err());
+    assert!(
+        fixture
+            .runtime
+            .inspect_learning_source(
+                extraction,
+                &config,
+                InspectSourceArgs {
+                    limit: 0,
+                    ..inspect(None)
+                },
+            )
+            .is_err()
+    );
+    assert!(fixture.runtime.learning_candidates(extraction).is_err());
+    let list = fixture
+        .runtime
+        .inspect_learning_source(extraction, &config, inspect(None))
+        .unwrap();
+    assert_eq!(list["total"], 4);
+    assert!(
+        fixture
+            .runtime
+            .learning_candidates(extraction)
+            .unwrap()
+            .is_empty()
+    );
+    let original = fixture
+        .runtime
+        .inspect_learning_source(extraction, &config, inspect(Some("run-4")))
+        .unwrap();
+    assert!(original.to_string().contains("completion-time evidence"));
+    assert!(!original.to_string().contains("later unrelated turn"));
+    let review_config = RunConfig {
+        learning_internal: true,
+        purpose: RunPurpose::LessonReview {
+            source_run_id: root,
+            extraction_run_id: extraction,
+        },
+        ..Default::default()
+    };
+    let reviewer = fixture.runtime.reserve_run_id();
+    let reviewed = fixture
+        .runtime
+        .inspect_learning_source(reviewer, &review_config, inspect(Some("run-4")))
+        .unwrap();
+    assert_eq!(reviewed, original);
+}
+
 #[test]
 fn learning_tools_require_internal_purpose_and_correct_role() {
     let specs: Vec<_> = crate::META_OPS
