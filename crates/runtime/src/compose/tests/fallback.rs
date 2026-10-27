@@ -429,3 +429,61 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
         assert!(!error.contains(&format!("profile-{index}")), "{error}");
     }
 }
+
+#[tokio::test]
+async fn failing_route_pool_falls_back_to_the_next_chain_entry() {
+    // Given: the first chain entry's route has two profiles that both fail with what a
+    // Cursor Connect `internal` end frame becomes, and the second entry's route succeeds.
+    let connect_internal = || ProviderError::Http {
+        status: 500,
+        body: "Cursor Connect request failed (code internal)".into(),
+    };
+    let (mut model, requests) = fixture(vec![
+        Some(connect_internal()),
+        Some(connect_internal()),
+        None,
+    ]);
+    let candidate = |profile: &str| RouteCandidateConfig {
+        profile: profile.into(),
+        model: None,
+        auto: false,
+    };
+    model.agents.worker.base.models = ["route-a", "route-b"]
+        .map(|route| config::ChainEntryConfig {
+            route: route.into(),
+            reasoning_effort: None,
+        })
+        .into();
+    model.router = Router::new(
+        model
+            .providers
+            .values()
+            .map(|p| p.profile.clone())
+            .collect(),
+        &RoutingConfig {
+            cooldown: Default::default(),
+            fallback: Default::default(),
+            routes: BTreeMap::from([
+                (
+                    "route-a".into(),
+                    vec![candidate("profile-0"), candidate("profile-1")],
+                ),
+                ("route-b".into(), vec![candidate("profile-2")]),
+            ]),
+        },
+        model.router.catalog().clone(),
+    )
+    .unwrap()
+    .with_health(Arc::clone(&model.health));
+    model.tool_router = model
+        .router
+        .clone()
+        .requiring_capability(Capability::ToolCalling);
+    // When
+    let result = complete(&model, "session").await;
+    // Then: both profiles of the first route are tried once, then the second route answers.
+    assert_eq!(result, Ok(response()));
+    for requests in &requests {
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
