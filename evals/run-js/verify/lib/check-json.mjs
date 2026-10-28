@@ -54,6 +54,46 @@ if (kind === "t1") {
     eq(`largest_files[${i}].path`, gotFiles[i]?.path, want.path);
     eq(`largest_files[${i}].lines`, gotFiles[i]?.lines, want.lines);
   });
+} else if (kind === "t1v2") {
+  const ser = (x) => JSON.stringify(x);
+  const gotTools = Array.isArray(answer?.tools) ? answer.tools : [];
+  const byName = new Map(gotTools.map((e) => [e?.name, e]));
+  eq("tools の要素数", gotTools.length, expected.tools.length);
+  eq("tools の name 昇順", ser(gotTools.map((e) => e?.name)), ser(expected.tools.map((e) => e.name)));
+  for (const want of expected.tools) {
+    const got = byName.get(want.name);
+    if (!got) {
+      total++;
+      problems.push(`${want.name}: 欠落`);
+      continue;
+    }
+    for (const key of ["execution_mode", "fs_read", "fs_write", "process_spawn", "network"]) eq(`${want.name}.${key}`, got[key], want[key]);
+    eq(`${want.name}.allowed_roles`, ser(got.allowed_roles), ser(want.allowed_roles));
+    for (const key of Object.keys(want.refs)) eq(`${want.name}.refs.${key}`, got.refs?.[key], want.refs[key]);
+  }
+  for (const [role, want] of Object.entries(expected.by_role)) eq(`by_role.${role}`, ser(answer?.by_role?.[role]), ser(want));
+  eq("by_role のロール数", Object.keys(answer?.by_role ?? {}).length, Object.keys(expected.by_role).length);
+  eq("ref_ranking", ser(answer?.ref_ranking), ser(expected.ref_ranking));
+} else if (kind === "t2v2") {
+  const ser = (x) => JSON.stringify(x);
+  const gotCrates = answer?.crates ?? {};
+  eq("crate 数", Object.keys(gotCrates).length, Object.keys(expected.crates).length);
+  for (const [name, want] of Object.entries(expected.crates)) {
+    for (const key of Object.keys(want)) eq(`crates.${name}.${key}`, gotCrates[name]?.[key], want[key]);
+  }
+  const gotDensity = Array.isArray(answer?.density_top5) ? answer.density_top5 : [];
+  eq("density_top5 件数", gotDensity.length, expected.density_top5.length);
+  expected.density_top5.forEach((want, i) => {
+    eq(`density_top5[${i}].crate`, gotDensity[i]?.crate, want.crate);
+    total++;
+    const g = gotDensity[i]?.per_1k;
+    if (typeof g !== "number" || Math.abs(g - want.per_1k) > 0.0101) problems.push(`density_top5[${i}].per_1k: got ${JSON.stringify(g)}, want ${want.per_1k}（±0.01）`);
+  });
+  const gotShared = Array.isArray(answer?.shared_basenames) ? answer.shared_basenames : [];
+  eq("shared_basenames 件数", gotShared.length, expected.shared_basenames.length);
+  expected.shared_basenames.forEach((want, i) => {
+    for (const key of Object.keys(want)) eq(`shared_basenames[${i}].${key}`, gotShared[i]?.[key], want[key]);
+  });
 } else {
   console.error(`unknown kind ${kind}`);
   process.exit(2);

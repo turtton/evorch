@@ -6,16 +6,31 @@ ADR 0039（`intents/evorch/decisions/0039-js-code-mode-tool.md`）の「評価 /
 
 ## 課題一覧
 
+予備実行（`results/prelim-20261028/`、5 モデル × 6 課題）は、どの run も 3〜13 リクエスト・2 分以内で終わり、`run_js` の効果（ターン数の削減）が出にくかった。そこで各種類を維持したまま、複数ファイル・多数の箇所・集計後の加工が要る規模に重くした **v2** を既定にした（1 run あたり現状の 2〜4 倍のリクエスト数を見込む）。旧課題（v1）は `tasks/t*-<名前>.md`（接尾辞なし）に残してあり、`EVAL_TASKS_V1` / `--tasks` で指定できる。結果ディレクトリは課題 id で分かれるので、v1 と v2 が混ざることはない。
+
+プロンプトはどれも `run_js` の使用を指示しない（自然に使うかを見る）。課題ごとに「正解で exit 0、未着手で exit 1、部分誤答で exit 1」になる検証コマンドと参照解（`solutions/`）を付けてある。
+
 | id | 種類 | 内容 | 検証が見るもの | 想定ターン数 |
 |---|---|---|---|---|
-| [`t1-survey`](tasks/t1-survey.md) | (1) 調査と要約 | `crates/tools/src/tools/` の 9 ツールの name / 実行モード / 権限 / Worker での許可を表にする | `answers/t1.json` の 65 項目 | 5〜10 |
-| [`t2-aggregate`](tasks/t2-aggregate.md) | (2) 集計 | 22 crate × (ファイル数・行数・テスト属性数) と最大 5 ファイル | `answers/t2.json` の 78 項目 | 4〜10 |
-| [`t3-rename`](tasks/t3-rename.md) | (3) 複数か所の編集 | `apply-patch` 内で構造体とフィールドを改名（51 行・5 ファイル） | grep の件数 + `cargo test -p apply-patch` | 5〜12 |
-| [`t4-build-test`](tasks/t4-build-test.md) | (4) ビルド・テストを含む手順 | `agents` に `Role::ALL` を追加し、fmt / clippy / test を通して報告する | fmt + clippy + test + 隠しテスト + 報告 JSON | 8〜16 |
-| [`t5-single-edit`](tasks/t5-single-edit.md) | (5) 1 回で済む対照 | `grep.rs` の定数と doc コメントの数字を 1 回の編集で変える | 差分がちょうど +2/-2 行 | 2〜4 |
-| [`t6-debug-fix`](tasks/t6-debug-fix.md) | (6) 調査してから直す | `apply-patch` に仕込んだ 2 つの退行（別ファイル）をテスト失敗から探して直す | `cargo test -p apply-patch` + 報告 | 6〜14 |
+| [`t1-survey-v2`](tasks/t1-survey-v2.md) | (1) 調査と要約 | `tools` の 9 ツールの name / 実行モード / 権限に加え、`agents` のロール行列から `allowed_roles`、`tools/tests`・`runtime/src`・`runtime/tests` で名前を含むファイル数（27 回の走査）、ロール別の逆引き `by_role`、参照数の合計での `ref_ranking` | `answers/t1.json` の 94 項目 | 12〜25 |
+| [`t2-aggregate-v2`](tasks/t2-aggregate-v2.md) | (2) 集計 | 22 crate × 6 指標（ファイル数・行数・テスト属性数と `src`/`tests`/その他の行数）、8000 行以上の crate の 1000 行あたりテスト属性数の上位 5、5 crate 以上に現れるファイル名の集計 | `answers/t2.json` の 165 項目 | 8〜20 |
+| [`t3-rename-v2`](tasks/t3-rename-v2.md) | (3) 複数か所の編集 | `event-bus` の 21 ファイルで 4 つの識別子（`SpanKey`・`SpanAction`・`drain_drops`・`str_attr`）を改名。コメント行は変えない。`str_attribute` は別の識別子 | ファイル別の件数（コード行 317 箇所）+ コメント行の不変 + `cargo test -p event-bus --features otel-exporter` | 10〜25 |
+| [`t4-build-test-v2`](tasks/t4-build-test-v2.md) | (4) ビルド・テストを含む手順 | `agents`: テスト数を控える → Explorer に権限を足す（既存テスト 2 件が落ちるので直す）→ `Role::ALL` と `roles_allowing` → 新規テスト → fmt / clippy / test → 報告 JSON | 変更範囲 + 既存テスト数の下限 + doc 表 + fmt + clippy + test + 隠しテスト + 報告 JSON の 5 項目 | 12〜25 |
+| [`t5-single-edit-v2`](tasks/t5-single-edit-v2.md) | (5) 1 回で済む対照 | `grep.rs` の定数と doc コメントの数字を 1 回の編集で変える（旧 `t5-single-edit` と同内容。対照なので重くしない） | 差分がちょうど +2/-2 行 | 2〜4 |
+| [`t6-debug-fix-v2`](tasks/t6-debug-fix-v2.md) | (6) 調査してから直す | 3 コミットで仕込んだ 5 つの退行（`apply-patch` に 4、`agents` に 1）。失敗が別のテストバイナリに順に現れ、テスト → 調査 → 修正 → 再テストを回す | 変更範囲 + 5 ファイルの `#[cfg(test)]` 以降が無改変 + `cargo test -p apply-patch -p agents` + 報告に 5 ファイル | 12〜25 |
 
-ビルド・テストを走らせる課題（t3 / t4 / t6）は `apply-patch` と `agents` の 2 crate だけを使い、ワークスペース全体のビルドは要らない（依存の解決だけは必要）。
+ビルド・テストを走らせる課題（t3 / t4 / t6）は `event-bus`・`agents`・`apply-patch` の小さな crate だけを使い、ワークスペース全体のビルドは要らない（依存の解決だけは必要）。
+
+旧課題（v1）:
+
+| id | 種類 | 内容 |
+|---|---|---|
+| [`t1-survey`](tasks/t1-survey.md) | (1) | 9 ツールの name / 実行モード / 権限 / Worker での許可（65 項目） |
+| [`t2-aggregate`](tasks/t2-aggregate.md) | (2) | 22 crate × (ファイル数・行数・テスト属性数) と最大 5 ファイル（78 項目） |
+| [`t3-rename`](tasks/t3-rename.md) | (3) | `apply-patch` 内の構造体とフィールドの改名（51 行・5 ファイル） |
+| [`t4-build-test`](tasks/t4-build-test.md) | (4) | `agents` に `Role::ALL` を追加し fmt / clippy / test を通す |
+| [`t5-single-edit`](tasks/t5-single-edit.md) | (5) | `grep.rs` の 2 か所の数字（`t5-single-edit-v2` と同内容） |
+| [`t6-debug-fix`](tasks/t6-debug-fix.md) | (6) | `apply-patch` の 2 つの退行 |
 
 ## ディレクトリ構成
 
@@ -24,13 +39,15 @@ evals/run-js/
   README.md
   tasks/<id>.md          課題の定義（プロンプト全文、想定解、採点基準、検証、ターン数、run_js が効く理由）
   verify/<id>.sh         検証コマンド。`verify/<id>.sh <clone>`、合格 = exit 0 / 不合格 = exit 1 / 使い方の誤り = exit 2
-  verify/expected/       t1 / t2 の期待値（JSON）
+  verify/expected/       t1 / t2 の期待値（JSON。v2 は scripts/gen-v2-expected.mjs で再計算できる）
   verify/hidden/         t4 の隠しテスト（検証時だけ clone にコピーする）
   verify/lib/            検証の共通部
-  setup/                 課題固有の初期化（t6 の退行コミット）
+  setup/                 課題固有の初期化（t6 の退行コミット。v2 は 3 コミット）
   solutions/<id>.sh      参照解（検証スクリプトの自己確認用。モデルには見せない）
-  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / gen-t2-expected.mjs（課題・検証）
-                         make-overlay.sh / run-one.sh / run-matrix.sh / models.sh / metrics.mjs（実行・集計）
+  solutions/<id>.wrong-*.sh  部分誤答（検証が fail になることの確認用）
+  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / gen-t2-expected.mjs / gen-v2-expected.mjs（課題・検証）
+                         make-overlay.sh / preflight.sh / run-one.sh / run-matrix.sh / models.sh（実行）
+                         metrics.mjs / classify-shell.mjs（集計）
   test/                  実行・集計スクリプトの確認（ダミー evorch、fixture、単体確認）
 ```
 
@@ -98,7 +115,7 @@ $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
 
 | ファイル | 内容 |
 |---|---|
-| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
+| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`error_reason`（`status` が `ok` でないときだけ。stderr の `reason=` 以降、なければ最後の非空行。300 文字まで）、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
 | `run.db` | この run の store（`--db`）。run ごとに別ファイルなので並列でも衝突しない |
 | `evorch.stdout.log` / `evorch.stderr.log` | Worker の最終出力 / `run_id:` を含む stderr |
 | `verify.log` | 検証の出力（不一致一覧） |
@@ -108,20 +125,25 @@ $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
 
 終了コード: 0 = 保存した（verify の合否は問わない）/ 結果が既にある、2 = 使い方や環境の誤り、3 = 準備に失敗（結果は書かない）。`result.json` が無いディレクトリは作り直す。
 
+**`--force` と退避**: `--force` で結果がある組を実行し直すときは、既存の結果ディレクトリを消さず `<rep>.attempt<N>`（N は未使用の最小の番号）へ移す。`<rep>` に `.attempt<N>` で終わる名前は使えない。
+
+**`status=error` だが `verify=pass` の run**: provider の SSE エラー（`invalid SSE stream: …` など）で evorch が非 0 終了しても、止まる前に成果物が正しく出来ていることがある。このとき `status` は `error`、`verify` は `pass` で、`error_reason` に理由が入る。`run-one.sh` の出力行には `(error だが verify=pass)` が付き、`metrics.mjs` は `outcome` を `error+pass` と表示して注意欄に理由を出す。ターン数や費用の比較では `ok` の run と分けて見る（途中で止まっているため）。
+
 ### 4. マトリクスの実行（`run-matrix.sh`）
 
 ```sh
 $EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
-  [--models "gpt-sol claude-opus"] [--tasks "t1-survey t5-single-edit"] \
+  [--models "gpt-sol claude-opus"] [--tasks "t1-survey-v2 t5-single-edit-v2"] \
   [--reps 3] [--rep-from 1] [-j 2] [--run-js true|false] [--effort <e>] [--timeout <sec>] \
-  [--retry-errors] [--list] [--keep-clone]
+  [--retry-errors] [--no-preflight | --preflight-only] [--list] [--keep-clone]
 ```
 
-- 既定は全 5 モデル × 全 6 課題 × 1 回。順序は rep → 課題 → モデル。
+- 既定は全 5 モデル × v2 の全 6 課題（`EVAL_TASKS`）× 1 回。順序は rep → 課題 → モデル。
 - `result.json` がある組はスキップするので、中断しても**同じコマンドで再開**できる。`--list` で実行せずに計画（run / skip）だけ見られる。
 - `-j N` で並列度（既定 1）。並列 run は clone・`run.db` が別なので干渉しないが、プロバイダのレート制限と CPU/ビルド負荷に注意。
-- `status` が `error` の結果（資格情報の誤りなど）は `--retry-errors` で消して再実行する。`timeout` は再実行しない。
-- 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
+- `status` が `error` の結果（資格情報の誤りなど）は `--retry-errors` で再実行する。最初の試行は消さず、`<model>/<task>/<rep>.attempt<N>` へ退避してから流す（`metrics.mjs` は既定で読まない。`--include-attempts` で読む）。`timeout` は再実行しない。`error` でも `verify=pass` だった結果も、`status` が `error` なので対象になる。
+- **preflight**: 実行前に、計画に残っている各モデルを `preflight.sh` で確かめる。Worker をそのモデルに固定した overlay で、極小のプロンプト（ツール不使用で `OK` と答えさせる、`--run-js-enabled false`）を 1 回流し、evorch が 0 で終われば使える。provider が advertise しないモデル（`model is not advertised by provider`）や、config にないモデル（`the model chain exists but has no available candidate`）は、モデル呼び出しの前に失敗するので費用はかからない（予備実行の gpt-6.1-sol は 4 秒で失敗した）。使えるモデルでは極小のリクエストが 1 回出る。使えないモデルの組は計画から外し、結果ディレクトリも作らず、使えるモデルだけを流して最後に exit 1 で報告する（直して同じコマンドで再開できる）。成功は `<outroot>/.preflight/<model>.ok` に記録し、再実行では確認を飛ばす（`preflight.sh <model> --outroot <dir> --force` で確かめ直す）。`--no-preflight` で省略、`--preflight-only` で確認だけ。`--list` は preflight をしない。
+- 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`（v2 を流す）。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
 - stage 2（run_js 無し対照）は別の `--outroot` に `--run-js false` で流す。
 
 ### 5. 検証
@@ -133,12 +155,12 @@ $EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
 bun か node（npm 依存なし）。
 
 ```sh
-node $EVAL/evals/run-js/scripts/metrics.mjs --results <outroot> [--json out.json] [--md out.md] [--format md|json|both]
+node $EVAL/evals/run-js/scripts/metrics.mjs --results <outroot> [--json out.json] [--md out.md] [--format md|json|both] [--include-attempts]
 node $EVAL/evals/run-js/scripts/metrics.mjs --db <path> --run <run-id>[=<model>/<task>/<rep>] [--run ...]
 node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 ```
 
-標準出力は Markdown（既定）。表は 3 つ: run ごと / モデル × 課題（平均。`run_js` 有効・無効は別行）/ shell コマンドの複雑さ分布。JSON には全指標（run ごとの入れ子の形と集計）が入る。`--db` を直接読むときは `--evorch <bin>`（既定 `$EVORCH_BIN`）で `evorch inspect` を呼ぶ。
+標準出力は Markdown（既定）。表は 3 つ: run ごと / モデル × 課題（平均。`run_js` 有効・無効は別行）/ shell コマンドのプログラム的構造（run ごと）。JSON には全指標（run ごとの入れ子の形と集計）が入る。`--db` を直接読むときは `--evorch <bin>`（既定 `$EVORCH_BIN`）で `evorch inspect` を呼ぶ。
 
 #### 指標の定義
 
@@ -187,21 +209,32 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 | `jq` | `interp_inline_by_lang.jq` に別枠で数える（`interp_inline_cmds` には含めない） |
 | `oneliner_cmds` | 改行を 1 つも含まないコマンドの数 |
 
-**ワンライナーの複雑さ**（ADR 0039 Open question「予備実行で決める」への初期案。予備実行の分布を見て閾値を見直す）
+**ワンライナーの複雑さ**（ADR 0039 Open question「予備実行で決める」への案。予備実行の 84 コマンドで検討し、v2 の予備実行の分布を見て閾値を見直す）
 
-コマンドごとに次の 5 指標を測り、run ごとに分布（件数・平均・中央値・p90・最大）を出す。重み付きの総合点は作らない（分布そのものを見る）。
+`chars` の大小や `segments` だけでは、無害な長い 1 行（`cd` や `ls` を並べた確認、`cargo fmt && cargo clippy && cargo test` の連結）を「複雑」と誤判定する。そこで、**主指標は「プログラム的構造」の有無**とし、`chars` と `segments` は補助にする。重み付きの総合点は作らない（分布と件数を見る）。コマンド文字列は前処理（ヒアドキュメント本体・引用符の中身・コメントを除く）した上で、`&&` `||` `;` `&` `|` と改行で単純コマンドに分けて判定する。
+
+主指標（コマンド単位の真偽。`programmatic_cmds` はどれかに当てはまるコマンドの数、種類別は `programmatic_by_kind`）:
+
+| 種類 | 定義 |
+|---|---|
+| ① `script` | ヒアドキュメント（`<<` `<<-`。`<<<` は含めない）を含む、またはインライン実行のインタプリタ本体を含む（python / node / bun / deno / perl / ruby の `-e` `-c` `-p` `-`・ヒアドキュメント・here-string 入力、awk / gawk / mawk のプログラム。`awk -f` や `python3 x.py` などのファイル実行と `jq` は含めない） |
+| ② `loop` | `for` / `while` / `until` のループ、または `xargs` によるファイル反復 |
+| ③ `textproc` | 1 つのパイプラインに text 処理の段（grep / egrep / fgrep / rg / sed / awk / gawk / mawk / sort / uniq / cut / tr / wc）が 3 つ以上。`head` / `tail`（と `cat`、`git ls-files` などその他の段）は段に数えないので、末尾が `head` / `tail` だけの延長は当たらない。`;` や `&&` をまたいで数えない |
+| ④ `sed_multi` | `sed -i`（`-i.bak`、`-Ei`、`--in-place`）で複数ファイルを書き換える。ファイル引数が 2 つ以上（glob は 2 と数える）、またはコマンドに `xargs` / ループがある。複数の `sed -i` が合計 2 ファイル以上になる場合も含む |
+
+補助指標:
 
 | 指標 | 定義 |
 |---|---|
+| `segments` | 単純コマンドの数。ただし **`cd` / `pwd` / `ls` / `echo` / `which` / `git status`**、**cargo の build 系**（`cargo fmt` / `clippy` / `test` / `check` / `build` / `nextest`。`+toolchain` やフラグは読み飛ばす）、制御語だけの区切り（`then` `do` `else` `fi` `done` など）は数えない。数えたものを `segments`、全部の非空区切りを `segments_raw`、除いた内訳を `segments_excluded`（`trivial` / `build` / `control`）に出す。帯 `1` / `2-3` / `4-7` / `8+` の件数も出す（0 は帯 `1`） |
+| `build_steps` / `build_chain_cmds` | 1 コマンドに含まれる cargo の build 系の数（`build_steps`、run ごとの分布と合計 `build_steps_total`）と、2 つ以上を連結したコマンドの数（**build 連結数** `build_chain_cmds`）。ADR 0039 の「ビルドと確認を 1 つのワンライナーに連結する」誤用の観察用で、`segments` や主指標とは別に数える |
 | `pipes` | パイプ演算子（`\|`、`\|&`）の数 = パイプライン段数 − パイプライン数。`\|\|` と `>\|` は含めない |
 | `chain_ops` | 連結演算子 `&&` `\|\|` `;` とバックグラウンド `&` の数（`2>&1` `&>` の `&` は含めない） |
-| `segments` | 上の演算子と改行で区切った非空の単純コマンドの概数（`then` `do` `fi` などの制御語も 1 つに数える）。帯 `1` / `2-3` / `4-7` / `8+` の件数も出す |
-| `chars` | コマンド文字列全体の文字数（ヒアドキュメント本体を含む） |
-| `lines` | 行数（ヒアドキュメント本体を含む） |
+| `chars` / `lines` | コマンド文字列全体の文字数 / 行数（ヒアドキュメント本体を含む。補助にとどめる） |
 
-目安として、`segments ≥ 4` または `chars ≥ 300`、あるいはインライン・インタプリタ／ヒアドキュメントを含むものを「ワンライナーを超えた複雑なコマンド」と見て、`run_js` に書くべきだったかを目視で確認する。
+`scripts/classify-shell.mjs --results <outroot> [--list]` は、同じ定義でモデル別の件数表を出し、`--list` で該当コマンドの本文を列挙する（`run_js` に書くべきだったかの目視確認用）。以前の臨時の分類スクリプトを取り込んだもので、`metrics.mjs` と同じ `analyzeShell` を使う。
 
-**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数。
+**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`outcome`（`ok` / `error` / `timeout`、および `status` が `ok` でないのに `verify=pass` の **`error+pass`** / `timeout+pass`。成果物は正しいが途中で止まった run を区別する）、`error_reason`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数、`err+pass` の件数。
 
 ## 繰り返し
 
@@ -210,27 +243,38 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 ## スクリプトの確認（実モデルを呼ばない）
 
 ```sh
-node test/shell-analysis-test.mjs        # shell 解析の単体確認
-node test/metrics-test.mjs               # fixture-metrics.json に対する metrics.mjs の期待値
-test/scripts-test.sh <存在しない作業ディレクトリ>   # ダミー evorch で make-overlay / run-one / run-matrix / metrics の流れを確認
+node test/shell-analysis-test.mjs        # shell 解析（プログラム的構造・segments・build 連結など）の単体確認
+node test/metrics-test.mjs               # fixture-metrics.json に対する metrics.mjs の期待値、結果ディレクトリの読み分け、outcome
+test/scripts-test.sh <存在しない作業ディレクトリ>   # ダミー evorch で make-overlay / preflight / run-one / run-matrix / metrics の流れを確認
 ```
 
-`test/fixture-metrics.json` は `evorch inspect` の出力形式に合わせた合成データ（`test/gen-fixture.mjs` で再生成）。`test/dummy-evorch.sh` は `EVORCH_BIN` に指定できるダミー（引数を記録し、`run_id:` を出し、fixture の `inspect` 出力を返す）。
+`test/fixture-metrics.json` は `evorch inspect` の出力形式に合わせた合成データ（`test/gen-fixture.mjs` で再生成）。`test/dummy-evorch.sh` は `EVORCH_BIN` に指定できるダミー（引数を記録し、`run_id:` を出し、fixture の `inspect` 出力を返す。`DUMMY_UNAVAILABLE_MODEL` で provider の `model is not advertised by provider` を、`DUMMY_ERROR_REASON` で provider エラーの stderr を再現する）。preflight の実装は、ダミーでの確認に加えて、存在しないモデル名を固定した overlay で実バイナリを 1 回起動し、モデル呼び出しの前に失敗して exit 1 になること（費用ゼロ）を確かめた。
+
+`metrics.mjs --results <dir>` は、`<dir>/<model>/<task>/<rep>/result.json` を持つ組だけを読む。`result.json` の `model` / `task` / `rep` がパスと一致しないもの（別の outroot を直下に置いた、手で退避したディレクトリなど）、`.`始まりのディレクトリ（`.preflight/`）、`timeline/` のような `result.json` を持たないディレクトリは読まない（読まなかった理由は stderr に `skip …` で出す）。`<rep>.attempt<N>` は `--include-attempts` のときだけ読む。結果が 1 つも見つからなければ、`--outroot` を指していない可能性を示して exit 1 にする。
 
 ## 検証の自己確認
 
-検証スクリプトとその期待値が壊れていないことを、各課題で「未着手の clone は不合格、参照解を適用した clone は合格」の両方で確かめる。
+検証スクリプトとその期待値が壊れていないことを、各課題で次の 3 通りで確かめる。
+
+| 状態 | 作り方 | 期待 |
+|---|---|---|
+| `untouched` | 未着手の clone | fail（exit 1） |
+| `solved` | 参照解 `solutions/<id>.sh` を適用 | pass（exit 0） |
+| `wrong-*` | 部分誤答 `solutions/<id>.wrong-*.sh` を適用 | fail（exit 1） |
 
 ```sh
-scripts/self-test.sh <存在しない作業ディレクトリ> [task-id ...]
+scripts/self-test.sh <存在しない作業ディレクトリ> [task-id ...]   # 省略時は v2 の 6 課題
 ```
 
-固定コミットが変わった場合や課題を変えた場合に再実行する。t2 の期待値は `scripts/gen-t2-expected.mjs <固定コミットの checkout>` で再計算できる（`verify/expected/t2-aggregate.json` と一致することを確認する）。
+部分誤答の例: t1 は参照数の 1 つ違いと順位の入れ替え、t2 は密度順位の入れ替えと `other_lines` の欠落、t3 はコメント行まで置換 / `str_attribute` まで置換、t4 は壊れたテストを消す / 名前順に返す / 権限付与の忘れ、t5 は doc コメントの直し忘れ、t6 は `role.rs` の直し忘れ / `seek_sequence.rs` のテストを緩める。
+
+固定コミットが変わった場合や課題を変えた場合に再実行する。期待値は `scripts/gen-t2-expected.mjs <固定コミットの checkout>`（v1 の t2）と `scripts/gen-v2-expected.mjs <固定コミットの checkout> verify/expected`（v2 の t1 / t2）で再計算できる。
 
 ## 注意
 
 - 課題の事実（t1 の表、t2 の数値、t3 の出現数、t4 のテスト件数 28、t6 の退行）は固定コミット `4391a7e5` に基づく。別のコミットでは使えない。
 - `answers/` は clone の `.git/info/exclude` に入れてあり、`git status` や `git diff` には出ない。検証は `git diff 4391a7e5`（追跡ファイルの差分）で変更範囲を見る。
 - t5 は `run_js` が不要な対照。t4 は `run_js` の中で cargo を走らせず通常の shell ジョブで流すのが望ましい（ADR 0039）。使い方の良し悪しは検証の合否とは別に観察する。
-- t6 は `git show HEAD` で退行コミットが見える。調査手段の観察対象であり、減点しない。
+- t6 は `git log` / `git show` で退行コミットが見える。調査手段の観察対象であり、減点しない。
+- t3-v2 の検証は `--features otel-exporter` 付きでテストを流す（`span_exporter.rs` は feature 無しではコンパイルされない）。初回は opentelemetry の依存のビルドが入るので、依存の取得（`cargo fetch`）を済ませておく。
 - 検証が cargo を走らせるため、並行して複数の検証や run を同じ clone で動かさない。

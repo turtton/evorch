@@ -1,0 +1,36 @@
+diff --git a/crates/apply-patch/src/apply.rs b/crates/apply-patch/src/apply.rs
+index ef56f9b0..0bded243 100644
+--- a/crates/apply-patch/src/apply.rs
++++ b/crates/apply-patch/src/apply.rs
+@@ -240,7 +240,7 @@ pub fn plan(patch: &str, root: Option<&Path>) -> Result<Plan, ApplyPatchError> {
+                 entry.current = VfsState::Absent;
+                 entry.remove_context = "Failed to delete file";
+                 plan.links.remove(&entry_path);
+-                reports[2].push(target.raw);
++                reports[1].push(target.raw);
+             }
+             Hunk::UpdateFile {
+                 move_path, chunks, ..
+diff --git a/crates/apply-patch/src/targets.rs b/crates/apply-patch/src/targets.rs
+index e5a399ce..571e94fb 100644
+--- a/crates/apply-patch/src/targets.rs
++++ b/crates/apply-patch/src/targets.rs
+@@ -93,7 +93,8 @@ pub fn targets_raw(patch: &str) -> Result<Vec<(PathBuf, TargetKind)>, ParseError
+ 
+ fn has_parent_dir(path: &Path) -> bool {
+     path.components()
+-        .any(|component| component == Component::ParentDir)
++        .next()
++        .is_some_and(|component| component == Component::ParentDir)
+ }
+ 
+ fn resolve(raw: &Path, root: Option<&Path>) -> Result<PathBuf, TargetsError> {
+@@ -107,7 +108,7 @@ fn resolve(raw: &Path, root: Option<&Path>) -> Result<PathBuf, TargetsError> {
+     };
+     // Rebuilding from components drops `.` and repeated separators, so the
+     // same file always yields the same string for path-based permission rules.
+-    Ok(joined.components().collect())
++    Ok(joined.components().collect::<PathBuf>())
+ }
+ 
+ #[cfg(test)]

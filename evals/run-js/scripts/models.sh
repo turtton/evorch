@@ -6,8 +6,11 @@
 
 # shellcheck disable=SC2034
 EVAL_MODELS="gpt-sol gpt-luna-fast gpt-astra claude-opus claude-sonnet"
+# 既定の課題は v2（予備実行の結果を受けて重くしたもの）。旧課題（v1）は EVAL_TASKS_V1 か --tasks で指定する。
 # shellcheck disable=SC2034
-EVAL_TASKS="t1-survey t2-aggregate t3-rename t4-build-test t5-single-edit t6-debug-fix"
+EVAL_TASKS="t1-survey-v2 t2-aggregate-v2 t3-rename-v2 t4-build-test-v2 t5-single-edit-v2 t6-debug-fix-v2"
+# shellcheck disable=SC2034
+EVAL_TASKS_V1="t1-survey t2-aggregate t3-rename t4-build-test t5-single-edit t6-debug-fix"
 # reasoning_effort の既定値。--effort か EVAL_EFFORT で上書きする（モデルごとの適切な値は実行前に決める）。
 EVAL_DEFAULT_EFFORT=${EVAL_DEFAULT_EFFORT:-medium}
 
@@ -25,3 +28,11 @@ eval_target() {
 
 # eval_model_dir <model-key>: 結果ディレクトリ用の名前（'+' を '-' にする）。
 eval_model_dir() { printf '%s\n' "${1//+/-}"; }
+
+# eval_archive_attempt <rundir>: 既存の結果ディレクトリを <rundir>.attempt<N>（N は未使用の最小の番号）へ退避して、そのパスを出す。
+# --retry-errors / --force が最初の試行（error の結果など）を消さないために使う。metrics.mjs は既定で .attempt<N> を読まない。
+eval_archive_attempt() {
+  local dir=$1 n=1
+  while [ -e "$dir.attempt$n" ]; do n=$((n + 1)); done
+  mv "$dir" "$dir.attempt$n" && printf '%s\n' "$dir.attempt$n"
+}

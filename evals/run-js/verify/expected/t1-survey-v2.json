@@ -1,0 +1,230 @@
+{
+ "tools": [
+  {
+   "name": "apply_patch",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 10,
+    "runtime_tests": 1
+   }
+  },
+  {
+   "name": "edit",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 8,
+    "runtime_src": 19,
+    "runtime_tests": 12
+   }
+  },
+  {
+   "name": "git_diff",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": true,
+   "network": false,
+   "allowed_roles": [
+    "Orchestrator",
+    "Worker",
+    "Reviewer",
+    "Planner",
+    "Advisor"
+   ],
+   "refs": {
+    "tools_tests": 3,
+    "runtime_src": 4,
+    "runtime_tests": 1
+   }
+  },
+  {
+   "name": "grep",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "allowed_roles": [
+    "Orchestrator",
+    "Explorer",
+    "Worker",
+    "Reviewer",
+    "WebResearcher",
+    "Planner",
+    "Advisor",
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 6,
+    "runtime_tests": 8
+   }
+  },
+  {
+   "name": "read",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "allowed_roles": [
+    "Orchestrator",
+    "Explorer",
+    "Worker",
+    "Reviewer",
+    "WebResearcher",
+    "Planner",
+    "Advisor",
+    "MultimodalLooker",
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 8,
+    "runtime_src": 35,
+    "runtime_tests": 43
+   }
+  },
+  {
+   "name": "shell",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": true,
+   "network": false,
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 9,
+    "runtime_src": 23,
+    "runtime_tests": 25
+   }
+  },
+  {
+   "name": "web_fetch",
+   "execution_mode": "Shared",
+   "fs_read": false,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": true,
+   "allowed_roles": [
+    "Orchestrator",
+    "WebResearcher",
+    "Planner"
+   ],
+   "refs": {
+    "tools_tests": 3,
+    "runtime_src": 6,
+    "runtime_tests": 5
+   }
+  },
+  {
+   "name": "web_search",
+   "execution_mode": "Shared",
+   "fs_read": false,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": true,
+   "allowed_roles": [
+    "WebResearcher"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 4,
+    "runtime_tests": 9
+   }
+  },
+  {
+   "name": "write",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 9,
+    "runtime_src": 22,
+    "runtime_tests": 23
+   }
+  }
+ ],
+ "by_role": {
+  "Orchestrator": [
+   "git_diff",
+   "grep",
+   "read",
+   "web_fetch"
+  ],
+  "Explorer": [
+   "grep",
+   "read"
+  ],
+  "Worker": [
+   "apply_patch",
+   "edit",
+   "git_diff",
+   "grep",
+   "read",
+   "shell",
+   "write"
+  ],
+  "Reviewer": [
+   "git_diff",
+   "grep",
+   "read"
+  ],
+  "WebResearcher": [
+   "grep",
+   "read",
+   "web_fetch",
+   "web_search"
+  ],
+  "Planner": [
+   "git_diff",
+   "grep",
+   "read",
+   "web_fetch"
+  ],
+  "Advisor": [
+   "git_diff",
+   "grep",
+   "read"
+  ],
+  "MultimodalLooker": [
+   "read"
+  ],
+  "Evaluator": [
+   "grep",
+   "read"
+  ]
+ },
+ "ref_ranking": [
+  "read",
+  "shell",
+  "write",
+  "edit",
+  "grep",
+  "web_search",
+  "apply_patch",
+  "web_fetch",
+  "git_diff"
+ ]
+}

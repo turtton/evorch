@@ -6,7 +6,7 @@
 #   --effort <e>          reasoning_effort（既定 $EVAL_EFFORT、なければ models.sh の既定）
 #   --timeout <sec>       evorch run のタイムアウト（既定 $EVAL_TIMEOUT_S、なければ 1800）
 #   --keep-clone          clone を消さずに残す
-#   --force               結果がある組も実行し直す
+#   --force               結果がある組も実行し直す（既存の結果は <rep>.attempt<N> へ退避する）
 # 環境変数:
 #   EVORCH_BIN            evorch バイナリ（必須）
 #   EVORCH_CONFIG_SRC     overlay の元になる config ディレクトリ（make-overlay.sh 参照）
@@ -14,7 +14,7 @@
 #   EVAL_SOURCE_REPO      prepare-clone.sh の source-repo（既定は prepare-clone.sh の既定）
 #   EVAL_VERIFY_TIMEOUT_S verify のタイムアウト（既定 900）
 # 結果: <outroot>/<model>/<task>/<rep>/
-#   result.json（最後に書く。あれば完了扱い）, run.db, evorch.stdout.log, evorch.stderr.log,
+#   result.json（最後に書く。あれば完了扱い。status が ok でなければ error_reason も）, run.db, evorch.stdout.log, evorch.stderr.log,
 #   verify.log, final.diff, answers/, inspect-run.json, inspect-events.json, zz-worker.toml
 # 終了コード: 0 = run を実行して保存した（verify の合否は問わない）/ 既に結果あり、
 #             2 = 使い方や環境の誤り、3 = 準備に失敗（結果は書かない。再実行で作り直す）
@@ -47,6 +47,7 @@ done
 case $run_js in true | false) ;; *) echo "--run-js は true か false" >&2; exit 2 ;; esac
 [[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
 [[ $rep =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "rep が不正: $rep" >&2; exit 2; }
+[[ $rep =~ \.attempt[0-9]+$ ]] && { echo "rep が不正（.attempt<N> は退避先の名前）: $rep" >&2; exit 2; }
 target=$(eval_target "$model") || { echo "未知のモデルキー: $model（$EVAL_MODELS）" >&2; exit 2; }
 read -r profile model_id <<<"$target"
 [ -f "$evals/tasks/$task.md" ] || { echo "未知の課題: $task" >&2; exit 2; }
@@ -63,7 +64,12 @@ if [ -f "$rundir/result.json" ] && [ "$force" -eq 0 ]; then
   echo "skip $mdir $task $rep（結果あり）"
   exit 0
 fi
-rm -rf "$rundir"
+if [ -f "$rundir/result.json" ]; then
+  archived=$(eval_archive_attempt "$rundir") || { echo "結果の退避に失敗: $rundir" >&2; exit 3; }
+  echo "既存の結果を退避した: $archived" >&2
+else
+  rm -rf "$rundir"
+fi
 mkdir -p "$rundir"
 
 work_root=${EVAL_WORK:-${TMPDIR:-/tmp}/run-js-eval-work}
@@ -112,6 +118,17 @@ elif [ "$rc" -ne 0 ]; then status=error; fi
 
 run_id=$(sed -n 's/^run_id: *//p' "$rundir/evorch.stderr.log" | head -n 1)
 
+# status が ok でないときの理由（stderr の `reason=` 以降。なければ最後の非空行）。provider のエラーで止まった run が
+# 成果物としては正しい（verify=pass）ことがあるので、結果に残して metrics.mjs が区別できるようにする。
+error_reason=
+if [ "$status" != ok ]; then
+  clean=$(sed -e 's/\x1b\[[0-9;]*m//g' "$rundir/evorch.stderr.log")
+  error_reason=$(printf '%s\n' "$clean" | grep 'reason=' | tail -n 1 | sed 's/.*reason=//')
+  [ -n "$error_reason" ] || error_reason=$(printf '%s\n' "$clean" | grep -v '^run_id:' | grep . | tail -n 1)
+  [ "$status" != timeout ] || error_reason="timeout after ${timeout_s}s${error_reason:+: $error_reason}"
+  error_reason=${error_reason:0:300}
+fi
+
 # 検証（同じ clone に対して）。タイムアウトで中断された run も検証する。
 v0=$(now_ms)
 "$TIMEOUT" --kill-after=30 "$verify_timeout_s" "$evals/verify/$task.sh" "$clone" >"$rundir/verify.log" 2>&1 </dev/null
@@ -146,6 +163,7 @@ tmp=$rundir/.result.json.tmp
   printf '  "db": "run.db",\n'
   printf '  "status": "%s",\n' "$status"
   printf '  "evorch_exit": %s,\n' "$rc"
+  if [ -n "$error_reason" ]; then printf '  "error_reason": "%s",\n' "$(json_str "$error_reason")"; fi
   printf '  "timed_out": %s,\n' "$timed_out"
   printf '  "timeout_s": %s,\n' "$timeout_s"
   printf '  "duration_ms": %s,\n' "$((t1 - t0))"
@@ -157,6 +175,8 @@ tmp=$rundir/.result.json.tmp
 } >"$tmp"
 mv "$tmp" "$rundir/result.json"
 
-printf '%s %s %s status=%s verify=%s dur=%ss run_id=%s\n' \
-  "$mdir" "$task" "$rep" "$status" "$verify" "$(((t1 - t0) / 1000))" "${run_id:-none}"
+note=
+[ "$status" != ok ] && [ "$verify" = pass ] && note=" (${status} だが verify=pass)"
+printf '%s %s %s status=%s verify=%s dur=%ss run_id=%s%s\n' \
+  "$mdir" "$task" "$rep" "$status" "$verify" "$(((t1 - t0) / 1000))" "${run_id:-none}" "$note"
 exit 0

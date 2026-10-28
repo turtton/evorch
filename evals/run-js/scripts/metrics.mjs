@@ -12,6 +12,7 @@
 // 共通:
 //   --evorch <bin>       `evorch inspect` に使うバイナリ（既定 $EVORCH_BIN）
 //   --format md|json|both   標準出力に出すもの（既定 md）。--json / --md はファイルへ書く。
+//   --include-attempts   --retry-errors が退避した <rep>.attempt<N> も読む（既定は読まない）
 //
 // 指標の定義は README.md の「指標」を参照。
 
@@ -128,14 +129,18 @@ export function sanitizeShell(source) {
 }
 
 const WRAPPERS = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'exec', 'command', 'nohup', 'sudo', 'env', 'xargs', 'builtin']);
+const CLOSERS = new Set(['done', 'fi', 'esac', '}', ')']);
 const FLAG_WITH_VALUE = new Set(['-I', '-n', '-P', '-L', '-d', '-s', '-u']);
 
-/** 1 セグメント（単純コマンド）から、インタプリタ実行を判定する。 */
-function interpreterOf(segment) {
+/** 単純コマンド 1 つを分解する: 先頭の環境変数代入・制御語・ラッパー（xargs など）を読み飛ばした実コマンド。 */
+function commandOf(segment) {
   const hasHere = /<<H|<<</.test(segment);
   const tokens = segment.trim().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return null;
+  const out = { program: null, args: [], hasHere, loopKeyword: false, viaXargs: false, bare: true };
+  if (tokens.length === 0) return out;
   tokens[0] = tokens[0].replace(/^[({!`$]+/, '');
+  if (/^(for|while|until)$/.test(tokens[0])) out.loopKeyword = true;
+  if (CLOSERS.has(tokens[0])) return out;
   let k = 0;
   let wrapped = false;
   while (k < tokens.length) {
@@ -144,14 +149,23 @@ function interpreterOf(segment) {
     else if (/^\w+=/.test(t)) k++;
     else if (WRAPPERS.has(t)) {
       wrapped = true;
+      if (t === 'xargs') out.viaXargs = true;
       k++;
     } else if (wrapped && t.startsWith('-')) {
       k += FLAG_WITH_VALUE.has(t) ? 2 : 1;
     } else break;
   }
-  if (k >= tokens.length) return null;
-  const program = tokens[k].split('/').pop();
-  const args = tokens.slice(k + 1);
+  if (k >= tokens.length) return out;
+  out.bare = false;
+  out.program = tokens[k].split('/').pop();
+  out.args = tokens.slice(k + 1);
+  return out;
+}
+
+/** 1 セグメント（単純コマンド）から、インタプリタ実行を判定する。 */
+function interpreterOf(cmd) {
+  const { program, args, hasHere } = cmd;
+  if (program == null) return null;
   const has = (re) => args.some((a) => re.test(a));
   if (/^(node|nodejs|bun|deno)$/.test(program)) {
     if (has(/^(-e|-p|-pe|--eval|--print|-)$/) || hasHere) return { lang: 'node', mode: 'inline' };
@@ -180,6 +194,41 @@ function interpreterOf(segment) {
     return { lang: 'jq', mode: has(/^(-f|--from-file)$/) ? 'file' : 'inline' };
   }
   return null;
+}
+
+/** `segments` の数から除く、ナビゲーション・確認だけの軽いコマンド（cd / pwd / ls / echo / git status / which）。 */
+function isTrivial(cmd) {
+  if (cmd.program == null) return false;
+  if (/^(cd|pwd|ls|echo|which)$/.test(cmd.program)) return true;
+  if (cmd.program === 'git') {
+    for (let k = 0; k < cmd.args.length; k++) {
+      const a = cmd.args[k];
+      if (a === '-C' || a === '-c') k++;
+      else if (!a.startsWith('-')) return a === 'status';
+    }
+  }
+  return false;
+}
+
+const BUILD_SUBCOMMANDS = new Set(['fmt', 'clippy', 'test', 'check', 'build', 'nextest']);
+
+/** `cargo fmt|clippy|test|check|build|nextest` の呼び出しか。`+toolchain` やフラグは読み飛ばす。 */
+function isBuildStep(cmd) {
+  if (cmd.program !== 'cargo') return false;
+  const sub = cmd.args.find((a) => !a.startsWith('-') && !a.startsWith('+'));
+  return sub != null && BUILD_SUBCOMMANDS.has(sub);
+}
+
+const TEXT_STAGE = /^(grep|egrep|fgrep|rg|sed|awk|gawk|mawk|sort|uniq|cut|tr|wc)$/;
+
+/** `sed -i`（インプレース編集）なら、編集対象ファイルの数の見積り（glob は 2 と数える）。違えば null。 */
+function sedInPlaceFiles(cmd) {
+  if (cmd.program !== 'sed') return null;
+  if (!cmd.args.some((a) => /^-[A-Za-z]*i/.test(a) || /^--in-place/.test(a))) return null;
+  const operands = cmd.args.filter((a) => !a.startsWith('-'));
+  const scriptGiven = cmd.args.some((a) => /^(-e|-f|--expression|--file)/.test(a));
+  const files = scriptGiven ? operands : operands.slice(1);
+  return files.reduce((n, f) => n + (f.includes('*') ? 2 : 1), 0);
 }
 
 /** 1 つの shell コマンド文字列の構造指標。 */
@@ -230,22 +279,49 @@ export function analyzeShell(command) {
   }
   push('');
   const nonEmpty = (seg) => seg.text.trim() !== '';
-  const real = segments.filter(nonEmpty);
+  const realSegs = segments.filter(nonEmpty);
   let newlineSeps = 0;
   segments.forEach((seg, idx) => {
     if (seg.terminator === '\n' && nonEmpty(seg) && segments.slice(idx + 1).some(nonEmpty)) newlineSeps++;
   });
-  const interps = real.map((seg) => interpreterOf(seg.text)).filter(Boolean);
+  const cmds = realSegs.map((seg) => ({ seg, cmd: commandOf(seg.text) }));
+  const interps = cmds.map(({ cmd }) => interpreterOf(cmd)).filter(Boolean);
+
+  // --- build 連結（cargo fmt / clippy / test / check ...）と、軽いコマンド・制御語だけの区切りは segments から除く
+  const buildSteps = cmds.filter(({ cmd }) => isBuildStep(cmd)).length;
+  const trivial = cmds.filter(({ cmd }) => isTrivial(cmd)).length;
+  const bare = cmds.filter(({ cmd }) => cmd.bare && !cmd.loopKeyword).length;
+  const countedSegments = cmds.filter(({ cmd }) => !isBuildStep(cmd) && !isTrivial(cmd) && !(cmd.bare && !cmd.loopKeyword)).length;
+
+  // --- プログラム的構造（4 種）
+  const inlineInterp = interps.some((i) => i.mode === 'inline' && i.lang !== 'jq');
+  const script = heredocs > 0 || inlineInterp;
+  const loop = cmds.some(({ cmd }) => cmd.loopKeyword || cmd.program === 'xargs' || cmd.viaXargs);
+  // 連続するパイプライン（`|` でつながる段）ごとに、テキスト処理の段数を数える。head / tail は段に数えない。
+  let textproc = false;
+  let stages = 0;
+  cmds.forEach(({ cmd }, idx) => {
+    const prevLinked = idx > 0 && cmds[idx - 1].seg.terminator === '|';
+    if (!prevLinked) stages = 0;
+    if (cmd.program != null && TEXT_STAGE.test(cmd.program)) stages++;
+    if (stages >= 3) textproc = true;
+  });
+  const sedFiles = cmds.map(({ cmd }) => sedInPlaceFiles(cmd)).filter((n) => n != null);
+  const sedMulti = sedFiles.length > 0 && (sedFiles.reduce((a, b) => a + b, 0) >= 2 || loop);
   return {
     chars: raw.length,
     lines: raw.split('\n').length,
     pipes,
     chain_ops: chain,
     newline_seps: newlineSeps,
-    segments: real.length,
+    segments: countedSegments,
+    segments_raw: realSegs.length,
+    segments_excluded: { trivial, build: buildSteps, control: bare },
+    build_steps: buildSteps,
     heredocs,
     here_strings: hereStrings,
     interpreters: interps,
+    programmatic: { script, loop, textproc, sed_multi: sedMulti },
   };
 }
 
@@ -302,6 +378,13 @@ const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
 const add = (map, key, by = 1) => {
   map[key] = (map[key] ?? 0) + by;
 };
+
+/** status と verify から実行結果の区分を決める。status が ok でなくても verify=pass の run は `<status>+pass` と区別する。 */
+export function outcomeOf(status, verify) {
+  if (status == null) return verify == null ? null : `verify-${verify}`;
+  if (status === 'ok') return 'ok';
+  return verify === 'pass' ? `${status}+pass` : status;
+}
 
 export function computeRun(entry) {
   const run = unwrap(entry.run) ?? {};
@@ -415,10 +498,18 @@ export function computeRun(entry) {
   const inlineCmds = commands.filter((c) => c.interpreters.some((i) => i.mode === 'inline' && i.lang !== 'jq'));
   const bands = { '1': 0, '2-3': 0, '4-7': 0, '8+': 0 };
   for (const c of commands) bands[bandOf(c.segments)]++;
+  const progKinds = { script: 0, loop: 0, textproc: 0, sed_multi: 0 };
+  for (const c of commands) for (const k of Object.keys(progKinds)) if (c.programmatic[k]) progKinds[k]++;
+  const programmatic = commands.filter((c) => Object.values(c.programmatic).some(Boolean));
   const shell = {
     commands: commands.length,
     control_calls: shellControl,
     child_commands: childByTool.shell ?? 0,
+    programmatic_cmds: programmatic.length,
+    programmatic_by_kind: progKinds,
+    build_chain_cmds: commands.filter((c) => c.build_steps >= 2).length,
+    build_steps_total: commands.reduce((a, c) => a + c.build_steps, 0),
+    build_steps: summarize(commands.map((c) => c.build_steps)),
     heredoc_cmds: commands.filter((c) => c.heredocs > 0).length,
     here_string_cmds: commands.filter((c) => c.here_strings > 0).length,
     interp_inline_cmds: inlineCmds.length,
@@ -439,6 +530,9 @@ export function computeRun(entry) {
   const eventSpanMs = stamps.length > 1 ? (Math.max(...stamps) - Math.min(...stamps)) / 1e6 : null;
   const result = entry.result ?? {};
   const label = entry.label ?? {};
+  const outcome = outcomeOf(result.status, result.verify);
+  if (outcome?.endsWith('+pass')) notes.push(`${result.status} だが verify=pass（成果物は正しい）${result.error_reason ? `: ${result.error_reason}` : ''}`);
+  else if (result.status && result.status !== 'ok' && result.error_reason) notes.push(`${result.status}: ${result.error_reason}`);
 
   return {
     model: label.model ?? result.model ?? null,
@@ -447,6 +541,8 @@ export function computeRun(entry) {
     run_js_enabled: result.run_js_enabled ?? null,
     run_id: runId,
     status: result.status ?? null,
+    outcome,
+    error_reason: result.error_reason ?? null,
     verify: result.verify ?? null,
     duration_s: (result.duration_ms ?? eventSpanMs) == null ? null : (result.duration_ms ?? eventSpanMs) / 1000,
     terminal_phase: run.context?.terminal_phase ?? null,
@@ -489,6 +585,8 @@ function flat(r) {
     run_js_output_bytes: r.run_js.output_bytes,
     run_js_return_bytes: r.run_js.return_bytes,
     shell_cmds: r.shell.commands,
+    programmatic_cmds: r.shell.programmatic_cmds,
+    build_chain_cmds: r.shell.build_chain_cmds,
     heredoc_cmds: r.shell.heredoc_cmds,
     interp_cmds: r.shell.interp_inline_cmds,
     pipes_max: r.shell.pipes.max,
@@ -518,6 +616,8 @@ export function aggregate(runs) {
       runs: list.length,
       verify_pass: list.filter((r) => r.verify === 'pass').length,
       verify_known: list.filter((r) => r.verify != null).length,
+      error_but_pass: list.filter((r) => String(r.outcome ?? '').endsWith('+pass')).length,
+      failed_status: list.filter((r) => r.status != null && r.status !== 'ok').length,
       mean: means,
     });
   }
@@ -537,40 +637,41 @@ export function toMarkdown(runs, agg) {
   };
   lines.push('## run ごと', '');
   table(
-    ['model', 'task', 'rep', 'js', 'status', 'verify', 'dur(s)', 'req', 'aux', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'child by tool', 'rj err(js/host/to/lim)', 'rj out B', 'rj ret B', 'shell', 'heredoc', 'interp', 'pipes max', 'chain max', 'chars med/max'],
+    ['model', 'task', 'rep', 'js', 'outcome', 'verify', 'dur(s)', 'req', 'aux', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'child by tool', 'rj err(js/host/to/lim)', 'rj out B', 'rj ret B', 'shell', 'prog', 'build chain', 'chars med/max'],
     runs.map((r) => {
       const e = r.run_js.errors;
       return [
-        r.model ?? '-', r.task ?? '-', r.rep ?? '-', r.run_js_enabled == null ? '-' : r.run_js_enabled ? 'on' : 'off', r.status ?? '-', r.verify ?? '-', fmt(r.duration_s, 0),
+        r.model ?? '-', r.task ?? '-', r.rep ?? '-', r.run_js_enabled == null ? '-' : r.run_js_enabled ? 'on' : 'off', r.outcome ?? r.status ?? '-', r.verify ?? '-', fmt(r.duration_s, 0),
         r.usage.requests, r.usage.aux_requests, r.usage.input_tokens, r.usage.cache_read_tokens, r.usage.cache_write_tokens, r.usage.output_tokens, r.usage.reasoning_tokens, fmt(r.usage.cost_usd, 4),
         r.tools.top_level_calls, r.run_js.calls, r.run_js.child_calls, compact(r.tools.child_by_tool),
         `${e.js_exception}/${e.host_rejected}/${e.timeout}/${e.limit_hit}`, r.run_js.output_bytes, r.run_js.return_bytes,
-        r.shell.commands, r.shell.heredoc_cmds, r.shell.interp_inline_cmds, fmt(r.shell.pipes.max), fmt(r.shell.chain_ops.max), `${fmt(r.shell.chars.median)}/${fmt(r.shell.chars.max)}`,
+        r.shell.commands, r.shell.programmatic_cmds, r.shell.build_chain_cmds, `${fmt(r.shell.chars.median)}/${fmt(r.shell.chars.max)}`,
       ].map(String);
     }),
   );
   lines.push('## モデル × 課題（平均）', '');
   table(
-    ['model', 'task', 'js', 'n', 'verify pass', 'dur(s)', 'req', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'rj js-exc', 'rj host-rej', 'rj timeout', 'rj limit', 'rj out B', 'rj ret B', 'shell', 'heredoc', 'interp', 'pipes max', 'chain max', 'chars med'],
+    ['model', 'task', 'js', 'n', 'verify pass', 'err+pass', 'dur(s)', 'req', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'rj js-exc', 'rj host-rej', 'rj timeout', 'rj limit', 'rj out B', 'rj ret B', 'shell', 'prog', 'build chain', 'chars med'],
     agg.map((g) => {
       const m = g.mean;
       return [
-        g.model ?? '-', g.task ?? '-', g.run_js_enabled == null ? '-' : g.run_js_enabled ? 'on' : 'off', g.runs, `${g.verify_pass}/${g.verify_known}`, fmt(m.duration_s, 0),
+        g.model ?? '-', g.task ?? '-', g.run_js_enabled == null ? '-' : g.run_js_enabled ? 'on' : 'off', g.runs, `${g.verify_pass}/${g.verify_known}`, g.error_but_pass, fmt(m.duration_s, 0),
         fmt(m.requests, 1), fmt(m.input, 0), fmt(m.cache_read, 0), fmt(m.cache_write, 0), fmt(m.output, 0), fmt(m.reasoning, 0), fmt(m.cost_usd, 4),
         fmt(m.tool_calls, 1), fmt(m.run_js_calls, 1), fmt(m.child_calls, 1), fmt(m.run_js_js_exception, 2), fmt(m.run_js_host_rejected, 2), fmt(m.run_js_timeout, 2), fmt(m.run_js_limit_hit, 2),
-        fmt(m.run_js_output_bytes, 0), fmt(m.run_js_return_bytes, 0), fmt(m.shell_cmds, 1), fmt(m.heredoc_cmds, 1), fmt(m.interp_cmds, 1), fmt(m.pipes_max, 1), fmt(m.chain_max, 1), fmt(m.chars_median, 0),
+        fmt(m.run_js_output_bytes, 0), fmt(m.run_js_return_bytes, 0), fmt(m.shell_cmds, 1), fmt(m.programmatic_cmds, 1), fmt(m.build_chain_cmds, 1), fmt(m.chars_median, 0),
       ].map(String);
     }),
   );
-  lines.push('## shell コマンドの複雑さ分布（run ごと）', '');
+  lines.push('## shell コマンドのプログラム的構造（run ごと）', '');
   table(
-    ['model', 'task', 'rep', 'cmds', 'oneliner', 'segments 1/2-3/4-7/8+', 'pipes med/p90/max', 'chain med/p90/max', 'chars med/p90/max', 'interp inline by lang', 'interp file', 'child shell'],
+    ['model', 'task', 'rep', 'cmds', 'prog', 'script', 'loop', 'textproc', 'sed -i multi', 'build chain', 'build steps max', 'segments 1/2-3/4-7/8+', 'segments med/p90/max', 'chars med/p90/max', 'interp inline by lang', 'interp file', 'child shell'],
     runs.map((r) => {
       const s = r.shell;
+      const k = s.programmatic_by_kind;
       const trio = (x) => `${fmt(x.median, 1)}/${fmt(x.p90, 1)}/${fmt(x.max, 0)}`;
       return [
-        r.model ?? '-', r.task ?? '-', r.rep ?? '-', s.commands, s.oneliner_cmds, `${s.bands['1']}/${s.bands['2-3']}/${s.bands['4-7']}/${s.bands['8+']}`,
-        trio(s.pipes), trio(s.chain_ops), trio(s.chars), compact(s.interp_inline_by_lang), s.interp_file_runs, s.child_commands,
+        r.model ?? '-', r.task ?? '-', r.rep ?? '-', s.commands, s.programmatic_cmds, k.script, k.loop, k.textproc, k.sed_multi, s.build_chain_cmds, fmt(s.build_steps.max),
+        `${s.bands['1']}/${s.bands['2-3']}/${s.bands['4-7']}/${s.bands['8+']}`, trio(s.segments), trio(s.chars), compact(s.interp_inline_by_lang), s.interp_file_runs, s.child_commands,
       ].map(String);
     }),
   );
@@ -605,20 +706,55 @@ function loadFromDb(bin, db, runId) {
   };
 }
 
-function loadResults(root, bin) {
+const isDir = (p) => {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+const ATTEMPT_SUFFIX = /\.attempt\d+$/;
+
+/**
+ * `<root>/<model>/<task>/<rep>/result.json` を読む。結果ディレクトリの直下に余計なディレクトリ（timeline/、
+ * 別の outroot、手で退避したもの）があっても、`result.json` の model / task / rep がパスと一致するものだけを取る。
+ * 一致しないものは `entries.skipped` に理由を入れる。`<rep>.attempt<N>`（--retry-errors が退避した最初の試行）は
+ * 既定では読まない（`includeAttempts` で読む）。
+ */
+export function loadResults(root, bin, { includeAttempts = false } = {}) {
   const entries = [];
-  for (const model of fs.readdirSync(root).sort()) {
+  const skipped = [];
+  const visible = (names) => names.filter((n) => !n.startsWith('.'));
+  for (const model of visible(fs.readdirSync(root)).sort()) {
     const mdir = path.join(root, model);
-    if (!fs.statSync(mdir).isDirectory()) continue;
-    for (const task of fs.readdirSync(mdir).sort()) {
+    if (!isDir(mdir)) continue;
+    for (const task of visible(fs.readdirSync(mdir)).sort()) {
       const tdir = path.join(mdir, task);
-      if (!fs.statSync(tdir).isDirectory()) continue;
-      for (const rep of fs.readdirSync(tdir).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
-        const dir = path.join(tdir, rep);
+      if (!isDir(tdir)) continue;
+      for (const repDir of visible(fs.readdirSync(tdir)).sort((x, y) => x.localeCompare(y, undefined, { numeric: true }))) {
+        const dir = path.join(tdir, repDir);
         const resultFile = path.join(dir, 'result.json');
-        if (!fs.existsSync(resultFile)) continue;
-        const result = readJson(resultFile);
-        const entry = { label: { model, task, rep }, result };
+        if (!isDir(dir) || !fs.existsSync(resultFile)) continue;
+        const isAttempt = ATTEMPT_SUFFIX.test(repDir);
+        if (isAttempt && !includeAttempts) {
+          skipped.push(`${model}/${task}/${repDir}: 退避された試行（--include-attempts で読む）`);
+          continue;
+        }
+        const rep = repDir.replace(ATTEMPT_SUFFIX, '');
+        let result;
+        try {
+          result = readJson(resultFile);
+        } catch (error) {
+          skipped.push(`${model}/${task}/${repDir}: result.json が読めない (${error.message})`);
+          continue;
+        }
+        const expected = { model, task, rep };
+        const mismatch = Object.entries(expected).filter(([k, v]) => result[k] != null && String(result[k]) !== v);
+        if (mismatch.length > 0) {
+          skipped.push(`${model}/${task}/${repDir}: result.json と場所が合わない (${mismatch.map(([k, v]) => `${k}=${result[k]} ≠ ${v}`).join(', ')})`);
+          continue;
+        }
+        const entry = { label: { model, task, rep: repDir }, result };
         const runFile = path.join(dir, 'inspect-run.json');
         const eventsFile = path.join(dir, 'inspect-events.json');
         try {
@@ -635,6 +771,7 @@ function loadResults(root, bin) {
       }
     }
   }
+  entries.skipped = skipped;
   return entries;
 }
 
@@ -654,6 +791,7 @@ function parseArgs(argv) {
     else if (a === '--json') args.json = value();
     else if (a === '--md') args.md = value();
     else if (a === '--format') args.format = value();
+    else if (a === '--include-attempts') args.includeAttempts = true;
     else if (a === '-h' || a === '--help') args.help = true;
     else throw new Error(`未知の引数: ${a}`);
   }
@@ -675,7 +813,14 @@ function main() {
   }
   let entries = [];
   try {
-    if (args.results) entries = loadResults(args.results, bin);
+    if (args.results) {
+      entries = loadResults(args.results, bin, { includeAttempts: args.includeAttempts });
+      for (const msg of entries.skipped) console.error(`skip ${msg}`);
+      if (entries.length === 0) {
+        console.error(`${args.results} に <model>/<task>/<rep>/result.json が 1 つもない。--results は run-matrix.sh の --outroot を指す（その親や timeline/ ではない）`);
+        process.exit(1);
+      }
+    }
     else if (args.fixture) entries = readJson(args.fixture).runs;
     else {
       for (const spec of args.runs) {

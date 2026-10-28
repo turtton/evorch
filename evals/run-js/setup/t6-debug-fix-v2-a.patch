@@ -1,0 +1,26 @@
+diff --git a/crates/apply-patch/src/seek_sequence.rs b/crates/apply-patch/src/seek_sequence.rs
+index 09528dc8..01cad66d 100644
+--- a/crates/apply-patch/src/seek_sequence.rs
++++ b/crates/apply-patch/src/seek_sequence.rs
+@@ -28,7 +28,7 @@ pub(crate) fn seek_sequence(
+     }
+     let search_start = if eof && lines.len() >= pattern.len() {
+         let eof_start = lines.len() - pattern.len();
+-        eof_start.max(start)
++        eof_start.min(start)
+     } else {
+         start
+     };
+diff --git a/crates/apply-patch/src/text_file.rs b/crates/apply-patch/src/text_file.rs
+index b7d598ca..7e58e33b 100644
+--- a/crates/apply-patch/src/text_file.rs
++++ b/crates/apply-patch/src/text_file.rs
+@@ -50,7 +50,7 @@ impl SourceFile {
+                     continue;
+                 }
+             };
+-            preferred_ending.get_or_insert(ending);
++            preferred_ending = Some(ending);
+             lines.push(SourceLine {
+                 text: contents[line_start..cursor].to_string(),
+                 ending: Some(ending),
