@@ -262,6 +262,30 @@ fn wall_time_unions_in_flight_runs_with_finished_ones() {
     assert_eq!(metrics.wall_time, Duration::from_secs(100));
 }
 
+#[test]
+fn wall_time_counts_identical_spans_once_and_empty_spans_as_zero() {
+    let metrics = parallel_metrics(&[("a", 10, Some(50)), ("b", 10, Some(50))], 120);
+    assert_eq!(metrics.wall_time, Duration::from_secs(40));
+    let metrics = parallel_metrics(&[("a", 10, Some(10))], 120);
+    assert_eq!(metrics.wall_time, Duration::ZERO);
+}
+
+#[test]
+fn wall_time_joins_adjacent_spans_without_double_counting_the_boundary() {
+    // Given: b starts the instant a ends.
+    let metrics = parallel_metrics(&[("a", 10, Some(30)), ("b", 30, Some(70))], 120);
+    // Then: 10..70 is covered exactly once.
+    assert_eq!(metrics.wall_time, Duration::from_secs(60));
+}
+
+#[test]
+fn wall_time_unions_several_unfinished_runs_up_to_now() {
+    // Given: three runs that are all still Running at 100 seconds.
+    let metrics = parallel_metrics(&[("a", 10, None), ("b", 20, None), ("c", 60, None)], 100);
+    // Then: only 10..100 counts, once.
+    assert_eq!(metrics.wall_time, Duration::from_secs(90));
+}
+
 fn wall_time_after_phases(phases: &[(AgentRunPhase, u64)]) -> Duration {
     let mut overlay = TelemetryOverlay::new();
     let start = Instant::now();

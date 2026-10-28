@@ -229,6 +229,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             thread.touch(sent_at);
                             self.composer.restore_thread_role(thread);
                         }
+                        // A busy run reads follow-ups later; they wait above the composer
+                        // and join the transcript once delivered. A message that starts
+                        // a run has no inbox to wait in, so it shows as sent at once and
+                        // receipts only take it back if it never arrives.
+                        let durable = self.sink.has_host_input_receipts();
+                        let queued = self
+                            .follow_up_would_queue(&submission.thread_id)
+                            .then(|| submission.thread_id.clone());
+                        let starts_run = durable && queued.is_none();
                         self.history.push(super::history::UserMessage {
                             id: submission.submission_id.clone(),
                             thread_id: submission.thread_id.clone(),
@@ -238,16 +247,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             image_count: submission.images.len(),
                             resent_from,
                             status: DeliveryStatus::Queued,
+                            starts_run,
                             resolution: None,
                         });
-                        // A busy run reads follow-ups later; they wait above the composer
-                        // and join the transcript once delivered. A message that starts
-                        // a run has no inbox to wait in, so it shows as sent at once and
-                        // receipts only take it back if it never arrives.
-                        let durable = self.sink.has_host_input_receipts();
-                        let queued = self
-                            .follow_up_would_queue(&submission.thread_id)
-                            .then(|| submission.thread_id.clone());
                         if let Some(thread) = self
                             .sidebar
                             .threads
@@ -303,7 +305,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                             &submission_id,
                                             prompt,
                                         );
-                                        self.sending.insert(submission_id);
                                         self.save_sidebar();
                                     }
                                     None => {

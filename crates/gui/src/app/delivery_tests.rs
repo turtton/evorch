@@ -54,6 +54,7 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         image_count: 2,
         resent_from: None,
         status: DeliveryStatus::Dropped,
+        starts_run: false,
         resolution: None,
     });
     state.rebuild_delivery_rows();

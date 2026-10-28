@@ -93,9 +93,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             } else {
                 continue;
             };
-            if status != DeliveryStatus::Queued {
-                self.sending.remove(&message.id);
-            }
             if message.status != status {
                 message.status = status;
                 changed = true;
@@ -219,8 +216,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.follow_up_queues.clear();
         for message in &self.history {
             if message.resolution.is_none()
-                && ((message.status == DeliveryStatus::Queued
-                    && !self.sending.contains(&message.id))
+                && ((message.status == DeliveryStatus::Queued && !message.starts_run)
                     || message.awaits_user())
             {
                 let mut row = message.undelivered_row();
@@ -343,6 +339,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.push_notice(format!("拒否状態を保存できませんでした: {error}"));
             return false;
         }
+        // A refusal after the bubble went up takes the bubble back.
+        self.transcripts.remove_host_input(&thread, id);
         let active = self
             .sidebar
             .active_thread

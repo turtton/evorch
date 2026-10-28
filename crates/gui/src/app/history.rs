@@ -19,6 +19,11 @@ pub(super) struct UserMessage {
     pub at: std::time::SystemTime,
     #[serde(default)]
     pub status: DeliveryStatus,
+    /// The message started a run rather than waiting in a live run's inbox, so
+    /// it shows as sent while its receipt is still `Queued`. Persisted so a
+    /// restart before delivery restores the same presentation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starts_run: bool,
     /// What the user did about a message that never reached the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
@@ -56,9 +61,15 @@ pub(super) enum Resolution {
 }
 
 impl UserMessage {
-    /// Only a committed context snapshot makes a sent transcript bubble.
+    /// A committed context snapshot makes a sent transcript bubble, and so does
+    /// starting a run.
     fn shown_as_sent(&self) -> bool {
-        self.status == DeliveryStatus::Delivered
+        self.status == DeliveryStatus::Delivered || self.sent_while_queued()
+    }
+
+    /// A message that started its run: shown as sent until a receipt refutes it.
+    pub(super) fn sent_while_queued(&self) -> bool {
+        self.starts_run && self.status == DeliveryStatus::Queued && self.resolution.is_none()
     }
 
     /// A message that never reached the agent and that the user has not

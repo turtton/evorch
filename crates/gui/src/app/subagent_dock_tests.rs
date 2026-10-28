@@ -227,3 +227,66 @@ fn unpark_ignores_panes_that_are_not_parked() {
     state.unpark_subagent("run-unknown");
     assert_eq!(state.dock.find_tab(&id), before);
 }
+
+/// How many dock tabs show `id`, across every surface.
+fn tab_occurrences(state: &WorkbenchState<crate::fixture::DemoSource>, id: &PanelId) -> usize {
+    state
+        .dock
+        .iter_all_tabs()
+        .filter(|(_, tab)| *tab == id)
+        .count()
+}
+
+fn assert_workspace_exports(state: &WorkbenchState<crate::fixture::DemoSource>) {
+    let workspace = crate::dock::from_dock_state(&state.dock, &state.panels).unwrap();
+    workspace_ui::validate(&workspace).unwrap();
+}
+
+#[test]
+fn unparking_a_tab_that_is_alone_in_its_leaf_keeps_one_valid_independent_pane() {
+    for other_running in [false, true] {
+        // Given: the region home is gone, so the parked tab is the only tab of its
+        // leaf and removing it prunes that leaf.
+        let mut state = state_with_runs(&["run-1", "run-2"]);
+        state.open_subagent_pane("run-1");
+        if other_running {
+            state.open_subagent_pane("run-2");
+        }
+        state.park_completed_subagent("run-1");
+        let home = PanelId::new(REGION_HOME);
+        let path = state.dock.find_tab(&home).expect("region home");
+        state.dock.remove_tab(path);
+        let id = PanelId::new("agent-run-1");
+        assert_eq!(leaf_tab_count(&state, &id), 1);
+
+        // When: the run resumes.
+        state.unpark_subagent("run-1");
+
+        // Then: the pane is shown once, in a leaf of its own, in a layout that
+        // still exports to a valid workspace.
+        assert_eq!(state.panels[&id].kind, PanelKind::SubagentTranscript);
+        assert_eq!(tab_occurrences(&state, &id), 1);
+        assert_eq!(leaf_tab_count(&state, &id), 1);
+        if other_running {
+            let other = PanelId::new("agent-run-2");
+            assert_eq!(tab_occurrences(&state, &other), 1);
+            assert_eq!(leaf_tab_count(&state, &other), 1);
+        }
+        assert_workspace_exports(&state);
+    }
+}
+
+#[test]
+fn unparking_from_a_shared_region_keeps_the_layout_exportable() {
+    let mut state = state_with_runs(&["run-1", "run-2"]);
+    state.open_subagent_pane("run-1");
+    state.open_subagent_pane("run-2");
+    state.park_completed_subagent("run-1");
+    state.park_completed_subagent("run-2");
+    state.unpark_subagent("run-1");
+    let id = PanelId::new("agent-run-1");
+    assert_eq!(tab_occurrences(&state, &id), 1);
+    assert_eq!(leaf_tab_count(&state, &id), 1);
+    assert_eq!(tab_occurrences(&state, &PanelId::new("agent-run-2")), 1);
+    assert_workspace_exports(&state);
+}

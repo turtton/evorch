@@ -233,11 +233,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         // A queued input may be consumed without a pump (headless fixtures or
         // lagged notifications). Poll only unsettled work at this frame boundary.
-        if !self.sending.is_empty()
-            || self
-                .follow_up_queues
-                .values()
-                .any(|rows| rows.iter().any(|row| !row.undelivered))
+        if self
+            .follow_up_queues
+            .values()
+            .any(|rows| rows.iter().any(|row| !row.undelivered))
         {
             self.receipt_reconciliation.dirty = true;
         }
