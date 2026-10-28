@@ -15,9 +15,11 @@ use crate::theme::widgets::{ghost_icon_button, icon_button, soft_frame};
 
 mod header;
 mod orchestration;
+mod run_js;
 mod sticky;
 
 pub use orchestration::agent_name;
+pub use run_js::{RUN_JS, RunJsChild, RunJsNesting, run_js_card};
 
 const LIVE_TAIL_LINES: usize = 4;
 /// Header note of a call whose run ended before it reported a result.
@@ -88,18 +90,30 @@ pub fn shell_job_key(entry: &TranscriptEntry) -> Option<ShellJobKey> {
 
 /// Only an unfinished control call may resolve a UUID from the live store.
 /// Completed legacy results keep their exact historical identity.
+///
+/// An unfinished start call has no handle yet. Live output names the call
+/// that started its job, which is how a `run_js` child shell streams before
+/// its result arrives.
 pub fn resolved_shell_job_key(entry: &TranscriptEntry, jobs: &ShellJobs) -> Option<ShellJobKey> {
     if let TranscriptEntry::Tool {
         run_id,
+        tool_name,
+        call_id,
         detail: None,
         status: ToolStatus::Running,
         ..
     } = entry
-        && shell_control(entry).is_some()
     {
-        return jobs
-            .get_scoped(run_id.as_deref(), shell_job_id(entry)?)
-            .map(|job| job.key.clone());
+        if shell_control(entry).is_some() {
+            return jobs
+                .get_scoped(run_id.as_deref(), shell_job_id(entry)?)
+                .map(|job| job.key.clone());
+        }
+        if matches!(tool_name.as_str(), "bash" | "shell") && shell_job_id(entry).is_none() {
+            return jobs
+                .get_by_call(run_id.as_deref(), call_id)
+                .map(|job| job.key.clone());
+        }
     }
     shell_job_key(entry)
 }
@@ -121,16 +135,24 @@ pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
     let Some(first) = entries.first() else {
         return 0;
     };
-    let Some(job) =
-        resolved_shell_job_key(first, jobs).filter(|_| shell_control(first) == Some("poll"))
-    else {
+    // A run_js child belongs to its parent's card, so it never folds.
+    let top_level_poll = |entry: &TranscriptEntry| {
+        shell_control(entry) == Some("poll")
+            && matches!(
+                entry,
+                TranscriptEntry::Tool {
+                    parent_call_id: None,
+                    ..
+                }
+            )
+    };
+    let Some(job) = resolved_shell_job_key(first, jobs).filter(|_| top_level_poll(first)) else {
         return 1;
     };
     1 + entries[1..]
         .iter()
         .take_while(|entry| {
-            shell_control(entry) == Some("poll")
-                && resolved_shell_job_key(entry, jobs).as_ref() == Some(&job)
+            top_level_poll(entry) && resolved_shell_job_key(entry, jobs).as_ref() == Some(&job)
         })
         .count()
 }
@@ -143,33 +165,33 @@ pub fn tool_card_group(
     pane_id: egui::Id,
     context: ToolCardContext<'_>,
 ) {
-    let Some(TranscriptEntry::Tool {
-        tool_name,
-        call_id,
-        input,
-        output,
-        detail,
-        is_error,
-        status,
-        run_id,
-        reviews,
-    }) = group.last()
+    let Some(
+        last @ TranscriptEntry::Tool {
+            tool_name,
+            call_id,
+            input,
+            output,
+            detail,
+            is_error,
+            status,
+            run_id,
+            reviews,
+            ..
+        },
+    ) = group.last()
     else {
         return;
     };
+    if tool_name == RUN_JS {
+        // Callers without the transcript's nesting still get the run_js layout.
+        run_js_card(ui, last, &[], pane_id, context);
+        return;
+    }
     let folded = group.len();
     let id = pane_id.with(("tool-expanded", run_id, call_id));
     let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
-    // Only states that need attention get a color; finished calls stay muted.
-    let color = match status {
-        _ if *is_error => palette().ERROR_FG,
-        ToolStatus::Running => palette().INFO,
-        ToolStatus::Succeeded | ToolStatus::Approved => palette().TEXT_MUTED,
-        ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
-        ToolStatus::AwaitingApproval => palette().WARNING_FG,
-        ToolStatus::Interrupted => palette().WARNING_FG,
-    };
+    let color = status_color(status, *is_error);
     let mut header = header::tool_header(
         tool_name,
         input.as_ref(),
@@ -203,16 +225,7 @@ pub fn tool_card_group(
         );
     }
     let header_text = header.text();
-    // The accessible name keeps a textual status mark; the painted header
-    // only colors the icon and leaves successful calls muted.
-    let (glyph, mark) = match status {
-        _ if *is_error => (icons::X, "✗ "),
-        ToolStatus::Running => ("", ""),
-        ToolStatus::Succeeded | ToolStatus::Approved => (header.icon, "✓ "),
-        ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
-        ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
-        ToolStatus::Interrupted => (icons::STOP_CIRCLE, "⏹ "),
-    };
+    let (glyph, mark) = status_mark(status, *is_error, header.icon);
     let label = format!("{mark}{header_text}");
     let tooltip = focused_input(tool_name, input.as_ref())
         .or_else(|| job.and_then(|job| job.command.as_deref()))
@@ -358,6 +371,35 @@ pub fn tool_card_group(
             ui.ctx().request_repaint();
         }
     });
+}
+
+/// Only states that need attention get a color; finished calls stay muted.
+fn status_color(status: &ToolStatus, is_error: bool) -> Color32 {
+    match status {
+        _ if is_error => palette().ERROR_FG,
+        ToolStatus::Running => palette().INFO,
+        ToolStatus::Succeeded | ToolStatus::Approved => palette().TEXT_MUTED,
+        ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
+        ToolStatus::AwaitingApproval => palette().WARNING_FG,
+        ToolStatus::Interrupted => palette().WARNING_FG,
+    }
+}
+
+/// The painted glyph and the accessible name's textual status mark. The
+/// painted header only colors the icon and leaves successful calls muted.
+fn status_mark(
+    status: &ToolStatus,
+    is_error: bool,
+    icon: &'static str,
+) -> (&'static str, &'static str) {
+    match status {
+        _ if is_error => (icons::X, "✗ "),
+        ToolStatus::Running => ("", ""),
+        ToolStatus::Succeeded | ToolStatus::Approved => (icon, "✓ "),
+        ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
+        ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
+        ToolStatus::Interrupted => (icons::STOP_CIRCLE, "⏹ "),
+    }
 }
 
 /// Access review outcome, shown whether or not the card is expanded.

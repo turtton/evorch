@@ -59,6 +59,7 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
                 is_error: false,
                 status,
                 reviews: Vec::new(),
+                parent_call_id: None,
             },
         )
     })

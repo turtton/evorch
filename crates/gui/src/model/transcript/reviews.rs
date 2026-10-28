@@ -166,6 +166,7 @@ impl TranscriptModel {
                         is_error: false,
                         status: ToolStatus::Denied { reason },
                         reviews: vec![review],
+                        parent_call_id: None,
                     });
                     return true;
                 }

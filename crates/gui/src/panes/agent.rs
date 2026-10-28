@@ -237,9 +237,10 @@ fn run_detail_body(
             }
             let entries = model.visible_entries();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
+            let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
             let mut folded_until = 0;
             for (entry_idx, entry) in entries.iter().enumerate() {
-                if entry_idx < folded_until {
+                if entry_idx < folded_until || nesting.is_nested(entry_idx) {
                     continue;
                 }
                 let entry_id = model.visible_entry_id(entry_idx);
@@ -257,6 +258,36 @@ fn run_detail_body(
                         own_branch == Some(entry_id),
                         branch,
                         branch_action,
+                    );
+                    continue;
+                }
+                if let TranscriptEntry::Tool { tool_name, .. } = entry
+                    && tool_name == crate::panes::transcript_tool::RUN_JS
+                {
+                    use crate::panes::transcript_tool::{RunJsChild, resolved_shell_job_key};
+                    let children: Vec<_> = nesting
+                        .children(entry_idx)
+                        .iter()
+                        .map(|&index| RunJsChild {
+                            entry: &entries[index],
+                            latest_for_job: resolved_shell_job_key(
+                                &entries[index],
+                                model.shell_jobs(),
+                            )
+                            .is_some_and(|job| latest_job_entry.get(&job) == Some(&index)),
+                        })
+                        .collect();
+                    crate::panes::transcript_tool::run_js_card(
+                        ui,
+                        entry,
+                        &children,
+                        pane_id.with(("tool-entry", entry_id)),
+                        crate::panes::transcript_tool::ToolCardContext {
+                            repo_root,
+                            jobs: model.shell_jobs(),
+                            latest_for_job: false,
+                            agents: task_rows,
+                        },
                     );
                     continue;
                 }

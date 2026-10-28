@@ -83,6 +83,9 @@ pub enum TranscriptEntry {
         is_error: bool,
         status: ToolStatus,
         reviews: Vec<ToolReview>,
+        /// The `run_js` call that made this call from its code (ADR 0039).
+        /// Such a child renders inside its parent's card when that is shown.
+        parent_call_id: Option<String>,
     },
     AgentMessage {
         direction: MessageDirection,
@@ -211,6 +214,7 @@ impl TranscriptModel {
             is_error: false,
             status,
             reviews: Vec::new(),
+            parent_call_id: None,
         });
     }
 
@@ -305,13 +309,18 @@ impl TranscriptModel {
                 call_id,
                 input,
                 run_id,
-                // 子呼び出しの入れ子表示は run_js の GUI 担当で扱う。
-                parent_call_id: _,
+                parent_call_id,
             }) => {
                 // Older ledgers have no completion events. Tool execution still
                 // closes the preceding response before the next answer streams.
                 self.streaming_messages.remove(run_id);
-                self.start_tool(run_id.as_deref(), tool_name, call_id, input.as_ref());
+                self.start_tool(
+                    run_id.as_deref(),
+                    tool_name,
+                    call_id,
+                    input.as_ref(),
+                    parent_call_id.as_deref(),
+                );
             }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
@@ -320,7 +329,7 @@ impl TranscriptModel {
                 output,
                 detail,
                 run_id,
-                parent_call_id: _,
+                parent_call_id,
             }) => {
                 self.update_scoped_tool(
                 call_id,
@@ -339,12 +348,16 @@ impl TranscriptModel {
                     output: current_output,
                     detail: current_detail,
                     is_error: current_is_error,
+                    parent_call_id: current_parent,
                     ..
                 }) = self.find_scoped_tool_mut(call_id, run_id.as_deref()) {
                     current_run.clone_from(run_id);
                     current_output.clone_from(output);
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
+                    if parent_call_id.is_some() {
+                        current_parent.clone_from(parent_call_id);
+                    }
                     input = current_input.clone();
                 }
                 if matches!(tool_name.as_str(), "shell" | "bash") {
@@ -360,14 +373,15 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
                 job_id,
                 job_uid,
+                call_id,
                 run_id,
                 offset,
                 chunk,
                 status,
                 exit_code,
-                ..
             }) => self.shell_jobs.apply_live(
                 shell_jobs::ShellJobKey::new(run_id.as_deref(), job_id, job_uid.as_deref()),
+                call_id.as_deref(),
                 *offset,
                 chunk,
                 status,
@@ -575,6 +589,7 @@ impl TranscriptModel {
         tool_name: &str,
         call_id: &str,
         input: Option<&serde_json::Value>,
+        parent_call_id: Option<&str>,
     ) {
         let pending = self.take_pending_reviews(run_id, call_id);
         if let Some(TranscriptEntry::Tool {
@@ -583,12 +598,16 @@ impl TranscriptModel {
             output: None,
             status: status @ (ToolStatus::AwaitingApproval | ToolStatus::Approved),
             reviews,
+            parent_call_id: current_parent,
             ..
         }) = self.find_scoped_tool_mut(call_id, run_id)
         {
             tool_name.clone_into(name);
             if input.is_some() {
                 *current_input = input.cloned();
+            }
+            if parent_call_id.is_some() {
+                *current_parent = parent_call_id.map(str::to_owned);
             }
             *status = ToolStatus::Running;
             reviews.extend(pending);
@@ -604,6 +623,7 @@ impl TranscriptModel {
             is_error: false,
             status: ToolStatus::Running,
             reviews: pending,
+            parent_call_id: parent_call_id.map(str::to_owned),
         });
     }
 
@@ -640,6 +660,7 @@ impl TranscriptModel {
                 is_error: false,
                 status,
                 reviews,
+                parent_call_id: None,
             });
             return;
         };
@@ -690,6 +711,7 @@ impl TranscriptModel {
                 is_error: false,
                 status,
                 reviews: Vec::new(),
+                parent_call_id: None,
             });
         }
     }
@@ -924,6 +946,7 @@ mod tests {
                 is_error: false,
                 status: ToolStatus::Succeeded,
                 reviews: Vec::new(),
+                parent_call_id: None,
             }
         );
     }
