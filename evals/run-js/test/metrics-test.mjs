@@ -94,6 +94,8 @@ assert.equal(outcomeOf('ok', 'pass'), 'ok');
 assert.equal(outcomeOf('error', 'pass'), 'error+pass');
 assert.equal(outcomeOf('error', 'fail'), 'error');
 assert.equal(outcomeOf('timeout', 'pass'), 'timeout+pass');
+assert.equal(outcomeOf('stalled', 'pass'), 'stalled+pass');
+assert.equal(outcomeOf('stalled', 'fail'), 'stalled');
 assert.equal(outcomeOf(null, null), null);
 const re = computeRun(buildEntry(['ls'], { status: 'error', verify: 'pass', error_reason: 'invalid SSE stream' }));
 assert.equal(re.outcome, 'error+pass');

@@ -56,6 +56,18 @@ check "run-one: timeout 後も verify を実行（fail）" "grep -q '\"verify\":
 DUMMY_EXIT=1 "$ev/scripts/run-one.sh" gpt-astra t1-survey-v2 1 "$out"
 check "run-one: error status" "grep -q '\"status\": \"error\"' $out/gpt-astra/t1-survey-v2/1/result.json"
 
+# watchdog: 質問して入力待ちになった run（TurnCompleted が最後のイベントのまま終了しない）を打ち切る
+t_start=$(date +%s)
+DUMMY_STALL=1 EVAL_WATCHDOG_POLL_S=1 "$ev/scripts/run-one.sh" claude-opus t5-single-edit-v2 7 "$out" --idle-timeout 3 --timeout 120 >/dev/null 2>&1
+t_end=$(date +%s)
+d=$out/claude-opus/t5-single-edit-v2/7
+check "watchdog: stalled run を打ち切る（status=stalled、timeout まで待たない）" "grep -q '\"status\": \"stalled\"' $d/result.json && [ $((t_end - t_start)) -lt 60 ]"
+check "watchdog: 最後の発言を error_reason に残す" "grep -q 'error_reason.*TurnCompleted のあと 3s 動かず.*この方針で進めてよいですか' $d/result.json && grep -q '\"idle_timeout_s\": 3' $d/result.json"
+check "watchdog: stalled の後も verify を実行する" "grep -q '\"verify\": \"fail\"' $d/result.json"
+check "watchdog: evorch は残らない" "! pgrep -f 'dummy-evorch.sh run .*t5-single-edit-v2-7' >/dev/null"
+DUMMY_STALL=1 EVAL_WATCHDOG_POLL_S=1 DUMMY_SOLUTION=$ev/solutions/t5-single-edit-v2.sh "$ev/scripts/run-one.sh" claude-opus t5-single-edit-v2 8 "$out" --idle-timeout 0 --timeout 3 >/dev/null 2>&1
+check "watchdog: --idle-timeout 0 で無効（timeout まで待つ）" "grep -q '\"status\": \"timeout\"' $out/claude-opus/t5-single-edit-v2/8/result.json"
+
 # 不正な入力
 check "run-one: 未知のモデル → 2" "$ev/scripts/run-one.sh nope t5-single-edit-v2 1 $out 2>/dev/null; [ \$? = 2 ]"
 check "run-one: EVORCH_BIN 無し → 2" "EVORCH_BIN= $ev/scripts/run-one.sh gpt-sol t5-single-edit-v2 1 $out 2>/dev/null; [ \$? = 2 ]"

@@ -1,0 +1,750 @@
+{
+ "crates": {
+  "agents": {
+   "rs_files": 6,
+   "rs_lines": 924,
+   "test_attrs": 28,
+   "src_lines": 290,
+   "tests_lines": 634,
+   "other_lines": 0
+  },
+  "apply-patch": {
+   "rs_files": 16,
+   "rs_lines": 4991,
+   "test_attrs": 94,
+   "src_lines": 3658,
+   "tests_lines": 1333,
+   "other_lines": 0
+  },
+  "browser": {
+   "rs_files": 13,
+   "rs_lines": 5606,
+   "test_attrs": 42,
+   "src_lines": 4578,
+   "tests_lines": 1028,
+   "other_lines": 0
+  },
+  "browser-cef": {
+   "rs_files": 17,
+   "rs_lines": 3993,
+   "test_attrs": 17,
+   "src_lines": 3503,
+   "tests_lines": 490,
+   "other_lines": 0
+  },
+  "catalog": {
+   "rs_files": 6,
+   "rs_lines": 927,
+   "test_attrs": 22,
+   "src_lines": 900,
+   "tests_lines": 27,
+   "other_lines": 0
+  },
+  "config": {
+   "rs_files": 88,
+   "rs_lines": 19657,
+   "test_attrs": 423,
+   "src_lines": 10630,
+   "tests_lines": 9011,
+   "other_lines": 16
+  },
+  "eval": {
+   "rs_files": 30,
+   "rs_lines": 11188,
+   "test_attrs": 63,
+   "src_lines": 11188,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "event-bus": {
+   "rs_files": 43,
+   "rs_lines": 12711,
+   "test_attrs": 175,
+   "src_lines": 10936,
+   "tests_lines": 1775,
+   "other_lines": 0
+  },
+  "evorch": {
+   "rs_files": 20,
+   "rs_lines": 5059,
+   "test_attrs": 36,
+   "src_lines": 3627,
+   "tests_lines": 1432,
+   "other_lines": 0
+  },
+  "gui": {
+   "rs_files": 444,
+   "rs_lines": 113821,
+   "test_attrs": 1702,
+   "src_lines": 67263,
+   "tests_lines": 46558,
+   "other_lines": 0
+  },
+  "mock-openai": {
+   "rs_files": 15,
+   "rs_lines": 4577,
+   "test_attrs": 64,
+   "src_lines": 2738,
+   "tests_lines": 1839,
+   "other_lines": 0
+  },
+  "model": {
+   "rs_files": 11,
+   "rs_lines": 1833,
+   "test_attrs": 26,
+   "src_lines": 1391,
+   "tests_lines": 442,
+   "other_lines": 0
+  },
+  "providers": {
+   "rs_files": 196,
+   "rs_lines": 43395,
+   "test_attrs": 607,
+   "src_lines": 29505,
+   "tests_lines": 13890,
+   "other_lines": 0
+  },
+  "recorder": {
+   "rs_files": 16,
+   "rs_lines": 3334,
+   "test_attrs": 46,
+   "src_lines": 2975,
+   "tests_lines": 359,
+   "other_lines": 0
+  },
+  "routing": {
+   "rs_files": 27,
+   "rs_lines": 6565,
+   "test_attrs": 108,
+   "src_lines": 3426,
+   "tests_lines": 3139,
+   "other_lines": 0
+  },
+  "runtime": {
+   "rs_files": 442,
+   "rs_lines": 156024,
+   "test_attrs": 1973,
+   "src_lines": 97820,
+   "tests_lines": 55282,
+   "other_lines": 2922
+  },
+  "sandbox": {
+   "rs_files": 19,
+   "rs_lines": 5261,
+   "test_attrs": 98,
+   "src_lines": 3999,
+   "tests_lines": 1262,
+   "other_lines": 0
+  },
+  "secret-guard": {
+   "rs_files": 2,
+   "rs_lines": 604,
+   "test_attrs": 10,
+   "src_lines": 604,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "storage": {
+   "rs_files": 132,
+   "rs_lines": 43810,
+   "test_attrs": 478,
+   "src_lines": 32452,
+   "tests_lines": 10014,
+   "other_lines": 1344
+  },
+  "test-support": {
+   "rs_files": 1,
+   "rs_lines": 117,
+   "test_attrs": 2,
+   "src_lines": 117,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "tools": {
+   "rs_files": 117,
+   "rs_lines": 30933,
+   "test_attrs": 509,
+   "src_lines": 17287,
+   "tests_lines": 13646,
+   "other_lines": 0
+  },
+  "workspace-ui": {
+   "rs_files": 27,
+   "rs_lines": 4790,
+   "test_attrs": 84,
+   "src_lines": 2399,
+   "tests_lines": 2391,
+   "other_lines": 0
+  }
+ },
+ "graph": {
+  "agents": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 4,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "apply-patch": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 3,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "browser": {
+   "deps": [],
+   "dev_deps": [
+    "storage"
+   ],
+   "dependents": 4,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "browser-cef": {
+   "deps": [
+    "browser"
+   ],
+   "dev_deps": [],
+   "dependents": 1,
+   "transitive_deps": 1,
+   "layer": 1
+  },
+  "catalog": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 5,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "config": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 7,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "eval": {
+   "deps": [
+    "agents",
+    "catalog",
+    "config",
+    "event-bus",
+    "model",
+    "providers",
+    "recorder",
+    "routing",
+    "runtime",
+    "sandbox",
+    "storage",
+    "tools",
+    "workspace-ui"
+   ],
+   "dev_deps": [],
+   "dependents": 2,
+   "transitive_deps": 16,
+   "layer": 6
+  },
+  "event-bus": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 10,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "evorch": {
+   "deps": [
+    "agents",
+    "catalog",
+    "config",
+    "eval",
+    "event-bus",
+    "routing",
+    "runtime",
+    "sandbox",
+    "storage",
+    "tools"
+   ],
+   "dev_deps": [
+    "mock-openai",
+    "test-support"
+   ],
+   "dependents": 0,
+   "transitive_deps": 17,
+   "layer": 7
+  },
+  "gui": {
+   "deps": [
+    "agents",
+    "browser",
+    "browser-cef",
+    "catalog",
+    "config",
+    "eval",
+    "event-bus",
+    "model",
+    "providers",
+    "recorder",
+    "routing",
+    "runtime",
+    "sandbox",
+    "storage",
+    "workspace-ui"
+   ],
+   "dev_deps": [
+    "mock-openai",
+    "test-support",
+    "tools"
+   ],
+   "dependents": 0,
+   "transitive_deps": 18,
+   "layer": 7
+  },
+  "mock-openai": {
+   "deps": [],
+   "dev_deps": [
+    "apply-patch",
+    "event-bus",
+    "providers"
+   ],
+   "dependents": 0,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "model": {
+   "deps": [
+    "storage"
+   ],
+   "dev_deps": [],
+   "dependents": 4,
+   "transitive_deps": 3,
+   "layer": 2
+  },
+  "providers": {
+   "deps": [
+    "apply-patch",
+    "event-bus",
+    "secret-guard"
+   ],
+   "dev_deps": [
+    "mock-openai"
+   ],
+   "dependents": 4,
+   "transitive_deps": 3,
+   "layer": 1
+  },
+  "recorder": {
+   "deps": [
+    "catalog",
+    "config",
+    "event-bus",
+    "runtime",
+    "storage"
+   ],
+   "dev_deps": [],
+   "dependents": 2,
+   "transitive_deps": 14,
+   "layer": 5
+  },
+  "routing": {
+   "deps": [
+    "config",
+    "event-bus",
+    "model",
+    "providers",
+    "sandbox"
+   ],
+   "dev_deps": [],
+   "dependents": 4,
+   "transitive_deps": 8,
+   "layer": 3
+  },
+  "runtime": {
+   "deps": [
+    "agents",
+    "apply-patch",
+    "browser",
+    "catalog",
+    "config",
+    "event-bus",
+    "model",
+    "providers",
+    "routing",
+    "sandbox",
+    "secret-guard",
+    "storage",
+    "tools"
+   ],
+   "dev_deps": [
+    "mock-openai",
+    "test-support"
+   ],
+   "dependents": 4,
+   "transitive_deps": 13,
+   "layer": 4
+  },
+  "sandbox": {
+   "deps": [
+    "event-bus"
+   ],
+   "dev_deps": [],
+   "dependents": 6,
+   "transitive_deps": 1,
+   "layer": 1
+  },
+  "secret-guard": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 4,
+   "transitive_deps": 0,
+   "layer": 0
+  },
+  "storage": {
+   "deps": [
+    "event-bus",
+    "secret-guard"
+   ],
+   "dev_deps": [
+    "providers"
+   ],
+   "dependents": 6,
+   "transitive_deps": 2,
+   "layer": 1
+  },
+  "test-support": {
+   "deps": [
+    "tools"
+   ],
+   "dev_deps": [
+    "catalog"
+   ],
+   "dependents": 0,
+   "transitive_deps": 7,
+   "layer": 3
+  },
+  "tools": {
+   "deps": [
+    "apply-patch",
+    "browser",
+    "config",
+    "event-bus",
+    "sandbox",
+    "secret-guard"
+   ],
+   "dev_deps": [],
+   "dependents": 4,
+   "transitive_deps": 6,
+   "layer": 2
+  },
+  "workspace-ui": {
+   "deps": [],
+   "dev_deps": [],
+   "dependents": 2,
+   "transitive_deps": 0,
+   "layer": 0
+  }
+ },
+ "history": {
+  "agents": {
+   "commits_200": 13,
+   "churn_200": 305,
+   "last_date": "2026-10-25"
+  },
+  "apply-patch": {
+   "commits_200": 1,
+   "churn_200": 5600,
+   "last_date": "2026-10-25"
+  },
+  "browser": {
+   "commits_200": 10,
+   "churn_200": 8305,
+   "last_date": "2026-10-23"
+  },
+  "browser-cef": {
+   "commits_200": 5,
+   "churn_200": 4351,
+   "last_date": "2026-10-22"
+  },
+  "catalog": {
+   "commits_200": 4,
+   "churn_200": 245,
+   "last_date": "2026-10-24"
+  },
+  "config": {
+   "commits_200": 29,
+   "churn_200": 9584,
+   "last_date": "2026-10-27"
+  },
+  "eval": {
+   "commits_200": 8,
+   "churn_200": 11644,
+   "last_date": "2026-10-26"
+  },
+  "event-bus": {
+   "commits_200": 25,
+   "churn_200": 2228,
+   "last_date": "2026-10-27"
+  },
+  "evorch": {
+   "commits_200": 16,
+   "churn_200": 2256,
+   "last_date": "2026-10-27"
+  },
+  "gui": {
+   "commits_200": 113,
+   "churn_200": 52214,
+   "last_date": "2026-10-27"
+  },
+  "mock-openai": {
+   "commits_200": 7,
+   "churn_200": 2604,
+   "last_date": "2026-10-27"
+  },
+  "model": {
+   "commits_200": 2,
+   "churn_200": 8,
+   "last_date": "2026-10-17"
+  },
+  "providers": {
+   "commits_200": 28,
+   "churn_200": 25466,
+   "last_date": "2026-10-27"
+  },
+  "recorder": {
+   "commits_200": 2,
+   "churn_200": 3360,
+   "last_date": "2026-10-21"
+  },
+  "routing": {
+   "commits_200": 12,
+   "churn_200": 3963,
+   "last_date": "2026-10-27"
+  },
+  "runtime": {
+   "commits_200": 106,
+   "churn_200": 104146,
+   "last_date": "2026-10-28"
+  },
+  "sandbox": {
+   "commits_200": 10,
+   "churn_200": 2634,
+   "last_date": "2026-10-25"
+  },
+  "secret-guard": {
+   "commits_200": 0,
+   "churn_200": 0,
+   "last_date": null
+  },
+  "storage": {
+   "commits_200": 33,
+   "churn_200": 29809,
+   "last_date": "2026-10-27"
+  },
+  "test-support": {
+   "commits_200": 1,
+   "churn_200": 139,
+   "last_date": "2026-10-24"
+  },
+  "tools": {
+   "commits_200": 41,
+   "churn_200": 14633,
+   "last_date": "2026-10-28"
+  },
+  "workspace-ui": {
+   "commits_200": 9,
+   "churn_200": 818,
+   "last_date": "2026-10-25"
+  }
+ },
+ "adr": {
+  "files": 44,
+  "status_counts": {
+   "accepted": 40,
+   "none": 3,
+   "proposed": 1
+  },
+  "most_referenced": [
+   {
+    "adr": 2,
+    "referenced_by": 9
+   },
+   {
+    "adr": 8,
+    "referenced_by": 7
+   },
+   {
+    "adr": 27,
+    "referenced_by": 7
+   },
+   {
+    "adr": 10,
+    "referenced_by": 5
+   },
+   {
+    "adr": 12,
+    "referenced_by": 5
+   }
+  ]
+ },
+ "ext_matrix": {
+  "crates": {
+   "json": {
+    "files": 41,
+    "lines": 2881
+   },
+   "md": {
+    "files": 41,
+    "lines": 951
+   },
+   "other": {
+    "files": 135,
+    "lines": 10633
+   },
+   "rs": {
+    "files": 1688,
+    "lines": 480120
+   },
+   "sql": {
+    "files": 27,
+    "lines": 977
+   },
+   "toml": {
+    "files": 22,
+    "lines": 693
+   }
+  },
+  ".intent-cli": {
+   "json": {
+    "files": 51,
+    "lines": 2247
+   },
+   "md": {
+    "files": 271,
+    "lines": 15689
+   },
+   "other": {
+    "files": 2,
+    "lines": 306
+   },
+   "toml": {
+    "files": 2,
+    "lines": 11
+   },
+   "yaml": {
+    "files": 150,
+    "lines": 6702
+   }
+  },
+  "intents": {
+   "json": {
+    "files": 9,
+    "lines": 387
+   },
+   "md": {
+    "files": 73,
+    "lines": 7043
+   },
+   "other": {
+    "files": 10,
+    "lines": 294
+   },
+   "rs": {
+    "files": 2,
+    "lines": 82
+   },
+   "yaml": {
+    "files": 1,
+    "lines": 19
+   }
+  },
+  "docs": {
+   "json": {
+    "files": 2,
+    "lines": 3208
+   },
+   "md": {
+    "files": 24,
+    "lines": 5179
+   }
+  },
+  "vendor": {
+   "md": {
+    "files": 1,
+    "lines": 11
+   },
+   "other": {
+    "files": 4,
+    "lines": 452
+   },
+   "rs": {
+    "files": 9,
+    "lines": 2568
+   },
+   "toml": {
+    "files": 2,
+    "lines": 185
+   }
+  },
+  "scripts": {
+   "other": {
+    "files": 12,
+    "lines": 1253
+   }
+  },
+  "examples": {
+   "json": {
+    "files": 1,
+    "lines": 20
+   },
+   "other": {
+    "files": 2,
+    "lines": 8
+   },
+   "rs": {
+    "files": 2,
+    "lines": 29
+   },
+   "toml": {
+    "files": 2,
+    "lines": 10
+   }
+  }
+ },
+ "hotspots": [
+  {
+   "crate": "event-bus",
+   "score": 21.63,
+   "commits_200": 25,
+   "dependents": 10,
+   "rs_lines": 12711
+  },
+  {
+   "crate": "sandbox",
+   "score": 13.31,
+   "commits_200": 10,
+   "dependents": 6,
+   "rs_lines": 5261
+  },
+  {
+   "crate": "config",
+   "score": 11.8,
+   "commits_200": 29,
+   "dependents": 7,
+   "rs_lines": 19657
+  },
+  {
+   "crate": "routing",
+   "score": 9.14,
+   "commits_200": 12,
+   "dependents": 4,
+   "rs_lines": 6565
+  },
+  {
+   "crate": "browser",
+   "score": 8.92,
+   "commits_200": 10,
+   "dependents": 4,
+   "rs_lines": 5606
+  }
+ ]
+}

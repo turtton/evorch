@@ -1,0 +1,611 @@
+diff --git a/crates/apply-patch/src/apply.rs b/crates/apply-patch/src/apply.rs
+index ef56f9b0..9bcba6a7 100644
+--- a/crates/apply-patch/src/apply.rs
++++ b/crates/apply-patch/src/apply.rs
+@@ -12,7 +12,7 @@ use crate::{ApplyPatchError, ErrorClass, Hunk, IoError, parse_patch, targets};
+ /// The final, resolved path and its last patch spelling used to report a change.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct AppliedChange {
+-    pub path: PathBuf,
++    pub final_path: PathBuf,
+     pub raw: PathBuf,
+     pub change: ChangeKind,
+ }
+@@ -29,17 +29,17 @@ pub enum ChangeKind {
+         overwritten: Option<String>,
+     },
+     Updated {
+-        old: String,
+-        new: String,
++        before: String,
++        after: String,
+     },
+     Moved {
+         from: PathBuf,
+-        old: String,
+-        new: String,
++        before: String,
++        after: String,
+         overwritten: Option<String>,
+     },
+     Deleted {
+-        old: String,
++        before: String,
+     },
+ }
+ 
+@@ -76,15 +76,15 @@ pub struct Applied {
+ #[derive(Debug)]
+ pub struct CommitFailure {
+     pub error: ApplyPatchError,
+-    pub committed: Vec<AppliedChange>,
++    pub persisted: Vec<AppliedChange>,
+ }
+ 
+ impl fmt::Display for CommitFailure {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         write!(f, "{}", self.error)?;
+-        if !self.committed.is_empty() {
++        if !self.persisted.is_empty() {
+             writeln!(f, "\nApplied before the failure:")?;
+-            for change in &self.committed {
++            for change in &self.persisted {
+                 writeln!(f, "{} {}", change.letter(), change.raw.display())?;
+             }
+         }
+@@ -218,8 +218,8 @@ pub fn plan(patch: &str, root: Option<&Path>) -> Result<Plan, ApplyPatchError> {
+         let path = target.resolved;
+         match hunk {
+             Hunk::AddFile { contents, .. } => {
+-                let path = plan.resolve(&path, &target.raw, "Failed to write file", true)?;
+-                let entry = plan.load(&path, &target.raw, "Failed to write file")?;
++                let path = plan.resolve(&path, &target.as_written, "Failed to write file", true)?;
++                let entry = plan.load(&path, &target.as_written, "Failed to write file")?;
+                 let mode = entry.current.mode().or_else(|| entry.initial.mode());
+                 entry.current = VfsState::Text {
+                     content: contents,
+@@ -227,30 +227,30 @@ pub fn plan(patch: &str, root: Option<&Path>) -> Result<Plan, ApplyPatchError> {
+                     origin: path.clone(),
+                 };
+                 entry.added = true;
+-                reports[0].push(target.raw);
++                reports[0].push(target.as_written);
+             }
+             Hunk::DeleteFile { .. } => {
+                 let entry_path =
+-                    plan.resolve(&path, &target.raw, "Failed to delete file", false)?;
++                    plan.resolve(&path, &target.as_written, "Failed to delete file", false)?;
+                 let content_path =
+-                    plan.resolve(&path, &target.raw, "Failed to delete file", true)?;
+-                let content = plan.load(&content_path, &target.raw, "Failed to delete file")?;
++                    plan.resolve(&path, &target.as_written, "Failed to delete file", true)?;
++                let content = plan.load(&content_path, &target.as_written, "Failed to delete file")?;
+                 require_text(&content.current, &path, "Failed to delete file")?;
+-                let entry = plan.load(&entry_path, &target.raw, "Failed to delete file")?;
++                let entry = plan.load(&entry_path, &target.as_written, "Failed to delete file")?;
+                 entry.current = VfsState::Absent;
+                 entry.remove_context = "Failed to delete file";
+                 plan.links.remove(&entry_path);
+-                reports[2].push(target.raw);
++                reports[2].push(target.as_written);
+             }
+             Hunk::UpdateFile {
+                 move_path, chunks, ..
+             } => {
+                 let entry_path =
+-                    plan.resolve(&path, &target.raw, "Failed to read file to update", false)?;
++                    plan.resolve(&path, &target.as_written, "Failed to read file to update", false)?;
+                 let content_path =
+-                    plan.resolve(&path, &target.raw, "Failed to read file to update", true)?;
++                    plan.resolve(&path, &target.as_written, "Failed to read file to update", true)?;
+                 let entry =
+-                    plan.load(&content_path, &target.raw, "Failed to read file to update")?;
++                    plan.load(&content_path, &target.as_written, "Failed to read file to update")?;
+                 let old = require_text(&entry.current, &path, "Failed to read file to update")?;
+                 let new = derive_new_contents_from_chunks(old, &path.to_string_lossy(), &chunks)?;
+                 let VfsState::Text { mode, origin, .. } = &entry.current else {
+@@ -266,7 +266,7 @@ pub fn plan(patch: &str, root: Option<&Path>) -> Result<Plan, ApplyPatchError> {
+                     let mut destination_uses_source = false;
+                     let dest_path = plan.resolve_observing(
+                         &dest.resolved,
+-                        &dest.raw,
++                        &dest.as_written,
+                         "Failed to write file",
+                         true,
+                         |entry| destination_uses_source |= entry == entry_path,
+@@ -280,22 +280,22 @@ pub fn plan(patch: &str, root: Option<&Path>) -> Result<Plan, ApplyPatchError> {
+                             *origin = entry_path.clone();
+                         }
+                         let destination =
+-                            plan.load(&dest_path, &dest.raw, "Failed to write file")?;
++                            plan.load(&dest_path, &dest.as_written, "Failed to write file")?;
+                         destination.current = updated;
+                         destination.added = false;
+                         let source =
+-                            plan.load(&entry_path, &target.raw, "Failed to remove original")?;
++                            plan.load(&entry_path, &target.as_written, "Failed to remove original")?;
+                         source.current = VfsState::Absent;
+                         source.remove_context = "Failed to remove original";
+                         plan.links.remove(&entry_path);
+                     } else {
+-                        let entry = plan.load(&content_path, &dest.raw, "Failed to write file")?;
++                        let entry = plan.load(&content_path, &dest.as_written, "Failed to write file")?;
+                         entry.current = updated;
+                     }
+-                    reports[1].push(dest.raw);
++                    reports[1].push(dest.as_written);
+                 } else {
+                     entry.current = updated;
+-                    reports[1].push(target.raw);
++                    reports[1].push(target.as_written);
+                 }
+             }
+         }
+@@ -405,7 +405,7 @@ impl Plan {
+                 continue;
+             };
+             if let Err(error) = write_atomically(path, content, mode.clone()) {
+-                return Err(CommitFailure { error, committed });
++                return Err(CommitFailure { error, persisted: committed });
+             }
+             committed.push(Self::write_change(path, entry));
+         }
+@@ -419,7 +419,7 @@ impl Plan {
+             if let Err(error) = fs::remove_file(path) {
+                 return Err(CommitFailure {
+                     error: io_error(entry.remove_context, path, error),
+-                    committed,
++                    persisted: committed,
+                 });
+             }
+             // Only collapse to Moved after the source has actually been removed.
+@@ -428,21 +428,21 @@ impl Plan {
+                     && matches!(&candidate.current, VfsState::Text { origin, .. } if origin == path)
+             });
+             if let Some((dest, candidate)) = moved_to
+-                && let Some(change) = committed.iter_mut().find(|change| &change.path == dest)
++                && let Some(change) = committed.iter_mut().find(|change| &change.final_path == dest)
+             {
+                 change.change = ChangeKind::Moved {
+                     from: path.clone(),
+-                    old: entry.initial.content().unwrap_or_default().to_string(),
+-                    new: candidate.current.content().unwrap().to_string(),
++                    before: entry.initial.content().unwrap_or_default().to_string(),
++                    after: candidate.current.content().unwrap().to_string(),
+                     overwritten: candidate.initial.content().map(str::to_string),
+                 };
+                 continue;
+             }
+             committed.push(AppliedChange {
+-                path: path.clone(),
++                final_path: path.clone(),
+                 raw: entry.raw.clone(),
+                 change: ChangeKind::Deleted {
+-                    old: entry.initial.content().unwrap_or_default().to_string(),
++                    before: entry.initial.content().unwrap_or_default().to_string(),
+                 },
+             });
+         }
+@@ -456,14 +456,14 @@ impl Plan {
+         let new = entry.current.content().unwrap().to_string();
+         let old = entry.initial.content().map(str::to_string);
+         let change = match old {
+-            Some(old) if !entry.added => ChangeKind::Updated { old, new },
++            Some(old) if !entry.added => ChangeKind::Updated { before: old, after: new },
+             overwritten => ChangeKind::Added {
+                 content: new,
+                 overwritten,
+             },
+         };
+         AppliedChange {
+-            path: path.to_path_buf(),
++            final_path: path.to_path_buf(),
+             raw: entry.raw.clone(),
+             change,
+         }
+diff --git a/crates/apply-patch/src/targets.rs b/crates/apply-patch/src/targets.rs
+index e5a399ce..4ef4e442 100644
+--- a/crates/apply-patch/src/targets.rs
++++ b/crates/apply-patch/src/targets.rs
+@@ -17,7 +17,7 @@ use crate::parser::parse_patch;
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct PatchTarget {
+     /// The path exactly as written in the patch.
+-    pub raw: PathBuf,
++    pub as_written: PathBuf,
+     /// `raw` if it is absolute, otherwise `root` joined with `raw`, with `.`
+     /// components and repeated separators removed. `..` components never
+     /// appear here because [`targets`] rejects them.
+@@ -56,7 +56,7 @@ pub fn targets(patch: &str, root: Option<&Path>) -> Result<Vec<PatchTarget>, Tar
+         .map(|(raw, kind)| {
+             let resolved = resolve(&raw, root)?;
+             Ok(PatchTarget {
+-                raw,
++                as_written: raw,
+                 resolved,
+                 kind,
+             })
+@@ -120,7 +120,7 @@ mod tests {
+ 
+     fn target(raw: &str, resolved: PathBuf, kind: TargetKind) -> PatchTarget {
+         PatchTarget {
+-            raw: PathBuf::from(raw),
++            as_written: PathBuf::from(raw),
+             resolved,
+             kind,
+         }
+@@ -183,17 +183,17 @@ mod tests {
+         );
+         let expected = vec![
+             PatchTarget {
+-                raw: add.clone(),
++                as_written: add.clone(),
+                 resolved: add.clone(),
+                 kind: TargetKind::Add,
+             },
+             PatchTarget {
+-                raw: source.clone(),
++                as_written: source.clone(),
+                 resolved: source.clone(),
+                 kind: TargetKind::MoveSource,
+             },
+             PatchTarget {
+-                raw: dest.clone(),
++                as_written: dest.clone(),
+                 resolved: dest.clone(),
+                 kind: TargetKind::MoveDest,
+             },
+diff --git a/crates/apply-patch/tests/commit.rs b/crates/apply-patch/tests/commit.rs
+index 00c15941..7bde94c6 100644
+--- a/crates/apply-patch/tests/commit.rs
++++ b/crates/apply-patch/tests/commit.rs
+@@ -19,12 +19,12 @@ fn move_chains_report_the_original_source_and_final_destination() {
+         applied
+             .changes
+             .iter()
+-            .any(|c| c.path == dir.path().join("dest")
++            .any(|c| c.final_path == dir.path().join("dest")
+                 && c.change
+                     == ChangeKind::Moved {
+                         from: dir.path().join("source"),
+-                        old: "old\n".into(),
+-                        new: "final\n".into(),
++                        before: "old\n".into(),
++                        after: "final\n".into(),
+                         overwritten: Some("dest overwritten\n".into()),
+                     })
+     );
+@@ -32,10 +32,10 @@ fn move_chains_report_the_original_source_and_final_destination() {
+         applied
+             .changes
+             .iter()
+-            .any(|c| c.path == dir.path().join("middle")
++            .any(|c| c.final_path == dir.path().join("middle")
+                 && c.change
+                     == ChangeKind::Deleted {
+-                        old: "middle overwritten\n".into()
++                        before: "middle overwritten\n".into()
+                     })
+     );
+     assert!(!dir.path().join("source").exists());
+@@ -51,7 +51,7 @@ fn newly_added_source_then_move_is_one_final_add() {
+     let dir = tempfile::tempdir().unwrap();
+     let applied = apply_patch(&patch("*** Add File: source\n+old\n*** Update File: source\n*** Move to: dest\n@@\n-old\n+new"), Some(dir.path())).unwrap();
+     assert_eq!(applied.changes.len(), 1);
+-    assert_eq!(applied.changes[0].path, dir.path().join("dest"));
++    assert_eq!(applied.changes[0].final_path, dir.path().join("dest"));
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Added {
+@@ -73,11 +73,11 @@ fn unchanged_move_destination_only_reports_source_deletion() {
+     )
+     .unwrap();
+     assert_eq!(applied.changes.len(), 1);
+-    assert_eq!(applied.changes[0].path, dir.path().join("source"));
++    assert_eq!(applied.changes[0].final_path, dir.path().join("source"));
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Deleted {
+-            old: "same\n".into()
++            before: "same\n".into()
+         }
+     );
+     assert_eq!(
+@@ -101,7 +101,7 @@ fn move_then_readd_source_reports_two_final_changes() {
+         applied
+             .changes
+             .iter()
+-            .any(|c| c.path == dir.path().join("source")
++            .any(|c| c.final_path == dir.path().join("source")
+                 && c.change
+                     == ChangeKind::Added {
+                         content: "recreated\n".into(),
+@@ -112,7 +112,7 @@ fn move_then_readd_source_reports_two_final_changes() {
+         applied
+             .changes
+             .iter()
+-            .any(|c| c.path == dir.path().join("dest")
++            .any(|c| c.final_path == dir.path().join("dest")
+                 && c.change
+                     == ChangeKind::Added {
+                         content: "moved\n".into(),
+@@ -135,12 +135,12 @@ fn write_phase_failure_does_not_remove_any_sources() {
+     .unwrap();
+     fs::create_dir(dir.path().join("z")).unwrap();
+     let failure = plan.commit().unwrap_err();
+-    assert_eq!(failure.committed.len(), 1);
++    assert_eq!(failure.persisted.len(), 1);
+     assert_eq!(
+-        failure.committed[0].change,
++        failure.persisted[0].change,
+         ChangeKind::Updated {
+-            old: "overwritten\n".into(),
+-            new: "new\n".into()
++            before: "overwritten\n".into(),
++            after: "new\n".into()
+         }
+     );
+     assert_eq!(
+@@ -193,10 +193,10 @@ fn readonly_directory_reports_aggregated_committed_prefix() {
+         }
+     }
+     let failure = plan.commit().unwrap_err();
+-    assert_eq!(failure.committed.len(), 1);
+-    assert_eq!(failure.committed[0].raw, Path::new("a"));
++    assert_eq!(failure.persisted.len(), 1);
++    assert_eq!(failure.persisted[0].raw, Path::new("a"));
+     assert_eq!(
+-        failure.committed[0].change,
++        failure.persisted[0].change,
+         ChangeKind::Added {
+             content: "final\n".into(),
+             overwritten: None
+@@ -242,9 +242,9 @@ fn readonly_source_directory_keeps_written_move_dest_unmoved() {
+         }
+     }
+     let failure = plan.commit().unwrap_err();
+-    assert_eq!(failure.committed.len(), 1);
++    assert_eq!(failure.persisted.len(), 1);
+     assert_eq!(
+-        failure.committed[0].change,
++        failure.persisted[0].change,
+         ChangeKind::Added {
+             content: "new\n".into(),
+             overwritten: None
+diff --git a/crates/apply-patch/tests/engine.rs b/crates/apply-patch/tests/engine.rs
+index 3e5c1839..f27d49e7 100644
+--- a/crates/apply-patch/tests/engine.rs
++++ b/crates/apply-patch/tests/engine.rs
+@@ -38,8 +38,8 @@ fn planning_is_read_only_and_combines_sequential_updates() {
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Updated {
+-            old: "old\n".into(),
+-            new: "final\n".into()
++            before: "old\n".into(),
++            after: "final\n".into()
+         }
+     );
+     assert_eq!(
+@@ -69,8 +69,8 @@ fn sequential_add_update_delete_readd_and_move_update() {
+     assert!(applied.changes.iter().any(|c| c.change
+         == ChangeKind::Moved {
+             from: dir.path().join("source"),
+-            old: "source\n".into(),
+-            new: "final\n".into(),
++            before: "source\n".into(),
++            after: "final\n".into(),
+             overwritten: Some("overwritten\n".into())
+         }));
+     assert!(!dir.path().join("source").exists());
+@@ -96,8 +96,8 @@ fn same_resolved_move_is_an_update() {
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Updated {
+-            old: "old\n".into(),
+-            new: "new\n".into()
++            before: "old\n".into(),
++            after: "new\n".into()
+         }
+     );
+     assert_eq!(applied.changes[0].raw, Path::new("./file"));
+@@ -170,8 +170,8 @@ fn commit_failure_reports_only_persisted_files_and_leaks_no_temps() {
+     fs::create_dir(dir.path().join("z")).unwrap();
+     let failure = plan.commit().unwrap_err();
+     assert_eq!(failure.error.class(), ErrorClass::Io);
+-    assert_eq!(failure.committed.len(), 1);
+-    assert_eq!(failure.committed[0].raw, Path::new("a"));
++    assert_eq!(failure.persisted.len(), 1);
++    assert_eq!(failure.persisted[0].raw, Path::new("a"));
+     assert!(
+         failure
+             .to_string()
+@@ -271,9 +271,9 @@ fn move_deletion_failure_reports_only_the_written_destination() {
+         "Failed to remove original {}:",
+         dir.path().join("source").display()
+     )));
+-    assert_eq!(failure.committed.len(), 1);
++    assert_eq!(failure.persisted.len(), 1);
+     assert_eq!(
+-        failure.committed[0].change,
++        failure.persisted[0].change,
+         ChangeKind::Added {
+             content: "new\n".into(),
+             overwritten: None
+@@ -298,7 +298,7 @@ fn commit_failure_before_first_persist_has_no_applied_suffix() {
+     fs::write(dir.path().join("parent"), "blocker").unwrap();
+     let before = snapshot(dir.path());
+     let failure = plan.commit().unwrap_err();
+-    assert!(failure.committed.is_empty());
++    assert!(failure.persisted.is_empty());
+     assert_eq!(failure.to_string(), failure.error.to_string());
+     // std reports a non-directory path component as a write failure; upstream
+     // also only retries parent creation for NotFound, not NotADirectory.
+@@ -352,7 +352,7 @@ fn error_messages_match_upstream_and_relative_paths_need_root() {
+         None,
+     )
+     .unwrap();
+-    assert_eq!(applied.changes[0].path, dir.path().join("absolute"));
++    assert_eq!(applied.changes[0].final_path, dir.path().join("absolute"));
+ }
+ 
+ #[cfg(unix)]
+@@ -399,15 +399,15 @@ fn assert_alias_updates(second_old: &str) {
+         );
+         assert_eq!(applied.changes.len(), 1);
+         assert_eq!(
+-            applied.changes[0].path,
++            applied.changes[0].final_path,
+             dir.path().canonicalize().unwrap().join("real/f.txt")
+         );
+         assert_eq!(applied.changes[0].raw, Path::new(alias));
+         assert_eq!(
+             applied.changes[0].change,
+             ChangeKind::Updated {
+-                old: "one\ntwo\n".into(),
+-                new: expected.into()
++                before: "one\ntwo\n".into(),
++                after: expected.into()
+             }
+         );
+         assert_eq!(
+@@ -456,7 +456,7 @@ fn moving_a_symlink_reads_virtual_contents_and_only_unlinks_the_source_entry() {
+         "moved\n"
+     );
+     assert_eq!(applied.changes.len(), 2);
+-    assert!(applied.changes.iter().any(|change| matches!(&change.change, ChangeKind::Moved { from, old, new, .. } if from == &dir.path().join("link") && old == "old\n" && new == "moved\n")));
++    assert!(applied.changes.iter().any(|change| matches!(&change.change, ChangeKind::Moved { from, before: old, after: new, .. } if from == &dir.path().join("link") && old == "old\n" && new == "moved\n")));
+ }
+ 
+ #[cfg(unix)]
+@@ -483,7 +483,7 @@ fn deleting_then_readding_a_symlink_replaces_only_the_entry() {
+         "new\n"
+     );
+     assert_eq!(applied.changes.len(), 1);
+-    assert_eq!(applied.changes[0].path, dir.path().join("link"));
++    assert_eq!(applied.changes[0].final_path, dir.path().join("link"));
+ }
+ 
+ #[cfg(unix)]
+diff --git a/crates/apply-patch/tests/symlink_moves.rs b/crates/apply-patch/tests/symlink_moves.rs
+index a8faa5ee..d419beb0 100644
+--- a/crates/apply-patch/tests/symlink_moves.rs
++++ b/crates/apply-patch/tests/symlink_moves.rs
+@@ -41,15 +41,15 @@ fn assert_move_is_an_update(source: &str, destination: &str) {
+     }
+     assert_eq!(applied.changes.len(), 1);
+     assert_eq!(
+-        applied.changes[0].path,
++        applied.changes[0].final_path,
+         root.canonicalize().unwrap().join("real/source")
+     );
+     assert_eq!(applied.changes[0].raw, Path::new(destination));
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Updated {
+-            old: "old\n".into(),
+-            new: "new\n".into(),
++            before: "old\n".into(),
++            after: "new\n".into(),
+         }
+     );
+     assert_eq!(
+@@ -104,7 +104,7 @@ fn move_between_distinct_symlinks_to_one_referent_only_unlinks_the_source_link()
+     );
+     assert_eq!(applied.changes.len(), 1);
+     assert_eq!(
+-        applied.changes[0].path,
++        applied.changes[0].final_path,
+         root.canonicalize().unwrap().join("real/source")
+     );
+     assert_eq!(applied.changes[0].raw, Path::new("real/back-link"));
+@@ -112,8 +112,8 @@ fn move_between_distinct_symlinks_to_one_referent_only_unlinks_the_source_link()
+         applied.changes[0].change,
+         ChangeKind::Moved {
+             from: root.canonicalize().unwrap().join("alias"),
+-            old: "old\n".into(),
+-            new: "new\n".into(),
++            before: "old\n".into(),
++            after: "new\n".into(),
+             overwritten: Some("old\n".into()),
+         }
+     );
+diff --git a/crates/apply-patch/tests/upstream.rs b/crates/apply-patch/tests/upstream.rs
+index 2f31ac58..db305203 100644
+--- a/crates/apply-patch/tests/upstream.rs
++++ b/crates/apply-patch/tests/upstream.rs
+@@ -92,7 +92,7 @@ fn test_delete_file_hunk_removes_file() {
+     assert_eq!(
+         applied.changes[0].change,
+         ChangeKind::Deleted {
+-            old: "gone\n".into()
++            before: "gone\n".into()
+         }
+     );
+ }
+@@ -148,8 +148,8 @@ fn test_update_file_hunk_can_move_file() {
+         applied.changes[0].change,
+         ChangeKind::Moved {
+             from: source,
+-            old: "foo\nbar\n".into(),
+-            new: "foo\nbaz\n".into(),
++            before: "foo\nbar\n".into(),
++            after: "foo\nbaz\n".into(),
+             overwritten: None
+         }
+     );
+diff --git a/crates/tools/src/tools/apply_patch.rs b/crates/tools/src/tools/apply_patch.rs
+index 5788a6af..2efdcfef 100644
+--- a/crates/tools/src/tools/apply_patch.rs
++++ b/crates/tools/src/tools/apply_patch.rs
+@@ -146,7 +146,7 @@ impl Tool for ApplyPatch {
+                 let mut result = failure(error.to_string(), error.class());
+                 if let Some(detail) = result.detail.as_mut() {
+                     detail["apply_patch"]["committed"] =
+-                        error.committed.iter().map(committed_json).collect();
++                        error.persisted.iter().map(committed_json).collect();
+                 }
+                 return Ok(result);
+             }
+@@ -201,7 +201,7 @@ fn target_json(target: &PatchTarget) -> serde_json::Value {
+         TargetKind::MoveDest => "move_dest",
+     };
+     json!({
+-        "raw": target.raw.to_string_lossy(),
++        "raw": target.as_written.to_string_lossy(),
+         "resolved": target.resolved.to_string_lossy(),
+         "kind": kind,
+     })
+@@ -210,7 +210,7 @@ fn target_json(target: &PatchTarget) -> serde_json::Value {
+ fn committed_json(change: &AppliedChange) -> serde_json::Value {
+     let mut value = json!({
+         "raw": change.raw.to_string_lossy(),
+-        "path": change.path.to_string_lossy(),
++        "path": change.final_path.to_string_lossy(),
+     });
+     let kind = match &change.change {
+         ChangeKind::Added { .. } => "added",
+@@ -237,7 +237,7 @@ fn post_edit_input(change: &AppliedChange) -> Option<PostEditInput> {
+         } => {
+             return Some(PostEditInput {
+                 tool_name: "Write",
+-                file_path: change.path.clone(),
++                file_path: change.final_path.clone(),
+                 content: Some(content.clone()),
+                 old_string: None,
+                 new_string: None,
+@@ -248,12 +248,12 @@ fn post_edit_input(change: &AppliedChange) -> Option<PostEditInput> {
+             content,
+             overwritten: Some(old),
+         } => (old, content),
+-        ChangeKind::Updated { old, new } | ChangeKind::Moved { old, new, .. } => (old, new),
++        ChangeKind::Updated { before: old, after: new } | ChangeKind::Moved { before: old, after: new, .. } => (old, new),
+         ChangeKind::Deleted { .. } => return None,
+     };
+     (old != new).then(|| PostEditInput {
+         tool_name: "Edit",
+-        file_path: change.path.clone(),
++        file_path: change.final_path.clone(),
+         content: None,
+         old_string: Some(old.clone()),
+         new_string: Some(new.clone()),

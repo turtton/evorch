@@ -5,13 +5,14 @@
 # 使い方: scripts/run-matrix.sh --outroot <dir> [options]
 #   --outroot <dir>     結果の置き場（必須。リポジトリの外に置く）
 #   --models "<k> ..."  既定は全 5 モデル（gpt-sol gpt-luna-fast gpt-astra claude-opus claude-sonnet）
-#   --tasks "<id> ..."  既定は models.sh の EVAL_TASKS（v2 の 6 課題）。旧課題は EVAL_TASKS_V1
+#   --tasks "<id> ..."  既定は models.sh の EVAL_TASKS（v3 の 6 課題）。v2 は EVAL_TASKS_V2、v1 は EVAL_TASKS_V1
 #   --reps <n>          回数（既定 1。rep は 1..n）
 #   --rep-from <m>      開始 rep 番号（既定 1。3 回目だけ追加したいときなど）
 #   -j, --jobs <n>      並列度（既定 1）
 #   --run-js true|false 既定 true
 #   --effort <e>        reasoning_effort（run-one.sh 参照）
 #   --timeout <sec>     1 run のタイムアウト（既定 1800）
+#   --idle-timeout <sec>  watchdog（run-one.sh 参照）。既定 60 秒、0 で無効
 #   --retry-errors      status が error の結果は <rep>.attempt<N> へ退避して再実行する（最初の試行は消さない）
 #   --no-preflight      実行前のモデル確認（preflight.sh）を省く
 #   --preflight-only    モデル確認だけを行って終わる
@@ -38,7 +39,7 @@ while [ $# -gt 0 ]; do
     --rep-from) rep_from=${2:-}; shift 2 || usage ;;
     -j | --jobs) jobs=${2:-}; shift 2 || usage ;;
     --effort) preflight_effort=${2:-}; extra+=("$1" "${2:-}"); shift 2 || usage ;;
-    --run-js | --timeout) extra+=("$1" "${2:-}"); shift 2 || usage ;;
+    --run-js | --timeout | --idle-timeout) extra+=("$1" "${2:-}"); shift 2 || usage ;;
     --keep-clone) extra+=("$1"); shift ;;
     --retry-errors) retry=1; shift ;;
     --no-preflight) preflight=0; shift ;;

@@ -4,7 +4,8 @@
 #   solved    : 参照解 solutions/<id>.sh を適用     → pass（exit 0）
 #   wrong-*   : 部分誤答 solutions/<id>.wrong-*.sh  → fail（exit 1）
 # 使い方: scripts/self-test.sh <work-dir> [task-id ...]   （work-dir は存在しない場所）
-# task-id を省くと models.sh の EVAL_TASKS（v2）。旧課題も指定できる（t1-survey など）。
+# task-id を省くと models.sh の EVAL_TASKS（v3）。v2・v1 の課題も指定できる（t1-survey-v2、t1-survey など）。
+# v3 の課題はプロンプトの静的な点検（scripts/lint-prompts.sh）も行う。
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=models.sh
@@ -27,6 +28,11 @@ check() {
   [ "$rc" -eq "$want" ] || { verdict=MISMATCH; status=1; }
   printf '%-18s %-26s exit=%s (期待 %s) %s\n' "$id" "$label" "$rc" "$want" "$verdict"
 }
+
+# v3 のプロンプトは静的に点検する（矛盾・確認質問で止まる原因を避ける）。
+v3_ids=()
+for id in "${ids[@]}"; do [[ $id == *-v3 ]] && v3_ids+=("$id"); done
+if [ ${#v3_ids[@]} -gt 0 ]; then "$here/scripts/lint-prompts.sh" "${v3_ids[@]}" || status=1; fi
 
 for id in "${ids[@]}"; do
   check "$id" untouched 1 ""

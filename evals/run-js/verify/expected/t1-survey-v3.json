@@ -1,0 +1,520 @@
+{
+ "tools": [
+  {
+   "name": "apply_patch",
+   "source": "crates/tools/src/tools/apply_patch.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "builtin_identity",
+    "description",
+    "execution_mode",
+    "set_default_cwd"
+   ],
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 10,
+    "runtime_tests": 1,
+    "eval_src": 0,
+    "gui_src": 2,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "edit",
+   "source": "crates/tools/src/tools/edit.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 8,
+    "runtime_src": 19,
+    "runtime_tests": 12,
+    "eval_src": 0,
+    "gui_src": 2,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_apply_config",
+   "source": "crates/eval/src/evaluator/apply.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execute_with_context"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_inspect_thread",
+   "source": "crates/eval/src/evaluator.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_list_threads",
+   "source": "crates/eval/src/evaluator.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_remove_sample",
+   "source": "crates/eval/src/evaluator.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_report",
+   "source": "crates/eval/src/evaluator.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 3,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_save_sample",
+   "source": "crates/eval/src/evaluator.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "eval_start",
+   "source": "crates/eval/src/evaluator/start.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": true,
+   "network": false,
+   "overrides": [
+    "description",
+    "execute_with_context"
+   ],
+   "allowed_roles": [
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 2,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "git_diff",
+   "source": "crates/tools/src/tools/git_diff.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": true,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Orchestrator",
+    "Worker",
+    "Reviewer",
+    "Planner",
+    "Advisor"
+   ],
+   "refs": {
+    "tools_tests": 3,
+    "runtime_src": 4,
+    "runtime_tests": 1,
+    "eval_src": 0,
+    "gui_src": 1,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "grep",
+   "source": "crates/tools/src/tools/grep.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Orchestrator",
+    "Explorer",
+    "Worker",
+    "Reviewer",
+    "WebResearcher",
+    "Planner",
+    "Advisor",
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 6,
+    "runtime_tests": 8,
+    "eval_src": 0,
+    "gui_src": 1,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "lsp_diagnostics",
+   "source": "crates/tools/src/lsp/mod.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": true,
+   "network": false,
+   "overrides": [
+    "execute_with_context"
+   ],
+   "allowed_roles": [],
+   "refs": {
+    "tools_tests": 0,
+    "runtime_src": 0,
+    "runtime_tests": 0,
+    "eval_src": 0,
+    "gui_src": 0,
+    "evorch_tests": 0
+   }
+  },
+  {
+   "name": "read",
+   "source": "crates/tools/src/tools/read.rs",
+   "execution_mode": "Shared",
+   "fs_read": true,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Orchestrator",
+    "Explorer",
+    "Worker",
+    "Reviewer",
+    "WebResearcher",
+    "Planner",
+    "Advisor",
+    "MultimodalLooker",
+    "Evaluator"
+   ],
+   "refs": {
+    "tools_tests": 8,
+    "runtime_src": 35,
+    "runtime_tests": 43,
+    "eval_src": 2,
+    "gui_src": 7,
+    "evorch_tests": 2
+   }
+  },
+  {
+   "name": "shell",
+   "source": "crates/tools/src/tools/shell.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": true,
+   "network": false,
+   "overrides": [
+    "cancel_shell_jobs",
+    "description",
+    "drain_shell_jobs",
+    "execute_with_context",
+    "execution_mode",
+    "has_running_shell_jobs",
+    "has_unobserved_shell_jobs",
+    "release_shell_jobs",
+    "reports_progress",
+    "reserve_shell_job_handles",
+    "set_default_cwd",
+    "set_event_bus",
+    "set_shell_environment",
+    "set_shell_escalation",
+    "take_shell_job_notifications"
+   ],
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 9,
+    "runtime_src": 23,
+    "runtime_tests": 25,
+    "eval_src": 5,
+    "gui_src": 11,
+    "evorch_tests": 1
+   }
+  },
+  {
+   "name": "web_fetch",
+   "source": "crates/tools/src/tools/web_fetch/mod.rs",
+   "execution_mode": "Shared",
+   "fs_read": false,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": true,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Orchestrator",
+    "WebResearcher",
+    "Planner"
+   ],
+   "refs": {
+    "tools_tests": 3,
+    "runtime_src": 6,
+    "runtime_tests": 5,
+    "eval_src": 3,
+    "gui_src": 2,
+    "evorch_tests": 1
+   }
+  },
+  {
+   "name": "web_search",
+   "source": "crates/tools/src/tools/web_search.rs",
+   "execution_mode": "Shared",
+   "fs_read": false,
+   "fs_write": false,
+   "process_spawn": false,
+   "network": true,
+   "overrides": [
+    "description",
+    "execute_with_search_provider",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "WebResearcher"
+   ],
+   "refs": {
+    "tools_tests": 5,
+    "runtime_src": 4,
+    "runtime_tests": 9,
+    "eval_src": 1,
+    "gui_src": 1,
+    "evorch_tests": 1
+   }
+  },
+  {
+   "name": "write",
+   "source": "crates/tools/src/tools/write.rs",
+   "execution_mode": "Exclusive",
+   "fs_read": true,
+   "fs_write": true,
+   "process_spawn": false,
+   "network": false,
+   "overrides": [
+    "description",
+    "execution_mode"
+   ],
+   "allowed_roles": [
+    "Worker"
+   ],
+   "refs": {
+    "tools_tests": 9,
+    "runtime_src": 22,
+    "runtime_tests": 23,
+    "eval_src": 1,
+    "gui_src": 9,
+    "evorch_tests": 1
+   }
+  }
+ ],
+ "by_role": {
+  "Orchestrator": [
+   "git_diff",
+   "grep",
+   "read",
+   "web_fetch"
+  ],
+  "Explorer": [
+   "grep",
+   "read"
+  ],
+  "Worker": [
+   "apply_patch",
+   "edit",
+   "git_diff",
+   "grep",
+   "read",
+   "shell",
+   "write"
+  ],
+  "Reviewer": [
+   "git_diff",
+   "grep",
+   "read"
+  ],
+  "WebResearcher": [
+   "grep",
+   "read",
+   "web_fetch",
+   "web_search"
+  ],
+  "Planner": [
+   "git_diff",
+   "grep",
+   "read",
+   "web_fetch"
+  ],
+  "Advisor": [
+   "git_diff",
+   "grep",
+   "read"
+  ],
+  "MultimodalLooker": [
+   "read"
+  ],
+  "Evaluator": [
+   "eval_apply_config",
+   "eval_inspect_thread",
+   "eval_list_threads",
+   "eval_remove_sample",
+   "eval_report",
+   "eval_save_sample",
+   "eval_start",
+   "grep",
+   "read"
+  ]
+ },
+ "ref_ranking": [
+  "read",
+  "shell",
+  "write",
+  "edit",
+  "web_search",
+  "grep",
+  "web_fetch",
+  "apply_patch",
+  "git_diff",
+  "eval_report",
+  "eval_apply_config",
+  "eval_inspect_thread",
+  "eval_list_threads",
+  "eval_remove_sample",
+  "eval_save_sample",
+  "eval_start",
+  "lsp_diagnostics"
+ ]
+}

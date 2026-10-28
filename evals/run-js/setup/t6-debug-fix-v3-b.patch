@@ -1,0 +1,41 @@
+diff --git a/crates/event-bus/src/otel/span/span_budget.rs b/crates/event-bus/src/otel/span/span_budget.rs
+index 3c202f5d..ecd0a7a9 100644
+--- a/crates/event-bus/src/otel/span/span_budget.rs
++++ b/crates/event-bus/src/otel/span/span_budget.rs
+@@ -137,7 +137,7 @@ impl SpanMapper {
+                             && span.run_id.as_deref() == Some(run_id)
+                     })
+                     .count();
+-                if run_open >= self.budget.max_in_flight_spans_per_run {
++                if run_open > self.budget.max_in_flight_spans_per_run {
+                     return Err(SpanDropKind::BudgetInFlightPerRun);
+                 }
+             }
+@@ -173,7 +173,7 @@ impl SpanMapper {
+             let value_bytes = attribute_value_bytes(&attribute.value);
+             let attribute_bytes = attribute.key.len().saturating_add(value_bytes);
+             let admissible = super::span_attrs::validate_attribute(&attribute).is_ok()
+-                && kept.len() < self.budget.max_attributes_per_span
++                && kept.len() <= self.budget.max_attributes_per_span
+                 && value_bytes <= self.budget.max_attribute_value_bytes
+                 && used_bytes.saturating_add(attribute_bytes)
+                     <= self.budget.max_attribute_bytes_per_span;
+diff --git a/crates/event-bus/src/ring.rs b/crates/event-bus/src/ring.rs
+index 5836c23a..7e890f28 100644
+--- a/crates/event-bus/src/ring.rs
++++ b/crates/event-bus/src/ring.rs
+@@ -50,12 +50,12 @@ impl<T> RingBuffer<T> {
+ 
+     /// 容量まで要素を保持している場合は `true` を返す。
+     pub fn is_full(&self) -> bool {
+-        self.len() == self.capacity
++        self.len() + 1 == self.capacity
+     }
+ 
+     /// バッファの容量を返す。
+     pub fn capacity(&self) -> usize {
+-        self.capacity
++        self.buf.capacity().min(self.capacity)
+     }
+ }
+ 

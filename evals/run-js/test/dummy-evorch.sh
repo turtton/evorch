@@ -6,6 +6,7 @@
 #            DUMMY_UNAVAILABLE_MODEL=<model-id> なら、--user-config の zz-worker.toml にそのモデルがあるとき
 #            実際の evorch と同じ形式のエラー（model is not advertised by provider）で終了コード 1 にする。
 #            DUMMY_ERROR_REASON=<text> なら、stderr に `agent run failed reason=<text>` を出す（provider エラーの再現）。
+#            DUMMY_STALL=1 なら、入力待ちのまま終了しない run を再現する（`<db>.stall` を作って眠り、inspect events は TurnCompleted が最後の列を返す）。
 #   inspect: test/fixture-metrics.json の最初の run の出力を返す（run / events）。
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,6 +31,10 @@ case ${1:-} in
     fi
     [ -z "$db" ] || : >"$db"
     echo "run_id: run-fixture-1" >&2
+    if [ -n "${DUMMY_STALL:-}" ] && [ -n "$db" ]; then
+      : >"$db.stall"
+      sleep 600
+    fi
     [ -z "${DUMMY_SLEEP:-}" ] || sleep "$DUMMY_SLEEP"
     [ -z "${DUMMY_SOLUTION:-}" ] || "$DUMMY_SOLUTION" "$project"
     [ -z "${DUMMY_ERROR_REASON:-}" ] || printf '\033[31mERROR\033[0m agent run failed reason=%s\n' "$DUMMY_ERROR_REASON" >&2
@@ -41,6 +46,15 @@ case ${1:-} in
     [ "$1" = --db ] || { echo "inspect --db <path> が先頭" >&2; exit 2; }
     [ -f "$2" ] || { echo "database not found: $2" >&2; exit 1; }
     cmd=$3
+    if [ "$cmd" = events ] && [ -f "$2.stall" ]; then
+      # DUMMY_STALL の run: 質問をして入力待ち（Waiting → TurnCompleted が最後のイベント）の末尾を返す。
+      node -e '
+        const ev = (id, kind, payload) => ({ id, kind: "Lifecycle", payload: { kind: "Lifecycle", payload: { kind, payload } }, session_id: "headless", wall_clock_ns: 1e18 + id });
+        const msg = { id: 1, kind: "Message", payload: { kind: "Message", payload: { kind: "MessageCompleted", payload: { run_id: "run-fixture-1", text: "確認です。この方針で進めてよいですか？" } } }, session_id: "headless", wall_clock_ns: 1e18 };
+        console.log(JSON.stringify({ db: process.argv[1], result: { events: [msg, ev(2, "RunProgress", { activity: "User" }), ev(3, "AgentRunStateChanged", { from: "Running", to: "Waiting" }), ev(4, "TurnCompleted", { context_len: 3 })] } }));
+      ' "$2"
+      exit 0
+    fi
     node -e '
       const f = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runs[0];
       console.log(JSON.stringify(process.argv[2] === "run" ? f.run : f.events, null, 2));

@@ -5,6 +5,9 @@
 #   --run-js true|false   run_js の有効化（既定 true）
 #   --effort <e>          reasoning_effort（既定 $EVAL_EFFORT、なければ models.sh の既定）
 #   --timeout <sec>       evorch run のタイムアウト（既定 $EVAL_TIMEOUT_S、なければ 1800）
+#   --idle-timeout <sec>  watchdog: run のターンが終わった（TurnCompleted が最後のイベント）のに evorch が終了せず、
+#                         この秒数だけ新しいイベントが出なければ打ち切る（既定 $EVAL_IDLE_S、なければ 60。0 で無効）。
+#                         モデルが確認の質問をして入力待ちになった run（status=stalled）を、30 分の timeout まで待たない
 #   --keep-clone          clone を消さずに残す
 #   --force               結果がある組も実行し直す（既存の結果は <rep>.attempt<N> へ退避する）
 # 環境変数:
@@ -13,6 +16,7 @@
 #   EVAL_WORK             clone と overlay の置き場（既定 ${TMPDIR:-/tmp}/run-js-eval-work。run の後に消す）
 #   EVAL_SOURCE_REPO      prepare-clone.sh の source-repo（既定は prepare-clone.sh の既定）
 #   EVAL_VERIFY_TIMEOUT_S verify のタイムアウト（既定 900）
+#   EVAL_IDLE_S / EVAL_WATCHDOG_POLL_S  watchdog の打ち切り秒数（既定 60）/ 確認の間隔（既定 5）
 # 結果: <outroot>/<model>/<task>/<rep>/
 #   result.json（最後に書く。あれば完了扱い。status が ok でなければ error_reason も）, run.db, evorch.stdout.log, evorch.stderr.log,
 #   verify.log, final.diff, answers/, inspect-run.json, inspect-events.json, zz-worker.toml
@@ -31,6 +35,8 @@ shift 4
 run_js=true
 effort=${EVAL_EFFORT:-$EVAL_DEFAULT_EFFORT}
 timeout_s=${EVAL_TIMEOUT_S:-1800}
+idle_s=${EVAL_IDLE_S:-60}
+poll_s=${EVAL_WATCHDOG_POLL_S:-5}
 verify_timeout_s=${EVAL_VERIFY_TIMEOUT_S:-900}
 keep_clone=0
 force=0
@@ -39,13 +45,14 @@ while [ $# -gt 0 ]; do
     --run-js) run_js=${2:-}; shift 2 || usage ;;
     --effort) effort=${2:-}; shift 2 || usage ;;
     --timeout) timeout_s=${2:-}; shift 2 || usage ;;
+    --idle-timeout) idle_s=${2:-}; shift 2 || usage ;;
     --keep-clone) keep_clone=1; shift ;;
     --force) force=1; shift ;;
     *) usage ;;
   esac
 done
 case $run_js in true | false) ;; *) echo "--run-js は true か false" >&2; exit 2 ;; esac
-[[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
+[[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ && $idle_s =~ ^[0-9]+$ && $poll_s =~ ^[0-9]+$ && $poll_s -ge 1 ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
 [[ $rep =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "rep が不正: $rep" >&2; exit 2; }
 [[ $rep =~ \.attempt[0-9]+$ ]] && { echo "rep が不正（.attempt<N> は退避先の名前）: $rep" >&2; exit 2; }
 target=$(eval_target "$model") || { echo "未知のモデルキー: $model（$EVAL_MODELS）" >&2; exit 2; }
@@ -107,13 +114,42 @@ t0=$(now_ms)
   --user-config "$overlay" --run-js-enabled "$run_js" --db "$db" \
   >"$rundir/evorch.stdout.log" 2>"$rundir/evorch.stderr.log" </dev/null &
 child_pid=$!
+
+# watchdog: evorch は、モデルが確認の質問などでターンを終えると、入力待ち（AgentRunStateChanged Running→Waiting、
+# 続いて TurnCompleted）のまま終了しない（予備実行の 2 回目では 30 分の timeout まで待った run が複数あった）。
+# 評価の Worker は対話しないので、最後のイベントが TurnCompleted のまま idle_s 秒動かなければ打ち切る。
+# run の DB（--db）を `evorch inspect events --limit 12` で読んで判定する（読めない間は何もしない）。
+stalled=false
+stall_info=
+if [ "$idle_s" -gt 0 ]; then
+  last_id= seen_at=0 stall_run_id=
+  while kill -0 "$child_pid" 2>/dev/null; do
+    sleep "$poll_s"
+    kill -0 "$child_pid" 2>/dev/null || break
+    [ -n "$stall_run_id" ] || stall_run_id=$(sed -n 's/^run_id: *//p' "$rundir/evorch.stderr.log" | head -n 1)
+    [ -n "$stall_run_id" ] && [ -f "$db" ] || continue
+    line=$("$EVORCH_BIN" inspect --db "$db" events --run "$stall_run_id" --limit 12 2>/dev/null | node "$here/last-events.mjs" 2>/dev/null) || continue
+    IFS=$'\t' read -r ev_id ev_kind ev_activity ev_state ev_text <<<"$line"
+    now=$(date +%s)
+    if [ "$ev_id" != "$last_id" ]; then last_id=$ev_id; seen_at=$now; fi
+    if [ "$ev_kind" = TurnCompleted ] && [ $((now - seen_at)) -ge "$idle_s" ]; then
+      stalled=true
+      stall_info="stalled: TurnCompleted のあと ${idle_s}s 動かず（activity=$ev_activity state=$ev_state）。最後の発言: $ev_text"
+      kill "$child_pid" 2>/dev/null
+      for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$child_pid" 2>/dev/null || break; sleep 1; done
+      kill -9 "$child_pid" 2>/dev/null
+      break
+    fi
+  done
+fi
 wait "$child_pid"
 rc=$?
 child_pid=
 t1=$(now_ms)
 status=ok
 timed_out=false
-if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then status=timeout; timed_out=true
+if [ "$stalled" = true ]; then status=stalled
+elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then status=timeout; timed_out=true
 elif [ "$rc" -ne 0 ]; then status=error; fi
 
 run_id=$(sed -n 's/^run_id: *//p' "$rundir/evorch.stderr.log" | head -n 1)
@@ -126,6 +162,7 @@ if [ "$status" != ok ]; then
   error_reason=$(printf '%s\n' "$clean" | grep 'reason=' | tail -n 1 | sed 's/.*reason=//')
   [ -n "$error_reason" ] || error_reason=$(printf '%s\n' "$clean" | grep -v '^run_id:' | grep . | tail -n 1)
   [ "$status" != timeout ] || error_reason="timeout after ${timeout_s}s${error_reason:+: $error_reason}"
+  [ "$status" != stalled ] || error_reason=$stall_info
   error_reason=${error_reason:0:300}
 fi
 
@@ -174,6 +211,7 @@ tmp=$rundir/.result.json.tmp
   if [ -n "$error_reason" ]; then printf '  "error_reason": "%s",\n' "$(json_str "$error_reason")"; fi
   printf '  "timed_out": %s,\n' "$timed_out"
   printf '  "timeout_s": %s,\n' "$timeout_s"
+  printf '  "idle_timeout_s": %s,\n' "$idle_s"
   printf '  "duration_ms": %s,\n' "$((t1 - t0))"
   printf '  "verify": "%s",\n' "$verify"
   printf '  "verify_exit": %s,\n' "$verify_rc"

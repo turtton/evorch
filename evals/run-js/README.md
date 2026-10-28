@@ -6,31 +6,36 @@ ADR 0039（`intents/evorch/decisions/0039-js-code-mode-tool.md`）の「評価 /
 
 ## 課題一覧
 
-予備実行（`results/prelim-20261028/`、5 モデル × 6 課題）は、どの run も 3〜13 リクエスト・2 分以内で終わり、`run_js` の効果（ターン数の削減）が出にくかった。そこで各種類を維持したまま、複数ファイル・多数の箇所・集計後の加工が要る規模に重くした **v2** を既定にした（1 run あたり現状の 2〜4 倍のリクエスト数を見込む）。旧課題（v1）は `tasks/t*-<名前>.md`（接尾辞なし）に残してあり、`EVAL_TASKS_V1` / `--tasks` で指定できる。結果ディレクトリは課題 id で分かれるので、v1 と v2 が混ざることはない。
+予備実行（`results/prelim-20261028/`）は、どの run も 3〜13 リクエスト・2 分以内で終わった。v2 に重くした 2 回目の観察（`results/r2-20261028/`）でも 5〜22 リクエストで、`run_js` の効果（ターン数の削減）を測れる規模にならなかった。モデルは集計・改名を 1 本のスクリプト（python / awk / sed）で片づけるので、「ファイルや箇所の数」を増やしただけでは往復が増えない。そこで **v3** は、素直な解き方（`run_js` なし）で 1 run あたり 20〜35 リクエストになるように、往復が**増えざるをえない**形にした:
 
-プロンプトはどれも `run_js` の使用を指示しない（自然に使うかを見る）。課題ごとに「正解で exit 0、未着手で exit 1、部分誤答で exit 1」になる検証コマンドと参照解（`solutions/`）を付けてある。
+- 入力の種類を増やす（t2: Rust・`Cargo.toml`・`git log`・ADR の markdown・全ファイルの拡張子表を別々に集計して合成する。パースの書き方を一から決めて試す必要がある）。
+- 読まないと分からない項目を増やす（t1: 17 個の `impl` ブロックを読まないと `overrides` と実行モードの既定値が分からない）。
+- コンパイラ・テストの出力を見て直す往復を作る（t3: フィールド名の改名は単語置換では通らず、`cargo check` のエラー位置に従って 4〜5 周直す。t4: 変更で既存テストが落ち、clippy が unused import を出す。t6: 失敗が crate・テストバイナリに分かれて 1 つずつ現れる）。
+- 3 crate にまたがらせる（t3 / t4 / t6）。
+
+プロンプトはどれも `run_js` の使用を指示しない（自然に使うかを見る）。全課題（v3）のプロンプトは、確認の質問で止まらないように「確認の質問はしないでください。曖昧な点は妥当な判断で進め、判断と仮定を `answers/notes.md` に書いてください」で終わり、変更範囲の制限には `answers/` への書き込みの例外を明記する（`scripts/lint-prompts.sh` で点検する）。課題ごとに「正解で exit 0、未着手で exit 1、部分誤答で exit 1」になる検証コマンドと参照解（`solutions/`）を付けてある。
 
 | id | 種類 | 内容 | 検証が見るもの | 想定ターン数 |
 |---|---|---|---|---|
-| [`t1-survey-v2`](tasks/t1-survey-v2.md) | (1) 調査と要約 | `tools` の 9 ツールの name / 実行モード / 権限に加え、`agents` のロール行列から `allowed_roles`、`tools/tests`・`runtime/src`・`runtime/tests` で名前を含むファイル数（27 回の走査）、ロール別の逆引き `by_role`、参照数の合計での `ref_ranking` | `answers/t1.json` の 94 項目 | 12〜25 |
-| [`t2-aggregate-v2`](tasks/t2-aggregate-v2.md) | (2) 集計 | 22 crate × 6 指標（ファイル数・行数・テスト属性数と `src`/`tests`/その他の行数）、8000 行以上の crate の 1000 行あたりテスト属性数の上位 5、5 crate 以上に現れるファイル名の集計 | `answers/t2.json` の 165 項目 | 8〜20 |
-| [`t3-rename-v2`](tasks/t3-rename-v2.md) | (3) 複数か所の編集 | `event-bus` の 21 ファイルで 4 つの識別子（`SpanKey`・`SpanAction`・`drain_drops`・`str_attr`）を改名。コメント行は変えない。`str_attribute` は別の識別子 | ファイル別の件数（コード行 317 箇所）+ コメント行の不変 + `cargo test -p event-bus --features otel-exporter` | 10〜25 |
-| [`t4-build-test-v2`](tasks/t4-build-test-v2.md) | (4) ビルド・テストを含む手順 | `agents`: テスト数を控える → Explorer に権限を足す（既存テスト 2 件が落ちるので直す）→ `Role::ALL` と `roles_allowing` → 新規テスト → fmt / clippy / test → 報告 JSON | 変更範囲 + 既存テスト数の下限 + doc 表 + fmt + clippy + test + 隠しテスト + 報告 JSON の 5 項目 | 12〜25 |
-| [`t5-single-edit-v2`](tasks/t5-single-edit-v2.md) | (5) 1 回で済む対照 | `grep.rs` の定数と doc コメントの数字を 1 回の編集で変える（旧 `t5-single-edit` と同内容。対照なので重くしない） | 差分がちょうど +2/-2 行 | 2〜4 |
-| [`t6-debug-fix-v2`](tasks/t6-debug-fix-v2.md) | (6) 調査してから直す | 3 コミットで仕込んだ 5 つの退行（`apply-patch` に 4、`agents` に 1）。失敗が別のテストバイナリに順に現れ、テスト → 調査 → 修正 → 再テストを回す | 変更範囲 + 5 ファイルの `#[cfg(test)]` 以降が無改変 + `cargo test -p apply-patch -p agents` + 報告に 5 ファイル | 12〜25 |
+| [`t1-survey-v3`](tasks/t1-survey-v3.md) | (1) 調査と要約 | `tools` 9 + `eval` 7 + `lsp_diagnostics` の 17 ツールの name・source・実行モード（トレイトの既定は Exclusive）・権限・`overrides`（`impl` ブロックのメソッド名）・`allowed_roles`、6 ディレクトリでの名前の参照ファイル数（102 回の走査）、`by_role`、`ref_ranking` | `answers/t1.json` の 251 項目 | 18〜32 |
+| [`t2-aggregate-v3`](tasks/t2-aggregate-v3.md) | (2) 集計 | 6 入力の集計の合成: Rust の crate 別 6 指標、`Cargo.toml` の内部依存グラフ（`dependents`・`transitive_deps`・`layer`）、`git log -200` の crate 別コミット数・変更行数・最終日、ADR 44 件の状態と被参照上位、最上位ディレクトリ × 拡張子の表、`hotspots`（4 つの結果から作る順位） | `answers/t2.json` の 399 項目 | 16〜30 |
+| [`t3-rename-v3`](tasks/t3-rename-v3.md) | (3) 複数か所の編集 | (A) `event-bus` の 3 識別子（コード 233 箇所・約 30 ファイル、コメント行は不変）。(B) `apply-patch` の 4 つの型のフィールド名（`AppliedChange.path` など。同名の別のフィールドがあり、tools にも使用箇所 92 行）をコンパイラのエラーに従って直す | event-bus のファイル別の件数、4 定義、コメント行の不変、`cargo test` event-bus / apply-patch と `cargo check -p tools --tests` | 16〜30 |
+| [`t4-build-test-v3`](tasks/t4-build-test-v3.md) | (4) ビルド・テストを含む手順 | 3 crate で、テスト数を控える → agents（権限変更・既存テスト 2 件の修正・`Role::ALL`・`roles_allowing`）→ apply-patch（`ChangeKind::label`・`ChangeCounts`）→ event-bus（`error_type` と `map_failure` の置き換え、clippy の unused import）→ fmt / clippy / test → 報告 JSON | 変更範囲 + 既存テスト数の下限 + doc 表 + `map_failure` の削除 + fmt + clippy + test（3 crate）+ 隠しテスト（3 crate）+ 報告 JSON | 20〜35 |
+| [`t5-single-edit-v3`](tasks/t5-single-edit-v3.md) | (5) 1 回で済む対照 | `grep.rs` の定数と doc コメントの数字を 1 回の編集で変える（v1・v2 と同内容。対照なので重くしない） | 差分がちょうど +2/-2 行 | 2〜4 |
+| [`t6-debug-fix-v3`](tasks/t6-debug-fix-v3.md) | (6) 調査してから直す | 4 コミットで仕込んだ 8 つの退行（apply-patch 4・event-bus 3・agents 1）。コミット c は新機能 `ChangeKind::label` も含み、コミットごとの revert では消える | 変更範囲 + 7 ファイルの `#[cfg(test)]` 以降が無改変 + 3 crate の `cargo test` + 隠しテスト（新機能が残る）+ 報告に 7 ファイル | 20〜35 |
 
-ビルド・テストを走らせる課題（t3 / t4 / t6）は `event-bus`・`agents`・`apply-patch` の小さな crate だけを使い、ワークスペース全体のビルドは要らない（依存の解決だけは必要）。
+**費用の見積り**（実測ではなく、実行前の見積り）: 1 rep = 全課題 × 4 モデル（opus・sonnet・astra・luna）。観察 2 回目の実測で、1 リクエストあたりの費用は opus 約 $0.025、sonnet 約 $0.014、astra 約 $0.04、luna 約 $0.003（4 モデルの合計で約 $0.082。長い run は文脈が増えて 1 リクエストあたりが 3 割ほど高くなる）。t5 以外の 5 課題が平均 20〜25 リクエストなら 5 × (20〜25) × $0.082 × 1.3 ＋ t5 約 $0.2 ≒ **$11〜14**。観察 2 回目の 1 rep（約 $3.9）の **約 2.8〜3.6 倍**で、目安の 2〜3 倍の上端をやや超える見込み。リクエスト数が各課題の想定の下端（18〜20）なら 3 倍に収まる。上端を超えそうなら、最初の予備実行は `--models` で費用の大きい astra / opus を外すか、t1・t3 だけ v2 に戻して調整する（想定ターン数と根拠は各 `tasks/*.md`）。
 
-旧課題（v1）:
+ビルド・テストを走らせる課題（t3 / t4 / t6）は agents・apply-patch・event-bus・tools の `cargo check` だけで、libclang が要る crate（routing・storage・recorder などは providers 経由で bindgen を使う）は避けてある。ワークスペース全体のビルドは要らない（依存の解決だけは必要）。
 
-| id | 種類 | 内容 |
+旧課題:
+
+| 世代 | id | 備考 |
 |---|---|---|
-| [`t1-survey`](tasks/t1-survey.md) | (1) | 9 ツールの name / 実行モード / 権限 / Worker での許可（65 項目） |
-| [`t2-aggregate`](tasks/t2-aggregate.md) | (2) | 22 crate × (ファイル数・行数・テスト属性数) と最大 5 ファイル（78 項目） |
-| [`t3-rename`](tasks/t3-rename.md) | (3) | `apply-patch` 内の構造体とフィールドの改名（51 行・5 ファイル） |
-| [`t4-build-test`](tasks/t4-build-test.md) | (4) | `agents` に `Role::ALL` を追加し fmt / clippy / test を通す |
-| [`t5-single-edit`](tasks/t5-single-edit.md) | (5) | `grep.rs` の 2 か所の数字（`t5-single-edit-v2` と同内容） |
-| [`t6-debug-fix`](tasks/t6-debug-fix.md) | (6) | `apply-patch` の 2 つの退行 |
+| v2（`EVAL_TASKS_V2`） | `t1-survey-v2` … `t6-debug-fix-v2` | 予備実行の次。プロンプトに確認質問を止める文がなく、t1 / t4 に矛盾があった（`ecd7467b` で直した） |
+| v1（`EVAL_TASKS_V1`） | `t1-survey` … `t6-debug-fix` | 最初の課題セット |
+
+結果ディレクトリは課題 id で分かれるので、世代が混ざることはない。
 
 ## ディレクトリ構成
 
@@ -39,14 +44,14 @@ evals/run-js/
   README.md
   tasks/<id>.md          課題の定義（プロンプト全文、想定解、採点基準、検証、ターン数、run_js が効く理由）
   verify/<id>.sh         検証コマンド。`verify/<id>.sh <clone>`、合格 = exit 0 / 不合格 = exit 1 / 使い方の誤り = exit 2
-  verify/expected/       t1 / t2 の期待値（JSON。v2 は scripts/gen-v2-expected.mjs で再計算できる）
+  verify/expected/       t1 / t2 の期待値（JSON。v2 は scripts/gen-v2-expected.mjs、v3 は scripts/gen-v3-expected.py で再計算できる）
   verify/hidden/         t4 の隠しテスト（検証時だけ clone にコピーする）
   verify/lib/            検証の共通部
-  setup/                 課題固有の初期化（t6 の退行コミット。v2 は 3 コミット）
+  setup/                 課題固有の初期化（t6 の退行コミット。v2 は 3 コミット、v3 は 4 コミット）
   solutions/<id>.sh      参照解（検証スクリプトの自己確認用。モデルには見せない）
   solutions/<id>.wrong-*.sh  部分誤答（検証が fail になることの確認用）
-  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / gen-t2-expected.mjs / gen-v2-expected.mjs（課題・検証）
-                         make-overlay.sh / preflight.sh / run-one.sh / run-matrix.sh / models.sh（実行）
+  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / lint-prompts.sh / gen-t2-expected.mjs / gen-v2-expected.mjs / gen-v3-expected.py（課題・検証）
+                         make-overlay.sh / preflight.sh / run-one.sh（watchdog 込み）/ last-events.mjs / run-matrix.sh / models.sh（実行）
                          metrics.mjs / classify-shell.mjs（集計）
   test/                  実行・集計スクリプトの確認（ダミー evorch、fixture、単体確認）
 ```
@@ -104,18 +109,23 @@ $EVAL/evals/run-js/scripts/make-overlay.sh <profile> <model-id> <effort> <outdir
 
 ```sh
 $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
-  [--run-js true|false] [--effort <e>] [--timeout <sec>] [--keep-clone] [--force]
+  [--run-js true|false] [--effort <e>] [--timeout <sec>] [--idle-timeout <sec>] [--keep-clone] [--force]
 ```
 
 流れ: overlay 生成 → `prepare-clone.sh`（t6 は退行コミットを積む setup を含む）→ `prompt.sh` → `evorch run`（`timeout` 付き、既定 30 分 = `EVAL_TIMEOUT_S`）→ `verify/<id>.sh`（既定 15 分 = `EVAL_VERIFY_TIMEOUT_S`。タイムアウトした run も検証する）→ 結果の保存 → clone と overlay の削除。clone は `${EVAL_WORK:-${TMPDIR:-/tmp}/run-js-eval-work}` に作り、clone ごとに `target/` を持つ（`CARGO_TARGET_DIR` は共有しない）。
 
-環境変数: `EVORCH_BIN`（必須）、`EVORCH_CONFIG_SRC`、`EVAL_WORK`、`EVAL_SOURCE_REPO`（`prepare-clone.sh` の source-repo）。
+環境変数: `EVORCH_BIN`（必須）、`EVORCH_CONFIG_SRC`、`EVAL_WORK`、`EVAL_SOURCE_REPO`（`prepare-clone.sh` の source-repo）、`EVAL_IDLE_S` / `EVAL_WATCHDOG_POLL_S`（watchdog、下記）。
+
+**watchdog（入力待ちで止まった run を打ち切る）**: evorch は、モデルが確認の質問などでターンを終えると、入力待ち（`AgentRunStateChanged` Running → Waiting、続いて `TurnCompleted`）のまま終了しない。第 2 回の観察では、そのまま 30 分の `timeout` まで待った run が複数あった（t1 の「8 個か 9 個か」、t4 の「answers への書き込みは範囲外か」）。評価の Worker は対話しないので、`run-one.sh` は evorch を動かしている間 `--idle-timeout`（既定 `$EVAL_IDLE_S` = 60 秒、0 で無効）の watchdog を回す。
+- 方式: `EVAL_WATCHDOG_POLL_S`（既定 5 秒）ごとに、run の DB（`--db`）を `evorch inspect events --run <id> --limit 12` で読み、`scripts/last-events.mjs` で末尾の状態（最後のイベントの種類・`RunProgress` の activity・状態・最後の `MessageCompleted` の本文）を取り出す。**最後のイベントが `TurnCompleted` のまま、イベント ID が `idle-timeout` 秒だけ動かなければ、evorch を `kill`（TERM、10 秒後に KILL）する**。通常の終了は `Running → Done` で `TurnCompleted` が最後にならず、すぐ evorch が終わるので誤検出しない（成功した run と停止した run の実データで確かめた）。DB が読めない間は何もしない。
+- 結果: `status` は `stalled`、`error_reason` に `stalled: TurnCompleted のあと 60s 動かず（activity=User state=Waiting）。最後の発言: …`（モデルの質問の冒頭）が入る。`stalled` の後も検証は走るので、成果物が揃っていれば `verify=pass`（metrics の `outcome` は `stalled+pass`）。`--retry-errors` の対象は `error` だけで、`stalled` は再実行しない（モデルの振る舞いの観察結果であるため）。
+- evorch 側の修正（入力待ちにならない `run`）が入っても、ハーネス側の防御として残す。
 
 結果は `<outroot>/<model>/<task>/<rep>/`（`<outroot>` はリポジトリの外に置く）:
 
 | ファイル | 内容 |
 |---|---|
-| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`error_reason`（`status` が `ok` でないときだけ。stderr の `reason=` 以降、なければ最後の非空行。300 文字まで）、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
+| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout` / `stalled` = watchdog が打ち切った）、`evorch_exit`、`idle_timeout_s`、`error_reason`（`status` が `ok` でないときだけ。stderr の `reason=` 以降、なければ最後の非空行。`stalled` は最後の発言つきの上の文。300 文字まで）、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
 | `run.db` | この run の store（`--db`）。run ごとに別ファイルなので並列でも衝突しない |
 | `evorch.stdout.log` / `evorch.stderr.log` | Worker の最終出力 / `run_id:` を含む stderr |
 | `verify.log` | 検証の出力（不一致一覧） |
@@ -133,17 +143,17 @@ $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
 
 ```sh
 $EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
-  [--models "gpt-sol claude-opus"] [--tasks "t1-survey-v2 t5-single-edit-v2"] \
-  [--reps 3] [--rep-from 1] [-j 2] [--run-js true|false] [--effort <e>] [--timeout <sec>] \
+  [--models "gpt-sol claude-opus"] [--tasks "t1-survey-v3 t5-single-edit-v3"] \
+  [--reps 3] [--rep-from 1] [-j 2] [--run-js true|false] [--effort <e>] [--timeout <sec>] [--idle-timeout <sec>] \
   [--retry-errors] [--no-preflight | --preflight-only] [--list] [--keep-clone]
 ```
 
-- 既定は全 5 モデル × v2 の全 6 課題（`EVAL_TASKS`）× 1 回。順序は rep → 課題 → モデル。
+- 既定は全 5 モデル × v3 の全 6 課題（`EVAL_TASKS`）× 1 回。順序は rep → 課題 → モデル。
 - `result.json` がある組はスキップするので、中断しても**同じコマンドで再開**できる。`--list` で実行せずに計画（run / skip）だけ見られる。
 - `-j N` で並列度（既定 1）。並列 run は clone・`run.db` が別なので干渉しないが、プロバイダのレート制限と CPU/ビルド負荷に注意。
 - `status` が `error` の結果（資格情報の誤りなど）は `--retry-errors` で再実行する。最初の試行は消さず、`<model>/<task>/<rep>.attempt<N>` へ退避してから流す（`metrics.mjs` は既定で読まない。`--include-attempts` で読む）。`timeout` は再実行しない。`error` でも `verify=pass` だった結果も、`status` が `error` なので対象になる。
 - **preflight**: 実行前に、計画に残っている各モデルを `preflight.sh` で確かめる。Worker をそのモデルに固定した overlay で、極小のプロンプト（ツール不使用で `OK` と答えさせる、`--run-js-enabled false`）を 1 回流し、evorch が 0 で終われば使える。provider が advertise しないモデル（`model is not advertised by provider`）や、config にないモデル（`the model chain exists but has no available candidate`）は、モデル呼び出しの前に失敗するので費用はかからない（予備実行の gpt-6.1-sol は 4 秒で失敗した）。使えるモデルでは極小のリクエストが 1 回出る。使えないモデルの組は計画から外し、結果ディレクトリも作らず、使えるモデルだけを流して最後に exit 1 で報告する（直して同じコマンドで再開できる）。成功は `<outroot>/.preflight/<model>.ok` に記録し、再実行では確認を飛ばす（`preflight.sh <model> --outroot <dir> --force` で確かめ直す）。`--no-preflight` で省略、`--preflight-only` で確認だけ。`--list` は preflight をしない。
-- 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`（v2 を流す）。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
+- 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`（v3 を流す）。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
 - stage 2（run_js 無し対照）は別の `--outroot` に `--run-js false` で流す。
 
 ### 5. 検証
@@ -234,7 +244,7 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 
 `scripts/classify-shell.mjs --results <outroot> [--list]` は、同じ定義でモデル別の件数表を出し、`--list` で該当コマンドの本文を列挙する（`run_js` に書くべきだったかの目視確認用）。以前の臨時の分類スクリプトを取り込んだもので、`metrics.mjs` と同じ `analyzeShell` を使う。
 
-**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`outcome`（`ok` / `error` / `timeout`、および `status` が `ok` でないのに `verify=pass` の **`error+pass`** / `timeout+pass`。成果物は正しいが途中で止まった run を区別する）、`error_reason`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数、`err+pass` の件数。
+**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`outcome`（`ok` / `error` / `timeout` / `stalled`、および `status` が `ok` でないのに `verify=pass` の **`error+pass`** / `timeout+pass` / `stalled+pass`。成果物は正しいが途中で止まった run を区別する）、`error_reason`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数、`err+pass` の件数。
 
 ## 繰り返し
 
@@ -266,15 +276,28 @@ test/scripts-test.sh <存在しない作業ディレクトリ>   # ダミー evo
 scripts/self-test.sh <存在しない作業ディレクトリ> [task-id ...]   # 省略時は v2 の 6 課題
 ```
 
-部分誤答の例: t1 は参照数の 1 つ違いと順位の入れ替え、t2 は密度順位の入れ替えと `other_lines` の欠落、t3 はコメント行まで置換 / `str_attribute` まで置換、t4 は壊れたテストを消す / 名前順に返す / 権限付与の忘れ、t5 は doc コメントの直し忘れ、t6 は `role.rs` の直し忘れ / `seek_sequence.rs` のテストを緩める。
+部分誤答の例（v3）: t1 は実行モードの既定値の取り違え（Shared と決めつけ）と `overrides` の欠落、t2 は `tokio::test` の取りこぼし（観察された誤り）と `git log -200 -- <path>`（パスで絞ってから 200 件）、t3 はコメント行まで置換 / (B) をしない / `AppliedChange.raw` まで巻き込む、t4 は壊れたテストを消す / 名前順に返す / `map_failure` を残す / `Moved` のラベルの誤り、t5 は doc コメントの直し忘れ、t6 は新機能ごと revert / `ring.rs` の直し忘れ / テストを緩める。v3 は `scripts/lint-prompts.sh`（プロンプトの静的な点検: `run_js` に触れない、確認質問をしない指示、`answers/notes.md`、変更制限に `answers/` の例外）も走らせる。
 
-固定コミットが変わった場合や課題を変えた場合に再実行する。期待値は `scripts/gen-t2-expected.mjs <固定コミットの checkout>`（v1 の t2）と `scripts/gen-v2-expected.mjs <固定コミットの checkout> verify/expected`（v2 の t1 / t2）で再計算できる。
+固定コミットが変わった場合や課題を変えた場合に再実行する。期待値は `scripts/gen-t2-expected.mjs <固定コミットの checkout>`（v1 の t2）、`scripts/gen-v2-expected.mjs <固定コミットの checkout> verify/expected`（v2 の t1 / t2）、`scripts/gen-v3-expected.py <固定コミットの checkout> verify/expected`（v3 の t1 / t2。Python 3.11+）で再計算できる。v3 の t1 は 9 ツールの値を v1 の期待値（ソースを読んで確定済み）と突き合わせ、t2 は `git log` / `wc` / `awk` / `grep` の別経路で agents・event-bus・config・runtime・storage・tools・ADR 2 の値を確認した。t3-v3 の (B) の参照差分 `solutions/t3-rename-v3-b.patch` は、コンパイルエラー駆動の置換（定義を直して `cargo check --tests -p apply-patch -p tools` を繰り返す）で作った。
+
+## 観察された落とし穴（第 2 回までの実データ）
+
+課題の解説（`tasks/*.md` の「落とし穴」）に加えて、実際の run で観察された失敗を書き残す。
+
+- **t2 の `tokio::test` の正規表現（gpt-6-luna+fast、v2）**: `test_attrs` の正規表現を `#[(?:test\]|tokio\.test)`（`::` を `.` と書き間違え）にして、`#[tokio::test…]` を数えなかった。tools（509 → 140）・providers（607 → 264）・runtime（1,973 → 782）など tokio のテストが多い crate が大きく少なくなり、密度の順位も崩れて 23 / 165 項目が不一致になった。`scripts/self-test.sh` の `t2-aggregate-v3.wrong-tokio-regex` はこの誤りの再現（同じ値になる）。`#[tokio::test(flavor = …)]` のように引数付きも数える。
+- **t2 の `git log -200 -- <path>`（v3 で追加）**: パスで絞ってから 200 件を取るので、「全体の最新 200 コミットのうち、その crate に触れたもの」より多くなる（agents は 13 でなく 28）。`wrong-path-limited-log` が再現。
+- **t1 の「9 個か 8 個か」（gpt-6-astra、v2）**: プロンプトが「`tools/` 直下」と書いていたが `web_fetch` は `web_fetch/mod.rs`（サブディレクトリ）にあり、モデルが確認の質問をして入力待ちになった（30 分 timeout）。v3 は「以下（サブディレクトリを含む）」に直し、確認質問を止める文を足し、watchdog で 60 秒で打ち切る。
+- **t4 の「変更範囲」と `answers/` の矛盾（gpt-6-astra、v2）**: 「`src/` と `tests/` 以外は変更しない」に `answers/t4.json` の書き込みが反したため、質問して止まった。v3 は全課題で `answers/` への書き込みの例外を明記し、`lint-prompts.sh` で点検する。
+- **t3 の `run_js` の子呼び出し（gpt-6-astra、v2）**: 1 回の `run_js` が 200 件を超える子呼び出し（`read` 206 + `shell` 56 + `write` 21）をして、`tool_call_threshold`（200）の escalation と `max_file_rereads=20` の予算超過で `BudgetExhausted`（`status=error`、成果物は正しく `verify=pass`）になった。`outcome` は `error+pass`。多数ファイルの改名では、`run_js` 内の子呼び出しの数を見る（`run_js.child_calls` の指標）。
+- **verify の sccache（ハーネス）**: `RUSTC_WRAPPER`（sccache）が長い cwd で動かず（`path must be shorter than SUN_LEN`）、第 2 回で t3 / t4 / t6 の検証がすべて cargo ごと落ちた（`ecd7467b` で、wrapper が動かないときは検証を wrapper なしで流すように直した）。Worker の shell は環境を絞られるので wrapper を持たない。
+- **t4 の clippy の unused import（v3 で設計）**: `map_failure` を消すと `otel/mod.rs` の `use crate::event::{…, ProviderFailureKind, …}` がテスト以外で使われなくなり、`-D warnings` の clippy が落ちる。`cargo test` だけでは気づかない。
 
 ## 注意
 
-- 課題の事実（t1 の表、t2 の数値、t3 の出現数、t4 のテスト件数 28、t6 の退行）は固定コミット `4391a7e5` に基づく。別のコミットでは使えない。
+- 課題の事実（t1 の表、t2 の数値、t3 の出現数、t4 のテスト件数 28 / 94 / 175、t6 の退行）は固定コミット `4391a7e5` に基づく。別のコミットでは使えない。
 - `answers/` は clone の `.git/info/exclude` に入れてあり、`git status` や `git diff` には出ない。検証は `git diff 4391a7e5`（追跡ファイルの差分）で変更範囲を見る。
 - t5 は `run_js` が不要な対照。t4 は `run_js` の中で cargo を走らせず通常の shell ジョブで流すのが望ましい（ADR 0039）。使い方の良し悪しは検証の合否とは別に観察する。
 - t6 は `git log` / `git show` で退行コミットが見える。調査手段の観察対象であり、減点しない。
-- t3-v2 の検証は `--features otel-exporter` 付きでテストを流す（`span_exporter.rs` は feature 無しではコンパイルされない）。初回は opentelemetry の依存のビルドが入るので、依存の取得（`cargo fetch`）を済ませておく。
+- t3-v2 / t3-v3 / t4-v3 / t6-v3 の検証は event-bus を `--features otel-exporter` 付きで流す（`span_exporter.rs` は feature 無しではコンパイルされない）。初回は opentelemetry の依存のビルドが入るので、依存の取得（`cargo fetch`）を済ませておく。
 - 検証が cargo を走らせるため、並行して複数の検証や run を同じ clone で動かさない。
+- v3 の t3 は `cargo check -p tools --tests` までで、tools の `cargo test` は流さない（この環境で 1 件落ちるテストが固定コミットの時点からある）。t3 / t4 / t6 の対象 crate は libclang が要らない。
