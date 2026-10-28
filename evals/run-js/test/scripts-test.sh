@@ -68,6 +68,31 @@ check "watchdog: evorch は残らない" "! pgrep -f 'dummy-evorch.sh run .*t5-s
 DUMMY_STALL=1 EVAL_WATCHDOG_POLL_S=1 DUMMY_SOLUTION=$ev/solutions/t5-single-edit-v2.sh "$ev/scripts/run-one.sh" claude-opus t5-single-edit-v2 8 "$out" --idle-timeout 0 --timeout 3 >/dev/null 2>&1
 check "watchdog: --idle-timeout 0 で無効（timeout まで待つ）" "grep -q '\"status\": \"timeout\"' $out/claude-opus/t5-single-edit-v2/8/result.json"
 
+# watchdog（暴走）: リクエスト数・費用・同一応答の上限で打ち切り、status=aborted と理由を残す
+for kind in requests cost repeat; do
+  t_start=$(date +%s)
+  DUMMY_GUARD=$kind EVAL_WATCHDOG_POLL_S=1 EVAL_USAGE_POLL_S=1 "$ev/scripts/run-one.sh" claude-sonnet t5-single-edit-v3 "g-$kind" "$out" --idle-timeout 0 --timeout 120 >/dev/null 2>&1
+  t_end=$(date +%s)
+  d=$out/claude-sonnet/t5-single-edit-v3/g-$kind
+  check "watchdog: $kind で打ち切り（status=aborted、abort_kind=$kind、timeout まで待たない）" "grep -q '\"status\": \"aborted\"' $d/result.json && grep -q '\"abort_kind\": \"$kind\"' $d/result.json && [ $((t_end - t_start)) -lt 60 ]"
+done
+check "watchdog: requests の理由（件数と上限）" "grep -q 'error_reason.*リクエスト数 200 が上限 150' $out/claude-sonnet/t5-single-edit-v3/g-requests/result.json"
+check "watchdog: cost の理由（費用と上限）" "grep -q 'error_reason.*費用 \$10.000000 が上限 \$3' $out/claude-sonnet/t5-single-edit-v3/g-cost/result.json"
+check "watchdog: repeat の理由（応答の本文）" "grep -q 'error_reason.*直近 6 件.*同じ通知への同じ返事です' $out/claude-sonnet/t5-single-edit-v3/g-repeat/result.json"
+DUMMY_GUARD=requests EVAL_WATCHDOG_POLL_S=1 EVAL_USAGE_POLL_S=1 "$ev/scripts/run-one.sh" claude-sonnet t5-single-edit-v3 g-opt "$out" --idle-timeout 0 --max-requests 300 --max-cost 0 --repeat-limit 0 --timeout 6 >/dev/null 2>&1
+check "watchdog: --max-requests で上限を変えられ、0 で無効（timeout まで待つ）" "grep -q '\"status\": \"timeout\"' $out/claude-sonnet/t5-single-edit-v3/g-opt/result.json && grep -q '\"max_requests\": 300' $out/claude-sonnet/t5-single-edit-v3/g-opt/result.json"
+check "watchdog: 不正な上限は exit 2" "$ev/scripts/run-one.sh gpt-sol t5-single-edit-v3 1 $out --max-cost abc 2>/dev/null; [ \$? = 2 ]"
+
+# --cost-limit: 区切り（同じ rep・課題）ごとに累計費用を見て、超えたら次の区切りを流さず exit 4
+cl=$scratch/cl
+"$ev/scripts/run-matrix.sh" --outroot "$cl" --models "gpt-sol claude-opus" --tasks "t5-single-edit-v3 t1-survey-v3" --cost-limit 0.05 --no-preflight -j 2 >"$scratch/cl.out" 2>&1
+cl_rc=$?
+check "matrix: --cost-limit を超えたら次の区切りを流さず exit 4" "[ $cl_rc = 4 ] && [ -f $cl/gpt-sol/t5-single-edit-v3/1/result.json ] && [ -f $cl/claude-opus/t5-single-edit-v3/1/result.json ] && [ ! -e $cl/gpt-sol/t1-survey-v3 ] && grep -q '費用の停止線: 累計' $scratch/cl.out"
+check "matrix: outroot-cost.mjs が累計費用を出す（2 run × \$0.061）" "[ \"\$(node $ev/scripts/outroot-cost.mjs $cl | cut -f1)\" = 0.1220 ]"
+"$ev/scripts/run-matrix.sh" --outroot "$cl" --models "gpt-sol claude-opus" --tasks "t5-single-edit-v3 t1-survey-v3" --cost-limit 5 --no-preflight -j 2 >"$scratch/cl2.out" 2>&1
+check "matrix: 上限を上げて同じコマンドで再開できる" "[ \$? = 0 ] && [ -f $cl/gpt-sol/t1-survey-v3/1/result.json ]"
+check "matrix: 不正な --cost-limit は exit 2" "$ev/scripts/run-matrix.sh --outroot $cl --cost-limit abc --list 2>/dev/null; [ \$? = 2 ]"
+
 # 不正な入力
 check "run-one: 未知のモデル → 2" "$ev/scripts/run-one.sh nope t5-single-edit-v2 1 $out 2>/dev/null; [ \$? = 2 ]"
 check "run-one: EVORCH_BIN 無し → 2" "EVORCH_BIN= $ev/scripts/run-one.sh gpt-sol t5-single-edit-v2 1 $out 2>/dev/null; [ \$? = 2 ]"

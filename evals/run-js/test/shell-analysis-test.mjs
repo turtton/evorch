@@ -1,6 +1,6 @@
 // analyzeShell の単体確認。実行: node test/shell-analysis-test.mjs
 import assert from 'node:assert/strict';
-import { analyzeShell, summarize } from '../scripts/metrics.mjs';
+import { analyzeShell, linkWrittenScripts, summarize } from '../scripts/metrics.mjs';
 
 const a = (c) => analyzeShell(c);
 const langs = (c) => a(c).interpreters.map((i) => `${i.lang}:${i.mode}`);
@@ -72,8 +72,45 @@ assert.equal(prog("awk '{print $1}' f").script, true);
 assert.equal(prog("perl -pe 's/a/b/' f").script, true);
 assert.equal(prog('python3 x.py').script, false);
 assert.equal(prog("jq '.a' f").script, false);
-assert.equal(prog('git commit -F - <<EOF\nmsg\nEOF').script, true);
+assert.equal(prog('git commit -F - <<EOF\nmsg\nEOF').script, false); // 受け手がインタプリタではない（other）
 assert.equal(prog('grep x f | head').script, false);
+// ヒアドキュメントの受け手: インタプリタ = script、ファイルへ書くだけ = write（実行されて初めて script）、それ以外 = other
+const hk = (c) => a(c).heredoc_kinds.map((h) => h.kind);
+assert.deepEqual(hk("python3 - <<'PY'\nprint(1)\nPY"), ['interp']);
+assert.deepEqual(hk("bash <<'EOF'\necho hi\nEOF"), ['interp']);
+assert.deepEqual(hk("cat > notes.md <<'EOF'\nhello\nEOF"), ['write']);
+assert.deepEqual(hk("cat >> notes.md <<EOF\nhello\nEOF"), ['write']);
+assert.deepEqual(hk("cat <<'EOF' > notes.md\nhello\nEOF"), ['write']);
+assert.deepEqual(hk("tee out.txt <<EOF\nhello\nEOF"), ['write']);
+assert.deepEqual(hk('git commit -F - <<EOF\nmsg\nEOF'), ['other']);
+assert.deepEqual(hk('cat <<EOF\nprint\nEOF'), ['write']); // 受け手は cat（書き込み先なし = 実行できないので write_only になる）
+assert.deepEqual(a("cat > 'my file.py' <<EOF\nx\nEOF").heredoc_kinds[0].path, 'my file.py');
+assert.equal(a("cat > notes.md <<'EOF'\nhello\nEOF").programmatic.script, false);
+assert.equal(a("cat > x.py <<'EOF'\nprint(1)\nEOF").programmatic.script, false); // 書いただけでは script ではない
+// 書いたあとに同じ run の後のコマンド（または同じコマンド）が実行したら script に数える
+const link = (cmds) => {
+  const analyzed = cmds.map(a);
+  return { counts: linkWrittenScripts(analyzed), analyzed };
+};
+let r = link(["cat > /tmp/x.py <<'EOF'\nprint(1)\nEOF", 'ls', 'python3 /tmp/x.py']);
+assert.deepEqual(r.counts, { interp: 0, write_run: 1, write_only: 0, other: 0 });
+assert.equal(r.analyzed[0].programmatic.script, true);
+r = link(["cat > x.sh <<'EOF'\necho hi\nEOF\nbash x.sh"]);
+assert.equal(r.counts.write_run, 1); // 同じコマンドの中で実行
+r = link(["cat > x.mjs <<'EOF'\nconsole.log(1)\nEOF", "cd /w && node ./x.mjs"]);
+assert.equal(r.counts.write_run, 1); // 別のパス表記（ファイル名で照合）
+r = link(["cat > x.sh <<'EOF'\necho hi\nEOF", 'chmod +x x.sh && ./x.sh']);
+assert.equal(r.counts.write_run, 1);
+r = link(["cat > x.py <<'EOF'\nprint(1)\nEOF", 'ls']);
+assert.deepEqual(r.counts, { interp: 0, write_run: 0, write_only: 1, other: 0 });
+assert.equal(r.analyzed[0].programmatic.script, false);
+r = link(['python3 /tmp/x.py', "cat > /tmp/x.py <<'EOF'\nprint(1)\nEOF"]);
+assert.equal(r.counts.write_only, 1); // 実行が書き込みより前なら照合しない
+r = link(["cat > notes.md <<EOF\nmention python3 x.py\nEOF"]);
+assert.equal(r.counts.write_only, 1); // ヒアドキュメント本体の中の文字列は実行とみなさない
+r = link(["python3 - <<'PY'\nprint(1)\nPY", 'git commit -F - <<EOF\nm\nEOF']);
+assert.deepEqual(r.counts, { interp: 1, write_run: 0, write_only: 0, other: 1 });
+assert.deepEqual(a("python3 -c 'x'; node x.mjs").runs, ['x.mjs']); // -c / -e の引数はコードで、実行ファイルではない
 // ② for / while / xargs によるファイル反復
 assert.equal(prog('for f in $(git ls-files); do wc -l "$f"; done').loop, true);
 assert.equal(prog('while read -r f; do echo "$f"; done < list').loop, true);

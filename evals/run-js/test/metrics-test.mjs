@@ -67,6 +67,7 @@ JSON.parse(JSON.stringify({ runs: [r1, r2, r3], aggregate: agg }));
 
 // プログラム的構造（主指標）と build 連結数
 assert.deepEqual(r1.shell.programmatic_by_kind, { script: 1, loop: 0, textproc: 1, sed_multi: 0 });
+assert.deepEqual(r1.shell.heredoc_by_kind, { interp: 1, write_run: 0, write_only: 0, other: 0 });
 assert.equal(r1.shell.programmatic_cmds, 2);
 assert.equal(r1.shell.build_chain_cmds, 0);
 const buildEntry = (commands, extra = {}) => ({
@@ -89,6 +90,22 @@ assert.deepEqual(rb.shell.programmatic_by_kind, { script: 0, loop: 1, textproc: 
 assert.equal(rb.shell.programmatic_cmds, 2);
 assert.deepEqual(rb.shell.bands, { '1': 4, '2-3': 0, '4-7': 1, '8+': 0 }); // 軽いコマンドと cargo の build 系は除いて数える（0 は帯 1）
 
+// ファイルへ書くだけのヒアドキュメントは script に数えない。同じ run で後から実行されたら数える
+const rh = computeRun(buildEntry([
+  "cat > /tmp/notes.md <<'EOF'\nhello\nEOF",
+  "cat > /tmp/job.py <<'EOF'\nprint(1)\nEOF",
+  'ls',
+  'python3 /tmp/job.py',
+  "git commit -F - <<'EOF'\nmsg\nEOF",
+  "python3 - <<'PY'\nprint(2)\nPY",
+]));
+assert.deepEqual(rh.shell.heredoc_by_kind, { interp: 1, write_run: 1, write_only: 1, other: 1 });
+assert.equal(rh.shell.heredoc_write_only_cmds, 1);
+assert.deepEqual(rh.shell.programmatic_by_kind, { script: 2, loop: 0, textproc: 0, sed_multi: 0 }); // job.py を書いたコマンド + python3 - <<PY
+assert.equal(rh.shell.programmatic_cmds, 2);
+assert.equal(rh.shell.heredoc_cmds, 4);
+assert.match(toMarkdown([rh], aggregate([rh])), /heredoc interp\/write\+run\/write only\/other/);
+
 // status が ok でなくても verify=pass の run を区別する
 assert.equal(outcomeOf('ok', 'pass'), 'ok');
 assert.equal(outcomeOf('error', 'pass'), 'error+pass');
@@ -96,6 +113,13 @@ assert.equal(outcomeOf('error', 'fail'), 'error');
 assert.equal(outcomeOf('timeout', 'pass'), 'timeout+pass');
 assert.equal(outcomeOf('stalled', 'pass'), 'stalled+pass');
 assert.equal(outcomeOf('stalled', 'fail'), 'stalled');
+assert.equal(outcomeOf('aborted', 'pass'), 'aborted+pass');
+assert.equal(outcomeOf('aborted', 'fail'), 'aborted');
+const ra = computeRun(buildEntry(['ls'], { status: 'aborted', abort_kind: 'repeat', verify: 'pass', error_reason: 'aborted: 直近 5 件のアシスタント応答が同一' }));
+assert.equal(ra.outcome, 'aborted+pass');
+assert.equal(ra.abort_kind, 'repeat');
+assert.ok(ra.notes.some((n) => n.includes('aborted（repeat）')));
+assert.equal(aggregate([ra])[0].aborted, 1);
 assert.equal(outcomeOf(null, null), null);
 const re = computeRun(buildEntry(['ls'], { status: 'error', verify: 'pass', error_reason: 'invalid SSE stream' }));
 assert.equal(re.outcome, 'error+pass');

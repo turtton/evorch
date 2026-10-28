@@ -17,14 +17,18 @@ ADR 0039（`intents/evorch/decisions/0039-js-code-mode-tool.md`）の「評価 /
 
 | id | 種類 | 内容 | 検証が見るもの | 想定ターン数 |
 |---|---|---|---|---|
-| [`t1-survey-v3`](tasks/t1-survey-v3.md) | (1) 調査と要約 | `tools` 9 + `eval` 7 + `lsp_diagnostics` の 17 ツールの name・source・実行モード（トレイトの既定は Exclusive）・権限・`overrides`（`impl` ブロックのメソッド名）・`allowed_roles`、6 ディレクトリでの名前の参照ファイル数（102 回の走査）、`by_role`、`ref_ranking` | `answers/t1.json` の 251 項目 | 18〜32 |
-| [`t2-aggregate-v3`](tasks/t2-aggregate-v3.md) | (2) 集計 | 6 入力の集計の合成: Rust の crate 別 6 指標、`Cargo.toml` の内部依存グラフ（`dependents`・`transitive_deps`・`layer`）、`git log -200` の crate 別コミット数・変更行数・最終日、ADR 44 件の状態と被参照上位、最上位ディレクトリ × 拡張子の表、`hotspots`（4 つの結果から作る順位） | `answers/t2.json` の 399 項目 | 16〜30 |
-| [`t3-rename-v3`](tasks/t3-rename-v3.md) | (3) 複数か所の編集 | (A) `event-bus` の 3 識別子（コード 233 箇所・約 30 ファイル、コメント行は不変）。(B) `apply-patch` の 4 つの型のフィールド名（`AppliedChange.path` など。同名の別のフィールドがあり、tools にも使用箇所 92 行）をコンパイラのエラーに従って直す | event-bus のファイル別の件数、4 定義、コメント行の不変、`cargo test` event-bus / apply-patch と `cargo check -p tools --tests` | 16〜30 |
+| [`t1-survey-v3`](tasks/t1-survey-v3.md) | (1) 調査と要約 | `tools` 9 + `eval` 7 + `lsp_diagnostics` の 17 ツールの name・source・実行モード（トレイトの既定は Exclusive）・権限・`overrides`（`impl` ブロックのメソッド名）・`allowed_roles`、6 ディレクトリでの名前の参照ファイル数（102 回の走査）、`by_role`、`ref_ranking` | `answers/t1.json` の 251 項目 | 9〜15（`run_js` あり。実測 9〜13）／ なし 15〜30 |
+| [`t2-aggregate-v3`](tasks/t2-aggregate-v3.md) | (2) 集計 | 6 入力の集計の合成: Rust の crate 別 6 指標、`Cargo.toml` の内部依存グラフ（`dependents`・`transitive_deps`・`layer`）、`git log -200` の crate 別コミット数・変更行数・最終日、ADR 44 件の状態と被参照上位、最上位ディレクトリ × 拡張子の表、`hotspots`（4 つの結果から作る順位） | `answers/t2.json` の 399 項目 | 7〜15（`run_js` あり。実測 7〜15）／ なし 12〜25 |
+| [`t3-rename-v3`](tasks/t3-rename-v3.md) | (3) 複数か所の編集 | (A) `event-bus` の 3 識別子（コード 233 箇所・約 30 ファイル、コメント行は不変）。(B) `apply-patch` の 4 つの型のフィールド名（`AppliedChange.path` など。同名の別のフィールドがあり、tools にも使用箇所 92 行）をコンパイラのエラーに従って直す | event-bus のファイル別の件数、4 定義、コメント行の不変、`cargo test` event-bus / apply-patch と `cargo check -p tools --tests` | 20〜50（実測 21〜49） |
 | [`t4-build-test-v3`](tasks/t4-build-test-v3.md) | (4) ビルド・テストを含む手順 | 3 crate で、テスト数を控える → agents（権限変更・既存テスト 2 件の修正・`Role::ALL`・`roles_allowing`）→ apply-patch（`ChangeKind::label`・`ChangeCounts`）→ event-bus（`error_type` と `map_failure` の置き換え、clippy の unused import）→ fmt / clippy / test → 報告 JSON | 変更範囲 + 既存テスト数の下限 + doc 表 + `map_failure` の削除 + fmt + clippy + test（3 crate）+ 隠しテスト（3 crate）+ 報告 JSON | 20〜35 |
 | [`t5-single-edit-v3`](tasks/t5-single-edit-v3.md) | (5) 1 回で済む対照 | `grep.rs` の定数と doc コメントの数字を 1 回の編集で変える（v1・v2 と同内容。対照なので重くしない） | 差分がちょうど +2/-2 行 | 2〜4 |
 | [`t6-debug-fix-v3`](tasks/t6-debug-fix-v3.md) | (6) 調査してから直す | 4 コミットで仕込んだ 8 つの退行（apply-patch 4・event-bus 3・agents 1）。コミット c は新機能 `ChangeKind::label` も含み、コミットごとの revert では消える | 変更範囲 + 7 ファイルの `#[cfg(test)]` 以降が無改変 + 3 crate の `cargo test` + 隠しテスト（新機能が残る）+ 報告に 7 ファイル | 20〜35 |
 
-**費用の見積り**（実測ではなく、実行前の見積り）: 1 rep = 全課題 × 4 モデル（opus・sonnet・astra・luna）。観察 2 回目の実測で、1 リクエストあたりの費用は opus 約 $0.025、sonnet 約 $0.014、astra 約 $0.04、luna 約 $0.003（4 モデルの合計で約 $0.082。長い run は文脈が増えて 1 リクエストあたりが 3 割ほど高くなる）。t5 以外の 5 課題が平均 20〜25 リクエストなら 5 × (20〜25) × $0.082 × 1.3 ＋ t5 約 $0.2 ≒ **$11〜14**。観察 2 回目の 1 rep（約 $3.9）の **約 2.8〜3.6 倍**で、目安の 2〜3 倍の上端をやや超える見込み。リクエスト数が各課題の想定の下端（18〜20）なら 3 倍に収まる。上端を超えそうなら、最初の予備実行は `--models` で費用の大きい astra / opus を外すか、t1・t3 だけ v2 に戻して調整する（想定ターン数と根拠は各 `tasks/*.md`）。
+**想定ターン数の考え方**: リクエスト数は「走査・集計を何回の呼び出しにまとめられるか」で大きく変わる。第 3 回の実測では、t1 / t2 は `run_js` で読み取り・走査・集計が 1〜3 回にまとまり、v3 でも 7〜15 リクエスト（`run_js` の子呼び出しは 0〜772 件）だった。一方 t3 はコンパイラ駆動の改名の周回数で 21〜49 リクエストになる。そこで各 `tasks/*.md` は、リクエスト数ではなく**処理量**（読むファイル数・走査回数・入力の種類・子呼び出し数・コンパイルの周回数）を主な指標として書き、リクエスト数は「`run_js` あり（実測）」と「なし（処理量からの見積り）」を分けて示す。
+
+**費用**: 第 3 回の実測（暴走なし）で、**1 rep（全課題 × 4 モデル）は約 $11〜12**。第 2 回の約 $3.9 の約 3 倍で、目安（2〜3 倍）の上端に収まる。第 3 回の run 別の費用は、t1 が $0.02〜0.70、t2 が $0.01〜1.06、t3 が $0.06〜1.26（opus・astra・luna。モデルごとの 1 リクエストあたりは opus 約 $0.025、sonnet 約 $0.014、astra 約 $0.04、luna 約 $0.003）。ただし第 3 回には**暴走した run**（claude-sonnet × t3、完了後の同じ通知に 487 リクエスト応答し続けて $12.6、30 分 timeout まで）があり、費用の見積りはこの種の暴走を止められることが前提になる。止める仕組みは次の 2 つ:
+- run ごと（`run-one.sh`、既定で有効）: リクエスト数 150 超、費用 $3 超、直近 4 件の同一応答のどれかで打ち切り（`status=aborted`、下の「watchdog」）。
+- マトリクス全体（`run-matrix.sh --cost-limit <usd>`、指定したとき）: 同じ (rep, 課題) の区切りごとに累計費用を見て、上限を超えたら次の区切りを始めずに止まる（第 3 回は外部のスクリプトで行っていたものを正式なオプションにした）。
 
 ビルド・テストを走らせる課題（t3 / t4 / t6）は agents・apply-patch・event-bus・tools の `cargo check` だけで、libclang が要る crate（routing・storage・recorder などは providers 経由で bindgen を使う）は避けてある。ワークスペース全体のビルドは要らない（依存の解決だけは必要）。
 
@@ -51,7 +55,7 @@ evals/run-js/
   solutions/<id>.sh      参照解（検証スクリプトの自己確認用。モデルには見せない）
   solutions/<id>.wrong-*.sh  部分誤答（検証が fail になることの確認用）
   scripts/               prepare-clone.sh / prompt.sh / self-test.sh / lint-prompts.sh / gen-t2-expected.mjs / gen-v2-expected.mjs / gen-v3-expected.py（課題・検証）
-                         make-overlay.sh / preflight.sh / run-one.sh（watchdog 込み）/ last-events.mjs / run-matrix.sh / models.sh（実行）
+                         make-overlay.sh / preflight.sh / run-one.sh（watchdog 込み）/ last-events.mjs / run-usage.mjs / run-matrix.sh / outroot-cost.mjs / models.sh（実行）
                          metrics.mjs / classify-shell.mjs（集計）
   test/                  実行・集計スクリプトの確認（ダミー evorch、fixture、単体確認）
 ```
@@ -109,23 +113,28 @@ $EVAL/evals/run-js/scripts/make-overlay.sh <profile> <model-id> <effort> <outdir
 
 ```sh
 $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
-  [--run-js true|false] [--effort <e>] [--timeout <sec>] [--idle-timeout <sec>] [--keep-clone] [--force]
+  [--run-js true|false] [--effort <e>] [--timeout <sec>] [--idle-timeout <sec>] [--max-requests <n>] [--max-cost <usd>] [--repeat-limit <n>] [--keep-clone] [--force]
 ```
 
 流れ: overlay 生成 → `prepare-clone.sh`（t6 は退行コミットを積む setup を含む）→ `prompt.sh` → `evorch run`（`timeout` 付き、既定 30 分 = `EVAL_TIMEOUT_S`）→ `verify/<id>.sh`（既定 15 分 = `EVAL_VERIFY_TIMEOUT_S`。タイムアウトした run も検証する）→ 結果の保存 → clone と overlay の削除。clone は `${EVAL_WORK:-${TMPDIR:-/tmp}/run-js-eval-work}` に作り、clone ごとに `target/` を持つ（`CARGO_TARGET_DIR` は共有しない）。
 
-環境変数: `EVORCH_BIN`（必須）、`EVORCH_CONFIG_SRC`、`EVAL_WORK`、`EVAL_SOURCE_REPO`（`prepare-clone.sh` の source-repo）、`EVAL_IDLE_S` / `EVAL_WATCHDOG_POLL_S`（watchdog、下記）。
+環境変数: `EVORCH_BIN`（必須）、`EVORCH_CONFIG_SRC`、`EVAL_WORK`、`EVAL_SOURCE_REPO`（`prepare-clone.sh` の source-repo）、`EVAL_IDLE_S` / `EVAL_WATCHDOG_POLL_S` / `EVAL_MAX_REQUESTS` / `EVAL_MAX_COST_USD` / `EVAL_REPEAT_LIMIT` / `EVAL_USAGE_POLL_S`（watchdog、下記）。
 
-**watchdog（入力待ちで止まった run を打ち切る）**: evorch は、モデルが確認の質問などでターンを終えると、入力待ち（`AgentRunStateChanged` Running → Waiting、続いて `TurnCompleted`）のまま終了しない。第 2 回の観察では、そのまま 30 分の `timeout` まで待った run が複数あった（t1 の「8 個か 9 個か」、t4 の「answers への書き込みは範囲外か」）。評価の Worker は対話しないので、`run-one.sh` は evorch を動かしている間 `--idle-timeout`（既定 `$EVAL_IDLE_S` = 60 秒、0 で無効）の watchdog を回す。
+**watchdog（入力待ち・暴走した run を打ち切る）**: evorch は、モデルが確認の質問などでターンを終えると、入力待ち（`AgentRunStateChanged` Running → Waiting、続いて `TurnCompleted`）のまま終了しない。第 2 回の観察では、そのまま 30 分の `timeout` まで待った run が複数あった（t1 の「8 個か 9 個か」、t4 の「answers への書き込みは範囲外か」）。評価の Worker は対話しないので、`run-one.sh` は evorch を動かしている間 `--idle-timeout`（既定 `$EVAL_IDLE_S` = 60 秒、0 で無効）の watchdog を回す。
 - 方式: `EVAL_WATCHDOG_POLL_S`（既定 5 秒）ごとに、run の DB（`--db`）を `evorch inspect events --run <id> --limit 12` で読み、`scripts/last-events.mjs` で末尾の状態（最後のイベントの種類・`RunProgress` の activity・状態・最後の `MessageCompleted` の本文）を取り出す。**最後のイベントが `TurnCompleted` のまま、イベント ID が `idle-timeout` 秒だけ動かなければ、evorch を `kill`（TERM、10 秒後に KILL）する**。通常の終了は `Running → Done` で `TurnCompleted` が最後にならず、すぐ evorch が終わるので誤検出しない（成功した run と停止した run の実データで確かめた）。DB が読めない間は何もしない。
-- 結果: `status` は `stalled`、`error_reason` に `stalled: TurnCompleted のあと 60s 動かず（activity=User state=Waiting）。最後の発言: …`（モデルの質問の冒頭）が入る。`stalled` の後も検証は走るので、成果物が揃っていれば `verify=pass`（metrics の `outcome` は `stalled+pass`）。`--retry-errors` の対象は `error` だけで、`stalled` は再実行しない（モデルの振る舞いの観察結果であるため）。
-- evorch 側の修正（入力待ちにならない `run`）が入っても、ハーネス側の防御として残す。
+- 結果: `status` は `stalled`、`error_reason` に `stalled: TurnCompleted のあと 60s 動かず（activity=User state=Waiting）。最後の発言: …`（モデルの質問の冒頭）が入る。`stalled` の後も検証は走るので、成果物が揃っていれば `verify=pass`（metrics の `outcome` は `stalled+pass`）。`--retry-errors` の対象は `error` だけで、`stalled` と `aborted` は再実行しない（モデルの振る舞いの観察結果であるため。再実行するなら `--force`）。
+- **暴走（`status=aborted`）**: 第 3 回に、claude-sonnet × t3-v3 が作業を終えたあとも、同じ nudge（実行中のジョブの通知）に 487 リクエストにわたって同じ返事をし続け、$12.6 を使って 30 分の timeout まで走った（検証は pass）。次の 3 つのどれかで `kill` して `status=aborted`、`abort_kind` に種類、`error_reason` に理由（件数・費用・繰り返された応答）を残す。打ち切った後も検証は走る（`outcome` は `aborted+pass` など）。
+  - `requests`: `usage_requests` の agent 行が `--max-requests`（既定 150。`EVAL_MAX_REQUESTS`）を超えた。`evorch inspect run <id>` を `EVAL_USAGE_POLL_S`（既定 10 秒）ごとに読み、`scripts/run-usage.mjs` で件数を数える（metrics の `requests` と同じ定義）。
+  - `cost`: `usage_requests` の `cost_usd` の合計が `--max-cost`（既定 $3。`EVAL_MAX_COST_USD`）を超えた。同じ `inspect run` から求める。
+  - `repeat`: 直近の（空でない）アシスタント応答（`MessageCompleted` の本文）が `--repeat-limit`（既定 4。`EVAL_REPEAT_LIMIT`）件続けて同一。`inspect events --limit 150` の末尾から `last-events.mjs` が数える。第 2・3 回の全 run（正常終了のもの）で、同一の応答が連続した run は暴走の 1 件だけだった（最大連続 469）ので、4 件なら誤検出しない。
+  - いずれも 0 で無効。上限に達する前に止めるわけではなく、確認の間隔の分だけ超過しうる（リクエスト数 10 秒分、費用は 1 リクエスト分程度）。metrics は `aborted` の run の費用・リクエスト数を「打ち切るまでの値」と注記し、モデル × 課題の表に `aborted` の件数を出す。
+- evorch 側の修正（入力待ちにならない `run`、nudge ループの修正）が入っても、ハーネス側の防御として残す。
 
 結果は `<outroot>/<model>/<task>/<rep>/`（`<outroot>` はリポジトリの外に置く）:
 
 | ファイル | 内容 |
 |---|---|
-| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout` / `stalled` = watchdog が打ち切った）、`evorch_exit`、`idle_timeout_s`、`error_reason`（`status` が `ok` でないときだけ。stderr の `reason=` 以降、なければ最後の非空行。`stalled` は最後の発言つきの上の文。300 文字まで）、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
+| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout` / `stalled` = 入力待ちを watchdog が打ち切った / `aborted` = 暴走を watchdog が打ち切った。`abort_kind` = `requests` / `cost` / `repeat`）、`evorch_exit`、`idle_timeout_s`、`max_requests`、`max_cost_usd`、`repeat_limit`、`error_reason`（`status` が `ok` でないときだけ。stderr の `reason=` 以降、なければ最後の非空行。`stalled` は最後の発言つきの上の文。300 文字まで）、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
 | `run.db` | この run の store（`--db`）。run ごとに別ファイルなので並列でも衝突しない |
 | `evorch.stdout.log` / `evorch.stderr.log` | Worker の最終出力 / `run_id:` を含む stderr |
 | `verify.log` | 検証の出力（不一致一覧） |
@@ -145,6 +154,7 @@ $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
 $EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
   [--models "gpt-sol claude-opus"] [--tasks "t1-survey-v3 t5-single-edit-v3"] \
   [--reps 3] [--rep-from 1] [-j 2] [--run-js true|false] [--effort <e>] [--timeout <sec>] [--idle-timeout <sec>] \
+  [--max-requests <n>] [--max-cost <usd>] [--repeat-limit <n>] [--cost-limit <usd>] \
   [--retry-errors] [--no-preflight | --preflight-only] [--list] [--keep-clone]
 ```
 
@@ -152,6 +162,7 @@ $EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
 - `result.json` がある組はスキップするので、中断しても**同じコマンドで再開**できる。`--list` で実行せずに計画（run / skip）だけ見られる。
 - `-j N` で並列度（既定 1）。並列 run は clone・`run.db` が別なので干渉しないが、プロバイダのレート制限と CPU/ビルド負荷に注意。
 - `status` が `error` の結果（資格情報の誤りなど）は `--retry-errors` で再実行する。最初の試行は消さず、`<model>/<task>/<rep>.attempt<N>` へ退避してから流す（`metrics.mjs` は既定で読まない。`--include-attempts` で読む）。`timeout` は再実行しない。`error` でも `verify=pass` だった結果も、`status` が `error` なので対象になる。
+- **`--cost-limit <usd>`（費用の停止線）**: 同じ (rep, 課題) の組（モデルは `-j` で並列）を 1 つの区切りとして順に流し、区切りの前後に結果ディレクトリの累計費用（`scripts/outroot-cost.mjs`。全 run の `inspect-run.json` の `cost_usd` の合計で、退避された `.attempt<N>` と打ち切られた run を含む）を見る。上限を超えていたら次の区切りを始めず、「費用の停止線で止まった」と出して**終了コード 4**。超過は最大で 1 区切り分（run ごとの `--max-cost` と組み合わせる）。上限を上げて同じコマンドで再開できる（既にある結果はスキップ）。`--cost-limit` なしは従来どおり全体を 1 つの並列キューで流す。
 - **preflight**: 実行前に、計画に残っている各モデルを `preflight.sh` で確かめる。Worker をそのモデルに固定した overlay で、極小のプロンプト（ツール不使用で `OK` と答えさせる、`--run-js-enabled false`）を 1 回流し、evorch が 0 で終われば使える。provider が advertise しないモデル（`model is not advertised by provider`）や、config にないモデル（`the model chain exists but has no available candidate`）は、モデル呼び出しの前に失敗するので費用はかからない（予備実行の gpt-6.1-sol は 4 秒で失敗した）。使えるモデルでは極小のリクエストが 1 回出る。使えないモデルの組は計画から外し、結果ディレクトリも作らず、使えるモデルだけを流して最後に exit 1 で報告する（直して同じコマンドで再開できる）。成功は `<outroot>/.preflight/<model>.ok` に記録し、再実行では確認を飛ばす（`preflight.sh <model> --outroot <dir> --force` で確かめ直す）。`--no-preflight` で省略、`--preflight-only` で確認だけ。`--list` は preflight をしない。
 - 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`（v3 を流す）。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
 - stage 2（run_js 無し対照）は別の `--outroot` に `--run-js false` で流す。
@@ -213,7 +224,7 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 
 | 指標 | 定義 |
 |---|---|
-| `heredoc_cmds` | `<<` / `<<-`（`<<<` を除く）を含むコマンドの数（`here_string_cmds` は `<<<`） |
+| `heredoc_cmds` | `<<` / `<<-`（`<<<` を除く）を含むコマンドの数（`here_string_cmds` は `<<<`）。受け手で分けた件数が `heredoc_by_kind`（下記） |
 | `interp_inline_cmds` | インライン実行のインタプリタを含むコマンドの数。対象は node / bun / deno（`-e` `-p` `--eval` `--print` `-`、またはヒアドキュメント・here-string 入力）、python（`-c` `-` または heredoc）、perl（`-e` `-E` 系または heredoc）、ruby（`-e`）、awk / gawk / mawk（`-f` 以外）。コマンド位置の語だけを見る（`echo "node -e"` は数えない。`xargs` `env` `sudo` `time` と環境変数代入は読み飛ばす）。言語別は `interp_inline_by_lang` |
 | `interp_file_runs` | スクリプトファイルの実行（`node x.mjs`、`python3 x.py`、`awk -f`）。インラインではない |
 | `jq` | `interp_inline_by_lang.jq` に別枠で数える（`interp_inline_cmds` には含めない） |
@@ -227,10 +238,21 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 
 | 種類 | 定義 |
 |---|---|
-| ① `script` | ヒアドキュメント（`<<` `<<-`。`<<<` は含めない）を含む、またはインライン実行のインタプリタ本体を含む（python / node / bun / deno / perl / ruby の `-e` `-c` `-p` `-`・ヒアドキュメント・here-string 入力、awk / gawk / mawk のプログラム。`awk -f` や `python3 x.py` などのファイル実行と `jq` は含めない） |
+| ① `script` | インライン実行のインタプリタ本体を含む（python / node / bun / deno / perl / ruby の `-e` `-c` `-p` `-`・ヒアドキュメント・here-string 入力、`bash` / `sh` / `zsh` / `dash` へのヒアドキュメント、awk / gawk / mawk のプログラム。`awk -f` や `python3 x.py` などのファイル実行と `jq` は含めない）、**または**ファイルへ書いたヒアドキュメント（`cat > x.py <<EOF`）を、同じ run の同じコマンドか後のコマンドが実行した（下記の `write_run`）。ファイルへ書くだけのヒアドキュメントは含めない |
 | ② `loop` | `for` / `while` / `until` のループ、または `xargs` によるファイル反復 |
 | ③ `textproc` | 1 つのパイプラインに text 処理の段（grep / egrep / fgrep / rg / sed / awk / gawk / mawk / sort / uniq / cut / tr / wc）が 3 つ以上。`head` / `tail`（と `cat`、`git ls-files` などその他の段）は段に数えないので、末尾が `head` / `tail` だけの延長は当たらない。`;` や `&&` をまたいで数えない |
 | ④ `sed_multi` | `sed -i`（`-i.bak`、`-Ei`、`--in-place`）で複数ファイルを書き換える。ファイル引数が 2 つ以上（glob は 2 と数える）、またはコマンドに `xargs` / ループがある。複数の `sed -i` が合計 2 ファイル以上になる場合も含む |
+
+**ヒアドキュメントの受け手**（`heredoc_by_kind`。run ごとの件数。`heredoc_write_only_cmds` は、ヒアドキュメントがすべて `write_only` のコマンドの数）:
+
+| 種類 | 定義 |
+|---|---|
+| `interp` | 受け手がインタプリタ（上の ① のインライン実行）。`python3 - <<'PY'`、`node <<EOF`、`bash <<EOF` など。script に数える |
+| `write_run` | 受け手が `cat` / `tee` でファイルへ書く（`cat > x.py <<EOF`、`cat >> f <<EOF`、`cat <<EOF > f`、`tee f <<EOF`）うえ、**同じ run の同じコマンドか後のコマンドがそのファイルを実行した**（`python3 /tmp/x.py`、`node ./x.mjs`、`bash x.sh`、`./x.sh`、`source x.sh`、`awk -f x.awk`）。ファイル名（basename）で照合する。script に数える（書いたコマンドを数える。実行したコマンドは `interp_file_runs`） |
+| `write_only` | ファイルへ書くだけで、同じ run で実行されない（ノート・設定・JSON の書き出し、`cat <<EOF` の表示など）。**プログラム的構造から除き**、別カテゴリとして数える。書き込み先が変数（`"$f"`）などで特定できないものもここに入る |
+| `other` | 受け手が上のどれでもない（`git commit -F - <<EOF`、`patch <<EOF` など）。プログラム的構造に数えない |
+
+照合は run ごとの top-level の shell コマンドの順で行う（`run_js` の中の shell は見えない）。ヒアドキュメントの本体の中の文字列（`python3 x.py` と書いたノートなど）は実行とみなさない。実行が書き込みより前のコマンドは照合しない。
 
 補助指標:
 
@@ -242,9 +264,9 @@ node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 | `chain_ops` | 連結演算子 `&&` `\|\|` `;` とバックグラウンド `&` の数（`2>&1` `&>` の `&` は含めない） |
 | `chars` / `lines` | コマンド文字列全体の文字数 / 行数（ヒアドキュメント本体を含む。補助にとどめる） |
 
-`scripts/classify-shell.mjs --results <outroot> [--list]` は、同じ定義でモデル別の件数表を出し、`--list` で該当コマンドの本文を列挙する（`run_js` に書くべきだったかの目視確認用）。以前の臨時の分類スクリプトを取り込んだもので、`metrics.mjs` と同じ `analyzeShell` を使う。
+`scripts/classify-shell.mjs --results <outroot> [--list]` は、同じ定義でモデル別の件数表（ヒアドキュメントの受け手の表を含む）を出し、`--list` で該当コマンド（`write_only` も）の本文を列挙する（`run_js` に書くべきだったかの目視確認用）。以前の臨時の分類スクリプトを取り込んだもので、`metrics.mjs` と同じ `analyzeShell` を使う。
 
-**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`outcome`（`ok` / `error` / `timeout` / `stalled`、および `status` が `ok` でないのに `verify=pass` の **`error+pass`** / `timeout+pass` / `stalled+pass`。成果物は正しいが途中で止まった run を区別する）、`error_reason`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数、`err+pass` の件数。
+**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`outcome`（`ok` / `error` / `timeout` / `stalled` / `aborted`、および `status` が `ok` でないのに `verify=pass` の **`error+pass`** / `timeout+pass` / `stalled+pass` / `aborted+pass`。成果物は正しいが途中で止まった run を区別する）、`error_reason`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数、`err+pass` の件数。
 
 ## 繰り返し
 

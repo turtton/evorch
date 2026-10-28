@@ -8,6 +8,13 @@
 #   --idle-timeout <sec>  watchdog: run のターンが終わった（TurnCompleted が最後のイベント）のに evorch が終了せず、
 #                         この秒数だけ新しいイベントが出なければ打ち切る（既定 $EVAL_IDLE_S、なければ 60。0 で無効）。
 #                         モデルが確認の質問をして入力待ちになった run（status=stalled）を、30 分の timeout まで待たない
+#   --max-requests <n>    watchdog: run のリクエスト数（usage_requests の agent 行）が n を超えたら打ち切る
+#                         （既定 $EVAL_MAX_REQUESTS、なければ 150。0 で無効）。status=aborted（abort_kind=requests）
+#   --max-cost <usd>      watchdog: run の費用（usage_requests の cost_usd の合計）が usd を超えたら打ち切る
+#                         （既定 $EVAL_MAX_COST_USD、なければ 3。0 で無効）。status=aborted（abort_kind=cost）
+#   --repeat-limit <n>    watchdog: 直近 n 件の（空でない）アシスタント応答が同一内容なら打ち切る
+#                         （既定 $EVAL_REPEAT_LIMIT、なければ 4。0 で無効）。status=aborted（abort_kind=repeat）。
+#                         完了後に同じ通知へ同じ返事を続ける暴走（第 3 回に 487 リクエスト・$12.6）を止める
 #   --keep-clone          clone を消さずに残す
 #   --force               結果がある組も実行し直す（既存の結果は <rep>.attempt<N> へ退避する）
 # 環境変数:
@@ -17,6 +24,7 @@
 #   EVAL_SOURCE_REPO      prepare-clone.sh の source-repo（既定は prepare-clone.sh の既定）
 #   EVAL_VERIFY_TIMEOUT_S verify のタイムアウト（既定 900）
 #   EVAL_IDLE_S / EVAL_WATCHDOG_POLL_S  watchdog の打ち切り秒数（既定 60）/ 確認の間隔（既定 5）
+#   EVAL_MAX_REQUESTS / EVAL_MAX_COST_USD / EVAL_REPEAT_LIMIT / EVAL_USAGE_POLL_S  暴走の打ち切り条件（既定 150 / 3 / 4）と、リクエスト数・費用を読む間隔（既定 10 秒）
 # 結果: <outroot>/<model>/<task>/<rep>/
 #   result.json（最後に書く。あれば完了扱い。status が ok でなければ error_reason も）, run.db, evorch.stdout.log, evorch.stderr.log,
 #   verify.log, final.diff, answers/, inspect-run.json, inspect-events.json, zz-worker.toml
@@ -37,6 +45,10 @@ effort=${EVAL_EFFORT:-$EVAL_DEFAULT_EFFORT}
 timeout_s=${EVAL_TIMEOUT_S:-1800}
 idle_s=${EVAL_IDLE_S:-60}
 poll_s=${EVAL_WATCHDOG_POLL_S:-5}
+max_requests=${EVAL_MAX_REQUESTS:-150}
+max_cost=${EVAL_MAX_COST_USD:-3}
+repeat_limit=${EVAL_REPEAT_LIMIT:-4}
+usage_poll_s=${EVAL_USAGE_POLL_S:-10}
 verify_timeout_s=${EVAL_VERIFY_TIMEOUT_S:-900}
 keep_clone=0
 force=0
@@ -46,13 +58,18 @@ while [ $# -gt 0 ]; do
     --effort) effort=${2:-}; shift 2 || usage ;;
     --timeout) timeout_s=${2:-}; shift 2 || usage ;;
     --idle-timeout) idle_s=${2:-}; shift 2 || usage ;;
+    --max-requests) max_requests=${2:-}; shift 2 || usage ;;
+    --max-cost) max_cost=${2:-}; shift 2 || usage ;;
+    --repeat-limit) repeat_limit=${2:-}; shift 2 || usage ;;
     --keep-clone) keep_clone=1; shift ;;
     --force) force=1; shift ;;
     *) usage ;;
   esac
 done
 case $run_js in true | false) ;; *) echo "--run-js は true か false" >&2; exit 2 ;; esac
-[[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ && $idle_s =~ ^[0-9]+$ && $poll_s =~ ^[0-9]+$ && $poll_s -ge 1 ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
+[[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ && $idle_s =~ ^[0-9]+$ && $poll_s =~ ^[0-9]+$ && $poll_s -ge 1 && $usage_poll_s =~ ^[0-9]+$ ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
+[[ $max_requests =~ ^[0-9]+$ && $repeat_limit =~ ^[0-9]+$ ]] || { echo "--max-requests / --repeat-limit は整数" >&2; exit 2; }
+[[ $max_cost =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "--max-cost は USD の数値" >&2; exit 2; }
 [[ $rep =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "rep が不正: $rep" >&2; exit 2; }
 [[ $rep =~ \.attempt[0-9]+$ ]] && { echo "rep が不正（.attempt<N> は退避先の名前）: $rep" >&2; exit 2; }
 target=$(eval_target "$model") || { echo "未知のモデルキー: $model（$EVAL_MODELS）" >&2; exit 2; }
@@ -115,29 +132,56 @@ t0=$(now_ms)
   >"$rundir/evorch.stdout.log" 2>"$rundir/evorch.stderr.log" </dev/null &
 child_pid=$!
 
-# watchdog: evorch は、モデルが確認の質問などでターンを終えると、入力待ち（AgentRunStateChanged Running→Waiting、
-# 続いて TurnCompleted）のまま終了しない（予備実行の 2 回目では 30 分の timeout まで待った run が複数あった）。
-# 評価の Worker は対話しないので、最後のイベントが TurnCompleted のまま idle_s 秒動かなければ打ち切る。
-# run の DB（--db）を `evorch inspect events --limit 12` で読んで判定する（読めない間は何もしない）。
+# watchdog: 評価の Worker は対話しないので、次のどれかで evorch を打ち切る（TERM、10 秒後に KILL）。run の DB（--db）を
+# `evorch inspect` で読んで判定する（読めない間は何もしない）。
+#   stalled : evorch は、モデルが確認の質問などでターンを終えると、入力待ち（AgentRunStateChanged Running→Waiting、続いて
+#             TurnCompleted）のまま終了しない。最後のイベントが TurnCompleted のまま idle_s 秒動かなければ打ち切る。
+#   aborted : 暴走の防御。requests = リクエスト数が max_requests を超えた、cost = 費用が max_cost を超えた、
+#             repeat = 直近 repeat_limit 件の同一のアシスタント応答（完了後の通知に同じ返事を 487 リクエスト続けた run がある）。
 stalled=false
 stall_info=
-if [ "$idle_s" -gt 0 ]; then
-  last_id= seen_at=0 stall_run_id=
+aborted=false
+abort_kind=
+abort_info=
+g_requests=0 g_cost=0
+kill_child() {
+  kill "$child_pid" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$child_pid" 2>/dev/null || break; sleep 1; done
+  kill -9 "$child_pid" 2>/dev/null
+}
+if [ "$idle_s" -gt 0 ] || [ "$max_requests" -gt 0 ] || [ "$repeat_limit" -gt 0 ] || awk -v c="$max_cost" 'BEGIN { exit !(c > 0) }'; then
+  last_id= seen_at=0 stall_run_id= usage_at=0
   while kill -0 "$child_pid" 2>/dev/null; do
     sleep "$poll_s"
     kill -0 "$child_pid" 2>/dev/null || break
     [ -n "$stall_run_id" ] || stall_run_id=$(sed -n 's/^run_id: *//p' "$rundir/evorch.stderr.log" | head -n 1)
     [ -n "$stall_run_id" ] && [ -f "$db" ] || continue
-    line=$("$EVORCH_BIN" inspect --db "$db" events --run "$stall_run_id" --limit 12 2>/dev/null | node "$here/last-events.mjs" 2>/dev/null) || continue
-    IFS=$'\t' read -r ev_id ev_kind ev_activity ev_state ev_text <<<"$line"
     now=$(date +%s)
+    # 暴走: リクエスト数と費用（usage_poll_s ごと。inspect run は大きな出力なので間引く）
+    if [ $((now - usage_at)) -ge "$usage_poll_s" ]; then
+      usage_at=$now
+      if uline=$("$EVORCH_BIN" inspect --db "$db" run "$stall_run_id" 2>/dev/null | node "$here/run-usage.mjs" 2>/dev/null); then
+        IFS=$'\t' read -r g_requests g_cost <<<"$uline"
+        if [ "$max_requests" -gt 0 ] && [ "$g_requests" -gt "$max_requests" ]; then
+          aborted=true abort_kind=requests abort_info="aborted: リクエスト数 $g_requests が上限 $max_requests を超えた（費用 \$$g_cost）"
+        elif awk -v c="$g_cost" -v l="$max_cost" 'BEGIN { exit !(l > 0 && c > l) }'; then
+          aborted=true abort_kind=cost abort_info="aborted: 費用 \$$g_cost が上限 \$$max_cost を超えた（リクエスト数 $g_requests）"
+        fi
+        if [ "$aborted" = true ]; then kill_child; break; fi
+      fi
+    fi
+    line=$("$EVORCH_BIN" inspect --db "$db" events --run "$stall_run_id" --limit 150 2>/dev/null | node "$here/last-events.mjs" 2>/dev/null) || continue
+    IFS=$'\t' read -r ev_id ev_kind ev_activity ev_state ev_text ev_repeat <<<"$line"
+    if [ "$repeat_limit" -gt 0 ] && [ "${ev_repeat:-0}" -ge "$repeat_limit" ]; then
+      aborted=true abort_kind=repeat abort_info="aborted: 直近 $ev_repeat 件のアシスタント応答が同一（リクエスト数 $g_requests、費用 \$$g_cost）。応答: $ev_text"
+      kill_child
+      break
+    fi
     if [ "$ev_id" != "$last_id" ]; then last_id=$ev_id; seen_at=$now; fi
-    if [ "$ev_kind" = TurnCompleted ] && [ $((now - seen_at)) -ge "$idle_s" ]; then
+    if [ "$idle_s" -gt 0 ] && [ "$ev_kind" = TurnCompleted ] && [ $((now - seen_at)) -ge "$idle_s" ]; then
       stalled=true
       stall_info="stalled: TurnCompleted のあと ${idle_s}s 動かず（activity=$ev_activity state=$ev_state）。最後の発言: $ev_text"
-      kill "$child_pid" 2>/dev/null
-      for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$child_pid" 2>/dev/null || break; sleep 1; done
-      kill -9 "$child_pid" 2>/dev/null
+      kill_child
       break
     fi
   done
@@ -148,7 +192,8 @@ child_pid=
 t1=$(now_ms)
 status=ok
 timed_out=false
-if [ "$stalled" = true ]; then status=stalled
+if [ "$aborted" = true ]; then status=aborted
+elif [ "$stalled" = true ]; then status=stalled
 elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then status=timeout; timed_out=true
 elif [ "$rc" -ne 0 ]; then status=error; fi
 
@@ -163,6 +208,7 @@ if [ "$status" != ok ]; then
   [ -n "$error_reason" ] || error_reason=$(printf '%s\n' "$clean" | grep -v '^run_id:' | grep . | tail -n 1)
   [ "$status" != timeout ] || error_reason="timeout after ${timeout_s}s${error_reason:+: $error_reason}"
   [ "$status" != stalled ] || error_reason=$stall_info
+  [ "$status" != aborted ] || error_reason=$abort_info
   error_reason=${error_reason:0:300}
 fi
 
@@ -212,6 +258,8 @@ tmp=$rundir/.result.json.tmp
   printf '  "timed_out": %s,\n' "$timed_out"
   printf '  "timeout_s": %s,\n' "$timeout_s"
   printf '  "idle_timeout_s": %s,\n' "$idle_s"
+  printf '  "max_requests": %s,\n  "max_cost_usd": %s,\n  "repeat_limit": %s,\n' "$max_requests" "$max_cost" "$repeat_limit"
+  if [ "$aborted" = true ]; then printf '  "abort_kind": "%s",\n' "$abort_kind"; fi
   printf '  "duration_ms": %s,\n' "$((t1 - t0))"
   printf '  "verify": "%s",\n' "$verify"
   printf '  "verify_exit": %s,\n' "$verify_rc"

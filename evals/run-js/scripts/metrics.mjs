@@ -23,8 +23,11 @@ import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------- shell 解析
 
-/** ヒアドキュメント本体・引用符の中身・コメントを取り除いた文字列と、ヒアドキュメント数を返す。 */
-export function sanitizeShell(source) {
+/**
+ * ヒアドキュメント本体・引用符の中身・コメントを取り除いた文字列と、ヒアドキュメント数を返す。
+ * `keepQuotes` なら引用符の中身は残す（パスの取り出し用。本体とコメントは取り除く）。
+ */
+export function sanitizeShell(source, { keepQuotes = false } = {}) {
   const s = String(source);
   const n = s.length;
   let out = '';
@@ -48,7 +51,7 @@ export function sanitizeShell(source) {
     if (c === "'") {
       let j = s.indexOf("'", i + 1);
       if (j < 0) j = n - 1;
-      out += 'Q';
+      out += keepQuotes ? s.slice(i, j + 1) : 'Q';
       i = j + 1;
       wordStart = false;
       continue;
@@ -56,7 +59,7 @@ export function sanitizeShell(source) {
     if (c === '"') {
       let j = i + 1;
       while (j < n && s[j] !== '"') j += s[j] === '\\' ? 2 : 1;
-      out += 'Q';
+      out += keepQuotes ? s.slice(i, j + 1) : 'Q';
       i = j + 1;
       wordStart = false;
       continue;
@@ -193,7 +196,34 @@ function interpreterOf(cmd) {
   if (program === 'jq') {
     return { lang: 'jq', mode: has(/^(-f|--from-file)$/) ? 'file' : 'inline' };
   }
+  if (/^(sh|bash|zsh|dash)$/.test(program) && hasHere) return { lang: 'sh', mode: 'inline' };
   return null;
+}
+
+const PATH = String.raw`(?:"([^"]+)"|'([^']+)'|([^\s"'<>|;&()]+))`;
+const pick = (m) => m[1] ?? m[2] ?? m[3];
+
+/** ヒアドキュメントで書き込むファイルのパス（`cat > f <<EOF`、`cat <<EOF > f`、`tee f <<EOF`）を、出てくる順に返す。 */
+function heredocWritePaths(kept) {
+  const found = [];
+  const res = [
+    new RegExp(String.raw`\bcat\b[^\n|;&<>]*>>?\s*${PATH}[^\n|;&<]*<<H`, 'g'),
+    new RegExp(String.raw`\bcat\b\s*<<H\s*>>?\s*${PATH}`, 'g'),
+    new RegExp(String.raw`\btee\b\s+(?:-[a-z]+\s+)*${PATH}[^\n|;&<]*<<H`, 'g'),
+  ];
+  for (const re of res) for (const m of kept.matchAll(re)) found.push({ at: m.index, path: pick(m) });
+  return found.sort((a, b) => a.at - b.at).map((f) => f.path);
+}
+
+/** コマンドが実行するスクリプトファイルのパス（`python3 x.py`、`node x.mjs`、`bash x.sh`、`./x.sh`、`awk -f x.awk`、`source x.sh`）。 */
+function fileRunPaths(kept) {
+  const found = [];
+  const interp = String.raw`\b(?:python3?(?:\.\d+)?|pypy3?|node|nodejs|bun|deno|perl|ruby|bash|sh|zsh|dash)\s+(?:-(?![ceEp]\b|-eval)[A-Za-z-]+\s+)*(?!-)`;
+  for (const m of kept.matchAll(new RegExp(interp + PATH, 'g'))) found.push(pick(m));
+  for (const m of kept.matchAll(new RegExp(String.raw`\b(?:awk|gawk|mawk)\s+(?:-[A-Za-z-]+\s+)*-f\s*${PATH}`, 'g'))) found.push(pick(m));
+  for (const m of kept.matchAll(new RegExp(String.raw`(?:^|[;&|\n(])\s*(\.?\.?/[^\s"'<>|;&()]+)`, 'gm'))) found.push(m[1]);
+  for (const m of kept.matchAll(new RegExp(String.raw`\b(?:source|\.)\s+${PATH}`, 'g'))) found.push(pick(m));
+  return found.filter(Boolean);
 }
 
 /** `segments` の数から除く、ナビゲーション・確認だけの軽いコマンド（cd / pwd / ls / echo / git status / which）。 */
@@ -295,7 +325,20 @@ export function analyzeShell(command) {
 
   // --- プログラム的構造（4 種）
   const inlineInterp = interps.some((i) => i.mode === 'inline' && i.lang !== 'jq');
-  const script = heredocs > 0 || inlineInterp;
+  // ヒアドキュメントの受け手で分ける: インタプリタに食わせる（script）／ファイルへ書くだけ（write）／それ以外（other。`git commit -F -` など）。
+  // `write` は、同じ run の後のコマンドがそのファイルを実行したときだけ script に数える（linkWrittenScripts）。
+  const kept = sanitizeShell(raw, { keepQuotes: true }).text;
+  const writeTargets = heredocWritePaths(kept);
+  let writeIndex = 0;
+  const heredocKinds = [];
+  for (const { seg, cmd } of cmds) {
+    if (!/<<H/.test(seg.text)) continue;
+    const ip = interpreterOf(cmd);
+    if (ip && ip.mode === 'inline' && ip.lang !== 'jq') heredocKinds.push({ kind: 'interp' });
+    else if (cmd.program === 'cat' || cmd.program === 'tee') heredocKinds.push({ kind: 'write', path: writeTargets[writeIndex++] ?? null });
+    else heredocKinds.push({ kind: 'other' });
+  }
+  const script = inlineInterp;
   const loop = cmds.some(({ cmd }) => cmd.loopKeyword || cmd.program === 'xargs' || cmd.viaXargs);
   // 連続するパイプライン（`|` でつながる段）ごとに、テキスト処理の段数を数える。head / tail は段に数えない。
   let textproc = false;
@@ -321,8 +364,33 @@ export function analyzeShell(command) {
     heredocs,
     here_strings: hereStrings,
     interpreters: interps,
+    heredoc_kinds: heredocKinds,
+    runs: fileRunPaths(kept),
     programmatic: { script, loop, textproc, sed_multi: sedMulti },
   };
+}
+
+const basename = (p) => String(p).split('/').pop();
+
+/**
+ * 1 つの run のトップレベル shell コマンド（実行順の analyzeShell の結果）を照合する。`cat > x.py <<EOF` のように
+ * ファイルへ書いただけのヒアドキュメントは、同じコマンドか後のコマンドがそのファイル（ファイル名で照合）を実行したときだけ
+ * script に数える（`write_run`）。実行されなければ `write_only`。コマンドを書き換えて、種類別の件数を返す。
+ */
+export function linkWrittenScripts(commands) {
+  const counts = { interp: 0, write_run: 0, write_only: 0, other: 0 };
+  commands.forEach((c, i) => {
+    for (const h of c.heredoc_kinds) {
+      if (h.kind === 'write') {
+        const target = h.path ? basename(h.path) : null;
+        const ran = target != null && commands.slice(i).some((d) => d.runs.some((r) => basename(r) === target));
+        h.kind = ran ? 'write_run' : 'write_only';
+        if (ran) c.programmatic.script = true;
+      }
+      counts[h.kind]++;
+    }
+  });
+  return counts;
 }
 
 // ---------------------------------------------------------------- 統計
@@ -487,6 +555,7 @@ export function computeRun(entry) {
     if (typeof e.input?.command === 'string' && (e.input.action == null || e.input.action === 'start')) commands.push(analyzeShell(e.input.command));
     else shellControl++;
   }
+  const heredocByKind = linkWrittenScripts(commands);
   const langs = {};
   let interpFile = 0;
   for (const c of commands) {
@@ -511,6 +580,8 @@ export function computeRun(entry) {
     build_steps_total: commands.reduce((a, c) => a + c.build_steps, 0),
     build_steps: summarize(commands.map((c) => c.build_steps)),
     heredoc_cmds: commands.filter((c) => c.heredocs > 0).length,
+    heredoc_by_kind: heredocByKind,
+    heredoc_write_only_cmds: commands.filter((c) => c.heredoc_kinds.length > 0 && c.heredoc_kinds.every((h) => h.kind === 'write_only')).length,
     here_string_cmds: commands.filter((c) => c.here_strings > 0).length,
     interp_inline_cmds: inlineCmds.length,
     interp_inline_by_lang: langs,
@@ -531,6 +602,7 @@ export function computeRun(entry) {
   const result = entry.result ?? {};
   const label = entry.label ?? {};
   const outcome = outcomeOf(result.status, result.verify);
+  if (result.status === 'aborted') notes.push(`aborted（${result.abort_kind ?? '?'}）。費用・リクエスト数は打ち切るまでの値で、他の run と平均しない`);
   if (outcome?.endsWith('+pass')) notes.push(`${result.status} だが verify=pass（成果物は正しい）${result.error_reason ? `: ${result.error_reason}` : ''}`);
   else if (result.status && result.status !== 'ok' && result.error_reason) notes.push(`${result.status}: ${result.error_reason}`);
 
@@ -543,6 +615,7 @@ export function computeRun(entry) {
     status: result.status ?? null,
     outcome,
     error_reason: result.error_reason ?? null,
+    abort_kind: result.abort_kind ?? null,
     verify: result.verify ?? null,
     duration_s: (result.duration_ms ?? eventSpanMs) == null ? null : (result.duration_ms ?? eventSpanMs) / 1000,
     terminal_phase: run.context?.terminal_phase ?? null,
@@ -618,6 +691,7 @@ export function aggregate(runs) {
       verify_known: list.filter((r) => r.verify != null).length,
       error_but_pass: list.filter((r) => String(r.outcome ?? '').endsWith('+pass')).length,
       failed_status: list.filter((r) => r.status != null && r.status !== 'ok').length,
+      aborted: list.filter((r) => r.status === 'aborted').length,
       mean: means,
     });
   }
@@ -651,11 +725,11 @@ export function toMarkdown(runs, agg) {
   );
   lines.push('## モデル × 課題（平均）', '');
   table(
-    ['model', 'task', 'js', 'n', 'verify pass', 'err+pass', 'dur(s)', 'req', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'rj js-exc', 'rj host-rej', 'rj timeout', 'rj limit', 'rj out B', 'rj ret B', 'shell', 'prog', 'build chain', 'chars med'],
+    ['model', 'task', 'js', 'n', 'verify pass', 'err+pass', 'aborted', 'dur(s)', 'req', 'input', 'cache_r', 'cache_w', 'output', 'reason', 'cost$', 'tools', 'run_js', 'child', 'rj js-exc', 'rj host-rej', 'rj timeout', 'rj limit', 'rj out B', 'rj ret B', 'shell', 'prog', 'build chain', 'chars med'],
     agg.map((g) => {
       const m = g.mean;
       return [
-        g.model ?? '-', g.task ?? '-', g.run_js_enabled == null ? '-' : g.run_js_enabled ? 'on' : 'off', g.runs, `${g.verify_pass}/${g.verify_known}`, g.error_but_pass, fmt(m.duration_s, 0),
+        g.model ?? '-', g.task ?? '-', g.run_js_enabled == null ? '-' : g.run_js_enabled ? 'on' : 'off', g.runs, `${g.verify_pass}/${g.verify_known}`, g.error_but_pass, g.aborted, fmt(m.duration_s, 0),
         fmt(m.requests, 1), fmt(m.input, 0), fmt(m.cache_read, 0), fmt(m.cache_write, 0), fmt(m.output, 0), fmt(m.reasoning, 0), fmt(m.cost_usd, 4),
         fmt(m.tool_calls, 1), fmt(m.run_js_calls, 1), fmt(m.child_calls, 1), fmt(m.run_js_js_exception, 2), fmt(m.run_js_host_rejected, 2), fmt(m.run_js_timeout, 2), fmt(m.run_js_limit_hit, 2),
         fmt(m.run_js_output_bytes, 0), fmt(m.run_js_return_bytes, 0), fmt(m.shell_cmds, 1), fmt(m.programmatic_cmds, 1), fmt(m.build_chain_cmds, 1), fmt(m.chars_median, 0),
@@ -664,13 +738,13 @@ export function toMarkdown(runs, agg) {
   );
   lines.push('## shell コマンドのプログラム的構造（run ごと）', '');
   table(
-    ['model', 'task', 'rep', 'cmds', 'prog', 'script', 'loop', 'textproc', 'sed -i multi', 'build chain', 'build steps max', 'segments 1/2-3/4-7/8+', 'segments med/p90/max', 'chars med/p90/max', 'interp inline by lang', 'interp file', 'child shell'],
+    ['model', 'task', 'rep', 'cmds', 'prog', 'script', 'loop', 'textproc', 'sed -i multi', 'heredoc interp/write+run/write only/other', 'build chain', 'build steps max', 'segments 1/2-3/4-7/8+', 'segments med/p90/max', 'chars med/p90/max', 'interp inline by lang', 'interp file', 'child shell'],
     runs.map((r) => {
       const s = r.shell;
       const k = s.programmatic_by_kind;
       const trio = (x) => `${fmt(x.median, 1)}/${fmt(x.p90, 1)}/${fmt(x.max, 0)}`;
       return [
-        r.model ?? '-', r.task ?? '-', r.rep ?? '-', s.commands, s.programmatic_cmds, k.script, k.loop, k.textproc, k.sed_multi, s.build_chain_cmds, fmt(s.build_steps.max),
+        r.model ?? '-', r.task ?? '-', r.rep ?? '-', s.commands, s.programmatic_cmds, k.script, k.loop, k.textproc, k.sed_multi, `${s.heredoc_by_kind.interp}/${s.heredoc_by_kind.write_run}/${s.heredoc_by_kind.write_only}/${s.heredoc_by_kind.other}`, s.build_chain_cmds, fmt(s.build_steps.max),
         `${s.bands['1']}/${s.bands['2-3']}/${s.bands['4-7']}/${s.bands['8+']}`, trio(s.segments), trio(s.chars), compact(s.interp_inline_by_lang), s.interp_file_runs, s.child_commands,
       ].map(String);
     }),

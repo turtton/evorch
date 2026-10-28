@@ -6,6 +6,7 @@
 #            DUMMY_UNAVAILABLE_MODEL=<model-id> なら、--user-config の zz-worker.toml にそのモデルがあるとき
 #            実際の evorch と同じ形式のエラー（model is not advertised by provider）で終了コード 1 にする。
 #            DUMMY_ERROR_REASON=<text> なら、stderr に `agent run failed reason=<text>` を出す（provider エラーの再現）。
+#            DUMMY_GUARD=requests|cost|repeat なら、暴走の watchdog（リクエスト数・費用・同一応答の上限）を試す run を再現する（`<db>.guard` を作って眠り、inspect が上の値を返す）。
 #            DUMMY_STALL=1 なら、入力待ちのまま終了しない run を再現する（`<db>.stall` を作って眠り、inspect events は TurnCompleted が最後の列を返す）。
 #   inspect: test/fixture-metrics.json の最初の run の出力を返す（run / events）。
 set -euo pipefail
@@ -31,6 +32,10 @@ case ${1:-} in
     fi
     [ -z "$db" ] || : >"$db"
     echo "run_id: run-fixture-1" >&2
+    if [ -n "${DUMMY_GUARD:-}" ] && [ -n "$db" ]; then
+      printf '%s\n' "$DUMMY_GUARD" >"$db.guard"
+      sleep 600
+    fi
     if [ -n "${DUMMY_STALL:-}" ] && [ -n "$db" ]; then
       : >"$db.stall"
       sleep 600
@@ -46,6 +51,26 @@ case ${1:-} in
     [ "$1" = --db ] || { echo "inspect --db <path> が先頭" >&2; exit 2; }
     [ -f "$2" ] || { echo "database not found: $2" >&2; exit 1; }
     cmd=$3
+    if [ -f "$2.guard" ]; then
+      # DUMMY_GUARD の run: requests = 200 リクエスト・費用小、cost = 20 リクエスト・$10、repeat = 同じ応答を繰り返す。
+      node -e '
+        const mode = require("fs").readFileSync(process.argv[1] + ".guard", "utf8").trim();
+        if (process.argv[2] === "run") {
+          const n = mode === "requests" ? 200 : 20;
+          const each = mode === "cost" ? 0.5 : 0.001;
+          const rows = Array.from({ length: n }, (_, i) => ({ purpose: "agent", request_id: `r${i}`, cost_usd: each }));
+          console.log(JSON.stringify({ db: process.argv[1], result: { run_id: "run-fixture-1", usage_requests: rows } }));
+        } else {
+          const msg = (id, text) => ({ id, kind: "Message", payload: { kind: "Message", payload: { kind: "MessageCompleted", payload: { run_id: "run-fixture-1", text } } }, session_id: "headless", wall_clock_ns: 1e18 + id });
+          const progress = { id: 99, kind: "Lifecycle", payload: { kind: "Lifecycle", payload: { kind: "RunProgress", payload: { activity: "Tools" } } }, session_id: "headless", wall_clock_ns: 1e18 + 99 };
+          const events = mode === "repeat"
+            ? [1, 2, 3, 4, 5, 6].map((i) => msg(i, "同じ通知への同じ返事です。")).concat([progress])
+            : [msg(1, "作業中"), msg(2, "別の応答"), progress];
+          console.log(JSON.stringify({ db: process.argv[1], result: { events } }));
+        }
+      ' "$2" "$cmd"
+      exit 0
+    fi
     if [ "$cmd" = events ] && [ -f "$2.stall" ]; then
       # DUMMY_STALL の run: 質問をして入力待ち（Waiting → TurnCompleted が最後のイベント）の末尾を返す。
       node -e '
