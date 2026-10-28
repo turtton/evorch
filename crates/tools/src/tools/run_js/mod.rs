@@ -76,6 +76,12 @@ pub trait RunJsHost: Send + Sync + std::fmt::Debug {
     /// a model's own batch of tool calls.
     fn shares_wave(&self, name: &str) -> bool;
     async fn call(&self, call: ChildCall) -> ChildOutcome;
+    /// Called once the program's calls were dropped: stops the commands the `parent`
+    /// call started and waits until their processes are gone. An error means one may
+    /// still be alive, and `run_js` then fails instead of reporting a clean end.
+    async fn drain_children(&self, _parent_call_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Paths a call names, as the program gave them.
@@ -95,18 +101,36 @@ pub fn call_paths(name: &str, args: &Value) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct RunJs {
     launcher: WorkerLauncher,
+    #[cfg(test)]
+    bounds: Option<serve::Bounds>,
 }
 
 impl RunJs {
     /// Starts workers in bubblewrap when a call runs; nothing is detected here.
     pub const fn new() -> Self {
-        Self {
-            launcher: WorkerLauncher::production(),
-        }
+        Self::with_launcher(WorkerLauncher::production())
     }
 
     pub const fn with_launcher(launcher: WorkerLauncher) -> Self {
-        Self { launcher }
+        Self {
+            launcher,
+            #[cfg(test)]
+            bounds: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_bounds(mut self, bounds: serve::Bounds) -> Self {
+        self.bounds = Some(bounds);
+        self
+    }
+
+    fn bounds(&self) -> serve::Bounds {
+        #[cfg(test)]
+        if let Some(bounds) = self.bounds {
+            return bounds;
+        }
+        serve::Bounds::default()
     }
 }
 
@@ -196,9 +220,19 @@ impl RunJs {
     ) -> ToolResult {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let tools = host.tool_names();
-        let mut connection = match self.launcher.launch().await {
-            Ok(connection) => connection,
-            Err(error) => return ToolResult::error(format!("run_js is unavailable: {error}")),
+        // Preparing the worker (locating it, listing its libraries) counts against the
+        // call's deadline too. A preparation that outlives the call finishes on its
+        // own and is dropped, killing whatever it started.
+        let mut connection = match tokio::time::timeout_at(deadline, self.launcher.launch()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                return ToolResult::error(format!("run_js is unavailable: {error}"));
+            }
+            Err(_) => {
+                return ToolResult::error(format!(
+                    "run_js is unavailable: the worker was not ready within {timeout_ms} ms"
+                ));
+            }
         };
         let start = HostMessage::Run {
             code,
@@ -215,11 +249,13 @@ impl RunJs {
                 tools: &tools,
                 max_tool_calls: settings.max_tool_calls,
                 deadline,
+                bounds: self.bounds(),
             },
             start,
             &mut state,
         )
         .await;
+        state.drain_error = host.drain_children(call_id).await.err();
         if matches!(ending, serve::Ending::Failed(_)) {
             connection.settle_stderr().await;
         }

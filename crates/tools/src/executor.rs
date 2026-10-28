@@ -428,6 +428,23 @@ impl ToolExecutor {
         }
     }
 
+    /// Stops the shell jobs started by the `run_js` call `parent_call_id` and waits
+    /// until their processes are gone; the run's other jobs keep running.
+    pub async fn drain_child_shell_jobs(
+        &self,
+        run_id: &str,
+        parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        if let Some(shell) = self.tools.get("shell") {
+            shell
+                .tool
+                .drain_child_shell_jobs(run_id, parent_call_id)
+                .await
+        } else {
+            Ok(())
+        }
+    }
+
     /// Release terminal handles after durable side-effect markers have been saved.
     /// The caller must prevent a new incarnation of this run from starting first.
     pub fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {

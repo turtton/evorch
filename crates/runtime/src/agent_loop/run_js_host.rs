@@ -272,6 +272,13 @@ impl RunJsHost for RuntimeRunJsHost {
         super::tool_calls::shares_wave(&self.executor, name)
     }
 
+    async fn drain_children(&self, parent_call_id: &str) -> Result<(), String> {
+        self.executor
+            .drain_child_shell_jobs(&self.base.run_id, parent_call_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn call(&self, call: ChildCall) -> ChildOutcome {
         let ChildCall {
             parent_call_id,

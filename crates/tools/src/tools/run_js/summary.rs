@@ -81,6 +81,16 @@ pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u
             failure = Some(format!("{reason}{stderr}"));
         }
     }
+    if let Some(error) = &state.drain_error {
+        let note = format!(
+            "run_js could not confirm that the commands it started have stopped ({error}); \
+treat their effects as unknown"
+        );
+        failure = Some(match failure {
+            Some(existing) => format!("{existing}\n{note}"),
+            None => note,
+        });
+    }
     if let Some(failure) = &failure {
         content.push_str(failure);
         content.push('\n');

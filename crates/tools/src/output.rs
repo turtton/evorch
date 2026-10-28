@@ -74,6 +74,21 @@ impl Capture {
 
 /// Apply the same ceiling before any event, GUI, or model receives a tool result.
 pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
+    // Two small facts outlive any replacement of the detail below: run_js's own
+    // summary (the interface reads it), and whether a post-edit checker warned
+    // (never its text), so a caller such as run_js can still report the warning.
+    let run_js = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("run_js"))
+        .cloned();
+    let checker_outcome = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("comment_checker"))
+        .and_then(|checker| checker.get("outcome"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     if result.images.len() > MAX_RESULT_IMAGES {
         let omitted = result.images.len() - MAX_RESULT_IMAGES;
         result.images.truncate(MAX_RESULT_IMAGES);
@@ -81,24 +96,16 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
             .content
             .push_str(&format!("\n[{omitted} more images omitted]"));
     }
+    let mut replaced = false;
     if result.content.len() > PREVIEW_BYTES + 2048
         || result.content.lines().count() > PREVIEW_LINES + 8
     {
-        // The interface reads run_js's own summary from the detail, so it outlives
-        // the artifact reference that replaces the rest of the detail.
-        let run_js = result
-            .detail
-            .as_ref()
-            .and_then(|detail| detail.get("run_js"))
-            .cloned();
         let mut capture = Capture::default();
         capture.push(result.content.as_bytes());
         let limited = capture.finish();
         result.content = limited.content;
         result.detail = limited.detail;
-        if let (Some(run_js), Some(detail)) = (run_js, result.detail.as_mut()) {
-            detail["run_js"] = run_js;
-        }
+        replaced = true;
     }
     // Structured output from external tools must not bypass the text ceiling.
     if result
@@ -108,6 +115,16 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
     {
         result.detail =
             Some(serde_json::json!({"detail_omitted": "structured output exceeded 16 KiB"}));
+        replaced = true;
+    }
+    if replaced {
+        if let Some(run_js) = run_js {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["run_js"] = run_js;
+        }
+        if let Some(outcome) = checker_outcome {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["comment_checker"] =
+                serde_json::json!({"outcome": outcome});
+        }
     }
     result
 }
@@ -349,6 +366,26 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checker_warning_outlives_the_artifact_but_its_text_does_not() {
+        let detail = serde_json::json!({"comment_checker": {"outcome": "warning", "message": "UNTRUSTED TEXT"}});
+        for result in [
+            ToolResult::success("line\n".repeat(20_000)).with_detail(detail.clone()),
+            ToolResult::success("short").with_detail(serde_json::json!({
+                "comment_checker": {"outcome": "warning", "message": "UNTRUSTED TEXT"},
+                "diff": "x".repeat(20_000),
+            })),
+        ] {
+            let limited = limit_result(result);
+            let detail = limited.detail.unwrap();
+            assert_eq!(
+                detail["comment_checker"],
+                serde_json::json!({"outcome": "warning"})
+            );
+            assert!(!detail.to_string().contains("UNTRUSTED"));
+        }
+    }
 
     #[test]
     fn a_large_run_js_result_keeps_its_summary_next_to_the_artifact() {

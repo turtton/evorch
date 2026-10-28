@@ -39,9 +39,20 @@ enum Mode {
         program: PathBuf,
         args: Vec<String>,
     },
+    /// Preparation that does not finish until the receiver is released, to test that
+    /// starting a worker is bounded by the call's deadline.
+    #[cfg(test)]
+    Stalled(Arc<Mutex<std::sync::mpsc::Receiver<()>>>),
 }
 
 impl WorkerLauncher {
+    #[cfg(test)]
+    pub(super) fn stalled(release: std::sync::mpsc::Receiver<()>) -> Self {
+        Self {
+            mode: Mode::Stalled(Arc::new(Mutex::new(release))),
+        }
+    }
+
     pub const fn production() -> Self {
         Self {
             mode: Mode::Production,
@@ -82,6 +93,8 @@ impl std::fmt::Debug for WorkerLauncher {
                 &match self.mode {
                     Mode::Production => "production",
                     Mode::Injected { .. } => "injected",
+                    #[cfg(test)]
+                    Mode::Stalled(_) => "stalled",
                 },
             )
             .finish()
@@ -184,6 +197,14 @@ impl Spawned {
 
 fn spawn(mode: &Mode) -> Result<Spawned, String> {
     match mode {
+        #[cfg(test)]
+        Mode::Stalled(release) => {
+            let _ = release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv();
+            Err("released without a worker".to_owned())
+        }
         Mode::Injected {
             sandbox,
             program,
@@ -205,7 +226,7 @@ fn spawn(mode: &Mode) -> Result<Spawned, String> {
             start(
                 &sandbox,
                 CommandSpec {
-                    program: program.to_string_lossy().into_owned(),
+                    program: sandbox.executable().to_string_lossy().into_owned(),
                     args: vec![WORKER_SUBCOMMAND.to_owned()],
                     cwd: None,
                     extra_env: Vec::new(),
@@ -251,12 +272,21 @@ fn library_path() -> Vec<(String, String)> {
 fn locate_worker() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(WORKER_ENV).filter(|value| !value.is_empty()) {
         let path = PathBuf::from(path);
-        return existing_file(&path)
+        return resolve_worker(&path)
             .ok_or_else(|| format!("{WORKER_ENV}={} is not a file", path.display()));
     }
     let current = std::env::current_exe()
         .map_err(|error| format!("cannot locate the running executable: {error}"))?;
-    worker_beside(&current)
+    let found = worker_beside(&current)?;
+    resolve_worker(&found).ok_or_else(|| format!("{} is not a file", found.display()))
+}
+
+/// The worker file with symlinks and relative parts resolved, so the sandbox mounts
+/// and runs one and the same path.
+fn resolve_worker(path: &Path) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()
+        .filter(|resolved| resolved.is_file())
 }
 
 /// The evorch binary that serves the worker for a process running as
@@ -294,6 +324,25 @@ mod tests {
         let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&path, b"").unwrap();
         path
+    }
+
+    #[test]
+    fn a_relative_or_symlinked_worker_path_is_resolved_to_the_real_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = touch(directory.path(), "real-evorch");
+        std::os::unix::fs::symlink(&real, directory.path().join("link")).unwrap();
+        let through_dots = directory.path().join("././link");
+
+        assert_eq!(
+            resolve_worker(&through_dots),
+            Some(real.canonicalize().unwrap())
+        );
+        assert_eq!(resolve_worker(&directory.path().join("absent")), None);
+        assert_eq!(
+            resolve_worker(directory.path()),
+            None,
+            "a directory is not a worker"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -33,6 +34,13 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// How long after its own deadline a worker may take to report before the host
 /// stops waiting and kills it.
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// Requests tolerated beyond the call limit (each is answered with a refusal);
+/// a program that keeps going after that is stopped.
+const OVER_LIMIT_REQUESTS: u32 = 32;
+/// Total size of the arguments a program may send in one run.
+const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Replies waiting for a worker that does not read them.
+const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
 /// One call as recorded in `detail.run_js.calls`.
 pub(super) struct Recorded {
@@ -58,6 +66,8 @@ pub(super) struct Run {
     pub uncertain: BTreeSet<String>,
     pub failures: Vec<Failure>,
     pub warnings: Vec<(u32, String, String)>,
+    /// Set when the commands the program started could not be confirmed stopped.
+    pub drain_error: Option<String>,
     pub limit_hit: Option<&'static str>,
 }
 
@@ -127,6 +137,55 @@ pub(super) struct Session<'a> {
     pub tools: &'a [String],
     pub max_tool_calls: u32,
     pub deadline: Instant,
+    pub bounds: Bounds,
+}
+
+/// Limits that keep a worker from making the host buffer without end.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Bounds {
+    pub over_limit_requests: u32,
+    pub request_bytes: usize,
+    pub pending_reply_bytes: usize,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self {
+            over_limit_requests: OVER_LIMIT_REQUESTS,
+            request_bytes: MAX_REQUEST_BYTES,
+            pending_reply_bytes: MAX_PENDING_BYTES,
+        }
+    }
+}
+
+/// Queues messages for the writer task, counting the bytes still unwritten.
+struct Outbox {
+    queue: mpsc::UnboundedSender<Vec<u8>>,
+    pending: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+enum SendError {
+    Closed,
+    Backlog,
+}
+
+impl Outbox {
+    fn send(&self, message: &HostMessage) -> Result<(), SendError> {
+        let line = protocol::encode_message(message).map_err(|_| SendError::Closed)?;
+        let total = self.pending.fetch_add(line.len(), Ordering::SeqCst) + line.len();
+        if total > self.limit {
+            return Err(SendError::Backlog);
+        }
+        self.queue.send(line).map_err(|_| SendError::Closed)
+    }
+}
+
+fn send_failure(error: &SendError) -> Ending {
+    Ending::Failed(match error {
+        SendError::Closed => "cannot reach the JS worker".to_owned(),
+        SendError::Backlog => "the JS worker is not reading its replies".to_owned(),
+    })
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -259,13 +318,19 @@ pub(super) async fn serve(
     else {
         return Ending::Failed("the JS worker's pipes are unavailable".into());
     };
-    let (outbox, mut queue) = mpsc::unbounded_channel::<HostMessage>();
+    let (queue, mut writes) = mpsc::unbounded_channel::<Vec<u8>>();
+    let pending = Arc::new(AtomicUsize::new(0));
+    let outbox = Outbox {
+        queue,
+        pending: Arc::clone(&pending),
+        limit: session.bounds.pending_reply_bytes,
+    };
     let _writer_task = AbortOnDrop(tokio::spawn(async move {
-        while let Some(message) = queue.recv().await {
-            if protocol::write_message(&mut writer, &message)
-                .await
-                .is_err()
-            {
+        use tokio::io::AsyncWriteExt;
+        while let Some(line) = writes.recv().await {
+            let written = writer.write_all(&line).await;
+            pending.fetch_sub(line.len(), Ordering::SeqCst);
+            if written.is_err() || writer.flush().await.is_err() {
                 break;
             }
         }
@@ -281,13 +346,13 @@ pub(super) async fn serve(
             }
         }
     }));
-    let unreachable = || Ending::Failed("cannot reach the JS worker".to_owned());
-    if outbox.send(start).is_err() {
-        return unreachable();
+    if let Err(error) = outbox.send(&start) {
+        return send_failure(&error);
     }
 
     let mut scheduler = Scheduler::default();
     let mut seq = 0u32;
+    let mut request_bytes = 0usize;
     let hard_deadline = session.deadline + KILL_GRACE;
     let ending = loop {
         tokio::select! {
@@ -304,6 +369,20 @@ pub(super) async fn serve(
                     }
                     WorkerMessage::ToolCall { id, name, args } => {
                         seq += 1;
+                        request_bytes = request_bytes.saturating_add(args.to_string().len());
+                        if seq > session.max_tool_calls.saturating_add(session.bounds.over_limit_requests) {
+                            state.limit_hit = Some("tool_calls");
+                            break Ending::Failed(format!(
+                                "the program kept calling tools after the limit of {} calls",
+                                session.max_tool_calls
+                            ));
+                        }
+                        if request_bytes > session.bounds.request_bytes {
+                            break Ending::Failed(format!(
+                                "the program sent more than {} bytes of tool arguments",
+                                session.bounds.request_bytes
+                            ));
+                        }
                         let refusal = if seq > session.max_tool_calls {
                             state.limit_hit = Some("tool_calls");
                             Some(format!(
@@ -318,8 +397,8 @@ pub(super) async fn serve(
                         if let Some(error) = refusal {
                             state.record_refused(seq, name, error.clone());
                             let reply = HostMessage::ToolResult { id, result: None, error: Some(error) };
-                            if outbox.send(reply).is_err() {
-                                break unreachable();
+                            if let Err(error) = outbox.send(&reply) {
+                                break send_failure(&error);
                             }
                         } else {
                             scheduler.queue.push_back(Pending { id, seq, name, args });
@@ -335,8 +414,8 @@ pub(super) async fn serve(
                     Ok(result) => HostMessage::ToolResult { id, result: Some(result), error: None },
                     Err(error) => HostMessage::ToolResult { id, result: None, error: Some(error) },
                 };
-                if outbox.send(reply).is_err() {
-                    break unreachable();
+                if let Err(error) = outbox.send(&reply) {
+                    break send_failure(&error);
                 }
                 scheduler.start_ready(&session);
             }

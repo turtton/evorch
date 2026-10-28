@@ -38,7 +38,6 @@ struct Fixture {
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     model: Arc<ScriptedModel>,
-    executor: Arc<ToolExecutor>,
 }
 
 fn fixture(
@@ -70,14 +69,12 @@ fn fixture_with(
         executor.set_policy(policy);
     }
     let model = Arc::new(ScriptedModel::new(responses.into_iter().map(Ok)));
-    let executor = Arc::new(executor);
-    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::clone(&executor), model.clone());
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
     runtime.set_run_js_settings(settings);
     Fixture {
         runtime,
         bus,
         model,
-        executor,
     }
 }
 
@@ -538,6 +535,30 @@ printf '%s\n' '{{"type":"done","value":"left it running"}}'"#,
         vec![run_js_call("js-1"), finish()],
     );
 
+    // Checks the child at the moment the parent completes, not after the run ends:
+    // by then its process must already be stopped and reaped.
+    let observer = {
+        let mut events = fixture.bus.subscribe();
+        let pid_file = pid_file.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = events.recv().await.unwrap();
+                if let EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. }) = &event.kind
+                    && call_id == "js-1"
+                {
+                    let pid: i32 = std::fs::read_to_string(&pid_file)
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    return rustix::process::test_kill_process(
+                        rustix::process::Pid::from_raw(pid).unwrap(),
+                    )
+                    .is_err();
+                }
+            }
+        })
+    };
     let mut receiver = fixture.bus.subscribe();
     let run =
         fixture
@@ -575,26 +596,16 @@ printf '%s\n' '{{"type":"done","value":"left it running"}}'"#,
             .unwrap()
     };
     assert!(position("js-1/1") < position("js-1"));
-    // The parent says what was cut off, and its process is gone once jobs are drained.
+    // The parent says what was cut off, and the process was gone when it completed.
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.contains("=> left it running"), "{text}");
     assert!(
         text.contains("shell #1: cut off before it finished"),
         "{text}"
     );
-    fixture
-        .executor
-        .drain_shell_jobs(&run.to_string())
-        .await
-        .unwrap();
-    let pid: i32 = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     assert!(
-        rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_err(),
-        "child {pid} is still alive"
+        observer.await.unwrap(),
+        "the child was still alive when run_js completed"
     );
 }
 
@@ -771,4 +782,69 @@ printf '%s\n' '{{"type":"done","value":null}}'"#
     assert!(text.contains(&format!("wrote: {target}")), "{text}");
     assert!(!text.contains("UNTRUSTED-REPOSITORY-COMMENT"), "{text}");
     assert_eq!(text.lines().count(), 1, "one summary line and nothing else");
+}
+
+#[tokio::test]
+async fn a_checker_warning_survives_an_artifact_and_a_discarded_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory
+        .path()
+        .join("big.rs")
+        .to_string_lossy()
+        .into_owned();
+    // 90 KB of file content and a 150 KB checker message: the executor turns the
+    // child's output into an artifact, and the program ignores the reply anyway.
+    let script = format!(
+        r#"content=$(head -c 90000 /dev/zero | tr '\0' a)
+printf '{{"type":"tool_call","id":1,"name":"write","args":{{"path":"{target}","content":"%s"}}}}\n' "$content"
+read -r _
+printf '%s\n' '{{"type":"done","value":null}}'"#
+    );
+    let fixture = fixture_with(
+        worker(&script),
+        None,
+        Some(Arc::new(HugeWarningHook)),
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run(&fixture, Role::Worker).await;
+
+    let child_detail = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                call_id, detail, ..
+            }) if call_id == "js-1/1" => detail.clone(),
+            _ => None,
+        })
+        .expect("child completed with a detail");
+    assert!(
+        child_detail["output_artifact"]["path"].is_string(),
+        "the output limiter must have engaged: {child_detail}"
+    );
+    assert_eq!(
+        child_detail["comment_checker"],
+        json!({"outcome": "warning"}),
+        "only the fact of the warning remains"
+    );
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(
+        text.contains(&format!(
+            "warnings: write #1: post-edit checker warning on {target}"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("UNTRUSTED-REPOSITORY-COMMENT"), "{text}");
+}
+
+struct HugeWarningHook;
+
+#[async_trait::async_trait]
+impl PostEditHook for HugeWarningHook {
+    async fn check(&self, _: &PostEditInput) -> PostEditOutcome {
+        PostEditOutcome::Warning {
+            message: "UNTRUSTED-REPOSITORY-COMMENT\n".repeat(5000),
+        }
+    }
 }

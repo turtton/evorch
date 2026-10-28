@@ -307,6 +307,13 @@ impl Tool for Shell {
     async fn drain_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.drain(run_id).await
     }
+    async fn drain_child_shell_jobs(
+        &self,
+        run_id: &str,
+        parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        self.jobs.drain_children(run_id, parent_call_id).await
+    }
     fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.release(run_id)
     }

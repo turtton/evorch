@@ -510,12 +510,35 @@ impl JobRegistry {
         }
     }
     pub(super) async fn drain(&self, run_id: &str) -> Result<(), ToolError> {
+        self.drain_where(|job| job.owner == run_id).await
+    }
+
+    /// Stops the jobs a `run_js` call started (their call ids are
+    /// `<parent>/<n>`) and waits for their processes to be gone. The run's other
+    /// jobs are left alone.
+    pub(super) async fn drain_children(
+        &self,
+        run_id: &str,
+        parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        let prefix = format!("{parent_call_id}/");
+        self.drain_where(|job| {
+            job.owner == run_id
+                && job
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call_id| call_id.starts_with(&prefix))
+        })
+        .await
+    }
+
+    async fn drain_where(&self, selected: impl Fn(&Job) -> bool) -> Result<(), ToolError> {
         let jobs: Vec<_> = self
             .jobs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .filter(|job| job.owner == run_id)
+            .filter(|job| selected(job))
             .cloned()
             .collect();
         for job in &jobs {

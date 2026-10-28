@@ -103,6 +103,17 @@ where
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+/// One message as the line [`write_message`] would send.
+///
+/// # Errors
+/// A message that cannot be serialised.
+pub fn encode_message<T: Serialize>(message: &T) -> std::io::Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(message)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 /// Writes one message as a single line and flushes.
 ///
 /// # Errors
