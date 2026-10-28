@@ -927,6 +927,86 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
 }
 
 #[tokio::test]
+async fn observed_child_completion_preserves_the_wire_prefix_without_an_extra_turn() {
+    for tool in ["wait", "run_output"] {
+        let read = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut h = harness_with_read(
+            vec![
+                read_response(0),
+                text_response("child result"),
+                ScriptedResponse::tool_call(
+                    "observe",
+                    MODEL,
+                    0,
+                    "observe",
+                    tool,
+                    [if tool == "wait" {
+                        json!({"run_ids":["run-2"]}).to_string()
+                    } else {
+                        json!({"run_id":"run-2"}).to_string()
+                    }],
+                ),
+                text_response("The child result is already known"),
+            ],
+            1_000_000,
+            read.clone(),
+        );
+        h.runtime = h.runtime.with_sequential_run_ids();
+        let parent = h.runtime.delegate_background(
+            Role::Orchestrator,
+            "Coordinate child".into(),
+            RunConfig::default(),
+        );
+        read.started.notified().await;
+        let child = h
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, "Child work", RunConfig::default())
+            .unwrap();
+        assert_eq!(h.runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+        read.release.notify_one();
+        assert_eq!(h.runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+        let events = through_phase(&mut h.receiver, parent, AgentRunPhase::Done).await;
+        let requests: Vec<_> = h
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .map(|request| request.body)
+            .collect();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(h.mock.remaining_scripts(), 0);
+        for (previous, next) in [(0, 2), (2, 3)] {
+            assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next])
+                .unwrap();
+        }
+        assert!(requests[3].to_string().contains("child result"));
+        assert!(!requests[3].to_string().contains("[agent-message"));
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Provider(ProviderEvent::RequestCompleted {
+                    run_id: Some(run),
+                    input_tokens,
+                    cache_read_tokens,
+                    ..
+                }) if run == &parent.to_string() => Some((*input_tokens, *cache_read_tokens)),
+                EventKind::Diagnostic(d) if d.code == "CacheRegression" => panic!("{d:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 3);
+        for pair in usage.windows(2) {
+            assert!(pair[0].0 > 0);
+            assert!(pair[1].1 >= pair[0].0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
     interrupted_tool_recovery(Some("Explain the interrupted result"), false).await;
 }

@@ -12,13 +12,25 @@ impl AgentRuntime {
     /// Hold `message` for a recipient that is not running. The caller holds the
     /// runs lock, so registration cannot release the queue concurrently.
     pub(super) fn hold_message(&self, recipient: RunId, message: AgentMessage) {
+        self.hold_queued_message(recipient, crate::mailbox::QueuedMessage::explicit(message));
+    }
+
+    pub(super) fn hold_queued_message(
+        &self,
+        recipient: RunId,
+        queued: crate::mailbox::QueuedMessage,
+    ) {
+        if queued.observed() {
+            return;
+        }
+        let message = queued.message.clone();
         self.shared
             .held_messages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(recipient)
             .or_default()
-            .push(message.clone());
+            .push(queued);
         self.shared
             .bus
             .emit(Event::new(AgentMessageEvent::Delivered {
@@ -43,9 +55,10 @@ impl AgentRuntime {
             .sent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for message in held {
+        for queued in held.into_iter().filter(|message| !message.observed()) {
+            let message = queued.message.clone();
             let sender = message.sender_run_id.parse::<RunId>().ok();
-            match mailbox.try_push_completion(message.clone()) {
+            match mailbox.try_push_queued(queued) {
                 Ok(()) => {
                     if let Some(sender) = sender {
                         sent.insert(
@@ -123,31 +136,34 @@ impl AgentRuntime {
         if self.operator_stopped(run) {
             return;
         }
-        let pending = self
-            .shared
-            .held_messages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run)
-            .is_some_and(|queue| !queue.is_empty());
+        // Observation also takes runs before held_messages. Keep the root wake
+        // decision under that lock, so acknowledging the last report cannot race
+        // the empty-queue check and emit a spurious host continuation request.
+        let runs = lock_runs(&self.shared.runs);
+        let Some(entry) = runs.get(&run) else { return };
+        let pending = {
+            let mut held = self
+                .shared
+                .held_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.get_mut(&run).is_some_and(|queue| {
+                queue.retain(|message| !message.observed());
+                !queue.is_empty()
+            })
+        };
         if !pending {
             return;
         }
-        let (parent, root) = {
-            let runs = lock_runs(&self.shared.runs);
-            let Some(entry) = runs.get(&run) else {
-                return;
-            };
-            let mut root = run;
-            let mut visited = HashSet::from([run]);
-            while let Some(parent) = runs.get(&root).and_then(|entry| entry.parent) {
-                if !visited.insert(parent) {
-                    break;
-                }
-                root = parent;
+        let parent = entry.parent;
+        let mut root = run;
+        let mut visited = HashSet::from([run]);
+        while let Some(parent) = runs.get(&root).and_then(|entry| entry.parent) {
+            if !visited.insert(parent) {
+                break;
             }
-            (entry.parent, root)
-        };
+            root = parent;
+        }
         if !self.take_auto_wake(root) {
             return;
         }
@@ -159,7 +175,10 @@ impl AgentRuntime {
                         run_id: run.to_string(),
                     }));
             }
-            Some(parent) => self.wake_subagent(parent, run),
+            Some(parent) => {
+                drop(runs);
+                self.wake_subagent(parent, run);
+            }
         }
     }
 
@@ -197,12 +216,15 @@ impl AgentRuntime {
                 .held_messages
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(queue) = held.get_mut(&run) {
+                queue.retain(|message| !message.observed());
+            }
             match held.get_mut(&run) {
                 Some(queue) if !queue.is_empty() => queue.remove(0),
                 _ => return,
             }
         };
-        if let Err(error) = self.restore_and_deliver(parent, run, first.clone()) {
+        if let Err(error) = self.restore_and_deliver(parent, run, first.message.clone()) {
             tracing::info!(%run, %error, "held messages wait for the subagent to be resumed");
             self.shared
                 .held_messages
@@ -218,6 +240,106 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observed_only_held_reports_do_not_wake_root_or_restore_subagent() {
+        use crate::mailbox::{CompletionNotice, QueuedMessage};
+        for subagent in [false, true] {
+            let bus = Arc::new(EventBus::new(128));
+            let runtime = AgentRuntime::new(
+                bus.clone(),
+                Arc::new(ToolExecutor::new(bus.clone())),
+                Arc::new(crate::escalation_review::support::ScriptedModel::new([])),
+            );
+            let root = runtime.delegate_background(
+                Role::Orchestrator,
+                "root".into(),
+                RunConfig::default(),
+            );
+            let parent = if subagent {
+                runtime
+                    .delegate_background_as_child(
+                        root,
+                        Role::Worker,
+                        "parent",
+                        RunConfig::default(),
+                    )
+                    .unwrap()
+            } else {
+                root
+            };
+            lock_runs(&runtime.shared.runs)
+                .get(&parent)
+                .unwrap()
+                .phase_tx
+                .send_replace(AgentRunPhase::Done);
+            let child = RunId::new(99);
+            let message = AgentMessage {
+                message_id: "held".into(),
+                sender_run_id: child.to_string(),
+                recipient_run_id: parent.to_string(),
+                kind: AgentMessageKind::Send,
+                content: "output".into(),
+                reply_to: None,
+            };
+            let old = CompletionNotice::new(Some(parent), child, 1);
+            runtime.hold_queued_message(
+                parent,
+                QueuedMessage::completion(message.clone(), old.clone()),
+            );
+            runtime.observe_completion(&old);
+            assert!(runtime.shared.held_messages.lock().unwrap()[&parent].is_empty());
+            // Inject a stale queued envelope to independently test the wake/release fences.
+            runtime
+                .shared
+                .held_messages
+                .lock()
+                .unwrap()
+                .entry(parent)
+                .or_default()
+                .push(QueuedMessage::completion(message.clone(), old.clone()));
+            let mut events = bus.subscribe();
+            runtime.wake(parent).await;
+            assert!(events.drain_pending_snapshot().is_empty());
+            assert!(runtime.shared.auto_wakes.lock().unwrap().is_empty());
+            let mailbox = RunMailbox::new();
+            let version = mailbox.subscribe_version();
+            runtime
+                .shared
+                .held_messages
+                .lock()
+                .unwrap()
+                .entry(parent)
+                .or_default()
+                .push(QueuedMessage::completion(message.clone(), old));
+            runtime.release_held_messages(parent, &mailbox);
+            assert!(mailbox.is_empty());
+            assert!(!version.has_changed().unwrap());
+            // An unobserved generation and a same-text explicit Send are still released.
+            runtime.hold_queued_message(
+                parent,
+                QueuedMessage::completion(
+                    message.clone(),
+                    CompletionNotice::new(Some(parent), child, 2),
+                ),
+            );
+            runtime.hold_message(parent, message.clone());
+            runtime.release_held_messages(parent, &mailbox);
+            assert_eq!(mailbox.drain_interrupting(), vec![message.clone()]);
+            assert_eq!(mailbox.drain_all(), vec![message.clone()]);
+            if !subagent {
+                runtime.hold_message(parent, message);
+                runtime.wake(parent).await;
+                assert!(events.drain_pending_snapshot().iter().any(|event| matches!(&event.kind,
+                    EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) if run_id == &parent.to_string()
+                )));
+                assert_eq!(
+                    runtime.shared.auto_wakes.lock().unwrap().get(&root),
+                    Some(&1)
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn automatic_wakes_pause_once_at_the_limit_until_user_input() {

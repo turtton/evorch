@@ -171,3 +171,63 @@ async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent
         assert_eq!(turn.parent_subagent_id, nested.then(|| child.to_string()));
     }
 }
+
+#[tokio::test]
+async fn restored_registration_has_a_fresh_completion_receipt() {
+    test_support::isolated_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("generation.sqlite3"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(CompletingModel::default()),
+    )
+    .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let old = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    runtime.observe_completion(&old);
+    runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "continue", None)
+        .unwrap();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let new = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    assert_ne!(old.generation, new.generation);
+    let report = AgentMessage {
+        message_id: "new-report".into(),
+        sender_run_id: child.to_string(),
+        recipient_run_id: parent.to_string(),
+        kind: AgentMessageKind::Send,
+        content: "done".into(),
+        reply_to: None,
+    };
+    runtime.hold_queued_message(
+        parent,
+        crate::mailbox::QueuedMessage::completion(report, new.clone()),
+    );
+    runtime.observe_completion(&old);
+    assert_eq!(
+        runtime.shared.held_messages.lock().unwrap()[&parent].len(),
+        1
+    );
+    runtime.observe_completion(&new);
+    assert!(runtime.shared.held_messages.lock().unwrap()[&parent].is_empty());
+}

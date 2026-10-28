@@ -2,10 +2,13 @@
 //!
 //! [`RunMailbox`] はプロセス内の run タスク間メッセージ配送を担う。容量制限
 //! 付きキューで fail-closed バックプレッシャーを提供し、各変更後に単調増加する
-//! バージョン番号を通知する。
+//! バージョン番号を通知する。観測済み完了通知の除去だけでは新入力を通知しない。
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+mod completion;
+pub(crate) use completion::{CompletionNotice, QueuedMessage};
 
 use event_bus::AgentMessage;
 use tokio::sync::watch;
@@ -28,12 +31,6 @@ pub struct RunMailbox {
     version: watch::Sender<u64>,
 }
 
-#[derive(Debug)]
-struct QueuedMessage {
-    message: AgentMessage,
-    interrupts_wait: bool,
-}
-
 impl RunMailbox {
     /// 空の inbox を生成する。バージョンは 0 から始まる。
     pub fn new() -> Self {
@@ -50,16 +47,23 @@ impl RunMailbox {
     /// inbox が閉じている場合は [`PushError::Closed`]、容量一杯の場合は
     /// [`PushError::Full`] を返す。成功時にバージョンを単調増加させる。
     pub fn try_push(&self, message: AgentMessage) -> Result<(), PushError> {
-        self.push(message, true)
+        self.try_push_queued(QueuedMessage::explicit(message))
     }
 
     /// 自動完了通知を追加する。複数 run の `wait(mode=all)` はこの通知だけでは
     /// 中断せず、対象 run の終端状態で完了条件を判定する。
-    pub(crate) fn try_push_completion(&self, message: AgentMessage) -> Result<(), PushError> {
-        self.push(message, false)
+    pub(crate) fn try_push_completion(
+        &self,
+        message: AgentMessage,
+        notice: std::sync::Arc<CompletionNotice>,
+    ) -> Result<(), PushError> {
+        self.try_push_queued(QueuedMessage::completion(message, notice))
     }
 
-    fn push(&self, message: AgentMessage, interrupts_wait: bool) -> Result<(), PushError> {
+    pub(crate) fn try_push_queued(&self, queued: QueuedMessage) -> Result<(), PushError> {
+        if queued.observed() {
+            return Ok(());
+        }
         let closed = self
             .closed
             .lock()
@@ -67,21 +71,30 @@ impl RunMailbox {
         if *closed {
             return Err(PushError::Closed);
         }
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.pending();
         if queue.len() >= MAILBOX_CAPACITY {
             return Err(PushError::Full);
         }
-        queue.push_back(QueuedMessage {
-            message,
-            interrupts_wait,
-        });
+        queue.push_back(queued);
         drop(queue);
         drop(closed);
         self.version.send_modify(|value| *value += 1);
         Ok(())
+    }
+
+    /// Filter before any queue consumer, including aside/Waiting drains and inbox.
+    /// Pruning is not new input and deliberately does not change the version.
+    fn pending(&self) -> MutexGuard<'_, VecDeque<QueuedMessage>> {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.retain(|message| !message.observed());
+        queue
+    }
+
+    pub(crate) fn discard_observed_completions(&self) {
+        drop(self.pending());
     }
 
     /// 新規メッセージの受け入れを停止する。閉じた後の `try_push` は
@@ -111,10 +124,7 @@ impl RunMailbox {
     ///
     /// 取り出し後にバージョンを更新する。
     pub fn drain_all(&self) -> Vec<AgentMessage> {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.pending();
         let drained: Vec<AgentMessage> = queue.drain(..).map(|queued| queued.message).collect();
         drop(queue);
         self.version.send_modify(|value| *value += 1);
@@ -124,10 +134,7 @@ impl RunMailbox {
     /// 条件に一致するすべてのメッセージを FIFO 順で取り出し、一致しないメッセージは
     /// 相対順序を保って残す。
     pub fn drain_where(&self, predicate: impl Fn(&AgentMessage) -> bool) -> Vec<AgentMessage> {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.pending();
         let mut matched = Vec::new();
         let mut remaining = VecDeque::with_capacity(queue.len());
         while let Some(queued) = queue.pop_front() {
@@ -149,10 +156,7 @@ impl RunMailbox {
         &self,
         predicate: impl Fn(&AgentMessage) -> bool,
     ) -> Option<AgentMessage> {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.pending();
         let index = queue.iter().position(|queued| predicate(&queued.message));
         let removed = index
             .and_then(|index| queue.remove(index))
@@ -166,28 +170,18 @@ impl RunMailbox {
 
     /// 現在のメッセージ数を返す。
     pub fn len(&self) -> usize {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.pending().len()
     }
 
     /// inbox が空かどうかを返す。
     pub fn is_empty(&self) -> bool {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+        self.pending().is_empty()
     }
 
     /// 自動完了通知以外の未読メッセージがあり、run の待機を中断すべきか返す。
     /// メッセージの内容や既読状態は変更しない。
     pub(crate) fn has_interrupting_message(&self) -> bool {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .any(|queued| queued.interrupts_wait)
+        self.pending().iter().any(|queued| queued.interrupts_wait())
     }
 
     /// バージョン変更通知を受け取る購読者を返す。
@@ -197,21 +191,16 @@ impl RunMailbox {
 
     /// `sender` からの、自動完了通知以外の未読メッセージがあるか返す。
     pub(crate) fn has_interrupting_message_from(&self, sender: &str) -> bool {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.pending()
             .iter()
-            .any(|queued| queued.interrupts_wait && queued.message.sender_run_id == sender)
+            .any(|queued| queued.interrupts_wait() && queued.message.sender_run_id == sender)
     }
 
     /// 自動完了通知以外の未読メッセージを FIFO 順で取り出し、完了通知は残す。
     pub(crate) fn drain_interrupting(&self) -> Vec<AgentMessage> {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.pending();
         let (taken, kept): (VecDeque<_>, VecDeque<_>) =
-            queue.drain(..).partition(|queued| queued.interrupts_wait);
+            queue.drain(..).partition(|queued| queued.interrupts_wait());
         *queue = kept;
         drop(queue);
         if !taken.is_empty() {

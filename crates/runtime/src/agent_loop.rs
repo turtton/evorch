@@ -15,6 +15,8 @@ mod host_inputs;
 mod identical_calls;
 mod messages;
 mod observability;
+#[cfg(test)]
+mod observed_completion_tests;
 mod questions;
 mod retracted_delegates;
 #[cfg(test)]

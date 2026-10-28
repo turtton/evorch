@@ -102,8 +102,10 @@ pub(crate) struct Shared {
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
+    /// Monotonic incarnation IDs, including same-run-ID restores.
+    next_completion_generation: AtomicU64,
     /// Messages for finished or stopped runs, released when the run is registered again.
-    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<AgentMessage>>>,
+    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
     /// Automatic wakes per conversation root since the last user input.
     pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
@@ -270,6 +272,7 @@ pub(crate) struct RunEntry {
     pub(crate) parent: Option<RunId>,
     escalated_from: Option<RunId>,
     completion_relayed: bool,
+    completion_notice: Arc<crate::mailbox::CompletionNotice>,
     terminal_reason: Option<String>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
@@ -698,6 +701,7 @@ impl AgentRuntime {
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
@@ -1016,6 +1020,7 @@ impl AgentRuntime {
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
                 bus,
@@ -1583,6 +1588,13 @@ impl AgentRuntime {
                     parent,
                     escalated_from,
                     completion_relayed,
+                    completion_notice: crate::mailbox::CompletionNotice::new(
+                        parent,
+                        run_id,
+                        self.shared
+                            .next_completion_generation
+                            .fetch_add(1, Ordering::Relaxed),
+                    ),
                     phase_tx: phase_tx_entry,
                     phase_rx,
                     message_count_rx,
