@@ -333,6 +333,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 run_id, agent_name, ..
             }) => {
                 self.open_subagent_pane(run_id);
+                self.unpark_subagent(run_id);
                 if let Some(panel) = self
                     .panels
                     .get_mut(&PanelId::new(format!("agent-{run_id}")))
@@ -354,7 +355,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.park_completed_subagent(run_id);
                         }
                     }
-                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
+                    AgentRunPhase::Pending | AgentRunPhase::Running => {
+                        self.unpark_subagent(run_id);
+                    }
+                    AgentRunPhase::Waiting => {}
                 }
             }
             EventKind::Ownership(event_bus::OwnershipEvent {

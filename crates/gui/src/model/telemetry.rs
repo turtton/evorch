@@ -154,13 +154,15 @@ pub struct TelemetryOverlay {
     /// Rows whose latest request changed since their context window was resolved.
     stale_context: BTreeSet<String>,
     active_running_start: BTreeMap<String, Instant>,
-    accumulated_running: BTreeMap<String, Duration>,
+    /// Finished Running spans per run, oldest first. Kept as spans rather than a
+    /// total so concurrent runs can be merged into real elapsed time.
+    running_spans: BTreeMap<String, Vec<(Instant, Instant)>>,
     context_order: u64,
     side_requests: BTreeSet<String>,
 }
 
 /// Thread totals plus the conversation roots' latest and average request measurements.
-/// Costs and wall time include owned children; cache and model performance do not.
+/// Costs and running time include owned children; cache and model performance do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThreadMetrics {
     /// Sum across the conversation and every subagent owned by this thread.
@@ -177,6 +179,8 @@ pub struct ThreadMetrics {
     pub average_cache_hit_rate: Option<f64>,
     /// Retention of the conversation roots, the displayed cache health metric.
     pub cache_reuse: CacheReuseSummary,
+    /// Elapsed time during which at least one run of the thread was Running:
+    /// the union of the runs' Running spans, so parallel subagents overlap.
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
     pub context_used_tokens: Option<u128>,
@@ -443,7 +447,6 @@ impl TelemetryOverlay {
                 row.conversation_root |= agent_name.starts_with("chat:");
                 row.ttft_sum_ms = 0;
                 row.ttft_count = 0;
-                self.accumulated_running.entry(run_id.clone()).or_default();
             }
             EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 new_run_id: run_id,
@@ -466,8 +469,10 @@ impl TelemetryOverlay {
                     | AgentRunPhase::Done
                     | AgentRunPhase::Error => {
                         if let Some(start) = self.active_running_start.remove(run_id) {
-                            *self.accumulated_running.entry(run_id.clone()).or_default() +=
-                                now.saturating_duration_since(start);
+                            self.running_spans
+                                .entry(run_id.clone())
+                                .or_default()
+                                .push((start, now.max(start)));
                         }
                         // An ended run executes no tool, even if a call of it
                         // never reported a result.
