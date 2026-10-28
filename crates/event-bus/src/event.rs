@@ -179,6 +179,9 @@ pub mod diagnostic_codes {
     /// reasoning effort was not applied, or the model's route was guessed because
     /// the account catalog did not provide it.
     pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
+    /// Catalog/version lookup evidence. Failures and degraded catalogs are warnings;
+    /// successful fetches are info (not persisted under the default warnings policy).
+    pub const PROVIDER_CATALOG_FETCH: &str = "ProviderCatalogFetch";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
@@ -241,6 +244,7 @@ pub mod diagnostic_codes {
         DELEGATION_RETRACTED,
         PROVIDER_UNAVAILABLE,
         PROVIDER_MODEL_ROUTE,
+        PROVIDER_CATALOG_FETCH,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,

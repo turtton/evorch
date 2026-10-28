@@ -23,6 +23,34 @@ fn fixture() -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
     (model, requests)
 }
 
+#[tokio::test]
+async fn catalog_timeout_and_rate_limit_cannot_become_model_absence() {
+    for (error, category) in [
+        (ProviderError::Timeout, "timed out"),
+        (ProviderError::RateLimited { retry_after: None }, "429"),
+    ] {
+        let (mut model, requests) = fixture();
+        model.verification =
+            tokio::sync::OnceCell::new_with(Some(BTreeMap::from([("local".into(), Err(error))])));
+        let invocation = AgentInvocationContext {
+            model_preference: Some(ModelPreference {
+                profile: "local".into(),
+                model: None,
+                reasoning_effort: None,
+            }),
+            ..Default::default()
+        };
+        let reason = model
+            .admit(&invocation, Role::Worker)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(reason.contains(category), "{reason}");
+        assert!(!reason.contains("not advertised"), "{reason}");
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
 async fn preferred(
     model: &RoutedModel,
     preference: Option<ModelPreference>,

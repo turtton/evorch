@@ -17,7 +17,7 @@ use super::session::{AuthorizedCodexToken, CodexSessionManager};
 use super::tokens::CodexTokenStore;
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
-use crate::codex_catalog_version::{CodexCatalogVersion, CodexClientVersion};
+use crate::codex_catalog_version::{CodexClientVersion, CodexVersionResolution, catalog_failure};
 use crate::error::ProviderError;
 use crate::http::stream::adapt_sse_stream;
 use crate::http::{
@@ -101,7 +101,7 @@ pub struct CodexClient {
     profile: Option<String>,
     client_version: CodexClientVersion,
     /// 解決結果を固定し、ターン間の prompt-cache affinity を維持する。
-    resolved_client_version: tokio::sync::OnceCell<CodexCatalogVersion>,
+    resolved_client_version: tokio::sync::OnceCell<CodexVersionResolution>,
     session: CodexSessionManager,
     /// クライアントの生存期間を通じて維持するセッション識別子。
     session_id: String,
@@ -342,17 +342,17 @@ impl CodexClient {
         let turn_id = Uuid::new_v4().to_string();
         let client_version = self
             .resolved_client_version
-            .get_or_init(|| self.client_version.resolve())
+            .get_or_init(|| self.client_version.resolve_with_evidence())
             .await;
         http.post(endpoint)
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
             .header("OpenAI-Beta", "responses=experimental")
-            .header("version", &client_version.version)
+            .header("version", &client_version.value.version)
             .header(
                 reqwest::header::USER_AGENT,
-                format!("codex_cli_rs/{}", client_version.version),
+                format!("codex_cli_rs/{}", client_version.value.version),
             )
             .header("session-id", &self.session_id)
             .header("thread-id", &turn_id)
@@ -374,26 +374,80 @@ impl ProviderClient for CodexClient {
     /// Discovery goes through the request session so an idle profile refreshes its token,
     /// and uses the catalog version its requests send.
     async fn list_models(&self, _: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {
-        let token = self.session.current().await?;
+        let started = std::time::Instant::now();
+        let version_cache_hit = self.resolved_client_version.initialized();
         let client_version = self
             .resolved_client_version
-            .get_or_init(|| self.client_version.resolve())
+            .get_or_init(|| self.client_version.resolve_with_evidence())
             .await;
-        crate::list_codex_models(
-            &self.catalog_base_url,
-            &ProviderAuth::new(token.access_token),
-            &token.chatgpt_account_id,
-            &client_version.version,
-        )
-        .await
-        .map(|models| Some(models.into_iter().map(|model| model.slug).collect()))
-        .map_err(|error| match error {
+        let catalog_started = std::time::Instant::now();
+        let result = async {
+            let token = self.session.current().await?;
+            crate::list_codex_models(
+                &self.catalog_base_url,
+                &ProviderAuth::new(token.access_token),
+                &token.chatgpt_account_id,
+                &client_version.value.version,
+            )
+            .await
+            .map(|models| {
+                Some(
+                    models
+                        .into_iter()
+                        .map(|model| model.slug)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        }
+        .await;
+        if let Some(bus) = &self.event_bus {
+            let failure = result.as_ref().err().map(catalog_failure);
+            let count = result.as_ref().ok().and_then(Option::as_ref).map(Vec::len);
+            bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                source: "providers::codex::catalog".into(),
+                severity: if client_version.value.warning.is_some() || result.is_err() {
+                    event_bus::DiagnosticSeverity::Warning
+                } else {
+                    event_bus::DiagnosticSeverity::Info
+                },
+                code: event_bus::event::diagnostic_codes::PROVIDER_CATALOG_FETCH.into(),
+                detail: format!(
+                    "profile={} {} client_version_cache_hit={version_cache_hit} catalog_cache_hit=false catalog_result={} model_count={} catalog_elapsed_ms={} elapsed_ms={}{}",
+                    self.profile.as_deref().unwrap_or("unknown"),
+                    client_version.detail(),
+                    failure.as_deref().unwrap_or("ok"),
+                    count.map_or_else(|| "unknown".into(), |n| n.to_string()),
+                    catalog_started.elapsed().as_millis(),
+                    started.elapsed().as_millis(),
+                    client_version.value.warning.as_ref().map_or_else(String::new, |warning| format!("; {warning}")),
+                ),
+                run_id: None,
+                thread_id: None,
+                call_id: None,
+            }));
+        }
+        result.map_err(|error| match error {
             ProviderError::Http { status, .. } => ProviderError::Http {
                 status,
                 body: "catalog verification failed".into(),
             },
+            ProviderError::Request(_) | ProviderError::Transport { .. } => {
+                ProviderError::Request("catalog verification failed (transport/auth)".into())
+            }
+            ProviderError::InvalidJson { .. } => ProviderError::InvalidJson {
+                detail: "catalog verification failed".into(),
+            },
             other => other,
         })
+    }
+
+    fn catalog_degradation(&self) -> Option<String> {
+        let resolution = self.resolved_client_version.get()?;
+        resolution.value.warning.as_ref()?;
+        Some(format!(
+            "catalog degraded: {}; temporarily unable to verify catalog; retry with a new runtime/composition after version lookup recovers",
+            resolution.detail(),
+        ))
     }
 
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {

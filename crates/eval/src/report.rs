@@ -124,6 +124,7 @@ pub struct AspectTally {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarningKind {
+    PreflightFailed,
     SelfPreference,
     CostIncomplete,
     ExternalDependency,
@@ -329,6 +330,20 @@ async fn report_dir(dir: &Path, context: &mut Context<'_>) -> Result<Report, Eva
         .map_err(|error| EvalError::Usage(format!("not an evaluation directory: {error}")))?;
     let mut runs = Vec::new();
     let mut warnings = Vec::new();
+    let preflight = dir.join(runner::preflight::REPORT_FILE);
+    if preflight.exists()
+        && let Some(reason) = read_json::<runner::preflight::Report>(&preflight)
+            .map_err(EvalError::Usage)?
+            .failure()
+    {
+        warnings.push(Warning {
+            kind: WarningKind::PreflightFailed,
+            message: format!(
+                "evaluation preflight failed; no replays started and no samples compared: {reason}; evidence: {}",
+                runner::preflight::REPORT_FILE,
+            ),
+        });
+    }
     for entry in &manifest.runs {
         if entry.status.is_none() {
             continue;

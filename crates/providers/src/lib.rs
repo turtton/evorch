@@ -23,7 +23,7 @@ pub use auth::ProviderAuth;
 pub use client::ProviderClient;
 pub use codex_catalog_version::{
     CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
-    CodexClientVersion,
+    CodexClientVersion, CodexVersionResolution,
 };
 pub use compaction::{CompactionResult, Compactor};
 pub use error::ProviderError;
