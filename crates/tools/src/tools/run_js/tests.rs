@@ -532,7 +532,7 @@ async fn a_shell_command_running_when_the_program_ends_is_named_as_cut_off() {
         text.starts_with("1 shell command was cut off when the program ended and may have partly run: shell #1 `cargo check --offline -p tools --tests --message-format=json`\n"),
         "{text}"
     );
-    assert_eq!(super::delivered_cut_off_shells(&result), [1]);
+    assert_eq!(super::acknowledged_cut_off(&result), [1]);
     // A read still running is cut off too, but only commands are named: they have effects.
     let reads = run(
         &call_line(1, "read", &json!({"path": "a"})),
@@ -546,7 +546,7 @@ async fn a_shell_command_running_when_the_program_ends_is_named_as_cut_off() {
         "{}",
         reads.content
     );
-    assert!(super::delivered_cut_off_shells(&reads).is_empty());
+    assert!(super::acknowledged_cut_off(&reads).is_empty());
 }
 
 #[tokio::test]

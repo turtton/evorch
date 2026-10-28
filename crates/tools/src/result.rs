@@ -26,13 +26,11 @@ pub struct ToolResult {
     /// excludes it, and it never reaches the content, detail or events.
     /// In whole milliseconds; zero when the call never waited.
     pub idle_wait_ms: u64,
-    /// The whole text of `content` when output limiting cut it down to a preview and
-    /// artifact reference, for a `run_js` program only (ADR 0039): the program's
-    /// context is its own memory, so it may have what the model's must not. Runtime-only
-    /// like `progress`: never in `content`, `detail` or an event, and the executor keeps
-    /// it only for calls a `run_js` program made. Absent when the text was not cut or is
-    /// larger than [`crate::output::FULL_CONTENT_BYTES`].
-    pub full_content: Option<Box<FullContent>>,
+    /// Facts for the host that must not reach the model, an event or the GUI (ADR 0039):
+    /// the whole text of `content` for a `run_js` program, and what a `run_js` result
+    /// told the model about cut-off commands. Runtime-only like `progress`, boxed so the
+    /// common result stays small; see [`RuntimeOnly`].
+    pub runtime_only: Option<Box<RuntimeOnly>>,
     /// Images returned to the model with `content`.
     pub images: Vec<ToolImage>,
 }
@@ -47,18 +45,51 @@ pub struct ToolImage {
     pub path: Option<std::path::PathBuf>,
 }
 
-/// The whole text of a result the model gets cut down (see [`ToolResult::full_content`]).
-/// Boxed in [`ToolResult`] so the common result stays small.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FullContent(String);
+/// The runtime-only facts of a [`ToolResult`] (see [`ToolResult::runtime_only`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeOnly {
+    /// The whole text of `content` when output limiting cut it down to a preview and an
+    /// artifact reference, for a `run_js` program only: the program's context is its own
+    /// memory, so it may have what the model's must not. The executor keeps it only for
+    /// calls a `run_js` program made. Absent when the text was not cut or is larger than
+    /// [`crate::output::FULL_CONTENT_BYTES`].
+    pub whole_text: Option<String>,
+    /// What a `run_js` result put on its summary line about commands cut off when the
+    /// program ended (see [`CutOffTold`]).
+    pub cut_off_told: Option<CutOffTold>,
+}
 
-impl FullContent {
-    pub fn new(text: String) -> Box<Self> {
-        Box::new(Self(text))
+/// The cut-off shell commands a `run_js` result names on its last line, and that line,
+/// as `run_js` built them. The host acknowledges the commands only if the result it
+/// adds to the history still ends with this line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutOffTold {
+    /// Child call numbers of the commands the summary line names.
+    pub seqs: Vec<u32>,
+    pub summary_line: String,
+}
+
+impl ToolResult {
+    /// The whole text a `run_js` program gets of this result, if it is kept.
+    pub fn whole_text(&self) -> Option<&str> {
+        self.runtime_only.as_deref()?.whole_text.as_deref()
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub fn set_whole_text(&mut self, text: String) {
+        self.runtime_only
+            .get_or_insert_with(Default::default)
+            .whole_text = Some(text);
+    }
+
+    pub fn cut_off_told(&self) -> Option<&CutOffTold> {
+        self.runtime_only.as_deref()?.cut_off_told.as_ref()
+    }
+
+    pub fn with_cut_off_told(mut self, told: CutOffTold) -> Self {
+        self.runtime_only
+            .get_or_insert_with(Default::default)
+            .cut_off_told = Some(told);
+        self
     }
 }
 
@@ -81,7 +112,7 @@ impl ToolResult {
             origin: ContentOrigin::WebUntrusted,
             progress: None,
             idle_wait_ms: 0,
-            full_content: None,
+            runtime_only: None,
             images: Vec::new(),
         }
     }
@@ -95,7 +126,7 @@ impl ToolResult {
             origin: ContentOrigin::WebUntrusted,
             progress: None,
             idle_wait_ms: 0,
-            full_content: None,
+            runtime_only: None,
             images: Vec::new(),
         }
     }
@@ -129,7 +160,7 @@ mod tests {
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
                 idle_wait_ms: 0,
-                full_content: None,
+                runtime_only: None,
                 images: Vec::new(),
             }
         );
@@ -149,7 +180,7 @@ mod tests {
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
                 idle_wait_ms: 0,
-                full_content: None,
+                runtime_only: None,
                 images: Vec::new(),
             }
         );

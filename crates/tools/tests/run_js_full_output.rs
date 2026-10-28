@@ -58,21 +58,17 @@ async fn a_child_call_keeps_the_whole_output_next_to_the_bounded_preview() {
     }
     let whole: String = (1..=5000).map(|n| format!("{n}\n")).collect();
     assert_eq!(
-        child
-            .full_content
-            .as_deref()
-            .map(tools::FullContent::as_str),
+        child.whole_text(),
         Some(format!("exit_code: 0\n{whole}").as_str())
     );
-    assert_eq!(model.full_content, None, "only a child call keeps it");
+    assert_eq!(model.whole_text(), None, "only a child call keeps it");
 }
 
 #[tokio::test]
 async fn nul_bytes_survive_in_the_whole_output() {
     let child = run("seq 1 5000 | tr '\\n' '\\0'", true).await;
 
-    let whole = child.full_content.expect("kept");
-    let whole = whole.as_str();
+    let whole = child.whole_text().expect("kept");
     assert_eq!(whole.matches('\0').count(), 5000);
     assert!(whole.starts_with("exit_code: 0\n1\u{0}2\u{0}3\u{0}"));
 }
@@ -87,10 +83,11 @@ async fn output_beyond_the_bound_is_not_kept_whole() {
     .await;
 
     assert!(child.content.contains("[Output artifact: "));
-    assert_eq!(child.full_content, None);
+    assert_eq!(child.whole_text(), None);
     let small = run("echo short", true).await;
     assert_eq!(
-        small.full_content, None,
+        small.whole_text(),
+        None,
         "nothing was cut, so content is whole"
     );
     assert_eq!(small.content, "exit_code: 0\nshort\n");
@@ -151,7 +148,7 @@ async fn a_result_already_cut_is_not_cut_again_into_a_second_artifact_or_a_whole
         "a long reference: {}",
         artifact.len()
     );
-    assert_eq!(child.full_content, None, "the preview is not the output");
+    assert_eq!(child.whole_text(), None, "the preview is not the output");
     assert!(
         child.content.len() <= 16 * 1024,
         "{} bytes",
@@ -180,6 +177,11 @@ async fn a_result_already_cut_is_not_cut_again_into_a_second_artifact_or_a_whole
         "the header was trimmed"
     );
     assert_eq!(
+        child.detail.as_ref().unwrap()["shell"]["header"],
+        false,
+        "and the tool says so, so a first line that looks like a header is kept"
+    );
+    assert_eq!(
         normalized.detail,
         json!({"exit_code": 0, "timed_out_ms": null})
     );
@@ -201,7 +203,7 @@ async fn the_whole_text_a_program_gets_is_redacted_and_escaped_like_the_preview(
     );
     let (child, events) = run_observed(&command, true).await;
 
-    let whole = child.full_content.as_ref().expect("kept").as_str();
+    let whole = child.whole_text().expect("kept");
     assert!(
         whole.contains("token [REDACTED:openai-style-key] here"),
         "redacted"
@@ -249,4 +251,72 @@ async fn the_whole_text_a_program_gets_is_redacted_and_escaped_like_the_preview(
             .contains("token [REDACTED:openai-style-key] here")
     );
     assert!(!normalized.truncated);
+}
+
+/// A tool that returns what `run_js` returns when a command was cut off: a text that ends
+/// with the summary line, and the runtime-only facts naming the command.
+struct CutOffReporter {
+    content: String,
+    line: String,
+}
+
+#[async_trait::async_trait]
+impl tools::Tool for CutOffReporter {
+    fn name(&self) -> &str {
+        "reporter"
+    }
+
+    fn description(&self) -> &str {
+        "test"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        json!({"type": "object", "additionalProperties": false})
+    }
+
+    fn permissions(&self) -> tools::Permissions {
+        tools::Permissions::read_only()
+    }
+
+    async fn execute(&self, _: serde_json::Value) -> Result<ToolResult, tools::ToolError> {
+        Ok(
+            ToolResult::success(self.content.clone()).with_cut_off_told(tools::CutOffTold {
+                seqs: vec![4],
+                summary_line: self.line.clone(),
+            }),
+        )
+    }
+}
+
+#[tokio::test]
+async fn the_cut_off_facts_survive_the_executor_escaped_and_are_never_published() {
+    let line = format!(
+        "[run_js: 1 calls, 1 failed; cut off, may have partly run: shell #4 `echo {}`]",
+        marker()
+    );
+    let reporter = CutOffReporter {
+        content: format!("printed\n{line}"),
+        line: line.clone(),
+    };
+    let bus = Arc::new(EventBus::new(64));
+    let mut receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(Arc::clone(&bus));
+    executor.register(Arc::new(reporter)).unwrap();
+    let ctx = ToolExecutionContext {
+        run_id: "run-full".into(),
+        ..Default::default()
+    };
+
+    let result = executor
+        .execute(&ctx, "reporter", "call-1", json!({}))
+        .await
+        .unwrap();
+
+    // The text and the line the host compares it with are escaped the same way, so the
+    // acknowledgement is not lost to the marker in a command.
+    assert!(result.content.contains(&escaped_marker()) && !result.content.contains(&marker()));
+    assert_eq!(tools::tools::run_js::acknowledged_cut_off(&result), [4]);
+    // Nothing of it is published.
+    let events = format!("{:?}", receiver.drain_pending_snapshot());
+    assert!(!events.contains("cut_off_told") && !events.contains("CutOffTold"));
 }

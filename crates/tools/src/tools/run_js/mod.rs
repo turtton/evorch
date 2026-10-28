@@ -16,7 +16,7 @@ mod summary;
 mod tests;
 pub mod typings;
 pub mod worker;
-pub use summary::delivered_cut_off_shells;
+pub use summary::acknowledged_cut_off;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,10 +110,21 @@ pub fn call_paths(name: &str, args: &Value) -> Vec<String> {
     }
 }
 
+/// A pause for tests of the host: [`RunJs`] says `drained` once every command the program
+/// started is stopped and settled, then waits for `release` before it returns its result.
+/// It is the moment a stop or cancel can still beat the result to the parent.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct AfterDrain {
+    pub drained: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// The `run_js` tool.
 #[derive(Debug, Clone)]
 pub struct RunJs {
     launcher: WorkerLauncher,
+    after_drain: Option<Arc<AfterDrain>>,
     #[cfg(test)]
     bounds: Option<serve::Bounds>,
     #[cfg(test)]
@@ -129,11 +140,20 @@ impl RunJs {
     pub const fn with_launcher(launcher: WorkerLauncher) -> Self {
         Self {
             launcher,
+            after_drain: None,
             #[cfg(test)]
             bounds: None,
             #[cfg(test)]
             expire: None,
         }
+    }
+
+    /// Pauses every call between the end of its commands and its result; see
+    /// [`AfterDrain`]. For tests of the host.
+    #[doc(hidden)]
+    pub fn with_after_drain(mut self, pause: Arc<AfterDrain>) -> Self {
+        self.after_drain = Some(pause);
+        self
     }
 
     #[cfg(test)]
@@ -288,6 +308,10 @@ impl RunJs {
             host.report_unconfirmed(&format!(
                 "commands started by run_js were not confirmed stopped: {error}"
             ));
+        }
+        if let Some(pause) = &self.after_drain {
+            pause.drained.notify_one();
+            pause.release.notified().await;
         }
         if matches!(ending, serve::Ending::Failed(_)) {
             connection.settle_stderr().await;

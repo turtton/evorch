@@ -71,11 +71,12 @@ impl Capture {
         if !large {
             return ToolResult::success(safe.text);
         }
-        let full = (!truncated && safe.text.len() <= FULL_CONTENT_BYTES)
-            .then(|| crate::result::FullContent::new(safe.text.clone()));
+        let full = (!truncated && safe.text.len() <= FULL_CONTENT_BYTES).then(|| safe.text.clone());
         let mut result =
             artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count);
-        result.full_content = full;
+        if let Some(full) = full {
+            result.set_whole_text(full);
+        }
         result
     }
 }
@@ -90,7 +91,7 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
         .as_ref()
         .and_then(|detail| detail.get("run_js"))
         .cloned();
-    let shell_status = result
+    let mut shell_status = result
         .detail
         .as_ref()
         .and_then(|detail| detail.get("shell"))
@@ -123,12 +124,28 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
         if already_cut {
             // Only a long reference can push it over the ceiling. Drop the head of the
             // preview, so the reference at its end survives.
-            result.content = tail_preview(&result.content).to_owned();
+            let kept = tail_preview(&result.content);
+            if kept.len() < result.content.len() {
+                // The status header was at the start: say it is gone, in the detail that
+                // stays and in the copy a rebuilt detail gets.
+                for status in result
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.get_mut("shell"))
+                    .into_iter()
+                    .chain(shell_status.as_mut())
+                {
+                    status["header"] = serde_json::json!(false);
+                }
+            }
+            result.content = kept.to_owned();
         } else {
             let mut capture = Capture::default();
             capture.push(result.content.as_bytes());
             let limited = capture.finish();
-            result.full_content = limited.full_content;
+            if let Some(whole) = limited.whole_text() {
+                result.set_whole_text(whole.to_owned());
+            }
             result.content = limited.content;
             result.detail = limited.detail;
             replaced = true;
@@ -396,6 +413,35 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_the_start_of_a_cut_shell_result_records_that_its_header_is_gone() {
+        let status =
+            |header| serde_json::json!({"exit_code": 1, "timed_out_ms": null, "header": header});
+        let long_note = format!(
+            "\n[Output artifact: /var/tmp/o/{}.txt; captured 9 of 9 bytes]",
+            "p".repeat(30_000)
+        );
+        let result = |content: String| {
+            ToolResult::error(content).with_detail(serde_json::json!({
+                "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
+                "shell": status(true),
+            }))
+        };
+
+        let trimmed = limit_result(result(format!("exit_code: 1\ntail{long_note}")));
+        assert!(
+            !trimmed.content.starts_with("exit_code: 1"),
+            "the header went with the head"
+        );
+        assert_eq!(trimmed.detail.as_ref().unwrap()["shell"]["header"], false);
+
+        let kept = limit_result(result(
+            "exit_code: 1\ntail\n[Output artifact: /var/tmp/o/4.txt]".into(),
+        ));
+        assert!(kept.content.starts_with("exit_code: 1"));
+        assert_eq!(kept.detail.as_ref().unwrap()["shell"]["header"], true);
+    }
 
     #[test]
     fn a_checker_warning_outlives_the_artifact_but_its_text_does_not() {

@@ -962,12 +962,21 @@ impl ToolExecutor {
                 let detail = result.detail.map(escape_control_markers_in_value);
                 // Only a call a run_js program made keeps the whole text; it is as
                 // trustworthy as `content`, so it gets the same marker escaping.
-                let full_content = result
-                    .full_content
-                    .filter(|_| ctx.parent_call_id.is_some())
-                    .map(|text| {
-                        crate::result::FullContent::new(escape_control_markers(text.as_str()))
-                    });
+                let runtime_only = result.runtime_only.and_then(|only| {
+                    let only = crate::result::RuntimeOnly {
+                        whole_text: only
+                            .whole_text
+                            .filter(|_| ctx.parent_call_id.is_some())
+                            .map(|text| escape_control_markers(&text)),
+                        // Escaped like `content`, which it must still end with.
+                        cut_off_told: only.cut_off_told.map(|told| crate::result::CutOffTold {
+                            seqs: told.seqs,
+                            summary_line: escape_control_markers(&told.summary_line),
+                        }),
+                    };
+                    (only.whole_text.is_some() || only.cut_off_told.is_some())
+                        .then(|| Box::new(only))
+                });
                 let result = ToolResult {
                     content,
                     is_error: result.is_error,
@@ -975,7 +984,7 @@ impl ToolExecutor {
                     origin: result.origin,
                     progress: result.progress,
                     idle_wait_ms: result.idle_wait_ms,
-                    full_content,
+                    runtime_only,
                     images: result.images,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
@@ -1295,7 +1304,7 @@ mod tests {
                 origin: ContentOrigin::ToolTrusted,
                 progress: None,
                 idle_wait_ms: 0,
-                full_content: None,
+                runtime_only: None,
                 images: Vec::new(),
             })
         }

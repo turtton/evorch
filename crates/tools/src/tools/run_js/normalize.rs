@@ -10,8 +10,6 @@
 use serde_json::{Value, json};
 
 use super::diff_summary::{self, Summary, Writer};
-#[cfg(test)]
-use crate::result::FullContent;
 use crate::result::ToolResult;
 
 const READ_NOTE: &str = "\n\n[Output truncated (range limit:";
@@ -56,33 +54,30 @@ impl Normalized {
 /// Normalises the result of `tool` called with `args`.
 pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
     // The whole text, when the executor kept it for this call (see
-    // `ToolResult::full_content`), replaces the preview and its artifact note.
-    let whole = result.full_content.is_some();
+    // `ToolResult::whole_text`), replaces the preview and its artifact note.
+    let whole = result.whole_text().is_some();
     let mut text = result
-        .full_content
-        .as_deref()
-        .map_or_else(|| result.content.clone(), |whole| whole.as_str().to_owned());
+        .whole_text()
+        .map_or_else(|| result.content.clone(), str::to_owned);
     let mut detail = result.detail.clone().unwrap_or(Value::Null);
     let mut truncated = false;
     let mut next = None;
 
     let mut exit_header = None;
     if tool == "shell" {
-        // The structured status is what the tool recorded; the first line of the text is
-        // only its own header when it says the same, else it is output that looks like one.
-        let mut without_header = text.clone();
-        let parsed = split_shell_header(&mut without_header);
-        exit_header = match (shell_status(&detail), parsed) {
-            (Some(status), Some(header)) if status == header => {
-                text = without_header;
+        exit_header = match shell_status(&detail) {
+            // The status the tool recorded is the truth. The tool also says whether the
+            // text still starts with its header (the whole text always does; a preview
+            // does until the output ceiling trims its start), so a first line that merely
+            // looks like a header is output and stays.
+            Some(status) => {
+                if whole || detail["shell"]["header"].as_bool() == Some(true) {
+                    split_shell_header(&mut text);
+                }
                 Some(status)
             }
-            (Some(status), _) => Some(status),
-            (None, Some(header)) => {
-                text = without_header;
-                Some(header)
-            }
-            (None, None) => None,
+            // No structured status: a small result, whose first line is the header.
+            None => split_shell_header(&mut text),
         };
     }
 
@@ -182,7 +177,6 @@ fn shell_status(detail: &Value) -> Option<ShellHeader> {
     })
 }
 
-#[derive(PartialEq, Eq)]
 struct ShellHeader {
     exit_code: i64,
     timed_out_ms: Option<u64>,
@@ -388,9 +382,7 @@ mod tests {
         let mut result = ToolResult::success(preview).with_detail(json!({
             "output_artifact": {"path": "/var/tmp/o/1.txt", "original_bytes": 9}
         }));
-        result.full_content = Some(FullContent::new(
-            "exit_code: 0\nhead of the log\ntail of the log".into(),
-        ));
+        result.set_whole_text("exit_code: 0\nhead of the log\ntail of the log".into());
         let normalized = normalize("shell", &json!({}), &result);
         assert_eq!(normalized.text, "head of the log\ntail of the log");
         assert!(!normalized.truncated);
@@ -406,7 +398,7 @@ mod tests {
         let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-a\n+b\n";
         let mut result = ToolResult::success("[cut preview]\n[Output artifact: /var/tmp/o/2.txt; captured 1 of 1 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]")
             .with_detail(json!({"output_artifact": {"path": "/var/tmp/o/2.txt", "original_bytes": 1}}));
-        result.full_content = Some(FullContent::new(diff.into()));
+        result.set_whole_text(diff.into());
         let normalized = normalize("edit", &json!({"path": "f.rs"}), &result);
         assert_eq!(normalized.text, "edited f.rs (+1 −1)");
         assert_eq!(
@@ -433,29 +425,46 @@ mod tests {
         );
     }
 
-    #[test]
-    fn output_that_looks_like_a_header_does_not_override_the_recorded_status() {
-        // The real header was trimmed off the preview; the command printed such a line.
-        let content = "exit_code: 0\nbuild finished\n[Output artifact: /var/tmp/o/4.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]";
-        let result = ToolResult::error(content).with_detail(json!({
+    fn cut_shell(content: &str, status: Value) -> ToolResult {
+        ToolResult::error(content).with_detail(json!({
             "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
-            "shell": {"exit_code": 101, "timed_out_ms": null}
-        }));
-        let normalized = normalize("shell", &json!({}), &result);
+            "shell": status
+        }))
+    }
+
+    const NOTE: &str = "\n[Output artifact: /var/tmp/o/4.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]";
+
+    #[test]
+    fn a_first_line_is_a_header_only_when_the_tool_says_the_text_still_has_one() {
+        // The tool recorded that its header is gone: the line is output, whatever it says,
+        // and even when it happens to equal the recorded status.
+        for printed in ["exit_code: 0", "exit_code: 101"] {
+            let result = cut_shell(
+                &format!("{printed}\nbuild finished{NOTE}"),
+                json!({"exit_code": 101, "timed_out_ms": null, "header": false}),
+            );
+            let normalized = normalize("shell", &json!({}), &result);
+            assert_eq!(normalized.detail["exit_code"], 101);
+            assert_eq!(normalized.text, format!("{printed}\nbuild finished"));
+        }
+        // No statement either way counts as "gone".
+        let unmarked = cut_shell(
+            &format!("exit_code: 101\nbuild finished{NOTE}"),
+            json!({"exit_code": 101, "timed_out_ms": null}),
+        );
+        assert_eq!(
+            normalize("shell", &json!({}), &unmarked).text,
+            "exit_code: 101\nbuild finished"
+        );
+        // The header is there: it is removed, and only it, even if the output begins with
+        // a line like it.
+        let kept = cut_shell(
+            &format!("exit_code: 101\nexit_code: 0\nbuild finished{NOTE}"),
+            json!({"exit_code": 101, "timed_out_ms": null, "header": true}),
+        );
+        let normalized = normalize("shell", &json!({}), &kept);
         assert_eq!(normalized.detail["exit_code"], 101);
         assert_eq!(normalized.text, "exit_code: 0\nbuild finished");
-
-        // When the header is there and agrees, it is removed as before.
-        let agreeing = ToolResult::error(
-            "exit_code: 101\nbuild finished\n[Output artifact: /var/tmp/o/4.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]",
-        )
-        .with_detail(json!({
-            "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
-            "shell": {"exit_code": 101, "timed_out_ms": null}
-        }));
-        let normalized = normalize("shell", &json!({}), &agreeing);
-        assert_eq!(normalized.detail["exit_code"], 101);
-        assert_eq!(normalized.text, "build finished");
     }
 
     #[test]

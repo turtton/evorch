@@ -18,7 +18,7 @@ use sandbox::{ApprovalMode, ApprovalPolicy, DirectSandbox, PolicyDecision};
 use serde_json::json;
 use support::{ScriptedModel, drain_events, text_response, tool_response};
 use tools::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
-use tools::tools::run_js::WorkerLauncher;
+use tools::tools::run_js::{AfterDrain, WorkerLauncher};
 use tools::{RunJs, ToolExecutor};
 
 /// Writes `pid` to `pid_file`-less workers; the script receives the `run` line in `$run`.
@@ -728,7 +728,7 @@ async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
 
 /// A fixture whose runtime has a durable store, so a run can record unobserved effects.
 fn store_fixture(
-    launcher: WorkerLauncher,
+    run_js: RunJs,
     responses: Vec<providers::ChatResponse>,
 ) -> (Fixture, storage::Storage, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
@@ -742,9 +742,7 @@ fn store_fixture(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     );
-    executor
-        .register(Arc::new(RunJs::with_launcher(launcher)))
-        .unwrap();
+    executor.register(Arc::new(run_js)).unwrap();
     let model = Arc::new(ScriptedModel::new(responses.into_iter().map(Ok)));
     let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone())
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
@@ -836,8 +834,10 @@ exec sleep 600"#;
 async fn with_a_durable_store_the_stopped_run_records_the_unobserved_command_instead() {
     let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"sleep 30"}}'
 exec sleep 600"#;
-    let (fixture, _storage, _directory) =
-        store_fixture(worker(script), vec![run_js_call("js-1"), finish()]);
+    let (fixture, _storage, _directory) = store_fixture(
+        RunJs::with_launcher(worker(script)),
+        vec![run_js_call("js-1"), finish()],
+    );
 
     let (phase, events) = stop_while_the_command_runs(&fixture).await;
 
@@ -1346,4 +1346,156 @@ async fn unconfirmed_cleanup_stops_the_run_before_any_further_tool_runs() {
         1,
         "no second request was made"
     );
+}
+
+/// The program starts a long command, waits until it is running (it reports through a
+/// named pipe) and ends without waiting for it, so the commands are stopped and settled
+/// after the program ends: they are finished but nobody has been told.
+fn start_and_end(directory: &Path) -> WorkerLauncher {
+    let pipe = directory.join("started");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let call = json!({"type": "tool_call", "id": 1, "name": "shell",
+        "args": {"command": format!("echo up > {}; sleep 30", pipe.display())}});
+    worker(&format!(
+        "printf '%s\\n' '{call}'\nread -r _ < {}\nprintf '%s\\n' '{{\"type\":\"done\",\"value\":null}}'",
+        pipe.display()
+    ))
+}
+
+/// Stops the run after its commands are stopped and settled, before the call's result
+/// reaches the parent, and returns the run, how it ended and its events.
+async fn stop_between_the_commands_and_the_result(
+    fixture: &Fixture,
+    pause: &AfterDrain,
+) -> (
+    runtime::RunId,
+    Result<AgentRunPhase, runtime::RuntimeError>,
+    Vec<Event>,
+) {
+    let mut events = fixture.bus.subscribe();
+    let run =
+        fixture
+            .runtime
+            .delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    pause.drained.notified().await;
+    fixture
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let phase = fixture.runtime.wait(run).await;
+    // Let the paused call finish if it is still alive; it must not matter.
+    pause.release.notify_one();
+    let seen = drain_events(&mut events).await;
+    (run, phase, seen)
+}
+
+#[tokio::test]
+async fn a_stop_after_the_commands_ended_and_before_the_result_keeps_the_snapshot_gate() {
+    let pause = Arc::new(AfterDrain::default());
+    let directory = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    executor
+        .register(Arc::new(
+            RunJs::with_launcher(start_and_end(directory.path()))
+                .with_after_drain(Arc::clone(&pause)),
+        ))
+        .unwrap();
+    let model = Arc::new(ScriptedModel::new(
+        vec![run_js_call("js-1"), finish()].into_iter().map(Ok),
+    ));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+    runtime.set_run_js_settings(enabled());
+    let fixture = Fixture {
+        runtime,
+        bus,
+        model,
+    };
+
+    let (_, phase, events) = stop_between_the_commands_and_the_result(&fixture, &pause).await;
+
+    // No store to save a terminal snapshot in: the model was never told about the command,
+    // so the run must not end as if everything were known.
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    let reason = error_reason(&events).expect("the run ended in an error");
+    assert!(
+        reason.contains("unobserved shell effects require a durable terminal snapshot"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn with_a_store_a_stop_after_the_commands_ended_records_the_uncertainty() {
+    let pause = Arc::new(AfterDrain::default());
+    let pipes = tempfile::tempdir().unwrap();
+    let (fixture, _storage, _directory) = store_fixture(
+        RunJs::with_launcher(start_and_end(pipes.path())).with_after_drain(Arc::clone(&pause)),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let (run, phase, events) = stop_between_the_commands_and_the_result(&fixture, &pause).await;
+
+    assert_ne!(phase, Ok(AgentRunPhase::Done));
+    assert!(
+        error_reason(&events).is_none_or(|reason| !reason.contains("durable terminal snapshot")),
+        "{:?}",
+        error_reason(&events)
+    );
+    // The snapshot was saved with the marker that tells a restored run the command's
+    // outcome is unknown, so the model is told on restore.
+    let diagnostics = fixture
+        .runtime
+        .restore_diagnostics(run)
+        .unwrap()
+        .expect("the run was saved");
+    assert!(
+        diagnostics
+            .interrupted_tool_calls
+            .iter()
+            .any(|call| call.call_id == "unobserved-shell-jobs" && call.may_have_side_effects),
+        "{:?}",
+        diagnostics.interrupted_tool_calls
+    );
+}
+
+#[tokio::test]
+async fn without_the_stop_the_same_run_acknowledges_the_command_and_ends_cleanly() {
+    // The control of the two tests above: the result reaches the model, which is told
+    // the command was cut off, so nothing is left unobserved.
+    let pause = Arc::new(AfterDrain::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (fixture, _storage, _store) = store_fixture(
+        RunJs::with_launcher(start_and_end(directory.path())).with_after_drain(Arc::clone(&pause)),
+        vec![run_js_call("js-1"), finish()],
+    );
+    let mut events = fixture.bus.subscribe();
+    let run =
+        fixture
+            .runtime
+            .delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    pause.drained.notified().await;
+    pause.release.notify_one();
+
+    assert_eq!(fixture.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let events = drain_events(&mut events).await;
+    let (output, _) = completed(&events, "js-1").expect("the call completed");
+    assert!(
+        output
+            .as_deref()
+            .is_some_and(|text| text.contains("was cut off when the program ended")),
+        "{output:?}"
+    );
+    let diagnostics = fixture.runtime.restore_diagnostics(run).unwrap();
+    assert!(diagnostics.is_none_or(|d| {
+        d.interrupted_tool_calls
+            .iter()
+            .all(|call| call.call_id != "unobserved-shell-jobs")
+    }));
 }

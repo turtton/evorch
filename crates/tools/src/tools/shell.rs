@@ -543,12 +543,14 @@ fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> Too
     {
         detail.insert(
             "shell".to_owned(),
-            serde_json::json!({"exit_code": exit_code, "timed_out_ms": timed_out}),
+            // `header`: the text still starts with the status header added below. The
+            // output ceiling clears it when it trims the start of the text away.
+            serde_json::json!({"exit_code": exit_code, "timed_out_ms": timed_out, "header": true}),
         );
     }
     result.content = format!("{status}\n{}", result.content);
-    result.full_content = result
-        .full_content
-        .map(|text| crate::result::FullContent::new(format!("{status}\n{}", text.as_str())));
+    if let Some(whole) = result.whole_text().map(str::to_owned) {
+        result.set_whole_text(format!("{status}\n{whole}"));
+    }
     result
 }

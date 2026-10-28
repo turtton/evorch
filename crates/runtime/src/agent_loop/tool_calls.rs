@@ -1318,12 +1318,14 @@ impl LoopState {
                     }
                     // The cut-off commands a run_js result names are acknowledged when that
                     // result goes into the history: the model has then been told they may
-                    // have partly run. Only the result the tool itself made counts (it carries
-                    // the list and names each command); a run that was stopped or cancelled,
-                    // a failed task or an error in handling the output leaves them unobserved.
-                    // A command that could not be confirmed stopped stays unobserved too.
+                    // have partly run. Only what the tool itself recorded counts: the commands
+                    // it named on its summary line, if the result still ends with that line.
+                    // Text a program or a file name could fill is not looked at. A run that
+                    // was stopped or cancelled, a failed task or an error in handling the
+                    // output has no such record and leaves them unobserved, as does a command
+                    // that could not be confirmed stopped.
                     if name == tools::tools::run_js::NAME {
-                        let seqs = tools::tools::run_js::delivered_cut_off_shells(&result);
+                        let seqs = tools::tools::run_js::acknowledged_cut_off(&result);
                         if !seqs.is_empty() {
                             self.shared.executor.observe_child_shell_jobs(
                                 &self.task.run_id.to_string(),

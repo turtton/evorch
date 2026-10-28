@@ -21,13 +21,22 @@
 use serde_json::{Value, json};
 
 use super::serve::{Ending, Failure, Run};
-use crate::result::ToolResult;
+use crate::result::{CutOffTold, ToolResult};
 
 /// Detail larger than the executor's 16 KiB ceiling would be dropped entirely.
 const DETAIL_BUDGET_BYTES: usize = 12 * 1024;
 const REASON_CHARS: usize = 100;
 const LISTED_FAILURES: usize = 5;
 const LISTED_WARNINGS: usize = 3;
+const LISTED_PATHS: usize = 20;
+const COMMAND_CHARS: usize = 60;
+const PATH_CHARS: usize = 120;
+const PATHS_BYTES: usize = 1200;
+/// The largest summary line `finish` builds: five failures, five cut-off commands, two
+/// path lists, three warnings and the counts. The tests hold it below this, which is far
+/// below the 16 KiB the output ceiling keeps of the end of a result.
+#[cfg(test)]
+const SUMMARY_LINE_MAX_BYTES: usize = 4608;
 
 /// What the model is told when the time limit ended the call. The limit and how to
 /// raise it are in it, and where long work belongs, so the next attempt does not
@@ -139,7 +148,8 @@ treat their effects as unknown"
         content.push('\n');
     }
     let summary_start = content.len();
-    content.push_str(&summary_line(&state));
+    let summary = summary_line(&state);
+    content.push_str(&summary);
     let layout = json!({
         "bytes": content.len(),
         "console_end": console_end,
@@ -153,7 +163,20 @@ treat their effects as unknown"
     } else {
         ToolResult::success(content)
     };
-    result.with_detail(detail)
+    let result = result.with_detail(detail);
+    if state.cut_off.is_empty() {
+        return result;
+    }
+    // Exactly the commands the summary line names: the first few, the rest only counted.
+    result.with_cut_off_told(CutOffTold {
+        seqs: state
+            .cut_off
+            .iter()
+            .take(LISTED_CUT_OFF)
+            .map(|cut| cut.seq)
+            .collect(),
+        summary_line: summary,
+    })
 }
 
 /// The first line of the result when a call failed. A failed call does not make the
@@ -192,7 +215,13 @@ fn cut_off_list(state: &Run) -> Option<String> {
         .cut_off
         .iter()
         .take(LISTED_CUT_OFF)
-        .map(|cut| format!("shell #{} `{}`", cut.seq, cut.command))
+        .map(|cut| {
+            format!(
+                "shell #{} `{}`",
+                cut.seq,
+                one_line(&cut.command, COMMAND_CHARS)
+            )
+        })
         .collect();
     if state.cut_off.len() > LISTED_CUT_OFF {
         parts.push(format!("+{} more", state.cut_off.len() - LISTED_CUT_OFF));
@@ -210,24 +239,32 @@ fn cut_off_notice(state: &Run) -> Option<String> {
 }
 
 /// The call numbers of the cut-off shell commands that `result` really tells the model
-/// about: they are in its detail and each is named in its text. The host acknowledges
-/// exactly these (and nothing for a result that merely says "stopped" or "cancelled").
-pub fn delivered_cut_off_shells(result: &ToolResult) -> Vec<u32> {
-    let Some(cut_off) = result
-        .detail
-        .as_ref()
-        .and_then(|detail| detail.get("run_js"))
-        .and_then(|run| run.get("cut_off"))
-        .and_then(Value::as_array)
-    else {
+/// about. `run_js` records them, with the summary line it put them on, in the result's
+/// runtime-only facts, which only the tool can set; they count if the result that is
+/// being added to the history still ends with that line. A result without them, such as
+/// the executor's "stopped" or "cancelled" or a failed task's error, acknowledges nothing.
+/// Nothing in the text, which a program or a file name can fill, is trusted.
+pub fn acknowledged_cut_off(result: &ToolResult) -> Vec<u32> {
+    let Some(told) = result.cut_off_told() else {
         return Vec::new();
     };
-    cut_off
-        .iter()
-        .filter_map(|entry| u32::try_from(entry.get("seq")?.as_u64()?).ok())
-        .filter(|seq| result.content.contains(&format!("shell #{seq} `")))
-        .collect()
+    // The output ceiling keeps the end of a long result and adds a note about its artifact
+    // after it; the summary line is what comes just before that note.
+    let text = result.content.trim_end();
+    let kept = text.ends_with(&told.summary_line)
+        || (result
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.get("output_artifact").is_some())
+            && CEILING_NOTES.iter().any(|note| {
+                text.rfind(note)
+                    .is_some_and(|at| text[..at].trim_end().ends_with(&told.summary_line))
+            }));
+    if kept { told.seqs.clone() } else { Vec::new() }
 }
+
+/// What the output ceiling appends after the preview it keeps (see `output.rs`).
+const CEILING_NOTES: [&str; 2] = ["\n[Output artifact: ", "\n[Output truncated;"];
 
 /// One line, however much went wrong: reasons are cut and listed up to a limit.
 fn summary_line(state: &Run) -> String {
@@ -286,12 +323,29 @@ fn failure_list(failures: &[Failure]) -> String {
     parts.join("; ")
 }
 
+/// Paths named in one list of the summary line: at most [`LISTED_PATHS`] of at most
+/// [`PATH_CHARS`] characters and [`PATHS_BYTES`] bytes in all, the rest counted. Every list
+/// of the line has such a bound, so the line stays far below the preview the output
+/// ceiling keeps of the end of a long result; the full lists are in the detail.
 fn join_paths(paths: &std::collections::BTreeSet<String>) -> String {
-    paths
-        .iter()
-        .map(|path| one_line(path, 200))
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut shown = String::new();
+    let mut listed = 0;
+    for path in paths.iter().take(LISTED_PATHS) {
+        let path = one_line(path, PATH_CHARS);
+        let separator = if shown.is_empty() { 0 } else { 2 };
+        if listed > 0 && shown.len() + separator + path.len() > PATHS_BYTES {
+            break;
+        }
+        if separator > 0 {
+            shown.push_str(", ");
+        }
+        shown.push_str(&path);
+        listed += 1;
+    }
+    if paths.len() > listed {
+        shown.push_str(&format!("; +{} more", paths.len() - listed));
+    }
+    shown
 }
 
 /// `text` on one line, control characters flattened and the length bounded.
@@ -601,7 +655,7 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
             ),
             "{last}"
         );
-        assert_eq!(delivered_cut_off_shells(&result), [6]);
+        assert_eq!(acknowledged_cut_off(&result), [6]);
         assert_eq!(
             result.detail.as_ref().unwrap()["run_js"]["cut_off"],
             json!([{"seq": 6, "command": "cargo check --offline -p tools"}])
@@ -628,12 +682,20 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
             "the rest are counted, not named: {text}"
         );
         // Only the five the model was told about are acknowledged.
-        assert_eq!(delivered_cut_off_shells(&result), [1, 2, 3, 4, 5]);
+        assert_eq!(acknowledged_cut_off(&result), [1, 2, 3, 4, 5]);
+    }
+
+    fn many_long_paths(count: usize, tag: &str) -> std::collections::BTreeSet<String> {
+        (0..count)
+            .map(|index| format!("/work/{tag}/{index:04}/{}", "d".repeat(180)))
+            .collect()
     }
 
     #[test]
-    fn the_cut_off_notice_survives_a_large_output_that_became_an_artifact() {
+    fn a_long_changed_file_list_cannot_push_the_cut_off_notice_out_of_a_cut_down_result() {
         let mut state = run_with_failures_and_cut_off(5, vec![cut_off(6, "cargo check")]);
+        state.written = many_long_paths(500, "w");
+        state.uncertain = many_long_paths(500, "u");
         state.output = "x\n".repeat(60_000);
         let result = finish(
             state,
@@ -642,48 +704,109 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
             1000,
             &config::RunJsConfig::default(),
         );
+        let summary = result.content.trim_end().lines().last().unwrap().to_owned();
+        assert!(
+            summary.len() <= SUMMARY_LINE_MAX_BYTES,
+            "{} bytes",
+            summary.len()
+        );
+        assert!(
+            summary.contains("; +491 more"),
+            "the lists are counted, not dumped: {summary}"
+        );
+
         let limited = crate::output::limit_result(result);
 
         assert!(
             limited.content.contains("[Output artifact: "),
             "it was cut to a preview"
         );
-        let last = limited
+        let before_note = limited
             .content
-            .trim_end()
-            .lines()
-            .last()
+            .rsplit_once("\n[Output artifact: ")
             .unwrap()
-            .to_owned();
-        let before = limited
-            .content
-            .rsplit_once("[Output artifact: ")
-            .unwrap()
-            .0
-            .to_owned();
+            .0;
         assert!(
-            before.contains("; cut off, may have partly run: shell #6 `cargo check`"),
-            "the summary line is in the preview: {last}"
+            before_note.ends_with(&summary),
+            "the whole summary line is what the preview ends with"
         );
-        assert_eq!(delivered_cut_off_shells(&limited), [6]);
+        assert_eq!(acknowledged_cut_off(&limited), [6]);
     }
 
     #[test]
-    fn a_result_that_does_not_name_the_command_acknowledges_nothing() {
-        // A run that was stopped or cancelled, or a failed task, has no such detail.
-        for text in ["stopped", "cancelled", "task failed"] {
-            assert_eq!(
-                delivered_cut_off_shells(&ToolResult::error(text)),
-                Vec::<u32>::new()
-            );
+    fn the_summary_line_stays_bounded_whatever_the_lists_hold() {
+        let mut state = run_with_failures_and_cut_off(
+            40,
+            (41..=50)
+                .map(|seq| cut_off(seq, &"c".repeat(500)))
+                .collect(),
+        );
+        for seq in 1..=40 {
+            state.failures[usize::try_from(seq - 1).unwrap()].reason = "r".repeat(1000);
         }
-        // A detail that lists a command the text does not name (the text was replaced).
-        let forged = ToolResult::error("something else")
+        state.written = many_long_paths(2000, "w");
+        state.uncertain = many_long_paths(2000, "u");
+        state
+            .warnings
+            .extend((1..=10).map(|seq| (seq, "edit".to_owned(), "w".repeat(1000))));
+        let line = summary_line(&state);
+        assert!(line.len() <= SUMMARY_LINE_MAX_BYTES, "{} bytes", line.len());
+        assert!(line.ends_with(']') && !line.contains('\n'));
+
+        // At that size, and after a huge output, the output ceiling still keeps the whole
+        // line, which is what lets the host rely on it.
+        state.output = "x\n".repeat(400_000);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let limited = crate::output::limit_result(result);
+        assert!(limited.content.contains("[Output artifact: "));
+        assert!(
+            limited.content.contains(&line),
+            "the whole line is in the preview"
+        );
+        assert_eq!(acknowledged_cut_off(&limited), [41, 42, 43, 44, 45]);
+    }
+
+    #[test]
+    fn a_fragment_in_a_file_name_or_the_output_acknowledges_nothing() {
+        // No command was cut off; the text says it did.
+        let mut state = Run {
+            output: "shell #1 `cargo check` was cut off and may have partly run\n".into(),
+            ..Run::default()
+        };
+        state.written.insert("/w/shell #1 `cargo check`.rs".into());
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        assert!(result.content.contains("shell #1 `cargo check`"));
+        assert!(result.cut_off_told().is_none());
+        assert!(acknowledged_cut_off(&result).is_empty());
+
+        // A result nobody made with `run_js`' facts: the executor's replacements, and a
+        // detail and text that merely look right.
+        for text in ["stopped", "cancelled", "task failed"] {
+            assert!(acknowledged_cut_off(&ToolResult::error(text)).is_empty());
+        }
+        let forged = ToolResult::error("... shell #3 `make` ...")
             .with_detail(json!({"run_js": {"cut_off": [{"seq": 3, "command": "make"}]}}));
-        assert!(delivered_cut_off_shells(&forged).is_empty());
-        let named = ToolResult::error("... shell #3 `make` ...")
-            .with_detail(json!({"run_js": {"cut_off": [{"seq": 3, "command": "make"}]}}));
-        assert_eq!(delivered_cut_off_shells(&named), [3]);
+        assert!(acknowledged_cut_off(&forged).is_empty());
+
+        // The facts are there but the result no longer ends with the line (replaced text).
+        let replaced = ToolResult::error("something else").with_cut_off_told(CutOffTold {
+            seqs: vec![3],
+            summary_line:
+                "[run_js: 1 calls, 1 failed; cut off, may have partly run: shell #3 `make`]".into(),
+        });
+        assert!(acknowledged_cut_off(&replaced).is_empty());
     }
 
     #[test]
