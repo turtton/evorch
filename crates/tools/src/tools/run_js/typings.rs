@@ -9,6 +9,13 @@ use serde_json::Value;
 
 const RESULT_TYPE: &str = "type Result = { ok: boolean; text: string; truncated: boolean; next: { tool: \"read\"; path: string; offset?: number; byte_offset?: number } | null; detail: any };";
 
+/// What `edit` and `write` add to `detail` (see `diff_summary`): the full diff and its counts.
+const FILE_DIFF_RESULT: &str =
+    "Result & { detail: { diff?: string; added?: number; removed?: number } }";
+
+/// What `git_diff` adds to `detail`.
+const GIT_DIFF_RESULT: &str = "Result & { detail: { diff?: string; files?: { path: string; added: number; removed: number; binary: boolean }[] } }";
+
 /// Arguments that only matter for calls outside `run_js` (access review).
 /// What a program may pass to `shell`.
 const SHELL_PROPERTIES: [&str; 3] = ["command", "cwd", "timeout_ms"];
@@ -25,8 +32,13 @@ pub fn declarations(tools: &[(String, Value)]) -> String {
         let schema = &callable_schema(name, schema);
         let arguments = object_type(schema);
         let optional = if has_required(schema) { "" } else { "?" };
+        let result = match name.as_str() {
+            "edit" | "write" => FILE_DIFF_RESULT,
+            "git_diff" => GIT_DIFF_RESULT,
+            _ => "Result",
+        };
         out.push_str(&format!(
-            "  {name}(args{optional}: {arguments}): Promise<Result>;\n"
+            "  {name}(args{optional}: {arguments}): Promise<{result}>;\n"
         ));
     }
     out.push_str("};");
@@ -178,12 +190,12 @@ mod tests {
         let expected = "\
 type Result = { ok: boolean; text: string; truncated: boolean; next: { tool: \"read\"; path: string; offset?: number; byte_offset?: number } | null; detail: any };
 declare const tools: {
-  edit(args: { edits?: { new_string: string; old_string: string; replace_all?: boolean }[]; new_string?: string; old_string?: string; path: string; replace_all?: boolean }): Promise<Result>;
-  git_diff(args?: { cwd?: string; path?: string }): Promise<Result>;
+  edit(args: { edits?: { new_string: string; old_string: string; replace_all?: boolean }[]; new_string?: string; old_string?: string; path: string; replace_all?: boolean }): Promise<Result & { detail: { diff?: string; added?: number; removed?: number } }>;
+  git_diff(args?: { cwd?: string; path?: string }): Promise<Result & { detail: { diff?: string; files?: { path: string; added: number; removed: number; binary: boolean }[] } }>;
   grep(args: { path: string; pattern: string }): Promise<Result>;
   read(args: { byte_offset?: number; limit?: number; offset?: number; path: string }): Promise<Result>;
   shell(args: { command: string; cwd?: string; timeout_ms?: number }): Promise<Result>;
-  write(args: { content: string; path: string }): Promise<Result>;
+  write(args: { content: string; path: string }): Promise<Result & { detail: { diff?: string; added?: number; removed?: number } }>;
 };
 declare function readText(path: string): Promise<string>;";
         assert_eq!(declarations(&schemas()), expected);

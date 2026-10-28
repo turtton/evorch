@@ -468,6 +468,24 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_failure_notice_is_console_text_and_leaves_the_return_value_and_summary_alone() {
+        let output = "1 of 2 tool calls failed: edit #1: old_string not found\nprogress\n=> done\n[run_js: 2 calls, 1 failed (edit #1: old_string not found)]";
+        assert_eq!(
+            sections(output),
+            Sections {
+                console: "1 of 2 tool calls failed: edit #1: old_string not found\nprogress",
+                returned: Some("done"),
+                summary: Some("[run_js: 2 calls, 1 failed (edit #1: old_string not found)]"),
+            }
+        );
+        let only_notice =
+            "1 of 1 tool calls failed: read #1: x\n=> 3\n[run_js: 1 calls, 1 failed (read #1: x)]";
+        let parsed = sections(only_notice);
+        assert_eq!(parsed.returned, Some("3"));
+        assert_eq!(parsed.console, "1 of 1 tool calls failed: read #1: x");
+    }
+
+    #[test]
     fn limit_hit_is_read_as_the_name_of_the_limit() {
         let stats = |limit_hit: serde_json::Value| {
             Stats::new(

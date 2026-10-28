@@ -60,6 +60,8 @@ pub(crate) fn apply_run_js_specs(
             spec.description = description::render(&callable, settings);
         } else if spec.name == "shell" {
             spec.description.push_str(description::SHELL_HINT);
+        } else if spec.name == "edit" {
+            spec.description.push_str(description::EDIT_HINT);
         }
     }
 }
@@ -397,7 +399,7 @@ impl RunJsHost for RuntimeRunJsHost {
         drop(guard);
         let (is_error, outcome) = match outcome {
             Ok(result) => {
-                let normalized = normalize::normalize(&name, &args, &result);
+                let normalized = normalize::normalize_full(&name, &args, &result).await;
                 let written = if matches!(name.as_str(), "edit" | "write") && !result.is_error {
                     paths.clone()
                 } else {

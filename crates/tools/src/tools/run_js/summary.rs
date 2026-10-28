@@ -96,6 +96,9 @@ treat their effects as unknown"
         content.push('\n');
     }
     content.push_str(&summary_line(&state));
+    if let Some(notice) = failed_calls_notice(&state) {
+        content.insert_str(0, &format!("{notice}\n"));
+    }
     let detail = json!({"run_js": run_detail(&state, output_bytes, return_bytes, timed_out)});
     let result = if failure.is_some() {
         ToolResult::error(content)
@@ -103,6 +106,26 @@ treat their effects as unknown"
         ToolResult::success(content)
     };
     result.with_detail(detail)
+}
+
+/// The first line of the result when a call failed. A failed call does not make the
+/// `run_js` call an error (the program may have handled it), so it is stated where
+/// the model reads first instead of only in the summary line at the end. The GUI
+/// reads the last line and the last `=> ` line, so a leading line does not affect it.
+fn failed_calls_notice(state: &Run) -> Option<String> {
+    let failed = state.calls.iter().filter(|call| call.is_error).count();
+    if failed == 0 {
+        return None;
+    }
+    let reasons = if state.failures.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", failure_list(&state.failures))
+    };
+    Some(format!(
+        "{failed} of {} tool calls failed{reasons}",
+        state.calls.len()
+    ))
 }
 
 /// One line, however much went wrong: reasons are cut and listed up to a limit.
@@ -291,13 +314,45 @@ mod tests {
         let result = finish(state, done(Value::Null), "", 1000);
         assert_eq!(
             result.content,
-            "[run_js: 2 calls, 2 failed (edit #1: old_string not found in /w/a.rs; read #3: no such file); \
+            "2 of 2 tool calls failed: edit #1: old_string not found in /w/a.rs; read #3: no such file\n\
+[run_js: 2 calls, 2 failed (edit #1: old_string not found in /w/a.rs; read #3: no such file); \
 wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         );
         assert!(
             !result.is_error,
             "failed calls alone do not fail the program"
         );
+    }
+
+    #[test]
+    fn the_failure_notice_comes_first_and_leaves_the_last_lines_to_the_interface() {
+        let mut state = Run {
+            output: "progress\n".into(),
+            ..Run::default()
+        };
+        for seq in 1..=3 {
+            state.calls.push(Recorded {
+                seq,
+                name: "read".into(),
+                is_error: seq == 2,
+                paths: Vec::new(),
+            });
+        }
+        let (_, failure) = failed_call(2, "edit", "old_string not found");
+        state.failures.push(failure);
+        let result = finish(state, done(json!("answer")), "", 1000);
+        let lines: Vec<&str> = result.content.lines().collect();
+        assert_eq!(
+            lines[0],
+            "1 of 3 tool calls failed: edit #2: old_string not found"
+        );
+        assert_eq!(lines[1], "progress");
+        assert_eq!(lines[2], "=> answer");
+        assert!(lines[3].starts_with("[run_js: 3 calls, 1 failed"));
+        assert_eq!(lines.len(), 4);
+        assert_eq!(result.detail.unwrap()["run_js"]["output_bytes"], 9);
+        let clean = finish(Run::default(), done(json!("ok")), "", 1000);
+        assert!(!clean.content.contains("tool calls failed"));
     }
 
     #[test]

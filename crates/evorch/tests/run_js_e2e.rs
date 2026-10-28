@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use event_bus::EventBus;
 use sandbox::DirectSandbox;
 use serde_json::{Value, json};
-use tools::tools::run_js::{ChildCall, ChildOutcome, RunJs, RunJsHost, WorkerLauncher, normalize};
+use tools::tools::run_js::{
+    ChildCall, ChildOutcome, RunJs, RunJsHost, WorkerLauncher, description, normalize,
+};
 use tools::{ToolExecutionContext, ToolExecutor};
 
 struct TestHost {
@@ -54,7 +56,9 @@ impl RunJsHost for TestHost {
         {
             Ok(result) => ChildOutcome {
                 is_error: result.is_error,
-                result: Ok(normalize::normalize(&call.name, &call.args, &result).into_value()),
+                result: Ok(normalize::normalize_full(&call.name, &call.args, &result)
+                    .await
+                    .into_value()),
                 paths: Vec::new(),
                 written: Vec::new(),
                 failure: None,
@@ -82,6 +86,10 @@ struct Fixture {
 }
 
 fn fixture(launcher: WorkerLauncher) -> Fixture {
+    fixture_with_tools(launcher, &["read", "grep"])
+}
+
+fn fixture_with_tools(launcher: WorkerLauncher, names: &[&str]) -> Fixture {
     let mut executor = ToolExecutor::with_standard_tools_in(
         Arc::new(EventBus::new(256)),
         Arc::new(DirectSandbox::new_unchecked()),
@@ -93,7 +101,7 @@ fn fixture(launcher: WorkerLauncher) -> Fixture {
     let executor = Arc::new(executor);
     let host = Arc::new(TestHost {
         executor: Arc::clone(&executor),
-        names: vec!["read".into(), "grep".into()],
+        names: names.iter().map(|name| (*name).to_owned()).collect(),
         seen: Mutex::new(Vec::new()),
         settings: config::RunJsConfig::default(),
     });
@@ -255,5 +263,54 @@ async fn bwrap_worker_runs_without_workspace_or_environment() {
             .starts_with("=> [\"undefined\",\"undefined\",\"undefined\"]"),
         "{}",
         result.content
+    );
+}
+
+#[tokio::test]
+async fn the_examples_in_the_description_run_as_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = ["a.rs", "b.rs", "c.rs"]
+        .iter()
+        .map(|name| directory.path().join(name).to_string_lossy().into_owned())
+        .collect();
+    std::fs::write(&paths[0], "unsafe { OldName }\n").unwrap();
+    std::fs::write(&paths[1], "fn safe() {}\n").unwrap();
+    std::fs::write(&paths[2], "OldName again\n").unwrap();
+    let with_paths = |example: &str| {
+        ["a.rs", "b.rs", "c.rs"]
+            .iter()
+            .zip(&paths)
+            .fold(example.to_owned(), |code, (name, path)| {
+                code.replace(&format!("\"{name}\""), &format!("{path:?}"))
+            })
+    };
+    let fixture = fixture_with_tools(direct_launcher(), &["read", "grep", "edit"]);
+
+    let found = run_code(&fixture, &with_paths(description::EXAMPLES[0]), None).await;
+    assert!(!found.is_error, "{}", found.content);
+    assert!(
+        found.content.contains(&format!("=> {}\n", paths[0])),
+        "{}",
+        found.content
+    );
+
+    let edited = run_code(&fixture, &with_paths(description::EXAMPLES[1]), None).await;
+    assert!(!edited.is_error, "{}", edited.content);
+    assert!(
+        edited.content.contains(&format!("{}: true", paths[0])),
+        "{}",
+        edited.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths[0]).unwrap(),
+        "unsafe { NewName }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths[1]).unwrap(),
+        "fn safe() {}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths[2]).unwrap(),
+        "NewName again\n"
     );
 }

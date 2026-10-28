@@ -334,6 +334,8 @@ async fn enabled_run_js_is_offered_with_generated_declarations() {
     assert!(run_js.description.contains("shell(args: { command: string"));
     let shell = offered[0].iter().find(|spec| spec.name == "shell").unwrap();
     assert!(shell.description.contains("use run_js instead"));
+    let edit = offered[0].iter().find(|spec| spec.name == "edit").unwrap();
+    assert!(edit.description.contains("use run_js with tools.edit"));
 
     // Roles without the capability never see it.
     let orchestrator = self::fixture(worker("exit 0"), None, enabled(), vec![finish()]);
@@ -470,6 +472,73 @@ read -r reply
     assert_eq!(streamed, "child-output\n");
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.ends_with("[run_js: 1 calls, 0 failed]"), "{text}");
+}
+
+#[tokio::test]
+async fn a_child_edit_gives_the_program_a_summary_and_keeps_its_diff_in_the_card() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = write_file(directory.path(), "f.txt", "one\ntwo\n");
+    let script = format!(
+        r#"printf '%s\n' '{{"type":"tool_call","id":1,"name":"edit","args":{{"path":"{target}","old_string":"two","new_string":"2"}}}}'
+read -r reply
+{DONE_WITH_REPLY}"#
+    );
+    let fixture = fixture(
+        worker(&script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run(&fixture, Role::Worker).await;
+
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(
+        text.contains(&format!("edited {target} (+1 −1)")),
+        "the program is given a summary: {text}"
+    );
+    assert!(
+        text.contains(&format!("\"text\":\"edited {target} (+1 −1)\"")),
+        "`text` is the summary, not the diff: {text}"
+    );
+    assert!(
+        text.contains("\"diff\":\"--- a/") && text.contains("-two\\n+2\\n"),
+        "the diff is in `detail.diff`: {text}"
+    );
+    let (output, is_error) = completed(&events, "js-1/1").expect("child completed");
+    assert!(!is_error);
+    let output = output.as_deref().expect("the child's own result");
+    assert!(
+        output.contains("@@") && output.contains("-two") && output.contains("+2"),
+        "the card of the child still shows the diff: {output}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_shell_whose_output_was_cut_into_an_artifact_reaches_the_program_whole() {
+    let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"seq 1 3000"}}'
+read -r reply
+case "$reply" in
+  *'"truncated":false'*) lines=$(printf '%s' "$reply" | grep -o '2999\\n3000' | wc -l) ;;
+  *) lines=cut ;;
+esac
+printf '{"type":"done","value":"%s"}\n' "$lines""#;
+    let fixture = fixture(
+        worker(script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run(&fixture, Role::Worker).await;
+
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("=> 1\n"), "{text}");
+    let (output, _) = completed(&events, "js-1/1").expect("child completed");
+    assert!(
+        output.as_deref().unwrap().contains("[Output artifact: "),
+        "the card still shows the bounded preview with its artifact"
+    );
 }
 
 /// Every call that started must have exactly one terminal event.
@@ -781,7 +850,17 @@ printf '%s\n' '{{"type":"done","value":null}}'"#
     );
     assert!(text.contains(&format!("wrote: {target}")), "{text}");
     assert!(!text.contains("UNTRUSTED-REPOSITORY-COMMENT"), "{text}");
-    assert_eq!(text.lines().count(), 1, "one summary line and nothing else");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "a failure notice and the summary line: {text}"
+    );
+    assert!(
+        lines[0].starts_with("1 of 2 tool calls failed: read #2: "),
+        "{text}"
+    );
+    assert!(lines[1].starts_with("[run_js: 2 calls, 1 failed"), "{text}");
 }
 
 #[tokio::test]

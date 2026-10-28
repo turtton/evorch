@@ -7,6 +7,7 @@
 //! model receives only what the program prints or returns, plus a short summary.
 
 pub mod description;
+mod diff_summary;
 pub mod normalize;
 pub mod protocol;
 mod serve;
