@@ -47,7 +47,8 @@ done
 case $run_js in true | false) ;; *) echo "--run-js は true か false" >&2; exit 2 ;; esac
 [[ $timeout_s =~ ^[0-9]+$ && $verify_timeout_s =~ ^[0-9]+$ ]] || { echo "タイムアウトは秒の整数" >&2; exit 2; }
 [[ $rep =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "rep が不正: $rep" >&2; exit 2; }
-route=$(eval_route "$model") || { echo "未知のモデルキー: $model（$EVAL_MODELS）" >&2; exit 2; }
+target=$(eval_target "$model") || { echo "未知のモデルキー: $model（$EVAL_MODELS）" >&2; exit 2; }
+read -r profile model_id <<<"$target"
 [ -f "$evals/tasks/$task.md" ] || { echo "未知の課題: $task" >&2; exit 2; }
 [ -n "${EVORCH_BIN:-}" ] && [ -x "$EVORCH_BIN" ] || { echo "EVORCH_BIN に実行可能な evorch を指定する" >&2; exit 2; }
 if command -v timeout >/dev/null 2>&1; then TIMEOUT=timeout
@@ -84,7 +85,7 @@ json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t
 
 prep_fail() { echo "準備に失敗: $1 ($mdir $task $rep)" >&2; rm -rf "$rundir"; exit 3; }
 
-"$here/make-overlay.sh" "$route" "$effort" "$overlay" >/dev/null || prep_fail make-overlay
+"$here/make-overlay.sh" "$profile" "$model_id" "$effort" "$overlay" >/dev/null || prep_fail make-overlay
 cp "$overlay/config.d/zz-worker.toml" "$rundir/zz-worker.toml"
 src_arg=()
 [ -n "${EVAL_SOURCE_REPO:-}" ] && src_arg=("${EVAL_SOURCE_REPO}")
@@ -135,7 +136,8 @@ tmp=$rundir/.result.json.tmp
 {
   printf '{\n'
   printf '  "model": "%s",\n' "$(json_str "$mdir")"
-  printf '  "route": "%s",\n' "$(json_str "$route")"
+  printf '  "profile": "%s",\n' "$(json_str "$profile")"
+  printf '  "model_id": "%s",\n' "$(json_str "$model_id")"
   printf '  "effort": "%s",\n' "$(json_str "$effort")"
   printf '  "task": "%s",\n' "$(json_str "$task")"
   printf '  "rep": "%s",\n' "$(json_str "$rep")"

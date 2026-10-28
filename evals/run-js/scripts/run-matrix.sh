@@ -45,7 +45,7 @@ done
 [ -n "$outroot" ] || usage
 [[ $reps =~ ^[0-9]+$ && $rep_from =~ ^[0-9]+$ && $jobs =~ ^[0-9]+$ ]] && [ "$jobs" -ge 1 ] && [ "$rep_from" -ge 1 ] \
   || { echo "--reps / --rep-from / --jobs は正の整数" >&2; exit 2; }
-for m in $models; do eval_route "$m" >/dev/null || { echo "未知のモデルキー: $m" >&2; exit 2; }; done
+for m in $models; do eval_target "$m" >/dev/null || { echo "未知のモデルキー: $m" >&2; exit 2; }; done
 for t in $tasks; do [ -f "$here/../tasks/$t.md" ] || { echo "未知の課題: $t" >&2; exit 2; }; done
 if [ "$list" -eq 0 ]; then
   [ -n "${EVORCH_BIN:-}" ] && [ -x "$EVORCH_BIN" ] || { echo "EVORCH_BIN に実行可能な evorch を指定する" >&2; exit 2; }

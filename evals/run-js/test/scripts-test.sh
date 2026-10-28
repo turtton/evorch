@@ -12,18 +12,23 @@ check() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
 
 # 偽の利用者設定
 mkdir -p "$scratch/cfg"
-printf '[providers.x]\ntype = "openai-compatible"\n' >"$scratch/cfg/config.toml"
+printf '[providers.codex-personal]\ntype = "openai-codex"\n\n[providers.claude-personal]\ntype = "anthropic-subscription"\n\n[providers.codex-work]\ntype = "openai-codex"\n' >"$scratch/cfg/config.toml"
 export EVORCH_CONFIG_SRC=$scratch/cfg
 export EVORCH_BIN=$here/dummy-evorch.sh
 export EVAL_WORK=$scratch/work
 export DUMMY_LOG=$scratch/dummy.log
 
 # make-overlay
-"$ev/scripts/make-overlay.sh" 'gpt-luna+fast' high "$scratch/ovl" >/dev/null
+"$ev/scripts/make-overlay.sh" codex-personal 'gpt-6-luna+fast' high "$scratch/ovl" >/dev/null
 check "overlay: config.toml コピー" "cmp -s $scratch/cfg/config.toml $scratch/ovl/config.toml"
-check "overlay: zz-worker.toml" "[ \"\$(cat $scratch/ovl/config.d/zz-worker.toml)\" = \"\$(printf '[agents.worker]\nmodels = [{ route = \"gpt-luna+fast\", reasoning_effort = \"high\" }]')\" ]"
-check "overlay: リポジトリ内は拒否" "! $ev/scripts/make-overlay.sh gpt-sol high $ev/ovl-should-not-exist 2>/dev/null; [ ! -e $ev/ovl-should-not-exist ]"
-check "overlay: 不正な route は拒否" "! $ev/scripts/make-overlay.sh 'a\"b' high $scratch/ovl2 2>/dev/null"
+check "overlay: zz-worker.toml（候補 1 件の eval-pinned route を Worker に割り当てる）" "[ \"\$(cat $scratch/ovl/config.d/zz-worker.toml)\" = \"\$(printf '[[routing.routes.eval-pinned]]\nprofile = \"codex-personal\"\nmodel = \"gpt-6-luna+fast\"\n\n[agents.worker]\nmodels = [{ route = \"eval-pinned\", reasoning_effort = \"high\" }]')\" ]"
+check "overlay: リポジトリ内は拒否" "! $ev/scripts/make-overlay.sh codex-personal gpt-sol high $ev/ovl-should-not-exist 2>/dev/null; [ ! -e $ev/ovl-should-not-exist ]"
+check "overlay: 不正な model は拒否" "! $ev/scripts/make-overlay.sh codex-personal 'a\"b' high $scratch/ovl2 2>/dev/null"
+check "overlay: *-work の profile は拒否" "! $ev/scripts/make-overlay.sh codex-work gpt-sol high $scratch/ovl3 2>/dev/null; [ ! -e $scratch/ovl3/config.d ]"
+check "overlay: config.toml に無い profile は拒否" "! EVORCH_CONFIG_SRC=$scratch/nocfg $ev/scripts/make-overlay.sh claude-personal claude-opus-5-5 high $scratch/ovl4 2>/dev/null"
+for k in gpt-sol gpt-luna-fast gpt-astra claude-opus claude-sonnet; do
+  check "models: $k は personal profile に固定" "(. $ev/scripts/models.sh; eval_target $k | grep -Eq '^(codex|claude)-personal ')"
+done
 
 # run-one（t5 を参照解で解いたことにする → verify pass）
 out=$scratch/out

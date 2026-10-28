@@ -63,22 +63,23 @@ export EVORCH_BIN=<evorch-checkout>/target/release/evorch
 ### 2. モデルごとの overlay（`make-overlay.sh`）
 
 ```sh
-$EVAL/evals/run-js/scripts/make-overlay.sh <route> <effort> <outdir>
+$EVAL/evals/run-js/scripts/make-overlay.sh <profile> <model-id> <effort> <outdir>
 ```
 
 - `<outdir>/config.toml` — 利用者の `config.toml` のコピー（元は `$EVORCH_CONFIG_SRC`、既定 `${XDG_CONFIG_HOME:-~/.config}/evorch`）。秘密値は含まれない。
-- `<outdir>/config.d/zz-worker.toml` — `[agents.worker]` / `models = [{ route = "<route>", reasoning_effort = "<effort>" }]`。5 つの overlay の違いは Worker のモデルだけ。
+- `<outdir>/config.d/zz-worker.toml` — 候補が 1 件だけの評価専用 route `eval-pinned`（`profile` と `model` を明示）と、`[agents.worker]` / `models = [{ route = "eval-pinned", reasoning_effort = "<effort>" }]`。5 つの overlay の違いは Worker のモデルと provider だけ。
+- provider の固定: 利用者の `config.toml` の route（`gpt-luna+fast` など）は `codex-work` が先頭候補で、そのままだと `*-work` に解決される。設定の深マージは配列を置き換えるので、既存 route を上書きせず別名の route を足している。候補が 1 件なので他 profile へのフェイルオーバーも起きない。`<profile>` は `codex-personal` / `claude-personal` のみ受け付け、`config.toml` に定義があることも確認する。
 - 生成物はリポジトリにコミットしない（このリポジトリの作業ツリー内への出力は拒否する）。`run-one.sh` は run ごとに作って後で消すので、通常は手で作らない。
 
-モデルキーと route（`scripts/models.sh`）:
+モデルキーと固定先（`scripts/models.sh`）:
 
-| model-key | route | モデル |
+| model-key | profile | モデル |
 |---|---|---|
-| `gpt-sol` | `gpt-sol` | gpt-6.1-sol |
-| `gpt-luna-fast` | `gpt-luna+fast` | gpt-6-luna+fast |
-| `gpt-astra` | `gpt-astra` | gpt-6-astra |
-| `claude-opus` | `claude-opus` | claude-opus-5-5 |
-| `claude-sonnet` | `claude-sonnet` | claude-sonnet-5-5 |
+| `gpt-sol` | `codex-personal` | gpt-6.1-sol |
+| `gpt-luna-fast` | `codex-personal` | gpt-6-luna+fast |
+| `gpt-astra` | `codex-personal` | gpt-6-astra |
+| `claude-opus` | `claude-personal` | claude-opus-5-5 |
+| `claude-sonnet` | `claude-personal` | claude-sonnet-5-5 |
 
 `reasoning_effort` の既定は `medium`（`models.sh` の `EVAL_DEFAULT_EFFORT`）。モデルごとに変えるなら `--effort` か `EVAL_EFFORT` で指定する（実行前に決める）。
 
@@ -97,7 +98,7 @@ $EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
 
 | ファイル | 内容 |
 |---|---|
-| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`route`、`effort` など。**最後に書く**ので、あれば完了扱い |
+| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`profile`、`model_id`、`effort` など。**最後に書く**ので、あれば完了扱い |
 | `run.db` | この run の store（`--db`）。run ごとに別ファイルなので並列でも衝突しない |
 | `evorch.stdout.log` / `evorch.stderr.log` | Worker の最終出力 / `run_id:` を含む stderr |
 | `verify.log` | 検証の出力（不一致一覧） |
