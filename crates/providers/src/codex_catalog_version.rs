@@ -37,6 +37,44 @@ pub struct CodexCatalogVersion {
     pub warning: Option<String>,
 }
 
+/// Credential-free evidence for a version decision, including cached failures.
+#[derive(Debug, Clone)]
+pub struct CodexVersionResolution {
+    pub value: CodexCatalogVersion,
+    /// `resolved`, `last_known`, `bundled`, or an explicitly `fixed` deployment.
+    pub source: &'static str,
+    pub lookup_failure: Option<String>,
+    pub cache_hit: bool,
+    pub elapsed_ms: u64,
+}
+
+impl CodexVersionResolution {
+    pub fn detail(&self) -> String {
+        format!(
+            "client_version={} version_source={} version_lookup_failure={} version_cache_hit={} version_lookup_elapsed_ms={}",
+            self.value.version,
+            self.source,
+            self.lookup_failure.as_deref().unwrap_or("none"),
+            self.cache_hit,
+            self.elapsed_ms,
+        )
+    }
+}
+
+/// Error categories deliberately exclude remote bodies, URLs, and credentials.
+pub(crate) fn catalog_failure(error: &ProviderError) -> String {
+    if let Some(status) = error.status() {
+        return format!("http_{status}");
+    }
+    match error {
+        ProviderError::Timeout => "timeout",
+        ProviderError::Transport { .. } => "transport",
+        ProviderError::InvalidJson { .. } => "invalid_json",
+        _ => "other",
+    }
+    .into()
+}
+
 /// Stable client version attached to Codex inference requests.
 /// Resolved once per client so request headers stay stable for prompt-cache affinity.
 #[derive(Clone, Debug)]
@@ -55,16 +93,26 @@ impl Default for CodexClientVersion {
 
 impl CodexClientVersion {
     pub async fn resolve(&self) -> CodexCatalogVersion {
+        self.resolve_with_evidence().await.value
+    }
+
+    pub async fn resolve_with_evidence(&self) -> CodexVersionResolution {
         match self {
-            Self::Fixed(version) => version.clone(),
-            Self::Resolve(resolver) => resolver.resolve().await,
+            Self::Fixed(version) => CodexVersionResolution {
+                value: version.clone(),
+                source: "fixed",
+                lookup_failure: None,
+                cache_hit: false,
+                elapsed_ms: 0,
+            },
+            Self::Resolve(resolver) => resolver.resolve_with_evidence().await,
         }
     }
 }
 
 #[derive(Debug)]
 struct CachedVersion {
-    value: CodexCatalogVersion,
+    resolution: CodexVersionResolution,
     checked_at: Instant,
 }
 
@@ -98,45 +146,74 @@ impl CodexCatalogVersionResolver {
 
     /// GitHub errors must not prevent an authenticated model-catalog fetch.
     pub async fn resolve(&self) -> CodexCatalogVersion {
+        self.resolve_with_evidence().await.value
+    }
+
+    pub async fn resolve_with_evidence(&self) -> CodexVersionResolution {
+        self.resolve_using(self.fetch_latest()).await
+    }
+
+    async fn resolve_using(
+        &self,
+        lookup: impl std::future::Future<Output = Result<String, ProviderError>>,
+    ) -> CodexVersionResolution {
+        let started = Instant::now();
         let mut cache = self.cache.lock().await;
         if let Some(cached) = cache.as_ref() {
-            let ttl = if cached.value.warning.is_some() {
+            let ttl = if cached.resolution.value.warning.is_some() {
                 RETRY_TTL
             } else {
                 SUCCESS_TTL
             };
             if cached.checked_at.elapsed() < ttl {
-                return cached.value.clone();
+                let mut resolution = cached.resolution.clone();
+                resolution.cache_hit = true;
+                resolution.elapsed_ms = started.elapsed().as_millis() as u64;
+                return resolution;
             }
         }
-        let value = match tokio::time::timeout(LOOKUP_TIMEOUT, self.fetch_latest()).await {
-            Ok(Ok(version)) => CodexCatalogVersion {
-                version,
-                warning: None,
-            },
-            _ => {
-                let version = cache.as_ref().map_or_else(
-                    || CODEX_MODELS_FALLBACK_VERSION.to_owned(),
-                    |cached| cached.value.version.clone(),
-                );
-                let source = if cache.is_some() {
-                    "cached/bundled"
-                } else {
-                    "bundled"
-                };
-                CodexCatalogVersion {
-                    warning: Some(format!(
-                        "Could not check the latest Codex release; using {source} client version {version}. New models may be missing."
-                    )),
+        let result = tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
+            .await
+            .unwrap_or(Err(ProviderError::Timeout));
+        let resolution = match result {
+            Ok(version) => CodexVersionResolution {
+                value: CodexCatalogVersion {
                     version,
+                    warning: None,
+                },
+                source: "resolved",
+                lookup_failure: None,
+                cache_hit: false,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+            Err(error) => {
+                let last_known = cache
+                    .as_ref()
+                    .filter(|cached| matches!(cached.resolution.source, "resolved" | "last_known"));
+                let (version, source) = last_known.map_or_else(
+                    || (CODEX_MODELS_FALLBACK_VERSION.to_owned(), "bundled"),
+                    |cached| (cached.resolution.value.version.clone(), "last_known"),
+                );
+                let failure = catalog_failure(&error);
+                CodexVersionResolution {
+                    value: CodexCatalogVersion {
+                        warning: Some(format!(
+                            "Could not check the latest Codex release ({failure}); using {source} client version {version}. New models may be missing."
+                        )),
+                        version,
+                    },
+                    source,
+                    lookup_failure: Some(failure),
+                    cache_hit: false,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
                 }
             }
         };
         *cache = Some(CachedVersion {
-            value: value.clone(),
+            resolution: resolution.clone(),
             checked_at: Instant::now(),
         });
-        value
+        resolution
     }
 
     async fn fetch_latest(&self) -> Result<String, ProviderError> {
@@ -156,7 +233,10 @@ impl CodexCatalogVersionResolver {
                 .map_err(map_request_error)?;
             if !response.status().is_success() {
                 // No remote error body is needed for the fallback notice.
-                return Err(ProviderError::Request("Codex release lookup failed".into()));
+                return Err(ProviderError::Http {
+                    status: response.status().as_u16(),
+                    body: "Codex release lookup failed".into(),
+                });
             }
             let mut body = Vec::new();
             while let Some(chunk) = response.chunk().await.map_err(map_request_error)? {

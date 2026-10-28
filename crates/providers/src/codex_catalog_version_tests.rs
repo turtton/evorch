@@ -156,29 +156,90 @@ async fn refresh_failure_retains_last_success_and_retries_after_backoff() {
     // Given: expired successful cache and a temporary GitHub failure.
     let server = MockServer::start().await;
     let resolver = resolver(&server);
-    *resolver.cache.lock().await = Some(CachedVersion {
-        value: CodexCatalogVersion {
-            version: "0.157.0".into(),
-            warning: None,
-        },
-        checked_at: Instant::now() - SUCCESS_TTL,
-    });
+    mount(&server, json!([release("rust-v0.157.0")])).await;
+    assert_eq!(resolver.resolve_with_evidence().await.source, "resolved");
+    server.reset().await;
+    resolver.cache.lock().await.as_mut().unwrap().checked_at = Instant::now() - SUCCESS_TTL;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(503))
         .expect(1)
         .mount(&server)
         .await;
     // When
-    let stale = resolver.resolve().await;
+    let stale = resolver.resolve_with_evidence().await;
     // Then: preserve latest known value, not the older bundled fallback.
-    assert_eq!(stale.version, "0.157.0");
-    assert!(stale.warning.is_some());
+    assert_eq!(stale.value.version, "0.157.0");
+    assert!(stale.value.warning.is_some());
+    assert_eq!(stale.source, "last_known");
+    assert_eq!(stale.lookup_failure.as_deref(), Some("http_503"));
+    assert!(!stale.cache_hit);
+    assert!(resolver.resolve_with_evidence().await.cache_hit);
     server.reset().await;
     resolver.cache.lock().await.as_mut().unwrap().checked_at = Instant::now() - RETRY_TTL;
     mount(&server, json!([release("rust-v0.158.0")])).await;
     let refreshed = resolver.resolve().await;
     assert_eq!(refreshed.version, "0.158.0");
     assert!(refreshed.warning.is_none());
+}
+
+#[tokio::test]
+async fn cached_bundled_failures_keep_their_source_until_successful_recovery() {
+    let server = MockServer::start().await;
+    let resolver = resolver(&server);
+    for status in [429, 503] {
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("secret response body"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let resolution = resolver.resolve_with_evidence().await;
+        assert_eq!(resolution.source, "bundled");
+        assert_eq!(resolution.lookup_failure, Some(format!("http_{status}")));
+        assert!(!resolution.cache_hit);
+        let cached = resolver.resolve_with_evidence().await;
+        assert!(cached.cache_hit);
+        assert_eq!(cached.source, "bundled");
+        assert!(!cached.detail().contains("secret"));
+        assert!(!cached.value.warning.unwrap().contains("secret"));
+        server.reset().await;
+        resolver.cache.lock().await.as_mut().unwrap().checked_at = Instant::now() - RETRY_TTL;
+    }
+    mount(&server, json!([release("rust-v0.999.0")])).await;
+    let recovered = resolver.resolve_with_evidence().await;
+    assert_eq!(recovered.value.version, "0.999.0");
+    assert_eq!(recovered.source, "resolved");
+    assert_eq!(recovered.lookup_failure, None);
+    assert!(recovered.value.warning.is_none());
+}
+
+#[test]
+fn timeout_and_other_failures_have_distinct_credential_free_categories() {
+    assert_eq!(catalog_failure(&ProviderError::Timeout), "timeout");
+    assert_eq!(
+        catalog_failure(&ProviderError::RateLimited { retry_after: None }),
+        "http_429"
+    );
+    assert_eq!(
+        catalog_failure(&ProviderError::Request("token account-id".into())),
+        "other"
+    );
+    assert_eq!(
+        catalog_failure(&ProviderError::Transport {
+            message: "token".into()
+        }),
+        "transport"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lookup_timeout_records_degraded_evidence_without_wall_clock_waiting() {
+    let resolver = CodexCatalogVersionResolver::new("unused");
+    // A non-completing transport exercises the production lookup deadline using
+    // virtual time; elapsed wall time is not a correctness condition.
+    let result = resolver.resolve_using(std::future::pending()).await;
+    assert_eq!(result.lookup_failure.as_deref(), Some("timeout"));
+    assert_eq!(result.source, "bundled");
+    assert!(result.value.warning.unwrap().contains("timeout"));
 }
 
 #[tokio::test]

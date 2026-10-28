@@ -33,6 +33,8 @@ const OVERLAY_FORBIDDEN_KEYS: [&str; 3] = ["eval", "tools", "comment_checker"];
 pub const BASELINE: &str = "baseline";
 pub const CANDIDATE: &str = "candidate";
 
+pub(crate) mod preflight;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvalArgs {
     pub thread_id: String,
@@ -96,6 +98,8 @@ pub enum EvalError {
     Credential(#[from] sandbox::CredentialError),
     #[error("credential initialization task failed: {0}")]
     CredentialTask(#[from] tokio::task::JoinError),
+    #[error("evaluation preflight failed: {reason}; report: {}", report.display())]
+    Preflight { reason: String, report: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +239,17 @@ pub async fn run(
         deps,
     };
     let mut runs = Vec::new();
+    let preflight = preflight::check(&context, &configurations, &dir).await;
+    let preflight_path = dir.join(preflight::REPORT_FILE);
+    output::write_json(&preflight_path, &preflight)?;
+    if let Some(reason) = preflight.failure() {
+        manifest.finished_at = Some(output::timestamp(SystemTime::now()));
+        output::write_json(&manifest_path, &manifest)?;
+        return Err(EvalError::Preflight {
+            reason,
+            report: preflight_path,
+        });
+    }
     for (label, overlay) in configurations {
         for index in 1..=repeat {
             let run_dir = dir.join("runs").join(format!("{label}-{index}"));
@@ -608,6 +623,17 @@ pub(crate) fn configured_model(
     env: &Arc<dyn EnvLookup>,
     bus: &Arc<EventBus>,
 ) -> Result<Arc<dyn AgentModel>, String> {
+    configured_routed_model(config, user_config_dir, credentials, env, bus)
+        .map(|model| model as Arc<dyn AgentModel>)
+}
+
+fn configured_routed_model(
+    config: &Config,
+    user_config_dir: Option<&Path>,
+    credentials: &Arc<dyn CredentialStore>,
+    env: &Arc<dyn EnvLookup>,
+    bus: &Arc<EventBus>,
+) -> Result<Arc<runtime::compose::RoutedModel>, String> {
     let user_dir = user_config_dir
         .map(Path::to_path_buf)
         .or_else(config::user_config_dir);
@@ -633,7 +659,6 @@ pub(crate) fn configured_model(
         },
         None,
     )
-    .map(|model| model as Arc<dyn AgentModel>)
     .map_err(|error| error.to_string())
 }
 

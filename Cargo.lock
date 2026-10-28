@@ -2283,6 +2283,7 @@ dependencies = [
  "toml",
  "tools",
  "tracing",
+ "wiremock",
  "workspace-ui",
 ]
 

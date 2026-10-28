@@ -31,6 +31,11 @@ pub trait ProviderClient: Send + Sync {
         Ok(None)
     }
 
+    /// Missing models in a degraded catalog are not authoritative unavailability.
+    fn catalog_degradation(&self) -> Option<String> {
+        None
+    }
+
     /// Session-backed hosted web search, when the provider offers it.
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         None

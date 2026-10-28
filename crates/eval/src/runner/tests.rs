@@ -95,6 +95,163 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+fn preflight_config(fixture: &Fixture, base_url: String) -> Config {
+    let mut config = Config::default();
+    config.providers.insert(
+        "primary".into(),
+        config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::OpenAiCompatible,
+            api_protocol: config::ApiProtocolConfig::OpenAiCompletions,
+            base_url,
+            default_model: "gpt-4o".into(),
+            models: ["gpt-4o", "missing"]
+                .into_iter()
+                .map(config::types::provider::ModelEntryConfig::enabled)
+                .collect(),
+            credential: config::CredentialRefConfig::Env { var: "KEY".into() },
+            ..Default::default()
+        },
+    );
+    for role in ["worker", "reviewer"] {
+        config.routing.routes.insert(
+            role.into(),
+            vec![config::RouteCandidateConfig {
+                profile: "primary".into(),
+                model: Some("gpt-4o".into()),
+                auto: false,
+            }],
+        );
+    }
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    config
+}
+
+#[tokio::test]
+async fn preflight_checks_candidate_child_roles_before_starting_any_baseline() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+    preflight_config(&fixture, server.uri());
+    // A post-capture project override must not contaminate the snapshot preflight.
+    let project_config = fixture.recorded.source.root().join(".evorch");
+    std::fs::create_dir_all(&project_config).unwrap();
+    std::fs::write(
+        project_config.join("config.toml"),
+        "[routing.routes]\nworker = [{ profile = \"primary\", model = \"missing\" }]\n",
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some(
+        "[routing.routes]\nreviewer = [{ profile = \"primary\", model = \"missing\" }]\n",
+    ));
+    let output = args.output.clone().unwrap();
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    assert!(
+        report["checks"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not advertised"),
+        "{report}"
+    );
+    assert_eq!(report["checks"][1]["label"], CANDIDATE);
+    assert!(!output.join("runs").exists());
+    let manifest = read_json(&output.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["runs"], serde_json::json!([]));
+    assert!(manifest["finished_at"].is_string());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+    let reports = crate::report::report(
+        crate::ReportArgs {
+            dirs: vec![output.clone()],
+            user_config_dir: Some(fixture.user.path().into()),
+            ..Default::default()
+        },
+        &crate::ReportDeps {
+            env: Arc::new(routing::MapEnv::default()),
+            judge: Some(Arc::new(|_| panic!("no failed preflight may be judged"))),
+            credentials: None,
+            catalog: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(reports[0].pairs.is_empty());
+    assert!(reports[0].warnings.iter().any(|warning| warning.kind
+        == crate::report::WarningKind::PreflightFailed
+        && warning.message.contains("missing")));
+    let markdown = std::fs::read_to_string(output.join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(markdown.contains("no samples compared"), "{markdown}");
+}
+
+#[tokio::test]
+async fn preflight_checks_user_simulator_before_starting_replays() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut config = preflight_config(&fixture, server.uri());
+    config.routing.routes.insert(
+        "simulator".into(),
+        vec![config::RouteCandidateConfig {
+            profile: "primary".into(),
+            model: Some("missing".into()),
+            auto: false,
+        }],
+    );
+    config.eval.user_simulator = Some(config::RoleBindingConfig {
+        models: vec![config::ChainEntryConfig::route("simulator")],
+        ..Default::default()
+    });
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(None);
+    let output = args.output.clone().unwrap();
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("user_simulator"), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    assert!(report["checks"][1]["error"].is_string(), "{report}");
+    assert!(!output.join("runs").exists());
+}
+
 #[tokio::test]
 async fn baseline_and_candidate_replays_each_leave_their_results() {
     // Given: a recorded thread, an agent that writes a file, and a user who then finishes.
