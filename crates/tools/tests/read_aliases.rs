@@ -35,10 +35,11 @@ macro_rules! alias_test {
             // When: the model supplies a common alternative key.
             let result = executor.execute(&context(), "read", "c1", input.clone()).await.unwrap();
 
-            // Then: the file is returned and the original input remains observable.
+            // Then: the file is returned and the recorded input names it as `path`.
             assert_eq!(result.content, "alias content\n");
+            let normalized = json!({"path": path});
             assert!(matches!(receiver.recv().await.unwrap().kind,
-                EventKind::Tool(ToolEvent::ToolStarted { input: Some(recorded), .. }) if recorded == input));
+                EventKind::Tool(ToolEvent::ToolStarted { input: Some(recorded), .. }) if recorded == normalized));
         }
     };
 }
@@ -49,24 +50,74 @@ alias_test!(read_accepts_filename_alias, "filename");
 alias_test!(read_accepts_target_alias, "target");
 
 #[tokio::test]
-async fn read_prefers_path_over_file() {
-    // Given: conflicting canonical and alias paths.
+async fn read_rejects_aliases_with_different_values() {
+    // Given: the canonical path and an alias naming different places.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("canonical.txt");
     std::fs::write(&path, "canonical").unwrap();
-    let (executor, _) = executor();
+    let (executor, mut receiver) = executor();
+    let input = json!({"path": path, "file": dir.path()});
     // When: both keys are supplied.
+    let error = executor
+        .execute(&context(), "read", "c1", input.clone())
+        .await
+        .unwrap_err();
+    // Then: nothing is read, and the message names each key with its value.
+    let ToolError::InvalidArgs { detail } = &error else {
+        panic!("expected InvalidArgs, got {error:?}");
+    };
+    assert!(
+        detail.contains(&format!("path=\"{}\"", path.display())),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(&format!("file=\"{}\"", dir.path().display())),
+        "{detail}"
+    );
+    assert!(detail.contains("path 引数 1 つ"), "{detail}");
+    assert!(matches!(receiver.recv().await.unwrap().kind,
+        EventKind::Tool(ToolEvent::ToolStarted { input: Some(recorded), .. }) if recorded == input));
+    assert!(matches!(
+        receiver.recv().await.unwrap().kind,
+        EventKind::Tool(ToolEvent::ToolCompleted { is_error: true, .. })
+    ));
+    assert!(matches!(
+        Read.execute(input).await,
+        Err(ToolError::InvalidArgs { .. })
+    ));
+}
+
+#[tokio::test]
+async fn read_accepts_equal_duplicates_and_empty_aliases() {
+    // Given: a file named by several aliases with the same value, plus empty ones.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same.txt");
+    std::fs::write(&path, "same").unwrap();
+    let (executor, _) = executor();
+    // When: the call is executed.
     let result = executor
         .execute(
             &context(),
             "read",
             "c1",
-            json!({"path": path, "file": dir.path().join("missing")}),
+            json!({"path": path, "file": path, "file_path": path, "filename": "", "target": ""}),
         )
         .await
         .unwrap();
-    // Then: the canonical path wins.
-    assert_eq!(result.content, "canonical");
+    // Then: the duplicates collapse into one path.
+    assert_eq!(result.content, "same");
+}
+
+#[test]
+fn read_schema_lists_only_path_for_the_file() {
+    // Given / When: the model-facing read schema.
+    let schema = Read.schema();
+    // Then: aliases are accepted at run time but not advertised.
+    let properties = schema["properties"].as_object().unwrap();
+    assert!(properties.contains_key("path"));
+    for alias in ["file", "file_path", "filename", "target"] {
+        assert!(!properties.contains_key(alias), "{alias}");
+    }
 }
 
 #[tokio::test]
@@ -80,11 +131,7 @@ async fn read_error_message_mentions_expected_keys() {
         .unwrap_err();
     // Then: the model receives an actionable argument hint.
     assert!(matches!(error, ToolError::InvalidArgs { .. }));
-    assert!(
-        error
-            .to_string()
-            .contains("expected keys: path (aliases: file, file_path)")
-    );
+    assert!(error.to_string().contains("引数 path は文字列"));
 }
 
 #[tokio::test]
