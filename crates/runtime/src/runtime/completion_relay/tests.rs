@@ -132,7 +132,7 @@ async fn stopped_child_publishes_terminal_output_and_relays_once_without_legacy_
 }
 
 #[tokio::test]
-async fn terminal_parents_drop_child_completion_without_mailbox_wake() {
+async fn terminal_parents_hold_child_completion_without_mailbox_input() {
     for phase in [
         AgentRunPhase::Stopped,
         AgentRunPhase::Done,
@@ -150,6 +150,10 @@ async fn terminal_parents_drop_child_completion_without_mailbox_wake() {
         assert!(!version.has_changed().unwrap());
         assert!(runtime.take_inbox(parent).unwrap().is_empty());
         assert_eq!(runtime.inspect_agent(parent).unwrap().phase, phase);
+        assert_eq!(
+            runtime.shared.held_messages.lock().unwrap()[&parent].len(),
+            1
+        );
     }
 }
 
@@ -328,4 +332,74 @@ async fn publish_terminal_emits_event_when_run_missing_from_registry() {
         assert!(matches!(events.recv().await.unwrap().kind,
             EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "marker"));
     }
+}
+
+#[tokio::test]
+async fn observing_old_snapshot_keeps_explicit_messages_and_same_id_new_completion() {
+    let runtime = fixture();
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    publish(&runtime, child, AgentRunPhase::Done);
+    let old = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    assert!(
+        runtime
+            .run_output(child, parent)
+            .unwrap()
+            .completion_notice
+            .is_none()
+    );
+    runtime.spawn_run_with_handoff(
+        child,
+        Some(parent),
+        Role::Worker,
+        "continued".into(),
+        RunConfig::default(),
+        RunContinuation::Fresh,
+        None,
+    );
+    publish(&runtime, child, AgentRunPhase::Done);
+    let new = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    assert_ne!(old.generation, new.generation);
+    runtime
+        .send_agent_message(
+            child,
+            parent,
+            AgentMessageKind::Send,
+            "completed without final output",
+            None,
+        )
+        .unwrap();
+    runtime.observe_completion(&old);
+    let messages = runtime.take_inbox(parent).unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "new generation and explicit Send survive"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.content == "completed without final output")
+    );
+    // Re-observing a stale snapshot cannot acknowledge the new receipt.
+    runtime
+        .run_mailbox(parent)
+        .unwrap()
+        .try_push_completion(messages[0].clone(), new.clone())
+        .unwrap();
+    runtime.observe_completion(&old);
+    assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
+    runtime.observe_completion(&new);
+    assert!(runtime.run_mailbox(parent).unwrap().is_empty());
 }

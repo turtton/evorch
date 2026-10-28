@@ -248,10 +248,12 @@ async fn terminal_root_resumes_with_live_child_and_collects_its_result() {
         );
         root_gate.notify_one();
         let finished = fixture.model.wait_for_request(4).await;
-        for id in ["finished", "waited", "report"] {
+        for id in ["finished", "waited"] {
             let result = tool_result(&finished, id);
             assert_eq!(result.matches("unique child result").count(), 1, "{result}");
         }
+        // Output-bearing tools acknowledged the completion before this inbox call.
+        assert_eq!(tool_result(&finished, "report"), "[]");
         root_gate.notify_one();
         let empty = fixture.model.wait_for_request(5).await;
         assert_eq!(tool_result(&empty, "empty"), "[]");

@@ -139,6 +139,13 @@ impl AgentRuntime {
                 parent,
                 escalated_from: None,
                 completion_relayed,
+                completion_notice: crate::mailbox::CompletionNotice::new(
+                    parent,
+                    run_id,
+                    self.shared
+                        .next_completion_generation
+                        .fetch_add(1, Ordering::Relaxed),
+                ),
                 phase_tx,
                 phase_rx,
                 message_count_rx,
