@@ -75,7 +75,7 @@ fn the_program_sees_no_host_secret_workspace_or_environment() {
 
     // Only the directories holding mounted files, plus the private tmpfs, /dev and /proc.
     let mut allowed: Vec<String> = ["/dev", "/proc", "/tmp"].map(String::from).into();
-    allowed.extend(sandbox.mounts().iter().filter_map(|path| {
+    allowed.extend(sandbox.mount_points().iter().filter_map(|path| {
         path.components()
             .nth(1)
             .map(|first| format!("/{}", first.as_os_str().to_string_lossy()))
@@ -117,7 +117,7 @@ fn a_relative_symlinked_program_is_mounted_and_run_by_its_resolved_path() {
     let sandbox = MinimalSandbox::detect(Path::new("tool"), &[]).expect("bubblewrap");
 
     assert_eq!(sandbox.executable(), shell());
-    assert!(sandbox.mounts().contains(&shell()));
+    assert!(sandbox.mount_points().contains(&shell()));
     let wrapped = sandbox
         .wrap(CommandSpec {
             program: sandbox.executable().to_string_lossy().into_owned(),

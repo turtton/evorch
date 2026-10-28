@@ -20,9 +20,10 @@
 //! group or others), and it runs inside its own bubblewrap sandbox without
 //! network, workspace or environment, under a deadline and an output cap.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::bwrap::{locate_bwrap, probe};
@@ -34,6 +35,8 @@ use crate::session::StdioSession;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most output the listing may produce.
 const DISCOVERY_OUTPUT_BYTES: usize = 64 * 1024;
+/// How often a listing in progress looks at the cancellation flag.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
 /// How long the process may linger after it closed its output.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// Where a loader may live: files here are installed by the system or are content-addressed.
@@ -46,8 +49,15 @@ const NIX_STORE: &str = "/nix/store";
 pub struct MinimalSandbox {
     bwrap: PathBuf,
     executable: PathBuf,
-    mounts: Vec<PathBuf>,
+    mounts: Vec<Mount>,
     env: Vec<(String, String)>,
+}
+
+/// A host file shown read-only at `dest` (which may be an alias of `source`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    pub source: PathBuf,
+    pub dest: PathBuf,
 }
 
 impl MinimalSandbox {
@@ -60,13 +70,28 @@ impl MinimalSandbox {
     /// Bubblewrap is missing or unusable, or the executable's libraries cannot
     /// be listed. There is no fallback to running without the sandbox.
     pub fn detect(executable: &Path, forward_env: &[&str]) -> Result<Self, SandboxError> {
+        Self::detect_cancellable(executable, forward_env, &AtomicBool::new(false))
+    }
+
+    /// Like [`Self::detect`], but stops as soon as `cancel` is set: a listing in
+    /// progress is killed and reaped, and an error is returned instead of a sandbox.
+    ///
+    /// # Errors
+    /// As [`Self::detect`], or the preparation was cancelled.
+    pub fn detect_cancellable(
+        executable: &Path,
+        forward_env: &[&str],
+        cancel: &AtomicBool,
+    ) -> Result<Self, SandboxError> {
         let unavailable = |detail: String| SandboxError::BwrapUnavailable { detail };
         let executable = executable
             .canonicalize()
             .map_err(|error| unavailable(format!("{}: {error}", executable.display())))?;
-        let loader = elf_interpreter(&executable)
-            .map_err(|error| unavailable(format!("{}: {error}", executable.display())))?
-            .map(|interpreter| trusted_loader(&interpreter))
+        let requested = elf_interpreter(&executable)
+            .map_err(|error| unavailable(format!("{}: {error}", executable.display())))?;
+        let loader = requested
+            .as_deref()
+            .map(trusted_loader)
             .transpose()
             .map_err(unavailable)?;
         let bwrap = locate_bwrap().ok_or_else(|| SandboxError::BwrapUnavailable {
@@ -82,14 +107,24 @@ impl MinimalSandbox {
                     .map(|value| ((*name).to_owned(), value))
             })
             .collect();
-        let mut files = BTreeSet::from([executable.clone()]);
-        if let Some(loader) = loader {
-            files.extend(list_libraries(&bwrap, &loader, &executable, &env).map_err(unavailable)?);
+        let listed = match &loader {
+            Some(loader) => {
+                list_libraries(&bwrap, loader, &executable, &env, cancel).map_err(unavailable)?
+            }
+            None => Vec::new(),
+        };
+        if cancel.load(Ordering::SeqCst) {
+            return Err(unavailable("preparation was cancelled".to_owned()));
         }
         Ok(Self {
             bwrap,
+            mounts: plan_mounts(
+                &executable,
+                requested.as_deref(),
+                loader.as_deref(),
+                &listed,
+            ),
             executable,
-            mounts: files.into_iter().collect(),
             env,
         })
     }
@@ -99,9 +134,9 @@ impl MinimalSandbox {
         &self.executable
     }
 
-    /// Every host file the program can see, besides `/tmp`, `/dev` and `/proc`.
-    pub fn mounts(&self) -> &[PathBuf] {
-        &self.mounts
+    /// The paths at which the program sees host files, besides `/tmp`, `/dev` and `/proc`.
+    pub fn mount_points(&self) -> Vec<PathBuf> {
+        self.mounts.iter().map(|mount| mount.dest.clone()).collect()
     }
 
     /// The bubblewrap arguments for `spec`; the working directory is always `/tmp`.
@@ -125,9 +160,12 @@ impl MinimalSandbox {
         ]
         .map(str::to_owned)
         .into();
-        for path in &self.mounts {
-            let path = path.to_string_lossy().into_owned();
-            args.extend(["--ro-bind".to_owned(), path.clone(), path]);
+        for mount in &self.mounts {
+            args.extend([
+                "--ro-bind".to_owned(),
+                mount.source.to_string_lossy().into_owned(),
+                mount.dest.to_string_lossy().into_owned(),
+            ]);
         }
         args.extend(["--chdir".to_owned(), "/tmp".to_owned()]);
         args.push(spec.program.clone());
@@ -162,6 +200,7 @@ fn list_libraries(
     loader: &Path,
     executable: &Path,
     env: &[(String, String)],
+    cancel: &AtomicBool,
 ) -> Result<Vec<PathBuf>, String> {
     let wrapped = WrappedCommand {
         program: bwrap.to_string_lossy().into_owned(),
@@ -170,11 +209,10 @@ fn list_libraries(
         inherit_env: false,
         env: env.to_vec(),
     };
-    let listing = run_bounded(wrapped, DISCOVERY_TIMEOUT, DISCOVERY_OUTPUT_BYTES)
+    let listing = run_bounded(wrapped, DISCOVERY_TIMEOUT, DISCOVERY_OUTPUT_BYTES, cancel)
         .map_err(|error| format!("listing the libraries of {}: {error}", executable.display()))?;
-    let mut files = vec![loader.to_path_buf()];
-    files.extend(listing.lines().filter_map(listed_path));
-    if files.len() < 2 {
+    let files: Vec<PathBuf> = listing.lines().filter_map(listed_path).collect();
+    if files.is_empty() {
         return Err(format!(
             "{} listed no libraries for {}",
             loader.display(),
@@ -182,6 +220,37 @@ fn list_libraries(
         ));
     }
     Ok(files)
+}
+
+/// What the program sees: itself, the checked loader (also at the path the ELF
+/// asks for, which on a merged-usr system is an alias such as `/lib64/ld-linux-…`),
+/// and the libraries the loader listed.
+fn plan_mounts(
+    executable: &Path,
+    requested_loader: Option<&Path>,
+    loader: Option<&Path>,
+    listed: &[PathBuf],
+) -> Vec<Mount> {
+    let mut by_dest: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    by_dest.insert(executable.to_path_buf(), executable.to_path_buf());
+    if let Some(loader) = loader {
+        by_dest.insert(loader.to_path_buf(), loader.to_path_buf());
+        if let Some(requested) = requested_loader {
+            by_dest.insert(requested.to_path_buf(), loader.to_path_buf());
+        }
+    }
+    for path in listed {
+        // A listed loader alias maps to the checked file; anything else is itself.
+        let source = match (loader, requested_loader) {
+            (Some(loader), Some(requested)) if path == requested => loader.to_path_buf(),
+            _ => path.clone(),
+        };
+        by_dest.entry(path.clone()).or_insert(source);
+    }
+    by_dest
+        .into_iter()
+        .map(|(dest, source)| Mount { source, dest })
+        .collect()
 }
 
 fn discovery_argv(loader: &Path, executable: &Path) -> Vec<String> {
@@ -286,7 +355,12 @@ fn refused(loader: &Path, reason: &str) -> String {
 /// when it exceeds `timeout` or writes more than `cap` bytes, and returns what it
 /// wrote to stdout. A command that ends successfully and stays within both limits
 /// is the only success.
-fn run_bounded(command: WrappedCommand, timeout: Duration, cap: usize) -> Result<String, String> {
+fn run_bounded(
+    command: WrappedCommand,
+    timeout: Duration,
+    cap: usize,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
     struct Prepared(WrappedCommand);
     impl Sandbox for Prepared {
         fn wrap(&self, _: CommandSpec) -> Result<WrappedCommand, SandboxError> {
@@ -317,11 +391,25 @@ fn run_bounded(command: WrappedCommand, timeout: Duration, cap: usize) -> Result
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut stderr, &mut std::io::sink());
     });
-    let output = match receiver.recv_timeout(timeout) {
-        Ok(Ok(output)) if output.len() <= cap => output,
-        Ok(Ok(_)) => return Err(format!("more than {cap} bytes of output")),
-        Ok(Err(error)) => return Err(error.to_string()),
-        Err(_) => return Err(format!("no result within {} ms", timeout.as_millis())),
+    let started = std::time::Instant::now();
+    let output = loop {
+        match receiver.recv_timeout(CANCEL_POLL) {
+            Ok(Ok(output)) if output.len() <= cap => break output,
+            Ok(Ok(_)) => return Err(format!("more than {cap} bytes of output")),
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("the output reader ended unexpectedly".to_owned());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Returning drops the session, which kills and reaps the process group.
+                if cancel.load(Ordering::SeqCst) {
+                    return Err("cancelled".to_owned());
+                }
+                if started.elapsed() >= timeout {
+                    return Err(format!("no result within {} ms", timeout.as_millis()));
+                }
+            }
+        }
     };
     // Output ended; the process must end too. The group is killed on drop either way.
     let exit_deadline = std::time::Instant::now() + EXIT_GRACE;
@@ -418,10 +506,12 @@ mod tests {
         let sandbox = MinimalSandbox {
             bwrap: PathBuf::from("bwrap"),
             executable: PathBuf::from("/opt/evorch"),
-            mounts: vec![
-                PathBuf::from("/opt/evorch"),
-                PathBuf::from("/lib/libc.so.6"),
-            ],
+            mounts: plan_mounts(
+                Path::new("/opt/evorch"),
+                None,
+                None,
+                &[PathBuf::from("/lib/libc.so.6")],
+            ),
             env: Vec::new(),
         };
         let args = sandbox.build_argv(&CommandSpec {
@@ -438,8 +528,8 @@ mod tests {
         assert_eq!(
             binds,
             [
-                ("/opt/evorch", "/opt/evorch"),
-                ("/lib/libc.so.6", "/lib/libc.so.6")
+                ("/lib/libc.so.6", "/lib/libc.so.6"),
+                ("/opt/evorch", "/opt/evorch")
             ]
         );
         for required in ["--unshare-net", "--unshare-pid", "--unshare-ipc", "--tmpfs"] {
@@ -534,7 +624,13 @@ mod tests {
         let pid_file = directory.path().join("pid");
         let script = format!("echo $$ > {}; exec sleep 600", pid_file.display());
 
-        let error = run_bounded(sh(&script), Duration::from_millis(200), 1024).unwrap_err();
+        let error = run_bounded(
+            sh(&script),
+            Duration::from_millis(200),
+            1024,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
 
         assert!(error.contains("no result within"), "{error}");
         let pid: i32 = std::fs::read_to_string(&pid_file)
@@ -547,7 +643,13 @@ mod tests {
 
     #[test]
     fn a_listing_that_floods_its_output_is_stopped_at_the_cap() {
-        let error = run_bounded(sh("yes x"), Duration::from_secs(60), 1024).unwrap_err();
+        let error = run_bounded(
+            sh("yes x"),
+            Duration::from_secs(60),
+            1024,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(error.contains("more than 1024 bytes"), "{error}");
     }
 
@@ -559,7 +661,13 @@ mod tests {
             "echo $$ > {}; echo done; exec >&- 2>&-; exec sleep 600",
             pid_file.display()
         );
-        let error = run_bounded(sh(&script), Duration::from_secs(60), 1024).unwrap_err();
+        let error = run_bounded(
+            sh(&script),
+            Duration::from_secs(60),
+            1024,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(error.contains("kept running"), "{error}");
         let pid: i32 = std::fs::read_to_string(&pid_file)
             .unwrap()
@@ -570,9 +678,88 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_a_listing_in_progress_kills_and_reaps_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let fifo = directory.path().join("started");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let script = format!(
+            "echo $$ > {}; echo go > {}; exec sleep 600",
+            pid_file.display(),
+            fifo.display()
+        );
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let listing = {
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                run_bounded(sh(&script), Duration::from_secs(600), 1024, &cancel)
+            })
+        };
+        // The listing is running once it has written to the FIFO.
+        std::fs::read_to_string(&fifo).unwrap();
+
+        cancel.store(true, Ordering::SeqCst);
+
+        assert_eq!(listing.join().unwrap().unwrap_err(), "cancelled");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(gone(pid), "listing process {pid} survived the cancellation");
+    }
+
+    #[test]
+    fn the_loader_is_also_shown_at_the_path_the_elf_asks_for() {
+        // A merged-usr system: the ELF asks for /lib64/ld-linux…, an alias of the file
+        // that was checked and that the loader reports at its own path.
+        let mounts = plan_mounts(
+            Path::new("/opt/evorch"),
+            Some(Path::new("/lib64/ld-linux-x86-64.so.2")),
+            Some(Path::new("/usr/lib/ld-linux-x86-64.so.2")),
+            &[
+                PathBuf::from("/lib64/ld-linux-x86-64.so.2"),
+                PathBuf::from("/usr/lib/libc.so.6"),
+            ],
+        );
+        let of = |dest: &str| {
+            mounts
+                .iter()
+                .find(|mount| mount.dest == Path::new(dest))
+                .map(|mount| mount.source.clone())
+        };
+        assert_eq!(
+            of("/lib64/ld-linux-x86-64.so.2"),
+            Some(PathBuf::from("/usr/lib/ld-linux-x86-64.so.2"))
+        );
+        assert_eq!(
+            of("/usr/lib/ld-linux-x86-64.so.2"),
+            Some(PathBuf::from("/usr/lib/ld-linux-x86-64.so.2"))
+        );
+        assert_eq!(
+            of("/usr/lib/libc.so.6"),
+            Some(PathBuf::from("/usr/lib/libc.so.6"))
+        );
+        assert_eq!(of("/opt/evorch"), Some(PathBuf::from("/opt/evorch")));
+        assert_eq!(mounts.len(), 4, "{mounts:?}");
+    }
+
+    #[test]
     fn a_successful_listing_returns_its_output() {
         assert_eq!(
-            run_bounded(sh("echo listing"), Duration::from_secs(60), 1024).unwrap(),
+            run_bounded(
+                sh("echo listing"),
+                Duration::from_secs(60),
+                1024,
+                &AtomicBool::new(false)
+            )
+            .unwrap(),
             "listing\n"
         );
     }
