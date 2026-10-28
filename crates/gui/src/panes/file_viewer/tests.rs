@@ -158,6 +158,28 @@ fn wait_loaded(cache: &FileCache) {
     }
 }
 
+pub(in crate::panes) fn wait_for_image(ctx: &egui::Context, path: &Path) {
+    let uri = image_uri(path).unwrap();
+    let _ = ctx.try_load_image(&uri, egui::load::SizeHint::default());
+    let loaders = ctx.loaders();
+    let images = loaders.image.lock();
+    let loader = images
+        .iter()
+        .find_map(|loader| {
+            (loader.as_ref() as &dyn std::any::Any).downcast_ref::<LocalImageLoader>()
+        })
+        .expect("local image loader installed");
+    let file = loader
+        .cache
+        .lock()
+        .unwrap()
+        .get(&uri)
+        .expect("image load started")
+        .clone();
+    drop(images);
+    wait_loaded(&file);
+}
+
 fn pending_reload(harness: &egui_kittest::Harness<'_, ()>, path: &Path) -> Option<FileCache> {
     harness
         .ctx

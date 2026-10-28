@@ -21,7 +21,26 @@ fn open_requests_id() -> egui::Id {
     egui::Id::new("artifact-open-requests")
 }
 
-/// Ask the host to open a stored artifact with the desktop's default application.
+fn external_open_requests_id() -> egui::Id {
+    egui::Id::new("artifact-external-open-requests")
+}
+
+/// Open outside evorch, even when the host has an in-app HTML preview.
+fn request_external_open(ctx: &egui::Context, path: PathBuf) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<Vec<PathBuf>>(external_open_requests_id())
+            .push(path);
+    });
+}
+
+pub fn take_external_open_requests(ctx: &egui::Context) -> Vec<PathBuf> {
+    ctx.data_mut(|data| {
+        data.remove_temp::<Vec<PathBuf>>(external_open_requests_id())
+            .unwrap_or_default()
+    })
+}
+
+/// Ask the host to open an artifact, allowing the in-app HTML preview.
 pub fn request_open(ctx: &egui::Context, path: PathBuf) {
     ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<Vec<PathBuf>>(open_requests_id())
@@ -69,14 +88,16 @@ pub fn show(ui: &mut Ui, id: egui::Id, presentation: &ArtifactPresentation) {
     });
 }
 
-/// Stored artifacts are immutable, so one metadata check per path suffices.
+/// Cache only successful checks: a temporarily missing store may reappear.
 fn is_available(ctx: &egui::Context, path: &Path) -> bool {
     let id = egui::Id::new(("artifact-available", path));
-    if let Some(available) = ctx.data(|data| data.get_temp::<bool>(id)) {
-        return available;
+    if ctx.data(|data| data.get_temp::<bool>(id)) == Some(true) {
+        return true;
     }
     let available = path.is_file();
-    ctx.data_mut(|data| data.insert_temp(id, available));
+    if available {
+        ctx.data_mut(|data| data.insert_temp(id, true));
+    }
     available
 }
 
@@ -84,46 +105,48 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
     let path = Path::new(&artifact.path);
     let available = is_available(ui.ctx(), path);
     ui.horizontal(|ui| {
-        let icon = if artifact.is_image() {
-            icons::IMAGE
-        } else {
-            icons::FILE_HTML
-        };
-        ui.label(medium(icons::with_icon(icon, &artifact.title)).color(palette().TEXT));
-        // Images open in the in-app viewer from their preview; the desktop's
-        // application stays in the preview's context menu.
-        if available
-            && !artifact.is_image()
-            && ghost_icon_button(ui, icons::ARROW_SQUARE_OUT, "Open").clicked()
-        {
-            request_open(ui.ctx(), path.to_path_buf());
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let icon = if artifact.is_image() {
+                icons::IMAGE
+            } else {
+                icons::FILE_HTML
+            };
+            if ui
+                .add_enabled_ui(available, |ui| {
+                    ghost_icon_button(ui, icons::ARROW_SQUARE_OUT, "Open")
+                        .on_hover_text("Open in the default browser or image viewer")
+                })
+                .inner
+                .clicked()
+            {
+                request_external_open(ui.ctx(), path.to_path_buf());
+            }
+            ui.add(
+                egui::Label::new(
+                    medium(icons::with_icon(icon, &artifact.title)).color(palette().TEXT),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&artifact.title);
+        });
     });
     if let Some(caption) = &artifact.caption {
         ui.label(RichText::new(caption).color(palette().TEXT_MUTED));
     }
     if !available {
         ui.label(
-            RichText::new(format!("Artifact unavailable: {}", artifact.artifact_id))
-                .size(FONT_SMALL)
-                .color(palette().WARNING_FG),
+            RichText::new(format!(
+                "Artifact unavailable: {} (file missing or inaccessible)",
+                artifact.artifact_id
+            ))
+            .size(FONT_SMALL)
+            .color(palette().WARNING_FG),
         );
         return;
     }
     if artifact.is_image() {
-        if let Some(uri) = crate::panes::file_viewer::image_uri(path) {
-            crate::panes::file_viewer::install_image_loader(ui.ctx());
-            ui.add_space(SP_1);
-            let width = ui.available_width().min(PREVIEW_MAX_WIDTH);
-            let preview = ui
-                .add(
-                    egui::Image::new(uri)
-                        .alt_text(format!("{} preview", artifact.title))
-                        .max_width(width)
-                        .max_height(PREVIEW_MAX_HEIGHT)
-                        .maintain_aspect_ratio(true)
-                        .sense(egui::Sense::click()),
-                )
+        if let Some(preview) = image_preview(ui, path, &artifact.title) {
+            let preview = preview
                 .on_hover_cursor(egui::CursorIcon::ZoomIn)
                 .on_hover_text(format!(
                     "Enlarge {} (right-click to open it in another app)",
@@ -138,14 +161,63 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
             }
             crate::panes::image_viewer::context_menu(&preview, path);
         }
-    } else if let Some(snapshots) = HtmlSnapshots::installed(ui.ctx()) {
-        html_snapshot(ui, &snapshots, artifact, path);
+    } else if artifact.media_type == "text/html" {
+        if let Some(snapshots) = HtmlSnapshots::installed(ui.ctx()) {
+            html_snapshot(ui, &snapshots, artifact, path);
+        } else {
+            preview_note(
+                ui,
+                "Preview unavailable: HTML renderer (CEF) is not installed",
+            );
+        }
     } else {
-        ui.label(
-            RichText::new("HTML mock — open it to view in the browser")
-                .size(FONT_SMALL)
-                .color(palette().TEXT_MUTED),
+        preview_note(
+            ui,
+            format!(
+                "Preview unavailable: unsupported media type ({})",
+                artifact.media_type
+            ),
         );
+    }
+}
+
+fn preview_note(ui: &mut Ui, text: impl Into<String>) {
+    ui.label(
+        RichText::new(text.into())
+            .size(FONT_SMALL)
+            .color(palette().TEXT_MUTED),
+    );
+}
+
+/// egui normally puts load errors in a hover tooltip on a tiny image icon.
+/// Keep the actual bounded loader's reason visible in the conversation instead.
+fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response> {
+    let Some(uri) = crate::panes::file_viewer::image_uri(path) else {
+        preview_note(ui, "Preview unavailable: invalid image path");
+        return None;
+    };
+    crate::panes::file_viewer::install_image_loader(ui.ctx());
+    let image = egui::Image::new(uri)
+        .alt_text(format!("{title} preview"))
+        // Remaining height can be zero below a transcript's scroll viewport.
+        .fit_to_original_size(1.0)
+        .max_width(ui.available_width().min(PREVIEW_MAX_WIDTH))
+        .max_height(PREVIEW_MAX_HEIGHT)
+        .maintain_aspect_ratio(true)
+        .sense(egui::Sense::click());
+    match image.load_for_size(ui.ctx(), ui.available_size()) {
+        Ok(egui::load::TexturePoll::Ready { .. }) => {
+            ui.add_space(SP_1);
+            Some(ui.add(image))
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            preview_note(ui, "Loading preview…");
+            None
+        }
+        Err(error) => {
+            preview_note(ui, format!("Preview unavailable: {error}"));
+            None
+        }
     }
 }
 
@@ -155,38 +227,32 @@ fn html_snapshot(
     artifact: &PresentedArtifact,
     path: &Path,
 ) {
-    let note = |ui: &mut Ui, text: String| {
-        ui.label(
-            RichText::new(text)
-                .size(FONT_SMALL)
-                .color(palette().TEXT_MUTED),
-        );
-    };
     match snapshots.state(&artifact.sha256, path) {
         SnapshotState::Ready(png) => {
-            let Some(uri) = crate::panes::file_viewer::image_uri(&png) else {
+            let Some(preview) = image_preview(ui, &png, &artifact.title) else {
                 return;
             };
-            crate::panes::file_viewer::install_image_loader(ui.ctx());
-            ui.add_space(SP_1);
-            let width = ui.available_width().min(PREVIEW_MAX_WIDTH);
-            let preview = ui
-                .add(
-                    egui::Image::new(uri)
-                        .alt_text(format!("{} preview", artifact.title))
-                        .max_width(width)
-                        .max_height(PREVIEW_MAX_HEIGHT)
-                        .maintain_aspect_ratio(true)
-                        .sense(egui::Sense::click()),
-                )
+            let preview = preview
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!("Open {}", artifact.title));
             if preview.clicked() {
                 request_open(ui.ctx(), path.to_path_buf());
             }
         }
-        SnapshotState::Pending => note(ui, "Rendering preview…".into()),
-        SnapshotState::Failed(error) => note(ui, format!("Preview unavailable: {error}")),
+        SnapshotState::Pending => {
+            preview_note(ui, "Rendering preview…");
+            // The host drains snapshot requests after the card has rendered.
+            let id = ui.id().with(("snapshot-requested", &artifact.sha256));
+            let already_requested = ui.ctx().data_mut(|data| {
+                let previous = data.get_temp::<bool>(id).unwrap_or(false);
+                data.insert_temp(id, true);
+                previous
+            });
+            if !already_requested {
+                ui.ctx().request_repaint();
+            }
+        }
+        SnapshotState::Failed(error) => preview_note(ui, format!("Preview unavailable: {error}")),
     }
 }
 

@@ -23,24 +23,19 @@ fn presentation(path: &Path) -> ArtifactPresentation {
 
 fn card_with_viewer(path: &Path) -> Harness<'static> {
     let shown = presentation(path);
-    Harness::builder()
+    let harness = Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .build_ui(move |ui| {
             artifact_card::show(ui, egui::Id::new("card"), &shown);
             show(ui.ctx());
-        })
+        });
+    crate::panes::file_viewer::tests::wait_for_image(&harness.ctx, path);
+    harness
 }
 
-/// Images load on a background thread, so step frames until `label` shows.
 fn step_until(harness: &mut Harness<'_>, label: &str) {
-    for _ in 0..200 {
-        harness.step();
-        if harness.query_by_label_contains(label).is_some() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    panic!("{label} never appeared");
+    harness.run();
+    assert!(harness.query_by_label_contains(label).is_some(), "{label}");
 }
 
 fn image(dir: &Path, width: u32, height: u32) -> PathBuf {
@@ -56,8 +51,7 @@ fn preview_click_opens_the_viewer_and_its_controls_zoom() {
     let mut harness = card_with_viewer(&path);
     step_until(&mut harness, "Variant A preview");
 
-    // The desktop's application moved into the context menu.
-    assert_eq!(harness.query_all_by_label("Open").count(), 0);
+    assert_eq!(harness.query_all_by_label("Open").count(), 1);
     harness.get_by_label("Variant A preview").click();
     step_until(&mut harness, "Variant A (Fit · 100%)");
     assert!(is_open(&harness.ctx));
