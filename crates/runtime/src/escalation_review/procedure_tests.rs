@@ -25,6 +25,7 @@ fn cleanup_skill(scope: SkillScope) -> LoadedSkill {
         scope,
         loaded_by: LoadedBy::SkillLoad,
         text: CLEANUP_PROCEDURE.into(),
+        truncated: false,
     }
 }
 

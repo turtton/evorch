@@ -68,6 +68,7 @@ fn attached_skills_join_the_recorded_ones_within_the_cap() {
             scope: crate::skill::SkillScope::Builtin,
             loaded_by: LoadedBy::SkillLoad,
             text: "steps".into(),
+            truncated: false,
         });
     }
     run.add_user_request("run-1", &expanded(TYPED, &[("s3", BODY), ("new", BODY)]));

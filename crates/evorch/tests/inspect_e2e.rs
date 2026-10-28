@@ -6,8 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, LifecycleEvent};
+use runtime::escalation_review::{
+    Decision, Digest, MANIFEST_VERSION, ManifestKind, ModelRequest, Outcome, OutcomeStatus,
+    ReviewManifest, VerdictRecord,
+};
 use runtime::self_improvement::{ImprovementCollector, ImprovementPolicy, ImprovementSettings};
 use serde_json::Value;
+use storage::usage::{UsageRequestRecord, UsageStatus};
 use storage::{RunContextRecord, Storage, StorageConfig};
 
 fn inspect(db: &Path, args: &[&str]) -> Result<Value, String> {
@@ -217,4 +222,150 @@ fn malformed_arguments_print_usage() {
             "{args:?}"
         );
     }
+}
+
+fn review_manifest(run_id: &str) -> ReviewManifest {
+    ReviewManifest {
+        version: MANIFEST_VERSION,
+        kind: ManifestKind::Shell,
+        scope: "network_only".into(),
+        tool: Some("shell".into()),
+        run_id: run_id.into(),
+        model_request: Some(ModelRequest {
+            category: "tool_execution".into(),
+            role: "Reviewer".into(),
+            requested_at_ns: 1_000,
+            finished_at_ns: Some(2_000),
+        }),
+        instruction: Some(Digest {
+            sha256: "1".repeat(64),
+            bytes: 10,
+        }),
+        schema: None,
+        payload: Some(Digest {
+            sha256: "2".repeat(64),
+            bytes: 20,
+        }),
+        context: None,
+        outcome: Outcome {
+            status: OutcomeStatus::Decided,
+            verdict: Some(VerdictRecord {
+                approve: false,
+                risk_level: None,
+                authorization_level: None,
+                procedure_step: Default::default(),
+                decision: Decision::Deny,
+            }),
+        },
+    }
+}
+
+fn usage_request(request_id: &str, run_id: &str, at_ns: i64, purpose: &str) -> UsageRequestRecord {
+    UsageRequestRecord {
+        request_id: request_id.into(),
+        at_ns,
+        provider: "p".into(),
+        profile: None,
+        model: "reviewer-model".into(),
+        run_id: Some(run_id.into()),
+        parent_run_id: None,
+        role: None,
+        purpose: Some(purpose.into()),
+        status: UsageStatus::Ok,
+        failure: None,
+        finish_reason: None,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: None,
+        ttft_ms: None,
+        duration_ms: 1,
+        cost_usd: None,
+        service_tier: None,
+    }
+}
+
+#[test]
+fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evorch-events.db");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    let manifest = review_manifest("run-7");
+    let emit = |run: &str, detail: String, severity| {
+        Event::new(DiagnosticEvent {
+            source: "sandbox".into(),
+            severity,
+            code: "escalation_review_manifest".into(),
+            detail,
+            run_id: Some(run.into()),
+            thread_id: Some("thread-1".into()),
+            call_id: Some("call-1".into()),
+        })
+    };
+    for event in [
+        emit(
+            "run-7",
+            serde_json::to_string(&manifest).unwrap(),
+            DiagnosticSeverity::Info,
+        ),
+        emit(
+            "run-7",
+            format!(
+                "manifest could not be recorded: boom; payload_sha256={}",
+                "3".repeat(64)
+            ),
+            DiagnosticSeverity::Warning,
+        ),
+        emit(
+            "run-70",
+            serde_json::to_string(&review_manifest("run-70")).unwrap(),
+            DiagnosticSeverity::Info,
+        ),
+    ] {
+        handle.append_event(Some("evorch-gui"), &event).unwrap();
+    }
+    handle
+        .record_usage_requests(vec![
+            usage_request("req-in", "run-7", 1_500, "escalation_review"),
+            usage_request("req-before", "run-7", 900, "escalation_review"),
+            usage_request("req-agent", "run-7", 1_500, "agent"),
+            usage_request("req-other-run", "run-70", 1_500, "escalation_review"),
+        ])
+        .unwrap();
+    storage.close();
+
+    let run = inspect(&path, &["run", "run-7"]).unwrap();
+    let manifests = run["review_manifests"].as_array().unwrap();
+    assert_eq!(manifests.len(), 2);
+    assert_eq!(run["diagnostics"].as_array().unwrap().len(), 0);
+
+    let first = &manifests[0];
+    assert_eq!(first["call_id"], "call-1");
+    assert_eq!(first["thread_id"], "thread-1");
+    assert_eq!(first["manifest"]["payload"]["sha256"], "2".repeat(64));
+    assert_eq!(first["manifest"]["outcome"]["verdict"]["decision"], "deny");
+    let candidates = first["usage_request_candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["request_id"], "req-in");
+    assert_eq!(candidates[0]["model"], "reviewer-model");
+
+    let unreadable = &manifests[1];
+    assert_eq!(unreadable["severity"], "warning");
+    assert!(unreadable["manifest"].is_null());
+    assert!(
+        unreadable["detail"]
+            .as_str()
+            .unwrap()
+            .contains("could not be recorded")
+    );
+    assert_eq!(
+        unreadable["usage_request_candidates"],
+        serde_json::json!([])
+    );
 }

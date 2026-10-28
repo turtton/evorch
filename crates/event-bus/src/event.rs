@@ -142,6 +142,18 @@ pub struct DiagnosticEvent {
     pub call_id: Option<String>,
 }
 
+impl DiagnosticEvent {
+    /// Whether this is a sandbox escalation review audit record: a decision or
+    /// the manifest of what the review was given. Audit records are always
+    /// persisted and exempt from diagnostic retention.
+    #[must_use]
+    pub fn is_escalation_audit(&self) -> bool {
+        self.source == "sandbox"
+            && (self.code == diagnostic_codes::ESCALATION_REVIEW
+                || self.code == diagnostic_codes::ESCALATION_REVIEW_MANIFEST)
+    }
+}
+
 /// A `DiagnosticEvent::detail` line starting with this names the fault site (for
 /// example a panic location). Consumers that group occurrences keep sites apart.
 pub const DIAGNOSTIC_SITE_PREFIX: &str = "site=";
@@ -198,6 +210,9 @@ pub mod diagnostic_codes {
     pub const STORAGE_WRITER_HALTED: &str = "StorageWriterHalted";
     /// Sandbox escalation review decisions.
     pub const ESCALATION_REVIEW: &str = "escalation_review";
+    /// What one sandbox escalation review was given: hashes and IDs of its inputs,
+    /// never their text. Retained like the decisions themselves.
+    pub const ESCALATION_REVIEW_MANIFEST: &str = "escalation_review_manifest";
     /// Tool call access decisions.
     pub const TOOL_CALL_ACCESS: &str = "tool_call_access";
     /// MCP scope policy denials.
@@ -240,6 +255,7 @@ pub mod diagnostic_codes {
         AGENT_RUN_PANICKED,
         STORAGE_WRITER_HALTED,
         ESCALATION_REVIEW,
+        ESCALATION_REVIEW_MANIFEST,
         TOOL_CALL_ACCESS,
         SCOPE_DENIED,
         PUBLISH_DIAGNOSTICS,

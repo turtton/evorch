@@ -64,6 +64,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | `user_questions` | ユーザーへの質問 |
 | `event_kinds` | イベント種別ごとの件数 |
 | `diagnostics` | この run の診断イベント |
+| `review_manifests` | sandbox 審査（escalation review）ごとの「審査モデルに渡した入力」の記録。`manifest` に、ユーザー発言の証跡 ID（本文なし）、skill・AGENTS.md・payload 全体・指示文の SHA-256 とバイト数（切り詰め有無）、審査種別・scope、lineage、EvidenceStamp の revision、判定結果がある。`usage_request_candidates` は、審査中に完了したこの run の `escalation_review` 用 provider 要求（モデル呼び出しに専用の ID はないので、同じ run で審査が重なれば候補も重なる）。「渡したはずの内容が本当に届いたか」は、記録した `payload.sha256` を、再構成した payload のハッシュと突き合わせて確かめる |
 
 `events --run` は、payload のどこかの `run_id` がその run と一致するイベントだけを返す。
 親子関係（`parent_run_id`）だけでは一致しない。子 run は `children` から個別に辿る。
@@ -108,7 +109,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 
 ## 6. 証跡の限界（調べても出てこないもの）
 
-- **診断イベントは 30 日で消える**（sandbox の `escalation_review` を除く）。候補だけが残っていても、元のイベントがないことがある。ツール出力の artifact も 7 日で消える。
+- **診断イベントは 30 日で消える**（sandbox の `escalation_review` と `escalation_review_manifest` を除く）。候補だけが残っていても、元のイベントがないことがある。ツール出力の artifact も 7 日で消える。
 - **Info 重大度の診断は既定では保存されない**（`[diagnostics].persistence` の既定は warnings）。
 - **SecretGuard が secret らしい文字列を検出すると、イベントも候補も丸ごと保存されない。** 痕跡も残らない。
 - **記録のみの診断は候補にならない。** `ToolArgumentsMalformed`（ストリームで組み立てた tool-call 引数が JSON でなく、ツールは実行していない。detail に provider・model・ツール名・長さ・sha256 先頭 16 桁）、`CompactionFailed`（要約モデルや provider 側 compaction の失敗、要約サイズ制限）、`EscalationAdmissionFailed`（handoff 先 run を provider が受け付けなかった。ユーザーの停止では出ない）、`ProviderModelRoute`（Cursor が会話の route を決めたとき、role の effort がモデル名で固定された値に負けた（Info）か、アカウントのモデル一覧に無い・取得できずに ID から route を推測した（Warning）。detail に送ったモデル・パラメータ・要求/送信 effort・理由）は一時的・外部要因に分類され、diagnostics にだけ残る。疑うときは `events --run <id>` で直接探す。

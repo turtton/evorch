@@ -35,6 +35,10 @@ pub(crate) struct LoadedSkill {
     pub(crate) scope: SkillScope,
     pub(crate) loaded_by: LoadedBy,
     pub(crate) text: String,
+    /// Whether `text` was cut to [`MAX_SKILL_BYTES`]. The runtime sets it when it
+    /// records the skill; a value given to [`ReviewRunContext::record_loaded_skill`]
+    /// is overwritten.
+    pub(crate) truncated: bool,
 }
 
 /// What a restored run needs to read its skills again.
@@ -52,9 +56,27 @@ pub(crate) struct LoadedSkillView {
     trust: &'static str,
     loaded_by: &'static str,
     text: String,
+    /// Not sent to the reviewer: whether `text` was cut to [`MAX_SKILL_BYTES`].
+    #[serde(skip)]
+    truncated: bool,
+    /// Not sent to the reviewer: the evidence ID of the user message this skill
+    /// was attached to, for a `user_mention` view.
+    #[serde(skip)]
+    attached_to: Option<String>,
 }
 
 impl LoadedSkillView {
+    pub(super) fn manifest_entry(&self) -> super::manifest::SkillEntry {
+        super::manifest::SkillEntry {
+            name: self.name.clone(),
+            scope: self.scope.to_owned(),
+            trust: self.trust.to_owned(),
+            loaded_by: self.loaded_by.to_owned(),
+            text: super::manifest::TextDigest::of(&self.text, self.truncated),
+            attached_to_evidence_id: self.attached_to.clone(),
+        }
+    }
+
     /// Whether the body says anything.
     pub(super) fn has_text(&self) -> bool {
         !self.text.trim().is_empty()
@@ -66,6 +88,7 @@ impl ReviewRunContext {
     /// name, and drops the oldest beyond [`MAX_LOADED_SKILLS`]. The evidence
     /// stamp does not move: skills are never authorization.
     pub(crate) fn record_loaded_skill(&mut self, mut skill: LoadedSkill) {
+        skill.truncated = skill.text.len() > MAX_SKILL_BYTES;
         skill.text = bounded(&skill.text, MAX_SKILL_BYTES);
         self.loaded_skills.retain(|known| known.name != skill.name);
         self.loaded_skills.push(skill);
@@ -107,6 +130,8 @@ impl ReviewRunContext {
                         LoadedBy::UserMention => "user_mention",
                     },
                     text: skill.text.clone(),
+                    truncated: skill.truncated,
+                    attached_to: None,
                 })
             })
             .collect()
@@ -127,12 +152,15 @@ pub(super) fn detach_attached_skills(requests: &mut [UserRequest]) -> Vec<Loaded
         if attachments.is_empty() {
             continue;
         }
+        let attached_to = request.evidence.id.clone();
         attached.extend(attachments.into_iter().map(|attachment| LoadedSkillView {
             name: attachment.name.to_owned(),
             scope: "user_message",
             trust: "user-attached",
             loaded_by: "user_mention",
             text: bounded(&attachment.body, MAX_SKILL_BYTES),
+            truncated: attachment.body.len() > MAX_SKILL_BYTES,
+            attached_to: attached_to.clone(),
         }));
         request.text = typed.to_owned();
     }
@@ -164,6 +192,7 @@ mod tests {
             scope,
             loaded_by: LoadedBy::SkillLoad,
             text: format!("{name} steps"),
+            truncated: false,
         }
     }
 

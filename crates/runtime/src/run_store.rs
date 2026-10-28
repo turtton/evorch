@@ -415,6 +415,10 @@ pub(crate) fn request_from_evidence(
         reference_context: row
             .reference_context
             .and_then(|json| serde_json::from_str(&json).ok()),
+        evidence: crate::escalation_review::EvidenceRef {
+            id: Some(row.id),
+            kind: Some(row.kind),
+        },
     }
 }
 
@@ -451,6 +455,23 @@ pub(crate) fn resync_review_context(
             Err(error)
         }
     }
+}
+
+/// ID of the evidence row recording `answer` to `question_id`, as the question
+/// flow stores it.
+pub(crate) fn answer_evidence_id(
+    root: &str,
+    recipient: &str,
+    answer: &str,
+    question_id: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{root}|{recipient}|user_answer|{answer}|{question_id}"
+        ))
+    )
 }
 
 pub(crate) fn evidence_row(

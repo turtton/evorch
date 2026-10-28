@@ -31,6 +31,7 @@ impl LoopState {
                 scope,
                 loaded_by,
                 text,
+                truncated: false,
             });
         }
     }

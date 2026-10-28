@@ -159,9 +159,15 @@ impl Database {
         let mut event_kinds = BTreeMap::<String, u64>::new();
         let (events, _) = self.inspect_events(EventScope::Run(run_id), 10_000)?;
         let mut diagnostics = Vec::new();
+        let mut review_manifests = Vec::new();
         for event in events {
             *event_kinds.entry(event.kind.clone()).or_default() += 1;
-            if event.kind == "Diagnostic" {
+            if event.kind != "Diagnostic" {
+                continue;
+            }
+            if is_review_manifest(&event.payload) {
+                review_manifests.push(self.review_manifest_json(run_id, &event)?);
+            } else {
                 diagnostics.push(event_json(&event));
             }
         }
@@ -179,11 +185,56 @@ impl Database {
             )?,
             "event_kinds": event_kinds,
             "diagnostics": diagnostics,
+            "review_manifests": review_manifests,
             "improvement_candidates": self.json_rows(
                 "SELECT candidate_id, project, code, title, status, occurrences FROM improvement_candidates
                  WHERE run_id = ?1 OR recent_run_ids LIKE ?2 ORDER BY created_at_ns",
                 &[run_id, &candidate_pattern],
             )?,
+        }))
+    }
+
+    /// One escalation review record with the provider requests that may have
+    /// served it. The model call carries no ID of its own, so these are the
+    /// run's `escalation_review` ledger rows that finished while the review was
+    /// waiting; reviews overlapping in one run share candidates.
+    fn review_manifest_json(
+        &self,
+        run_id: &str,
+        event: &InspectEvent,
+    ) -> Result<Value, StorageError> {
+        let diagnostic = &event.payload["payload"];
+        let detail = diagnostic["detail"].as_str().unwrap_or_default();
+        let parsed = serde_json::from_str::<Value>(detail).ok();
+        let window = parsed.as_ref().and_then(|manifest| {
+            let request = &manifest["model_request"];
+            Some((
+                request["requested_at_ns"].as_i64()?,
+                request["finished_at_ns"].as_i64()?,
+            ))
+        });
+        let candidates = match window {
+            Some((from, to)) => self.json_rows(
+                "SELECT request_id, at_ns, provider, profile, model, status, failure
+                 FROM usage_requests
+                 WHERE run_id = ?1 AND purpose = 'escalation_review'
+                   AND at_ns BETWEEN CAST(?2 AS INTEGER) AND CAST(?3 AS INTEGER)
+                 ORDER BY at_ns",
+                &[run_id, &from.to_string(), &to.to_string()],
+            )?,
+            None => Vec::new(),
+        };
+        Ok(json!({
+            "event_id": event.id,
+            "wall_clock_ns": event.wall_clock_ns,
+            "severity": diagnostic["severity"],
+            "thread_id": diagnostic["thread_id"],
+            "call_id": diagnostic["call_id"],
+            // A record that could not be made, or one this build cannot read,
+            // is shown as stored.
+            "manifest": parsed,
+            "detail": if parsed.is_some() { Value::Null } else { json!(detail) },
+            "usage_request_candidates": candidates,
         }))
     }
 
@@ -243,6 +294,12 @@ pub fn event_json(event: &InspectEvent) -> Value {
         "kind": event.kind,
         "payload": event.payload,
     })
+}
+
+/// Whether a stored diagnostic is a sandbox escalation review manifest.
+fn is_review_manifest(payload: &Value) -> bool {
+    let diagnostic = &payload["payload"];
+    diagnostic["source"] == "sandbox" && diagnostic["code"] == "escalation_review_manifest"
 }
 
 fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {
