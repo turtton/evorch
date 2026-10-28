@@ -1253,19 +1253,22 @@ impl LoopState {
                         (Some(host), true) => host.take_records(&id),
                         _ => Vec::new(),
                     };
+                    let mut accounting = super::run_js_accounting::ChildAccounting::new();
                     for child in &children {
+                        let accounted = accounting.observe(child);
                         let paths = if matches!(child.name.as_str(), "edit" | "write") {
                             child.paths.clone()
                         } else {
                             Vec::new()
                         };
-                        if let Some(trigger) = self.escalation_detector.observe(
+                        if let Some(trigger) = self.escalation_detector.observe_weighted(
                             &ToolObservation {
                                 tool: child.name.as_str(),
                                 paths,
                                 is_error: child.is_error,
                             },
                             &self.shared.escalation,
+                            accounted.weight,
                         ) {
                             self.propose_escalation(trigger, &child.name, &child.input, &id, None);
                         }
@@ -1282,7 +1285,7 @@ impl LoopState {
                             ));
                         }
                         if !child.is_error {
-                            if child.name == "read"
+                            if accounted.counts_as_read
                                 && let Some(path) = child.paths.first()
                             {
                                 self.budget.read(path);

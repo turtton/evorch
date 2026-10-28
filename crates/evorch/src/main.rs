@@ -77,7 +77,7 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::from(1)
+            ExitCode::from(headless::exit_code(&error))
         }
     }
 }

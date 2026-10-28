@@ -8,6 +8,7 @@ use evorch::headless::{HeadlessArgs, HeadlessError, SandboxChoice, parse_args, r
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::Role;
+use serde_json::json;
 
 const KEY_ENV: &str = "EVORCH_TEST_KEY_HEADLESS_E2E";
 const KEY: &str = "headless-e2e-key";
@@ -519,4 +520,63 @@ async fn headless_run_without_db_creates_no_database() {
             .all(|name| !name.to_string_lossy().ends_with(".db")),
         "{created:?}"
     );
+}
+
+// Given: 最終応答の前に blocking の ask_user を呼び、回答待ちで 1 ターンを終える worker
+// When: headless 実行する (対話相手がいない)
+// Then: 無期限に待たず、質問を示す WaitingForInput で終わり、終了コードは専用値になる
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_run_waiting_for_a_user_answer_stops_with_a_dedicated_error() {
+    let directory = tempfile::tempdir().expect("project directory");
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            ScriptedResponse::tool_call(
+                "ask",
+                MODEL,
+                0,
+                "call-ask",
+                "ask_user",
+                [
+                    json!({"title": "Include web_fetch in the count?", "blocking": true})
+                        .to_string(),
+                ],
+            ),
+            ScriptedResponse::text_stream("question", MODEL, ["Include web_fetch in the count?"]),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.to_owned()],
+    );
+    write_user_config(directory.path(), &mock.base_url());
+    let env = MapEnv::from_iter([(KEY_ENV, KEY)]);
+    let args = HeadlessArgs {
+        db_path: Some(directory.path().join("run.db")),
+        ..headless_args(
+            directory.path().to_path_buf(),
+            Some(directory.path().join("user-config")),
+        )
+    };
+
+    let error = run_headless(args, Arc::new(env), SandboxChoice::DirectUnchecked)
+        .await
+        .expect_err("a run that waits for an answer nobody can give does not finish");
+
+    let HeadlessError::WaitingForInput { run_id, questions } = &error else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(run_id.starts_with("run-"), "{run_id}");
+    assert_eq!(questions, "Include web_fetch in the count?");
+    assert!(error.to_string().contains("non-interactive"), "{error}");
+    assert_eq!(
+        evorch::headless::exit_code(&error),
+        evorch::headless::EXIT_WAITING_FOR_INPUT
+    );
+    assert_ne!(evorch::headless::EXIT_WAITING_FOR_INPUT, 1);
+    assert_eq!(evorch::headless::exit_code(&usage_error()), 1);
+    // Both responses were consumed: the run really asked, then ended its turn.
+    let completions = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .count();
+    assert_eq!(completions, 2);
 }

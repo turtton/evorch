@@ -395,7 +395,7 @@ async fn a_timed_out_call_leaves_no_worker_process() {
         None,
         enabled(),
         vec![
-            tool_response("js-1", "run_js", json!({"code": "x", "timeout_ms": 1})),
+            tool_response("js-1", "run_js", json!({"code": "x", "timeout_ms": 500})),
             finish(),
         ],
     );
@@ -403,7 +403,7 @@ async fn a_timed_out_call_leaves_no_worker_process() {
     let events = run(&fixture, Role::Worker).await;
 
     let text = result_text(&fixture.model, "js-1").await;
-    assert!(text.contains("timed out after 1 ms"), "{text}");
+    assert!(text.contains("timed out after 500 ms"), "{text}");
     let detail = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -515,8 +515,36 @@ read -r reply
 }
 
 #[tokio::test]
-async fn a_child_shell_cut_into_an_artifact_returns_its_tail_and_a_next_the_program_can_read() {
+async fn a_child_shell_output_cut_for_the_model_reaches_the_program_whole() {
     let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"seq 1 3000"}}'
+read -r reply
+case "$reply" in
+  *'1\n2\n3\n'*'2999\n3000\n'*'"truncated":false'*) result=whole ;;
+  *) result=partial ;;
+esac
+printf '{"type":"done","value":"%s"}\n' "$result""#;
+    let fixture = fixture(
+        worker(script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run(&fixture, Role::Worker).await;
+
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("=> whole\n"), "{text}");
+    // The card and the events keep the bounded preview, as for any shell call.
+    let (output, _) = completed(&events, "js-1/1").expect("child completed");
+    let output = output.as_deref().unwrap();
+    assert!(output.contains("[Output artifact: "), "{}", output.len());
+    assert!(output.len() < 20 * 1024);
+}
+
+#[tokio::test]
+async fn a_child_shell_output_beyond_the_bound_returns_its_tail_and_a_next_the_program_can_read() {
+    // About 2 MB: more than the program may hold whole, less than the artifact cap.
+    let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"seq 1 300000"}}'
 read -r reply
 case "$reply" in
   *'"truncated":true'*) ;;
@@ -536,15 +564,145 @@ esac"#;
         vec![run_js_call("js-1"), finish()],
     );
 
-    let events = run(&fixture, Role::Worker).await;
+    run(&fixture, Role::Worker).await;
 
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.contains("=> continued\n"), "{text}");
-    let (output, _) = completed(&events, "js-1/1").expect("child completed");
-    assert!(
-        output.as_deref().unwrap().contains("[Output artifact: "),
-        "the card still shows the bounded preview with its artifact"
+}
+
+/// A worker that makes `calls` one after the other, waiting for each reply, then ends.
+fn sequential_worker(calls: &[(&str, serde_json::Value)]) -> WorkerLauncher {
+    let mut script = String::new();
+    for (index, (name, args)) in calls.iter().enumerate() {
+        let message = json!({"type": "tool_call", "id": index + 1, "name": name, "args": args});
+        script.push_str(&format!("printf '%s\\n' '{message}'\nread -r _\n"));
+    }
+    script.push_str("printf '%s\\n' '{\"type\":\"done\",\"value\":null}'\n");
+    worker(&script)
+}
+
+/// Runs the fixture with these budget settings and returns its events.
+async fn run_with_budget(
+    fixture: &Fixture,
+    budget: runtime::budget_tracker::BudgetSettings,
+) -> Vec<Event> {
+    let mut events = fixture.bus.subscribe();
+    let run = fixture.runtime.delegate_background(
+        Role::Worker,
+        "task".into(),
+        RunConfig {
+            budget,
+            ..RunConfig::default()
+        },
     );
+    let _ = fixture.runtime.wait(run).await;
+    drain_events(&mut events).await
+}
+
+fn budget_exhausted(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Error,
+            reason: Some(reason),
+            ..
+        }) if reason.starts_with("BudgetExhausted:") => Some(reason.clone()),
+        _ => None,
+    })
+}
+
+fn reread_budget(max_file_rereads: u32) -> runtime::budget_tracker::BudgetSettings {
+    runtime::budget_tracker::BudgetSettings {
+        max_file_rereads,
+        // Repeated identical calls are a different guard.
+        max_identical_tool_call_repeats: u32::MAX,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_program_that_rewrites_a_scratch_file_and_reads_it_again_is_not_a_reread_loop() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = directory
+        .path()
+        .join("scratch.txt")
+        .to_string_lossy()
+        .into_owned();
+    let mut calls = Vec::new();
+    for round in 0..12 {
+        calls.push((
+            "shell",
+            json!({"command": format!("echo {round} > {scratch}")}),
+        ));
+        calls.push(("read", json!({"path": scratch})));
+    }
+    let fixture = fixture(
+        sequential_worker(&calls),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run_with_budget(&fixture, reread_budget(3)).await;
+
+    assert_eq!(budget_exhausted(&events), None);
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.ends_with("[run_js: 24 calls, 0 failed]"), "{text}");
+}
+
+#[tokio::test]
+async fn rereading_an_unchanged_file_in_a_program_still_exhausts_the_reread_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_file(directory.path(), "a.txt", "text\n");
+    let calls: Vec<_> = (0..12).map(|_| ("read", json!({"path": file}))).collect();
+    let fixture = fixture(
+        sequential_worker(&calls),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run_with_budget(&fixture, reread_budget(3)).await;
+
+    let reason = budget_exhausted(&events).expect("the repeated reads are caught");
+    assert!(reason.contains("max_file_rereads=3"), "{reason}");
+}
+
+#[tokio::test]
+async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_file(directory.path(), "a.txt", "text\n");
+    let reads: Vec<_> = (0..100).map(|_| ("read", json!({"path": file}))).collect();
+    let shells: Vec<_> = (0..30)
+        .map(|_| ("shell", json!({"command": "true"})))
+        .collect();
+    let budget = || runtime::budget_tracker::BudgetSettings {
+        max_tool_calls: 20,
+        max_file_rereads: u32::MAX,
+        // Repeated identical calls are a different guard.
+        max_identical_tool_call_repeats: u32::MAX,
+        ..Default::default()
+    };
+
+    let light = fixture(
+        sequential_worker(&reads),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+    assert_eq!(
+        budget_exhausted(&run_with_budget(&light, budget()).await),
+        None
+    );
+
+    let heavy = fixture(
+        sequential_worker(&shells),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+    let reason = budget_exhausted(&run_with_budget(&heavy, budget()).await)
+        .expect("thirty shell commands are thirty tool calls");
+    assert!(reason.contains("max_tool_calls=20"), "{reason}");
 }
 
 /// Every call that started must have exactly one terminal event.
@@ -695,14 +853,19 @@ fn read_call_line(id: u64, path: &str) -> String {
     )
 }
 
+fn shell_call_line(id: u64) -> String {
+    format!(
+        "printf '%s\\n' '{{\"type\":\"tool_call\",\"id\":{id},\"name\":\"shell\",\"args\":{{\"command\":\"true\"}}}}'\nread -r _\n"
+    )
+}
+
 #[tokio::test]
 async fn calls_are_counted_even_when_the_result_detail_is_replaced_by_an_artifact() {
-    let directory = tempfile::tempdir().unwrap();
-    let file = write_file(directory.path(), "a.txt", "x\n");
+    // Shell commands count in full (reads are light, see the budget tests).
     let script = format!(
         "{}{}{BIG_OUTPUT}\nprintf '%s\\n' '{{\"type\":\"done\",\"value\":null}}'",
-        read_call_line(1, &file),
-        read_call_line(2, &file)
+        shell_call_line(1),
+        shell_call_line(2)
     );
     let fixture = fixture(
         worker(&script),
@@ -711,7 +874,7 @@ async fn calls_are_counted_even_when_the_result_detail_is_replaced_by_an_artifac
         vec![run_js_call("js-1"), finish()],
     );
     let mut config = RunConfig::default();
-    // run_js itself plus its two reads reach the limit; the program's calls count.
+    // run_js itself plus its two commands reach the limit; the program's calls count.
     config.budget.max_tool_calls = 3;
 
     let mut receiver = fixture.bus.subscribe();

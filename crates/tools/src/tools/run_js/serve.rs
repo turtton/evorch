@@ -26,7 +26,7 @@ use tokio::time::Instant;
 
 use super::protocol::{self, HostMessage, JsError, WorkerMessage};
 use super::worker::WorkerConnection;
-use super::{CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths};
+use super::{CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths, is_read_continuation};
 
 /// Bytes of printed output the host keeps; the executor then bounds what the
 /// model sees.
@@ -34,6 +34,9 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// How long after its own deadline a worker may take to report before the host
 /// stops waiting and kills it.
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// Requests, counting the continuation pages of reads that the call limit ignores, at
+/// most this many times the call limit (plus the requests tolerated beyond it).
+const CONTINUATION_FACTOR: u32 = 10;
 /// Requests tolerated beyond the call limit (each is answered with a refusal);
 /// a program that keeps going after that is stopped.
 const OVER_LIMIT_REQUESTS: u32 = 32;
@@ -388,6 +391,8 @@ pub(super) async fn serve(
 
     let mut scheduler = Scheduler::default();
     let mut seq = 0u32;
+    // Calls that count toward the limit: `seq` without the continuation pages of reads.
+    let mut counted = 0u32;
     let mut request_bytes = 0usize;
     let hard_deadline = session.deadline + KILL_GRACE;
     let ending = loop {
@@ -411,8 +416,15 @@ pub(super) async fn serve(
                             break Ending::Failed("the JS worker called a tool that run_js does not provide".to_owned());
                         };
                         seq += 1;
+                        let continuation = is_read_continuation(&name, &args);
+                        if !continuation {
+                            counted += 1;
+                        }
                         request_bytes = request_bytes.saturating_add(line_bytes);
-                        if seq > session.max_tool_calls.saturating_add(session.bounds.over_limit_requests) {
+                        let over = session.bounds.over_limit_requests;
+                        if counted > session.max_tool_calls.saturating_add(over)
+                            || seq > session.max_tool_calls.saturating_mul(CONTINUATION_FACTOR).saturating_add(over)
+                        {
                             state.limit_hit = Some("tool_calls");
                             break Ending::Failed(format!(
                                 "the program kept calling tools after the limit of {} calls",
@@ -425,10 +437,10 @@ pub(super) async fn serve(
                                 session.bounds.request_bytes
                             ));
                         }
-                        let refusal = if seq > session.max_tool_calls {
+                        let refusal = if !continuation && counted > session.max_tool_calls {
                             state.limit_hit = Some("tool_calls");
                             Some(format!(
-                                "tool call limit of {} per run_js call exceeded",
+                                "tool call limit of {} per run_js call exceeded. To process many files, run one shell command that counts or extracts what you need (wc, grep -c, awk) and aggregate its output in JS instead of reading files one by one",
                                 session.max_tool_calls
                             ))
                         } else if !session.tools.contains(&name) {

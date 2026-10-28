@@ -10,6 +10,8 @@
 use serde_json::{Value, json};
 
 use super::diff_summary::{self, Summary, Writer};
+#[cfg(test)]
+use crate::result::FullContent;
 use crate::result::ToolResult;
 
 const READ_NOTE: &str = "\n\n[Output truncated (range limit:";
@@ -53,7 +55,13 @@ impl Normalized {
 
 /// Normalises the result of `tool` called with `args`.
 pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
-    let mut text = result.content.clone();
+    // The whole text, when the executor kept it for this call (see
+    // `ToolResult::full_content`), replaces the preview and its artifact note.
+    let whole = result.full_content.is_some();
+    let mut text = result
+        .full_content
+        .as_deref()
+        .map_or_else(|| result.content.clone(), |whole| whole.as_str().to_owned());
     let mut detail = result.detail.clone().unwrap_or(Value::Null);
     let mut truncated = false;
     let mut next = None;
@@ -63,7 +71,11 @@ pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
         exit_header = split_shell_header(&mut text);
     }
 
-    if let Some(artifact) = detail
+    if whole {
+        if let Some(object) = detail.as_object_mut() {
+            object.remove("output_artifact");
+        }
+    } else if let Some(artifact) = detail
         .get("output_artifact")
         .and_then(|artifact| artifact.get("path"))
         .and_then(Value::as_str)
@@ -342,6 +354,39 @@ mod tests {
         assert_eq!(normalized.detail["diff"], diff);
         let clean = normalize("git_diff", &json!({}), &ToolResult::success(""));
         assert_eq!(clean.text, "");
+    }
+
+    #[test]
+    fn the_whole_text_replaces_the_preview_and_its_artifact_reference() {
+        let preview = "exit_code: 0\ntail of the log\n[Output artifact: /var/tmp/o/1.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]";
+        let mut result = ToolResult::success(preview).with_detail(json!({
+            "output_artifact": {"path": "/var/tmp/o/1.txt", "original_bytes": 9}
+        }));
+        result.full_content = Some(FullContent::new(
+            "exit_code: 0\nhead of the log\ntail of the log".into(),
+        ));
+        let normalized = normalize("shell", &json!({}), &result);
+        assert_eq!(normalized.text, "head of the log\ntail of the log");
+        assert!(!normalized.truncated);
+        assert_eq!(normalized.next, None);
+        assert_eq!(
+            normalized.detail,
+            json!({"exit_code": 0, "timed_out_ms": null})
+        );
+    }
+
+    #[test]
+    fn a_large_edit_diff_is_summarised_from_its_whole_text() {
+        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let mut result = ToolResult::success("[cut preview]\n[Output artifact: /var/tmp/o/2.txt; captured 1 of 1 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]")
+            .with_detail(json!({"output_artifact": {"path": "/var/tmp/o/2.txt", "original_bytes": 1}}));
+        result.full_content = Some(FullContent::new(diff.into()));
+        let normalized = normalize("edit", &json!({"path": "f.rs"}), &result);
+        assert_eq!(normalized.text, "edited f.rs (+1 −1)");
+        assert_eq!(
+            normalized.detail,
+            json!({"diff": diff, "added": 1, "removed": 1})
+        );
     }
 
     #[test]

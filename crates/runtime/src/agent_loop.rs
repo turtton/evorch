@@ -22,6 +22,7 @@ mod review_evidence_tests;
 mod review_skills;
 #[cfg(test)]
 mod review_skills_tests;
+mod run_js_accounting;
 mod run_js_host;
 mod stop_context;
 mod team;

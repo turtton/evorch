@@ -244,7 +244,7 @@
           "default_timeout_ms": 30000,
           "enabled": false,
           "max_timeout_ms": 300000,
-          "max_tool_calls": 200,
+          "max_tool_calls": 1000,
           "memory_limit_mib": 64
         }
       }
@@ -1634,10 +1634,10 @@
           "minimum": 0
         },
         "max_tool_calls": {
-          "description": "Tool calls the code may make in one `run_js` call.",
+          "description": "Tool calls the code may make in one `run_js` call. The pages after the first\nof one `read` (how `readText` assembles a longer file) do not count.",
           "type": "integer",
           "format": "uint32",
-          "default": 200,
+          "default": 1000,
           "minimum": 0
         },
         "memory_limit_mib": {
@@ -1811,7 +1811,7 @@
             "default_timeout_ms": 30000,
             "enabled": false,
             "max_timeout_ms": 300000,
-            "max_tool_calls": 200,
+            "max_tool_calls": 1000,
             "memory_limit_mib": 64
           }
         }

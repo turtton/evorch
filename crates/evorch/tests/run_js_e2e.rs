@@ -47,6 +47,7 @@ impl RunJsHost for TestHost {
         self.seen.lock().unwrap().push(child_id.clone());
         let ctx = ToolExecutionContext {
             run_id: "run-e2e".into(),
+            parent_call_id: Some(call.parent_call_id.clone()),
             ..Default::default()
         };
         match self
@@ -282,15 +283,19 @@ async fn the_examples_in_the_description_run_as_written() {
                 code.replace(&format!("\"{name}\""), &format!("{path:?}"))
             })
     };
-    let fixture = fixture_with_tools(direct_launcher(), &["read", "grep", "edit"]);
+    let fixture = fixture_with_tools(direct_launcher(), &["read", "grep", "edit", "shell"]);
 
     let found = run_code(&fixture, &with_paths(description::EXAMPLES[0]), None).await;
     assert!(!found.is_error, "{}", found.content);
+    // The matching lines only, with their file and line number.
     assert!(
-        found.content.contains(&format!("=> {}\n", paths[0])),
+        found
+            .content
+            .contains(&format!("=> {}:1: unsafe {{ OldName }}\n", paths[0])),
         "{}",
         found.content
     );
+    assert!(!found.content.contains("fn safe"), "{}", found.content);
 
     let edited = run_code(&fixture, &with_paths(description::EXAMPLES[1]), None).await;
     assert!(!edited.is_error, "{}", edited.content);
@@ -310,5 +315,68 @@ async fn the_examples_in_the_description_run_as_written() {
     assert_eq!(
         std::fs::read_to_string(&paths[2]).unwrap(),
         "NewName again\n"
+    );
+
+    // Counting is the shell's job: the example runs in a repository of two crates.
+    let repository = tempfile::tempdir().unwrap();
+    for (name, lines) in [("alpha", 3), ("beta", 5), ("beta/nested", 2)] {
+        let directory = repository.path().join("crates").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("lib.rs"), "x\n".repeat(lines)).unwrap();
+    }
+    for args in [["init", "-q"], ["add", "."]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repository.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let counted = run_code(
+        &fixture,
+        &description::EXAMPLES[2].replace(
+            "{ command: \"git ls-files",
+            &format!(
+                "{{ cwd: {:?}, command: \"git ls-files",
+                repository.path().display().to_string()
+            ),
+        ),
+        None,
+    )
+    .await;
+    assert!(!counted.is_error, "{}", counted.content);
+    assert!(
+        counted.content.contains("=> {\"alpha\":3,\"beta\":7}"),
+        "{}",
+        counted.content
+    );
+}
+
+/// `git ls-files -z` style output: NUL bytes reach the program, in the whole text of
+/// an output the model-facing result would have cut to a preview.
+#[tokio::test]
+async fn a_child_shell_keeps_nul_bytes_and_the_whole_text_for_the_program() {
+    let fixture = fixture_with_tools(direct_launcher(), &["shell"]);
+
+    let small = run_code(
+        &fixture,
+        "const r = await tools.shell({command: \"printf 'a\\\\0b\\\\0c'\"}); return JSON.stringify([r.text.length, r.text.split('\\0').length]);",
+        None,
+    )
+    .await;
+    assert!(small.content.contains("=> [5,3]"), "{}", small.content);
+
+    let large = run_code(
+        &fixture,
+        "const r = await tools.shell({command: \"seq 1 20000 | tr '\\\\n' '\\\\0'\"}); const parts = r.text.split('\\0').filter(Boolean); return JSON.stringify([r.truncated, r.next, parts.length, parts[0], parts[parts.length - 1]]);",
+        None,
+    )
+    .await;
+    assert!(
+        large
+            .content
+            .contains("=> [false,null,20000,\"1\",\"20000\"]"),
+        "{}",
+        large.content
     );
 }

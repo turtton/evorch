@@ -438,6 +438,97 @@ async fn a_program_that_keeps_calling_after_the_limit_is_stopped_with_bounded_re
     assert_gone(&pid_file);
 }
 
+#[tokio::test]
+async fn the_pages_after_the_first_of_a_read_do_not_count_toward_the_call_limit() {
+    // Three first-page reads reach the limit of 3; five continuation pages follow, then a
+    // fourth first-page read, which is refused with a pointer to aggregating in shell.
+    let mut script = String::new();
+    let mut id = 0;
+    for _ in 0..3 {
+        id += 1;
+        script.push_str(&call_line(id, "read", &json!({"path": "a"})));
+        script.push_str("read -r _\n");
+    }
+    for page in 0..5 {
+        id += 1;
+        let args = if page % 2 == 0 {
+            json!({"path": "a", "offset": 301 + page})
+        } else {
+            json!({"path": "a", "offset": 1, "byte_offset": 16384})
+        };
+        script.push_str(&call_line(id, "read", &args));
+        script.push_str("read -r _\n");
+    }
+    id += 1;
+    script.push_str(&call_line(id, "read", &json!({"path": "b"})));
+    // The program's value is the reply to the refused call.
+    script.push_str(
+        r#"read -r reply
+esc=$(printf '%s' "$reply" | sed 's/\\/\\\\/g; s/"/\\"/g')
+printf '{"type":"done","value":"%s"}\n' "$esc"
+"#,
+    );
+    let host = ScriptHost::configured(Behavior::Exclusive, |host| {
+        host.settings.max_tool_calls = 3;
+    });
+
+    let result = run(&script, host, "x", 60_000).await;
+
+    let detail = result.detail.clone().unwrap();
+    let calls = detail["run_js"]["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 9, "{}", result.content);
+    let failed: Vec<u64> = calls
+        .iter()
+        .filter(|call| call["is_error"] == true)
+        .map(|call| call["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(failed, [9], "only the call beyond the limit fails");
+    assert!(
+        result
+            .content
+            .contains("tool call limit of 3 per run_js call exceeded"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("wc, grep -c, awk"),
+        "{}",
+        result.content
+    );
+    assert_eq!(detail["run_js"]["limit_hit"], "tool_calls");
+}
+
+#[tokio::test]
+async fn continuation_pages_are_bounded_too() {
+    let directory = tempfile::tempdir().unwrap();
+    let pid_file = directory.path().join("pid");
+    // Only continuation pages, and never a reply read: they must not run forever.
+    let script = format!(
+        "echo $$ > {}\ni=1\nwhile [ $i -le 500 ]; do\n  printf '%s\\n' \"{{\\\"type\\\":\\\"tool_call\\\",\\\"id\\\":$i,\\\"name\\\":\\\"read\\\",\\\"args\\\":{{\\\"path\\\":\\\"a\\\",\\\"offset\\\":2}}}}\"\n  i=$((i+1))\ndone\nexec sleep 600\n",
+        pid_file.display()
+    );
+    let host = ScriptHost::configured(Behavior::Exclusive, |host| {
+        host.settings.max_tool_calls = 3;
+    });
+
+    let result = run(&script, host, "x", 60_000).await;
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("kept calling tools after the limit of 3 calls"),
+        "{}",
+        result.content
+    );
+    let recorded = result.detail.unwrap()["run_js"]["calls"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(recorded <= 3 * 10 + 32, "{recorded} calls were recorded");
+    assert_gone(&pid_file);
+}
+
 /// Stands in for the dependency listing of the production start: a process that
 /// writes its pid and says it is running, then is waited for until the start is
 /// cancelled. It then finishes "successfully" — a preparation that completes just

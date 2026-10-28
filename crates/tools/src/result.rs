@@ -26,6 +26,13 @@ pub struct ToolResult {
     /// excludes it, and it never reaches the content, detail or events.
     /// In whole milliseconds; zero when the call never waited.
     pub idle_wait_ms: u64,
+    /// The whole text of `content` when output limiting cut it down to a preview and
+    /// artifact reference, for a `run_js` program only (ADR 0039): the program's
+    /// context is its own memory, so it may have what the model's must not. Runtime-only
+    /// like `progress`: never in `content`, `detail` or an event, and the executor keeps
+    /// it only for calls a `run_js` program made. Absent when the text was not cut or is
+    /// larger than [`crate::output::FULL_CONTENT_BYTES`].
+    pub full_content: Option<Box<FullContent>>,
     /// Images returned to the model with `content`.
     pub images: Vec<ToolImage>,
 }
@@ -38,6 +45,21 @@ pub struct ToolImage {
     /// File holding the same bytes, so a model that cannot view images can
     /// hand the path to another agent.
     pub path: Option<std::path::PathBuf>,
+}
+
+/// The whole text of a result the model gets cut down (see [`ToolResult::full_content`]).
+/// Boxed in [`ToolResult`] so the common result stays small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullContent(String);
+
+impl FullContent {
+    pub fn new(text: String) -> Box<Self> {
+        Box::new(Self(text))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// [`Tool::reports_progress`](crate::Tool::reports_progress) が真の呼び出しの観測結果。
@@ -59,6 +81,7 @@ impl ToolResult {
             origin: ContentOrigin::WebUntrusted,
             progress: None,
             idle_wait_ms: 0,
+            full_content: None,
             images: Vec::new(),
         }
     }
@@ -72,6 +95,7 @@ impl ToolResult {
             origin: ContentOrigin::WebUntrusted,
             progress: None,
             idle_wait_ms: 0,
+            full_content: None,
             images: Vec::new(),
         }
     }
@@ -105,6 +129,7 @@ mod tests {
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
                 idle_wait_ms: 0,
+                full_content: None,
                 images: Vec::new(),
             }
         );
@@ -124,6 +149,7 @@ mod tests {
                 origin: ContentOrigin::WebUntrusted,
                 progress: None,
                 idle_wait_ms: 0,
+                full_content: None,
                 images: Vec::new(),
             }
         );

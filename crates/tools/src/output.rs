@@ -18,6 +18,9 @@ pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PREVIEW_LINES: usize = 300;
 pub const CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESULT_IMAGES: usize = 4;
+/// Largest text a `run_js` program gets whole when the model's copy was cut to a
+/// preview. It is held in memory only, for the duration of the call.
+pub const FULL_CONTENT_BYTES: usize = 1024 * 1024;
 const SLOTS: usize = 64;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const MARKER: &str = "\n[Output artifact: ";
@@ -68,7 +71,12 @@ impl Capture {
         if !large {
             return ToolResult::success(safe.text);
         }
-        artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count)
+        let full = (!truncated && safe.text.len() <= FULL_CONTENT_BYTES)
+            .then(|| crate::result::FullContent::new(safe.text.clone()));
+        let mut result =
+            artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count);
+        result.full_content = full;
+        result
     }
 }
 
@@ -103,6 +111,10 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
         let mut capture = Capture::default();
         capture.push(result.content.as_bytes());
         let limited = capture.finish();
+        // A result that was cut earlier (shell) already carries its whole text.
+        if result.full_content.is_none() {
+            result.full_content = limited.full_content;
+        }
         result.content = limited.content;
         result.detail = limited.detail;
         replaced = true;

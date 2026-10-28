@@ -171,6 +171,9 @@ pub(super) async fn delegate(
     result
 }
 
+// The error is a whole tool result, produced once on a refused spawn; boxing it would
+// only add an allocation to a path that is already the exception.
+#[allow(clippy::result_large_err)]
 pub(crate) fn spawn_delegate(
     state: &mut LoopState,
     runtime: &AgentRuntime,

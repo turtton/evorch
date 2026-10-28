@@ -8,16 +8,20 @@ use super::typings;
 pub const BASE_DESCRIPTION: &str = "Run JavaScript (ES2023, QuickJS) that calls your tools, and return only what you print or return.";
 
 /// Added to `shell` when `run_js` is offered.
-pub const SHELL_HINT: &str = " Before writing a `python3 - <<EOF` or `node -e` script, a `for ... done` loop or `xargs sed -i` to aggregate output, read many files or change many places, use run_js instead.";
+pub const SHELL_HINT: &str = " Before writing a `python3 - <<EOF`, `node -e`, `perl -i -pe` or `awk` script, a `for ... done` loop or `xargs sed -i` to aggregate output, read many files or change many places, use run_js instead.";
 
 /// Added to `edit` when `run_js` is offered.
 pub const EDIT_HINT: &str = " To apply the same edit in many files, use run_js with tools.edit instead of looping `sed -i` in shell.";
 
 /// The examples in the description. Each is the body of a program, and the tests run them.
-pub const EXAMPLES: [&str; 2] = [
+pub const EXAMPLES: [&str; 3] = [
     "const paths = [\"a.rs\", \"b.rs\", \"c.rs\"];\n\
 const texts = await Promise.all(paths.map((p) => readText(p)));\n\
-return paths.filter((p, i) => texts[i].includes(\"unsafe\")).join(\"\\n\");",
+const hits = [];\n\
+paths.forEach((p, i) => texts[i].split(\"\\n\").forEach((line, n) => {\n\
+  if (line.includes(\"unsafe\")) hits.push(`${p}:${n + 1}: ${line.trim()}`);\n\
+}));\n\
+return hits.slice(0, 50).join(\"\\n\");",
     "const out = [];\n\
 for (const p of [\"a.rs\", \"b.rs\", \"c.rs\"]) {\n\
   const t = await readText(p);\n\
@@ -26,6 +30,15 @@ for (const p of [\"a.rs\", \"b.rs\", \"c.rs\"]) {\n\
   out.push(p + \": \" + r.ok);\n\
 }\n\
 return out.join(\"\\n\");",
+    "const r = await tools.shell({ command: \"git ls-files -z '*.rs' | xargs -0 wc -l\" });\n\
+const lines = r.text.trim().split(\"\\n\").filter((l) => !l.endsWith(\" total\"));\n\
+const byDir = {};\n\
+for (const l of lines) {\n\
+  const [n, path] = l.trim().split(/\\s+/);\n\
+  const dir = path.split(\"/\")[1];\n\
+  byDir[dir] = (byDir[dir] || 0) + Number(n);\n\
+}\n\
+return JSON.stringify(byDir);",
 ];
 
 /// Builds the description for a run from its callable tools and the limits.
@@ -37,9 +50,11 @@ Use it instead of a python/node heredoc, a `for` loop or `xargs sed -i` in shell
 read or write several files, or apply the same edit in many places. \
 Do not use it for a single tool call, and do not make it a thin wrapper around shell: \
 if the program would only return one long shell command's output, call shell directly.\n\
-- Tool results stay out of your context unless you print or return them, so print only the essentials.\n\
+- Tool results stay out of your context unless you print or return them: print only the lines or numbers you need, never whole files or long command output.\n\
 - `tools.<name>(args)` returns Promise<{{ok, text, truncated, next, detail}}>; run independent calls with Promise.all. \
 A failed call resolves with ok=false and the message in text: check `.ok`. `readText(path)` returns a whole file.\n\
+- To cover many files (a count, a survey), do not read them one by one: run one shell command that counts or extracts (git ls-files -z | xargs -0 wc -l, grep -c, awk) and aggregate its output here. \
+Shell output is returned whole up to 1 MiB, NUL bytes included.\n\
 - Edits go through tools.edit / tools.write so they show as diffs. The text of edit and write is a one-line summary (`edited <path> (+N −M)`): \
 check `.ok` instead of printing it. The full diff is in `detail.diff`; git_diff's text is a per-file summary and its diff is in `detail.diff` too.\n\
 - truncated=true means `text` is only part of the output. With a `next`, continue with `readText(next.path)`; with next=null (for example a cut-off grep), call again with a narrower range. Never count or conclude from partial output.\n\
@@ -48,19 +63,22 @@ fetch, timers, TextEncoder, URL, structuredClone, Intl (localeCompare orders by 
 - A returned string is shown as is, anything else as JSON.\n\
 - Calls needing approval or non-isolated shell fail here; make them as normal tool calls.\n\
 - Run builds and long tests as normal shell jobs, not here.\n\
-- Limits: {seconds} s (timeout_ms up to {max}), {memory} MiB, {calls} tool calls.\n\
+- Limits: {seconds} s (timeout_ms up to {max}), {memory} MiB, {calls} tool calls (the later pages of one read are free).\n\
 Available tools:\n\
 {declarations}\n\
-Example (read several files, return only a summary):\n\
+Example (read several files, return only the matching lines):\n\
 {first}\n\
 Example (the same edit in several files):\n\
-{second}",
+{second}\n\
+Example (aggregate over all files with one shell command):\n\
+{third}",
         max = limits.max_timeout_ms,
         memory = limits.memory_limit_mib,
         calls = limits.max_tool_calls,
         declarations = typings::declarations(tools),
         first = EXAMPLES[0],
         second = EXAMPLES[1],
+        third = EXAMPLES[2],
     )
 }
 
@@ -80,12 +98,11 @@ mod tests {
     fn description_states_the_limits_and_the_declarations() {
         let text = render(&tools(), &config::RunJsConfig::default());
         assert!(text.starts_with(BASE_DESCRIPTION));
-        assert!(text.contains("Limits: 30 s (timeout_ms up to 300000), 64 MiB, 200 tool calls."));
+        assert!(text.contains("Limits: 30 s (timeout_ms up to 300000), 64 MiB, 1000 tool calls (the later pages of one read are free)."));
         assert!(text.contains("grep(args: { path: string; pattern: string })"));
         assert!(text.contains("Run builds and long tests as normal shell jobs"));
         assert!(text.contains("readText(next.path)"));
         assert!(text.contains("next=null"));
-        assert!(!text.contains("1 MiB"));
         assert!(text.contains("structuredClone"));
     }
 
@@ -97,6 +114,10 @@ mod tests {
         assert!(text.contains("check `.ok` instead of printing it"));
         assert!(text.contains(EXAMPLES[0]));
         assert!(text.contains(EXAMPLES[1]));
+        assert!(text.contains(EXAMPLES[2]));
+        assert!(SHELL_HINT.contains("perl -i -pe") && SHELL_HINT.contains("`awk`"));
+        assert!(text.contains("whole up to 1 MiB"));
+        assert!(text.contains("never whole files"));
     }
 
     #[test]

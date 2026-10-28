@@ -90,6 +90,15 @@ pub trait RunJsHost: Send + Sync + std::fmt::Debug {
     fn report_unconfirmed(&self, _detail: &str) {}
 }
 
+/// Whether a call only continues an earlier `read` of the same file: a page after the
+/// first, which is how `readText` assembles a longer file. A continuation is one logical
+/// read, so it does not count toward the call limit or the run's budgets.
+pub fn is_read_continuation(name: &str, args: &Value) -> bool {
+    name == "read"
+        && (args.get("offset").and_then(Value::as_u64).unwrap_or(1) > 1
+            || args.get("byte_offset").and_then(Value::as_u64).unwrap_or(0) > 0)
+}
+
 /// Paths a call names, as the program gave them.
 pub fn call_paths(name: &str, args: &Value) -> Vec<String> {
     match name {

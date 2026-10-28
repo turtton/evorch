@@ -29,7 +29,8 @@ pub struct RunJsConfig {
     pub max_timeout_ms: u64,
     /// Memory limit of the JavaScript engine, in MiB.
     pub memory_limit_mib: u32,
-    /// Tool calls the code may make in one `run_js` call.
+    /// Tool calls the code may make in one `run_js` call. The pages after the first
+    /// of one `read` (how `readText` assembles a longer file) do not count.
     pub max_tool_calls: u32,
 }
 
@@ -40,7 +41,7 @@ impl Default for RunJsConfig {
             default_timeout_ms: 30_000,
             max_timeout_ms: 300_000,
             memory_limit_mib: 64,
-            max_tool_calls: 200,
+            max_tool_calls: 1000,
         }
     }
 }
@@ -115,7 +116,7 @@ mod tests {
                 default.memory_limit_mib,
                 default.max_tool_calls
             ),
-            (30_000, 300_000, 64, 200)
+            (30_000, 300_000, 64, 1000)
         );
         assert_eq!(Config::default().tools.run_js, default);
         assert_eq!(toml::from_str::<Config>("").unwrap().tools.run_js, default);

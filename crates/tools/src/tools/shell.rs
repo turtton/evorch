@@ -529,5 +529,8 @@ fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> Too
         |ms| format!("exit_code: {exit_code}\ntimed out after {ms} ms; partial output follows"),
     );
     result.content = format!("{status}\n{}", result.content);
+    result.full_content = result
+        .full_content
+        .map(|text| crate::result::FullContent::new(format!("{status}\n{}", text.as_str())));
     result
 }

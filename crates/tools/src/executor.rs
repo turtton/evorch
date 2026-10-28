@@ -942,6 +942,14 @@ impl ToolExecutor {
                 }
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
+                // Only a call a run_js program made keeps the whole text; it is as
+                // trustworthy as `content`, so it gets the same marker escaping.
+                let full_content = result
+                    .full_content
+                    .filter(|_| ctx.parent_call_id.is_some())
+                    .map(|text| {
+                        crate::result::FullContent::new(escape_control_markers(text.as_str()))
+                    });
                 let result = ToolResult {
                     content,
                     is_error: result.is_error,
@@ -949,6 +957,7 @@ impl ToolExecutor {
                     origin: result.origin,
                     progress: result.progress,
                     idle_wait_ms: result.idle_wait_ms,
+                    full_content,
                     images: result.images,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
@@ -1268,6 +1277,7 @@ mod tests {
                 origin: ContentOrigin::ToolTrusted,
                 progress: None,
                 idle_wait_ms: 0,
+                full_content: None,
                 images: Vec::new(),
             })
         }
