@@ -214,11 +214,14 @@ pub struct ReviewManifest {
     /// API, so this names what the runtime asked for, not the provider's wire form.
     pub schema: Option<Digest>,
     /// The user message handed to the model boundary: the whole payload JSON.
-    /// It matches the input that was prepared; it does not by itself show that a
-    /// provider received it, which `attempts` does.
+    /// It matches the input that was prepared; it does not show what a provider
+    /// received.
     pub payload: Option<Digest>,
-    /// Every provider attempt made for the call, with the model and route it
-    /// used. `request_id` is the key of the `usage_requests` row, which the
+    /// The provider attempts the observer saw for the call, with the model and
+    /// route each used and how it ended. An attempt is noted when it starts,
+    /// before its HTTP request, so a `pending` or `failed` one may never have
+    /// reached the provider: this shows what was attempted and how it ended, not
+    /// delivery. `request_id` is the key of the `usage_requests` row, which the
     /// ledger's retention may remove; this copy is kept.
     pub attempts: Vec<AttemptRecord>,
     /// Absent when the review had no run context.

@@ -291,7 +291,8 @@ pub struct ObservationContext {
     pub turn: Option<RequestTurnContext>,
     /// Where the provider attempts made for this call are noted, for a caller
     /// that must later say which attempts served it. Observation only: never
-    /// part of a wire request, and ignored when contexts are compared.
+    /// part of a wire request. Two logs always compare equal, so contexts that
+    /// both carry one are equal regardless of its contents.
     #[serde(skip)]
     pub attempts: Option<AttemptLog>,
 }
@@ -367,7 +368,8 @@ impl std::fmt::Debug for AttemptLog {
     }
 }
 
-/// A log is a side channel, not part of what a context says.
+/// A log is a side channel, not part of what a context says: which attempts it
+/// holds never makes two contexts differ. (Whether a context has one still does.)
 impl PartialEq for AttemptLog {
     fn eq(&self, _: &Self) -> bool {
         true

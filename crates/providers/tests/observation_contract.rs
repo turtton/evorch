@@ -1046,6 +1046,22 @@ fn assert_codex_success_sequence(events: &[Event], streaming: bool, first_token:
     );
 }
 
+/// A client whose request deadline never decides these tests: they end when the
+/// call returns, and the runner's hang detection covers a stuck server.
+fn compatible_client_without_deadline(
+    server: &MockServer,
+    bus: Arc<EventBus>,
+) -> OpenAiCompatibleClient {
+    OpenAiCompatibleClient::new(
+        server.uri(),
+        "custom-compatible",
+        Duration::from_secs(24 * 60 * 60),
+        Some(bus),
+    )
+    .expect("互換 client を構築できる")
+    .with_profile("compatible-profile")
+}
+
 fn request_with_log(model: &str, log: &AttemptLog) -> ChatRequest {
     let mut request = request_with_context(model, "run-log");
     request.observation.as_mut().unwrap().attempts = Some(log.clone());
@@ -1065,7 +1081,7 @@ async fn attempt_log_names_the_attempt_the_bus_observed() {
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
     let log = AttemptLog::default();
-    compatible_client(&server, bus)
+    compatible_client_without_deadline(&server, bus)
         .send(
             &ProviderAuth::new("sk"),
             &request_with_log(COMPATIBLE_MODEL, &log),
@@ -1073,8 +1089,22 @@ async fn attempt_log_names_the_attempt_the_bus_observed() {
         .await
         .expect("send は成功する");
 
-    let events = collect_events(&mut rx, 3).await;
-    let (request_id, provider, profile, protocol, model, streaming) = started(&events[0]);
+    // The observer emits before `send` returns: nothing is left to wait for.
+    let events = rx.drain_pending_snapshot();
+    let first = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestStarted { .. })
+            )
+        })
+        .expect("the attempt started");
+    let (request_id, provider, profile, protocol, model, streaming) = started(first);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Provider(ProviderEvent::RequestCompleted { request_id: id, .. }) if id == request_id
+    )));
     let [record] = log.snapshot().try_into().expect("1 attempt");
     assert_eq!(record.request_id, request_id);
     assert_eq!(record.provider, provider);
@@ -1094,20 +1124,39 @@ async fn attempt_log_names_the_attempt_the_bus_observed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn attempt_log_records_a_failed_attempt() {
     let server = MockServer::start().await;
-    mount(&server, "/responses", json_response(500, "boom")).await;
+    mount(&server, "/chat/completions", json_response(500, "boom")).await;
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
     let log = AttemptLog::default();
-    openai_client(&server, bus, Duration::from_secs(1))
+    compatible_client_without_deadline(&server, bus)
         .send(
             &ProviderAuth::new("sk"),
-            &request_with_log(OPENAI_MODEL, &log),
+            &request_with_log(COMPATIBLE_MODEL, &log),
         )
         .await
         .expect_err("send は失敗する");
 
-    let events = collect_events(&mut rx, 2).await;
-    let (request_id, ..) = started(&events[0]);
+    let events = rx.drain_pending_snapshot();
+    let first = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestStarted { .. })
+            )
+        })
+        .expect("the attempt started");
+    let (request_id, ..) = started(first);
+    let terminal = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestFailed { .. })
+            )
+        })
+        .expect("the attempt failed");
+    assert_eq!(failed(terminal).0, request_id);
     let [record] = log.snapshot().try_into().expect("1 attempt");
     assert_eq!(record.request_id, request_id);
     assert_eq!(

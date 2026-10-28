@@ -203,20 +203,27 @@ impl Database {
         let detail = |event: &InspectEvent| -> Option<Value> {
             serde_json::from_str(event.payload["payload"]["detail"].as_str()?).ok()
         };
-        let mut parts = BTreeMap::<String, Vec<(u64, Vec<Value>)>>::new();
+        struct Part {
+            index: u64,
+            count: u64,
+            refs: Vec<Value>,
+        }
+        let mut parts = BTreeMap::<String, Vec<Part>>::new();
         for event in events {
             if let Some(part) =
                 detail(event).and_then(|detail| detail.get("manifest_part").cloned())
-                && let (Some(id), Some(index), Some(refs)) = (
+                && let (Some(id), Some(index), Some(count), Some(refs)) = (
                     part["review_id"].as_str(),
                     part["index"].as_u64(),
+                    part["count"].as_u64(),
                     part["user_requests"].as_array(),
                 )
             {
-                parts
-                    .entry(id.to_owned())
-                    .or_default()
-                    .push((index, refs.clone()));
+                parts.entry(id.to_owned()).or_default().push(Part {
+                    index,
+                    count,
+                    refs: refs.clone(),
+                });
             }
         }
         let mut manifests = Vec::new();
@@ -233,18 +240,31 @@ impl Database {
             if let Some(manifest) = manifest.as_mut() {
                 let id = manifest["review_id"].as_str().map(str::to_owned);
                 if let (Some(id), Some(context)) = (id, manifest["context"].as_object_mut()) {
-                    let mut joined = parts.get(&id).cloned().unwrap_or_default();
-                    joined.sort_by_key(|(index, _)| *index);
+                    let expected = context
+                        .get("user_request_parts")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let found = parts.get(&id).map_or(&[][..], Vec::as_slice);
+                    // One event per index is joined; a repeated index,
+                    // a gap, or a part that disagrees on the count leaves the
+                    // list incomplete rather than guessed.
+                    let mut by_index = BTreeMap::new();
+                    let mut repeated = false;
+                    for part in found {
+                        repeated |= by_index.insert(part.index, part).is_some();
+                    }
+                    let consecutive = by_index.keys().copied().eq(0..expected);
+                    let counts_agree = found.iter().all(|part| part.count == expected);
+                    let count = context.get("user_request_count").and_then(Value::as_u64);
                     if let Some(Value::Array(refs)) = context.get_mut("user_requests") {
-                        for (_, more) in joined {
-                            refs.extend(more);
+                        for part in by_index.values() {
+                            refs.extend(part.refs.iter().cloned());
                         }
                         complete = json!(
-                            context.get("user_request_count").and_then(Value::as_u64)
-                                == context
-                                    .get("user_requests")
-                                    .and_then(Value::as_array)
-                                    .map(|refs| refs.len() as u64)
+                            !repeated
+                                && consecutive
+                                && counts_agree
+                                && count == Some(refs.len() as u64)
                         );
                     }
                 }

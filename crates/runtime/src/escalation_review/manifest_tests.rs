@@ -939,13 +939,59 @@ async fn the_manifest_names_each_provider_attempt_and_its_model() {
     );
 }
 
+/// Waits for its sibling inside the model call, so both reviews are in flight
+/// together, then notes one attempt whose ID is derived from its own payload.
+struct OverlappingModel(Arc<tokio::sync::Barrier>);
+
+#[async_trait::async_trait]
+impl crate::AgentModel for OverlappingModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "overlapping".into()
+    }
+
+    async fn complete(
+        &self,
+        invocation: &AgentInvocationContext,
+        _: Role,
+        messages: &[Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+        self.0.wait().await;
+        let ContentBlock::Text { text } = &messages[1].content[0] else {
+            panic!("a review sends its payload as text");
+        };
+        let request_id = format!("req-{}", &sha256_hex(text.as_bytes())[..8]);
+        let log = invocation.attempts.as_ref().expect("a review passes a log");
+        log.started(AttemptRecord {
+            request_id: request_id.clone(),
+            provider: "stub".into(),
+            profile: None,
+            protocol: "stub-protocol".into(),
+            model: "overlapping".into(),
+            streaming: false,
+            outcome: AttemptOutcome::Pending,
+        });
+        // Let the sibling note its attempt before either review finishes.
+        self.0.wait().await;
+        log.finished(
+            &request_id,
+            AttemptOutcome::Completed {
+                finish_reason: "stop".into(),
+            },
+        );
+        Ok(text_response(APPROVE, FinishReason::Stop))
+    }
+}
+
 #[tokio::test]
-async fn parallel_reviews_of_one_run_keep_their_own_attempts() {
+async fn overlapping_reviews_of_one_run_keep_their_own_attempts() {
     let mut fixture = Fixture::new(RULES_TEXT);
+    let model = Arc::new(OverlappingModel(Arc::new(tokio::sync::Barrier::new(2))));
     let review = |command: &'static str| {
         let context = fixture.context(run_with(&[]));
+        let reviewer = QuickModelReviewer::new(model.clone());
         async move {
-            QuickModelReviewer::new(Arc::new(AttemptingModel))
+            reviewer
                 .review_scoped_with_context(
                     "run-1",
                     command,
@@ -963,10 +1009,24 @@ async fn parallel_reviews_of_one_run_keep_their_own_attempts() {
     );
     let records = fixture.diagnostics();
     assert_eq!(records.len(), 2);
+    let mut seen = Vec::new();
     for record in records {
         let manifest: ReviewManifest = serde_json::from_str(&record.detail).unwrap();
-        assert_eq!(manifest.attempts.len(), 2, "no attempt of the other review");
+        let payload = manifest.payload.as_ref().unwrap();
+        let [attempt] = manifest.attempts.as_slice() else {
+            panic!("exactly its own attempt, got {:?}", manifest.attempts);
+        };
+        assert_eq!(
+            attempt.request_id,
+            format!("req-{}", &payload.sha256[..8]),
+            "the attempt belongs to this review's payload"
+        );
+        assert!(matches!(attempt.outcome, AttemptOutcome::Completed { .. }));
+        seen.push(attempt.request_id.clone());
     }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 2, "the two reviews have different attempts");
 }
 
 #[tokio::test]

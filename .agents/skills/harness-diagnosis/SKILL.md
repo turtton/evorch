@@ -64,7 +64,7 @@ cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 | `user_questions` | ユーザーへの質問 |
 | `event_kinds` | イベント種別ごとの件数 |
 | `diagnostics` | この run の診断イベント |
-| `review_manifests` | sandbox 審査（escalation review）ごとの「審査モデルに渡した入力」の記録。`manifest` に、ユーザー発言の証跡 ID（本文なし。多いときは続きのイベントを `inspect` が結合し、`user_requests_complete` で揃ったか分かる）、委譲プロンプト・skill・AGENTS.md・payload 全体・指示文の SHA-256 とバイト数（切り詰め有無）、審査種別・scope、lineage、EvidenceStamp の revision、判定結果、`attempts`（この審査で行った provider attempt ごとの `request_id`・provider・model・結果。fallback で複数になる）がある。`usage_requests` は `attempts` の `request_id` で引いた ledger 行で、ledger の retention 後は空になるが、`attempts` は残る。`payload.sha256` は runtime が審査モデルの境界へ渡した入力との照合用で、provider への到達の証明ではない（到達は `attempts` と ledger で見る）。`schema` は要求した schema で、provider が API 用に変形することがある |
+| `review_manifests` | sandbox 審査（escalation review）ごとの「審査モデルに渡した入力」の記録。`manifest` に、ユーザー発言の証跡 ID（本文なし。多いときは続きのイベントを `inspect` が結合し、`user_requests_complete` で揃ったか分かる）、委譲プロンプト・skill・AGENTS.md・payload 全体・指示文の SHA-256 とバイト数（切り詰め有無）、審査種別・scope、lineage、EvidenceStamp の revision、判定結果、`attempts`（この審査で行った provider attempt ごとの `request_id`・provider・model・結果。fallback で複数になる）がある。`usage_requests` は `attempts` の `request_id` で引いた ledger 行で、ledger の retention 後は空になるが、`attempts` は残る。`payload.sha256` は runtime が審査モデルの境界へ渡した入力との照合用。`attempts` は attempt の開始（HTTP 送信前に記録する）・終了・応答の観測で、provider への到達の証明ではない（`pending` や送信失敗も含む）。`schema` は要求した schema で、provider が API 用に変形することがある |
 
 `events --run` は、payload のどこかの `run_id` がその run と一致するイベントだけを返す。
 親子関係（`parent_run_id`）だけでは一致しない。子 run は `children` から個別に辿る。

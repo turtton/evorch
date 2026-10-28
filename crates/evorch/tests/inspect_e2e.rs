@@ -426,3 +426,74 @@ fn run_shows_each_review_manifest_with_its_attempts_and_complete_user_requests()
     );
     assert_eq!(unreadable["usage_requests"], serde_json::json!([]));
 }
+
+/// `user_requests_complete` for a manifest of three inputs (two inline, one
+/// expected continuation) followed by the given continuation events.
+fn completeness_with(parts: &[ManifestPart]) -> Value {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evorch-events.db");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    let emit = |detail: String| {
+        Event::new(DiagnosticEvent {
+            source: "sandbox".into(),
+            severity: DiagnosticSeverity::Info,
+            code: "escalation_review_manifest".into(),
+            detail,
+            run_id: Some("run-9".into()),
+            thread_id: None,
+            call_id: Some("call-1".into()),
+        })
+    };
+    handle
+        .append_event(
+            Some("evorch-gui"),
+            &emit(serde_json::to_string(&review_manifest("run-9")).unwrap()),
+        )
+        .unwrap();
+    for part in parts {
+        handle
+            .append_event(
+                Some("evorch-gui"),
+                &emit(serde_json::json!({ "manifest_part": part }).to_string()),
+            )
+            .unwrap();
+    }
+    storage.close();
+    let run = inspect(&path, &["run", "run-9"]).unwrap();
+    let manifests = run["review_manifests"].as_array().unwrap();
+    assert_eq!(manifests.len(), 1);
+    manifests[0]["user_requests_complete"].clone()
+}
+
+#[test]
+fn a_split_user_request_list_is_complete_only_when_every_part_is_there_exactly_once() {
+    let part = |index: usize, count: usize| ManifestPart {
+        review_id: "review-of-run-9".into(),
+        index,
+        count,
+        user_requests: vec![request_ref(&format!("ev-part-{index}"))],
+    };
+    assert_eq!(completeness_with(&[part(0, 1)]), true);
+    assert_eq!(completeness_with(&[]), false, "missing part");
+    assert_eq!(
+        completeness_with(&[part(0, 1), part(0, 1)]),
+        false,
+        "repeated index"
+    );
+    assert_eq!(completeness_with(&[part(0, 2)]), false, "count disagrees");
+    assert_eq!(completeness_with(&[part(1, 1)]), false, "gap at index 0");
+    let stranger = ManifestPart {
+        review_id: "another-review".into(),
+        ..part(0, 1)
+    };
+    assert_eq!(
+        completeness_with(&[stranger]),
+        false,
+        "part of another review"
+    );
+}
