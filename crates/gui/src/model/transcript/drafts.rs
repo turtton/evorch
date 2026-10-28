@@ -214,8 +214,15 @@ impl TranscriptModel {
             AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
                 self.discard_drafts(Some(run_id));
             }
-            // An idle run has no response left that could start a sealed call.
-            AgentRunPhase::Waiting => self.discard_sealed_drafts(Some(run_id)),
+            // A call that waits (a child, a reply, an answer) leaves its card running
+            // while later calls of the same batch still have to start. Only a run
+            // that waits with no call in flight is idle, and nothing can start the
+            // calls its finished response left sealed.
+            AgentRunPhase::Waiting => {
+                if !self.running_tool_runs().any(|run| run == run_id) {
+                    self.discard_sealed_drafts(Some(run_id));
+                }
+            }
             AgentRunPhase::Pending | AgentRunPhase::Running => {}
         }
     }

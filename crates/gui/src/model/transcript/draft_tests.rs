@@ -358,3 +358,49 @@ fn only_the_run_that_retries_loses_its_drafts() {
         [("read".into(), "call-2".into(), "{}".into())]
     );
 }
+
+#[test]
+fn a_waiting_call_keeps_the_later_calls_of_its_batch() {
+    // Given: one response with two calls; the first waits for a child.
+    let mut model = TranscriptModel::new();
+    model.apply(&delta(0, Some("call-a"), Some("delegate"), "{}"));
+    model.apply(&delta(1, Some("call-b"), Some("send_message"), "{}"));
+    model.apply(&completed_message(""));
+    model.apply(&started("call-a", "delegate"));
+
+    // When: the run enters Waiting because call-a is awaiting its child.
+    model.apply(&phase(AgentRunPhase::Waiting));
+
+    // Then: call-b is still announced, and starts in place afterwards.
+    assert_eq!(
+        drafts(&model),
+        [("send_message".into(), "call-b".into(), "{}".into())]
+    );
+    model.apply(&started("call-b", "send_message"));
+    assert!(drafts(&model).is_empty());
+    assert_eq!(model.entries().len(), 2);
+}
+
+#[test]
+fn waiting_with_nothing_in_flight_is_idle_and_drops_sealed_drafts() {
+    // Given: a finished call and a sealed draft that never started.
+    let mut model = TranscriptModel::new();
+    model.apply(&delta(0, Some("call-a"), Some("read"), "{}"));
+    model.apply(&delta(1, Some("call-b"), Some("write"), "{}"));
+    model.apply(&completed_message(""));
+    model.apply(&started("call-a", "read"));
+    model.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "read".into(),
+        call_id: "call-a".into(),
+        is_error: false,
+        output: None,
+        detail: None,
+        run_id: Some(RUN.into()),
+    }));
+
+    // When: the run waits for input.
+    model.apply(&phase(AgentRunPhase::Waiting));
+
+    // Then: the orphaned draft is dropped.
+    assert!(drafts(&model).is_empty());
+}

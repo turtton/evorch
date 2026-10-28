@@ -161,9 +161,10 @@ impl SecretRedactor {
         }
     }
 
-    /// Like [`Self::redact`] for text that is still being written. A trailing
-    /// token that already starts like a credential but is not long enough to
-    /// match a rule yet is masked too, so a credential never shows up in pieces.
+    /// Like [`Self::redact`] for text that is still being written. An unfinished
+    /// credential at the very end is masked too, so one never shows up in pieces:
+    /// a trailing token that already opens like a credential, or a trailing run
+    /// that is the beginning of a known credential value.
     #[must_use]
     pub fn redact_streaming(&self, text: &str) -> RedactedText {
         let mut redacted = self.redact(text);
@@ -174,11 +175,18 @@ impl SecretRedactor {
             .find(|(_, character)| !is_token_character(*character))
             .map_or(0, |(index, character)| index + character.len_utf8());
         let token = &redacted.text[token_start..];
-        if STREAMING_PREFIXES
+        let mut cut = STREAMING_PREFIXES
             .iter()
             .any(|prefix| token.starts_with(prefix))
-        {
-            redacted.text.truncate(token_start);
+            .then_some(token_start);
+        let known_start = self
+            .known_values
+            .iter()
+            .filter_map(|known| known_prefix_start(&redacted.text, known))
+            .min();
+        cut = cut.into_iter().chain(known_start).min();
+        if let Some(start) = cut {
+            redacted.text.truncate(start);
             redacted.text.push_str("[REDACTED:partial-credential]");
             redacted.count += 1;
         }
@@ -312,6 +320,18 @@ const STREAMING_PREFIXES: &[&str] = &[
     "xox",
     "eyJ",
 ];
+
+/// Fewest characters of a known value that count as a recognisable beginning.
+const MIN_KNOWN_PREFIX_LEN: usize = 4;
+
+/// Start of the longest ending of `text` that is a proper beginning of `known`.
+fn known_prefix_start(text: &str, known: &str) -> Option<usize> {
+    (MIN_KNOWN_PREFIX_LEN..known.len())
+        .rev()
+        .filter(|length| known.is_char_boundary(*length))
+        .find(|length| text.ends_with(&known[..*length]))
+        .map(|length| text.len() - length)
+}
 
 fn is_token_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
