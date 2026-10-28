@@ -211,6 +211,25 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.input_mut()
     }
 
+    /// 以後のフレームで、どの処理にも消費されなかった `key` の押下を検知するフラグを返します。
+    ///
+    /// 各 pass の終わりに入力を調べるため、他のペインや modal がキーを消費したかを区別できます。
+    pub fn watch_unconsumed(&self, key: Key) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = seen.clone();
+        // The name keys the callback, so watching a key again replaces its earlier probe.
+        let name: &'static str = Box::leak(format!("watch-unconsumed-{key:?}").into_boxed_str());
+        self.harness.ctx.on_end_pass(
+            name,
+            std::sync::Arc::new(move |ctx| {
+                if ctx.input(|input| input.key_pressed(key)) {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+        seen
+    }
+
     /// 現在フォーカスを持つ egui widget の Id を返します（フォーカス遷移検証用）。
     pub fn focused_id(&self) -> Option<egui::Id> {
         self.harness.ctx.memory(|memory| memory.focused())

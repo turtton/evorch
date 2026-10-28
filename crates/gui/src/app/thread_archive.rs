@@ -40,7 +40,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .is_some_and(|active| family.contains(active))
         {
             let next = self.sidebar.selected_project.as_ref().and_then(|project| {
-                ThreadRecord::partition_for_project(&self.sidebar.threads, project)
+                ThreadRecord::partition_for_project(&self.sidebar.threads, project, &self.phases)
                     .0
                     .first()
                     .map(|thread| thread.id.clone())

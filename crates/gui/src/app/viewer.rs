@@ -105,6 +105,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ctx = ui.ctx().clone();
         self.observe_attention();
         self.observe_unread_threads();
+        self.capture_thread_search_keys(&ctx);
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut tasks_action = None;
@@ -301,6 +302,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_add_project();
                     Ok(())
                 }
+                SidebarAction::OpenThreadSearch => {
+                    self.open_thread_search();
+                    Ok(())
+                }
                 SidebarAction::OpenProjectSettings(project_id) => {
                     self.open_project_settings(project_id);
                     Ok(())
@@ -347,6 +352,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.render_project_dialog(ui.ctx());
+        self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());

@@ -148,12 +148,15 @@ fn user_message(gui: &WorkbenchState<DemoSource>, text: &str) -> usize {
 }
 
 fn visible_rows(gui: &WorkbenchState<DemoSource>) -> Vec<String> {
-    let mut rows: Vec<_> =
-        ThreadRecord::partition_for_project(&gui.sidebar().threads, &ProjectId::new("project"))
-            .0
-            .iter()
-            .map(|thread| thread.id.to_string())
-            .collect();
+    let mut rows: Vec<_> = ThreadRecord::partition_for_project(
+        &gui.sidebar().threads,
+        &ProjectId::new("project"),
+        &std::collections::BTreeMap::new(),
+    )
+    .0
+    .iter()
+    .map(|thread| thread.id.to_string())
+    .collect();
     rows.sort();
     rows
 }
@@ -525,7 +528,11 @@ fn completed_turn_marks_its_thread_updated_and_persists_the_time() {
         .find(|thread| thread.id == ThreadId::new("one"))
         .unwrap();
     assert_eq!(one.updated_at, 4_000_000_000);
-    let (main, _) = ThreadRecord::partition_for_project(&saved.threads, &project);
+    let (main, _) = ThreadRecord::partition_for_project(
+        &saved.threads,
+        &project,
+        &std::collections::BTreeMap::new(),
+    );
     assert_eq!(
         main.iter()
             .map(|thread| thread.title.as_str())

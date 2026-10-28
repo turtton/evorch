@@ -87,6 +87,7 @@ pub use restore::ChatForkSeed;
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
+pub use meta::{HOST_SEARCH_MAX_LIMIT, HostSearchIndex, HostThreadHit, HostThreadSearch};
 pub use model::{AgentInvocationContext, AgentModel, ModelPreference, RoutePinRecord};
 pub use network::{NetworkAccessDecision, build_sandbox, judge_web_network_access};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};

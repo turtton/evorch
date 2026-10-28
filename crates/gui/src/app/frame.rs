@@ -445,6 +445,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.picker_owns_input() {
             return;
         }
+        // Search wins over a focused composer, but only where it can open: on a
+        // screen that cannot show it, the key stays for that screen.
+        if self.thread_search_available()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
+        {
+            self.thread_search.toggle();
+        }
+        // While the search is up every key belongs to it, not to shortcuts behind it.
+        if self.search_owns_input() {
+            return;
+        }
         if let Some(action) = ctx.input(|input| self.keymap.action_for_input(input)) {
             if action == KeyAction::CycleAgentRole && self.settings_owns_input() {
                 return;

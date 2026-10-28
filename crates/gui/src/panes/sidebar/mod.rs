@@ -18,6 +18,7 @@ struct SidebarUiState {
 pub enum SidebarAction {
     SelectProject(ProjectId),
     OpenAddProject,
+    OpenThreadSearch,
     OpenProjectSettings(ProjectId),
     CreateThread(String),
     /// Start a thread in the given project and make it the active one.
