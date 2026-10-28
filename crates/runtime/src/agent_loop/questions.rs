@@ -61,9 +61,10 @@ impl LoopState {
             let already_in_history = self.has_user_answer(&question);
             self.answered_questions.insert(question.id.clone());
             if !already_in_history {
-                // The durable projection does not preserve whether a host or agent answered.
+                // The message tag carries who answered, so a parent agent's answer
+                // cannot pass for the user's.
                 self.begin_internal_input();
-                self.context.push_user(&answer_message(&question));
+                self.context.push_user(&question.answer_message());
                 received = true;
             }
         }
@@ -78,15 +79,6 @@ impl LoopState {
         self.answered_questions.contains(&question.id)
             || answer_in_history(&self.context.messages, question)
     }
-}
-
-fn answer_message(question: &UserQuestion) -> String {
-    format!(
-        "[user-answer id={}]\nQuestion: {}\nAnswer: {}",
-        question.id,
-        question.title,
-        question.answer.as_deref().unwrap_or_default(),
-    )
 }
 
 fn answer_in_history(messages: &[providers::Message], question: &UserQuestion) -> bool {
@@ -109,11 +101,12 @@ mod tests {
             options: vec![],
             blocking: true,
             answer: Some("A".into()),
+            answer_origin: None,
         };
         let mut message = providers::Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
-                text: answer_message(&question),
+                text: question.answer_message(),
             }],
         };
         assert!(!answer_in_history(&[message.clone()], &question));

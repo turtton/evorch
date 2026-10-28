@@ -1,5 +1,5 @@
 //! Atomic host answers through the additive writer command.
-use event_bus::UserQuestion;
+use event_bus::{AnswerOrigin, UserQuestion};
 use storage::{Database, ReviewEvidenceRow, Storage, StorageConfig, StorageError};
 
 fn question() -> UserQuestion {
@@ -13,6 +13,7 @@ fn question() -> UserQuestion {
         options: vec![],
         blocking: true,
         answer: None,
+        answer_origin: None,
     }
 }
 
@@ -45,7 +46,12 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
     let mut invalid = evidence();
     invalid.in_reply_to_title = Some(format!("sk-{}", "a".repeat(32)));
     assert!(matches!(
-        handle.answer_user_question_with_evidence(&question().id, "yes", &[evidence(), invalid]),
+        handle.answer_user_question_with_evidence(
+            &question().id,
+            "yes",
+            &AnswerOrigin::Host,
+            &[evidence(), invalid]
+        ),
         Err(StorageError::SecretDetected {
             entity: "review_evidence",
             ..
@@ -58,7 +64,12 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
     assert!(db.review_evidence_for_target("run-1").unwrap().is_empty());
     for _ in 0..2 {
         handle
-            .answer_user_question_with_evidence(&question().id, "yes", &[evidence()])
+            .answer_user_question_with_evidence(
+                &question().id,
+                "yes",
+                &AnswerOrigin::Host,
+                &[evidence()],
+            )
             .unwrap();
     }
     let mut conflicting = evidence();
@@ -66,7 +77,12 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
     conflicting.text = "no".into();
     assert!(
         handle
-            .answer_user_question_with_evidence(&question().id, "no", &[conflicting])
+            .answer_user_question_with_evidence(
+                &question().id,
+                "no",
+                &AnswerOrigin::Host,
+                &[conflicting]
+            )
             .is_err()
     );
     assert_eq!(
@@ -86,7 +102,7 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
     suspended.hard_limits.max_db_bytes = 1;
     let storage = Storage::open(suspended).unwrap();
     assert!(
-        matches!(storage.handle().answer_user_question_with_evidence(&question().id, "yes", &[evidence()]),
+        matches!(storage.handle().answer_user_question_with_evidence(&question().id, "yes", &AnswerOrigin::Host, &[evidence()]),
         Err(StorageError::Serialization(message)) if message.contains("writes suspended"))
     );
     assert_eq!(
@@ -116,7 +132,12 @@ fn concurrent_answers_commit_only_the_winners_evidence() {
                 barrier.wait();
                 (
                     answer,
-                    handle.answer_user_question_with_evidence(&question().id, answer, &[row]),
+                    handle.answer_user_question_with_evidence(
+                        &question().id,
+                        answer,
+                        &AnswerOrigin::Host,
+                        &[row],
+                    ),
                 )
             })
         })

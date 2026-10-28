@@ -93,6 +93,7 @@ mod tests {
             options: vec!["選択肢 A".into()],
             blocking: true,
             answer: None,
+            answer_origin: None,
         };
         let answered = event_bus::UserQuestion {
             id: "question-answered".into(),

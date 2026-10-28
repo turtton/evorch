@@ -52,6 +52,7 @@ mod tests {
             options: vec![],
             blocking: true,
             answer: None,
+            answer_origin: None,
         };
         assert!(belongs_to_thread(&question, "one", &[]));
         assert!(!belongs_to_thread(&question, "two", &[]));

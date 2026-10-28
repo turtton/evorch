@@ -214,6 +214,7 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
         options: Vec::new(),
         blocking: true,
         answer: None,
+        answer_origin: None,
     };
     let asked = Event::new(ToolEvent::UserQuestionUpdated {
         question: question.clone(),
@@ -402,4 +403,43 @@ fn final_result_is_separate_from_progress_and_finishes_thinking_before_done() {
         3,
         "a deduped result still ends thinking"
     );
+}
+
+#[test]
+fn answer_notice_names_who_answered() {
+    let notice = |origin: Option<event_bus::AnswerOrigin>| {
+        let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("owner", "root");
+        registry.select_thread(Some("owner".into()));
+        registry.apply(&Event::new(ToolEvent::UserQuestionUpdated {
+            question: UserQuestion {
+                id: "question-1".into(),
+                run_id: "root".into(),
+                root_run_id: "root".into(),
+                root_name: "orchestrator".into(),
+                recipient_run_ids: Vec::new(),
+                title: "Which API?".into(),
+                options: Vec::new(),
+                blocking: true,
+                answer: Some("Use A".into()),
+                answer_origin: origin,
+            },
+        }));
+        registry.run("root").unwrap().entries().to_vec()
+    };
+    let text = |entries: Vec<TranscriptEntry>| match entries.as_slice() {
+        [TranscriptEntry::Notice { text }] => text.clone(),
+        other => panic!("unexpected entries: {other:?}"),
+    };
+    assert_eq!(
+        text(notice(Some(event_bus::AnswerOrigin::Host))),
+        "Answer from you: Use A"
+    );
+    assert_eq!(
+        text(notice(Some(event_bus::AnswerOrigin::ParentAgent {
+            answered_by_run_id: "run-parent".into()
+        }))),
+        "Answer from parent agent: Use A"
+    );
+    assert_eq!(text(notice(None)), "Answer: Use A");
 }

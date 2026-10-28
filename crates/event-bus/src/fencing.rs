@@ -523,6 +523,7 @@ mod question_tests {
             options: vec![],
             blocking: true,
             answer: None,
+            answer_origin: None,
         };
         assert!(!fences.accepts(&Event::new(ToolEvent::UserQuestionUpdated {
             question: question.clone()

@@ -349,7 +349,7 @@ pub(super) fn subagent_questions(name: &str) -> ToolSpec {
 pub(super) fn answer_subagent_question(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Answer one direct child's pending question. The answer reaches its next model turn, waking a Waiting child or continuing a completed child from saved history under your current run authority. Repeating the same answer does not start another continuation. If continuation is unavailable or the child was stopped, cancelled or failed, the answer remains saved and an error explains the recovery needed. Only the direct Orchestrator parent may answer; this never grants tool permissions. If user judgment is needed, ask_user on your own run first, then pass that answer here.",
+        "Answer one direct child's pending question. The answer reaches its next model turn, waking a Waiting child or continuing a completed child from saved history under your current run authority. Repeating the same answer does not start another continuation. If continuation is unavailable or the child was stopped, cancelled or failed, the answer remains saved and an error explains the recovery needed. Only the direct Orchestrator parent may answer; this never grants tool permissions. If user judgment is needed, ask_user on your own run first, then pass that answer here, quoting its question ID. The child receives your answer marked as a parent-agent answer, which is not user approval.",
         json!({"question_id":{"type":"string"},"answer":{"type":"string","minLength":1,"maxLength":4096}}),
         &["question_id", "answer"],
         true,

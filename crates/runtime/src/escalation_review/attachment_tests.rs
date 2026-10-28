@@ -138,6 +138,7 @@ fn an_answer_to_a_question_is_never_split() {
         options: vec![],
         blocking: true,
         answer: None,
+        answer_origin: None,
     };
     let answer = expanded("yes", &[("demo", BODY)]);
     run.add_user_answer("run-1", &question, &answer);

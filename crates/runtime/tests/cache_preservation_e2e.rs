@@ -912,7 +912,10 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
         assert!(usage[index + 1].1 >= usage[index].0);
     }
     assert_eq!(
-        requests[3].to_string().matches("[user-answer id=").count(),
+        requests[3]
+            .to_string()
+            .matches("[parent-answer id=")
+            .count(),
         1
     );
     assert!(requests[3].to_string().contains("Use scope A"));
