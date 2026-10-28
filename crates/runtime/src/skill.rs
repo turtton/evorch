@@ -5,12 +5,14 @@
 //! 仕様に基づく検証に加え、skill ディレクトリの発見とメタデータレジストリを
 //! 提供する。
 
+mod attachments;
 mod builtin;
 mod discovery;
 mod frontmatter;
 mod registry;
 mod resource;
 
+pub use attachments::{SkillAttachment, append_skill_attachment, split_skill_attachments};
 pub(crate) use discovery::repo_skill_dirs;
 pub use discovery::{
     build_standard_registry, default_skill_dirs, discover_skills, discover_with_builtin,

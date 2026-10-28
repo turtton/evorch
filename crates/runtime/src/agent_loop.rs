@@ -19,6 +19,9 @@ mod questions;
 mod retracted_delegates;
 #[cfg(test)]
 mod review_evidence_tests;
+mod review_skills;
+#[cfg(test)]
+mod review_skills_tests;
 mod stop_context;
 mod team;
 mod tool_calls;
@@ -38,6 +41,7 @@ use crate::compaction;
 use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
+use crate::escalation_review::{LoadedBy, LoadedSkillRef};
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
 use crate::runtime::{SandboxFactory, Shared, loop_shared};
@@ -241,6 +245,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
+    let mut review_skill_refs = restored
+        .as_ref()
+        .map(|restored| restored.loaded_skills.clone())
+        .unwrap_or_default();
     let continuity = restored
         .as_ref()
         .map(|state| state.continuity.clone())
@@ -614,6 +622,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         let skill_roots = std::mem::take(&mut state.allowed_instructions.skill_roots);
         let inherited = state.task.config.allowed_skill_roots.clone();
         state.restore_allowed_skills(skill_roots.into_iter().chain(inherited));
+        review_skill_refs.extend(
+            state
+                .task
+                .config
+                .load_skills
+                .iter()
+                .map(|name| LoadedSkillRef {
+                    name: name.clone(),
+                    loaded_by: LoadedBy::DelegateLoadSkills,
+                }),
+        );
+        state.record_review_skills_again(review_skill_refs, is_restored);
         if !is_restored && !benchmark_replay {
             let allowed = state.directory_list();
             if let Err(error) = push_initial_system_message(

@@ -249,6 +249,7 @@ mod review_tests {
                         turn_completed: true,
                         allowed_directories: Default::default(),
                         allowed_instructions: Default::default(),
+                        loaded_skills: Vec::new(),
                     },
                     &trigger,
                     None,

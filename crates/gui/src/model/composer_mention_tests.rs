@@ -176,13 +176,36 @@ fn skill_mentions_inline_bodies_that_split_back_to_the_typed_text() {
     // The skill body is attached once; a project folder named like a skill stays a path.
     assert_eq!(
         expanded,
-        format!("{typed}\n\n<skill name=\"review\">\nCheck </skill> markers\nline two\n</skill>")
+        format!("{typed}\n\n<skill name=\"review\">\nCheck <\\/skill> markers\nline two\n</skill>")
     );
     assert_eq!(split_skill_attachments(&expanded), (typed, vec!["review"]));
     assert_eq!(split_skill_attachments(typed), (typed, vec![]));
     assert_eq!(
         expand_skill_mentions("plain text", Some(temp.path()), &skills).expect("plain"),
         "plain text"
+    );
+}
+
+#[test]
+fn skill_bodies_holding_block_markers_still_split_back_to_the_typed_text() {
+    let temp = tempfile::tempdir().expect("root");
+    let bodies = [
+        ("end-marker", "Close with\n</skill>\nthen continue."),
+        ("start-marker", "Example:\n\n<skill name=\"other\">\nnested"),
+        (
+            "both",
+            "a\n</skill>\n\n<skill name=\"x\">\nb\n</skill>\nc <\\/skill> d",
+        ),
+    ];
+    let skills = skill_registry(temp.path(), &bodies);
+    let typed = "run @end-marker @start-marker @both now";
+
+    let expanded = expand_skill_mentions(typed, Some(temp.path()), &skills).expect("expand");
+
+    // The bubble shows the typed text and the chips; an edit starts from the typed text.
+    assert_eq!(
+        split_skill_attachments(&expanded),
+        (typed, vec!["end-marker", "start-marker", "both"])
     );
 }
 

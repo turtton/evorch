@@ -35,6 +35,8 @@ pub(crate) struct RestoredState {
     /// Boxed so the restore continuations stay small.
     pub(crate) allowed_directories: Box<crate::allowed_directories::ToldDirectories>,
     pub(crate) allowed_instructions: Box<crate::allowed_instructions::AllowedInstructions>,
+    /// Skills the run had handed its escalation reviewer; read again on restore.
+    pub(crate) loaded_skills: Vec<crate::escalation_review::LoadedSkillRef>,
     /// Prompt IDs of host inputs the saved messages hold. Unreadable lists
     /// restore as empty: they only drive delivery receipts.
     pub(crate) host_inputs: Vec<String>,
@@ -104,6 +106,7 @@ impl RestoredState {
             turn_completed,
             allowed_directories: Box::new(descriptor.allowed_directories),
             allowed_instructions: Box::new(descriptor.allowed_instructions),
+            loaded_skills: descriptor.loaded_skills,
             host_inputs: serde_json::from_str(&record.host_inputs_json).unwrap_or_default(),
         })
     }
@@ -212,6 +215,9 @@ pub struct RunRestoreDescriptor {
         skip_serializing_if = "crate::allowed_instructions::AllowedInstructions::is_empty"
     )]
     pub allowed_instructions: crate::allowed_instructions::AllowedInstructions,
+    /// Skills handed to the escalation reviewer; restore reads them again by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loaded_skills: Vec<crate::escalation_review::LoadedSkillRef>,
 }
 
 impl RunRestoreDescriptor {
@@ -545,6 +551,7 @@ fn write_snapshot_with_context(
             .route_pins(&state.caller_run_id().to_string()),
         allowed_directories: state.told_directories.clone(),
         allowed_instructions: state.allowed_instructions.clone(),
+        loaded_skills: state.review_skill_refs(),
     };
     let host_inputs = state.host_inputs().snapshot(end);
     let record = RunContextRecord {
