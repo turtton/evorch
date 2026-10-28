@@ -1651,6 +1651,161 @@ async fn manual_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Manual).await;
 }
 
+/// An explicit saved-context transaction is the one replacement boundary, even
+/// when either compaction or resume happens in a fresh runtime.
+#[tokio::test]
+async fn ended_run_offline_compaction_resume_reuses_the_new_wire_prefix() {
+    for wire in [Wire::ChatCompletions, Wire::Responses] {
+        for restart in [0, 1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage_config = storage::StorageConfig {
+                db_path: directory.path().join("saved-compaction.sqlite3"),
+                ..Default::default()
+            };
+            let storage = storage::Storage::open(storage_config.clone()).unwrap();
+            let mut harness = harness_with_wire(
+                wire,
+                vec![
+                    read_response(0),
+                    text_response(&"old analysis to summarize ".repeat(100)),
+                    text_response("latest completed turn"),
+                    read_response(1),
+                    read_response(2),
+                    text_response("done"),
+                ],
+                1_000_000,
+                Arc::new(BulkRead),
+                Vec::new(),
+                None,
+                0.5,
+                |_| {},
+            );
+            harness.runtime = harness.runtime.with_run_store(
+                runtime::RunStore::open(&storage_config, storage.handle()).unwrap(),
+            );
+            let run = harness.runtime.delegate_background(
+                Role::Worker,
+                "Preserve this original goal".into(),
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            );
+            let mut events =
+                through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+            harness
+                .runtime
+                .send_message(run, "Keep this last complete turn".into())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            harness
+                .runtime
+                .stop(run, runtime::StopScope::SelfOnly)
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+            harness.runtime.wait(run).await.unwrap();
+            if restart == 1 {
+                restart_saved_compaction_harness(&mut harness, &storage_config, &storage);
+            }
+            let before = harness
+                .mock
+                .recorded_requests()
+                .iter()
+                .filter(|request| request.path == wire.path())
+                .count();
+            harness
+                .runtime
+                .compact_saved_chat(run, RunConfig::default())
+                .await
+                .unwrap();
+            loop {
+                let event = harness.receiver.recv().await.unwrap();
+                let compacted = matches!(&event.kind, EventKind::Compaction(
+                    CompactionEvent::Compacted { run_id, .. }) if run_id == &run.to_string());
+                events.push(event);
+                if compacted {
+                    break;
+                }
+            }
+            assert_eq!(
+                harness
+                    .mock
+                    .recorded_requests()
+                    .iter()
+                    .filter(|request| request.path == wire.path())
+                    .count(),
+                before,
+                "offline structural compaction must not start an agent request"
+            );
+            if restart == 2 {
+                restart_saved_compaction_harness(&mut harness, &storage_config, &storage);
+            }
+            harness
+                .runtime
+                .resume_chat(run, RunConfig::default())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            assert_eq!(
+                harness
+                    .mock
+                    .recorded_requests()
+                    .iter()
+                    .filter(|request| request.path == wire.path())
+                    .count(),
+                before,
+                "a completed turn must resume to input waiting, not replay"
+            );
+            harness
+                .runtime
+                .send_message(run, "Continue after the saved boundary".into())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            harness.runtime.cancel(run).unwrap();
+            harness.runtime.wait(run).await.unwrap();
+            // Retains both the input-derived cache accounting and independent
+            // protocol assertions: replacement once, then append-only reuse.
+            verify_trace(&harness, run, &events, 1);
+        }
+    }
+}
+
+fn restart_saved_compaction_harness(
+    harness: &mut Harness,
+    storage_config: &storage::StorageConfig,
+    storage: &storage::Storage,
+) {
+    let root = harness._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    harness.runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_system_prompts(contract_prompts())
+    .with_compaction(current.compaction.clone())
+    .with_run_store(runtime::RunStore::open(storage_config, storage.handle()).unwrap());
+    assert!(harness.runtime.list_agents().is_empty());
+}
+
 #[tokio::test]
 async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;

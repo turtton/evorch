@@ -150,6 +150,8 @@ pub enum RuntimeError {
         /// compaction 実行中の run ID。
         run_id: String,
     },
+    #[error("Could not compact saved AgentRun {run_id}: {reason}")]
+    SavedCompactionFailed { run_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
