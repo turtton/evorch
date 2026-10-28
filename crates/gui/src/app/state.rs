@@ -134,6 +134,8 @@ pub struct WorkbenchState<S> {
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
+    /// Live image payloads retained by submission ID for queued edits.
+    pub(super) queued_images: BTreeMap<String, Vec<crate::model::composer::ImageAttachment>>,
     /// Follow-ups each thread queued while its run was busy, oldest first.
     pub(super) follow_up_queues: BTreeMap<String, Vec<crate::model::composer::QueuedFollowUp>>,
     /// Display state each thread had last frame, to notice finished work.
@@ -258,6 +260,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
+            queued_images: BTreeMap::new(),
             follow_up_queues: BTreeMap::new(),
             thread_states: BTreeMap::new(),
             unread_threads: std::collections::BTreeSet::new(),

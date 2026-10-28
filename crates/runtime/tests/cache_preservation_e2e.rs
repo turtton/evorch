@@ -2349,7 +2349,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     media_type: "image/png".into(),
                     data: "aW1hZ2U=".into(),
                 }],
-                None,
+                Some(format!("delivered-{expedite}")),
             )
             .unwrap();
         review_storage.attach(&harness.runtime);
@@ -2377,6 +2377,36 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     .next_turn_requested
             );
         }
+        let withdrawn_ids = [
+            format!("withdraw-middle-{expedite}"),
+            format!("withdraw-tail-{expedite}"),
+        ];
+        for id in &withdrawn_ids {
+            harness
+                .runtime
+                .send_message_with_images(
+                    run,
+                    format!("never deliver {id}"),
+                    vec![DelegateImage {
+                        media_type: "image/png".into(),
+                        data: "d2l0aGRyYXdu".into(),
+                    }],
+                    Some(id.clone()),
+                )
+                .unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 4);
+        for id in &withdrawn_ids {
+            harness.runtime.withdraw_follow_up(run, id).unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 2);
+        let receipts = harness.runtime.host_input_receipts(&withdrawn_ids).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.status == storage::HostInputStatus::Withdrawn)
+        );
         assert_eq!(
             harness
                 .mock
@@ -2389,6 +2419,12 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         read.release.notify_one();
         let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
         harness.runtime.wait(run).await.unwrap();
+        assert_eq!(
+            harness
+                .runtime
+                .withdraw_follow_up(run, &format!("delivered-{expedite}")),
+            Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into())
+        );
         assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 0);
         assert!(
             !harness
@@ -2405,6 +2441,13 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .map(|r| &r.body)
             .collect::<Vec<_>>();
         assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !body.to_string().contains("never deliver")
+                    && !body.to_string().contains("d2l0aGRyYXdu"))
+        );
+
         assert_eq!(
             bodies[1].to_string().contains("first queued follow-up"),
             expedite

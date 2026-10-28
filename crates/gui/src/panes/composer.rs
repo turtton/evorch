@@ -27,6 +27,9 @@ pub enum ComposerAction {
     Send,
     Stop,
     DeliverNextTurn,
+    /// Withdraw a live queued input, restoring it only for Edit.
+    EditQueued(usize),
+    DeleteQueued(usize),
     /// Put an undelivered queued follow-up back into the input.
     RestoreQueued(usize),
     /// Drop an undelivered queued follow-up.

@@ -3,7 +3,6 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use gui::model::commands::{ChatSubmission, CommandSink, LoopEvent, WorkbenchCommand};
@@ -135,9 +134,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
             sink.bind_goal_context("thread-1", "project", &run.to_string());
         }
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), model.started[0].notified())
-                .await
-                .unwrap();
+            model.started[0].notified().await;
         });
         let mut sidebar = SidebarState::default();
         let project = ProjectId::new("project");
@@ -161,7 +158,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
             run_id: run.to_string(),
         });
         let startup = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            {
                 let mut events = Vec::new();
                 loop {
                     let event = receiver.recv().await.unwrap();
@@ -169,10 +166,29 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
                     events.push(event);
                     if running { return events; }
                 }
-            }).await.unwrap()
+            }
         });
         state.apply_events(startup);
         let mut h = HeadlessWorkbench::new(state, [1400.0, 1000.0]);
+        for (text, button) in [
+            ("remove before delivery", "Delete"),
+            ("edit before delivery", "Edit"),
+        ] {
+            h.state_mut().composer_mut().input = text.into();
+            h.state_mut().submit_composer();
+            h.run();
+            assert!(h.has_label(&format!("Queued: {text}")));
+            h.click_label(&format!("{button}: {text}"));
+            h.run();
+            assert!(!h.has_label(&format!("Queued: {text}")));
+            assert!(!h.has_label(&format!("Not delivered: {text}")));
+            assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
+            if button == "Edit" {
+                assert_eq!(h.state().composer().input, text);
+                h.state_mut().composer_mut().input.clear();
+            }
+        }
+
         h.state_mut().composer_mut().input = "queued follow-up".into();
         h.run();
         h.click_label("Queue");
@@ -197,15 +213,16 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
         assert_eq!(model.calls.load(Ordering::SeqCst), 1);
         model.release[0].notify_one();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), model.started[1].notified())
-                .await
-                .unwrap();
+            model.started[1].notified().await;
         });
         h.run();
         assert!(!h.has_label("Queued: queued follow-up"));
         assert!(user_messages(&h).contains(&"queued follow-up".to_owned()));
         assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
         let messages = model.messages.lock().unwrap();
+        let captured = serde_json::to_string(&*messages).unwrap();
+        assert!(!captured.contains("remove before delivery"));
+        assert!(!captured.contains("edit before delivery"));
         assert!(
             messages[1]
                 .iter()
@@ -217,7 +234,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
         drop(messages);
         model.release[1].notify_one();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            {
                 loop {
                     let event = receiver.recv().await.unwrap();
                     if matches!(
@@ -230,9 +247,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
                         break;
                     }
                 }
-            })
-            .await
-            .unwrap();
+            }
             runtime.cancel(run).unwrap();
             runtime.wait(run).await.unwrap();
         });

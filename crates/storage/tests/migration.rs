@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const LATEST_SCHEMA: u32 = 28;
+const LATEST_SCHEMA: u32 = 29;
 
 const EXPECTED_TABLES: [&str; 50] = [
     "learning_claims",

@@ -33,7 +33,7 @@ use agents::Role;
 use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tools::ToolExecutor;
 
 use crate::base_context::{self, InitialSystemPromptError};
@@ -88,7 +88,7 @@ pub(crate) struct RunHandoff {
 pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
-    pub(crate) inbox_rx: mpsc::Receiver<crate::runtime::user_inbox::UserInput>,
+    pub(crate) inbox_rx: crate::runtime::user_inbox::InboxReceiver,
     pub(crate) user_inbox: Arc<crate::runtime::user_inbox::UserInbox>,
     pub(crate) cancel_rx: watch::Receiver<RunInterrupt>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
@@ -1440,9 +1440,9 @@ impl LoopState {
                         }
                         continue;
                     }
-                    let seq = message.4;
-                    self.take_user_input(message);
-                    self.channels.user_inbox.consumed_through(seq);
+                    if !self.take_user_input(message) {
+                        continue;
+                    }
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();

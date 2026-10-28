@@ -8,6 +8,8 @@ use crate::StorageError;
 pub enum HostInputStatus {
     /// The runtime took it; the run may still hold it in its inbox.
     Accepted,
+    /// The host withdrew it before context adoption. Never shown in history.
+    Withdrawn,
     /// A committed run context snapshot contains it.
     Delivered,
     /// Its run ended before reading it.
@@ -20,6 +22,7 @@ impl HostInputStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
+            Self::Withdrawn => "withdrawn",
             Self::Delivered => "delivered",
             Self::Dropped => "dropped",
             Self::Unknown => "unknown",
@@ -29,6 +32,7 @@ impl HostInputStatus {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "accepted" => Self::Accepted,
+            "withdrawn" => Self::Withdrawn,
             "delivered" => Self::Delivered,
             "dropped" => Self::Dropped,
             "unknown" => Self::Unknown,

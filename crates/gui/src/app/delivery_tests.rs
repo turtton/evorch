@@ -246,3 +246,110 @@ fn rejected_resend_creates_a_new_durable_draft_without_reviving_the_original() {
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(saved["composer_drafts"][0]["origin"], state.history[1].id);
 }
+
+#[test]
+fn withdrawn_receipt_removes_history_on_recovery_without_a_tombstone() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = state(&temp.path().join("sidebar.json"));
+    let mut receipt = storage::HostInputReceipt {
+        prompt_id: "old".into(),
+        run_id: "run-1".into(),
+        root_run_id: "run-1".into(),
+        text: "withdrawn".into(),
+        image_count: 0,
+        status: storage::HostInputStatus::Withdrawn,
+        reason: None,
+        accepted_at_ns: 0,
+        status_at_ns: 0,
+    };
+    state.history[0].status = DeliveryStatus::Queued;
+    assert!(state.apply_receipts(std::slice::from_ref(&receipt), true));
+    assert!(state.history.is_empty());
+    state.persist_history().unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();
+    assert!(saved["user_messages"].as_array().unwrap().is_empty());
+    receipt.status = storage::HostInputStatus::Delivered;
+    assert!(!state.apply_receipts(&[receipt], false));
+}
+
+struct WithdrawalSink(bool);
+impl CommandSink for WithdrawalSink {
+    fn submit(&mut self, _: WorkbenchCommand) -> Vec<LoopEvent> {
+        Vec::new()
+    }
+    fn withdraw_follow_up(&mut self, thread: &str, id: &str) -> Result<(), runtime::RuntimeError> {
+        assert_eq!((thread, id), ("thread", "old"));
+        if self.0 {
+            Ok(())
+        } else {
+            Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into())
+        }
+    }
+}
+
+#[test]
+fn successful_live_edit_and_delete_persist_no_history_tombstone() {
+    for edit in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar.json");
+        let mut state = state(&path).with_command_sink(Box::new(WithdrawalSink(true)));
+        state.history[0].status = DeliveryStatus::Queued;
+        state.rebuild_delivery_rows();
+        state.withdraw_queued_follow_up(0, edit);
+        assert!(state.history.is_empty());
+        assert!(state.composer.queued.is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved["user_messages"].as_array().unwrap().is_empty());
+        assert_eq!(state.composer.input, if edit { "retry this" } else { "" });
+        assert_eq!(
+            saved["composer_drafts"].as_array().unwrap().len(),
+            usize::from(edit)
+        );
+    }
+}
+
+#[test]
+fn already_consumed_input_cannot_be_deleted_or_duplicated_into_composer() {
+    for edit in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state(&dir.path().join("sidebar.json"))
+            .with_command_sink(Box::new(WithdrawalSink(false)));
+        state.history[0].status = DeliveryStatus::Queued;
+        state.rebuild_delivery_rows();
+        state.composer.input = "keep draft".into();
+        state.withdraw_queued_follow_up(0, edit);
+        assert_eq!(state.history[0].status, DeliveryStatus::Delivered);
+        let receipt = storage::HostInputReceipt {
+            prompt_id: "old".into(),
+            run_id: "run-1".into(),
+            root_run_id: "run-1".into(),
+            text: "retry this".into(),
+            image_count: 2,
+            status: storage::HostInputStatus::Accepted,
+            reason: None,
+            accepted_at_ns: 0,
+            status_at_ns: 0,
+        };
+        assert!(!state.apply_receipts(&[receipt], false));
+        assert_eq!(state.history[0].status, DeliveryStatus::Delivered);
+        assert_eq!(state.composer.input, "keep draft");
+        assert!(state.composer_drafts.is_empty());
+        assert!(state.composer.queued.is_empty());
+    }
+}
+
+#[test]
+fn live_edit_keeps_recovered_text_in_memory_if_draft_save_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state =
+        state(&dir.path().join("sidebar.json")).with_command_sink(Box::new(WithdrawalSink(true)));
+    state.history[0].status = DeliveryStatus::Queued;
+    state.rebuild_delivery_rows();
+    state.sidebar_path = Some(dir.path().join("missing/sidebar.json"));
+    state.withdraw_queued_follow_up(0, true);
+    assert!(state.history.is_empty());
+    assert_eq!(state.composer.input, "retry this");
+    assert!(state.composer.queued.is_empty());
+}
