@@ -18,6 +18,7 @@ catalog = { path = "../catalog" }
 config = { path = "../config" }
 eval = { path = "../eval" }
 event-bus = { path = "../event-bus" }
+recorder = { path = "../recorder" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 sandbox = { path = "../sandbox", features = ["keychain"] }

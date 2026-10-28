@@ -2330,6 +2330,7 @@ dependencies = [
  "eval",
  "event-bus",
  "mock-openai",
+ "recorder",
  "routing",
  "runtime",
  "rusqlite",
