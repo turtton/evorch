@@ -11,8 +11,8 @@ use super::{
     compose_system_sections, resolve_preset_origins, workspace_note,
 };
 use crate::agent_loop::{
-    LoopShared, append_subagent_context_note, retain_backed_tools, shared_active_root,
-    standard_tool_specs, visible_tool_specs,
+    LoopShared, append_subagent_context_note, apply_run_js_specs, retain_backed_tools,
+    shared_active_root, standard_tool_specs, visible_tool_specs,
 };
 use crate::allowed_directories;
 use crate::compaction::estimator::estimate_tool_tokens;
@@ -269,6 +269,7 @@ impl AgentRuntime {
             web_tools_enabled,
         );
         retain_backed_tools(&mut visible, self.artifact_pages().is_some());
+        apply_run_js_specs(&mut visible, self.run_js_enabled(), &self.run_js_settings());
         append_subagent_context_note(&mut visible, classify(selected_model));
         let choice = shared
             .model
@@ -330,6 +331,8 @@ fn tool_exclusion_reason(
         "No skill registry is connected"
     } else if spec.name == "escalate" {
         "Only root runs can escalate"
+    } else if spec.name == tools::tools::run_js::NAME {
+        "run_js is disabled in the tools settings"
     } else if !web_tools_enabled {
         "Web tools are disabled in sandbox settings"
     } else {

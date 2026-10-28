@@ -2329,6 +2329,7 @@ dependencies = [
  "config",
  "eval",
  "event-bus",
+ "js-engine",
  "mock-openai",
  "routing",
  "runtime",

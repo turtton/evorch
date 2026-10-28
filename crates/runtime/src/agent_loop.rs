@@ -19,6 +19,7 @@ mod questions;
 mod retracted_delegates;
 #[cfg(test)]
 mod review_evidence_tests;
+mod run_js_host;
 mod stop_context;
 mod team;
 mod tool_calls;
@@ -46,6 +47,7 @@ use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
+pub(crate) use run_js_host::apply_run_js_specs;
 pub(crate) use tool_calls::{
     append_subagent_context_note, retain_backed_tools, standard_tool_specs, visible_tool_specs,
 };
@@ -543,6 +545,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .runtime()
             .is_some_and(|runtime| runtime.artifact_pages().is_some());
         retain_backed_tools(&mut state.tool_specs, artifact_pages);
+        state.apply_run_js();
         if !is_restored {
             state.add_team_tools();
         }

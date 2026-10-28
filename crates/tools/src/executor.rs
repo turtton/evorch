@@ -21,7 +21,9 @@ use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
 use crate::tool::{BuiltinTool, Permissions, Tool, ToolExecutionMode};
-use crate::tools::{ApplyPatch, Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
+use crate::tools::{
+    ApplyPatch, Edit, GitDiff, Grep, Read, RunJs, Shell, WebFetch, WebSearch, Write,
+};
 
 mod prepared;
 mod specs;
@@ -111,6 +113,8 @@ pub struct ToolExecutionContext {
     pub parent_call_id: Option<String>,
     pub shell_wait_policy: ShellWaitPolicy,
     pub shell_input: Option<Arc<dyn ShellInputControl>>,
+    /// Runs the tool calls a `run_js` program makes. Set by the runtime for `run_js` only.
+    pub run_js_host: Option<Arc<dyn crate::tools::run_js::RunJsHost>>,
 }
 
 impl PartialEq for ToolExecutionContext {
@@ -256,7 +260,7 @@ impl ToolExecutor {
             None => shell,
         };
         let [edit, write, apply_patch] = executor.post_edit_tools();
-        let standard: [Arc<dyn Tool>; 7] = [
+        let standard: [Arc<dyn Tool>; 8] = [
             Arc::new(Read),
             edit,
             write,
@@ -264,6 +268,7 @@ impl ToolExecutor {
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
+            Arc::new(RunJs::new()),
         ];
         for tool in standard {
             executor

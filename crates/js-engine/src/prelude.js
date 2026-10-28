@@ -40,11 +40,20 @@
   Object.defineProperty(g, "console", { value: consoleObject, writable: true, configurable: true });
   Object.defineProperty(g, "print", { value: write, writable: true, configurable: true });
 
-  async function call(name, args) {
+  // The stack of a rejection would end in the host callback; the call site is
+  // captured synchronously so the error still points at the user's line.
+  function call(name, args) {
+    const site = new Error().stack;
     const raw = JSON.stringify(args === undefined ? {} : args);
-    const reply = JSON.parse(await hostCall(name, raw === undefined ? "{}" : raw));
-    if (!reply.ok) throw new Error(reply.error);
-    return reply.value;
+    return hostCall(name, raw === undefined ? "{}" : raw).then((text) => {
+      const reply = JSON.parse(text);
+      if (!reply.ok) {
+        const error = new Error(reply.error);
+        error.stack = "Error: " + reply.error + "\n" + site;
+        throw error;
+      }
+      return reply.value;
+    });
   }
 
   const tools = {};
@@ -67,8 +76,8 @@
       }
       if (!result.next) return text;
       args = { path: result.next.path };
-      if (result.next.offset !== undefined) args.offset = result.next.offset;
-      if (result.next.byte_offset !== undefined) args.byte_offset = result.next.byte_offset;
+      if (result.next.offset != null) args.offset = result.next.offset;
+      if (result.next.byte_offset != null) args.byte_offset = result.next.byte_offset;
     }
   }
   Object.defineProperty(g, "readText", { value: readText, writable: false, configurable: false });

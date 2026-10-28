@@ -14,7 +14,7 @@ use serde_json::Value;
 use tools::executor::PreparedToolCall;
 use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
-use super::LoopState;
+use super::{LoopState, run_js_host};
 use crate::escalation::detector::{
     EscalationDetector, ToolErrorClass, ToolObservation, patch_rewrite_paths,
 };
@@ -739,6 +739,11 @@ impl LoopState {
                 parent: self.task.parent.map(|parent| parent.to_string()),
             })),
             parent_call_id: None,
+            run_js_host: None,
+        };
+        let ctx = ToolExecutionContext {
+            run_js_host: self.run_js_host(&ctx),
+            ..ctx
         };
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();
@@ -791,6 +796,10 @@ impl LoopState {
                         }
                     })
                 };
+                if name == tools::tools::run_js::NAME && !self.run_js_offered() {
+                    permission = permission
+                        .and_then(|()| Err("run_js is not enabled for this run".to_owned()));
+                }
                 // providers::StreamAccumulator turns unparsable arguments into null; tools
                 // only take objects, so name the cause instead of a schema mismatch.
                 if input.is_null() {
@@ -1222,29 +1231,42 @@ impl LoopState {
                             &self.shared.escalation,
                         )
                     {
-                        let run_id = self.caller_run_id().to_string();
-                        if EscalationDetector::is_no_progress_trigger(&trigger) {
-                            self.shared.bus.emit(Event::new(DiagnosticEvent {
-                                source: "escalation_detector".into(),
-                                severity: DiagnosticSeverity::Warning,
-                                code: diagnostic_codes::NO_PROGRESS.into(),
-                                detail: crate::escalation::detector::no_progress_detail(
-                                    &trigger,
-                                    &name,
-                                    &input,
-                                    error_class,
-                                ),
-                                run_id: Some(run_id.clone()),
-                                thread_id: None,
-                                call_id: Some(id.clone()),
-                            }));
+                        self.propose_escalation(trigger, &name, &input, &id, error_class);
+                    }
+                    // Calls a run_js program made count like calls made directly: the
+                    // detector sees them (edit loops, error streaks) and so does the budget.
+                    let children = if observed && name == tools::tools::run_js::NAME {
+                        run_js_host::child_observations(result.detail.as_ref())
+                    } else {
+                        Vec::new()
+                    };
+                    for child in &children {
+                        let paths = if matches!(child.name.as_str(), "edit" | "write") {
+                            child.paths.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        if let Some(trigger) = self.escalation_detector.observe(
+                            &ToolObservation {
+                                tool: child.name.as_str(),
+                                paths,
+                                is_error: child.is_error,
+                            },
+                            &self.shared.escalation,
+                        ) {
+                            self.propose_escalation(trigger, &child.name, &input, &id, None);
                         }
-                        self.shared
-                            .bus
-                            .emit(Event::new(LifecycleEvent::EscalationProposed {
-                                run_id,
-                                trigger,
-                            }));
+                        if !child.is_error {
+                            if child.name == "read"
+                                && let Some(path) = child.paths.first()
+                            {
+                                self.budget.read(path);
+                            }
+                            self.budget.mark_progress();
+                            if matches!(child.name.as_str(), "read" | "edit" | "write") {
+                                rule_targets.extend(child.paths.iter().cloned());
+                            }
+                        }
                     }
                     if observed && !result.is_error {
                         if name == "read"
@@ -1301,6 +1323,39 @@ impl LoopState {
             self.append_allowed_instructions(routed.allowed);
         }
         true
+    }
+
+    fn propose_escalation(
+        &mut self,
+        trigger: event_bus::EscalationTrigger,
+        name: &str,
+        input: &Value,
+        call_id: &str,
+        error_class: Option<ToolErrorClass>,
+    ) {
+        let run_id = self.caller_run_id().to_string();
+        if EscalationDetector::is_no_progress_trigger(&trigger) {
+            self.shared.bus.emit(Event::new(DiagnosticEvent {
+                source: "escalation_detector".into(),
+                severity: DiagnosticSeverity::Warning,
+                code: diagnostic_codes::NO_PROGRESS.into(),
+                detail: crate::escalation::detector::no_progress_detail(
+                    &trigger,
+                    name,
+                    input,
+                    error_class,
+                ),
+                run_id: Some(run_id.clone()),
+                thread_id: None,
+                call_id: Some(call_id.to_owned()),
+            }));
+        }
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::EscalationProposed {
+                run_id,
+                trigger,
+            }));
     }
 
     fn shared_call(&self, call: &BatchCall) -> bool {

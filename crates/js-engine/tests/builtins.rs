@@ -449,3 +449,20 @@ async fn engine_extras_that_the_adr_did_not_assume() {
         json!("ok")
     );
 }
+
+#[tokio::test]
+async fn a_rejected_tool_call_reports_the_line_of_the_call() {
+    let outcome = eval("const first = 1;\nconst second = 2;\nawait tools.boom({});").await;
+    let error = outcome.error.expect("error");
+    assert_eq!(error.message, "Error: denied: use a normal tool call");
+    assert!(
+        error.stack.contains("run_js:3"),
+        "stack was {:?}",
+        error.stack
+    );
+    assert!(
+        !error.stack.contains("<prelude>"),
+        "stack was {:?}",
+        error.stack
+    );
+}

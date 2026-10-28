@@ -52,6 +52,12 @@ impl BwrapConfig {
         self
     }
 
+    /// See [`SandboxBoundary::without_tool_caches`].
+    pub fn without_tool_caches(mut self) -> Self {
+        self.boundary = self.boundary.without_tool_caches();
+        self
+    }
+
     pub const fn allow_network(mut self, allow: bool) -> Self {
         self.allow_network = allow;
         self

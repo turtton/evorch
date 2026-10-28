@@ -98,6 +98,12 @@ impl ToolExecutor {
 }
 
 impl ValidatedToolCall {
+    /// What the executor's own policy decides for this call before any approval.
+    /// `Deny` and `AskFirst` need a user decision the caller may not want to request.
+    pub const fn action(&self) -> Action {
+        self.action
+    }
+
     /// Consume a call after the runtime has resolved all scope and approval layers.
     pub fn scope_approved(mut self) -> PreparedToolCall {
         self.action = Action::Proceed;

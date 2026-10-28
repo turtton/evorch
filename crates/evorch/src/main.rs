@@ -8,6 +8,10 @@ use evorch::headless::{self, SandboxChoice};
 use routing::ProcessEnv;
 
 fn main() -> ExitCode {
+    // The sandboxed run_js worker (ADR 0039) must not initialise logging or panic capture.
+    if std::env::args().nth(1).as_deref() == Some("js-worker") {
+        return evorch::js_worker::main();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
