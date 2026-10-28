@@ -267,6 +267,194 @@ async fn preflight_checks_user_simulator_before_starting_replays() {
     assert!(!output.join("runs").exists());
 }
 
+fn conversation_only_config(fixture: &Fixture, base_url: String) -> Config {
+    let mut config = preflight_config(fixture, base_url);
+    let chat = config.routing.routes.remove("worker").unwrap();
+    config.routing.routes.insert("chat".into(), chat);
+    config.agents.worker.categories.insert(
+        CategoryId::Conversation.to_string(),
+        config::CategoryBindingConfig {
+            models: vec![config::ChainEntryConfig::route("chat")],
+            ..Default::default()
+        },
+    );
+    config
+}
+
+#[tokio::test]
+async fn preflight_simulator_base_cannot_be_masked_by_conversation_category() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    let config = conversation_only_config(&fixture, server.uri());
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(None);
+    let dir = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    assert!(error.to_string().contains("user_simulator"), "{error}");
+    let evidence = read_json(&dir.join(preflight::REPORT_FILE));
+    assert!(evidence["checks"][0]["error"].is_null(), "{evidence}");
+    assert_eq!(
+        evidence["checks"][0]["bindings"],
+        serde_json::json!([{"role": "worker", "category": "conversation"}])
+    );
+    assert_eq!(evidence["checks"][1]["label"], "user_simulator");
+    assert_eq!(
+        evidence["checks"][1]["bindings"],
+        serde_json::json!([{"role": "worker", "category": null}])
+    );
+    assert!(
+        evidence["checks"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("worker"),
+        "{evidence}"
+    );
+    assert_eq!(
+        read_json(&dir.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!dir.join("runs").exists());
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the conversation binding was verified"
+    );
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn preflight_accepts_explicit_simulator_with_conversation_only_worker() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut config = conversation_only_config(&fixture, server.uri());
+    config.eval.user_simulator = Some(config::RoleBindingConfig {
+        models: vec![config::ChainEntryConfig::route("chat")],
+        ..Default::default()
+    });
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let database = storage::Database::open_read_only(&fixture.recorded.config.db_path).unwrap();
+    let thread = OriginalThread::load(&database, "thread-1").unwrap();
+    let context = Context {
+        identity: CommitIdentity::from_host(&thread.source_toplevel),
+        thread,
+        user_config_dir: Some(fixture.user.path().into()),
+        budget: config.eval.budget.clone(),
+        verify: None,
+        verify_timeout: verify::DEFAULT_TIMEOUT,
+        simulator: simulator_config(&config).0,
+        trust: ProjectTrust::Unapproved,
+        credentials: Arc::clone(deps.credentials.as_ref().unwrap()),
+        deps,
+    };
+    let evidence = preflight::check(
+        &context,
+        &[(BASELINE, None)],
+        &fixture.user.path().join("out"),
+    )
+    .await;
+    assert!(evidence.failure().is_none(), "{:?}", evidence.failure());
+    let evidence = serde_json::to_value(evidence).unwrap();
+    assert_eq!(evidence["checks"][1]["label"], "user_simulator");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn preflight_changed_child_base_cannot_be_masked_by_a_category() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    let mut config = preflight_config(&fixture, server.uri());
+    config.routing.routes.remove("reviewer");
+    config.agents.reviewer.categories.insert(
+        "tool-execution".into(),
+        config::CategoryBindingConfig {
+            models: vec![config::ChainEntryConfig::route("worker")],
+            ..Default::default()
+        },
+    );
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some("[agents.reviewer.generation]\ntemperature = 0.5\n"));
+    let dir = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let evidence = read_json(&dir.join(preflight::REPORT_FILE));
+    for check in &evidence["checks"].as_array().unwrap()[..2] {
+        assert!(
+            check["error"].as_str().unwrap().contains("reviewer"),
+            "{evidence}"
+        );
+    }
+    assert_eq!(
+        read_json(&dir.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!dir.join("runs").exists());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
 async fn rejects_undefined_route_before_replay(overlay: &str, role: &str) {
     let fixture = Fixture::new().await;
     let server = wiremock::MockServer::start().await;

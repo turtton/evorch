@@ -142,6 +142,33 @@ impl RoutedModel {
         )))
     }
 
+    /// Resolve one preflight binding using the same router and chat-chain checks
+    /// as admission. A scratch affinity keeps this read-only with respect to any
+    /// already-running session. Every fallback must resolve, not just the head.
+    pub fn preflight_chain(
+        &self,
+        key: &str,
+        entries: &[config::ChainEntryConfig],
+    ) -> Result<Vec<routing::ResolvedRoute>, crate::RuntimeError> {
+        let error = |error| crate::RuntimeError::Model {
+            reason: format!("preflight binding `{key}`: {error}"),
+        };
+        let chain = self.router.chain(key, entries).map_err(error)?;
+        self.ensure_chat_chain(&chain)?;
+        self.router
+            .resolve_chain(
+                &mut routing::SessionAffinity::default(),
+                "preflight",
+                &chain,
+            )
+            .map_err(error)?;
+        Ok(chain
+            .members()
+            .iter()
+            .map(|member| member.target.clone())
+            .collect())
+    }
+
     /// Strict evaluation gate: degraded catalogs cannot start a comparison, even
     /// when they contain the model. This sends no inference requests.
     pub async fn preflight_routes(

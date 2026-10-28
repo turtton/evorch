@@ -587,7 +587,7 @@ async fn drive_in(
                 conversation: true,
                 interactive: true,
                 keep_alive: true,
-                category: (role == Role::Worker).then(|| CategoryId::Conversation.to_string()),
+                category: replay_category(role),
                 project_root: Some(project),
                 ..RunConfig::default()
             },
@@ -599,6 +599,10 @@ async fn drive_in(
     }
     bridge.shutdown();
     Ok(outcome)
+}
+
+fn replay_category(role: Role) -> Option<String> {
+    (role == Role::Worker).then(|| CategoryId::Conversation.to_string())
 }
 
 fn simulator_model(context: &Context, bus: &Arc<EventBus>) -> Result<Arc<dyn AgentModel>, String> {

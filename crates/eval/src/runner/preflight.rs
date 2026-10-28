@@ -29,9 +29,47 @@ impl Report {
 #[derive(Deserialize, Serialize)]
 struct Check {
     label: String,
+    bindings: Vec<Binding>,
     models: Vec<roles::ModelRef>,
     error: Option<String>,
     diagnostics: Vec<DiagnosticEvent>,
+}
+
+#[derive(Clone, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct Binding {
+    role: String,
+    category: Option<String>,
+}
+
+impl Binding {
+    fn base(role: &str) -> Self {
+        Self {
+            role: role.into(),
+            category: None,
+        }
+    }
+
+    fn key(&self) -> String {
+        match &self.category {
+            Some(category) => format!("{}.categories.{category}", self.role),
+            None => self.role.clone(),
+        }
+    }
+
+    fn entries(&self, config: &Config) -> Result<Vec<config::ChainEntryConfig>, String> {
+        if self.role == "roles.compactor" {
+            // An unset compactor inherits the running binding already checked.
+            return Ok(config.agents.roles.compactor.models.clone());
+        }
+        config
+            .agents
+            .binding_for(
+                self.role.strip_prefix("roles.").unwrap_or(&self.role),
+                self.category.as_deref(),
+            )
+            .map(|binding| binding.models)
+            .map_err(|error| format!("preflight binding `{}`: {error}", self.key()))
+    }
 }
 
 pub(super) async fn check(
@@ -58,6 +96,7 @@ pub(super) async fn check(
         Err(error) => {
             report.checks.push(Check {
                 label: "workspace".into(),
+                bindings: Vec::new(),
                 models: Vec::new(),
                 error: Some(error.to_string()),
                 diagnostics: Vec::new(),
@@ -83,21 +122,47 @@ pub(super) async fn check(
         [(_, Ok(baseline)), (_, Ok(candidate))] => roles::swapped_roles(baseline, candidate),
         _ => Vec::new(),
     };
-    // Check both sides before spending tokens on either side. Include changed
-    // child roles (not just the chat root), with every category and fallback.
-    let mut addresses: BTreeSet<&str> = swapped.iter().map(|role| role.role.as_str()).collect();
-    addresses.insert(roles::address(context.thread.role.name()).expect("runtime role address"));
+    // A role-wide model union can hide a missing implicit base route behind a
+    // valid category. Resolve the actual starting binding, and independently
+    // check each changed child role's base and categories on both sides.
+    let mut bindings = BTreeSet::from([Binding {
+        role: roles::address(context.thread.role.name())
+            .expect("runtime role address")
+            .into(),
+        category: replay_category(context.thread.role),
+    }]);
+    for role in &swapped {
+        bindings.insert(Binding::base(&role.role));
+        for (_, config) in &configs {
+            if let Ok(config) = config {
+                let categories = match role.role.as_str() {
+                    "worker" => Some(&config.agents.worker.categories),
+                    "reviewer" => Some(&config.agents.reviewer.categories),
+                    _ => None,
+                };
+                for category in categories
+                    .into_iter()
+                    .flat_map(|categories| categories.keys())
+                {
+                    bindings.insert(Binding {
+                        role: role.role.clone(),
+                        category: Some(category.clone()),
+                    });
+                }
+            }
+        }
+    }
     for (label, config) in configs {
         report
             .checks
-            .push(check_config(context, label, config, &addresses).await);
+            .push(check_config(context, label, config, &bindings).await);
     }
     report.checks.push(
         check_config(
             context,
             "user_simulator",
             Ok(context.simulator.clone()),
-            &BTreeSet::from(["worker"]),
+            &BTreeSet::from([Binding::base("worker")]),
         )
         .await,
     );
@@ -108,40 +173,44 @@ async fn check_config(
     context: &Context,
     label: &str,
     config: Result<Config, String>,
-    addresses: &BTreeSet<&str>,
+    bindings: &BTreeSet<Binding>,
 ) -> Check {
     let bus = Arc::new(EventBus::new(BUS_CAPACITY));
     let mut receiver = bus.subscribe();
     let mut check = Check {
         label: label.into(),
+        bindings: bindings.iter().cloned().collect(),
         models: Vec::new(),
         error: None,
         diagnostics: Vec::new(),
     };
     let result = async {
         let config = config?;
-        // Model summaries omit unresolved routes. Promote the config validator's
-        // target-chain warnings to failures before collecting those summaries.
-        let prefixes: Vec<_> = addresses
-            .iter()
-            .map(|role| format!("agents.{role}."))
-            .collect();
-        if let Some(problem) = config.chain_problems().into_iter().find(|problem| {
-            matches!(problem, config::ConfigError::InvalidField { path, .. }
-                if prefixes.iter().any(|prefix| path.starts_with(prefix)))
-        }) {
-            return Err(problem.to_string());
-        }
-        for role in addresses {
-            let models = roles::role_models(&config, role);
-            let inherits_run_chain =
-                *role == "roles.compactor" && config.agents.roles.compactor.models.is_empty();
-            if models.is_empty() && !inherits_run_chain {
-                return Err(format!(
-                    "no model routes resolve for preflight role `{role}`"
-                ));
+        let model = configured_routed_model(
+            &config,
+            context.user_config_dir.as_deref(),
+            &context.credentials,
+            &context.deps.env,
+            &bus,
+        )?;
+        for binding in bindings {
+            let entries = binding.entries(&config)?;
+            if binding.role == "roles.compactor" && entries.is_empty() {
+                continue;
             }
-            check.models.extend(models);
+            let routes = model
+                .preflight_chain(&binding.key(), &entries)
+                .map_err(|error| error.to_string())?;
+            check.models.extend(routes.into_iter().map(|route| {
+                roles::ModelRef {
+                    provider_type: config
+                        .providers
+                        .get(&route.profile)
+                        .map(|profile| profile.provider_type),
+                    profile: route.profile,
+                    model: route.model_id,
+                }
+            }));
         }
         check
             .models
@@ -150,13 +219,6 @@ async fn check_config(
         if check.models.is_empty() {
             return Err("no model routes are configured for the preflight roles".into());
         }
-        let model = configured_routed_model(
-            &config,
-            context.user_config_dir.as_deref(),
-            &context.credentials,
-            &context.deps.env,
-            &bus,
-        )?;
         let routes: Vec<_> = check
             .models
             .iter()

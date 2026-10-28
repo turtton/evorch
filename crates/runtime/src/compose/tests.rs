@@ -353,3 +353,24 @@ async fn complete_keeps_affinity_per_run_id() {
         .collect::<Vec<_>>();
     assert_eq!(models, ["route-model", "route-model", "route-model"]);
 }
+
+#[tokio::test]
+async fn preflight_chain_preserves_live_affinity_without_inference() {
+    let (model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
+    assert_eq!(complete(&model, "live-run").await, Ok(response()));
+    let before = model.affinity.lock().unwrap().clone();
+
+    let routes = model
+        .preflight_chain("worker", &[config::ChainEntryConfig::route("worker")])
+        .unwrap();
+
+    assert_eq!(
+        routes,
+        [routing::ResolvedRoute {
+            profile: "local".into(),
+            model_id: "route-model".into(),
+        }]
+    );
+    assert_eq!(*model.affinity.lock().unwrap(), before);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
