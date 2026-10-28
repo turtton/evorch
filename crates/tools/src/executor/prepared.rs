@@ -71,6 +71,8 @@ impl ToolExecutor {
             .tools
             .get(name.as_str())
             .ok_or_else(|| ToolError::UnknownTool { name: name.clone() })?;
+        let mut args = args;
+        crate::path_args::canonicalize_path_aliases(&name, &mut args)?;
         let args = self.scoped_args(&name, args);
         schema::validate_args(&registered.validator, &args)?;
         self.validate_workspace_args(&name, &args, registered.tool.permissions())?;

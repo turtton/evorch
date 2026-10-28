@@ -365,8 +365,7 @@ impl ToolExecutor {
             return args;
         };
         let keys: &[&str] = match name {
-            "read" => &["path", "file", "file_path", "filename", "target"],
-            "write" | "edit" | "grep" => &["path"],
+            "read" | "write" | "edit" | "grep" => &["path"],
             "shell" | "git_diff" => &["cwd"],
             _ => &[],
         };
@@ -766,6 +765,9 @@ impl ToolExecutor {
             });
         };
 
+        // 別名の衝突は境界判定・審査より前に拒否する。ToolStarted には受け取った入力を残す。
+        let mut args = args;
+        let alias_error = crate::path_args::canonicalize_path_aliases(tool_name, &mut args).err();
         let args = self.scoped_args(tool_name, args);
         let started = ToolEvent::ToolStarted {
             tool_name: tool_name.to_string(),
@@ -784,6 +786,11 @@ impl ToolExecutor {
             "ToolStarted には ctx の run_id が stamp 済みであること"
         );
         self.event_bus.emit(Event::new(started));
+
+        if let Some(error) = alias_error {
+            self.emit_completed(ctx, tool_name, call_id, Err(&error));
+            return Err(error);
+        }
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
             self.emit_completed(ctx, tool_name, call_id, Err(&error));

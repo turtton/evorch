@@ -27,14 +27,7 @@ impl Tool for Read {
         super::file_access::with_access_arguments(serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Target file path (preferred). Aliases: file, file_path, filename, target."
-                },
-                "file": { "type": "string" },
-                "file_path": { "type": "string" },
-                "filename": { "type": "string" },
-                "target": { "type": "string" },
+                "path": { "type": "string" },
                 "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based; default 1)." },
                 "limit": { "type": "integer", "minimum": 1, "description": "Maximum lines to return (default 300; larger values are capped at 300)." },
                 "byte_offset": { "type": "integer", "minimum": 0, "description": "Bytes to skip within the selected line (default 0). Use the continuation value returned for a long line; must be a UTF-8 boundary." }
@@ -52,14 +45,13 @@ impl Tool for Read {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        // 直接呼び出しでも別名は executor と同じ規則で path に畳む（異なる値は拒否）。
+        let mut args = args;
+        crate::path_args::canonicalize_path_aliases(self.name(), &mut args)?;
         // キーの存在はここで検証し、スキーマの一般エラーではなく修正可能なヒントを返す。
-        let Some(path) = ["path", "file", "file_path", "filename", "target"]
-            .iter()
-            .find_map(|key| args.get(key))
-            .and_then(serde_json::Value::as_str)
-        else {
+        let Some(path) = args.get("path").and_then(serde_json::Value::as_str) else {
             return Err(ToolError::InvalidArgs {
-                detail: "引数 path は文字列である必要があります; expected keys: path (aliases: file, file_path); filename and target are also accepted".to_string(),
+                detail: "引数 path は文字列である必要があります".to_string(),
             });
         };
         let offset = unsigned_arg(&args, "offset", 1, 1)?;

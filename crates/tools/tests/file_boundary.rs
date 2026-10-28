@@ -425,29 +425,68 @@ async fn unsandboxed_access_inside_the_boundary_runs_without_review() {
 }
 
 #[tokio::test]
-async fn escalation_review_lists_only_the_paths_outside_the_boundary() {
+async fn escalation_review_sees_only_the_one_normalized_path() {
     // Given: an approving gate.
     let layout = layout();
     let (executor, _) = executor(&layout);
     let gate = with_gate(&executor, true);
     let secret = layout.outside.join("secret.txt");
 
-    // When: a read names an outside path, with in-boundary paths in its aliases.
+    // When: an outside read repeats its path under an alias and leaves another one empty.
     executor
         .execute(
             &context(),
             "read",
             "r",
-            json!({"path": secret, "file": layout.project, "target": layout.scratch.join("tmp.txt"),
+            json!({"path": secret, "file": secret, "target": "",
                 "sandbox_access":"unsandboxed", "justification":"user asked for it"}),
         )
         .await
         .unwrap();
 
-    // Then: the reviewer is asked only about the path that leaves the boundary.
+    // Then: the reviewer is asked about that single path.
     let requests = gate.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].paths, std::slice::from_ref(&secret));
+}
+
+#[tokio::test]
+async fn read_with_conflicting_aliases_is_rejected_before_boundary_and_review() {
+    // Given: an approving gate and a read whose alias names an outside path
+    // while `path` names a project file, or the other way around.
+    let layout = layout();
+    let (executor, _) = executor(&layout);
+    let gate = with_gate(&executor, true);
+    let secret = layout.outside.join("secret.txt");
+    let inside = layout.project.join("inside.txt");
+
+    for args in [
+        json!({"path": inside, "file": layout.outside}),
+        json!({"path": secret, "file": layout.project, "target": layout.scratch.join("tmp.txt")}),
+        json!({"path": inside, "file_path": secret}),
+    ] {
+        // When: the call is made with and without a reviewed escalation.
+        for escalation in [
+            json!({}),
+            json!({"sandbox_access":"unsandboxed", "justification":"user asked"}),
+        ] {
+            let mut args = args.clone();
+            args.as_object_mut()
+                .unwrap()
+                .extend(escalation.as_object().unwrap().clone());
+            let error = executor
+                .execute(&context(), "read", "r", args)
+                .await
+                .unwrap_err();
+
+            // Then: a clear argument error, not a boundary denial or a review.
+            let ToolError::InvalidArgs { detail } = error else {
+                panic!("expected InvalidArgs, got {error:?}");
+            };
+            assert!(detail.contains("path 引数 1 つ"), "{detail}");
+        }
+    }
+    assert!(gate.requests.lock().unwrap().is_empty());
 }
 
 #[test]

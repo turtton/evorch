@@ -317,8 +317,7 @@ impl ToolExecutor {
 
 fn file_path_keys(name: &str) -> &'static [&'static str] {
     match name {
-        "read" => &["path", "file", "file_path", "filename", "target"],
-        "write" | "edit" | "grep" => &["path"],
+        "read" | "write" | "edit" | "grep" => &["path"],
         _ => &[],
     }
 }
