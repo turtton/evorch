@@ -258,14 +258,22 @@ fn locate_worker() -> Result<PathBuf, String> {
     }
     let current = std::env::current_exe()
         .map_err(|error| format!("cannot locate the running executable: {error}"))?;
+    worker_beside(&current)
+}
+
+/// The evorch binary that serves the worker for a process running as
+/// `current`: `current` itself when it is `evorch`, otherwise the `evorch`
+/// next to it. Other executables (the GUI, a test harness) cannot serve it.
+fn worker_beside(current: &Path) -> Result<PathBuf, String> {
+    let name = format!("evorch{}", std::env::consts::EXE_SUFFIX);
     if current
-        .file_stem()
-        .is_some_and(|stem| stem == "evorch" || stem == "evorch-gui")
-        && let Some(path) = existing_file(&current)
+        .file_name()
+        .is_some_and(|file| *file == *name.as_str())
+        && let Some(path) = existing_file(current)
     {
         return Ok(path);
     }
-    let sibling = current.with_file_name("evorch");
+    let sibling = current.with_file_name(&name);
     existing_file(&sibling).ok_or_else(|| {
         format!(
             "no evorch binary to serve the JS worker: {} is not evorch and {} does not exist; \
@@ -278,4 +286,44 @@ fn locate_worker() -> Result<PathBuf, String> {
 
 fn existing_file(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&path, b"").unwrap();
+        path
+    }
+
+    #[test]
+    fn evorch_serves_the_worker_itself() {
+        let directory = tempfile::tempdir().unwrap();
+        let evorch = touch(directory.path(), "evorch");
+        touch(directory.path(), "evorch-gui");
+
+        assert_eq!(worker_beside(&evorch).unwrap(), evorch);
+    }
+
+    #[test]
+    fn gui_binary_uses_the_evorch_beside_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let evorch = touch(directory.path(), "evorch");
+        let gui = touch(directory.path(), "evorch-gui");
+
+        assert_eq!(worker_beside(&gui).unwrap(), evorch);
+    }
+
+    #[test]
+    fn gui_binary_without_evorch_beside_it_is_a_clear_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let gui = touch(directory.path(), "evorch-gui");
+
+        let error = worker_beside(&gui).unwrap_err();
+
+        assert!(error.contains("no evorch binary"), "{error}");
+        assert!(error.contains(WORKER_ENV), "{error}");
+    }
 }

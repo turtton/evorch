@@ -107,6 +107,11 @@ fn finished() -> TranscriptModel {
 }
 
 fn harness(model: TranscriptModel, width: f32) -> Harness<'static> {
+    harness_from(&model, width)
+}
+
+fn harness_from(model: &TranscriptModel, width: f32) -> Harness<'static> {
+    let model = model.clone();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(width, 600.0))
         .build_ui(move |ui| {
@@ -188,4 +193,29 @@ fn child_without_its_parent_renders_at_top_level() {
     );
     let harness = harness(model, 640.0);
     assert!(harness.query_by_label_contains("Grep").is_some());
+}
+
+#[test]
+fn run_js_being_composed_shows_the_draft_then_the_run_js_card() {
+    // Given: the model is still streaming the run_js arguments.
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(event_bus::MessageEvent::ToolCallDelta {
+        run_id: Some("run-1".into()),
+        index: 0,
+        call_id: Some("js".into()),
+        tool_name: Some("run_js".into()),
+        arguments_delta: "{\"code\":\"const src = ".into(),
+    }));
+
+    // Then: the generic composing card is shown, not an empty run_js card.
+    let harness = harness_from(&model, 640.0);
+    assert!(harness.query_by_label_contains("composing…").is_some());
+
+    // When: the runtime starts the call.
+    start(&mut model, "js", "run_js", json!({"code": CODE}), None);
+
+    // Then: the same call becomes the run_js card, once.
+    let harness = harness_from(&model, 640.0);
+    assert!(harness.query_by_label_contains("composing…").is_none());
+    assert_eq!(harness.query_all_by_label_contains("Run JS").count(), 1);
 }

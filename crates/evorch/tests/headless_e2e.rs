@@ -379,6 +379,64 @@ async fn headless_web_tools_follow_saved_setting_and_cli_override() {
     }
 }
 
+// Given: 保存設定 `[tools.run_js] enabled` と `--run-js-enabled` の組み合わせ
+// When: worker を headless 実行する
+// Then: モデルへ送る tools 一覧に run_js が出るのは有効なときだけ (既定は出ない)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_run_js_tool_follows_saved_setting_and_cli_override() {
+    for (saved, override_enabled, expected) in [
+        (None, None, false),
+        (None, Some(false), false),
+        (None, Some(true), true),
+        (Some(true), None, true),
+        (Some(true), Some(false), false),
+        (Some(false), Some(true), true),
+    ] {
+        let directory = tempfile::tempdir().expect("project directory");
+        let mock = StreamingMockOpenAi::spawn_with_models(
+            vec![ScriptedResponse::text_stream("text", MODEL, ["done"]).with_usage(1, 1)],
+            mock_openai::WriteMode::default(),
+            vec![MODEL.to_owned()],
+        );
+        write_user_config(directory.path(), &mock.base_url());
+        if let Some(enabled) = saved {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(user_config_path(directory.path()))
+                .expect("open user config");
+            write!(file, "\n[tools.run_js]\nenabled = {enabled}\n").expect("save run_js");
+        }
+        let mut args = headless_args(
+            directory.path().to_path_buf(),
+            Some(directory.path().join("user-config")),
+        );
+        args.run_js_enabled = override_enabled;
+        let outcome = run_headless(
+            args,
+            Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+            SandboxChoice::DirectUnchecked,
+        )
+        .await
+        .expect("headless run succeeds");
+        assert_eq!(outcome.phase, AgentRunPhase::Done);
+        let requests = mock.recorded_requests();
+        let completion = requests
+            .iter()
+            .find(|request| request.path == "/v1/chat/completions")
+            .expect("completion request");
+        let tools = completion.body["tools"].as_array().expect("tools");
+        assert_eq!(
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "run_js"),
+            expected,
+            "saved={saved:?}, override={override_enabled:?}",
+        );
+        assert!(tools.iter().any(|tool| tool["function"]["name"] == "read"));
+    }
+}
+
 // Given: --db 付きの headless run (ScriptedModel 相当のモック応答 1 回)
 // When: run が終了し、永続化先を `evorch inspect --db <path> run <run-id>` で読む
 // Then: 終端まで flush 済みで、event_kinds・usage_requests・run の文脈が見える
