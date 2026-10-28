@@ -130,7 +130,7 @@ provider is used or required.
 Non-demo mode starts a real AgentRuntime. Messages and `/goal <objective>`
 both continue the thread's persistent conversation; `/goal` also records a
 thread goal that the runtime checks before the work is reported as done.
-既知の制限: エージェント応答の描画は demo スクリプトモデルのままであり、provider composition root 導入まで実 provider の応答は表示されない。
+Known limitation: agent responses are still rendered by the demo script model; real provider responses are not shown until the provider composition root lands.
 
 Sidebar state is loaded from and saved to --state PATH. Without --state, the
 default is <user-config-dir>/sidebar.json; if no user config dir is derivable,
@@ -585,7 +585,7 @@ impl CredentialStore for UnwiredCredentialStore {
 impl UnwiredCredentialStore {
     fn unwired() -> CredentialError {
         CredentialError::KeychainUnavailable {
-            detail: String::from("GUI runtime は credential store を接続していない"),
+            detail: String::from("The GUI runtime has no credential store connected"),
         }
     }
 }

@@ -25,7 +25,7 @@ fn capture_role_routing_states() {
         std::fs::create_dir_all(&output).expect("evidence directory");
         for state in ["warning-preview", "prefilled-routing"] {
             if state == "prefilled-routing" {
-                harness.click_label("route を作成");
+                harness.click_label("Create route");
                 harness.run();
             }
             let frame = gui::evidence::capture_or_skip(&mut harness).expect("offscreen capture");

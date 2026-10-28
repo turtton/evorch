@@ -34,8 +34,8 @@ fn inherited_compactor_keeps_its_empty_chain_and_dormant_overrides() {
         harness.label_value("Compactor route").as_deref(),
         Some("Use running role's chain")
     );
-    assert!(!harness.has_label("未定義 (route なし)"));
-    assert!(!harness.has_label("route を作成"));
+    assert!(!harness.has_label("Undefined (no route)"));
+    assert!(!harness.has_label("Create route"));
     assert!(!harness.has_label("Preset reference"));
     assert!(!harness.has_label("Category overrides"));
     // Generation settings have no effect while the running role's chain is inherited.
@@ -110,7 +110,7 @@ fn compactor_controls_save_chain_effort_generation_and_restore_inheritance() {
     harness.click_label("Use running role's chain");
     harness.run();
     expected.models.clear();
-    assert!(!harness.has_label("未定義 (route なし)"));
+    assert!(!harness.has_label("Undefined (no route)"));
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);
@@ -132,8 +132,8 @@ fn unknown_compactor_route_opens_prefilled_routing_settings() {
     harness.run();
     harness.click_label("Compactor (fallback)");
     harness.run();
-    assert!(harness.has_label("未定義 (route なし)"));
-    harness.click_label("route を作成");
+    assert!(harness.has_label("Undefined (no route)"));
+    harness.click_label("Create route");
     harness.run();
 
     assert!(!harness.state().role_settings().open);
