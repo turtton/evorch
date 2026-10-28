@@ -100,7 +100,9 @@ struct Stats {
     calls: usize,
     failed: usize,
     timed_out: bool,
-    limit_hit: bool,
+    /// Which limit stopped the run (`tool_calls`, `timeout`, `memory`, `output`);
+    /// empty when only the fact is known.
+    limit_hit: Option<String>,
 }
 
 impl Stats {
@@ -111,18 +113,26 @@ impl Stats {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         };
+        let count = |key| {
+            run.and_then(|run| run.get(key))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok())
+        };
         let (calls, failed) = match run
             .and_then(|run| run.get("calls"))
             .and_then(serde_json::Value::as_array)
         {
+            // The list may be cut to fit the detail; the counts are not.
             Some(calls) => (
-                calls.len(),
-                calls
-                    .iter()
-                    .filter(|call| {
-                        call.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
-                    })
-                    .count(),
+                calls.len() + count("calls_omitted").unwrap_or(0),
+                count("calls_failed").unwrap_or_else(|| {
+                    calls
+                        .iter()
+                        .filter(|call| {
+                            call.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
+                        })
+                        .count()
+                }),
             ),
             None => (
                 children.len(),
@@ -145,7 +155,11 @@ impl Stats {
             calls,
             failed,
             timed_out: flag("timed_out"),
-            limit_hit: flag("limit_hit"),
+            limit_hit: match run.and_then(|run| run.get("limit_hit")) {
+                Some(serde_json::Value::String(kind)) => Some(kind.clone()),
+                Some(serde_json::Value::Bool(true)) => Some(String::new()),
+                _ => None,
+            },
         }
     }
 
@@ -163,8 +177,10 @@ impl Stats {
         if self.timed_out {
             parts.push("timed out".to_owned());
         }
-        if self.limit_hit {
-            parts.push("limit hit".to_owned());
+        match self.limit_hit.as_deref() {
+            Some("") => parts.push("limit hit".to_owned()),
+            Some(kind) => parts.push(format!("limit hit: {kind}")),
+            None => {}
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
@@ -447,6 +463,50 @@ mod tests {
                 console: "plain",
                 returned: None,
                 summary: None,
+            }
+        );
+    }
+
+    #[test]
+    fn limit_hit_is_read_as_the_name_of_the_limit() {
+        let stats = |limit_hit: serde_json::Value| {
+            Stats::new(
+                Some(&json!({"run_js": {"calls": [], "limit_hit": limit_hit}})),
+                &[],
+            )
+            .meta(false)
+        };
+        assert_eq!(
+            stats(json!("tool_calls")).as_deref(),
+            Some("0 calls · limit hit: tool_calls")
+        );
+        // The earlier boolean form still reads, and null or false mean no limit.
+        assert_eq!(stats(json!(true)).as_deref(), Some("0 calls · limit hit"));
+        assert_eq!(stats(json!(null)).as_deref(), Some("0 calls"));
+        assert_eq!(stats(json!(false)).as_deref(), Some("0 calls"));
+    }
+
+    #[test]
+    fn counts_include_calls_cut_from_the_listed_detail() {
+        let detail = json!({"run_js": {
+            "calls": [{"seq": 1, "name": "read", "is_error": false, "paths": []}],
+            "calls_omitted": 199,
+            "calls_failed": 12,
+        }});
+        assert_eq!(
+            Stats::new(Some(&detail), &[]).meta(false).as_deref(),
+            Some("200 calls · 12 failed")
+        );
+    }
+
+    #[test]
+    fn a_multi_line_string_return_value_runs_to_the_summary_line() {
+        assert_eq!(
+            sections("progress\n=> first line\nsecond line\n\n[run_js: 1 calls, 0 failed]"),
+            Sections {
+                console: "progress",
+                returned: Some("first line\nsecond line"),
+                summary: Some("[run_js: 1 calls, 0 failed]"),
             }
         );
     }

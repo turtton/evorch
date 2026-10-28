@@ -63,15 +63,27 @@
   Object.freeze(tools);
   Object.defineProperty(g, "tools", { value: tools, writable: false, configurable: false });
 
+  // The limit counts what the file occupies, not UTF-16 units.
+  function utf8Length(value) {
+    let length = 0;
+    for (const character of value) {
+      const point = character.codePointAt(0);
+      length += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    }
+    return length;
+  }
+
   async function readText(path) {
     if (typeof tools.read !== "function") throw new Error("readText needs tools.read, which is not available");
     let args = { path };
     let text = "";
+    let bytes = 0;
     for (;;) {
       const result = await tools.read(args);
       if (!result.ok) throw new Error(result.text);
       text += result.text;
-      if (text.length > READ_TEXT_LIMIT) {
+      bytes += utf8Length(result.text);
+      if (bytes > READ_TEXT_LIMIT) {
         throw new Error("readText: " + path + " exceeds the 4 MiB limit");
       }
       if (!result.next) return text;

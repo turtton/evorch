@@ -466,3 +466,58 @@ async fn a_rejected_tool_call_reports_the_line_of_the_call() {
         error.stack
     );
 }
+
+struct Pages(Vec<String>);
+
+#[async_trait(?Send)]
+impl HostCalls for Pages {
+    async fn call_tool(&self, _: &str, args: Value) -> Result<Value, String> {
+        let index = args.get("offset").and_then(Value::as_u64).unwrap_or(1) as usize - 1;
+        let last = index + 1 == self.0.len();
+        Ok(
+            json!({"ok": true, "text": self.0[index], "truncated": !last,
+                  "next": if last { Value::Null } else { json!({"tool": "read", "path": args["path"], "offset": index + 2}) }}),
+        )
+    }
+    fn output(&self, _: &str) {}
+}
+
+async fn read_text_of(pages: Vec<String>) -> RunOutcome {
+    run(
+        r#"return (await readText("p")).length;"#,
+        RunOptions {
+            tools: vec!["read".into()],
+            ..options()
+        },
+        Rc::new(Pages(pages)),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn read_text_limit_counts_utf8_bytes_not_characters() {
+    // 1.4M characters but 4.2 MB of UTF-8: over the limit although short in UTF-16 units.
+    let pages = vec!["あ".repeat(100_000); 14];
+    let outcome = read_text_of(pages).await;
+    assert!(
+        outcome
+            .error
+            .expect("limit error")
+            .message
+            .contains("4 MiB")
+    );
+
+    // Exactly 4 MiB of emoji (surrogate pairs) is allowed; one more byte is not.
+    let full = "😀".repeat(1024 * 1024);
+    let outcome = read_text_of(vec![full.clone()]).await;
+    assert_eq!(outcome.error, None);
+    assert_eq!(outcome.value, json!(2 * 1024 * 1024));
+    let outcome = read_text_of(vec![full, "x".into()]).await;
+    assert!(
+        outcome
+            .error
+            .expect("limit error")
+            .message
+            .contains("4 MiB")
+    );
+}

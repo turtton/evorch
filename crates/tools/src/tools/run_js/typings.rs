@@ -10,6 +10,9 @@ use serde_json::Value;
 const RESULT_TYPE: &str = "type Result = { ok: boolean; text: string; truncated: boolean; next: { tool: \"read\"; path: string; offset?: number; byte_offset?: number } | null; detail: any };";
 
 /// Arguments that only matter for calls outside `run_js` (access review).
+/// What a program may pass to `shell`.
+const SHELL_PROPERTIES: [&str; 3] = ["command", "cwd", "timeout_ms"];
+
 const HIDDEN_PROPERTIES: [&str; 2] = ["sandbox_access", "justification"];
 
 /// Declarations for `tools` (sorted by name) given each callable tool's schema.
@@ -19,17 +22,9 @@ pub fn declarations(tools: &[(String, Value)]) -> String {
     let mut out = String::from(RESULT_TYPE);
     out.push_str("\ndeclare const tools: {\n");
     for (name, schema) in &sorted {
-        let schema = &with_required(name, schema);
-        let arguments = if name == "shell" {
-            "{ command: string; cwd?: string; timeout_ms?: number }".to_owned()
-        } else {
-            object_type(schema)
-        };
-        let optional = if name == "shell" || has_required(schema) {
-            ""
-        } else {
-            "?"
-        };
+        let schema = &callable_schema(name, schema);
+        let arguments = object_type(schema);
+        let optional = if has_required(schema) { "" } else { "?" };
         out.push_str(&format!(
             "  {name}(args{optional}: {arguments}): Promise<Result>;\n"
         ));
@@ -41,11 +36,22 @@ pub fn declarations(tools: &[(String, Value)]) -> String {
     out
 }
 
-/// `read` enforces `path` at run time but not in its schema.
-fn with_required(name: &str, schema: &Value) -> Value {
+/// The part of a tool's schema a program may use. `read` enforces `path` at run
+/// time but not in its schema; `shell` shrinks to starting a command, because job
+/// control, interactive use and non-isolated access are not available here.
+fn callable_schema(name: &str, schema: &Value) -> Value {
     let mut schema = schema.clone();
-    if name == "read" && schema.get("required").is_none() {
-        schema["required"] = serde_json::json!(["path"]);
+    match name {
+        "read" if schema.get("required").is_none() => {
+            schema["required"] = serde_json::json!(["path"]);
+        }
+        "shell" => {
+            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                properties.retain(|key, _| SHELL_PROPERTIES.contains(&key.as_str()));
+            }
+            schema["required"] = serde_json::json!(["command"]);
+        }
+        _ => {}
     }
     schema
 }
@@ -188,6 +194,24 @@ declare function readText(path: string): Promise<string>;";
         let mut reversed = schemas();
         reversed.reverse();
         assert_eq!(declarations(&reversed), declarations(&schemas()));
+    }
+
+    #[test]
+    fn shell_is_projected_from_its_schema_to_starting_a_command() {
+        let mut schema = schemas()
+            .into_iter()
+            .find(|(name, _)| name == "shell")
+            .unwrap()
+            .1;
+        schema["properties"]["timeout_ms"] = json!({"type": "string"});
+        schema["properties"]["job_id"] = json!({"type": "string"});
+        let declared = declarations(&[("shell".to_owned(), schema)]);
+        assert!(
+            declared
+                .contains("shell(args: { command: string; cwd?: string; timeout_ms?: string })"),
+            "{declared}"
+        );
+        assert!(!declared.contains("job_id"));
     }
 
     #[test]

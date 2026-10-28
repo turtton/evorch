@@ -14,7 +14,7 @@ use serde_json::Value;
 use tools::executor::PreparedToolCall;
 use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
-use super::{LoopState, run_js_host};
+use super::LoopState;
 use crate::escalation::detector::{
     EscalationDetector, ToolErrorClass, ToolObservation, patch_rewrite_paths,
 };
@@ -741,10 +741,14 @@ impl LoopState {
             parent_call_id: None,
             run_js_host: None,
         };
+        let js_host = self.run_js_host(&ctx);
         let ctx = ToolExecutionContext {
-            run_js_host: self.run_js_host(&ctx),
+            run_js_host: js_host
+                .clone()
+                .map(|host| host as Arc<dyn tools::tools::run_js::RunJsHost>),
             ..ctx
         };
+        let mut repeated_child = None;
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
@@ -1238,11 +1242,13 @@ impl LoopState {
                         self.propose_escalation(trigger, &name, &input, &id, error_class);
                     }
                     // Calls a run_js program made count like calls made directly: the
-                    // detector sees them (edit loops, error streaks) and so does the budget.
-                    let children = if observed && name == tools::tools::run_js::NAME {
-                        run_js_host::child_observations(result.detail.as_ref())
-                    } else {
-                        Vec::new()
+                    // detector sees them (edit loops, error streaks), the budget and the
+                    // repeat guard too. They come from the host's own record, which the
+                    // result's detail (owned by the interface, replaceable by the output
+                    // limiter) cannot change.
+                    let children = match (&js_host, name == tools::tools::run_js::NAME) {
+                        (Some(host), true) => host.take_records(&id),
+                        _ => Vec::new(),
                     };
                     for child in &children {
                         let paths = if matches!(child.name.as_str(), "edit" | "write") {
@@ -1258,7 +1264,19 @@ impl LoopState {
                             },
                             &self.shared.escalation,
                         ) {
-                            self.propose_escalation(trigger, &child.name, &input, &id, None);
+                            self.propose_escalation(trigger, &child.name, &child.input, &id, None);
+                        }
+                        let limit = self.task.config.budget.max_identical_tool_call_repeats;
+                        if self
+                            .identical_calls
+                            .observe_child(&child.name, &child.input, limit)
+                            && repeated_child.is_none()
+                        {
+                            repeated_child = Some((
+                                format!("{id}/{}", child.seq),
+                                child.name.clone(),
+                                child.input.clone(),
+                            ));
                         }
                         if !child.is_error {
                             if child.name == "read"
@@ -1297,6 +1315,10 @@ impl LoopState {
                 }
                 if let Some((id, name, input, error)) = stalled {
                     self.stop_identical_calls(&id, &name, &input, error, true);
+                    return false;
+                }
+                if let Some((id, name, input)) = repeated_child.take() {
+                    self.stop_identical_calls(&id, &name, &input, None, false);
                     return false;
                 }
                 // A completed parallel wave belongs to one assistant tool batch.
@@ -1628,7 +1650,7 @@ fn call_rule_targets(name: &str, input: &Value) -> Vec<PathBuf> {
 
 /// Whether a call to `name` may run in one wave with its neighbors. File
 /// writers, apply_patch included, and exclusive tools always run alone.
-fn shares_wave(executor: &tools::ToolExecutor, name: &str) -> bool {
+pub(super) fn shares_wave(executor: &tools::ToolExecutor, name: &str) -> bool {
     !is_meta_op(name)
         && !matches!(name, "task_claim" | "task_complete" | "finding_append")
         && !executor

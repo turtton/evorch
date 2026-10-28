@@ -20,7 +20,11 @@ across many places. Do not use it for a single tool call.\n\
 - Tool results stay out of your context unless you print or return them, so print only the essentials.\n\
 - `tools.<name>(args)` returns Promise<{{ok, text, truncated, next, detail}}>; run independent calls with Promise.all. \
 `readText(path)` returns a whole file.\n\
-- Edits go through tools.edit / tools.write so they show as diffs. There is no fs, require, fetch, timers or Intl.\n\
+- Edits go through tools.edit / tools.write so they show as diffs.\n\
+- A result with truncated=true holds only part of the output: follow `next` (or use readText) before counting or concluding.\n\
+- ES2023 plus queueMicrotask, performance, atob/btoa, WeakRef, Set methods and Iterator helpers. Not available: fs, require, import, \
+fetch, timers, TextEncoder, URL, structuredClone, Intl (localeCompare orders by code point).\n\
+- A returned string is shown as is, anything else as JSON.\n\
 - Calls needing approval or non-isolated shell fail here; make them as normal tool calls.\n\
 - Run builds and long tests as normal shell jobs, not here.\n\
 - Limits: {seconds} s (timeout_ms up to {max}), {memory} MiB, {calls} tool calls.\n\
@@ -53,6 +57,8 @@ mod tests {
         assert!(text.contains("Limits: 30 s (timeout_ms up to 300000), 64 MiB, 200 tool calls."));
         assert!(text.contains("grep(args: { path: string; pattern: string })"));
         assert!(text.contains("Run builds and long tests as normal shell jobs"));
+        assert!(text.contains("follow `next`"));
+        assert!(text.contains("structuredClone"));
     }
 
     #[test]

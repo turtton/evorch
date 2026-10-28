@@ -36,6 +36,10 @@ impl RunJsHost for TestHost {
         self.settings.clone()
     }
 
+    fn shares_wave(&self, name: &str) -> bool {
+        matches!(name, "read" | "grep")
+    }
+
     async fn call(&self, call: ChildCall) -> ChildOutcome {
         let child_id = format!("{}/{}", call.parent_call_id, call.seq);
         self.seen.lock().unwrap().push(child_id.clone());
@@ -53,12 +57,16 @@ impl RunJsHost for TestHost {
                 result: Ok(normalize::normalize(&call.name, &call.args, &result).into_value()),
                 paths: Vec::new(),
                 written: Vec::new(),
+                failure: None,
+                warning: None,
             },
             Err(error) => ChildOutcome {
                 result: Err(error.agent_message()),
                 is_error: true,
                 paths: Vec::new(),
                 written: Vec::new(),
+                failure: Some(error.agent_message()),
+                warning: None,
             },
         }
     }

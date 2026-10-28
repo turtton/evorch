@@ -1,12 +1,13 @@
-//! Starting the JS worker process (ADR 0039): inside bubblewrap with an empty
-//! directory as its only writable path, no network, no workspace, no credentials
-//! and no inherited environment. Failing to build that sandbox fails the call;
+//! Starting the JS worker process (ADR 0039): inside the minimal bubblewrap
+//! sandbox of [`sandbox::MinimalSandbox`] (its own executable and libraries, a
+//! private tmpfs, no network, no workspace, no credentials, and only
+//! `LD_LIBRARY_PATH` from the environment). Failing to build that sandbox fails the call;
 //! there is no fallback to running the worker unsandboxed.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, Sandbox, StdioSession};
+use sandbox::{CommandSpec, MinimalSandbox, Sandbox, StdioSession};
 use tokio::io::BufReader;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
@@ -92,7 +93,7 @@ impl std::fmt::Debug for WorkerLauncher {
 /// the worker behind.
 pub struct WorkerConnection {
     reader: Option<BufReader<ChildStdout>>,
-    pub writer: ChildStdin,
+    writer: Option<ChildStdin>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     session: Option<StdioSession>,
@@ -106,6 +107,11 @@ impl WorkerConnection {
         if let Some(task) = self.stderr_task.take() {
             let _ = tokio::time::timeout(STDERR_SETTLE, task).await;
         }
+    }
+
+    /// Hands the stdin writer to a task that sends the host's messages.
+    pub fn take_writer(&mut self) -> Option<ChildStdin> {
+        self.writer.take()
     }
 
     /// Hands the stdout reader to a task that forwards the worker's messages.
@@ -167,7 +173,7 @@ impl Spawned {
         });
         Ok(WorkerConnection {
             reader: Some(reader),
-            writer,
+            writer: Some(writer),
             stderr_tail,
             stderr_task: Some(stderr_task),
             session: Some(self.session),
@@ -194,25 +200,17 @@ fn spawn(mode: &Mode) -> Result<Spawned, String> {
         ),
         Mode::Production => {
             let program = locate_worker()?;
-            let directory = tempfile::Builder::new()
-                .prefix("evorch-js-worker-")
-                .tempdir()
-                .map_err(|error| format!("cannot create the worker directory: {error}"))?;
-            let config = BwrapConfig::new(directory.path().to_path_buf())
-                .without_tool_caches()
-                .isolate_processes()
-                .ro_bind(program.clone());
-            let sandbox = BwrapSandbox::detect(config)
+            let sandbox = MinimalSandbox::detect(&program, &[LIBRARY_PATH_ENV])
                 .map_err(|error| format!("bubblewrap is unavailable: {error}"))?;
             start(
                 &sandbox,
                 CommandSpec {
                     program: program.to_string_lossy().into_owned(),
                     args: vec![WORKER_SUBCOMMAND.to_owned()],
-                    cwd: Some(directory.path().to_path_buf()),
-                    extra_env: library_path(),
+                    cwd: None,
+                    extra_env: Vec::new(),
                 },
-                vec![Box::new(sandbox.clone()), Box::new(directory)],
+                vec![Box::new(sandbox.clone())],
             )
         }
     }

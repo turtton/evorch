@@ -1,0 +1,342 @@
+//! The result the model receives: printed output, the returned value and one
+//! summary line, plus the `detail` the interface reads.
+//!
+//! Shape of `content`, which the GUI parses:
+//!
+//! ```text
+//! <printed output>
+//! => <returned value>          (a string as is, anything else as JSON)
+//! <error message and stack>    (only when the program failed)
+//! [run_js: N calls, M failed (…); wrote: …; may have changed: …; warnings: …]
+//! ```
+//!
+//! The last line is always the summary. It is built from what the host reported
+//! for each call, so the model learns about failures, writes and checker warnings
+//! even when the program discarded the call results.
+
+use serde_json::{Value, json};
+
+use super::serve::{Ending, Failure, Run};
+use crate::result::ToolResult;
+
+/// Detail larger than the executor's 16 KiB ceiling would be dropped entirely.
+const DETAIL_BUDGET_BYTES: usize = 12 * 1024;
+const REASON_CHARS: usize = 100;
+const LISTED_FAILURES: usize = 5;
+const LISTED_WARNINGS: usize = 3;
+
+pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u64) -> ToolResult {
+    state.calls.sort_by_key(|call| call.seq);
+    state.failures.sort_by_key(|failure| failure.seq);
+    let mut content = std::mem::take(&mut state.output);
+    let output_bytes = content.len();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if state.output_truncated {
+        content.push_str("[run_js: output was cut at 8 MiB]\n");
+    }
+    let mut timed_out = false;
+    let mut return_bytes = 0;
+    let mut failure = None;
+    match ending {
+        Ending::Done {
+            value,
+            error,
+            timed_out: expired,
+        } => {
+            timed_out = expired;
+            if expired {
+                state.limit_hit = Some("timeout");
+            }
+            if let Some(error) = error {
+                let lowered = error.message.to_lowercase();
+                if state.limit_hit.is_none() && lowered.contains("out of memory") {
+                    state.limit_hit = Some("memory");
+                } else if state.limit_hit.is_none() && lowered.contains("output limit") {
+                    state.limit_hit = Some("output");
+                }
+                failure = Some(if error.stack.trim().is_empty() {
+                    error.message
+                } else {
+                    format!("{}\n{}", error.message, error.stack.trim_end())
+                });
+            } else if timed_out {
+                failure = Some(format!("run_js timed out after {timeout_ms} ms"));
+            } else if !value.is_null() {
+                let text = match &value {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                return_bytes = text.len();
+                content.push_str(&format!("=> {text}\n"));
+            }
+        }
+        Ending::Failed(reason) => {
+            let stderr = if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" (worker stderr: {stderr})")
+            };
+            failure = Some(format!("{reason}{stderr}"));
+        }
+    }
+    if let Some(failure) = &failure {
+        content.push_str(failure);
+        content.push('\n');
+    }
+    content.push_str(&summary_line(&state));
+    let detail = json!({"run_js": run_detail(&state, output_bytes, return_bytes, timed_out)});
+    let result = if failure.is_some() {
+        ToolResult::error(content)
+    } else {
+        ToolResult::success(content)
+    };
+    result.with_detail(detail)
+}
+
+/// One line, however much went wrong: reasons are cut and listed up to a limit.
+fn summary_line(state: &Run) -> String {
+    let failed = state.calls.iter().filter(|call| call.is_error).count();
+    let mut line = format!("[run_js: {} calls, {failed} failed", state.calls.len());
+    if !state.failures.is_empty() {
+        line.push_str(&format!(" ({})", failure_list(&state.failures)));
+    }
+    if !state.written.is_empty() {
+        line.push_str(&format!("; wrote: {}", join_paths(&state.written)));
+    }
+    if !state.uncertain.is_empty() {
+        line.push_str(&format!(
+            "; may have changed: {}",
+            join_paths(&state.uncertain)
+        ));
+    }
+    if !state.warnings.is_empty() {
+        let shown: Vec<String> = state
+            .warnings
+            .iter()
+            .take(LISTED_WARNINGS)
+            .map(|(seq, name, text)| format!("{name} #{seq}: {}", one_line(text, REASON_CHARS)))
+            .collect();
+        let more = state.warnings.len().saturating_sub(LISTED_WARNINGS);
+        let more = if more > 0 {
+            format!("; +{more} more")
+        } else {
+            String::new()
+        };
+        line.push_str(&format!("; warnings: {}{more}", shown.join("; ")));
+    }
+    line.push(']');
+    line
+}
+
+fn failure_list(failures: &[Failure]) -> String {
+    let mut parts: Vec<String> = failures
+        .iter()
+        .take(LISTED_FAILURES)
+        .map(|failure| {
+            format!(
+                "{} #{}: {}",
+                failure.name,
+                failure.seq,
+                one_line(&failure.reason, REASON_CHARS)
+            )
+        })
+        .collect();
+    if failures.len() > LISTED_FAILURES {
+        parts.push(format!("+{} more", failures.len() - LISTED_FAILURES));
+    }
+    parts.join("; ")
+}
+
+fn join_paths(paths: &std::collections::BTreeSet<String>) -> String {
+    paths
+        .iter()
+        .map(|path| one_line(path, 200))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `text` on one line, control characters flattened and the length bounded.
+pub(super) fn one_line(text: &str, limit: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(limit).collect();
+    cut.push('…');
+    cut
+}
+
+fn run_detail(state: &Run, output_bytes: usize, return_bytes: usize, timed_out: bool) -> Value {
+    let written: Vec<&String> = state.written.iter().collect();
+    let uncertain: Vec<&String> = state.uncertain.iter().collect();
+    let calls_value = |keep_paths: bool, limit: usize| -> Vec<Value> {
+        state
+            .calls
+            .iter()
+            .take(limit)
+            .map(|call| {
+                let paths = if keep_paths {
+                    call.paths.clone()
+                } else {
+                    Vec::new()
+                };
+                json!({"seq": call.seq, "name": call.name, "is_error": call.is_error, "paths": paths})
+            })
+            .collect()
+    };
+    let build = |calls: Vec<Value>| {
+        json!({
+            "calls": calls,
+            "calls_omitted": state.calls.len().saturating_sub(calls.len()),
+            "calls_failed": state.calls.iter().filter(|call| call.is_error).count(),
+            "output_bytes": output_bytes,
+            "return_bytes": return_bytes,
+            "timed_out": timed_out,
+            "limit_hit": state.limit_hit,
+            "written_paths": written,
+            "uncertain_paths": uncertain,
+        })
+    };
+    let full = build(calls_value(true, usize::MAX));
+    if full.to_string().len() <= DETAIL_BUDGET_BYTES {
+        return full;
+    }
+    let without_paths = build(calls_value(false, usize::MAX));
+    if without_paths.to_string().len() <= DETAIL_BUDGET_BYTES {
+        return without_paths;
+    }
+    let mut keep = state.calls.len();
+    loop {
+        keep = keep * 3 / 4;
+        let trimmed = build(calls_value(false, keep));
+        if keep == 0 || trimmed.to_string().len() <= DETAIL_BUDGET_BYTES {
+            return trimmed;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::run_js::serve::Recorded;
+
+    fn done(value: Value) -> Ending {
+        Ending::Done {
+            value,
+            error: None,
+            timed_out: false,
+        }
+    }
+
+    fn failed_call(seq: u32, name: &str, reason: &str) -> (Recorded, Failure) {
+        (
+            Recorded {
+                seq,
+                name: name.into(),
+                is_error: true,
+                paths: Vec::new(),
+            },
+            Failure {
+                seq,
+                name: name.into(),
+                reason: reason.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_string_return_value_is_shown_as_is() {
+        let result = finish(Run::default(), done(json!("line one\nline two")), "", 1000);
+        assert_eq!(
+            result.content,
+            "=> line one\nline two\n[run_js: 0 calls, 0 failed]"
+        );
+        let result = finish(Run::default(), done(json!({"a": [1, "x"]})), "", 1000);
+        assert_eq!(
+            result.content,
+            "=> {\"a\":[1,\"x\"]}\n[run_js: 0 calls, 0 failed]"
+        );
+    }
+
+    #[test]
+    fn the_summary_names_failed_calls_even_when_the_program_returns_nothing() {
+        let mut state = Run::default();
+        for (call, failure) in [
+            failed_call(1, "edit", "old_string not found\nin /w/a.rs"),
+            failed_call(3, "read", "no such file"),
+        ] {
+            state.calls.push(call);
+            state.failures.push(failure);
+        }
+        state.written.insert("/w/b.rs".into());
+        state
+            .warnings
+            .push((2, "write".into(), "comment checker flagged /w/b.rs".into()));
+        let result = finish(state, done(Value::Null), "", 1000);
+        assert_eq!(
+            result.content,
+            "[run_js: 2 calls, 2 failed (edit #1: old_string not found in /w/a.rs; read #3: no such file); \
+wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
+        );
+        assert!(
+            !result.is_error,
+            "failed calls alone do not fail the program"
+        );
+    }
+
+    #[test]
+    fn long_failure_lists_and_reasons_are_bounded_to_one_line() {
+        let mut state = Run::default();
+        for seq in 1..=8 {
+            let (call, failure) = failed_call(seq, "grep", &"x".repeat(500));
+            state.calls.push(call);
+            state.failures.push(failure);
+        }
+        let line = summary_line(&state);
+        assert!(!line.contains('\n'));
+        assert!(line.contains("+3 more"), "{line}");
+        assert!(line.len() < 1200, "{} bytes", line.len());
+        assert!(line.ends_with(']'));
+    }
+
+    #[test]
+    fn cut_off_writes_are_reported_as_uncertain() {
+        let mut state = Run::default();
+        state.uncertain.insert("/w/half.rs".into());
+        let (call, failure) = failed_call(1, "write", "cut off before it finished");
+        state.calls.push(call);
+        state.failures.push(failure);
+        let result = finish(state, done(Value::Null), "", 1000);
+        assert!(
+            result.content.contains("may have changed: /w/half.rs"),
+            "{}",
+            result.content
+        );
+        assert_eq!(
+            result.detail.unwrap()["run_js"]["uncertain_paths"],
+            json!(["/w/half.rs"])
+        );
+    }
+
+    #[test]
+    fn detail_stays_within_budget_for_many_calls() {
+        let mut state = Run::default();
+        for seq in 1..=200 {
+            state.calls.push(Recorded {
+                seq,
+                name: "read".into(),
+                is_error: false,
+                paths: vec![format!("/workspace/some/long/path/segment/file-{seq}.rs")],
+            });
+        }
+        let result = finish(state, done(Value::Null), "", 1000);
+        let detail = result.detail.unwrap();
+        assert!(detail.to_string().len() <= DETAIL_BUDGET_BYTES);
+    }
+}

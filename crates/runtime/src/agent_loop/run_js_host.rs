@@ -6,16 +6,21 @@
 //! validated by the same executor and bound by the same role limits. The one
 //! difference is that nothing here may ask the user: a call that would need
 //! approval fails and tells the program to make it as a normal tool call.
+//!
+//! The host also keeps its own record of every call it ran. Budget, escalation
+//! and repeat detection read that record, not the `run_js` result's `detail`,
+//! which the interface owns and the output limiter may replace.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use providers::ToolSpec;
 use sandbox::Action;
 use serde_json::Value;
 use tools::tools::run_js::{
-    CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, description, normalize,
+    CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths, description, normalize,
 };
 use tools::{ToolExecutionContext, ToolExecutor};
 
@@ -78,7 +83,7 @@ impl LoopState {
     }
 
     /// The host that runs the calls of `run_js` programs in this run.
-    pub(super) fn run_js_host(&self, base: &ToolExecutionContext) -> Option<Arc<dyn RunJsHost>> {
+    pub(super) fn run_js_host(&self, base: &ToolExecutionContext) -> Option<Arc<RuntimeRunJsHost>> {
         if !self.run_js_offered() {
             return None;
         }
@@ -103,16 +108,28 @@ impl LoopState {
                 .map(|runtime| runtime.run_js_settings())
                 .unwrap_or_default(),
             tools,
+            records: Mutex::new(HashMap::new()),
         }))
     }
 }
 
-struct RuntimeRunJsHost {
+/// A call the program made, as the host ran it.
+pub(crate) struct ChildRecord {
+    pub seq: u32,
+    pub name: String,
+    /// The arguments as the program gave them, before the host adjusted any.
+    pub input: Value,
+    pub is_error: bool,
+    pub paths: Vec<PathBuf>,
+}
+
+pub(crate) struct RuntimeRunJsHost {
     executor: Arc<ToolExecutor>,
     base: ToolExecutionContext,
     policy: ExecutionPolicy,
     settings: config::RunJsConfig,
     tools: Vec<String>,
+    records: Mutex<HashMap<String, Vec<ChildRecord>>>,
 }
 
 impl std::fmt::Debug for RuntimeRunJsHost {
@@ -124,25 +141,38 @@ impl std::fmt::Debug for RuntimeRunJsHost {
     }
 }
 
+impl RuntimeRunJsHost {
+    /// The calls made by the `run_js` call `parent`, in program order, removed
+    /// from the record.
+    pub(crate) fn take_records(&self, parent: &str) -> Vec<ChildRecord> {
+        let mut records = self
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(parent)
+            .unwrap_or_default();
+        records.sort_by_key(|record| record.seq);
+        records
+    }
+
+    fn record(&self, parent: &str, record: ChildRecord) {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(parent.to_owned())
+            .or_default()
+            .push(record);
+    }
+}
+
 fn rejected(message: String) -> ChildOutcome {
     ChildOutcome {
+        failure: Some(message.clone()),
         result: Err(message),
         is_error: true,
         paths: Vec::new(),
         written: Vec::new(),
-    }
-}
-
-/// Paths named by a call, as given.
-fn call_paths(name: &str, args: &Value) -> Vec<String> {
-    match name {
-        "read" | "grep" | "edit" | "write" | "git_diff" => args
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
+        warning: None,
     }
 }
 
@@ -192,6 +222,42 @@ fn check_arguments(name: &str, args: &mut Value, remaining: Duration) -> Result<
     Ok(())
 }
 
+/// Closes an unfinished call when its future is dropped (the program ended, the
+/// call timed out, or the run was cancelled): the same terminal event a cancelled
+/// model call gets, and a record, so the call is counted either way.
+struct UnfinishedCall<'a> {
+    host: &'a RuntimeRunJsHost,
+    ctx: ToolExecutionContext,
+    parent: String,
+    seq: u32,
+    name: String,
+    input: Value,
+    paths: Vec<String>,
+    id: String,
+    finished: bool,
+}
+
+impl Drop for UnfinishedCall<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.host
+            .executor
+            .report_cancelled_call(&self.ctx, &self.name, &self.id, "cancelled");
+        self.host.record(
+            &self.parent,
+            ChildRecord {
+                seq: self.seq,
+                name: std::mem::take(&mut self.name),
+                input: std::mem::take(&mut self.input),
+                is_error: true,
+                paths: self.paths.iter().map(PathBuf::from).collect(),
+            },
+        );
+    }
+}
+
 #[async_trait::async_trait]
 impl RunJsHost for RuntimeRunJsHost {
     fn tool_names(&self) -> Vec<String> {
@@ -202,30 +268,48 @@ impl RunJsHost for RuntimeRunJsHost {
         self.settings.clone()
     }
 
+    fn shares_wave(&self, name: &str) -> bool {
+        super::tool_calls::shares_wave(&self.executor, name)
+    }
+
     async fn call(&self, call: ChildCall) -> ChildOutcome {
         let ChildCall {
             parent_call_id,
             seq,
             name,
-            mut args,
+            args: given,
             remaining,
         } = call;
+        let paths = call_paths(&name, &given);
+        let refuse = |message: String| {
+            self.record(
+                &parent_call_id,
+                ChildRecord {
+                    seq,
+                    name: name.clone(),
+                    input: given.clone(),
+                    is_error: true,
+                    paths: paths.iter().map(PathBuf::from).collect(),
+                },
+            );
+            rejected(message)
+        };
         if !self.tools.contains(&name) {
-            return rejected(format!("tools.{name} is not available in this run"));
+            return refuse(format!("tools.{name} is not available in this run"));
         }
         if let Err(error) = self.policy.authorize(&name) {
-            return rejected(error.to_string());
+            return refuse(error.to_string());
         }
+        let mut args = given.clone();
         if let Err(message) = check_arguments(&name, &mut args, remaining) {
-            return rejected(message);
+            return refuse(message);
         }
         let child_id = format!("{parent_call_id}/{seq}");
         let ctx = ToolExecutionContext {
             call_id: Some(child_id.clone()),
-            parent_call_id: Some(parent_call_id),
+            parent_call_id: Some(parent_call_id.clone()),
             ..self.base.clone()
         };
-        let paths = call_paths(&name, &args);
         let validated = match self.executor.validate_call(
             ctx.clone(),
             name.clone(),
@@ -236,29 +320,99 @@ impl RunJsHost for RuntimeRunJsHost {
             Err(error) => {
                 self.executor
                     .report_invalid_call(&ctx, &name, &child_id, args, &error);
-                return failed(&error.agent_message(), paths);
+                let message = error.agent_message();
+                self.record(
+                    &parent_call_id,
+                    ChildRecord {
+                        seq,
+                        name: name.clone(),
+                        input: given,
+                        is_error: true,
+                        paths: paths.iter().map(PathBuf::from).collect(),
+                    },
+                );
+                return failed(&message, paths);
             }
         };
         if matches!(validated.action(), Action::Deny | Action::AskFirst) {
-            return rejected(format!("tools.{name} {NEEDS_APPROVAL}"));
+            return refuse(format!("tools.{name} {NEEDS_APPROVAL}"));
         }
-        match validated.scope_approved().execute().await {
+        // `execute` emits ToolStarted on its first poll, which happens before this
+        // future can be dropped, so from here on an unfinished call owes a terminal event.
+        let mut guard = UnfinishedCall {
+            host: self,
+            ctx,
+            parent: parent_call_id.clone(),
+            seq,
+            name: name.clone(),
+            input: given.clone(),
+            paths: paths.clone(),
+            id: child_id,
+            finished: false,
+        };
+        let outcome = validated.scope_approved().execute().await;
+        guard.finished = true;
+        drop(guard);
+        let (is_error, outcome) = match outcome {
             Ok(result) => {
+                let normalized = normalize::normalize(&name, &args, &result);
                 let written = if matches!(name.as_str(), "edit" | "write") && !result.is_error {
                     paths.clone()
                 } else {
                     Vec::new()
                 };
-                ChildOutcome {
-                    is_error: result.is_error,
-                    result: Ok(normalize::normalize(&name, &args, &result).into_value()),
-                    paths,
-                    written,
-                }
+                let warning = (result
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("comment_checker"))
+                    .and_then(|checker| checker.get("outcome"))
+                    .and_then(Value::as_str)
+                    == Some("warning"))
+                .then(|| {
+                    format!(
+                        "post-edit checker warning on {}",
+                        paths.first().map_or("the edited file", String::as_str)
+                    )
+                });
+                let failure = result
+                    .is_error
+                    .then(|| first_line(&normalized.text).unwrap_or_else(|| "failed".into()));
+                (
+                    result.is_error,
+                    ChildOutcome {
+                        is_error: result.is_error,
+                        result: Ok(normalized.into_value()),
+                        paths: paths.clone(),
+                        written,
+                        failure,
+                        warning,
+                    },
+                )
             }
-            Err(error) => failed(&error.agent_message(), paths),
-        }
+            Err(error) => {
+                let message = error.agent_message();
+                (true, failed(&message, paths.clone()))
+            }
+        };
+        self.record(
+            &parent_call_id,
+            ChildRecord {
+                seq,
+                name,
+                input: given,
+                is_error,
+                paths: paths.iter().map(PathBuf::from).collect(),
+            },
+        );
+        outcome
     }
+}
+
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 fn failed(message: &str, paths: Vec<String>) -> ChildOutcome {
@@ -267,44 +421,7 @@ fn failed(message: &str, paths: Vec<String>) -> ChildOutcome {
         is_error: true,
         paths,
         written: Vec::new(),
+        failure: Some(first_line(message).unwrap_or_else(|| "failed".into())),
+        warning: None,
     }
-}
-
-/// A call a `run_js` program made, read back from the parent's result detail.
-pub(crate) struct ChildObservation {
-    pub name: String,
-    pub is_error: bool,
-    pub paths: Vec<PathBuf>,
-}
-
-/// The calls recorded in `detail.run_js.calls`, so the escalation detector and
-/// the budget see them like calls made directly.
-pub(crate) fn child_observations(detail: Option<&Value>) -> Vec<ChildObservation> {
-    let Some(calls) = detail
-        .and_then(|detail| detail.get("run_js"))
-        .and_then(|run| run.get("calls"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    calls
-        .iter()
-        .filter_map(|call| {
-            Some(ChildObservation {
-                name: call.get("name")?.as_str()?.to_owned(),
-                is_error: call.get("is_error")?.as_bool()?,
-                paths: call
-                    .get("paths")
-                    .and_then(Value::as_array)
-                    .map(|paths| {
-                        paths
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(PathBuf::from)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
-        })
-        .collect()
 }

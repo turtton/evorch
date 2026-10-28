@@ -84,11 +84,21 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
     if result.content.len() > PREVIEW_BYTES + 2048
         || result.content.lines().count() > PREVIEW_LINES + 8
     {
+        // The interface reads run_js's own summary from the detail, so it outlives
+        // the artifact reference that replaces the rest of the detail.
+        let run_js = result
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.get("run_js"))
+            .cloned();
         let mut capture = Capture::default();
         capture.push(result.content.as_bytes());
         let limited = capture.finish();
         result.content = limited.content;
         result.detail = limited.detail;
+        if let (Some(run_js), Some(detail)) = (run_js, result.detail.as_mut()) {
+            detail["run_js"] = run_js;
+        }
     }
     // Structured output from external tools must not bypass the text ceiling.
     if result
@@ -339,6 +349,19 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_run_js_result_keeps_its_summary_next_to_the_artifact() {
+        let content = "line\n".repeat(20_000);
+        let result = ToolResult::success(content)
+            .with_detail(serde_json::json!({"run_js": {"calls": [{"seq": 1, "name": "read"}]}}));
+
+        let limited = limit_result(result);
+
+        let detail = limited.detail.unwrap();
+        assert!(detail["output_artifact"]["path"].is_string());
+        assert_eq!(detail["run_js"]["calls"][0]["name"], "read");
+    }
 
     #[test]
     fn root_defaults_to_var_tmp() {
