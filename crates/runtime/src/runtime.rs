@@ -16,6 +16,7 @@ mod output;
 mod project;
 mod questions;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
+pub use questions::RunWait;
 mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;

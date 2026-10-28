@@ -668,6 +668,27 @@ async fn rereading_an_unchanged_file_in_a_program_still_exhausts_the_reread_budg
 }
 
 #[tokio::test]
+async fn offsets_a_program_makes_up_do_not_escape_the_reread_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_file(directory.path(), "long.txt", &"line\n".repeat(50));
+    // The host never offered offset 2 as a `next`, so each is an ordinary read.
+    let calls: Vec<_> = (0..12)
+        .map(|_| ("read", json!({"path": file, "offset": 2})))
+        .collect();
+    let fixture = fixture(
+        sequential_worker(&calls),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let events = run_with_budget(&fixture, reread_budget(3)).await;
+
+    let reason = budget_exhausted(&events).expect("made-up pages are caught as re-reads");
+    assert!(reason.contains("max_file_rereads=3"), "{reason}");
+}
+
+#[tokio::test]
 async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
     let directory = tempfile::tempdir().unwrap();
     let file = write_file(directory.path(), "a.txt", "text\n");

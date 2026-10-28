@@ -11,7 +11,7 @@
 //!   writer or shell alone) and their futures live inside this one, so ending the
 //!   loop for any reason drops every unfinished call before the tool returns.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use tokio::time::Instant;
 
 use super::protocol::{self, HostMessage, JsError, WorkerMessage};
 use super::worker::WorkerConnection;
-use super::{CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths, is_read_continuation};
+use super::{CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths};
 
 /// Bytes of printed output the host keeps; the executor then bounds what the
 /// model sees.
@@ -213,6 +213,44 @@ struct Pending {
     seq: u32,
     name: String,
     args: Value,
+    continuation: bool,
+}
+
+/// A page of a file as a `read` names it: path, first line, byte within that line.
+type PageKey = (String, u64, u64);
+
+/// The page a `read` request asks for.
+fn requested_page(args: &Value) -> Option<PageKey> {
+    page_of(
+        args.get("path")?,
+        args.get("offset"),
+        args.get("byte_offset"),
+    )
+}
+
+/// The page a result's `next` offers, if it offers a `read`.
+fn offered_page(result: &Value) -> Option<PageKey> {
+    let next = result.get("next")?;
+    if next.get("tool")?.as_str()? != "read" {
+        return None;
+    }
+    page_of(
+        next.get("path")?,
+        next.get("offset"),
+        next.get("byte_offset"),
+    )
+}
+
+fn page_of(path: &Value, offset: Option<&Value>, byte_offset: Option<&Value>) -> Option<PageKey> {
+    let number = |value: Option<&Value>, default: u64| match value {
+        None | Some(Value::Null) => Some(default),
+        Some(value) => value.as_u64(),
+    };
+    Some((
+        path.as_str()?.to_owned(),
+        number(offset, 1)?,
+        number(byte_offset, 0)?,
+    ))
 }
 
 struct InFlight {
@@ -247,6 +285,7 @@ impl Scheduler {
                 seq,
                 name,
                 args,
+                continuation,
             }) = self.queue.pop_front()
             else {
                 break;
@@ -267,6 +306,7 @@ impl Scheduler {
                 seq,
                 name,
                 args,
+                continuation,
                 remaining: session.deadline.saturating_duration_since(Instant::now()),
             };
             self.running.push(Box::pin(async move {
@@ -393,6 +433,8 @@ pub(super) async fn serve(
     let mut seq = 0u32;
     // Calls that count toward the limit: `seq` without the continuation pages of reads.
     let mut counted = 0u32;
+    // Pages the host offered as a `next` and the program has not asked for yet.
+    let mut offered: HashSet<PageKey> = HashSet::new();
     let mut request_bytes = 0usize;
     let hard_deadline = session.deadline + KILL_GRACE;
     let ending = loop {
@@ -416,7 +458,9 @@ pub(super) async fn serve(
                             break Ending::Failed("the JS worker called a tool that run_js does not provide".to_owned());
                         };
                         seq += 1;
-                        let continuation = is_read_continuation(&name, &args);
+                        // A page the host offered as a `next`, asked for the first time.
+                        let continuation = name == "read"
+                            && requested_page(&args).is_some_and(|page| offered.remove(&page));
                         if !continuation {
                             counted += 1;
                         }
@@ -455,7 +499,7 @@ pub(super) async fn serve(
                                 break send_failure(&error);
                             }
                         } else {
-                            scheduler.queue.push_back(Pending { id, seq, name, args });
+                            scheduler.queue.push_back(Pending { id, seq, name, args, continuation });
                             scheduler.start_ready(&session);
                         }
                     }
@@ -464,6 +508,11 @@ pub(super) async fn serve(
             Some((id, finished, outcome)) = scheduler.running.next(), if !scheduler.running.is_empty() => {
                 let name = scheduler.finished(finished).map(|call| call.name).unwrap_or_default();
                 state.record_outcome(finished, name, &outcome);
+                if let Ok(result) = &outcome.result
+                    && let Some(page) = offered_page(result)
+                {
+                    offered.insert(page);
+                }
                 let reply = match outcome.result {
                     Ok(result) => HostMessage::ToolResult { id, result: Some(result), error: None },
                     Err(error) => HostMessage::ToolResult { id, result: None, error: Some(error) },

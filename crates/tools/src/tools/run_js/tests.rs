@@ -75,6 +75,10 @@ struct ScriptHost {
     expire_after: Option<(u32, Arc<tokio::sync::Notify>)>,
     /// What the host was told could not be confirmed stopped.
     unconfirmed: std::sync::Mutex<Vec<String>>,
+    /// Every `read` answers with a `next` for the page 300 lines further on.
+    paged_reads: bool,
+    /// `(seq, continuation)` of every call the host was given.
+    seen: std::sync::Mutex<Vec<(u32, bool)>>,
 }
 
 impl std::fmt::Debug for ScriptHost {
@@ -103,6 +107,8 @@ impl ScriptHost {
             dropped: Arc::new(AtomicUsize::new(0)),
             expire_after: None,
             unconfirmed: std::sync::Mutex::new(Vec::new()),
+            paged_reads: false,
+            seen: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -154,6 +160,10 @@ impl RunJsHost for ScriptHost {
     async fn call(&self, call: ChildCall) -> ChildOutcome {
         let _guard = CountDrop(Arc::clone(&self.dropped));
         self.started.fetch_add(1, Ordering::SeqCst);
+        self.seen
+            .lock()
+            .unwrap()
+            .push((call.seq, call.continuation));
         let signal = self.signal.lock().unwrap().take();
         if let Some(fifo) = signal {
             tokio::task::spawn_blocking(move || std::fs::write(fifo, "go\n"))
@@ -201,6 +211,16 @@ impl RunJsHost for ScriptHost {
             expire.notify_one();
         }
         let mut outcome = ok_outcome(&[], &[]);
+        if self.paged_reads
+            && call.name == "read"
+            && let Some(path) = call.args.get("path").and_then(Value::as_str)
+        {
+            let offset = call.args.get("offset").and_then(Value::as_u64).unwrap_or(1);
+            outcome.result = Ok(json!({
+                "ok": true,
+                "next": {"tool": "read", "path": path, "offset": offset + 300, "byte_offset": 0},
+            }));
+        }
         if self.reply_bytes > 0 {
             outcome.result = Ok(json!({"ok": true, "text": "x".repeat(self.reply_bytes)}));
         }
@@ -438,51 +458,49 @@ async fn a_program_that_keeps_calling_after_the_limit_is_stopped_with_bounded_re
     assert_gone(&pid_file);
 }
 
-#[tokio::test]
-async fn the_pages_after_the_first_of_a_read_do_not_count_toward_the_call_limit() {
-    // Three first-page reads reach the limit of 3; five continuation pages follow, then a
-    // fourth first-page read, which is refused with a pointer to aggregating in shell.
+/// A script that makes each of `calls` and reads its reply before the next.
+fn sequential_script(calls: &[(&str, Value)]) -> String {
     let mut script = String::new();
-    let mut id = 0;
-    for _ in 0..3 {
-        id += 1;
-        script.push_str(&call_line(id, "read", &json!({"path": "a"})));
+    for (index, (name, args)) in calls.iter().enumerate() {
+        script.push_str(&call_line(index as u64 + 1, name, args));
         script.push_str("read -r _\n");
     }
-    for page in 0..5 {
-        id += 1;
-        let args = if page % 2 == 0 {
-            json!({"path": "a", "offset": 301 + page})
-        } else {
-            json!({"path": "a", "offset": 1, "byte_offset": 16384})
-        };
-        script.push_str(&call_line(id, "read", &args));
-        script.push_str("read -r _\n");
-    }
-    id += 1;
-    script.push_str(&call_line(id, "read", &json!({"path": "b"})));
-    // The program's value is the reply to the refused call.
-    script.push_str(
-        r#"read -r reply
-esc=$(printf '%s' "$reply" | sed 's/\\/\\\\/g; s/"/\\"/g')
-printf '{"type":"done","value":"%s"}\n' "$esc"
-"#,
-    );
+    script.push_str(DONE);
+    script
+}
+
+fn failed_seqs(result: &ToolResult) -> Vec<u64> {
+    result.detail.as_ref().unwrap()["run_js"]["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|call| call["is_error"] == true)
+        .map(|call| call["seq"].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_program_cannot_make_up_a_continuation_to_get_past_the_call_limit() {
+    // Offsets and byte offsets nobody offered: each is an ordinary read, so after the
+    // limit of 3 they are refused (with a pointer to aggregating in shell).
+    let mut calls: Vec<(&str, Value)> = (0..3).map(|_| ("read", json!({"path": "a"}))).collect();
+    calls.extend([
+        ("read", json!({"path": "a", "offset": 2})),
+        ("read", json!({"path": "a", "offset": 301})),
+        (
+            "read",
+            json!({"path": "a", "offset": 1, "byte_offset": 16384}),
+        ),
+    ]);
+    calls.push(("read", json!({"path": "b"})));
+    let script = sequential_script(&calls);
     let host = ScriptHost::configured(Behavior::Exclusive, |host| {
         host.settings.max_tool_calls = 3;
     });
 
-    let result = run(&script, host, "x", 60_000).await;
+    let result = run(&script, Arc::clone(&host), "x", 60_000).await;
 
-    let detail = result.detail.clone().unwrap();
-    let calls = detail["run_js"]["calls"].as_array().unwrap();
-    assert_eq!(calls.len(), 9, "{}", result.content);
-    let failed: Vec<u64> = calls
-        .iter()
-        .filter(|call| call["is_error"] == true)
-        .map(|call| call["seq"].as_u64().unwrap())
-        .collect();
-    assert_eq!(failed, [9], "only the call beyond the limit fails");
+    assert_eq!(failed_seqs(&result), [4, 5, 6, 7], "{}", result.content);
     assert!(
         result
             .content
@@ -491,24 +509,75 @@ printf '{"type":"done","value":"%s"}\n' "$esc"
         result.content
     );
     assert!(
-        result.content.contains("wc, grep -c, awk"),
-        "{}",
-        result.content
+        host.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, continuation)| !continuation),
+        "nothing was a continuation"
     );
-    assert_eq!(detail["run_js"]["limit_hit"], "tool_calls");
 }
 
 #[tokio::test]
-async fn continuation_pages_are_bounded_too() {
-    let directory = tempfile::tempdir().unwrap();
-    let pid_file = directory.path().join("pid");
-    // Only continuation pages, and never a reply read: they must not run forever.
-    let script = format!(
-        "echo $$ > {}\ni=1\nwhile [ $i -le 500 ]; do\n  printf '%s\\n' \"{{\\\"type\\\":\\\"tool_call\\\",\\\"id\\\":$i,\\\"name\\\":\\\"read\\\",\\\"args\\\":{{\\\"path\\\":\\\"a\\\",\\\"offset\\\":2}}}}\"\n  i=$((i+1))\ndone\nexec sleep 600\n",
-        pid_file.display()
-    );
+async fn a_page_the_host_offered_is_free_once_and_nothing_else_is() {
+    let calls = [
+        // 1 counts. Its `next` offers offset 301, which 2 asks for; that offers 601, 3.
+        ("read", json!({"path": "a"})),
+        (
+            "read",
+            json!({"path": "a", "offset": 301, "byte_offset": 0}),
+        ),
+        ("read", json!({"path": "a", "offset": 601})),
+        // 4 asks for 301 again (used up), 5 for another file's page 301, 6 goes back to
+        // the first page: ordinary reads, so the limit of 3 is reached by 5 and 6 is
+        // refused. 7 asks for 901, which 3 offered and nobody has used: still free.
+        ("read", json!({"path": "a", "offset": 301})),
+        ("read", json!({"path": "b", "offset": 301})),
+        ("read", json!({"path": "a", "offset": 1})),
+        ("read", json!({"path": "a", "offset": 901})),
+    ];
     let host = ScriptHost::configured(Behavior::Exclusive, |host| {
         host.settings.max_tool_calls = 3;
+        host.paged_reads = true;
+    });
+
+    let result = run(&sequential_script(&calls), Arc::clone(&host), "x", 60_000).await;
+
+    assert_eq!(
+        host.seen.lock().unwrap().clone(),
+        [
+            (1, false),
+            (2, true),
+            (3, true),
+            (4, false),
+            (5, false),
+            (7, true)
+        ],
+        "the host is told which calls were continuations"
+    );
+    assert_eq!(failed_seqs(&result), [6], "{}", result.content);
+}
+
+#[tokio::test]
+async fn pages_the_host_offered_are_bounded_too() {
+    let directory = tempfile::tempdir().unwrap();
+    let pid_file = directory.path().join("pid");
+    // Follows every `next` it is given, one page after another, without end.
+    let script = r#"echo $$ > PID_FILE
+printf '%s\n' '{"type":"tool_call","id":1,"name":"read","args":{"path":"a"}}'
+read -r _
+i=1
+while [ $i -le 500 ]; do
+  printf '{"type":"tool_call","id":%s,"name":"read","args":{"path":"a","offset":%s}}\n' $((i + 1)) $((i * 300 + 1))
+  read -r _
+  i=$((i + 1))
+done
+exec sleep 600
+"#
+    .replace("PID_FILE", &pid_file.display().to_string());
+    let host = ScriptHost::configured(Behavior::Exclusive, |host| {
+        host.settings.max_tool_calls = 3;
+        host.paged_reads = true;
     });
 
     let result = run(&script, host, "x", 60_000).await;

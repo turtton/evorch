@@ -44,6 +44,12 @@ pub struct ChildCall {
     pub seq: u32,
     pub name: String,
     pub args: Value,
+    /// Whether this `read` is a page the host itself offered as the `next` of an earlier
+    /// result of this program, used for the first time. It is one logical read with the
+    /// call that offered it, so it does not count toward the call limit or the budgets.
+    /// Only `run_js` decides this, from the `next` values it has seen: a program that
+    /// writes `{offset: 2}` out of nowhere does not get it.
+    pub continuation: bool,
     /// Time left of the `run_js` call; the host must not outlast it.
     pub remaining: Duration,
 }
@@ -88,15 +94,6 @@ pub trait RunJsHost: Send + Sync + std::fmt::Debug {
     /// this run: that state is reported by the host itself, not by a result the
     /// model or the output limiter could reshape.
     fn report_unconfirmed(&self, _detail: &str) {}
-}
-
-/// Whether a call only continues an earlier `read` of the same file: a page after the
-/// first, which is how `readText` assembles a longer file. A continuation is one logical
-/// read, so it does not count toward the call limit or the run's budgets.
-pub fn is_read_continuation(name: &str, args: &Value) -> bool {
-    name == "read"
-        && (args.get("offset").and_then(Value::as_u64).unwrap_or(1) > 1
-            || args.get("byte_offset").and_then(Value::as_u64).unwrap_or(0) > 0)
 }
 
 /// Paths a call names, as the program gave them.

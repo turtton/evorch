@@ -89,6 +89,14 @@ fn fixture(launcher: WorkerLauncher) -> Fixture {
 }
 
 fn fixture_with_tools(launcher: WorkerLauncher, names: &[&str]) -> Fixture {
+    fixture_limited(
+        launcher,
+        names,
+        config::RunJsConfig::default().max_tool_calls,
+    )
+}
+
+fn fixture_limited(launcher: WorkerLauncher, names: &[&str], max_tool_calls: u32) -> Fixture {
     let mut executor = ToolExecutor::with_standard_tools_in(
         Arc::new(EventBus::new(256)),
         Arc::new(DirectSandbox::new_unchecked()),
@@ -102,7 +110,10 @@ fn fixture_with_tools(launcher: WorkerLauncher, names: &[&str]) -> Fixture {
         executor: Arc::clone(&executor),
         names: names.iter().map(|name| (*name).to_owned()).collect(),
         seen: Mutex::new(Vec::new()),
-        settings: config::RunJsConfig::default(),
+        settings: config::RunJsConfig {
+            max_tool_calls,
+            ..config::RunJsConfig::default()
+        },
     });
     Fixture { executor, host }
 }
@@ -164,6 +175,48 @@ async fn tools_read_returns_the_normalised_first_page_and_a_continuation() {
     // The child's text never reaches the model.
     assert!(!result.content.contains("line 2\n"));
     assert_eq!(run_detail(&result)["calls"][0]["name"], "read");
+}
+
+#[tokio::test]
+async fn the_pages_readtext_follows_do_not_count_toward_the_call_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("long.txt");
+    let text: String = (1..=700).map(|line| format!("line {line}\n")).collect();
+    std::fs::write(&path, &text).unwrap();
+    // One call is allowed; the file takes three pages.
+    let fixture = fixture_limited(direct_launcher(), &["read"], 1);
+
+    let result = run_code(
+        &fixture,
+        &format!(
+            "const text = await readText({:?}); return text.split('\\n').length;",
+            path.display().to_string()
+        ),
+        None,
+    )
+    .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("=> 701\n"), "{}", result.content);
+    let calls = run_detail(&result)["calls"].as_array().unwrap().len();
+    assert!(calls >= 3, "every page was a call: {calls}");
+    assert_eq!(run_detail(&result)["calls_failed"], 0);
+
+    // A program that names a page the host never offered (it offered 301) is not given that.
+    let invented = run_code(
+        &fixture,
+        &format!(
+            "const a = await tools.read({{path: {0:?}}}); const b = await tools.read({{path: {0:?}, offset: 601}}); return [a.ok, b.ok];",
+            path.display().to_string()
+        ),
+        None,
+    )
+    .await;
+    assert!(
+        invented.content.contains("tool call limit of 1"),
+        "{}",
+        invented.content
+    );
 }
 
 #[tokio::test]

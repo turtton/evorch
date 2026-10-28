@@ -149,6 +149,13 @@ pub(crate) struct ChildRecord {
     pub input: Value,
     pub is_error: bool,
     pub paths: Vec<PathBuf>,
+    /// A page `run_js` offered as a `next`, used for the first time (see
+    /// [`ChildCall::continuation`]). The budgets read this, not the arguments.
+    pub continuation: bool,
+    /// Whether the call reached its tool. A call that was refused, had invalid
+    /// arguments or needed approval changed nothing; one that ran and failed, or was
+    /// cut off while running, may have.
+    pub executed: bool,
 }
 
 pub(crate) struct RuntimeRunJsHost {
@@ -264,6 +271,7 @@ struct UnfinishedCall<'a> {
     input: Value,
     paths: Vec<String>,
     id: String,
+    continuation: bool,
     finished: bool,
 }
 
@@ -283,6 +291,9 @@ impl Drop for UnfinishedCall<'_> {
                 input: std::mem::take(&mut self.input),
                 is_error: true,
                 paths: self.paths.iter().map(PathBuf::from).collect(),
+                continuation: self.continuation,
+                // Cut off while it ran: it may have changed something.
+                executed: true,
             },
         );
     }
@@ -323,6 +334,7 @@ impl RunJsHost for RuntimeRunJsHost {
             name,
             args: given,
             remaining,
+            continuation,
         } = call;
         let paths = call_paths(&name, &given);
         let refuse = |message: String| {
@@ -334,6 +346,8 @@ impl RunJsHost for RuntimeRunJsHost {
                     input: given.clone(),
                     is_error: true,
                     paths: paths.iter().map(PathBuf::from).collect(),
+                    continuation,
+                    executed: false,
                 },
             );
             rejected(message)
@@ -373,6 +387,8 @@ impl RunJsHost for RuntimeRunJsHost {
                         input: given,
                         is_error: true,
                         paths: paths.iter().map(PathBuf::from).collect(),
+                        continuation,
+                        executed: false,
                     },
                 );
                 return failed(&message, paths);
@@ -392,6 +408,7 @@ impl RunJsHost for RuntimeRunJsHost {
             input: given.clone(),
             paths: paths.clone(),
             id: child_id,
+            continuation,
             finished: false,
         };
         let outcome = validated.scope_approved().execute().await;
@@ -409,6 +426,9 @@ impl RunJsHost for RuntimeRunJsHost {
                 input: given,
                 is_error: outcome.as_ref().map_or(true, |result| result.is_error),
                 paths: paths.iter().map(PathBuf::from).collect(),
+                continuation,
+                // It ran, so a failure does not show that nothing changed.
+                executed: true,
             },
         );
         drop(guard);

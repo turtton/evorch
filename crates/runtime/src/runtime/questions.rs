@@ -8,7 +8,68 @@ mod tests;
 
 mod continuation;
 
+/// How [`AgentRuntime::wait_or_blocked_on_user`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunWait {
+    /// The run reached a terminal phase.
+    Ended(AgentRunPhase),
+    /// The run is `Waiting` while blocking questions to the user have no answer.
+    BlockedOnUser(Vec<UserQuestion>),
+}
+
 impl AgentRuntime {
+    /// Waits for the run like [`AgentRuntime::wait`], but also returns when the run is
+    /// `Waiting` with a blocking question unanswered: a host with no one to answer
+    /// (a headless run) would otherwise wait for ever.
+    ///
+    /// This reads state, not events: the run's phase and the persisted questions, woken
+    /// by changes of either. Events can be dropped for a slow subscriber; neither of
+    /// these can be missed, and a caller that starts waiting late still sees the state.
+    ///
+    /// # Errors
+    /// [`crate::RuntimeError::UnknownRun`] when the run is not registered.
+    pub async fn wait_or_blocked_on_user(
+        &self,
+        run_id: RunId,
+    ) -> Result<RunWait, crate::RuntimeError> {
+        self.wait_admission(run_id).await?;
+        let mut phase_rx = self.entry(run_id)?.phase_rx.clone();
+        let mut question_changes = self.shared.question_version.subscribe();
+        loop {
+            // Mark both as seen before reading the state they announce, so a change
+            // after the read wakes the wait again.
+            let phase = *phase_rx.borrow_and_update();
+            question_changes.borrow_and_update();
+            match phase {
+                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
+                    // Terminal publication holds runs until its completion relay finishes.
+                    drop(self.entry(run_id)?);
+                    return Ok(RunWait::Ended(phase));
+                }
+                AgentRunPhase::Waiting => {
+                    if let Ok(questions) = self.user_answers(run_id) {
+                        let pending: Vec<UserQuestion> = questions
+                            .into_iter()
+                            .filter(|question| question.blocking && question.answer.is_none())
+                            .collect();
+                        if !pending.is_empty() {
+                            return Ok(RunWait::BlockedOnUser(pending));
+                        }
+                    }
+                }
+                AgentRunPhase::Pending | AgentRunPhase::Running => {}
+            }
+            tokio::select! {
+                changed = phase_rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(RunWait::Ended(*phase_rx.borrow()));
+                    }
+                }
+                _ = question_changes.changed() => {}
+            }
+        }
+    }
+
     pub fn request_user_question(
         &self,
         run: RunId,

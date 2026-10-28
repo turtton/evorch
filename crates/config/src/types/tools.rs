@@ -29,8 +29,9 @@ pub struct RunJsConfig {
     pub max_timeout_ms: u64,
     /// Memory limit of the JavaScript engine, in MiB.
     pub memory_limit_mib: u32,
-    /// Tool calls the code may make in one `run_js` call. The pages after the first
-    /// of one `read` (how `readText` assembles a longer file) do not count.
+    /// Tool calls the code may make in one `run_js` call. A page of a file that a
+    /// result offered as its `next` (how `readText` assembles a longer file) does not
+    /// count the first time the code asks for it.
     pub max_tool_calls: u32,
 }
 

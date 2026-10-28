@@ -4,12 +4,13 @@
 //!
 //! - `max_tool_calls`: a cheap read-only call (read, grep, git_diff) is a
 //!   [`CallWeight::Light`] call, one tool call per ten; edit, write and shell count
-//!   in full. A later page of a read is part of the read before it and counts for
-//!   nothing.
+//!   in full. A page that `run_js` offered as the `next` of an earlier result and the
+//!   program asked for the first time is part of the read before it and counts for
+//!   nothing; a page the program named on its own is an ordinary read.
 //! - `max_file_rereads` guards against a model reading the same file again and
 //!   again. Inside one program a file read again after something may have changed it
-//!   (any shell command, or an edit or write of that file made earlier in the same
-//!   program) is a new read, not a repeat; so is a later page of a read. Files under
+//!   (any shell command, or an edit or write of that file, that actually ran earlier
+//!   in the same program) is a new read, not a repeat; so is a later page of a read. Files under
 //!   the output directory (artifacts of cut-off output) are continuations of a call,
 //!   not files the program re-reads.
 //!
@@ -18,8 +19,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-use tools::tools::run_js::is_read_continuation;
 
 use super::run_js_host::ChildRecord;
 use crate::escalation::detector::CallWeight;
@@ -60,7 +59,7 @@ impl ChildAccounting {
     pub(super) fn observe(&mut self, child: &ChildRecord) -> Accounted {
         let seq = child.seq;
         match child.name.as_str() {
-            "read" if is_read_continuation(&child.name, &child.input) => Accounted {
+            "read" if child.continuation => Accounted {
                 weight: CallWeight::Free,
                 counts_as_read: false,
             },
@@ -85,8 +84,11 @@ impl ChildAccounting {
                 counts_as_read: false,
             },
             "write" | "edit" => {
-                for path in &child.paths {
-                    self.last_write.insert(path.clone(), seq);
+                // A call that was refused changed nothing; one that ran and failed may have.
+                if child.executed {
+                    for path in &child.paths {
+                        self.last_write.insert(path.clone(), seq);
+                    }
                 }
                 Accounted {
                     weight: CallWeight::Full,
@@ -94,7 +96,9 @@ impl ChildAccounting {
                 }
             }
             "shell" => {
-                self.last_shell = Some(seq);
+                if child.executed {
+                    self.last_shell = Some(seq);
+                }
                 Accounted {
                     weight: CallWeight::Full,
                     counts_as_read: false,
@@ -142,6 +146,8 @@ mod tests {
             input,
             is_error: false,
             paths: path.map(PathBuf::from).into_iter().collect(),
+            continuation: false,
+            executed: true,
         }
     }
 
@@ -206,20 +212,30 @@ mod tests {
     }
 
     #[test]
-    fn a_page_after_the_first_is_part_of_the_read_before_it() {
+    fn a_page_run_js_offered_is_part_of_the_read_before_it_and_one_the_program_named_is_not() {
         let mut accounting = accounting();
         let first = accounting.observe(&read(1, "/w/long"));
-        let second = accounting.observe(&child(
+        let mut offered = child(
             2,
             "read",
             json!({"path": "/w/long", "offset": 301, "byte_offset": 0}),
             Some("/w/long"),
-        ));
-        let third = accounting.observe(&child(
+        );
+        offered.continuation = true;
+        let page = accounting.observe(&offered);
+        // The same arguments again, which `run_js` did not call a continuation, and an
+        // offset out of nowhere: ordinary reads.
+        let again = accounting.observe(&child(
             3,
             "read",
-            json!({"path": "/w/long", "offset": 1, "byte_offset": 16384}),
+            json!({"path": "/w/long", "offset": 301}),
             Some("/w/long"),
+        ));
+        let invented = accounting.observe(&child(
+            4,
+            "read",
+            json!({"path": "/w/other", "offset": 2}),
+            Some("/w/other"),
         ));
         assert_eq!(
             first,
@@ -228,15 +244,54 @@ mod tests {
                 counts_as_read: true
             }
         );
-        for page in [second, third] {
-            assert_eq!(
-                page,
-                Accounted {
-                    weight: CallWeight::Free,
-                    counts_as_read: false
-                }
-            );
-        }
+        assert_eq!(
+            page,
+            Accounted {
+                weight: CallWeight::Free,
+                counts_as_read: false
+            }
+        );
+        assert_eq!(
+            again,
+            Accounted {
+                weight: CallWeight::Light,
+                counts_as_read: true
+            }
+        );
+        assert_eq!(
+            invented,
+            Accounted {
+                weight: CallWeight::Light,
+                counts_as_read: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_call_that_never_ran_does_not_make_a_file_look_changed() {
+        let mut accounting = accounting();
+        let mut refused_shell = child(2, "shell", json!({"command": "echo x > /w/a"}), None);
+        refused_shell.is_error = true;
+        refused_shell.executed = false;
+        let mut refused_write = child(3, "write", json!({"path": "/w/a"}), Some("/w/a"));
+        refused_write.is_error = true;
+        refused_write.executed = false;
+        let mut failed_shell = child(5, "shell", json!({"command": "false"}), None);
+        failed_shell.is_error = true;
+        let counted = reads(
+            &mut accounting,
+            &[
+                read(1, "/w/a"),
+                refused_shell,
+                refused_write,
+                read(4, "/w/a"),
+            ],
+        );
+        // Nothing ran between the two reads: the second is a repeat.
+        assert_eq!(counted, [true, false, false, true]);
+        let after = reads(&mut accounting, &[failed_shell, read(6, "/w/a")]);
+        // A command that ran and failed may still have changed the file.
+        assert_eq!(after, [false, false]);
     }
 
     #[test]

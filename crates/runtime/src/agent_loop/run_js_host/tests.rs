@@ -39,6 +39,7 @@ fn call(name: &str, args: Value) -> ChildCall {
         seq: 1,
         name: name.into(),
         args,
+        continuation: false,
         remaining: Duration::from_secs(60),
     }
 }

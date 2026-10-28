@@ -105,19 +105,29 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
             .push_str(&format!("\n[{omitted} more images omitted]"));
     }
     let mut replaced = false;
+    // A result that was cut to a preview and an artifact reference before (shell) is
+    // not cut again: the preview is not the output, so it must not become a new
+    // artifact or a whole text, and its reference must keep pointing at the output.
+    let already_cut = result
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail.get("output_artifact").is_some());
     if result.content.len() > PREVIEW_BYTES + 2048
         || result.content.lines().count() > PREVIEW_LINES + 8
     {
-        let mut capture = Capture::default();
-        capture.push(result.content.as_bytes());
-        let limited = capture.finish();
-        // A result that was cut earlier (shell) already carries its whole text.
-        if result.full_content.is_none() {
+        if already_cut {
+            // Only a long reference can push it over the ceiling. Drop the head of the
+            // preview, so the reference at its end survives.
+            result.content = tail_preview(&result.content).to_owned();
+        } else {
+            let mut capture = Capture::default();
+            capture.push(result.content.as_bytes());
+            let limited = capture.finish();
             result.full_content = limited.full_content;
+            result.content = limited.content;
+            result.detail = limited.detail;
+            replaced = true;
         }
-        result.content = limited.content;
-        result.detail = limited.detail;
-        replaced = true;
     }
     // Structured output from external tools must not bypass the text ceiling.
     if result

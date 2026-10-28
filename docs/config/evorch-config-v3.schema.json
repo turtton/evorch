@@ -1634,7 +1634,7 @@
           "minimum": 0
         },
         "max_tool_calls": {
-          "description": "Tool calls the code may make in one `run_js` call. The pages after the first\nof one `read` (how `readText` assembles a longer file) do not count.",
+          "description": "Tool calls the code may make in one `run_js` call. A page of a file that a\nresult offered as its `next` (how `readText` assembles a longer file) does not\ncount the first time the code asks for it.",
           "type": "integer",
           "format": "uint32",
           "default": 1000,

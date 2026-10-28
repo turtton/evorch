@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use event_bus::{AgentRunPhase, Event, EventBus, EventKind, LifecycleEvent, ToolEvent};
+use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
 use recorder::pricing::UsagePricing;
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use routing::EnvLookup;
@@ -339,23 +339,27 @@ async fn drive(
         });
     }
     let approval_task = tokio::spawn(serve_approvals(approval_receiver, Arc::clone(bus)));
-    // Subscribed before the run starts, so no question or phase change is missed.
-    let watcher = bus.subscribe();
     let run_id = runtime.delegate_background(args.role, args.prompt.clone(), RunConfig::default());
     if persistence.is_some() {
         eprintln!("run_id: {run_id}");
     }
-    let waited = wait_unless_asking(&runtime, run_id, watcher).await;
+    // A run that ends its turn on a blocking question goes to `Waiting`, which `wait`
+    // never returns from; nothing in a headless run can answer, so that is reported.
+    let waited = runtime.wait_or_blocked_on_user(run_id).await;
     approval_task.abort();
-    let phase = match waited {
-        Ok(phase) => phase?,
-        Err(questions) => {
+    let phase = match waited? {
+        runtime::RunWait::Ended(phase) => phase,
+        runtime::RunWait::BlockedOnUser(questions) => {
             // Stopped, not cancelled: the run stays resumable from its database.
             let _ = runtime.stop(run_id, runtime::StopScope::Subtree);
             let _ = runtime.wait(run_id).await;
             return Err(HeadlessError::WaitingForInput {
                 run_id: run_id.to_string(),
-                questions: questions.join(" / "),
+                questions: questions
+                    .iter()
+                    .map(|question| question.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
             });
         }
     };
@@ -366,51 +370,6 @@ async fn drive(
         phase,
         final_text,
     })
-}
-
-/// Waits for the run to end. A run that ends its turn with a blocking question to the
-/// user pending goes to `Waiting` for an answer; nothing in a headless run can give
-/// one, so that is reported as `Err` with the pending questions instead of waiting on.
-async fn wait_unless_asking(
-    runtime: &runtime::AgentRuntime,
-    run_id: RunId,
-    mut events: event_bus::EventReceiver,
-) -> Result<Result<AgentRunPhase, runtime::RuntimeError>, Vec<String>> {
-    let id = run_id.to_string();
-    let mut pending: Vec<(String, String)> = Vec::new();
-    let wait = runtime.wait(run_id);
-    tokio::pin!(wait);
-    loop {
-        tokio::select! {
-            phase = &mut wait => return Ok(phase),
-            event = events.recv() => {
-                let event = match event {
-                    Ok(event) => event,
-                    Err(event_bus::RecvError::Lagged(_)) => continue,
-                    // No more events: only the run's end is left to wait for.
-                    Err(event_bus::RecvError::Closed) => return Ok((&mut wait).await),
-                };
-                match event.kind {
-                    EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
-                        if question.run_id == id =>
-                    {
-                        pending.retain(|(known, _)| *known != question.id);
-                        if question.blocking && question.answer.is_none() {
-                            pending.push((question.id, question.title));
-                        }
-                    }
-                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                        run_id: changed,
-                        to: AgentRunPhase::Waiting,
-                        ..
-                    }) if changed == id && !pending.is_empty() => {
-                        return Err(pending.into_iter().map(|(_, title)| title).collect());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
 }
 
 fn open_credential_store(args: &HeadlessArgs) -> Result<Arc<dyn CredentialStore>, HeadlessError> {
