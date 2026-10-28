@@ -284,6 +284,9 @@ impl SecretGuard {
             EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => {
                 self.check_text("event", "ReasoningDelta.delta", delta)
             }
+            EventKind::Message(MessageEvent::ToolCallDelta {
+                arguments_delta, ..
+            }) => self.check_text("event", "ToolCallDelta.arguments_delta", arguments_delta),
             EventKind::Tool(ToolEvent::ShellJobOutput { chunk, .. }) => {
                 self.check_text("event", "ShellJobOutput.chunk", chunk)
             }

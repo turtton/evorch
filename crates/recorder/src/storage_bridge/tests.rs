@@ -139,6 +139,37 @@ fn live_shell_output_is_not_persisted() {
 }
 
 #[test]
+fn composing_tool_call_drafts_are_not_persisted() {
+    // Given: a tool call still being streamed, next to a durable text delta.
+    let (_dir, storage, db) = fixture();
+    let mut bridge = StorageBridge::new(storage.handle(), "session");
+    // When: both reach the bridge.
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::ToolCallDelta {
+            run_id: Some("run".into()),
+            index: 0,
+            call_id: Some("call".into()),
+            tool_name: Some("write".into()),
+            arguments_delta: "{\"path\":".into(),
+            begins_attempt: true,
+        }))
+        .unwrap();
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::MessageCompleted {
+            run_id: "run".into(),
+            text: "done".into(),
+        }))
+        .unwrap();
+    // Then: only the accepted response is stored.
+    let stored = db.events_all_ordered().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert!(matches!(
+        stored[0].event.kind,
+        event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { .. })
+    ));
+}
+
+#[test]
 fn heartbeat_is_observational_but_ownership_transitions_are_durable() {
     let (_dir, storage, db) = fixture();
     let mut bridge = StorageBridge::new(storage.handle(), "session");

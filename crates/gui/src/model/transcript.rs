@@ -5,6 +5,7 @@ use super::scoped_call::parse_scoped_call_id;
 mod branch;
 mod compaction;
 mod diagnostics;
+mod drafts;
 mod lifecycle;
 mod reviews;
 pub mod shell_jobs;
@@ -12,6 +13,8 @@ mod thinking;
 
 pub use reviews::ToolReview;
 
+#[cfg(test)]
+mod draft_tests;
 #[cfg(test)]
 mod tool_tests;
 
@@ -30,6 +33,15 @@ pub enum ToolStatus {
     /// The run ended before the call reported a result, for example because
     /// the process exited mid-call. A late completion still replaces it.
     Interrupted,
+    /// The model is still composing the call; `arguments` is the raw text
+    /// streamed so far. `ToolStarted` turns the card into a running call.
+    Drafting {
+        /// Position of the call within the streamed response.
+        index: usize,
+        arguments: String,
+        /// The response finished, so the call is waiting for its start event.
+        sealed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +228,7 @@ impl TranscriptModel {
 
     pub fn apply(&mut self, event: &Event) {
         self.finish_thinking(event);
+        self.finish_drafts(event);
         if let event_bus::EventKind::Diagnostic(diagnostic) = &event.kind
             && self.apply_review(diagnostic)
         {
@@ -236,7 +249,10 @@ impl TranscriptModel {
                 run_id, parent_run_id: Some(_), agent_name, ..
             }) => {
                 self.agent_names.insert(run_id.clone(), agent_name.clone());
-                self.push_notice(format!("subagent {agent_name} started"));
+                // The delegate card that spawned it already announces the subagent.
+                if !self.delegate_in_flight() {
+                    self.push_notice(format!("subagent {agent_name} started"));
+                }
             }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
                 agent_name, prompt, ..
@@ -298,8 +314,32 @@ impl TranscriptModel {
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
                 self.complete_message(run_id, text, &event.meta);
+                self.seal_drafts(run_id);
             }
-            event_bus::EventKind::Message(message) => self.append_text(message),
+            event_bus::EventKind::Message(event_bus::MessageEvent::ToolCallDelta {
+                run_id,
+                index,
+                call_id,
+                tool_name,
+                arguments_delta,
+                begins_attempt,
+            }) => self.apply_tool_call_delta(&drafts::ToolCallFragment {
+                run_id: run_id.as_deref(),
+                index: *index,
+                call_id: call_id.as_deref(),
+                tool_name: tool_name.as_deref(),
+                arguments_delta,
+                begins_attempt: *begins_attempt,
+            }),
+            event_bus::EventKind::Message(message) => {
+                if let event_bus::MessageEvent::MessageDelta { run_id, .. }
+                | event_bus::MessageEvent::ReasoningDelta { run_id, .. } = message
+                {
+                    // A new response began, so earlier calls it did not start are stale.
+                    self.discard_sealed_drafts(run_id.as_deref());
+                }
+                self.append_text(message);
+            }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
@@ -421,7 +461,7 @@ impl TranscriptModel {
         let (delta, run_id) = match message {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
-            MessageEvent::MessageCompleted { .. } => return,
+            MessageEvent::MessageCompleted { .. } | MessageEvent::ToolCallDelta { .. } => return,
             MessageEvent::FinalResultPublished { text, run_id } => {
                 self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
@@ -481,7 +521,8 @@ impl TranscriptModel {
             self.push(match message {
                 MessageEvent::MessageDelta { .. }
                 | MessageEvent::FinalResultPublished { .. }
-                | MessageEvent::MessageCompleted { .. } => TranscriptEntry::Message {
+                | MessageEvent::MessageCompleted { .. }
+                | MessageEvent::ToolCallDelta { .. } => TranscriptEntry::Message {
                     text: delta.clone(),
                     run_id: run_id.clone(),
                 },
@@ -573,6 +614,9 @@ impl TranscriptModel {
         call_id: &str,
         input: Option<&serde_json::Value>,
     ) {
+        if self.claim_draft(run_id, tool_name, call_id, input) {
+            return;
+        }
         let pending = self.take_pending_reviews(run_id, call_id);
         if let Some(TranscriptEntry::Tool {
             tool_name: name,

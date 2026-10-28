@@ -162,7 +162,8 @@ impl TranscriptRegistry {
                 | MessageEvent::MessageCompleted { run_id, .. },
             ) => self.route_run(run_id),
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
+            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::ToolCallDelta { run_id, .. }) => match run_id {
                 Some(run_id) => self.route_run(run_id),
                 None => Vec::new(),
             },
@@ -209,7 +210,8 @@ impl TranscriptRegistry {
         match &event.kind {
             EventKind::Message(
                 MessageEvent::MessageDelta { run_id: None, .. }
-                | MessageEvent::ReasoningDelta { run_id: None, .. },
+                | MessageEvent::ReasoningDelta { run_id: None, .. }
+                | MessageEvent::ToolCallDelta { run_id: None, .. },
             ) => {
                 tracing::warn!("dropped run-less stream delta");
                 return;
@@ -219,6 +221,9 @@ impl TranscriptRegistry {
                     run_id: Some(_), ..
                 }
                 | MessageEvent::ReasoningDelta {
+                    run_id: Some(_), ..
+                }
+                | MessageEvent::ToolCallDelta {
                     run_id: Some(_), ..
                 }
                 | MessageEvent::FinalResultPublished { .. }

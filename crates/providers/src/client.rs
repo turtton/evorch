@@ -112,6 +112,7 @@ pub trait ProviderClient: Send + Sync {
         let mut attempts_used = 0;
         loop {
             attempts_used += 1;
+            let mut attempt_has_tool_call = false;
             let (error, premature_eof) = match self.stream(auth, request).await {
                 Err(error) => (error, false),
                 Ok(mut stream) => loop {
@@ -145,7 +146,26 @@ pub trait ProviderClient: Send + Sync {
                                 }));
                             }
                         }
-                        StreamEvent::ToolCallDelta { .. } => {}
+                        // Display only: Completed stays the sole source of the tool calls.
+                        // Retries replay from the start and are not deduplicated; the first
+                        // fragment of each attempt tells consumers to drop earlier drafts.
+                        StreamEvent::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_delta,
+                        } => {
+                            let begins_attempt =
+                                !std::mem::replace(&mut attempt_has_tool_call, true);
+                            bus.emit(Event::new(MessageEvent::ToolCallDelta {
+                                run_id,
+                                index,
+                                call_id: id,
+                                tool_name: name,
+                                arguments_delta,
+                                begins_attempt,
+                            }));
+                        }
                         StreamEvent::Completed { response } => return Ok(response),
                     }
                 },
@@ -309,6 +329,73 @@ mod tests {
         assert_eq!(deltas.concat(), "Hello world");
         assert_eq!(deltas, ["Hello", " world"]);
         assert_eq!(client.attempts.load(Ordering::SeqCst), 2);
+    }
+
+    fn tool_delta(
+        index: usize,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: &str,
+    ) -> Result<StreamEvent, ProviderError> {
+        Ok(StreamEvent::ToolCallDelta {
+            index,
+            id: id.map(Into::into),
+            name: name.map(Into::into),
+            arguments_delta: arguments.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn streaming_publishes_tool_call_drafts_and_marks_each_attempt() {
+        // Given: 最初の試行は引数の途中で EOF になり、二回目が全体を再生する。
+        let client = ScriptedClient::new(vec![
+            Ok(vec![tool_delta(0, Some("call-1"), Some("write"), "{\"pa")]),
+            Ok(vec![
+                tool_delta(0, Some("call-1"), Some("write"), "{\"pa"),
+                tool_delta(0, None, None, "th\":1}"),
+                completed(),
+            ]),
+        ]);
+        let bus = EventBus::new(16);
+        let mut receiver = bus.subscribe();
+        // When: 共通のストリーミング経路で送信する。
+        let result = client
+            .send_streaming(&ProviderAuth::new("key"), &sample_request(), &bus)
+            .await;
+        // Then: 確定応答は Completed のまま、表示用の断片は各試行の先頭だけが印付けされる。
+        assert_eq!(result, Ok(sample_response()));
+        let mut drafts = Vec::new();
+        while let Some(event) = receiver.recv().now_or_never() {
+            let EventKind::Message(MessageEvent::ToolCallDelta {
+                call_id,
+                tool_name,
+                arguments_delta,
+                begins_attempt,
+                ..
+            }) = event.expect("イベントを受信できる").kind
+            else {
+                panic!("想定外のイベント");
+            };
+            drafts.push((call_id, tool_name, arguments_delta, begins_attempt));
+        }
+        assert_eq!(
+            drafts,
+            [
+                (
+                    Some("call-1".into()),
+                    Some("write".into()),
+                    "{\"pa".into(),
+                    true
+                ),
+                (
+                    Some("call-1".into()),
+                    Some("write".into()),
+                    "{\"pa".into(),
+                    true
+                ),
+                (None, None, "th\":1}".into(), false),
+            ]
+        );
     }
 
     #[tokio::test]

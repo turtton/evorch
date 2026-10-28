@@ -20,6 +20,7 @@ mod sticky;
 pub use orchestration::agent_name;
 
 const LIVE_TAIL_LINES: usize = 4;
+const DRAFTING_META: &str = "composing…";
 /// Header note of a call whose run ended before it reported a result.
 pub const INTERRUPTED_META: &str = "ended without a result";
 const INTERRUPTED_NOTE: &str =
@@ -159,12 +160,12 @@ pub fn tool_card_group(
     };
     let folded = group.len();
     let id = pane_id.with(("tool-expanded", run_id, call_id));
-    let running = matches!(status, ToolStatus::Running);
+    let running = matches!(status, ToolStatus::Running | ToolStatus::Drafting { .. });
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     // Only states that need attention get a color; finished calls stay muted.
     let color = match status {
         _ if *is_error => palette().ERROR_FG,
-        ToolStatus::Running => palette().INFO,
+        ToolStatus::Running | ToolStatus::Drafting { .. } => palette().INFO,
         ToolStatus::Succeeded | ToolStatus::Approved => palette().TEXT_MUTED,
         ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
         ToolStatus::AwaitingApproval => palette().WARNING_FG,
@@ -182,6 +183,15 @@ pub fn tool_card_group(
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
         header::with_shell_job(&mut header, job, shell_control(last).is_some());
+    }
+    if matches!(status, ToolStatus::Drafting { .. }) {
+        header.meta = Some(
+            [header.meta.take(), Some(DRAFTING_META.to_owned())]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
     }
     if matches!(status, ToolStatus::Interrupted) {
         header.meta = Some(
@@ -207,7 +217,7 @@ pub fn tool_card_group(
     // only colors the icon and leaves successful calls muted.
     let (glyph, mark) = match status {
         _ if *is_error => (icons::X, "✗ "),
-        ToolStatus::Running => ("", ""),
+        ToolStatus::Running | ToolStatus::Drafting { .. } => ("", ""),
         ToolStatus::Succeeded | ToolStatus::Approved => (header.icon, "✓ "),
         ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
         ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
@@ -222,6 +232,9 @@ pub fn tool_card_group(
         let title = sticky::Header::reserve(ui, id);
         for review in reviews {
             review_line(ui, review);
+        }
+        if let ToolStatus::Drafting { arguments, .. } = status {
+            draft_tail(ui, arguments);
         }
         // An expanded card already shows the output in full.
         let preview = context.latest_for_job && (running || !expanded);
@@ -386,6 +399,24 @@ fn live_tail(ui: &mut Ui, job: &ShellJob) {
         ui.add(
             egui::Label::new(
                 RichText::new(line)
+                    .monospace()
+                    .size(FONT_SMALL)
+                    .color(palette().TEXT_MUTED),
+            )
+            .truncate(),
+        );
+    }
+}
+
+/// The last few lines of the arguments the model is still writing, so a long
+/// call shows its progress without expanding anything.
+fn draft_tail(ui: &mut Ui, arguments: &str) {
+    let lines: Vec<&str> = arguments.lines().collect();
+    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    for line in &lines[start..] {
+        ui.add(
+            egui::Label::new(
+                RichText::new(*line)
                     .monospace()
                     .size(FONT_SMALL)
                     .color(palette().TEXT_MUTED),
