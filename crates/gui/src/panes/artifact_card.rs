@@ -4,6 +4,7 @@
 //! links are consumed by the in-app file viewer, which would show HTML source.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use egui::{RichText, Ui};
 use event_bus::{ArtifactPresentation, PresentedArtifact};
@@ -16,6 +17,7 @@ use crate::theme::widgets::{ghost_icon_button, soft_frame};
 
 const PREVIEW_MAX_WIDTH: f32 = 640.0;
 const PREVIEW_MAX_HEIGHT: f32 = 480.0;
+const AVAILABILITY_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn open_requests_id() -> egui::Id {
     egui::Id::new("artifact-open-requests")
@@ -88,17 +90,43 @@ pub fn show(ui: &mut Ui, id: egui::Id, presentation: &ArtifactPresentation) {
     });
 }
 
-/// Cache only successful checks: a temporarily missing store may reappear.
+#[derive(Clone, Copy)]
+struct Availability {
+    available: bool,
+    retry_at: f64,
+}
+
 fn is_available(ctx: &egui::Context, path: &Path) -> bool {
+    is_available_at(ctx, path, ctx.input(|input| input.time), Path::is_file)
+}
+
+/// Stored files are immutable, but an unavailable store can recover. Limit
+/// metadata I/O during repeated frames while scheduling a repaint for recovery.
+fn is_available_at(
+    ctx: &egui::Context,
+    path: &Path,
+    now: f64,
+    check_file: impl FnOnce(&Path) -> bool,
+) -> bool {
     let id = egui::Id::new(("artifact-available", path));
-    if ctx.data(|data| data.get_temp::<bool>(id)) == Some(true) {
-        return true;
+    let cached = ctx.data(|data| data.get_temp::<Availability>(id));
+    let availability = match cached {
+        Some(cached) if cached.available || now < cached.retry_at => cached,
+        _ => {
+            let checked = Availability {
+                available: check_file(path),
+                retry_at: now + AVAILABILITY_RECHECK_INTERVAL.as_secs_f64(),
+            };
+            ctx.data_mut(|data| data.insert_temp(id, checked));
+            checked
+        }
+    };
+    if !availability.available {
+        ctx.request_repaint_after(Duration::from_secs_f64(
+            (availability.retry_at - now).max(0.0),
+        ));
     }
-    let available = path.is_file();
-    if available {
-        ctx.data_mut(|data| data.insert_temp(id, true));
-    }
-    available
+    availability.available
 }
 
 fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {

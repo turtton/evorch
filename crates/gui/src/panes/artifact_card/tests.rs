@@ -216,11 +216,15 @@ fn a_missing_artifact_is_rechecked_and_shown_when_the_store_reappears() {
             .is_some()
     );
     assert!(harness.query_by_label("Open").is_some());
-    // Also exercise a false value left in egui's data by an earlier card.
-    harness.ctx.data_mut(|data| {
-        data.insert_temp(egui::Id::new(("artifact-available", path.as_path())), false);
-    });
     image::RgbImage::new(4, 3).save(&path).unwrap();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Artifact unavailable")
+            .is_some()
+    );
+    let now = harness.ctx.input(|input| input.time);
+    harness.input_mut().time = Some(now + AVAILABILITY_RECHECK_INTERVAL.as_secs_f64());
     harness.run();
     assert!(
         harness
@@ -231,6 +235,36 @@ fn a_missing_artifact_is_rechecked_and_shown_when_the_store_reappears() {
     harness.get_by_label("Open").click();
     harness.run();
     assert_eq!(take_external_open_requests(&harness.ctx), vec![path]);
+}
+
+#[test]
+fn missing_artifact_checks_are_throttled_and_detect_recovery_at_the_deadline() {
+    let ctx = egui::Context::default();
+    let path = Path::new("/artifacts/recovering.png");
+    let checks = std::cell::Cell::new(0);
+    let present = std::cell::Cell::new(false);
+    let check = |checked_path: &Path| {
+        assert_eq!(checked_path, path);
+        checks.set(checks.get() + 1);
+        present.get()
+    };
+    let interval = AVAILABILITY_RECHECK_INTERVAL.as_secs_f64();
+    assert!(!is_available_at(&ctx, path, 0.0, check));
+    for now in [0.0, 0.0, interval / 2.0, interval - 0.001] {
+        assert!(!is_available_at(&ctx, path, now, check));
+    }
+    assert_eq!(checks.get(), 1, "frames before the deadline reuse the miss");
+    assert!(!is_available_at(&ctx, path, interval, check));
+    assert_eq!(checks.get(), 2, "an expired miss gets one new check");
+    present.set(true);
+    for now in [interval, 1.5 * interval, 2.0 * interval - 0.001] {
+        assert!(!is_available_at(&ctx, path, now, check));
+    }
+    assert_eq!(checks.get(), 2, "a repeated miss renews the deadline");
+    assert!(is_available_at(&ctx, path, 2.0 * interval, check));
+    assert_eq!(checks.get(), 3, "the exact deadline detects recovery");
+    assert!(is_available_at(&ctx, path, 10.0 * interval, check));
+    assert_eq!(checks.get(), 3, "immutable available files remain cached");
 }
 
 #[test]
@@ -278,6 +312,55 @@ fn png_loaded_from_disk_keeps_its_size_below_the_scroll_viewport() {
             .query_by_label_contains("Preview unavailable")
             .is_none()
     );
+}
+
+#[test]
+fn portrait_and_wide_previews_fit_cards_at_normal_and_high_dpi() {
+    let dir = tempfile::tempdir().unwrap();
+    for (width, height) in [(300, 1800), (1800, 675)] {
+        let path = dir.path().join(format!("{width}x{height}.png"));
+        image::RgbImage::from_pixel(width, height, image::Rgb([20, 80, 160]))
+            .save(&path)
+            .unwrap();
+        for card_width in [360.0, 900.0] {
+            for dpi in [1.0, 2.0] {
+                let shown = ArtifactPresentation {
+                    presentation_id: "sizing".into(),
+                    title: None,
+                    caption: None,
+                    artifacts: vec![artifact("png", "Sized PNG", "image/png", &path)],
+                };
+                let mut harness = Harness::builder()
+                    .with_size(egui::vec2(card_width, 700.0))
+                    .with_pixels_per_point(dpi)
+                    .build_ui_state(
+                        move |ui, card_rect| {
+                            *card_rect = ui
+                                .scope(|ui| show(ui, egui::Id::new("card"), &shown))
+                                .response
+                                .rect;
+                        },
+                        egui::Rect::NOTHING,
+                    );
+                crate::panes::file_viewer::tests::wait_for_image(&harness.ctx, &path);
+                harness.run();
+                assert_eq!(harness.ctx.pixels_per_point(), dpi);
+                let rect = harness.get_by_label("Sized PNG preview").rect();
+                let size = rect.size();
+                let bounds = harness.ctx.content_rect();
+                assert!(size.x > 0.0 && size.y > 0.0);
+                assert!(harness.state().contains_rect(rect));
+                assert!(rect.min.x >= bounds.min.x && rect.max.x <= bounds.max.x);
+                assert!(size.x <= PREVIEW_MAX_WIDTH && size.y <= PREVIEW_MAX_HEIGHT);
+                assert!((size.x / size.y - width as f32 / height as f32).abs() < 0.01);
+                if height > width {
+                    assert!((size.y - PREVIEW_MAX_HEIGHT).abs() < 0.01);
+                } else if card_width > PREVIEW_MAX_WIDTH {
+                    assert!((size.x - PREVIEW_MAX_WIDTH).abs() < 0.01);
+                }
+            }
+        }
+    }
 }
 
 #[test]
