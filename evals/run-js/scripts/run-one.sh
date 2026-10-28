@@ -131,7 +131,15 @@ fi
 
 # 検証（同じ clone に対して）。タイムアウトで中断された run も検証する。
 v0=$(now_ms)
-"$TIMEOUT" --kill-after=30 "$verify_timeout_s" "$evals/verify/$task.sh" "$clone" >"$rundir/verify.log" 2>&1 </dev/null
+# RUSTC_WRAPPER（sccache）が clone の cwd で動かない環境がある（長い cwd で `sccache: error: path must be shorter
+# than SUN_LEN`。予備実行の 2 回目では t3 / t4 / t6 の検証が cargo ごと全部落ちた）。Worker の shell は環境を
+# 絞られるので wrapper を持たない。検証の cargo は、wrapper が動かないときだけ wrapper なしで流す。
+verify_env=()
+if [ -n "${RUSTC_WRAPPER:-}" ] && ! (cd "$clone" && "$RUSTC_WRAPPER" rustc -vV >/dev/null 2>&1); then
+  verify_env=(env RUSTC_WRAPPER=)
+  echo "note: RUSTC_WRAPPER=$RUSTC_WRAPPER が clone の cwd で動かないため、検証は RUSTC_WRAPPER なしで流す" >&2
+fi
+"$TIMEOUT" --kill-after=30 "$verify_timeout_s" "${verify_env[@]}" "$evals/verify/$task.sh" "$clone" >"$rundir/verify.log" 2>&1 </dev/null
 verify_rc=$?
 v1=$(now_ms)
 case $verify_rc in 0) verify=pass ;; 1) verify=fail ;; 124) verify=timeout ;; *) verify=error ;; esac

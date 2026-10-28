@@ -12,7 +12,7 @@
 ## プロンプト
 
 ```prompt
-`crates/agents` のロール定義を次のとおり変更してください。ワークスペース全体のビルドは不要で、`crates/agents` の `src/` と `tests/` 以外は変更しません。依存の取得ができない環境では cargo に `--offline` を付けてください。
+`crates/agents` のロール定義を次のとおり変更してください。ワークスペース全体のビルドは不要で、`crates/agents` の `src/` と `tests/` 以外は変更しません（手順 7 の `answers/t4.json` の書き込みを除きます）。依存の取得ができない環境では cargo に `--offline` を付けてください。
 
 1. 変更前に `cargo test -p agents` を実行し、通ったテスト数の合計（すべてのテストバイナリと doc-test の `N passed` の合計）を控えます。
 2. Explorer ロールに `git_diff` と `skill_load` を許可します（`Role::capabilities()`）。`crates/agents/src/role.rs` の doc コメントのロール一覧の表も合わせて直します。

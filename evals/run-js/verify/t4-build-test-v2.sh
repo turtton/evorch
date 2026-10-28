@@ -27,11 +27,11 @@ ok "role.rs の doc 表"
 # 4. fmt / clippy。
 cargo fmt -p agents -- --check >/dev/null 2>&1 || fail "cargo fmt -p agents -- --check が失敗"
 ok "cargo fmt"
-cargo clippy -p agents --all-targets --offline -- -D warnings >/dev/null 2>&1 || fail "cargo clippy が失敗"
+out=$(cargo clippy -p agents --all-targets --offline -- -D warnings 2>&1) || { echo "$out" | tail -25 >&2; fail "cargo clippy が失敗"; }
 ok "cargo clippy"
 
 # 5. テストを実行し、報告の final_passed と一致する。
-out=$(cargo test -p agents --offline 2>&1) || { echo "$out" | grep -E 'FAILED|failed|panicked' | head >&2; fail "cargo test -p agents が失敗"; }
+out=$(cargo test -p agents --offline 2>&1) || { echo "$out" | tail -25 >&2; fail "cargo test -p agents が失敗"; }
 final=$(echo "$out" | sum_passed)
 [ "$final" -ge $((BASELINE_PASSED + n_new_tests)) ] || fail "passed 合計 $final が baseline+新規 を下回る"
 ok "cargo test passed=$final"
@@ -56,5 +56,5 @@ ok "answers/t4.json"
 hidden=crates/agents/tests/zz_eval_hidden.rs
 trap 'rm -f "$hidden"' EXIT
 cp "$HERE/hidden/role_all_v2_check.rs" "$hidden"
-cargo test -p agents --offline --test zz_eval_hidden >/dev/null 2>&1 || fail "隠しテスト（Role::ALL の順序、Explorer の権限、roles_allowing）が失敗"
+out=$(cargo test -p agents --offline --test zz_eval_hidden 2>&1) || { echo "$out" | tail -25 >&2; fail "隠しテスト（Role::ALL の順序、Explorer の権限、roles_allowing）が失敗"; }
 ok "隠しテスト"

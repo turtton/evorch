@@ -15,7 +15,7 @@ done
 ok "変更範囲とテストの無改変"
 
 # 2. 両 crate のテストが全部通る（失敗した binary で止まらないよう --no-fail-fast）。
-out=$(cargo test -p apply-patch -p agents --offline --no-fail-fast 2>&1) || { echo "$out" | grep -E 'FAILED|failed' | head >&2; fail "cargo test -p apply-patch -p agents が失敗"; }
+out=$(cargo test -p apply-patch -p agents --offline --no-fail-fast 2>&1) || { echo "$out" | tail -25 >&2; fail "cargo test -p apply-patch -p agents が失敗"; }
 ok "cargo test passed=$(echo "$out" | sum_passed)"
 
 # 3. 原因の報告: 5 ファイルが全部、1 ファイル 1 行以上で挙がっている。
