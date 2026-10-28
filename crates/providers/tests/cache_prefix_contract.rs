@@ -312,12 +312,16 @@ async fn anthropic_effort_change_is_an_explicit_boundary_with_reuse_after_it() {
     let medium = conversation_with_effort("claude-sonnet-4-6", "medium");
     let high = conversation_with_effort("claude-sonnet-4-6", "high");
     for request in [&medium[0], &medium[1], &high[2], &high[3]] {
-        client
+        let events = client
             .stream(&ProviderAuth::new("local-contract-key"), request)
             .await
             .unwrap()
             .collect::<Vec<_>>()
-            .await;
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the fixture must complete successfully");
+        assert!(matches!(events.last(), Some(StreamEvent::Completed { .. })));
     }
     let bodies: Vec<Value> = server
         .received_requests()

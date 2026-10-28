@@ -2,7 +2,9 @@
 use config::{
     ApiProtocolConfig, Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
 };
-use event_bus::{CacheComparison, EventBus, EventKind, ProviderEvent, RequestPurpose};
+use event_bus::{
+    CacheBaselineMissing, CacheComparison, EventBus, EventKind, ProviderEvent, RequestPurpose,
+};
 use mock_openai::claude_contract::claude_model_input;
 use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent, ToolSpec};
 use routing::{ComposeDeps, MapEnv};
@@ -20,6 +22,8 @@ struct Oracle {
     prompts: Vec<Vec<u8>>,
     cached: Vec<u64>,
     searches: Vec<Value>,
+    /// API-key requests must never carry subscription-only transport headers.
+    api_key_header_leaks: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -29,6 +33,15 @@ impl Respond for ClaudeEndpoint {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         let oauth = request.headers.contains_key("authorization");
+        if !oauth {
+            let leaks = request
+                .headers
+                .keys()
+                .map(|name| name.as_str().to_owned())
+                .filter(|name| name == "anthropic-beta" || name.starts_with("x-stainless-"))
+                .collect::<Vec<_>>();
+            self.0.lock().unwrap().api_key_header_leaks.extend(leaks);
+        }
         let model_input = if oauth {
             claude_model_input(&request.body).unwrap()
         } else {
@@ -165,10 +178,22 @@ impl Respond for ClaudeEndpoint {
     }
 }
 
-async fn exercise(oauth: bool, effort: Option<&str>) {
+const TOKEN: &str = "fixture-claude-token";
+
+struct Harness {
+    server: MockServer,
+    oracle: Arc<Mutex<Oracle>>,
+    model: Arc<runtime::compose::RoutedModel>,
+    bus: Arc<EventBus>,
+    _credentials: tempfile::TempDir,
+}
+
+/// Mounts the Claude endpoint and composes the production routed model against it.
+/// `effort_levels` is the model's explicit `effort_levels` configuration, if any.
+async fn harness(oauth: bool, effort_levels: Option<Vec<String>>, posts: u64) -> Harness {
     let server = MockServer::start().await;
     let oracle = Arc::new(Mutex::new(Oracle::default()));
-    let token = "fixture-claude-token";
+    let token = TOKEN;
     let auth_header = if oauth { "authorization" } else { "x-api-key" };
     let auth_value = if oauth {
         format!("Bearer {token}")
@@ -189,7 +214,7 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
         .and(path("/v1/messages"))
         .and(header(auth_header, &auth_value))
         .respond_with(ClaudeEndpoint(oracle.clone()))
-        .expect(5)
+        .expect(posts)
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
@@ -223,6 +248,7 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
         },
     );
     config.providers.get_mut("claude").unwrap().models[0].preset = Some("output-limit".into());
+    config.providers.get_mut("claude").unwrap().models[0].effort_levels = effort_levels;
     config.model_presets.insert(
         "output-limit".into(),
         config::ModelPresetConfig {
@@ -231,7 +257,6 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
         },
     );
     let bus = Arc::new(EventBus::new(128));
-    let mut events = bus.subscribe();
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {
@@ -244,6 +269,26 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
         Some(test_support::model_catalog_dir()),
     )
     .unwrap();
+    Harness {
+        server,
+        oracle,
+        model,
+        bus,
+        _credentials: dir,
+    }
+}
+
+async fn exercise(oauth: bool, effort: Option<&str>) {
+    // The model lists its efforts explicitly, as the GUI picker requires for API profiles.
+    let levels = effort.map(|_| ["low", "medium", "high"].map(str::to_owned).to_vec());
+    let Harness {
+        server: _server,
+        oracle,
+        model,
+        bus,
+        _credentials,
+    } = harness(oauth, levels, 5).await;
+    let mut events = bus.subscribe();
     let invocation = AgentInvocationContext {
         run_id: "claude-cache-contract".into(),
         model_preference: Some(ModelPreference {
@@ -344,6 +389,27 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
     }
     let oracle = oracle.lock().unwrap();
     assert_eq!(oracle.searches.len(), 2);
+    if !oauth {
+        // Hosted web search requests follow the same effort contract as chat requests, and
+        // neither carries subscription-only controls or headers.
+        for body in oracle.searches.iter().chain(&oracle.requests) {
+            assert!(body.get("context_management").is_none());
+            match effort {
+                Some(effort) => {
+                    assert_eq!(
+                        body["thinking"],
+                        json!({"type":"adaptive","display":"summarized"})
+                    );
+                    assert_eq!(body["output_config"], json!({"effort": effort}));
+                }
+                None => {
+                    assert!(body.get("thinking").is_none());
+                    assert!(body.get("output_config").is_none());
+                }
+            }
+        }
+        assert_eq!(oracle.api_key_header_leaks, Vec::<String>::new());
+    }
     assert_eq!(search_usage.lock().unwrap().len(), 2);
     assert_eq!(oracle.cached[0], 0);
     // The effort reaches the wire (and so the input-derived mock cache key) identically on
@@ -488,4 +554,165 @@ async fn claude_api_key_runtime_with_reasoning_effort_preserves_prefix() {
 #[tokio::test]
 async fn claude_oauth_runtime_tool_turns_and_hosted_search_preserve_prefix() {
     exercise(true, None).await;
+}
+
+// Given: one run on an API-key profile whose model lists its efforts, as selected from the picker
+// When: the selected effort goes medium -> medium -> high -> high through the runtime
+// Then: each wire carries the selected effort, the change is an explicit boundary that reuses
+// none of the old history, and the new setting is reused again on the next turn. The mock cache
+// is derived from the received bytes, and `assert_append_only` is an independent oracle.
+#[tokio::test]
+async fn claude_api_key_effort_change_is_a_boundary_and_the_new_setting_is_reused() {
+    let levels = ["low", "medium", "high"].map(str::to_owned).to_vec();
+    let Harness {
+        server: _server,
+        oracle,
+        model,
+        bus,
+        _credentials,
+    } = harness(false, Some(levels), 4).await;
+    let mut events = bus.subscribe();
+    let mut messages = vec![
+        Message {
+            role: MessageRole::System,
+            content: vec![ContentBlock::Text {
+                text: "Stable instructions. ".repeat(50),
+            }],
+        },
+        Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "Read twice".into(),
+            }],
+        },
+    ];
+    let tools = vec![
+        ToolSpec {
+            name: "read".into(),
+            description: "Read a bounded UTF-8 file range".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "inspect_run".into(),
+            description: "Inspect a run".into(),
+            input_schema: json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}),
+        },
+    ];
+    for (index, effort) in ["medium", "medium", "high", "high"].into_iter().enumerate() {
+        let invocation = AgentInvocationContext {
+            run_id: "claude-effort-boundary".into(),
+            model_preference: Some(ModelPreference {
+                profile: "claude".into(),
+                model: Some("claude-sonnet-4-6".into()),
+                reasoning_effort: Some(effort.into()),
+            }),
+            ..Default::default()
+        };
+        let response = model
+            .complete_streaming(&invocation, Role::Worker, &messages, &tools, &bus)
+            .await
+            .unwrap();
+        messages.push(Message {
+            role: MessageRole::Assistant,
+            content: response.message.content.clone(),
+        });
+        let call = response
+            .message
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            });
+        messages.push(Message {
+            role: MessageRole::User,
+            content: vec![match call {
+                Some(tool_call_id) => ContentBlock::ToolResult {
+                    tool_call_id,
+                    content: vec![ToolResultContent::Text {
+                        text: format!("result-{index}\n").repeat(2_000),
+                    }],
+                    is_error: false,
+                },
+                None => ContentBlock::Text {
+                    text: format!("continue-{index}"),
+                },
+            }],
+        });
+    }
+    let oracle = oracle.lock().unwrap();
+    assert_eq!(oracle.requests.len(), 4);
+    for (body, effort) in oracle
+        .requests
+        .iter()
+        .zip(["medium", "medium", "high", "high"])
+    {
+        assert_eq!(
+            body["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(body["output_config"], json!({"effort": effort}));
+    }
+    let append_only = |from: usize| {
+        mock_openai::cache_contract::assert_append_only(
+            mock_openai::cache_contract::CacheProtocol::Anthropic,
+            &oracle.model_inputs[from],
+            &oracle.model_inputs[from + 1],
+        )
+    };
+    // Same settings: the whole previous prompt is reused.
+    append_only(0).unwrap();
+    assert!(oracle.cached[1] >= oracle.prompts[0].len() as u64);
+    // The change: not append-only, and none of the old history counts as reused.
+    assert!(append_only(1).is_err());
+    assert!(
+        oracle.cached[2] < oracle.prompts[1].len() as u64 / 2,
+        "the previous history must not be reused across an effort change"
+    );
+    // After the boundary, the new settings continue the new prefix.
+    append_only(2).unwrap();
+    assert!(oracle.cached[3] >= oracle.prompts[2].len() as u64);
+    assert_eq!(oracle.api_key_header_leaks, Vec::<String>::new());
+    // The production observer agrees: the boundary has no baseline (it is not a regression),
+    // and the first turn on the new setting is compared with the boundary request.
+    let events = events.drain_pending_snapshot();
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted { request_id, .. }) => {
+                Some(request_id)
+            }
+            _ => None,
+        })
+        .collect();
+    let cache: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::CacheReuseObserved { comparison, .. }) => {
+                Some(comparison)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 4);
+    assert_eq!(cache.len(), 4);
+    // The mock reports no cache write on the first request, so turn 1 has nothing to compare.
+    assert!(matches!(
+        cache[1],
+        CacheComparison::NoBaseline {
+            reason: CacheBaselineMissing::PreviousUncached
+        }
+    ));
+    assert!(matches!(
+        cache[2],
+        CacheComparison::NoBaseline {
+            reason: CacheBaselineMissing::PrefixChanged
+        }
+    ));
+    assert!(
+        matches!(cache[3], CacheComparison::Compared { previous_request_id, .. } if previous_request_id == completed[2])
+    );
+    assert!(events.iter().all(
+        |event| !matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "CacheRegression")
+    ));
 }

@@ -930,20 +930,18 @@ async fn request_started_records_the_effort_actually_sent() {
         .await
         .unwrap();
 
-    let mut efforts = Vec::new();
-    while efforts.len() < 3 {
-        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .expect("RequestStarted arrives")
-            .unwrap();
-        if let event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
-            reasoning_effort,
-            ..
-        }) = event.kind
-        {
-            efforts.push(reasoning_effort);
-        }
-    }
+    // Every send has completed, so its RequestStarted is already published.
+    let efforts: Vec<_> = receiver
+        .drain_pending_snapshot()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
+                reasoning_effort,
+                ..
+            }) => Some(reasoning_effort),
+            _ => None,
+        })
+        .collect();
 
     assert_eq!(
         efforts,
