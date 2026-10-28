@@ -7,6 +7,8 @@ mod encrypted_reasoning_cache;
 #[path = "hosted_search_cache/mod.rs"]
 mod hosted_search_cache;
 mod image_generation_cache;
+#[path = "read_alias_cache/mod.rs"]
+mod read_alias_cache;
 mod support;
 use std::sync::Arc;
 
