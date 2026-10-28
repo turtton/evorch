@@ -335,3 +335,70 @@ async fn image_input_follows_catalog_modalities_and_skips_unlisted_models() {
         ])
     );
 }
+
+#[tokio::test]
+async fn cursor_limits_come_from_docs_then_the_api_equivalent_model() {
+    // Given: a catalog that knows the public API models but not Cursor's IDs.
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let data = serde_json::json!({"fetched_at": now, "api": {
+        "anthropic": {"models": {"claude-opus-5-5": {"id": "claude-opus-5-5",
+            "limit": {"context": 1000000, "output": 64000}}}},
+        "openai": {"models": {"gpt-5": {"id": "gpt-5",
+            "limit": {"context": 400000, "output": 128000}}}},
+    }});
+    std::fs::write(dir.path().join("models-dev.json"), data.to_string()).unwrap();
+    let catalog = catalog::ModelCatalog::load_or_refresh(dir.path())
+        .await
+        .unwrap();
+    let cursor = Some(config::ProviderTypeConfig::Cursor);
+    let resolve = |entry: &ModelEntryConfig, provider_type| {
+        let resolved = resolve_model_metadata(
+            entry,
+            &BTreeMap::new(),
+            Some(&catalog),
+            Some("cursor"),
+            provider_type,
+        );
+        (resolved.context_window, resolved.origin)
+    };
+
+    // When/Then: a documented Cursor model uses Cursor's window, an undocumented
+    // variant its API model's, and a manual window or explicit reference still wins.
+    assert_eq!(
+        resolve(&ModelEntryConfig::enabled("composer-2.5-fast"), cursor),
+        (Some(200_000), MetadataOrigin::ProviderDocs)
+    );
+    assert_eq!(
+        resolve(&ModelEntryConfig::enabled("claude-opus-5-5-high"), cursor),
+        (Some(300_000), MetadataOrigin::ProviderDocs)
+    );
+    assert_eq!(
+        resolve(&ModelEntryConfig::enabled("gpt-5-high"), cursor),
+        (Some(400_000), MetadataOrigin::ApiEquivalent)
+    );
+    assert_eq!(
+        resolve(&ModelEntryConfig::enabled("mystery-high"), cursor),
+        (None, MetadataOrigin::Default)
+    );
+    let mut referenced = ModelEntryConfig::enabled("claude-opus-5-5-high");
+    referenced.metadata_ref = Some("anthropic/claude-opus-5-5".into());
+    assert_eq!(
+        resolve(&referenced, cursor),
+        (Some(1_000_000), MetadataOrigin::Catalog)
+    );
+    let mut manual = ModelEntryConfig::enabled("composer-2.5");
+    manual.context_window = Some(123);
+    assert_eq!(
+        resolve(&manual, cursor),
+        (Some(123), MetadataOrigin::Manual)
+    );
+    // Other providers never use Cursor's table.
+    assert_eq!(
+        resolve(&ModelEntryConfig::enabled("composer-2.5"), None),
+        (None, MetadataOrigin::Default)
+    );
+}

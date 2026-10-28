@@ -10,6 +10,7 @@ pub mod demo;
 pub mod durable_tasks;
 pub mod effort;
 pub mod folder_picker;
+pub mod fuzzy;
 pub mod html_snapshots;
 pub mod ledger;
 pub mod model_catalog;

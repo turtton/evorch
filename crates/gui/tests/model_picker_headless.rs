@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
+use egui::Key;
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ProviderStatus;
 use gui::model::production::{ProductionModel, compose_production_model};
+use gui::panes::model_picker::{
+    AUTOMATIC_LABEL, DEFAULT_EFFORT_LABEL, EFFORT_HEADING, SEARCH_LABEL,
+};
 use runtime::compose::SwitchableModel;
 use workspace_ui::{ModelPreference, ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -92,100 +96,206 @@ fn default_model(harness: &HeadlessWorkbench<DemoSource>) -> String {
     model
 }
 
+fn open_picker(harness: &mut HeadlessWorkbench<DemoSource>, button: &str) {
+    harness.click_label(button);
+    harness.run();
+    assert!(harness.has_label(SEARCH_LABEL), "the modal opens");
+}
+
+fn type_query(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text(text.into()));
+    harness.run();
+}
+
+fn press(harness: &mut HeadlessWorkbench<DemoSource>, key: Key) {
+    harness.key_press(egui::Modifiers::NONE, key);
+    harness.run();
+}
+
+fn preference(
+    profile: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> Option<ModelPreference> {
+    Some(ModelPreference {
+        profile: profile.into(),
+        model: Some(model.into()),
+        reasoning_effort: reasoning_effort.map(str::to_owned),
+    })
+}
+
+fn thread_preference(harness: &HeadlessWorkbench<DemoSource>) -> Option<ModelPreference> {
+    harness.state().sidebar().threads[0]
+        .model_preference
+        .clone()
+}
+
 #[test]
-fn picker_lists_profiles_and_models_from_catalog() {
+fn model_button_opens_a_modal_listing_profiles_and_models() {
     // Given
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    // When: the closed picker names the routed default model.
-    harness.click_label(&default_model(&harness));
-    harness.run();
+    assert!(!harness.has_label(SEARCH_LABEL));
+    // When: the button naming the routed default model is pressed.
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
     // Then
-    for label in ["local / model-a", "local / model-b", "remote / model-c"] {
-        assert!(harness.has_label(label));
+    for label in [
+        AUTOMATIC_LABEL,
+        "local / model-a",
+        "local / model-b",
+        "remote / model-c",
+    ] {
+        assert!(harness.has_label(label), "{label}");
     }
 }
 
 #[test]
-fn selecting_model_persists_on_thread() {
+fn search_then_enter_selects_the_model_and_persists_it() {
+    // Given: the search box has focus as soon as the modal opens.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    // When: searching by model name and confirming with Enter.
+    type_query(&mut harness, "model-c");
+    assert!(!harness.has_label("local / model-a"));
+    press(&mut harness, Key::Enter);
+    // Then: its effort step follows, and Enter on Default effort finishes the selection.
+    assert!(harness.has_label(EFFORT_HEADING));
+    assert_eq!(thread_preference(&harness), None);
+    press(&mut harness, Key::Enter);
+    let expected = preference("remote", "model-c", None);
+    assert_eq!(thread_preference(&harness), expected);
+    assert_eq!(harness.state().sidebar().threads[1].model_preference, None);
+    assert!(!harness.has_label(SEARCH_LABEL));
+    assert!(harness.state().issued().is_empty());
+    let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    assert_eq!(restored.threads[0].model_preference, expected);
+}
+
+#[test]
+fn search_matches_provider_name_and_type_with_fuzzy_ranking() {
     // Given
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    harness.click_label(&default_model(&harness));
-    harness.run();
-    // When
-    harness.click_label("local / model-b");
-    harness.run();
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    // When: searching a profile name, then a provider type shared by both profiles.
+    type_query(&mut harness, "remote");
     // Then
-    let threads = &harness.state().sidebar().threads;
+    assert!(harness.has_label("remote / model-c"));
+    assert!(!harness.has_label("local / model-a"));
+    assert!(!harness.has_label(AUTOMATIC_LABEL));
+    // When: a subsequence of the model name still finds it, and nonsense finds nothing.
+    for _ in 0.."remote".len() {
+        press(&mut harness, Key::Backspace);
+    }
+    type_query(&mut harness, "mdlb");
+    assert!(harness.has_label("local / model-b"));
+    assert!(!harness.has_label("remote / model-c"));
+    for _ in 0.."mdlb".len() {
+        press(&mut harness, Key::Backspace);
+    }
+    type_query(&mut harness, "zzzz");
+    assert!(harness.has_label("No matching models"));
+}
+
+#[test]
+fn arrow_keys_move_the_highlight_and_escape_closes_without_changes() {
+    // Given: automatic routing is current, so it starts highlighted.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    // When: moving down to remote / model-c and confirming.
+    for _ in 0..3 {
+        press(&mut harness, Key::ArrowDown);
+    }
+    press(&mut harness, Key::Enter);
+    // Then: Enter on the effort step's Default effort completes the selection.
+    assert!(harness.has_label(EFFORT_HEADING));
+    press(&mut harness, Key::Enter);
     assert_eq!(
-        threads[0].model_preference,
-        Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-b".into()),
-            reasoning_effort: None,
-        })
+        thread_preference(&harness),
+        preference("remote", "model-c", None)
     );
-    assert_eq!(threads[1].model_preference, None);
-    assert!(harness.state().issued().is_empty());
-    let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    // When: the highlight moves after reopening, Escape closes without applying it.
+    harness.click_label("remote / model-c");
+    harness.run();
+    press(&mut harness, Key::ArrowUp);
+    press(&mut harness, Key::Escape);
+    // Then
+    assert!(!harness.has_label(SEARCH_LABEL));
     assert_eq!(
-        restored.threads[0].model_preference,
-        threads[0].model_preference
+        thread_preference(&harness),
+        preference("remote", "model-c", None)
     );
 }
 
 #[test]
-fn effort_picker_follows_selected_model_levels_and_persists() {
-    // Given: an explicit selection whose model restricts effort levels.
+fn effort_step_follows_model_levels_and_persists() {
+    // Given: a model that restricts effort levels.
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    assert!(!harness.has_label("Reasoning effort"));
-    harness
-        .state_mut()
-        .set_thread_model_preference(Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-b".into()),
-            reasoning_effort: None,
-        }));
-    harness.run();
-    // When: choosing an effort offered by the selected model.
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    // When: choosing it from the list.
     harness.click_label("local / model-b");
     harness.run();
-    assert!(harness.has_label("Reasoning effort"));
+    // Then: the effort step offers only its levels, and nothing is stored yet.
+    assert!(harness.has_label(EFFORT_HEADING));
+    assert!(harness.has_label(DEFAULT_EFFORT_LABEL));
     assert!(harness.has_label("low"));
     assert!(!harness.has_label("xhigh"));
+    assert_eq!(thread_preference(&harness), None);
+    // When: choosing an effort.
     harness.click_label("high");
     harness.run();
-    // Then: the effort is stored on the thread with the explicit model.
-    let expected = Some(ModelPreference {
-        profile: "local".into(),
-        model: Some("model-b".into()),
-        reasoning_effort: Some("high".into()),
-    });
-    assert_eq!(
-        harness.state().sidebar().threads[0].model_preference,
-        expected
-    );
+    // Then: model and effort are stored together.
+    let expected = preference("local", "model-b", Some("high"));
+    assert_eq!(thread_preference(&harness), expected);
+    assert!(!harness.has_label(EFFORT_HEADING));
     let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
     assert_eq!(restored.threads[0].model_preference, expected);
     // When: switching to a model that cannot send that effort.
-    harness.click_label("local / model-b · high");
-    harness.run();
+    open_picker(&mut harness, "local / model-b · high");
     harness.click_label("local / model-a");
     harness.run();
-    // Then: the unsupported effort is dropped instead of being sent.
+    // Then: the effort step starts on Default effort, so Enter drops the effort.
+    assert!(harness.has_label(EFFORT_HEADING));
+    press(&mut harness, Key::Enter);
     assert_eq!(
-        harness.state().sidebar().threads[0].model_preference,
-        Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-a".into()),
-            reasoning_effort: None,
-        })
+        thread_preference(&harness),
+        preference("local", "model-a", None)
     );
+}
+
+#[test]
+fn escape_in_the_effort_step_returns_to_the_model_list() {
+    // Given: the effort step of a model with levels.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    harness.click_label("local / model-b");
+    harness.run();
+    assert!(harness.has_label(EFFORT_HEADING));
+    // When: Escape is pressed.
+    press(&mut harness, Key::Escape);
+    // Then: the list is back, and the model was not applied.
+    assert!(harness.has_label(SEARCH_LABEL));
+    assert!(!harness.has_label(EFFORT_HEADING));
+    assert_eq!(thread_preference(&harness), None);
 }
 
 #[test]
@@ -195,19 +305,14 @@ fn clearing_selection_restores_automatic_routing() {
     let mut harness = workbench(temp.path(), true);
     harness
         .state_mut()
-        .set_thread_model_preference(Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-b".into()),
-            reasoning_effort: None,
-        }));
+        .set_thread_model_preference(preference("local", "model-b", None));
     harness.run();
-    harness.click_label("local / model-b");
-    harness.run();
+    open_picker(&mut harness, "local / model-b");
     // When
-    harness.click_label("Automatic routing");
+    harness.click_label(AUTOMATIC_LABEL);
     harness.run();
     // Then
-    assert_eq!(harness.state().sidebar().threads[0].model_preference, None);
+    assert_eq!(thread_preference(&harness), None);
 }
 
 #[test]
@@ -218,11 +323,7 @@ fn capture_model_picker_evidence() {
     let mut harness = workbench(temp.path(), true);
     harness
         .state_mut()
-        .set_thread_model_preference(Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-a".into()),
-            reasoning_effort: None,
-        }));
+        .set_thread_model_preference(preference("local", "model-a", None));
     harness.run();
     // When
     let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
@@ -231,8 +332,7 @@ fn capture_model_picker_evidence() {
     frame
         .save_png(std::path::Path::new("/tmp/opencode/w-picker.png"))
         .unwrap();
-    harness.click_label("local / model-a");
-    harness.run();
+    open_picker(&mut harness, "local / model-a");
     // Then
     assert!(harness.has_label("remote / model-c"));
     let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
@@ -259,20 +359,21 @@ fn picker_disabled_without_profiles_offers_settings() {
     assert!(harness.has_label("Select model"));
 }
 
-#[test]
-fn selecting_unsupported_provider_or_claude_model_clears_effort_and_hides_choices() {
-    for kind in ["anthropic", "anthropic-subscription", "cursor"] {
-        let temp = tempfile::tempdir().unwrap();
-        let credential = if kind != "anthropic" {
-            r#"credential = {type = "keyring", service = "evorch", account = "native-test"}"#
-        } else {
-            ""
-        };
-        let mut harness = workbench_with_provider(
-            temp.path(),
-            true,
-            &format!(
-                r#"
+const CREDENTIAL: &str =
+    r#"credential = {type = "keyring", service = "evorch", account = "native-test"}"#;
+
+fn native_workbench(
+    root: &std::path::Path,
+    kind: &str,
+    model: &str,
+    effort_levels: &str,
+) -> HeadlessWorkbench<DemoSource> {
+    let credential = if kind == "anthropic" { "" } else { CREDENTIAL };
+    let mut harness = workbench_with_provider(
+        root,
+        true,
+        &format!(
+            r#"
 [providers.codex]
 type = "openai-codex"
 api_protocol = "openai-codex-responses"
@@ -283,41 +384,67 @@ default_model = "model-b"
 [providers.a-native]
 type = "{kind}"
 {credential}
-models = [{{ id = "selected-model", enabled = true, effort_levels = ["high"] }}]
-default_model = "selected-model"
+models = [{{ id = "{model}", enabled = true{effort_levels} }}]
+default_model = "{model}"
 "#
-            ),
-        );
-        harness
-            .state_mut()
-            .set_thread_model_preference(Some(ModelPreference {
-                profile: "codex".into(),
-                model: Some("model-b".into()),
-                reasoning_effort: Some("high".into()),
-            }));
-        harness.run();
-        harness.click_label("codex / model-b · high");
-        harness.run();
+        ),
+    );
+    harness
+        .state_mut()
+        .set_thread_model_preference(preference("codex", "model-b", Some("high")));
+    harness.run();
+    harness
+}
+
+#[test]
+fn effort_step_is_offered_for_anthropic_only_with_explicit_levels() {
+    // Given: an Anthropic API profile whose model lists effort levels, and one without.
+    for (levels, offered) in [(r#", effort_levels = ["low", "high"]"#, true), ("", false)] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut harness = native_workbench(temp.path(), "anthropic", "selected-model", levels);
+        // When: switching to it from a model with a stored effort.
+        open_picker(&mut harness, "codex / model-b · high");
         harness.click_label("a-native / selected-model");
         harness.run();
-        assert_eq!(
-            harness.state().sidebar().threads[0].model_preference,
-            Some(ModelPreference {
-                profile: "a-native".into(),
-                model: Some("selected-model".into()),
-                reasoning_effort: None,
-            }),
-            "{kind}"
-        );
-        harness.click_label("a-native / selected-model");
-        harness.run();
-        assert!(!harness.has_label("Reasoning effort"), "{kind}");
-        assert!(!harness.has_label("high"), "{kind}");
+        // Then: configured levels are offered (never the common defaults) and the
+        // incompatible stored effort starts on Default; without levels there is no step.
+        assert_eq!(harness.has_label(EFFORT_HEADING), offered, "{levels}");
+        if offered {
+            assert!(harness.has_label("low"));
+            assert!(!harness.has_label("xhigh"));
+            harness.click_label("low");
+            harness.run();
+        }
+        let expected = preference("a-native", "selected-model", offered.then_some("low"));
+        assert_eq!(thread_preference(&harness), expected, "{levels}");
     }
 }
 
 #[test]
-fn selecting_claude_model_preserves_compatible_effort_and_persists_changes() {
+fn cursor_never_offers_an_effort_step_and_clears_the_effort() {
+    // Given: a Cursor profile, even with levels configured on the model.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = native_workbench(
+        temp.path(),
+        "cursor",
+        "claude-opus-5-5-high",
+        r#", effort_levels = ["high"]"#,
+    );
+    // When: switching to it from a model with a stored effort.
+    open_picker(&mut harness, "codex / model-b · high");
+    harness.click_label("a-native / claude-opus-5-5-high");
+    harness.run();
+    // Then: the model is applied at once with no effort.
+    assert!(!harness.has_label(EFFORT_HEADING));
+    assert!(!harness.has_label(SEARCH_LABEL));
+    assert_eq!(
+        thread_preference(&harness),
+        preference("a-native", "claude-opus-5-5-high", None)
+    );
+}
+
+#[test]
+fn claude_subscription_keeps_compatible_effort_and_persists_changes() {
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench_with_provider(
         temp.path(),
@@ -332,38 +459,27 @@ default_model = "claude-sonnet-5-5"
     );
     harness
         .state_mut()
-        .set_thread_model_preference(Some(ModelPreference {
-            profile: "local".into(),
-            model: Some("model-b".into()),
-            reasoning_effort: Some("high".into()),
-        }));
+        .set_thread_model_preference(preference("local", "model-b", Some("high")));
     harness.run();
-    harness.click_label("local / model-b · high");
-    harness.run();
+    open_picker(&mut harness, "local / model-b · high");
     harness.click_label("a-claude / claude-sonnet-5-5");
     harness.run();
-    let mut expected = ModelPreference {
-        profile: "a-claude".into(),
-        model: Some("claude-sonnet-5-5".into()),
-        reasoning_effort: Some("high".into()),
-    };
-    assert_eq!(
-        harness.state().sidebar().threads[0].model_preference,
-        Some(expected.clone())
-    );
-    harness.click_label("a-claude / claude-sonnet-5-5 · high");
-    harness.run();
-    assert!(harness.has_label("Reasoning effort"));
+    // The stored effort is supported by the new model, so the step starts on it.
+    assert!(harness.has_label(EFFORT_HEADING));
     assert!(harness.has_label("xhigh"));
     assert!(!harness.has_label("minimal"));
     assert!(!harness.has_label("none"));
+    press(&mut harness, Key::Enter);
+    let mut expected = preference("a-claude", "claude-sonnet-5-5", Some("high"));
+    assert_eq!(thread_preference(&harness), expected);
+    // Changing the effort of the current model reopens the step.
+    open_picker(&mut harness, "a-claude / claude-sonnet-5-5 · high");
+    harness.click_label("a-claude / claude-sonnet-5-5");
+    harness.run();
     harness.click_label("max");
     harness.run();
-    expected.reasoning_effort = Some("max".into());
-    assert_eq!(
-        harness.state().sidebar().threads[0].model_preference,
-        Some(expected.clone())
-    );
+    expected.as_mut().unwrap().reasoning_effort = Some("max".into());
+    assert_eq!(thread_preference(&harness), expected);
     let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
-    assert_eq!(restored.threads[0].model_preference, Some(expected));
+    assert_eq!(restored.threads[0].model_preference, expected);
 }

@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use config::{ProviderProfileConfig, ProviderTypeConfig};
+use config::{ModelEntryConfig, ProviderProfileConfig, ProviderTypeConfig};
 
 use super::*;
 
@@ -71,4 +71,65 @@ async fn subscriptions_are_priced_as_their_api_models_and_plans_are_never_free()
         price("api", "claude-sonnet-9"),
         Some((Some(3.0), PriceBasis::Billed))
     );
+}
+
+#[tokio::test]
+async fn cursor_models_are_priced_from_docs_or_their_api_equivalent() {
+    // Given: a Cursor profile with a TOML price override, and a catalog that lists the
+    // public API models but no `cursor` provider.
+    let catalog = catalog(serde_json::json!({
+        "anthropic": {"models": {"claude-opus-5-5": {"id": "claude-opus-5-5",
+            "limit": {"context": 1000000, "output": 64000},
+            "cost": {"input": 4.0, "output": 20.0}}}},
+        "openai": {"models": {"gpt-5": {"id": "gpt-5",
+            "cost": {"input": 1.25, "output": 10.0}}}},
+        "google": {"models": {"gemini-3.1-pro": {"id": "gemini-3.1-pro",
+            "cost": {"input": 2.0, "output": 12.0}}}},
+    }))
+    .await;
+    let mut cursor = profile(ProviderTypeConfig::Cursor);
+    cursor.models = vec![ModelEntryConfig {
+        input_price: Some(9.0),
+        ..ModelEntryConfig::enabled("gpt-5-high")
+    }];
+    let pricing = UsagePricing::new(BTreeMap::from([("cursor".into(), cursor)]), Some(catalog));
+    let price = |model: &str| {
+        pricing
+            .comparable_pricing("cursor", Some("cursor"), model)
+            .map(|(schedule, basis)| {
+                (
+                    schedule.standard.base.input,
+                    schedule.standard.base.output,
+                    basis,
+                )
+            })
+    };
+
+    // When/Then: suffixed IDs resolve to their API model, Cursor's own models to the docs
+    // table (the `-fast` ID taking the Fast lane), TOML prices win, and unknown IDs stay
+    // unpriced.
+    let api = PriceBasis::ApiEquivalent;
+    assert_eq!(
+        price("claude-opus-5-5-high"),
+        Some((Some(4.0), Some(20.0), api))
+    );
+    assert_eq!(
+        price("claude-opus-5-5-thinking-xhigh"),
+        Some((Some(4.0), Some(20.0), api))
+    );
+    assert_eq!(
+        price("gemini-3.1-pro-low"),
+        Some((Some(2.0), Some(12.0), api))
+    );
+    assert_eq!(
+        price("gpt-5-medium-fast"),
+        Some((Some(1.25), Some(10.0), api))
+    );
+    assert_eq!(price("composer-2.5"), Some((Some(0.5), Some(2.5), api)));
+    assert_eq!(
+        price("composer-2.5-fast"),
+        Some((Some(3.0), Some(15.0), api))
+    );
+    assert_eq!(price("gpt-5-high"), Some((Some(9.0), Some(10.0), api)));
+    assert_eq!(price("mystery-model-high"), None);
 }

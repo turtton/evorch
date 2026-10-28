@@ -24,13 +24,10 @@ impl ModelRoute {
         };
         // Cursor's OpenAI effort slugs belong only in modelDetails. Preserve the
         // fast price lane while moving the effort into requestedModel.parameters.
-        let (stem, lane) = id.strip_suffix("-fast").map_or((id, ""), |s| (s, "-fast"));
-        if let Some((base, effort)) = stem.rsplit_once('-')
+        let (stem, fast) = config::types::cursor_model::split_fast_lane(id);
+        let lane = if fast { "-fast" } else { "" };
+        if let (base, Some(effort)) = config::types::cursor_model::split_effort_suffix(stem)
             && openai_family(base)
-            && matches!(
-                effort,
-                "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-            )
         {
             route.model_id = format!("{base}{lane}");
             route.fixed_parameters = true;
