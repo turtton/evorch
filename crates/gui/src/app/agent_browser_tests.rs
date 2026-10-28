@@ -81,6 +81,7 @@ fn browser_call(run: &str) -> event_bus::Event {
         call_id: format!("call-{run}"),
         input: None,
         run_id: Some(run.into()),
+        parent_call_id: None,
     })
 }
 

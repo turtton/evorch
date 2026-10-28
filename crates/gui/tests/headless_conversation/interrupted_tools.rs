@@ -71,6 +71,7 @@ fn persist_unfinished_call(storage: &storage::Storage, record: Record) {
         call_id: "call-lost".into(),
         input: Some(serde_json::json!({"command": "sleep 600"})),
         run_id: Some(RUN.into()),
+        parent_call_id: None,
     });
     let events = match record {
         Record::Checkpointed | Record::NoSnapshot => vec![started, running, call],

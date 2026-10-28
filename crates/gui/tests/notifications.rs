@@ -20,6 +20,7 @@ fn notifications_resolve_approval_using_call_index() {
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
             input: None,
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ApprovalRequested {
             input: None,
@@ -48,6 +49,7 @@ fn started(call_id: &str, run_id: &str) -> Event {
         call_id: call_id.into(),
         run_id: Some(run_id.into()),
         input: None,
+        parent_call_id: None,
     })
 }
 

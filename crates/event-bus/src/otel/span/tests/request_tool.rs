@@ -30,6 +30,7 @@ fn chat_and_tool_spans_parent_to_known_agent() {
             tool_name: "search".to_owned(),
             call_id: "call-1".to_owned(),
             run_id: Some("run-1".to_owned()),
+            parent_call_id: None,
         },
         3,
     ));
@@ -105,6 +106,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             tool_name: "tool".to_owned(),
             call_id: "missing-tool-run".to_owned(),
             run_id: None,
+            parent_call_id: None,
         },
         2,
     ));
@@ -135,5 +137,56 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
             SpanDropKind::MissingRunId,
             SpanDropKind::UnknownParent,
         ]
+    );
+}
+
+#[test]
+fn child_tool_span_parents_to_open_parent_tool_else_agent() {
+    // Given: a known agent run with an open parent tool span (e.g. run_js).
+    let mut mapper = SpanMapper::new();
+    mapper.ingest(&start_run("run-1", None, 1));
+    mapper.ingest(&event(
+        ToolEvent::ToolStarted {
+            input: None,
+            tool_name: "run_js".to_owned(),
+            call_id: "call-1".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            parent_call_id: None,
+        },
+        2,
+    ));
+    let child_started = |call_id: &str, parent: &str, seconds| {
+        event(
+            ToolEvent::ToolStarted {
+                input: None,
+                tool_name: "read".to_owned(),
+                call_id: call_id.to_owned(),
+                run_id: Some("run-1".to_owned()),
+                parent_call_id: Some(parent.to_owned()),
+            },
+            seconds,
+        )
+    };
+
+    // When: a child names the open parent, and another names a parent that is not open.
+    let child = mapper.ingest(&child_started("call-1/0", "call-1", 3));
+    let orphan = mapper.ingest(&child_started("call-9/0", "call-9", 4));
+
+    // Then: the first parents to the tool span, the second falls back to the agent.
+    let parent_of = |actions: &[SpanAction]| match actions {
+        [SpanAction::Start { parent, .. }] => parent.clone(),
+        other => panic!("expected one Start, got {other:?}"),
+    };
+    assert_eq!(
+        parent_of(&child),
+        Some(SpanKey::Tool {
+            call_id: "call-1".to_owned()
+        })
+    );
+    assert_eq!(
+        parent_of(&orphan),
+        Some(SpanKey::Agent {
+            run_id: "run-1".to_owned()
+        })
     );
 }

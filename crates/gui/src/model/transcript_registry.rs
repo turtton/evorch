@@ -555,6 +555,7 @@ mod tests {
             tool_name: "read".into(),
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         });
         registry.apply(&started);
         let completed = Event::new(ToolEvent::ToolCompleted {
@@ -564,6 +565,7 @@ mod tests {
             is_error: false,
             detail: None,
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         });
 
         assert_eq!(
@@ -597,6 +599,7 @@ mod tests {
                 tool_name: "write".into(),
                 call_id: call_id.into(),
                 run_id: run_id.map(str::to_owned),
+                parent_call_id: None,
             }));
         }
         // When: looking up known, unknown, and runless calls.
@@ -614,6 +617,7 @@ mod tests {
             tool_name: "write".into(),
             call_id: "known".into(),
             run_id: Some("run-2".into()),
+            parent_call_id: None,
         }));
         let known = Event::new(ToolEvent::ApprovalRequested {
             input: None,
@@ -667,6 +671,7 @@ mod tests {
                 tool_name: format!("tool-{run_id}"),
                 call_id: format!("call-{run_id}"),
                 run_id: Some(run_id.into()),
+                parent_call_id: None,
             }));
         }
         registry.apply(&Event::new(MessageEvent::MessageDelta {

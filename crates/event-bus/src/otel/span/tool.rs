@@ -40,6 +40,7 @@ impl SpanMapper {
             tool_name,
             call_id,
             run_id,
+            parent_call_id,
             ..
         } = event
         else {
@@ -67,9 +68,18 @@ impl SpanMapper {
             self.record_drop(SpanDropKind::UnknownParent, key, at);
             return Vec::new();
         }
+        // 親ツール呼び出し (run_js など) の span が open なら、その子にする。
+        // 親が open でなければ従来どおり agent を親にする。
+        let parent = parent_call_id
+            .as_ref()
+            .map(|parent_call_id| SpanKey::Tool {
+                call_id: parent_call_id.clone(),
+            })
+            .filter(|parent_key| self.open.contains_key(parent_key))
+            .unwrap_or(agent_key);
         self.start_span(StartSpec {
             key,
-            parent: Some(agent_key),
+            parent: Some(parent),
             name: format!("execute_tool {tool_name}"),
             kind: SpanKind::Internal,
             at,

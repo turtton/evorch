@@ -738,6 +738,7 @@ impl LoopState {
                 mailbox: Arc::clone(&self.task.mailbox),
                 parent: self.task.parent.map(|parent| parent.to_string()),
             })),
+            parent_call_id: None,
         };
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();
@@ -1036,6 +1037,7 @@ impl LoopState {
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
                     let run_id = ctx.run_id.clone();
+                    let parent_call_id = ctx.parent_call_id.clone();
                     let handle = tasks.spawn(async move {
                             let ready = tokio::select! {
                                 biased;
@@ -1047,6 +1049,7 @@ impl LoopState {
                                     bus.emit(Event::new(event_bus::ToolEvent::ToolCompleted {
                                         tool_name: name.clone(), call_id: id.clone(), is_error: true,
                                         output: Some(reason.into()), detail: None, run_id: Some(run_id.clone()),
+                                        parent_call_id: parent_call_id.clone(),
                                     }));
                                     ReadyCall::Executed(ToolResult::error(reason))
                                 },
@@ -1076,6 +1079,7 @@ impl LoopState {
                                         output: Some(result.content.clone()),
                                         detail: None,
                                         run_id: Some(ctx.run_id.clone()),
+                                        parent_call_id: ctx.parent_call_id.clone(),
                                     },
                                 ));
                                 completed.push((

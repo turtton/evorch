@@ -69,6 +69,7 @@ fn current_tool_set_and_cleared() {
         tool_name: "read".into(),
         call_id: "call-1".into(),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
     assert_eq!(
         overlay
@@ -85,6 +86,7 @@ fn current_tool_set_and_cleared() {
         is_error: false,
         detail: None,
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
     assert!(
         overlay
@@ -115,6 +117,7 @@ fn ending_a_run_clears_its_tool_but_waiting_keeps_it() {
             tool_name: "read".into(),
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         }));
         // When: the run changes phase before the call reports a result.
         overlay.apply_event(&agent_run_changed("run-1", AgentRunPhase::Running, to));

@@ -309,6 +309,7 @@ async fn approval_requests_are_denied_and_escalation_denials_recorded() {
             call_id: "call-1".into(),
             input: Some(serde_json::json!({"command": "git push"})),
             run_id: Some("root".into()),
+            parent_call_id: None,
         }),
         EventKind::Diagnostic(DiagnosticEvent {
             source: "sandbox".into(),

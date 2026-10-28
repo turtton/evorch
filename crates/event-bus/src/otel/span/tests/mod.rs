@@ -127,6 +127,7 @@ fn tool_started(call_id: &str, run_id: &str, seconds: u64) -> Event {
             tool_name: "search".to_owned(),
             call_id: call_id.to_owned(),
             run_id: Some(run_id.to_owned()),
+            parent_call_id: None,
         },
         seconds,
     )

@@ -61,6 +61,7 @@ fn agents_display_additional_role_names() {
                 tool_name: "read".into(),
                 call_id: format!("image-{id}"),
                 run_id: Some(run_id.clone()),
+                parent_call_id: None,
             },
         )]);
         harness.run();

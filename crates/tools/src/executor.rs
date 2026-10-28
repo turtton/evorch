@@ -106,6 +106,9 @@ pub struct ToolExecutionContext {
     /// 実行元スレッドの識別子。スレッド相関が利用できない場合は `None`。
     pub thread_id: Option<String>,
     pub call_id: Option<String>,
+    /// この呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+    /// `ToolStarted` / `ToolCompleted` へ stamp する。通常の呼び出しでは `None`。
+    pub parent_call_id: Option<String>,
     pub shell_wait_policy: ShellWaitPolicy,
     pub shell_input: Option<Arc<dyn ShellInputControl>>,
 }
@@ -115,6 +118,7 @@ impl PartialEq for ToolExecutionContext {
         self.run_id == other.run_id
             && self.thread_id == other.thread_id
             && self.call_id == other.call_id
+            && self.parent_call_id == other.parent_call_id
             && self.shell_wait_policy == other.shell_wait_policy
     }
 }
@@ -774,6 +778,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             input: Some(args.clone()),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         };
         debug_assert!(
             matches!(
@@ -952,6 +957,7 @@ impl ToolExecutor {
             }),
             detail: result.ok().and_then(|result| result.detail.clone()),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         };
         debug_assert!(
             matches!(

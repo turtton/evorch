@@ -305,6 +305,8 @@ impl TranscriptModel {
                 call_id,
                 input,
                 run_id,
+                // 子呼び出しの入れ子表示は run_js の GUI 担当で扱う。
+                parent_call_id: _,
             }) => {
                 // Older ledgers have no completion events. Tool execution still
                 // closes the preceding response before the next answer streams.
@@ -318,6 +320,7 @@ impl TranscriptModel {
                 output,
                 detail,
                 run_id,
+                parent_call_id: _,
             }) => {
                 self.update_scoped_tool(
                 call_id,
@@ -898,6 +901,7 @@ mod tests {
             tool_name: "read".into(),
             call_id: "c1".into(),
             run_id: None,
+            parent_call_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
             output: None,
@@ -906,6 +910,7 @@ mod tests {
             is_error: false,
             detail: None,
             run_id: None,
+            parent_call_id: None,
         }));
         assert_eq!(
             model.entries()[0],

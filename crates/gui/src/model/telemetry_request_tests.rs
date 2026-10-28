@@ -205,6 +205,7 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
             tool_name: "shell".into(),
             call_id: "call".into(),
             input: None,
+            parent_call_id: None,
         }),
         start + Duration::from_secs(1),
     );
@@ -216,6 +217,7 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
             output: None,
             is_error: false,
             detail: None,
+            parent_call_id: None,
         }),
         start + Duration::from_secs(100),
     );

@@ -176,6 +176,7 @@ impl Fixture {
                 call_id: "call-1".into(),
                 input: Some(json!({"path": "lib.rs"})),
                 run_id: Some(child.clone()),
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ApprovalRequested {
                 tool_name: "shell".into(),

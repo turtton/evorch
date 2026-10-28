@@ -31,9 +31,12 @@ impl SpanMapper {
             SpanKey::Request { .. } | SpanKey::Tool { .. } | SpanKey::Diagnostic { .. } => {
                 spec.parent.as_ref().and_then(|parent| match parent {
                     SpanKey::Agent { run_id } => Some(run_id.clone()),
+                    // 親ツール span (run_js など) の子は、親と同じ run の所属にする。
+                    SpanKey::Tool { .. } => {
+                        self.open.get(parent).and_then(|open| open.run_id.clone())
+                    }
                     SpanKey::Run { .. }
                     | SpanKey::Request { .. }
-                    | SpanKey::Tool { .. }
                     | SpanKey::Diagnostic { .. }
                     | SpanKey::Session { .. } => None,
                 })

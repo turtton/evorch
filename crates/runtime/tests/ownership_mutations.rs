@@ -48,6 +48,7 @@ async fn delayed_run_tool_and_transcript_events_are_fenced_after_claim() {
             is_error: false,
             output: None,
             detail: None,
+            parent_call_id: None,
         }),
     ];
     for event in &events {

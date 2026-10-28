@@ -8,6 +8,7 @@ fn started(call_id: &str) -> Event {
         call_id: call_id.into(),
         input: Some(json!({"path": "README.md"})),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     })
 }
 
@@ -19,6 +20,7 @@ fn completed(is_error: bool) -> Event {
         detail: Some(json!({"bytes": 13})),
         is_error,
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     })
 }
 
@@ -163,6 +165,7 @@ fn started_in(run_id: &str, call_id: &str) -> Event {
         call_id: call_id.into(),
         input: None,
         run_id: Some(run_id.into()),
+        parent_call_id: None,
     })
 }
 
@@ -205,6 +208,7 @@ fn ending_a_run_interrupts_only_its_calls_that_are_still_running() {
             detail: None,
             is_error: false,
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         }));
         model.apply(&started_in("run-1", "lost"));
         model.apply(&started_in("run-2", "other"));
@@ -242,6 +246,7 @@ fn waiting_keeps_running_calls_and_a_late_result_replaces_interrupted() {
         detail: None,
         is_error: true,
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
     // Then: the reported outcome wins.
     assert_eq!(statuses(&model), vec![("c1", &ToolStatus::Failed)]);

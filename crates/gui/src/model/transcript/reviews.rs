@@ -297,6 +297,7 @@ mod tests {
             call_id: "call-1".into(),
             input: None,
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         })
     }
 

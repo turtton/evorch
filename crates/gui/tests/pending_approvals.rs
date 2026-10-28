@@ -180,6 +180,7 @@ fn pending_approvals_workbench_joins_input_by_run_and_original_call() {
             call_id: "call-1".into(),
             run_id: Some(run.into()),
             input: Some(json!({"command": command})),
+            parent_call_id: None,
         })
     }));
     // When: 明示された run の承認を要求する。
@@ -204,6 +205,7 @@ fn pending_approvals_workbench_accepts_raw_and_missing_started_requests() {
         call_id: "raw".into(),
         run_id: Some("run-9".into()),
         input: Some(json!({"command": "pwd"})),
+        parent_call_id: None,
     })]);
     // When: 要求を折り畳む。
     state.apply_events([requested("raw"), requested("run-2:missing:17")]);

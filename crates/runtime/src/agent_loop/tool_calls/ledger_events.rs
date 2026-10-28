@@ -28,6 +28,7 @@ impl LoopState {
                 call_id: id.into(),
                 input: Some(input.clone()),
                 run_id: Some(self.caller_run_id().to_string()),
+                parent_call_id: None,
             }));
         }
     }
@@ -41,6 +42,7 @@ impl LoopState {
                 output: Some(result.content.clone()),
                 detail: result.detail.clone(),
                 run_id: Some(self.caller_run_id().to_string()),
+                parent_call_id: None,
             }));
         }
     }

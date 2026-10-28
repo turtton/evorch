@@ -45,6 +45,7 @@ impl ToolExecutor {
             call_id: id.to_owned(),
             input: Some(args),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         }));
         if let ToolError::ExecutionDenied { reason, .. } = error {
             self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {

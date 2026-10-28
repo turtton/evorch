@@ -83,6 +83,7 @@ fn scoped_prefix_wins_over_conflicting_call_index() {
         call_id: "run-2:call-1:0".into(),
         run_id: Some("run-9".into()),
         input: None,
+        parent_call_id: None,
     }));
     // When/Then: explicit run scope wins without changing index registration.
     assert_eq!(registry.run_for_call("run-2:call-1:0"), Some("run-2"));
@@ -108,6 +109,7 @@ fn malformed_scoped_ids_use_only_exact_call_index() {
             call_id: call_id.into(),
             run_id: Some("run-9".into()),
             input: None,
+            parent_call_id: None,
         }));
         // When/Then: a full matching index entry, not a guessed prefix, resolves the ID.
         assert_eq!(registry.run_for_call(call_id), Some("run-9"));

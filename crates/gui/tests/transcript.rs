@@ -323,6 +323,7 @@ fn final_result_dedups_last_message_for_same_run_even_after_other_entries() {
         tool_name: "read".into(),
         call_id: "call".into(),
         input: None,
+        parent_call_id: None,
     }));
     let result = Event::new(MessageEvent::FinalResultPublished {
         run_id: "run".into(),

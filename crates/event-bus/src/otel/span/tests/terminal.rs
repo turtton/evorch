@@ -124,6 +124,7 @@ fn tool_error_excludes_detail_and_first_token_is_nonmapped() {
             tool_name: "search".to_owned(),
             call_id: "call-1".to_owned(),
             run_id: Some("run-1".to_owned()),
+            parent_call_id: None,
         },
         2,
     ));
@@ -148,6 +149,7 @@ fn tool_error_excludes_detail_and_first_token_is_nonmapped() {
             is_error: true,
             detail: Some(serde_json::json!({"secret": "raw detail"})),
             run_id: Some("run-1".to_owned()),
+            parent_call_id: None,
         },
         4,
     ));

@@ -224,6 +224,7 @@ fn folded_poll_title_and_shell_log_action_remain_reachable_while_pinned() {
             call_id: format!("poll-{index}"),
             input: Some(serde_json::json!({"action":"poll", "job_id":"job-1"})),
             run_id: Some("run-sticky".into()),
+            parent_call_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
             tool_name: "shell".into(),
@@ -235,6 +236,7 @@ fn folded_poll_title_and_shell_log_action_remain_reachable_while_pinned() {
             )),
             detail: Some(serde_json::json!({"shell_job":{"job_id":"job-1", "status":"running"}})),
             run_id: Some("run-sticky".into()),
+            parent_call_id: None,
         }));
     }
     harness.state_mut().entries = model.entries().to_vec();

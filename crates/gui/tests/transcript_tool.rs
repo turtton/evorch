@@ -11,6 +11,7 @@ fn transcript(is_error: bool) -> TranscriptModel {
         call_id: "abcdefgh-1234".into(),
         input: Some(serde_json::json!({"command": "find missing"})),
         run_id: None,
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "bash".into(),
@@ -19,6 +20,7 @@ fn transcript(is_error: bool) -> TranscriptModel {
         output: Some("**literal**: missing directory".into()),
         detail: Some(serde_json::json!({"exit_code": 1})),
         run_id: None,
+        parent_call_id: None,
     }));
     model
 }
@@ -40,6 +42,7 @@ fn grep_harness(input: serde_json::Value) -> Harness<'static> {
         call_id: "grep-1234".into(),
         input: Some(input),
         run_id: None,
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "grep".into(),
@@ -48,6 +51,7 @@ fn grep_harness(input: serde_json::Value) -> Harness<'static> {
         output: Some(String::new()),
         detail: None,
         run_id: None,
+        parent_call_id: None,
     }));
     let mut harness = Harness::new_ui(move |ui| {
         gui::theme::install(ui.ctx());
@@ -264,6 +268,7 @@ fn read_tool_card_keeps_file_name_visible_in_narrow_pane() {
         call_id: "read-2".into(),
         input: Some(serde_json::json!({"path": path})),
         run_id: None,
+        parent_call_id: None,
     }));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(300.0, 200.0))
@@ -297,6 +302,7 @@ fn reviewed_shell_card_shows_its_verdict_while_collapsed() {
         call_id: "call-secret-77".into(),
         input: Some(serde_json::json!({"command": "curl example.com"})),
         run_id: Some("run-77".into()),
+        parent_call_id: None,
     }));
     model.apply(&Event::new(event_bus::DiagnosticEvent {
         source: "sandbox".into(),
@@ -383,6 +389,7 @@ fn browser_card(available: bool) -> Harness<'static> {
         call_id: "browse-1".into(),
         input: Some(serde_json::json!({"url": "https://example.test/"})),
         run_id: Some("run-7".into()),
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "browser_navigate".into(),
@@ -391,6 +398,7 @@ fn browser_card(available: bool) -> Harness<'static> {
         output: Some("- heading \"Example\"".into()),
         detail: None,
         run_id: Some("run-7".into()),
+        parent_call_id: None,
     }));
     let mut harness = Harness::new_ui(move |ui| {
         gui::theme::install(ui.ctx());

@@ -159,6 +159,7 @@ fn lag_never_adds_entries_between_tool_updates_and_agent_messages() {
         call_id: "call".into(),
         input: None,
         run_id: None,
+        parent_call_id: None,
     });
     registry.apply(&started);
     registry.apply(&lag(2, 4));
@@ -170,6 +171,7 @@ fn lag_never_adds_entries_between_tool_updates_and_agent_messages() {
         detail: None,
         is_error: false,
         run_id: None,
+        parent_call_id: None,
     }));
     registry.apply(&Event::new(AgentMessageEvent::Delivered {
         message: AgentMessage {

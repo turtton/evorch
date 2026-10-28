@@ -20,6 +20,7 @@ fn tool_call(call: &str, tool: &str, input: serde_json::Value, error: Option<&st
             call_id: call.into(),
             input: Some(input),
             run_id: Some("child".into()),
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ToolCompleted {
             tool_name: tool.into(),
@@ -28,6 +29,7 @@ fn tool_call(call: &str, tool: &str, input: serde_json::Value, error: Option<&st
             output: Some(error.unwrap_or("ok").into()),
             detail: None,
             run_id: Some("child".into()),
+            parent_call_id: None,
         }),
     ]
 }
@@ -132,6 +134,37 @@ fn metrics_count_the_agent_and_keep_the_simulated_user_apart() {
         [("orchestrator", None), ("worker", Some("root"))]
     );
     assert_eq!((metrics.user_turns, metrics.elapsed_ms), (2, 1_500));
+}
+
+#[test]
+fn metrics_leave_out_calls_made_inside_a_parent_tool_call() {
+    // Given: a run_js call whose child read call failed.
+    let mut events = vec![started("child", None, "worker")];
+    events.extend(tool_call("1", "run_js", serde_json::json!({}), None));
+    let mut inner = tool_call(
+        "1/0",
+        "read",
+        serde_json::json!({"path": "a"}),
+        Some("boom"),
+    );
+    for event in &mut inner {
+        match &mut event.kind {
+            EventKind::Tool(
+                ToolEvent::ToolStarted { parent_call_id, .. }
+                | ToolEvent::ToolCompleted { parent_call_id, .. },
+            ) => *parent_call_id = Some("1".into()),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    events.extend(inner);
+    let record = recorded(&events, Vec::new());
+
+    // When: the run's metrics are derived.
+    let metrics = RunMetrics::of(&record, &outcome(Vec::new()));
+
+    // Then: only the model-issued call counts toward the turn totals.
+    assert_eq!(metrics.tool_calls, BTreeMap::from([("run_js".into(), 1)]));
+    assert!(metrics.tool_errors.is_empty());
 }
 
 #[test]

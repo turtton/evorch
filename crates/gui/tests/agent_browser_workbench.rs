@@ -90,6 +90,7 @@ fn navigate(run: &str) -> [Event; 2] {
             call_id: format!("{run}-navigate"),
             input: Some(json!({"url": "https://example.test/"})),
             run_id: Some(run.into()),
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ToolCompleted {
             tool_name: "browser_navigate".into(),
@@ -98,6 +99,7 @@ fn navigate(run: &str) -> [Event; 2] {
             output: Some("- heading \"Example\"".into()),
             detail: None,
             run_id: Some(run.into()),
+            parent_call_id: None,
         }),
     ]
 }
