@@ -500,12 +500,12 @@ fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
                     )
                 },
             ),
-            format!("wall {}", crate::format::duration(metrics.wall_time)),
         ]
         .iter()
         {
             metric(ui, label);
         }
+        metric_detailed(ui, &metrics.wall_label(), &metrics.wall_tooltip(), false);
     });
 }
 

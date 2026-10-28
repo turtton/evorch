@@ -99,3 +99,131 @@ fn runs_without_an_owning_thread_do_not_open_right_hand_tabs() {
             .is_none()
     );
 }
+
+fn state_with_runs(runs: &[&str]) -> WorkbenchState<crate::fixture::DemoSource> {
+    let mut state = WorkbenchState::new(
+        crate::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .unwrap();
+    let mut thread = workspace_ui::ThreadRecord::new(
+        workspace_ui::ThreadId::new("thread"),
+        workspace_ui::ProjectId::new("project"),
+        "Thread",
+    );
+    thread.run_ids = runs.iter().map(ToString::to_string).collect();
+    state.sidebar.threads = vec![thread];
+    state.sidebar.active_thread = Some(workspace_ui::ThreadId::new("thread"));
+    state
+}
+
+fn started(run: &str) -> event_bus::Event {
+    event_bus::Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+        run_id: run.into(),
+        parent_run_id: Some("root".into()),
+        agent_name: "worker".into(),
+        role: "worker".into(),
+    })
+}
+
+fn changed(run: &str, to: event_bus::AgentRunPhase) -> event_bus::Event {
+    event_bus::Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from: event_bus::AgentRunPhase::Pending,
+        to,
+        reason: None,
+    })
+}
+
+/// The tab count of the leaf holding `id`; 1 means the pane stands alone.
+fn leaf_tab_count(state: &WorkbenchState<crate::fixture::DemoSource>, id: &PanelId) -> usize {
+    let path = state.dock.find_tab(id).expect("pane is docked");
+    state.dock.leaf(path.node_path()).unwrap().tabs.len()
+}
+
+#[test]
+fn restarted_run_leaves_the_parked_tab_for_its_own_split() {
+    // Given: a finished subagent parked in the region next to a running one.
+    let mut state = state_with_runs(&["run-1", "run-2"]);
+    state.apply_events([started("run-1"), started("run-2")]);
+    state.apply_events([changed("run-1", event_bus::AgentRunPhase::Done)]);
+    let id1 = PanelId::new("agent-run-1");
+    assert!(matches!(
+        state.panels[&id1].kind,
+        PanelKind::ParkedAgentTranscript(_)
+    ));
+    assert!(leaf_tab_count(&state, &id1) > 1);
+
+    // When: the runtime resumes it and announces the start again.
+    state.apply_events([started("run-1")]);
+
+    // Then: it is an ordinary transcript pane in a leaf of its own.
+    assert_eq!(state.panels[&id1].kind, PanelKind::SubagentTranscript);
+    assert_eq!(leaf_tab_count(&state, &id1), 1);
+    // Parking again after it finishes works as for any other pane.
+    state.apply_events([changed("run-1", event_bus::AgentRunPhase::Done)]);
+    assert!(matches!(
+        state.panels[&id1].kind,
+        PanelKind::ParkedAgentTranscript(_)
+    ));
+}
+
+#[test]
+fn running_transition_alone_unparks_the_pane() {
+    for phase in [
+        event_bus::AgentRunPhase::Running,
+        event_bus::AgentRunPhase::Pending,
+    ] {
+        let mut state = state_with_runs(&["run-1"]);
+        state.apply_events([started("run-1")]);
+        state.apply_events([changed("run-1", event_bus::AgentRunPhase::Done)]);
+        let id = PanelId::new("agent-run-1");
+        assert!(matches!(
+            state.panels[&id].kind,
+            PanelKind::ParkedAgentTranscript(_)
+        ));
+
+        state.apply_events([changed("run-1", phase)]);
+
+        assert_eq!(state.panels[&id].kind, PanelKind::SubagentTranscript);
+        assert_eq!(leaf_tab_count(&state, &id), 1);
+    }
+}
+
+#[test]
+fn parked_pane_of_another_thread_is_docked_as_running_when_its_thread_returns() {
+    let mut state = state_with_runs(&["run-1"]);
+    state.open_subagent_pane("run-1");
+    state.park_completed_subagent("run-1");
+    let mut other = workspace_ui::ThreadRecord::new(
+        workspace_ui::ThreadId::new("other"),
+        workspace_ui::ProjectId::new("project"),
+        "Other",
+    );
+    other.run_ids = vec!["run-2".into()];
+    state.sidebar.threads.push(other);
+    state.sidebar.active_thread = Some(workspace_ui::ThreadId::new("other"));
+    state.sync_subagent_thread_panes();
+    let id = PanelId::new("agent-run-1");
+    assert!(state.dock.find_tab(&id).is_none());
+
+    // The run resumes while another thread is open.
+    state.unpark_subagent("run-1");
+    assert!(state.dock.find_tab(&id).is_none());
+    state.sidebar.active_thread = Some(workspace_ui::ThreadId::new("thread"));
+    state.sync_subagent_thread_panes();
+
+    assert_eq!(state.panels[&id].kind, PanelKind::SubagentTranscript);
+    assert_eq!(leaf_tab_count(&state, &id), 1);
+}
+
+#[test]
+fn unpark_ignores_panes_that_are_not_parked() {
+    let mut state = state_with_runs(&["run-1"]);
+    state.open_subagent_pane("run-1");
+    let id = PanelId::new("agent-run-1");
+    let before = state.dock.find_tab(&id);
+    state.unpark_subagent("run-1");
+    state.unpark_subagent("run-unknown");
+    assert_eq!(state.dock.find_tab(&id), before);
+}

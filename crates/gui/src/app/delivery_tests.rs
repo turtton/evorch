@@ -7,6 +7,7 @@ use crate::model::composer::ProviderStatus;
 use std::sync::{Arc, Mutex};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+mod new_run_bubble;
 mod performance;
 mod review;
 

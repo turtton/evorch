@@ -36,6 +36,17 @@ impl ThreadMetrics {
         }
     }
 
+    pub fn wall_label(&self) -> String {
+        format!("wall {}", crate::format::duration(self.wall_time))
+    }
+
+    pub fn wall_tooltip(&self) -> String {
+        format!(
+            "Wall time: time with at least one run Running\nagent time: {} (all runs summed)",
+            crate::format::duration(self.agent_time)
+        )
+    }
+
     pub fn cache_label(&self) -> String {
         self.cache_reuse.label()
     }
@@ -44,6 +55,30 @@ impl ThreadMetrics {
         self.cache_reuse
             .tooltip(self.cache_hit_rate, self.average_cache_hit_rate)
     }
+}
+
+/// The total length covered by `spans` (overlaps counted once), and the sum of
+/// their lengths (overlaps counted per span).
+fn union_and_sum(spans: &mut [(Instant, Instant)]) -> (Duration, Duration) {
+    spans.sort_unstable();
+    let mut union = Duration::ZERO;
+    let mut sum = Duration::ZERO;
+    let mut open: Option<(Instant, Instant)> = None;
+    for &(start, end) in spans.iter() {
+        sum += end.saturating_duration_since(start);
+        open = match open {
+            Some((from, until)) if start <= until => Some((from, until.max(end))),
+            Some((from, until)) => {
+                union += until.saturating_duration_since(from);
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((from, until)) = open {
+        union += until.saturating_duration_since(from);
+    }
+    (union, sum)
 }
 
 impl TelemetryOverlay {
@@ -55,20 +90,21 @@ impl TelemetryOverlay {
         let mut cost_total = 0.0;
         let mut has_cost = false;
         let mut cost_partial = false;
-        let mut wall_time = Duration::ZERO;
+        let mut spans: Vec<(Instant, Instant)> = Vec::new();
         for run_id in run_ids {
             if let Some(cost) = self.costs.get(run_id) {
                 cost_total += cost;
                 has_cost = true;
             }
             cost_partial |= self.partially_priced.contains(run_id);
-            if let Some(accumulated) = self.accumulated_running.get(run_id) {
-                wall_time += *accumulated;
+            if let Some(finished) = self.running_spans.get(run_id) {
+                spans.extend_from_slice(finished);
             }
             if let Some(start) = self.active_running_start.get(run_id) {
-                wall_time += now.saturating_duration_since(*start);
+                spans.push((*start, now.max(*start)));
             }
         }
+        let (wall_time, agent_time) = union_and_sum(&mut spans);
         // Prefer explicit conversation roots. Older observations can lack a
         // lifecycle marker, so use parentless runs only when none are known.
         // A thread still owns all its subagents for the total cost above.
@@ -146,6 +182,7 @@ impl TelemetryOverlay {
             average_cache_hit_rate: has_usage.then(|| usage.cache_hit_rate()),
             cache_reuse,
             wall_time,
+            agent_time,
             context_pressure: latest.and_then(TelemetryRow::context_pressure),
             context_used_tokens: latest.and_then(TelemetryRow::context_used_tokens),
             ttft: latest
