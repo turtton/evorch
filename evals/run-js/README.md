@@ -29,74 +29,192 @@ evals/run-js/
   verify/lib/            検証の共通部
   setup/                 課題固有の初期化（t6 の退行コミット）
   solutions/<id>.sh      参照解（検証スクリプトの自己確認用。モデルには見せない）
-  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / gen-t2-expected.mjs
+  scripts/               prepare-clone.sh / prompt.sh / self-test.sh / gen-t2-expected.mjs（課題・検証）
+                         make-overlay.sh / run-one.sh / run-matrix.sh / models.sh / metrics.mjs（実行・集計）
+  test/                  実行・集計スクリプトの確認（ダミー evorch、fixture、単体確認）
 ```
 
 ## 実行手順の骨子
 
-以下の `<…>` は環境に合わせて置き換える。`--db` / `--run-js-enabled` は別担当が headless に実装中のため、フラグ名は仮置き。
+フラグ名は確定（`feat/run-js-prototype` の `evorch run` / `evorch inspect`）:
+
+```
+evorch run --project <clone> --role worker --prompt <text> \
+  [--user-config <overlay>] [--run-js-enabled <true|false>] [--db <path>]
+evorch inspect --db <path> run <run-id> [--full]
+evorch inspect --db <path> events --run <run-id> [--limit <n>]     # 既定 limit 200、上限 10000
+```
+
+- `--db` は `inspect` では**サブコマンドの直前**に置く（`inspect --db <path> run …`）。
+- `--db` を付けた run だけ stderr に `run_id: <id>` を出す。`--run-js-enabled` は `[tools.run_js] enabled` の上書き。
+- `--user-config` は元の `~/.config/evorch` にフォールバックしない。overlay に必要な設定をすべて入れる。
 
 ### 1. 事前準備（1 回だけ）
 
 ```sh
 # 依存を取得しておく（検証と Worker のビルドは --offline で動かすため）
 cd <evorch-checkout> && cargo fetch
+# run_js を含む evorch をビルドし、バイナリを指定する（feat/run-js-prototype の成果）
+export EVORCH_BIN=<evorch-checkout>/target/release/evorch
 ```
 
-`evals/run-js` を含むこのブランチ（`feat/run-js-eval`）を 1 か所に checkout しておく（以下 `$EVAL`）。
+`evals/run-js` を含むこのブランチ（`feat/run-js-eval`）を 1 か所に checkout しておく（以下 `$EVAL`）。資格情報は keyring にあり、overlay には入れない。
 
-### 2. run ごとの clone を作る
-
-利用者の作業ツリーでは実行しない。run ごとに使い捨ての clone を作る。`prepare-clone.sh` は固定コミットの履歴だけを取り込み（他の ref は入れない。`run_js` の実装を含みうる branch が見えないようにするため）、detached HEAD にし、`answers/` を作り（git の追跡対象外）、課題固有の初期化（t6 のみ）を適用する。
+### 2. モデルごとの overlay（`make-overlay.sh`）
 
 ```sh
-RUN=<scratch>/<model>-<task>-<n>
-$EVAL/evals/run-js/scripts/prepare-clone.sh t3-rename "$RUN" [<source-repo>]
+$EVAL/evals/run-js/scripts/make-overlay.sh <route> <effort> <outdir>
 ```
 
-`<source-repo>` の既定は、このブランチの worktree の共通 `.git`。初回のビルドは clone ごとに走る（依存は sccache で大半が再利用される。`agents` と `apply-patch` は数十秒）。clone ごとに `target/` を持たせ、`CARGO_TARGET_DIR` は共有しない（AGENTS.md）。
+- `<outdir>/config.toml` — 利用者の `config.toml` のコピー（元は `$EVORCH_CONFIG_SRC`、既定 `${XDG_CONFIG_HOME:-~/.config}/evorch`）。秘密値は含まれない。
+- `<outdir>/config.d/zz-worker.toml` — `[agents.worker]` / `models = [{ route = "<route>", reasoning_effort = "<effort>" }]`。5 つの overlay の違いは Worker のモデルだけ。
+- 生成物はリポジトリにコミットしない（このリポジトリの作業ツリー内への出力は拒否する）。`run-one.sh` は run ごとに作って後で消すので、通常は手で作らない。
 
-### 3. モデルごとの overlay 設定
+モデルキーと route（`scripts/models.sh`）:
 
-モデルごとの user-config ディレクトリ（overlay）を用意する。provider は `codex-personal`（`gpt-6.1-sol`、`gpt-6-luna+fast`、`gpt-6-astra`）と `claude-personal`（`claude-opus-5-5`、`claude-sonnet-5-5`）。モデル名は利用者の設定に登録された名前を使う。
+| model-key | route | モデル |
+|---|---|---|
+| `gpt-sol` | `gpt-sol` | gpt-6.1-sol |
+| `gpt-luna-fast` | `gpt-luna+fast` | gpt-6-luna+fast |
+| `gpt-astra` | `gpt-astra` | gpt-6-astra |
+| `claude-opus` | `claude-opus` | claude-opus-5-5 |
+| `claude-sonnet` | `claude-sonnet` | claude-sonnet-5-5 |
 
-```
-<overlays>/gpt-6.1-sol/        # Worker のモデルを gpt-6.1-sol にする overlay（仮置き）
-<overlays>/gpt-6-luna-fast/
-<overlays>/gpt-6-astra/
-<overlays>/claude-opus-5-5/
-<overlays>/claude-sonnet-5-5/
-```
+`reasoning_effort` の既定は `medium`（`models.sh` の `EVAL_DEFAULT_EFFORT`）。モデルごとに変えるなら `--effort` か `EVAL_EFFORT` で指定する（実行前に決める）。
 
-overlay の中身（設定ファイル名と書式）はこの README では決めない。5 つの overlay の違いは Worker のモデルだけにし、他の設定（`run_js` の有効化、上限など）は揃える。
-
-### 4. headless で Worker を走らせる
+### 3. 1 run の実行（`run-one.sh`）
 
 ```sh
-evorch run \
-  --project "$RUN" \
-  --role worker \
-  --prompt "$($EVAL/evals/run-js/scripts/prompt.sh t3-rename)" \
-  --user-config <overlays>/<model> \
-  --db <results>/<model>-t3-rename-<n>.db \   # 仮置き: run ごとの store の出力先（別担当が実装中）
-  --run-js-enabled true                        # 仮置き: run_js の有効化フラグ
+$EVAL/evals/run-js/scripts/run-one.sh <model-key> <task-id> <rep> <outroot> \
+  [--run-js true|false] [--effort <e>] [--timeout <sec>] [--keep-clone] [--force]
 ```
 
-`scripts/prompt.sh <id>` は `tasks/<id>.md` の ` ```prompt ` ブロックをそのまま出す（モデルに渡す全文。補足や指示を足さない）。
+流れ: overlay 生成 → `prepare-clone.sh`（t6 は退行コミットを積む setup を含む）→ `prompt.sh` → `evorch run`（`timeout` 付き、既定 30 分 = `EVAL_TIMEOUT_S`）→ `verify/<id>.sh`（既定 15 分 = `EVAL_VERIFY_TIMEOUT_S`。タイムアウトした run も検証する）→ 結果の保存 → clone と overlay の削除。clone は `${EVAL_WORK:-${TMPDIR:-/tmp}/run-js-eval-work}` に作り、clone ごとに `target/` を持つ（`CARGO_TARGET_DIR` は共有しない）。
+
+環境変数: `EVORCH_BIN`（必須）、`EVORCH_CONFIG_SRC`、`EVAL_WORK`、`EVAL_SOURCE_REPO`（`prepare-clone.sh` の source-repo）。
+
+結果は `<outroot>/<model>/<task>/<rep>/`（`<outroot>` はリポジトリの外に置く）:
+
+| ファイル | 内容 |
+|---|---|
+| `result.json` | `run_id`、`status`（`ok` / `error` = evorch が非 0 終了 / `timeout`）、`evorch_exit`、`duration_ms`、`verify`（`pass` / `fail` / `timeout` / `error`）、`verify_exit`、`run_js_enabled`、`route`、`effort` など。**最後に書く**ので、あれば完了扱い |
+| `run.db` | この run の store（`--db`）。run ごとに別ファイルなので並列でも衝突しない |
+| `evorch.stdout.log` / `evorch.stderr.log` | Worker の最終出力 / `run_id:` を含む stderr |
+| `verify.log` | 検証の出力（不一致一覧） |
+| `final.diff` / `answers/` | 固定コミットからの追跡ファイル差分 / `answers/` のコピー |
+| `inspect-run.json` / `inspect-events.json` | run 直後の `evorch inspect` の出力（`metrics.mjs` が優先して読む。無ければ `run.db` を読む） |
+| `zz-worker.toml` | この run で使った Worker のモデル設定 |
+
+終了コード: 0 = 保存した（verify の合否は問わない）/ 結果が既にある、2 = 使い方や環境の誤り、3 = 準備に失敗（結果は書かない）。`result.json` が無いディレクトリは作り直す。
+
+### 4. マトリクスの実行（`run-matrix.sh`）
+
+```sh
+$EVAL/evals/run-js/scripts/run-matrix.sh --outroot <dir> \
+  [--models "gpt-sol claude-opus"] [--tasks "t1-survey t5-single-edit"] \
+  [--reps 3] [--rep-from 1] [-j 2] [--run-js true|false] [--effort <e>] [--timeout <sec>] \
+  [--retry-errors] [--list] [--keep-clone]
+```
+
+- 既定は全 5 モデル × 全 6 課題 × 1 回。順序は rep → 課題 → モデル。
+- `result.json` がある組はスキップするので、中断しても**同じコマンドで再開**できる。`--list` で実行せずに計画（run / skip）だけ見られる。
+- `-j N` で並列度（既定 1）。並列 run は clone・`run.db` が別なので干渉しないが、プロバイダのレート制限と CPU/ビルド負荷に注意。
+- `status` が `error` の結果（資格情報の誤りなど）は `--retry-errors` で消して再実行する。`timeout` は再実行しない。
+- 予備実行（5 モデル × 6 課題 × 1 回 = 30 run）: `run-matrix.sh --outroot <dir>`。その後 `--reps 3` で 3 回に増やすと、既にある rep 1 はスキップされる。
+- stage 2（run_js 無し対照）は別の `--outroot` に `--run-js false` で流す。
 
 ### 5. 検証
 
-run が終わったら、同じ clone に対して検証コマンドを走らせる。
+`run-one.sh` が自動で実行する。手動で行う場合は clone に対して `verify/<id>.sh <clone>` を走らせる（合格 = exit 0 / 不合格 = 1 / 使い方の誤り = 2）。LLM による採点の観点は各 `tasks/<id>.md` の「採点基準」にある。
+
+### 6. 指標の集計（`metrics.mjs`）
+
+bun か node（npm 依存なし）。
 
 ```sh
-$EVAL/evals/run-js/verify/t3-rename.sh "$RUN"; echo "exit=$?"
+node $EVAL/evals/run-js/scripts/metrics.mjs --results <outroot> [--json out.json] [--md out.md] [--format md|json|both]
+node $EVAL/evals/run-js/scripts/metrics.mjs --db <path> --run <run-id>[=<model>/<task>/<rep>] [--run ...]
+node $EVAL/evals/run-js/scripts/metrics.mjs --fixture test/fixture-metrics.json
 ```
 
-検証は clone の `cargo` を使うため、clone の `target/` が温まっていれば短い。結果（exit code と標準エラーの不一致一覧）を run の記録に残す。ターン数・トークン・`run_js` の使い方などの指標は、store（`--db`）から集計する（集計手段は ADR 0039 の Open questions）。LLM による採点の観点は各 `tasks/<id>.md` の「採点基準」に書いてある。
+標準出力は Markdown（既定）。表は 3 つ: run ごと / モデル × 課題（平均。`run_js` 有効・無効は別行）/ shell コマンドの複雑さ分布。JSON には全指標（run ごとの入れ子の形と集計）が入る。`--db` を直接読むときは `--evorch <bin>`（既定 `$EVORCH_BIN`）で `evorch inspect` を呼ぶ。
 
-### 6. 繰り返し
+#### 指標の定義
 
-予備の実行は 5 モデル × 6 課題を 1 回ずつ（30 run）。その後、ばらつきを見るため各条件を 3 回程度に増やす。run ごとに手順 2 の clone を作り直す（clone は使い回さない）。
+データ源: `evorch inspect run`（`usage_requests`、`context`）と `evorch inspect events --run … --limit 10000`（`ToolStarted` / `ToolCompleted`。イベントが上限で切れたら注意欄に出す）。
+
+**リクエスト・トークン・費用**（`usage_requests` の行単位）
+
+| 指標 | 定義 |
+|---|---|
+| `requests` | `purpose` が `agent`（または欠落）の行数。失敗した試行も含む（`requests_failed` に内数） |
+| `aux_requests` | それ以外の行数（`compaction` / `title` / `routing` / `escalation_review` など）。種別は `aux_purposes` |
+| `input` / `cache_read` / `cache_write` / `output` / `reasoning` | agent 行の `input_tokens` / `cache_read_tokens` / `cache_write_tokens` / `output_tokens` / `reasoning_tokens`（null は 0）の合計。台帳の値そのままで、`input` が `cache_read` を含むかはプロバイダ依存の可能性がある（未確認）。モデル間比較は費用か 3 種の和で行う |
+| `cost_usd` / `aux_cost_usd` / `total_cost_usd` | agent 行 / それ以外 / 全体の `cost_usd` 合計。価格不明の行（null）は 0 扱いで、数を `unpriced_requests` と注意欄に出す |
+
+**ツール**
+
+| 指標 | 定義 |
+|---|---|
+| `tools.top_level_calls` | `parent_call_id` を持たない `ToolStarted` の数（`by_name` にツール別）。`top_level_errors` は対応する `ToolCompleted.is_error` の数 |
+| `run_js.calls` | 上のうち `tool_name = run_js` |
+| `run_js.child_calls` | 各 `run_js` の `detail.run_js.calls` の件数 + `calls_omitted` の合計（host に拒否された呼び出しを含む試行数） |
+| `tools.child_executed` / `child_by_tool` | `parent_call_id` を持つ `ToolStarted`（実際に実行した子呼び出し）の数とツール別 |
+| `run_js.output_bytes` / `return_bytes` | `detail.run_js` の `output_bytes` / `return_bytes` の合計 |
+| `run_js.code_chars` | `run_js` の `input.code` の文字数の合計 |
+
+**`run_js` のエラー**（`run_js.errors`。1 つの `run_js` 呼び出しが複数に数えられることがある）
+
+| 指標 | 定義 |
+|---|---|
+| `js_exception` | 親 `ToolCompleted.is_error` で、`timed_out` でも `limit_hit` でもない（JS の例外、worker 異常終了を含む） |
+| `host_rejected` | 子呼び出しのうち `detail.calls[].is_error` だが、対応する子 `ToolCompleted` の `is_error` が無いもの。host が実行せず拒否した呼び出し（利用不可ツール、権限・承認が要る、引数不正、呼び出し数上限） |
+| `child_tool_error` | 子呼び出しが実行されてツール側でエラーになった数（`ToolCompleted.is_error`） |
+| `timeout` | `detail.run_js.timed_out` が真 |
+| `limit_hit` | `detail.run_js.limit_hit` が `timeout` 以外（`tool_calls` / `memory` / `output`。種別は `limit_hit_kinds`） |
+| `pre_run_error` | `detail.run_js` が無いエラー（引数不正、`timeout_ms` の範囲外、host 不在） |
+
+**shell**（トップレベルの `shell` 呼び出しのうち `command` を持つ開始呼び出しが対象。`poll` / `stdin` / `stop` は `control_calls`。`run_js` 内の shell は `child_commands` に件数だけ）
+
+コマンド文字列を次のように前処理してから数える: ヒアドキュメント本体、引用符（`'…'` `"…"`）の中身、コメントを取り除く。
+
+| 指標 | 定義 |
+|---|---|
+| `heredoc_cmds` | `<<` / `<<-`（`<<<` を除く）を含むコマンドの数（`here_string_cmds` は `<<<`） |
+| `interp_inline_cmds` | インライン実行のインタプリタを含むコマンドの数。対象は node / bun / deno（`-e` `-p` `--eval` `--print` `-`、またはヒアドキュメント・here-string 入力）、python（`-c` `-` または heredoc）、perl（`-e` `-E` 系または heredoc）、ruby（`-e`）、awk / gawk / mawk（`-f` 以外）。コマンド位置の語だけを見る（`echo "node -e"` は数えない。`xargs` `env` `sudo` `time` と環境変数代入は読み飛ばす）。言語別は `interp_inline_by_lang` |
+| `interp_file_runs` | スクリプトファイルの実行（`node x.mjs`、`python3 x.py`、`awk -f`）。インラインではない |
+| `jq` | `interp_inline_by_lang.jq` に別枠で数える（`interp_inline_cmds` には含めない） |
+| `oneliner_cmds` | 改行を 1 つも含まないコマンドの数 |
+
+**ワンライナーの複雑さ**（ADR 0039 Open question「予備実行で決める」への初期案。予備実行の分布を見て閾値を見直す）
+
+コマンドごとに次の 5 指標を測り、run ごとに分布（件数・平均・中央値・p90・最大）を出す。重み付きの総合点は作らない（分布そのものを見る）。
+
+| 指標 | 定義 |
+|---|---|
+| `pipes` | パイプ演算子（`\|`、`\|&`）の数 = パイプライン段数 − パイプライン数。`\|\|` と `>\|` は含めない |
+| `chain_ops` | 連結演算子 `&&` `\|\|` `;` とバックグラウンド `&` の数（`2>&1` `&>` の `&` は含めない） |
+| `segments` | 上の演算子と改行で区切った非空の単純コマンドの概数（`then` `do` `fi` などの制御語も 1 つに数える）。帯 `1` / `2-3` / `4-7` / `8+` の件数も出す |
+| `chars` | コマンド文字列全体の文字数（ヒアドキュメント本体を含む） |
+| `lines` | 行数（ヒアドキュメント本体を含む） |
+
+目安として、`segments ≥ 4` または `chars ≥ 300`、あるいはインライン・インタプリタ／ヒアドキュメントを含むものを「ワンライナーを超えた複雑なコマンド」と見て、`run_js` に書くべきだったかを目視で確認する。
+
+**その他**: `verify`（`result.json` の `pass` / `fail` / `timeout` / `error`）、`status`、`duration_s`（`result.json`、無ければイベントの最初〜最後）、`terminal_phase`。モデル × 課題の表は、同じ（モデル, 課題, `run_js` 有効/無効）の run の各数値の平均と `verify pass` の件数。
+
+## 繰り返し
+
+予備の実行は 5 モデル × 6 課題を 1 回ずつ（30 run）。その後、ばらつきを見るため各条件を 3 回程度に増やす。run ごとに clone は作り直す（`run-one.sh` が行う）。
+
+## スクリプトの確認（実モデルを呼ばない）
+
+```sh
+node test/shell-analysis-test.mjs        # shell 解析の単体確認
+node test/metrics-test.mjs               # fixture-metrics.json に対する metrics.mjs の期待値
+test/scripts-test.sh <存在しない作業ディレクトリ>   # ダミー evorch で make-overlay / run-one / run-matrix / metrics の流れを確認
+```
+
+`test/fixture-metrics.json` は `evorch inspect` の出力形式に合わせた合成データ（`test/gen-fixture.mjs` で再生成）。`test/dummy-evorch.sh` は `EVORCH_BIN` に指定できるダミー（引数を記録し、`run_id:` を出し、fixture の `inspect` 出力を返す）。
 
 ## 検証の自己確認
 
