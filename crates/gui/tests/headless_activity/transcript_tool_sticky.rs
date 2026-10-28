@@ -28,6 +28,7 @@ fn harness() -> Harness<'static, State> {
             is_error: false,
             status: ToolStatus::Succeeded,
             reviews: Vec::new(),
+            parent_call_id: None,
         }],
         jobs: ShellJobs::default(),
         viewport: Rect::NOTHING,

@@ -585,6 +585,7 @@ mod tests {
                 is_error: false,
                 status: ToolStatus::Succeeded,
                 reviews: Vec::new(),
+                parent_call_id: None,
             }]
         );
     }
@@ -692,6 +693,7 @@ mod tests {
                     is_error: false,
                     status: ToolStatus::Running,
                     reviews: Vec::new(),
+                    parent_call_id: None,
                 }]
             );
         }

@@ -157,6 +157,14 @@ pub fn tool_header(
                 .unwrap_or_default();
             header
         }
+        "run_js" => {
+            let mut header = header(icons::CODE, "Run JS");
+            header.subject = str_arg("code")
+                .and_then(|code| code.lines().find(|line| !line.trim().is_empty()))
+                .map(one_line)
+                .unwrap_or_default();
+            header
+        }
         "skill_load" => {
             let mut header = header(icons::BOOK_OPEN, "Load skill");
             header.subject = str_arg("name").map(one_line).unwrap_or_default();

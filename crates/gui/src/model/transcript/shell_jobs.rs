@@ -51,6 +51,9 @@ pub struct ShellJob {
     pub exit_code: Option<i32>,
     /// Saved full output once the job finished, when the tool kept one.
     pub artifact: Option<String>,
+    /// The call that started the job, as live output reports it. A start
+    /// call's card has no job handle until its result arrives.
+    pub call_id: Option<String>,
     live: Option<LiveLog>,
     polled: String,
     polled_truncated: bool,
@@ -74,6 +77,7 @@ impl ShellJob {
             status: "running".into(),
             exit_code: None,
             artifact: None,
+            call_id: None,
             live: None,
             polled: String::new(),
             polled_truncated: false,
@@ -170,6 +174,14 @@ impl ShellJobs {
         matches.next().is_none().then_some(first)
     }
 
+    /// The latest job of `run_id` that `call_id` started, known only from
+    /// live output.
+    pub fn get_by_call(&self, run_id: Option<&str>, call_id: &str) -> Option<&ShellJob> {
+        self.jobs.iter().rev().find(|job| {
+            job.key.run_id.as_deref() == run_id && job.call_id.as_deref() == Some(call_id)
+        })
+    }
+
     /// Jobs in the order they were first seen.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ShellJob> {
         self.jobs.iter()
@@ -194,12 +206,16 @@ impl ShellJobs {
     pub(crate) fn apply_live(
         &mut self,
         key: ShellJobKey,
+        call_id: Option<&str>,
         offset: u64,
         chunk: &str,
         status: &str,
         exit_code: Option<i32>,
     ) {
         let job = self.job_mut(key);
+        if let Some(call_id) = call_id {
+            job.call_id = Some(call_id.to_owned());
+        }
         job.set_status(status, exit_code);
         let live = job.live.get_or_insert_with(|| LiveLog {
             text: String::new(),
@@ -350,6 +366,7 @@ mod tests {
         started(&mut jobs);
         jobs.apply_live(
             ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            None,
             0,
             "one\n",
             "running",
@@ -357,6 +374,7 @@ mod tests {
         );
         jobs.apply_live(
             ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            None,
             2,
             "e\ntwo\n",
             "running",
@@ -364,6 +382,7 @@ mod tests {
         );
         jobs.apply_live(
             ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            None,
             20,
             "late\n",
             "completed",
@@ -381,6 +400,7 @@ mod tests {
         let mut jobs = ShellJobs::default();
         jobs.apply_live(
             ShellJobKey::new(Some("run-1"), "job-12345678", None),
+            None,
             0,
             "",
             "completed",
@@ -398,6 +418,7 @@ mod tests {
         for index in 0..300u64 {
             jobs.apply_live(
                 ShellJobKey::new(None, "job", None),
+                None,
                 index * 1024,
                 &line,
                 "running",
@@ -416,6 +437,7 @@ mod tests {
             if live {
                 jobs.apply_live(
                     ShellJobKey::new(None, "job", None),
+                    None,
                     0,
                     output,
                     "running",
