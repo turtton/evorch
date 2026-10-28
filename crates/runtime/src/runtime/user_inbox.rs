@@ -127,6 +127,8 @@ pub(crate) struct UserInbox {
     sealed: AtomicBool,
     #[cfg(test)]
     pause: Mutex<Option<test_pause::SendPause>>,
+    #[cfg(test)]
+    claim_gate_contended: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl Default for UserInbox {
@@ -140,6 +142,8 @@ impl Default for UserInbox {
             sealed: AtomicBool::new(false),
             #[cfg(test)]
             pause: Mutex::new(None),
+            #[cfg(test)]
+            claim_gate_contended: Mutex::new(None),
         }
     }
 }
@@ -268,6 +272,15 @@ impl UserInbox {
     pub(crate) fn claim(&self, seq: u64) -> bool {
         if seq == 0 {
             return true; // internal notification / initial input
+        }
+        #[cfg(test)]
+        if let Some(reached) = self.claim_gate_contended.lock().unwrap().take() {
+            // Signal an actual contended gate attempt, not just thread startup.
+            assert!(matches!(
+                self.consumption.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            reached.send(()).unwrap();
         }
         let _guard = self
             .consumption
@@ -667,10 +680,13 @@ mod withdrawal_tests {
         reached.recv().unwrap();
         // Observation does not take the consumption/storage gate.
         assert_eq!(inbox.status().pending, 1);
+        let (claim_reached_tx, claim_reached) = std::sync::mpsc::channel();
+        *inbox.claim_gate_contended.lock().unwrap() = Some(claim_reached_tx);
         let adoption = {
             let inbox = inbox.clone();
             std::thread::spawn(move || inbox.claim(seq))
         };
+        claim_reached.recv().unwrap();
         resume.send(()).unwrap();
         assert_eq!(withdrawal.join().unwrap(), Ok(()));
         assert!(!adoption.join().unwrap());
