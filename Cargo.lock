@@ -2331,6 +2331,7 @@ dependencies = [
  "event-bus",
  "js-engine",
  "mock-openai",
+ "recorder",
  "routing",
  "runtime",
  "rusqlite",
