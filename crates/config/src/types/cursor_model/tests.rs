@@ -149,3 +149,38 @@ fn docs_context_windows_ignore_suffixes() {
     );
     assert_eq!(cursor_docs_context_window("unknown-model"), None);
 }
+
+#[test]
+fn id_aliases_cover_version_separator_and_preview_spellings() {
+    // (id, aliases in order)
+    let cases: [(&str, &[&str]); 8] = [
+        ("claude-opus-5-5", &["claude-opus-5.5"]),
+        ("gpt-5.6-sol", &["gpt-5-6-sol"]),
+        (
+            "gemini-3.1-pro",
+            &[
+                "gemini-3-1-pro",
+                "gemini-3.1-pro-preview",
+                "gemini-3-1-pro-preview",
+            ],
+        ),
+        ("gemini-3.1-pro-preview", &["gemini-3-1-pro-preview"]),
+        ("claude-opus-5", &[]),
+        ("composer-2.5", &["composer-2-5"]),
+        ("o3-mini", &[]),
+        ("claude-opus-4-5-20251101", &["claude-opus-4.5-20251101"]),
+    ];
+    for (id, expected) in cases {
+        assert_eq!(cursor_id_aliases(id), expected, "{id}");
+    }
+}
+
+#[test]
+fn docs_rows_match_alternative_spellings() {
+    assert_eq!(
+        cursor_docs_context_window("claude-opus-5.5-high"),
+        Some(300_000)
+    );
+    assert_eq!(cursor_docs_context_window("gpt-5-6-sol"), Some(272_000));
+    assert!(cursor_docs_pricing("composer-2-5-fast").is_some());
+}

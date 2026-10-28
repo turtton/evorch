@@ -31,7 +31,12 @@ fn workbench_with_provider(
             .unwrap();
     }
     sidebar.switch_thread(&ThreadId::new("thread-1")).unwrap();
-    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+    let mut ui_settings = UiSettings::default();
+    ui_settings.keybinds.bindings.insert(
+        workspace_ui::KeyAction::CycleAgentRole,
+        "Alt+R".parse().unwrap(),
+    );
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &ui_settings)
         .unwrap()
         .with_sidebar(sidebar)
         .with_sidebar_path(root.join("sidebar.json"));
@@ -296,6 +301,35 @@ fn escape_in_the_effort_step_returns_to_the_model_list() {
     assert!(harness.has_label(SEARCH_LABEL));
     assert!(!harness.has_label(EFFORT_HEADING));
     assert_eq!(thread_preference(&harness), None);
+}
+
+#[test]
+fn shortcuts_behind_the_picker_stay_quiet_in_both_steps() {
+    // Given: Alt+R cycles the composer role, and the picker is open on the model list.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let role = harness.state().composer().role;
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+    // When/Then: the shortcut does nothing in the model list...
+    harness.key_press(egui::Modifiers::ALT, Key::R);
+    harness.run();
+    assert_eq!(harness.state().composer().role, role);
+    // ...nor in the effort step.
+    harness.click_label("local / model-b");
+    harness.run();
+    assert!(harness.has_label(EFFORT_HEADING));
+    harness.key_press(egui::Modifiers::ALT, Key::R);
+    harness.run();
+    assert_eq!(harness.state().composer().role, role);
+    // When: the picker is closed, the shortcut works again.
+    press(&mut harness, Key::Escape);
+    press(&mut harness, Key::Escape);
+    assert!(!harness.has_label(SEARCH_LABEL));
+    harness.key_press(egui::Modifiers::ALT, Key::R);
+    harness.run();
+    assert_ne!(harness.state().composer().role, role);
 }
 
 #[test]

@@ -133,3 +133,38 @@ async fn cursor_models_are_priced_from_docs_or_their_api_equivalent() {
     assert_eq!(price("gpt-5-high"), Some((Some(9.0), Some(10.0), api)));
     assert_eq!(price("mystery-model-high"), None);
 }
+
+#[tokio::test]
+async fn cursor_ids_match_catalog_spellings_and_prefer_exact_names() {
+    // Given: a catalog spelled as models.dev spells it (dotted OpenAI versions, a
+    // `-preview` Gemini, a dotted Claude) that also lists `o3-mini-high` as a model of
+    // its own next to `o3-mini`.
+    let cost = |input: f64| serde_json::json!({"input": input, "output": input * 10.0});
+    let catalog = catalog(serde_json::json!({
+        "anthropic": {"models": {"claude-sonnet-4.5": {"id": "claude-sonnet-4.5", "cost": cost(3.0)}}},
+        "openai": {"models": {
+            "gpt-5.5": {"id": "gpt-5.5", "cost": cost(5.0)},
+            "o3-mini": {"id": "o3-mini", "cost": cost(1.1)},
+            "o3-mini-high": {"id": "o3-mini-high", "cost": cost(7.0)},
+        }},
+        "google": {"models": {"gemini-3.1-pro-preview": {"id": "gemini-3.1-pro-preview", "cost": cost(2.0)}}},
+    }))
+    .await;
+    let pricing = UsagePricing::new(
+        BTreeMap::from([("cursor".into(), profile(ProviderTypeConfig::Cursor))]),
+        Some(catalog),
+    );
+    let input = |model: &str| {
+        pricing
+            .comparable_pricing("cursor", Some("cursor"), model)
+            .and_then(|(schedule, _)| schedule.standard.base.input)
+    };
+
+    // When/Then: separator and preview spellings resolve, while a catalog model whose
+    // own name carries the suffix beats the base model it would be stripped to.
+    assert_eq!(input("gpt-5-5-high"), Some(5.0));
+    assert_eq!(input("claude-sonnet-4-5-thinking-high"), Some(3.0));
+    assert_eq!(input("gemini-3.1-pro-low"), Some(2.0));
+    assert_eq!(input("o3-mini-high"), Some(7.0));
+    assert_eq!(input("o3-mini-low"), Some(1.1));
+}

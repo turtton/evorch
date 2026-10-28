@@ -402,3 +402,45 @@ async fn cursor_limits_come_from_docs_then_the_api_equivalent_model() {
         (None, MetadataOrigin::Default)
     );
 }
+
+#[tokio::test]
+async fn cursor_alias_spellings_rank_after_every_exact_id() {
+    // Given: the exact base ID and an alias spelling of the full ID both exist.
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let data = serde_json::json!({"fetched_at": now, "api": {
+        "openai": {"models": {
+            "gpt-5-5": {"id": "gpt-5-5", "limit": {"context": 111, "output": 1}},
+            "gpt-5.5-high": {"id": "gpt-5.5-high", "limit": {"context": 222, "output": 2}},
+            "gpt-5.6": {"id": "gpt-5.6", "limit": {"context": 333, "output": 3}},
+        }},
+    }});
+    std::fs::write(dir.path().join("models-dev.json"), data.to_string()).unwrap();
+    let catalog = catalog::ModelCatalog::load_or_refresh(dir.path())
+        .await
+        .unwrap();
+    let find = |id: &str| {
+        resolve_catalog_match(
+            &ModelEntryConfig::enabled(id),
+            &catalog,
+            Some("cursor"),
+            Some(config::ProviderTypeConfig::Cursor),
+        )
+        .map(|(model, kind)| (model.context_window, kind))
+    };
+
+    // When/Then: the exact base wins over the alias of the full ID; an alias alone still
+    // resolves, as API-equivalent; the sent ID is only looked up, never rewritten.
+    assert_eq!(
+        find("gpt-5-5-high"),
+        Some((Some(111), CatalogMatch::ApiEquivalent))
+    );
+    assert_eq!(
+        find("gpt-5-6-low"),
+        Some((Some(333), CatalogMatch::ApiEquivalent))
+    );
+    assert_eq!(find("gpt-5.6"), Some((Some(333), CatalogMatch::Direct)));
+}

@@ -72,12 +72,19 @@ fn cursor_api_equivalent<'a>(
     model_id: &str,
     catalog: &'a ModelCatalog,
 ) -> Option<&'a ModelMetadata> {
-    use config::types::cursor_model::{cursor_api_providers, cursor_lookup_ids};
-    cursor_lookup_ids(model_id).into_iter().find_map(|id| {
-        cursor_api_providers(id)
-            .iter()
-            .find_map(|provider| catalog.find(provider, id))
-    })
+    use config::types::cursor_model::{cursor_api_providers, cursor_id_aliases, cursor_lookup_ids};
+    let exact = cursor_lookup_ids(model_id);
+    // Spellings the catalog may use for the same models; they only rank after every
+    // exact ID, so a model whose own name carries a suffix still beats its base.
+    let aliases: Vec<String> = exact.iter().flat_map(|id| cursor_id_aliases(id)).collect();
+    exact
+        .into_iter()
+        .chain(aliases.iter().map(String::as_str))
+        .find_map(|id| {
+            cursor_api_providers(id)
+                .iter()
+                .find_map(|provider| catalog.find(provider, id))
+        })
 }
 
 /// Like [`resolve_catalog_entry`], also reporting whether the entry is only the

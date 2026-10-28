@@ -103,6 +103,53 @@ pub fn cursor_lookup_ids(id: &str) -> Vec<&str> {
     }
 }
 
+/// 別表記で載っている同じモデルの ID 候補。カタログ照合専用で、送信する ID には使わない。
+///
+/// 版番号の区切りは提供元で `5-5` と `5.5` に揺れ、Google は `-preview` を付けた ID で
+/// 載せることが多い。元の ID は含めない。
+pub fn cursor_id_aliases(id: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for (from, to) in [('-', '.'), ('.', '-')] {
+        let swapped = swap_version_separator(id, from, to);
+        if swapped != id {
+            aliases.push(swapped);
+        }
+    }
+    if id.starts_with("gemini-") && !id.ends_with("-preview") {
+        let preview = format!("{id}-preview");
+        aliases.extend(
+            std::iter::once(preview.clone()).chain(
+                aliases
+                    .clone()
+                    .into_iter()
+                    .map(|alias| format!("{alias}-preview")),
+            ),
+        );
+    }
+    aliases
+}
+
+/// 短い数字（版番号）に挟まれた `from` だけを `to` に置き換える。日付の `5-20251101` のような
+/// 長い数字列との境目は版番号ではないので触らない。
+fn swap_version_separator(id: &str, from: char, to: char) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    let digits =
+        |range: &mut dyn Iterator<Item = &char>| range.take_while(|c| c.is_ascii_digit()).count();
+    chars
+        .iter()
+        .enumerate()
+        .map(|(index, &c)| {
+            let before = digits(&mut chars[..index].iter().rev());
+            let after = digits(&mut chars[index + 1..].iter());
+            if c == from && (1..=2).contains(&before) && (1..=2).contains(&after) {
+                to
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// 基底 ID のファミリーから、同じモデルを API 価格で引く models.dev の provider。
 /// ファミリーを推定できなければ空。
 pub fn cursor_api_providers(base: &str) -> &'static [&'static str] {
@@ -256,7 +303,11 @@ const DOCS: &[DocsRow] = &[
 
 fn docs_row(id: &str) -> Option<&'static DocsRow> {
     let base = split_cursor_model_id(id).base;
-    DOCS.iter().find(|row| row.id == base)
+    DOCS.iter().find(|row| row.id == base).or_else(|| {
+        let aliases = cursor_id_aliases(base);
+        DOCS.iter()
+            .find(|row| aliases.iter().any(|alias| alias == row.id))
+    })
 }
 
 /// Cursor docs が示す context window。docs に無いモデルは `None`。

@@ -69,7 +69,19 @@ fn picker_modal(
     state: &mut ModelPickerState,
     accept_keys: bool,
 ) -> Option<Option<ModelPreference>> {
-    let keys = accept_keys.then(|| read_keys(ctx, &state.stage));
+    let keys = accept_keys.then(|| read_keys(ctx));
+    if keys.is_some_and(|keys| keys.escape) {
+        match state.stage {
+            PickerStage::Models => state.close(),
+            PickerStage::Effort { .. } => {
+                state.stage = PickerStage::Models;
+                state.focus_query = true;
+            }
+        }
+        if !state.open {
+            return None;
+        }
+    }
     let mut chosen = None;
     let modal = egui::Modal::new(egui::Id::new("model-picker"))
         .backdrop_color(palette().OVERLAY)
@@ -95,19 +107,20 @@ struct Keys {
     up: bool,
     down: bool,
     enter: bool,
-    /// Escape in the effort step, which returns to the model list.
-    back: bool,
+    /// Closes the model list; in the effort step it returns to the list.
+    escape: bool,
 }
 
-fn read_keys(ctx: &egui::Context, stage: &PickerStage) -> Keys {
+/// Takes the picker's keys out of the frame so that nothing drawn after it, such
+/// as the composer below, also reacts to them.
+fn read_keys(ctx: &egui::Context) -> Keys {
     ctx.input_mut(|input| {
         let mut press = |key| input.consume_key(Modifiers::NONE, key);
         Keys {
             up: press(Key::ArrowUp),
             down: press(Key::ArrowDown),
             enter: press(Key::Enter),
-            // In the model list the modal itself closes on Escape.
-            back: matches!(stage, PickerStage::Effort { .. }) && press(Key::Escape),
+            escape: press(Key::Escape),
         }
     })
 }
@@ -163,8 +176,7 @@ fn models_step(
         .show(ui, |ui| {
             for (index, row) in rows.iter().enumerate() {
                 let (text, detail, current) = row_texts(row, context.preference);
-                let response = ui.selectable_label(index == state.selected, text);
-                paint_detail(ui, &response, &detail, current);
+                let response = picker_row(ui, index == state.selected, &text, &detail, current);
                 if response.hovered()
                     && response
                         .ctx
@@ -199,21 +211,111 @@ fn row_texts(row: &PickerRow, current: Option<&ModelPreference>) -> (String, Str
     }
 }
 
-/// Right-aligned provider type, with a marker on the current selection.
-fn paint_detail(ui: &egui::Ui, response: &egui::Response, detail: &str, current: bool) {
-    let text = match (detail.is_empty(), current) {
+/// Detail text of a row: the provider type, then a marker on the current selection.
+fn detail_text(detail: &str, current: bool) -> String {
+    match (detail.is_empty(), current) {
         (true, true) => "current".to_owned(),
-        (true, false) => return,
+        (true, false) => String::new(),
         (false, true) => format!("{detail} · current"),
         (false, false) => detail.to_owned(),
-    };
-    ui.painter().text(
-        response.rect.right_center() - egui::vec2(SP_2, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        text,
+    }
+}
+
+/// Where a row's two texts go. The detail keeps its own width at the right and the
+/// name takes what is left, so a long name is elided instead of running into it.
+struct RowLayout {
+    name: std::sync::Arc<egui::Galley>,
+    name_pos: egui::Pos2,
+    detail: std::sync::Arc<egui::Galley>,
+    detail_pos: egui::Pos2,
+}
+
+/// One line of text no wider than `width`, ending in an ellipsis when it was cut.
+fn elided(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    ui.painter().layout_job(job)
+}
+
+fn layout_row(ui: &egui::Ui, rect: egui::Rect, text: &str, detail: &str) -> RowLayout {
+    let inner = rect.shrink2(egui::vec2(SP_2, 0.0));
+    let detail = elided(
+        ui,
+        detail,
         egui::FontId::proportional(FONT_SMALL),
         palette().TEXT_MUTED,
+        inner.width() * ROW_DETAIL_MAX_SHARE,
     );
+    let detail_width = detail.size().x;
+    let gap = if detail_width > 0.0 { SP_3 } else { 0.0 };
+    let name_width = (inner.width() - detail_width - gap).max(0.0);
+    let name = elided(
+        ui,
+        text,
+        egui::FontId::proportional(FONT_BODY),
+        palette().TEXT,
+        name_width,
+    );
+    let name_pos = egui::pos2(inner.left(), rect.center().y - name.size().y / 2.0);
+    let detail_pos = egui::pos2(
+        inner.right() - detail_width,
+        rect.center().y - detail.size().y / 2.0,
+    );
+    RowLayout {
+        name,
+        name_pos,
+        detail,
+        detail_pos,
+    }
+}
+
+/// A full-width selectable row: the name on the left, elided when long, and the
+/// provider type on the right.
+fn picker_row(
+    ui: &mut egui::Ui,
+    highlighted: bool,
+    text: &str,
+    detail: &str,
+    current: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_DENSE),
+        egui::Sense::click(),
+    );
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            enabled,
+            highlighted,
+            text,
+        )
+    });
+    if ui.is_rect_visible(rect) {
+        let fill = if highlighted {
+            palette().SELECTED_ROW
+        } else if response.hovered() {
+            palette().HOVER_ROW
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(R_SM), fill);
+        let layout = layout_row(ui, rect, text, &detail_text(detail, current));
+        ui.painter()
+            .galley(layout.name_pos, layout.name, palette().TEXT);
+        ui.painter()
+            .galley(layout.detail_pos, layout.detail, palette().TEXT_MUTED);
+    }
+    response
 }
 
 fn effort_step(
@@ -225,11 +327,6 @@ fn effort_step(
     keys: Option<Keys>,
 ) -> Option<Option<ModelPreference>> {
     let keys = keys.unwrap_or_default();
-    if keys.back {
-        state.stage = PickerStage::Models;
-        state.focus_query = true;
-        return None;
-    }
     ui.label(h3(EFFORT_HEADING));
     ui.horizontal(|ui| {
         ui.label(muted(preference_label(model)));
@@ -243,8 +340,13 @@ fn effort_step(
     let mut chosen = None;
     for (index, effort) in efforts.iter().enumerate() {
         let text = effort.as_deref().unwrap_or(DEFAULT_EFFORT_LABEL);
-        let response = ui.selectable_label(index == selected, text);
-        paint_detail(ui, &response, "", *effort == model.reasoning_effort);
+        let response = picker_row(
+            ui,
+            index == selected,
+            text,
+            "",
+            *effort == model.reasoning_effort,
+        );
         if response.clicked() {
             chosen = Some(index);
         }
@@ -262,3 +364,54 @@ fn effort_step(
 const PICKER_MAX_WIDTH: f32 = 560.0;
 /// Visible height of the model list before it scrolls.
 const PICKER_LIST_HEIGHT: f32 = 360.0;
+/// Largest share of a row's width the detail may take before it is cut short.
+const ROW_DETAIL_MAX_SHARE: f32 = 0.4;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lays out one row of `width` and returns it with the row's rectangle.
+    fn layout(width: f32, text: &str, detail: &str) -> (RowLayout, egui::Rect) {
+        let mut laid_out = None;
+        let mut harness = egui_kittest::Harness::builder().build_ui(|ui| {
+            crate::theme::install(ui.ctx());
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, ROW_DENSE));
+            laid_out = Some((layout_row(ui, rect, text, detail), rect));
+        });
+        harness.run();
+        drop(harness);
+        laid_out.expect("the UI ran once")
+    }
+
+    #[test]
+    fn long_names_are_elided_and_never_overlap_the_detail() {
+        // (width, name, detail, name is cut)
+        let long = "profile / a-very-long-model-name-that-keeps-going-and-going-and-going";
+        for (width, name, detail, cut) in [
+            (
+                400.0,
+                "local / model-b",
+                "openai-compatible · current",
+                false,
+            ),
+            (400.0, long, "openai-compatible · current", true),
+            (160.0, long, "anthropic-subscription · current", true),
+            (400.0, long, "", true),
+        ] {
+            let (row, rect) = layout(width, name, detail);
+            let name_rect = egui::Rect::from_min_size(row.name_pos, row.name.size());
+            let detail_rect = egui::Rect::from_min_size(row.detail_pos, row.detail.size());
+            assert_eq!(row.name.elided, cut, "{name:?} in {width}");
+            assert!(rect.contains_rect(name_rect), "{name:?} in {width}");
+            assert!(rect.contains_rect(detail_rect), "{detail:?} in {width}");
+            if !detail.is_empty() {
+                assert!(
+                    name_rect.right() < detail_rect.left(),
+                    "name {name_rect:?} overlaps detail {detail_rect:?} in {width}"
+                );
+            }
+        }
+    }
+}
