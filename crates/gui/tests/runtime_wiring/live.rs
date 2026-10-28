@@ -67,6 +67,7 @@ worker = [{{ profile = "live" }}]
     let response = model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 turn: None,
                 category: None,
                 run_id: "gui-chat".into(),

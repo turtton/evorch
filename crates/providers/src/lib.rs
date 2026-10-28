@@ -36,9 +36,9 @@ pub use image_generation::{
     ImageGenerationResponse, InlineImage,
 };
 pub use message::{
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
-    ProviderCapabilities, RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec,
-    Usage,
+    AttemptLog, AttemptOutcome, AttemptRecord, ChatRequest, ChatResponse, ContentBlock,
+    FinishReason, JsonSchema, Message, ObservationContext, ProviderCapabilities,
+    RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
 pub use responses_replay::{

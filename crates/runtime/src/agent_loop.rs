@@ -888,6 +888,7 @@ impl LoopState {
             // Resolve D3 and scope before manual/automatic/window compaction so
             // no preparation request can see the previous route's reasoning.
             let preparation_invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -1002,6 +1003,7 @@ impl LoopState {
                 }
             }
             let invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),

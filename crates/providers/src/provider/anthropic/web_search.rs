@@ -36,6 +36,7 @@ impl HostedWebSearch for AnthropicClient {
         request: &HostedWebSearchRequest,
     ) -> Result<HostedWebSearchResponse, HostedWebSearchError> {
         let observation = ObservationContext {
+            attempts: None,
             purpose: RequestPurpose::WebSearch,
             ..request.observation.clone().unwrap_or_default()
         };

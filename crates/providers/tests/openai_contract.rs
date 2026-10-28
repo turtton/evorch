@@ -31,6 +31,7 @@ async fn cache_key_is_serialized_when_run_is_set_and_omitted_otherwise() {
     for run in [Some("run-cache-affinity"), None] {
         let mut input = request();
         input.observation = run.map(|id| providers::ObservationContext {
+            attempts: None,
             turn: None,
             run_id: id.into(),
             purpose: Default::default(),
@@ -554,6 +555,7 @@ async fn requests_use_the_official_responses_endpoint_and_shape() {
     input.max_tokens = Some(512);
     input.temperature = Some(0.5);
     input.observation = Some(providers::ObservationContext {
+        attempts: None,
         turn: None,
         run_id: "run-shape".into(),
         purpose: Default::default(),

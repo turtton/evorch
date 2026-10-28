@@ -70,6 +70,7 @@ fn request() -> ChatRequest {
         service_tier: None,
         output_schema: None,
         observation: Some(ObservationContext {
+            attempts: None,
             run_id: "cursor-contract".into(),
             ..Default::default()
         }),

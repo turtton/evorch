@@ -49,6 +49,7 @@ impl RoutedModel {
             .map_err(|e| e.to_string())?;
         let mut cycle = None;
         request.observation = Some(ObservationContext {
+            attempts: None,
             run_id: invocation.run_id.clone(),
             turn: invocation.turn.clone(),
             purpose: event_bus::RequestPurpose::ImageGeneration,

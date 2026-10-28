@@ -51,6 +51,7 @@ async fn streaming_falls_back_after_provider_retries_are_exhausted() {
     }
     let bus = EventBus::new(32);
     let invocation = AgentInvocationContext {
+        attempts: None,
         turn: Some(providers::RequestTurnContext {
             origin: Some("human".into()),
             prompt_index: Some(7),

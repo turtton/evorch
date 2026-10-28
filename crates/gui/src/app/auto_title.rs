@@ -81,7 +81,7 @@ fn generate(context: ProductionModel, chat: ChatSubmission) -> Result<String, St
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-    let invocation = AgentInvocationContext {
+    let invocation = AgentInvocationContext { attempts: None,
 turn: None,
         category: None,
             run_id: format!("auto-title:{}", chat.thread_id),

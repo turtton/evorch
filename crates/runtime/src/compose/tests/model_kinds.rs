@@ -17,6 +17,7 @@ fn invocation(
     preference: Option<ModelPreference>,
 ) -> AgentInvocationContext {
     AgentInvocationContext {
+        attempts: None,
         run_id: "run".into(),
         purpose,
         model_preference: preference,

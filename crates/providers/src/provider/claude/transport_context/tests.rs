@@ -2,6 +2,7 @@ use super::*;
 
 fn observation(purpose: RequestPurpose) -> ObservationContext {
     ObservationContext {
+        attempts: None,
         run_id: "run".into(),
         purpose,
         turn: None,

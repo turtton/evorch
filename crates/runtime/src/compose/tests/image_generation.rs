@@ -121,6 +121,7 @@ async fn ac5_ac7_image_chain_fallback_includes_404_and_shares_auth_quota_cooldow
             Ok(()),
         ]);
         let invocation = AgentInvocationContext {
+            attempts: None,
             run_id: "run-image".into(),
             ..Default::default()
         };

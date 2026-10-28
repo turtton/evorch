@@ -1364,7 +1364,15 @@ impl LoopState {
                             .ok()
                         });
                     let (context, stamp) = match context {
-                        Some((context, stamp)) => (Some(context), Some(stamp)),
+                        Some((context, stamp)) => {
+                            let sink = crate::escalation_review::ManifestSink::new(
+                                Arc::clone(&self.shared.bus),
+                                &self.task.run_id.to_string(),
+                                None,
+                                Some(call_id.to_owned()),
+                            );
+                            (Some(context.recorded_to(sink)), Some(stamp))
+                        }
                         None => (None, None),
                     };
                     let reviewer = crate::escalation_review::QuickModelReviewer::new(Arc::clone(

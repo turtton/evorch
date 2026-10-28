@@ -53,6 +53,22 @@ impl ProviderClient for StubClient {
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        // What a provider adapter's observer does with the context it is given.
+        if let Some(log) = request
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.attempts.as_ref())
+        {
+            log.started(providers::AttemptRecord {
+                request_id: "req-stub".into(),
+                provider: "stub".into(),
+                profile: None,
+                protocol: "stub-protocol".into(),
+                model: request.model.clone(),
+                streaming: false,
+                outcome: providers::AttemptOutcome::Pending,
+            });
+        }
         self.requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -181,6 +197,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 turn: None,
                 category: None,
                 run_id: run_id.to_string(),

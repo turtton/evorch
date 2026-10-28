@@ -50,7 +50,7 @@ impl PersistencePolicy {
                 true
             }
             EventKind::Diagnostic(event)
-                if !(event.source == "sandbox" && event.code == "escalation_review")
+                if !event.is_escalation_audit()
                     && (self.diagnostics == DiagnosticPersistence::Off
                         || (self.diagnostics == DiagnosticPersistence::Warnings
                             && event.severity == DiagnosticSeverity::Info)) =>

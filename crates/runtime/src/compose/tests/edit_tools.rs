@@ -26,6 +26,7 @@ async fn call(model: &dyn AgentModel, run_id: &str) -> Result<ChatResponse, Runt
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 run_id: run_id.into(),
                 ..Default::default()
             },
@@ -72,6 +73,7 @@ async fn reconfiguration_preserves_known_edit_interface_and_replayable_checkpoin
         live.replace(Arc::new(second));
         live.complete(
             &AgentInvocationContext {
+                attempts: None,
                 run_id: "reload".into(),
                 ..Default::default()
             },
@@ -109,6 +111,7 @@ async fn restored_checkpoint_with_unknown_edit_interface_resummarizes_once() {
                 }],
             );
             let invocation = AgentInvocationContext {
+                attempts: None,
                 run_id: "restored".into(),
                 model_preference: explicit.then(|| crate::ModelPreference {
                     profile: "local".into(),
@@ -186,6 +189,7 @@ async fn unknown_edit_history_uses_only_incompatible_tool_calls_as_switch_eviden
                 .into_iter()
                 .collect::<Vec<_>>();
             let invocation = AgentInvocationContext {
+                attempts: None,
                 run_id: "unknown".into(),
                 ..Default::default()
             };
@@ -224,6 +228,7 @@ async fn an_unprepared_opaque_switch_remains_pending_until_preparation_commits()
     let (mut model, _) = routed_model(Ok(response()), "gpt-5.5", None);
     openai(&mut model);
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "pending".into(),
         ..Default::default()
     };
@@ -272,6 +277,7 @@ async fn explicit_model_change_resummarizes_once_and_summaries_do_not_reset_it()
     let (mut model, requests) = routed_model(Ok(response()), "gpt-5.5", Some("other-model"));
     openai(&mut model);
     let mut invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "explicit".into(),
         model_preference: Some(crate::ModelPreference {
             profile: "local".into(),
@@ -574,6 +580,7 @@ async fn unsupported_capability_still_sends_no_tools() {
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 model_preference: Some(crate::ModelPreference {
                     profile: "local".into(),
                     model: None,
@@ -596,6 +603,7 @@ async fn unsupported_capability_still_sends_no_tools() {
     model
         .compact_context(
             &AgentInvocationContext {
+                attempts: None,
                 model_preference: Some(crate::ModelPreference {
                     profile: "local".into(),
                     model: None,
@@ -650,6 +658,7 @@ async fn gpt5_to_non_gpt_fallback_rebuilds_the_full_authorized_set() {
         .clone()
         .requiring_capability(Capability::ToolCalling);
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "fallback".into(),
         purpose: event_bus::RequestPurpose::Compaction,
         ..Default::default()
@@ -727,6 +736,7 @@ async fn same_profile_same_family_fallback_still_resummarizes_when_edit_tools_ch
     );
     model.model_switch_prepared(
         &AgentInvocationContext {
+            attempts: None,
             run_id: "same-family".into(),
             ..Default::default()
         },
@@ -770,6 +780,7 @@ async fn fallback_edit_family_switch_resummarizes_before_rebuilding_from_origina
     // The agent loop has prepared the context and retries on the updated pin.
     model.model_switch_prepared(
         &AgentInvocationContext {
+            attempts: None,
             run_id: "run".into(),
             ..Default::default()
         },

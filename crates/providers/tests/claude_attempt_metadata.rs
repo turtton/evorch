@@ -21,6 +21,7 @@ fn input() -> ChatRequest {
     }))
     .unwrap();
     request.observation = Some(ObservationContext {
+        attempts: None,
         run_id: "child % 東京\r\nid".into(),
         purpose: RequestPurpose::Agent,
         turn: Some(RequestTurnContext {

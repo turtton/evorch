@@ -16,11 +16,20 @@ use crate::{AgentInvocationContext, AgentModel};
 mod denial_streak;
 mod gate;
 mod loaded_skills;
+mod manifest;
 pub(crate) use denial_streak::{CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, DenialStreaks};
 pub use gate::{EvidenceStamp, SandboxEscalationGate};
 pub use loaded_skills::LoadedSkillRef;
 pub(crate) use loaded_skills::{LoadedBy, LoadedSkill, LoadedSkillView};
 use loaded_skills::{detach_attached_skills, merge_views};
+pub(crate) use manifest::ManifestSink;
+use manifest::{Audit, ContextAudit, ReviewKind};
+pub use manifest::{
+    Decision, Digest, MANIFEST_VERSION, ManifestPart, ModelRequest, Outcome, OutcomeStatus,
+    ReviewKind as ManifestKind, ReviewManifest, ReviewedContext, RulesEntry, SkillEntry,
+    TextDigest, UserRequestRef, VerdictRecord, sha256_hex,
+};
+pub use providers::{AttemptOutcome, AttemptRecord};
 
 pub const DEFAULT_REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -78,6 +87,15 @@ pub(crate) const UPLOAD_REVIEW_INSTRUCTION: &str = concat!(
     verdict_contract!()
 );
 
+/// What a review is about: the tool, how its record is labelled, and how
+/// threshold reasons name the call.
+struct ReviewTarget<'a> {
+    tool: &'a str,
+    kind: ReviewKind,
+    scope: &'a str,
+    action: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewVerdict {
     Approve,
@@ -117,6 +135,17 @@ pub(crate) struct UserRequest {
     pub(crate) in_reply_to: Option<UserQuestionContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reference_context: Option<ReferenceContext>,
+    /// Which stored evidence this input is. Not sent to the reviewer.
+    #[serde(skip)]
+    pub(crate) evidence: EvidenceRef,
+}
+
+/// The stored evidence row behind a user input; unset for an input that only
+/// lives in memory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EvidenceRef {
+    pub(crate) id: Option<String>,
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -196,6 +225,7 @@ impl ReviewRunContext {
             text: text.into(),
             in_reply_to: None,
             reference_context: None,
+            evidence: EvidenceRef::default(),
         });
     }
 
@@ -224,6 +254,15 @@ impl ReviewRunContext {
                 title: question.title.clone(),
             }),
             reference_context: None,
+            evidence: EvidenceRef {
+                id: Some(crate::run_store::answer_evidence_id(
+                    &self.root_run_id,
+                    target_run_id,
+                    answer,
+                    &question.id,
+                )),
+                kind: Some("user_answer".into()),
+            },
         });
     }
 
@@ -299,6 +338,9 @@ pub(crate) struct ReviewContext {
     project_rules: Option<ProjectRules>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     loaded_skills: Vec<LoadedSkillView>,
+    /// What the record of this review needs besides the fields above.
+    #[serde(skip)]
+    audit: ContextAudit,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -306,6 +348,9 @@ struct ProjectRules {
     source: String,
     trust: &'static str,
     text: String,
+    /// Not sent to the reviewer: whether the file was longer than was read.
+    #[serde(skip)]
+    truncated: bool,
 }
 
 impl ReviewContext {
@@ -340,13 +385,17 @@ pub(crate) fn review_context(
         let file = std::fs::File::open(&path).ok()?;
         use std::io::Read;
         let mut bytes = Vec::new();
-        file.take(PROJECT_RULES_BYTES)
+        // One byte past the limit tells a file of exactly the limit from a longer one.
+        file.take(PROJECT_RULES_BYTES + 1)
             .read_to_end(&mut bytes)
             .ok()?;
+        let truncated = bytes.len() as u64 > PROJECT_RULES_BYTES;
+        bytes.truncate(usize::try_from(PROJECT_RULES_BYTES).ok()?);
         Some(ProjectRules {
             source: path.display().to_string(),
             trust: "approved",
             text: String::from_utf8_lossy(&bytes).into_owned(),
+            truncated,
         })
     });
     let loaded_skills = merge_views(
@@ -362,22 +411,27 @@ pub(crate) fn review_context(
             loaded_skills,
             delegation_chain: run.delegation_chain,
             project_rules,
+            audit: ContextAudit {
+                lineage_run_ids: run.lineage_run_ids,
+                evidence_revision: revision,
+                sink: None,
+            },
         },
         EvidenceStamp { revision, synced },
     ))
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RiskLevel {
+pub enum RiskLevel {
     Low,
     Medium,
     High,
     Critical,
 }
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AuthorizationLevel {
+pub enum AuthorizationLevel {
     None,
     Low,
     Medium,
@@ -386,9 +440,9 @@ enum AuthorizationLevel {
 
 /// How firmly the reviewer ties a shell command to a step that project rules
 /// or a loaded skill define. A missing answer is `None`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ProcedureStep {
+pub enum ProcedureStep {
     #[default]
     None,
     Defined,
@@ -434,10 +488,10 @@ fn verdict_schema() -> providers::JsonSchema {
 /// stands only with `procedure_source` (the context carries project rules or a
 /// loaded skill) and at least medium authorization. Callers other than the
 /// shell review pass `false`, so `verified` means nothing for them.
-fn judge(verdict: WireVerdict, action: &str, procedure_source: bool) -> ReviewVerdict {
+fn judge(verdict: &WireVerdict, action: &str, procedure_source: bool) -> ReviewVerdict {
     if !verdict.approve {
         return ReviewVerdict::Deny {
-            reason: verdict.reason.unwrap_or_default(),
+            reason: verdict.reason.clone().unwrap_or_default(),
         };
     }
     let authorized = matches!(
@@ -507,11 +561,15 @@ impl QuickModelReviewer {
         );
         self.review_for_user_requests(
             run_id,
-            tool,
+            ReviewTarget {
+                tool,
+                kind: ReviewKind::Web,
+                scope: "web",
+                action: "web fetch",
+            },
             instruction,
             serde_json::json!({"tool":tool, "input":input}),
             context,
-            "web fetch",
         )
         .await
     }
@@ -526,27 +584,35 @@ impl QuickModelReviewer {
     ) -> Result<ReviewVerdict, ReviewError> {
         self.review_for_user_requests(
             run_id,
-            crate::network::UPLOAD_TOOL,
+            ReviewTarget {
+                tool: crate::network::UPLOAD_TOOL,
+                kind: ReviewKind::Upload,
+                scope: "upload",
+                action: "upload",
+            },
             UPLOAD_REVIEW_INSTRUCTION.to_owned(),
             serde_json::json!({"tool": crate::network::UPLOAD_TOOL, "upload": upload}),
             context,
-            "upload",
         )
         .await
     }
 
     /// Asks the quick model about one call against the run's real user
-    /// requests, failing closed without them. `action` names the call in
-    /// threshold reasons.
+    /// requests, failing closed without them.
     async fn review_for_user_requests(
         &self,
         run_id: &str,
-        tool: &str,
+        target: ReviewTarget<'_>,
         instruction: String,
         mut payload: serde_json::Value,
         context: Option<ReviewContext>,
-        action: &str,
     ) -> Result<ReviewVerdict, ReviewError> {
+        let ReviewTarget {
+            tool,
+            kind,
+            scope,
+            action,
+        } = target;
         let Some(context) = context else {
             return Ok(ReviewVerdict::Deny {
                 reason: "real user request context is unavailable".into(),
@@ -557,20 +623,30 @@ impl QuickModelReviewer {
                 reason: format!("{tool} lacks a real user request in this run's lineage"),
             });
         }
+        let mut audit = Audit::begin(kind, scope, Some(tool), run_id, Some(&context));
         payload["context"] = serde_json::json!(context);
-        let verdict = self
-            .request_verdict(
-                run_id,
-                CategoryId::Quick,
-                Role::Worker,
-                instruction,
-                &payload,
-            )
-            .await?;
-        if verdict.risk_level.is_none() || verdict.authorization_level.is_none() {
-            return Err(ReviewError::InvalidVerdict);
+        let mut wire = None;
+        let result = async {
+            let verdict = self
+                .request_verdict(
+                    run_id,
+                    CategoryId::Quick,
+                    Role::Worker,
+                    instruction,
+                    &payload,
+                    &mut audit,
+                )
+                .await?;
+            let valid = verdict.risk_level.is_some() && verdict.authorization_level.is_some();
+            let wire_ref = wire.insert(verdict);
+            if !valid {
+                return Err(ReviewError::InvalidVerdict);
+            }
+            Ok(judge(wire_ref, action, false))
         }
-        Ok(judge(verdict, action, false))
+        .await;
+        audit.conclude(wire.as_ref(), &result);
+        result
     }
 
     /// Sends one instruction and JSON payload to the model, without history or
@@ -582,7 +658,11 @@ impl QuickModelReviewer {
         role: Role,
         instruction: String,
         payload: &serde_json::Value,
+        audit: &mut Audit,
     ) -> Result<WireVerdict, ReviewError> {
+        let payload_text = payload.to_string();
+        let schema = verdict_schema();
+        audit.sent(category, role, &instruction, &schema.schema, &payload_text);
         let messages = [
             Message {
                 role: MessageRole::System,
@@ -590,12 +670,11 @@ impl QuickModelReviewer {
             },
             Message {
                 role: MessageRole::User,
-                content: vec![ContentBlock::Text {
-                    text: payload.to_string(),
-                }],
+                content: vec![ContentBlock::Text { text: payload_text }],
             },
         ];
         let invocation = AgentInvocationContext {
+            attempts: Some(audit.attempt_log()),
             turn: None,
             run_id: run_id.to_owned(),
             category: Some(category.to_string()),
@@ -605,7 +684,7 @@ impl QuickModelReviewer {
         let response = tokio::time::timeout(
             self.timeout,
             self.model
-                .complete_structured(&invocation, role, &messages, &verdict_schema()),
+                .complete_structured(&invocation, role, &messages, &schema),
         )
         .await
         .map_err(|_| ReviewError::Timeout)?
@@ -645,6 +724,17 @@ impl QuickModelReviewer {
                 reason: "access lacks a real user request in this run's lineage".into(),
             });
         }
+        let mut audit = Audit::begin(
+            ReviewKind::FileAccess,
+            if request.write {
+                "file_write"
+            } else {
+                "file_read"
+            },
+            Some(&request.tool),
+            run_id,
+            context.as_ref(),
+        );
         let mut payload = serde_json::json!({
             "tool": request.tool,
             "access": if request.write { "write" } else { "read" },
@@ -657,19 +747,28 @@ impl QuickModelReviewer {
         if let Some(context) = context {
             payload["context"] = serde_json::to_value(context).map_err(|_| ReviewError::Model)?;
         }
-        let verdict = self
-            .request_verdict(
-                run_id,
-                CategoryId::ToolExecution,
-                Role::Reviewer,
-                FILE_ACCESS_REVIEW_INSTRUCTION.to_owned(),
-                &payload,
-            )
-            .await?;
-        if verdict.risk_level.is_none() || verdict.authorization_level.is_none() {
-            return Err(ReviewError::InvalidVerdict);
+        let mut wire = None;
+        let result = async {
+            let verdict = self
+                .request_verdict(
+                    run_id,
+                    CategoryId::ToolExecution,
+                    Role::Reviewer,
+                    FILE_ACCESS_REVIEW_INSTRUCTION.to_owned(),
+                    &payload,
+                    &mut audit,
+                )
+                .await?;
+            let valid = verdict.risk_level.is_some() && verdict.authorization_level.is_some();
+            let wire_ref = wire.insert(verdict);
+            if !valid {
+                return Err(ReviewError::InvalidVerdict);
+            }
+            Ok(judge(wire_ref, "file access", false))
         }
-        Ok(judge(verdict, "file access", false))
+        .await;
+        audit.conclude(wire.as_ref(), &result);
+        result
     }
 
     /// Reviews only the supplied request, without worker history or tool access.
@@ -717,29 +816,46 @@ impl QuickModelReviewer {
                 reason: "access lacks a real user request in this run's lineage".into(),
             });
         }
+        let scope = match access {
+            ShellAccess::Host => "host_unsandboxed",
+            ShellAccess::Network => "network_only",
+        };
+        let mut audit = Audit::begin(
+            ReviewKind::Shell,
+            scope,
+            Some("shell"),
+            run_id,
+            context.as_ref(),
+        );
         let mut payload = match context {
             Some(context) => {
                 serde_json::json!({"command": command, "justification": justification, "context": context})
             }
             None => serde_json::json!({"command": command, "justification": justification}),
         };
-        payload["access"] = serde_json::json!(match access {
-            ShellAccess::Host => "host_unsandboxed",
-            ShellAccess::Network => "network_only",
-        });
-        let verdict = self
-            .request_verdict(
-                run_id,
-                CategoryId::ToolExecution,
-                Role::Reviewer,
-                REVIEW_INSTRUCTION.to_owned(),
-                &payload,
-            )
-            .await?;
-        if has_context && (verdict.risk_level.is_none() || verdict.authorization_level.is_none()) {
-            return Err(ReviewError::InvalidVerdict);
+        payload["access"] = serde_json::json!(scope);
+        let mut wire = None;
+        let result = async {
+            let verdict = self
+                .request_verdict(
+                    run_id,
+                    CategoryId::ToolExecution,
+                    Role::Reviewer,
+                    REVIEW_INSTRUCTION.to_owned(),
+                    &payload,
+                    &mut audit,
+                )
+                .await?;
+            let valid = verdict.risk_level.is_some() && verdict.authorization_level.is_some();
+            let wire_ref = wire.insert(verdict);
+            if has_context && !valid {
+                return Err(ReviewError::InvalidVerdict);
+            }
+            Ok(judge(wire_ref, "shell action", procedure_source))
         }
-        Ok(judge(verdict, "shell action", procedure_source))
+        .await;
+        audit.conclude(wire.as_ref(), &result);
+        result
     }
 }
 
@@ -761,6 +877,10 @@ mod attachment_tests;
 #[cfg(test)]
 #[path = "escalation_review/procedure_tests.rs"]
 mod procedure_tests;
+
+#[cfg(test)]
+#[path = "escalation_review/manifest_tests.rs"]
+mod manifest_tests;
 
 #[cfg(test)]
 mod tests {
@@ -939,6 +1059,7 @@ mod tests {
                     text: "Read the public documentation".into(),
                     in_reply_to: None,
                     reference_context: None,
+                    evidence: EvidenceRef::default(),
                 }]
                 .into(),
             )),
@@ -1011,6 +1132,7 @@ mod tests {
                     text: "Submit docs/report.pdf through the vendor portal".into(),
                     in_reply_to: None,
                     reference_context: None,
+                    evidence: EvidenceRef::default(),
                 }]
                 .into(),
             )),
@@ -1171,6 +1293,7 @@ mod tests {
                     text: "Implement the fix".into(),
                     in_reply_to: None,
                     reference_context: None,
+                    evidence: EvidenceRef::default(),
                 }]
                 .into(),
             )),
@@ -1258,6 +1381,7 @@ mod tests {
                 text: "Implement the requested fix".into(),
                 in_reply_to: None,
                 reference_context: None,
+                evidence: EvidenceRef::default(),
             }]
             .into(),
         ));
@@ -1289,6 +1413,7 @@ mod tests {
                     text: "Implement the fix and open a PR".into(),
                     in_reply_to: None,
                     reference_context: None,
+                    evidence: EvidenceRef::default(),
                 }]
                 .into(),
             )),
@@ -1467,6 +1592,7 @@ mod tests {
                     text: "Implement the fix".into(),
                     in_reply_to: None,
                     reference_context: None,
+                    evidence: EvidenceRef::default(),
                 }]
                 .into(),
             )),

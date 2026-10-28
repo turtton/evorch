@@ -154,7 +154,14 @@ impl SandboxEscalationGate {
             Some(project) => project.rules.clone(),
             None => shared.rules(),
         };
-        review_context(run, rules.as_deref()).ok()
+        let (context, stamp) = review_context(run, rules.as_deref()).ok()?;
+        let sink = super::ManifestSink::new(
+            self.bus.clone(),
+            &ctx.run_id,
+            ctx.thread_id.clone(),
+            ctx.call_id.clone(),
+        );
+        Some((context.recorded_to(sink), stamp))
     }
 
     fn current_stamp(&self, ctx: &ToolExecutionContext) -> Option<EvidenceStamp> {

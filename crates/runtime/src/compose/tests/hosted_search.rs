@@ -139,6 +139,7 @@ async fn selected_capability_name_reaches_tool_metadata() {
 
 fn invocation(run: &str, profile: &str, effort: &str) -> AgentInvocationContext {
     AgentInvocationContext {
+        attempts: None,
         run_id: run.into(),
         model_preference: Some(crate::ModelPreference {
             profile: profile.into(),
@@ -217,6 +218,7 @@ async fn search_uses_the_chat_fallback_pin_and_its_reasoning_effort() {
     );
     let searches = enable_search(&mut model, "profile-1");
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "fallback-run".into(),
         ..Default::default()
     };

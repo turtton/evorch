@@ -31,6 +31,7 @@ fn input(run: &str) -> ChatRequest {
         ]}))
         .unwrap();
     input.observation = Some(ObservationContext {
+        attempts: None,
         run_id: run.into(),
         ..Default::default()
     });
