@@ -4,6 +4,7 @@ use event_bus::{
 };
 
 use super::TranscriptEntry;
+use crate::model::failure_text;
 
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
@@ -53,14 +54,27 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
                 "Provider request failed: {provider}/{model} — {} ({duration_ms} ms{suffix})",
                 failure_label(failure)
             );
+            let mut raw_changed = None;
             if let Some(detail) = detail {
+                let shown = failure_text::english(detail);
+                if shown != *detail {
+                    raw_changed = Some(detail.clone());
+                }
                 text.push_str(": ");
-                text.push_str(detail);
+                text.push_str(&shown);
             }
-            Some(if transient {
-                TranscriptEntry::Notice { text }
-            } else {
-                TranscriptEntry::Error { text }
+            Some(match (transient, raw_changed) {
+                (true, None) => TranscriptEntry::Notice { text },
+                (false, None) => TranscriptEntry::Error { text },
+                (transient, Some(hover)) => TranscriptEntry::Diagnostic {
+                    severity: if transient {
+                        event_bus::DiagnosticSeverity::Warning
+                    } else {
+                        event_bus::DiagnosticSeverity::Error
+                    },
+                    text,
+                    hover,
+                },
             })
         }
         EventKind::Provider(ProviderEvent::CooldownStarted {
@@ -96,8 +110,16 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
                 SkillDiagnosticKind::ValidationError => "validation error",
                 SkillDiagnosticKind::Shadowed => "shadowed",
             };
-            Some(TranscriptEntry::Error {
-                text: format!("Skill {skill} ({scope}): {label} — {detail}"),
+            let shown = failure_text::english(detail);
+            let text = format!("Skill {skill} ({scope}): {label} — {shown}");
+            Some(if shown == *detail {
+                TranscriptEntry::Error { text }
+            } else {
+                TranscriptEntry::Diagnostic {
+                    severity: event_bus::DiagnosticSeverity::Error,
+                    text,
+                    hover: detail.clone(),
+                }
             })
         }
         EventKind::Fault(FaultEvent::SubscriberLagged { .. }) => None,
@@ -152,21 +174,84 @@ fn wording(code: &str) -> Option<Wording> {
         code::AGENT_RUN_PANICKED => Fixed("The run crashed and was stopped"),
         code::STORAGE_WRITER_HALTED => Fixed("History is no longer being saved"),
         code::SCOPE_DENIED => Lead("Tool call denied"),
+        code::ESCALATION_REVIEW => Detail,
+        code::TOOL_CALL_ACCESS => Fixed("Network access decision recorded"),
+        code::PUBLISH_DIAGNOSTICS => Fixed("Language server reported diagnostics"),
+        code::TOOL_RESULT => Fixed("MCP tool call reported a result"),
+        code::EVALUATION_FINISHED => Detail,
+        code::BROWSER_SESSION => Fixed("Browser session updated"),
+        code::BROWSER_STOPPED => Fixed("Browser stopped"),
+        code::BROWSER_ERROR => Fixed("Browser error"),
+        code::BROWSER_CLOSE_ERROR => Fixed("Browser could not be closed cleanly"),
+        code::BROWSER_ACTION => Fixed("Browser action performed"),
+        code::BROWSER_ACTION_ERROR => Fixed("Browser action failed"),
+        code::BROWSER_DOM_DIFF => Fixed("Page content changed"),
+        code::BROWSER_SCREENSHOT => Fixed("Screenshot captured"),
         _ => return None,
     })
 }
 
-/// The one-line, user-facing text of a diagnostic; unknown codes show their detail.
+/// The one-line, user-facing text of a diagnostic. Unknown codes show their
+/// detail when it reads as text, and a generic line when it is empty or
+/// structured data.
 fn summary(event: &DiagnosticEvent) -> String {
+    if let Some(text) = structured(event) {
+        return text;
+    }
     let detail = event.detail.trim();
-    let first_line = detail.lines().next().unwrap_or_default().trim();
+    let first_line = failure_text::english(detail.lines().next().unwrap_or_default().trim());
     match wording(&event.code) {
         Some(Wording::Fixed(text)) => text.to_owned(),
         Some(Wording::Lead(lead)) if !first_line.is_empty() => format!("{lead}: {first_line}"),
         Some(Wording::Lead(lead)) => lead.to_owned(),
-        Some(Wording::Detail) if !first_line.is_empty() => first_line.to_owned(),
-        Some(Wording::Detail) | None if !detail.is_empty() => detail.to_owned(),
-        Some(Wording::Detail) | None => event.code.clone(),
+        Some(Wording::Detail) if !first_line.is_empty() => first_line,
+        Some(Wording::Detail) | None if is_plain_text(detail) => failure_text::english(detail),
+        Some(Wording::Detail) | None => generic(event.severity).to_owned(),
+    }
+}
+
+fn generic(severity: event_bus::DiagnosticSeverity) -> &'static str {
+    match severity {
+        event_bus::DiagnosticSeverity::Info => "A diagnostic was reported",
+        event_bus::DiagnosticSeverity::Warning => "A warning was reported",
+        event_bus::DiagnosticSeverity::Error => "An error was reported",
+    }
+}
+
+/// Whether a detail is prose for people rather than empty or JSON.
+fn is_plain_text(detail: &str) -> bool {
+    !detail.is_empty() && !detail.starts_with('{') && !detail.starts_with('[')
+}
+
+/// Lines for diagnostics whose detail is a JSON object built by the producer
+/// (language server and MCP results); the object itself stays in the hover.
+fn structured(event: &DiagnosticEvent) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(event.detail.trim()).ok()?;
+    let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+    match event.code.as_str() {
+        code::PUBLISH_DIAGNOSTICS => {
+            let count = value.get("count")?.as_u64()?;
+            let file = text("file")
+                .map(|file| file.rsplit('/').next().unwrap_or(file))
+                .filter(|file| !file.is_empty())
+                .map_or_else(String::new, |file| format!(" in {file}"));
+            Some(match count {
+                0 => format!("Language server found no issues{file}"),
+                1 => format!("Language server reported 1 issue{file}"),
+                n => format!("Language server reported {n} issues{file}"),
+            })
+        }
+        code::TOOL_RESULT => {
+            let server = text("server")
+                .filter(|server| !server.is_empty())
+                .map_or_else(String::new, |server| format!(" to {server}"));
+            Some(match text("class") {
+                Some("success") => format!("MCP tool call{server} succeeded"),
+                Some(class) => format!("MCP tool call{server} failed ({class})"),
+                None => format!("MCP tool call{server} reported a result"),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -276,8 +361,69 @@ mod tests {
             "odd_code",
             "",
         ));
-        assert_eq!(text, "odd_code");
+        assert_eq!(text, "A diagnostic was reported");
         assert_eq!(hover, "[info] src (odd_code)");
+    }
+
+    // Given: the JSON details the LSP and MCP producers emit / When: shown
+    // Then: a short English line, with the JSON and the code only in the hover
+    #[test]
+    fn structured_details_become_short_lines_with_the_json_in_the_hover() {
+        use event_bus::DiagnosticSeverity::{Error, Info};
+        let lsp = r#"{"file":"/repo/src/main.rs","count":2,"codes":[1,"[redacted]"]}"#;
+        let (text, hover) = text_and_hover(&diagnostic(Error, code::PUBLISH_DIAGNOSTICS, lsp));
+        assert_eq!(text, "Language server reported 2 issues in main.rs");
+        assert_eq!(hover, format!("[error] src (publish_diagnostics)\n{lsp}"));
+        let (text, _) = text_and_hover(&diagnostic(
+            Info,
+            code::PUBLISH_DIAGNOSTICS,
+            r#"{"file":"/repo/a.rs","count":0,"codes":[]}"#,
+        ));
+        assert_eq!(text, "Language server found no issues in a.rs");
+
+        let ok = r#"{"server":"docs","method":"tools/call","request_id":3,"class":"success","status":null}"#;
+        let (text, hover) = text_and_hover(&diagnostic(Info, code::TOOL_RESULT, ok));
+        assert_eq!(text, "MCP tool call to docs succeeded");
+        assert!(hover.ends_with(ok));
+        let failed = r#"{"server":"docs","method":"tools/call","request_id":4,"class":"timeout","status":null}"#;
+        let (text, _) = text_and_hover(&diagnostic(Error, code::TOOL_RESULT, failed));
+        assert_eq!(text, "MCP tool call to docs failed (timeout)");
+
+        for code in [code::PUBLISH_DIAGNOSTICS, code::TOOL_RESULT] {
+            let (text, _) = text_and_hover(&diagnostic(Info, code, "{not json"));
+            assert!(!text.contains('{') && !text.is_empty(), "{code}: {text}");
+        }
+    }
+
+    // Given: unknown codes with an empty or JSON detail / When: shown
+    // Then: a generic English line, never the code or the JSON
+    #[test]
+    fn empty_or_structured_unknown_details_use_a_generic_line() {
+        use event_bus::DiagnosticSeverity::{Error, Info, Warning};
+        for (severity, expected) in [
+            (Info, "A diagnostic was reported"),
+            (Warning, "A warning was reported"),
+            (Error, "An error was reported"),
+        ] {
+            let (text, hover) = text_and_hover(&diagnostic(severity, "odd_code", "  "));
+            assert_eq!(text, expected);
+            assert!(hover.contains("odd_code"));
+            let (text, _) = text_and_hover(&diagnostic(severity, "odd_code", r#"{"a":1}"#));
+            assert_eq!(text, expected);
+        }
+    }
+
+    // Given: a Japanese runtime detail / When: shown / Then: English in the line, raw in the hover
+    #[test]
+    fn japanese_runtime_details_are_translated_and_kept_in_the_hover() {
+        let raw = "モデル呼び出しに失敗しました: HTTP 500";
+        let (text, hover) = text_and_hover(&diagnostic(
+            event_bus::DiagnosticSeverity::Error,
+            code::PROVIDER_UNAVAILABLE,
+            raw,
+        ));
+        assert_eq!(text, "Provider unavailable: Model call failed: HTTP 500");
+        assert!(hover.ends_with(raw));
     }
 
     // Given: a very long raw detail / When: shown / Then: the hover is capped

@@ -58,13 +58,13 @@ impl CodexTokenStore for CredentialStoreTokenStore {
         serde_json::from_str(secret.expose())
             .map(Some)
             .map_err(|error| ProviderError::InvalidJson {
-                detail: format!("Could not parse the stored token bundle: {error}"),
+                detail: format!("保存済みトークン一式の解析に失敗しました: {error}"),
             })
     }
 
     fn save(&self, bundle: &TokenBundle) -> Result<(), ProviderError> {
         let json = serde_json::to_string(bundle).map_err(|error| ProviderError::InvalidJson {
-            detail: format!("Could not serialize the token bundle: {error}"),
+            detail: format!("トークン一式の保存用 JSON への変換に失敗しました: {error}"),
         })?;
         self.store
             .set(&self.key, &Secret::from(json))
@@ -326,8 +326,9 @@ fn build_codex(
     if profile.api_protocol != model::ApiProtocol::OpenAiCodexResponses {
         return Err(RoutingError::InvalidProfile {
             reason: format!(
-                "provider type `openai-codex` supports only api protocol \
-                 `openai-codex-responses` (actual: {}); set api_protocol to it",
+                "provider type `openai-codex` は api protocol `openai-codex-responses` のみを\
+                 サポートします (actual: {})。api_protocol を `openai-codex-responses` に\
+                 変更してください",
                 protocol_label(profile.api_protocol)
             ),
         });
@@ -336,8 +337,9 @@ fn build_codex(
         CredentialRef::Keyring { account, .. } => account.clone(),
         CredentialRef::Env { .. } => {
             return Err(RoutingError::InvalidProfile {
-                reason: "provider type `openai-codex` supports only keyring credentials; use a keyring \
-                 reference (service = \"evorch\", account = \"...\") instead of an environment variable"
+                reason: "provider type `openai-codex` は keyring 認証情報参照のみをサポート\
+                 します。環境変数参照ではなく keyring 参照 \
+                 (service = \"evorch\", account = \"...\") に変更してください"
                     .to_string(),
             });
         }
@@ -356,7 +358,7 @@ fn build_codex(
     let token_store = Arc::new(CredentialStoreTokenStore::new(store, account));
     let client = CodexClient::with_config(config, token_store).map_err(|error| {
         RoutingError::InvalidProfile {
-            reason: format!("Could not build the codex client: {error}"),
+            reason: format!("codex client の構築に失敗しました: {error}"),
         }
     })?;
     Ok(Box::new(client.with_profile(&profile.name)))
@@ -370,8 +372,9 @@ fn build_openai(
     if profile.api_protocol != model::ApiProtocol::OpenAiResponses {
         return Err(RoutingError::InvalidProfile {
             reason: format!(
-                "provider type `openai` supports only api protocol `openai-responses` \
-                 (actual: {}); set api_protocol to it",
+                "provider type `openai` は api protocol `openai-responses` のみを\
+                 サポートします (actual: {})。api_protocol を `openai-responses` に\
+                 変更してください",
                 protocol_label(profile.api_protocol)
             ),
         });
@@ -386,7 +389,7 @@ fn build_openai(
     };
     let client = OpenAiClient::new(config)
         .map_err(|error| RoutingError::InvalidProfile {
-            reason: format!("Could not build the openai client: {error}"),
+            reason: format!("openai client の構築に失敗しました: {error}"),
         })?
         .with_profile(&profile.name);
     Ok(Box::new(client))
@@ -400,7 +403,7 @@ fn build_openai_compatible(
     if profile.api_protocol != model::ApiProtocol::OpenAiCompletions {
         return Err(RoutingError::InvalidProfile {
             reason: format!(
-                "provider type `{}` supports only api protocol `openai-completions` (actual: {})",
+                "provider type `{}` は api protocol `openai-completions` のみをサポートします (actual: {})",
                 provider_type_label(profile.provider_type),
                 protocol_label(profile.api_protocol)
             ),
@@ -414,7 +417,7 @@ fn build_openai_compatible(
         event_bus,
     )
     .map_err(|error| RoutingError::InvalidProfile {
-        reason: format!("Could not build the openai-compatible client: {error}"),
+        reason: format!("openai-compatible client の構築に失敗しました: {error}"),
     })?
     .with_profile(&profile.name);
     Ok(Box::new(client))
@@ -444,7 +447,7 @@ fn v1_base_url(base_url: &str, default: &str) -> String {
 
 /// [`CredentialError`] を provider 契約のエラーへ写像する。
 fn credential_store_failure(error: sandbox::error::CredentialError) -> ProviderError {
-    ProviderError::Request(format!("Credential store operation failed: {error}"))
+    ProviderError::Request(format!("credential store 操作に失敗しました: {error}"))
 }
 
 /// プロバイダ種別の設定上の識別子を返す。

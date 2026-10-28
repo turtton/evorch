@@ -50,6 +50,22 @@ pub enum MessageDirection {
     Outgoing,
 }
 
+/// A failed run as the transcript shows it: runtime reasons are Japanese, so
+/// the line is English and the original reason moves to the hover.
+fn failure_entry(reason: &str) -> TranscriptEntry {
+    let shown = crate::model::failure_text::english(reason);
+    if shown == reason {
+        return TranscriptEntry::Error {
+            text: format!("Run failed: {reason}"),
+        };
+    }
+    TranscriptEntry::Diagnostic {
+        severity: event_bus::DiagnosticSeverity::Error,
+        text: format!("Run failed: {shown}"),
+        hover: reason.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
     Error {
@@ -312,9 +328,7 @@ impl TranscriptModel {
                     reason: Some(reason),
                     ..
                 } | event_bus::LifecycleEvent::Failed { reason, .. },
-            ) => self.push(TranscriptEntry::Error {
-                text: format!("Run failed: {reason}"),
-            }),
+            ) => self.push(failure_entry(reason)),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, ..
             }) if self.agent_names.contains_key(run_id) => {
@@ -849,6 +863,26 @@ mod tests {
             model.entries(),
             &[TranscriptEntry::Error {
                 text: "Run failed: profile=x http error 401".into(),
+            }]
+        );
+    }
+
+    // Given: a run that fails with the Japanese runtime Display (the same text the model reads)
+    // When: the transcript shows it / Then: English line, original reason in the hover
+    #[test]
+    fn japanese_failure_reason_shows_in_english_with_the_original_in_the_hover() {
+        let reason = "モデル呼び出しに失敗しました: HTTP 500";
+        let mut model = TranscriptModel::new();
+        model.apply(&Event::new(LifecycleEvent::Failed {
+            session_id: "run-error".into(),
+            reason: reason.into(),
+        }));
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Diagnostic {
+                severity: event_bus::DiagnosticSeverity::Error,
+                text: "Run failed: Model call failed: HTTP 500".into(),
+                hover: reason.into(),
             }]
         );
     }

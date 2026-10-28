@@ -9,6 +9,7 @@ pub mod context_inspector;
 pub mod demo;
 pub mod durable_tasks;
 pub mod effort;
+pub mod failure_text;
 pub mod folder_picker;
 pub mod fuzzy;
 pub mod html_snapshots;

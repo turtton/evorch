@@ -60,7 +60,7 @@ impl TranscriptModel {
                 run_id,
                 to: AgentRunPhase::Stopped,
                 ..
-            }) => (run_id, "stopped (resumable)"),
+            }) => (run_id, "stopped"),
             _ => return None,
         };
         let text = match self.agent_names.get(run_id) {

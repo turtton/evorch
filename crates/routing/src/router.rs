@@ -114,7 +114,7 @@ impl Router {
             let name = profile.name.clone();
             if profile_map.insert(name.clone(), profile).is_some() {
                 return Err(RoutingError::InvalidProfile {
-                    reason: format!("Duplicate profile name '{name}'"),
+                    reason: format!("プロファイル名 '{name}' が重複しています"),
                 });
             }
         }
@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(
             error,
             RoutingError::InvalidProfile {
-                reason: "Duplicate profile name 'primary'".to_string()
+                reason: "プロファイル名 'primary' が重複しています".to_string()
             }
         );
     }

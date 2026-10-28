@@ -81,10 +81,9 @@ impl NotificationsModel {
             }) => {
                 let who = || run_name(run_id).unwrap_or_else(|| "Agent run".to_owned());
                 let (kind, summary) = match to {
-                    AgentRunPhase::Stopped => (
-                        NotificationKind::RunStopped,
-                        format!("{} stopped (resumable)", who()),
-                    ),
+                    AgentRunPhase::Stopped => {
+                        (NotificationKind::RunStopped, format!("{} stopped", who()))
+                    }
                     AgentRunPhase::Done => (
                         NotificationKind::RunCompleted,
                         format!("{} completed", who()),
@@ -95,7 +94,11 @@ impl NotificationsModel {
                         },
                         match reason.as_deref() {
                             Some(event_bus::CANCELLED_REASON) => format!("{} cancelled", who()),
-                            Some(reason) => format!("{} failed: {reason}", who()),
+                            Some(reason) => format!(
+                                "{} failed: {}",
+                                who(),
+                                crate::model::failure_text::english(reason)
+                            ),
                             None => format!("{} failed", who()),
                         },
                     ),
@@ -295,11 +298,7 @@ mod tests {
     fn terminal_summaries_name_the_run_without_exposing_its_id() {
         for (to, reason, expected) in [
             (AgentRunPhase::Done, None, "reviewer-two completed"),
-            (
-                AgentRunPhase::Stopped,
-                None,
-                "reviewer-two stopped (resumable)",
-            ),
+            (AgentRunPhase::Stopped, None, "reviewer-two stopped"),
             (
                 AgentRunPhase::Error,
                 Some("cancelled"),
@@ -346,6 +345,26 @@ mod tests {
             assert!(model.is_unread(item.id));
         }
     }
+    // Given: a run failing with a Japanese runtime reason / When: notified
+    // Then: the summary is English while the item keeps the original reason
+    #[test]
+    fn japanese_failure_reason_reads_in_english_in_the_summary() {
+        let reason = "サンドボックス構築に失敗しました: bwrap missing";
+        let mut model = NotificationsModel::default();
+        model.apply_event(&transition(AgentRunPhase::Error, Some(reason)), |_| None);
+        let item = model.items().next().unwrap();
+        assert!(
+            item.summary
+                .ends_with("failed: Sandbox setup failed: bwrap missing")
+        );
+        assert_eq!(
+            item.kind,
+            NotificationKind::RunFailed {
+                reason: Some(reason.into())
+            }
+        );
+    }
+
     #[test]
     fn stopped_is_resumable_notification_not_failure() {
         let mut model = NotificationsModel::default();
@@ -355,7 +374,7 @@ mod tests {
         );
         let item = model.items().next().unwrap();
         assert_eq!(item.kind, NotificationKind::RunStopped);
-        assert!(item.summary.contains("resumable"));
+        assert!(item.summary.ends_with(" stopped"));
         assert!(!item.summary.contains("failed"));
         assert!(model.is_unread(item.id));
     }

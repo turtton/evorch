@@ -140,7 +140,12 @@ pub fn composer_strip_within(
                 let send = if can_stop {
                     stop_button(ui, phase == Some(ThreadRunPhase::Stopped), model.running_children)
                 } else if can_send {
-                    primary_icon_button(ui, icons::PAPER_PLANE_RIGHT, "Send")
+                    let send = primary_icon_button(ui, icons::PAPER_PLANE_RIGHT, "Send");
+                    if phase == Some(ThreadRunPhase::Stopped) {
+                        send.on_hover_text(crate::theme::tokens::STOPPED_HINT)
+                    } else {
+                        send
+                    }
                 } else {
                     let send = ui.add_enabled(false, ghost(icons::with_icon(icons::PAPER_PLANE_RIGHT, "Send")));
                     accessible(&send, "Send");
@@ -498,6 +503,18 @@ mod tests {
         h.get_by_label("Send").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    // Given: a stopped run without running subagents / When: Send is hovered
+    // Then: the hover tells how to resume, though no banner does
+    #[test]
+    fn send_hover_explains_resuming_a_stopped_run() {
+        let mut h = harness("draft");
+        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
+        h.run();
+        h.get_by_label("Send").hover();
+        h.run();
+        h.get_by_label(crate::theme::tokens::STOPPED_HINT);
     }
 
     #[test]
