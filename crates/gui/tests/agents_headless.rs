@@ -622,6 +622,7 @@ fn assert_run_entries(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::Diagnostic { .. }
             | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
@@ -639,6 +640,7 @@ fn assert_run_entries(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::Diagnostic { .. }
             | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }

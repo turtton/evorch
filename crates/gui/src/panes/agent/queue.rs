@@ -61,7 +61,7 @@ fn row(
             });
             response.on_hover_text(match &item.rejection {
                 Some(reason) => reason.clone(),
-                None => "未配送 — run が先に終了しました".into(),
+                None => "Not delivered — the run ended first".into(),
             });
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -123,7 +123,7 @@ fn row(
             egui::RichText::new(
                 item.rejection
                     .as_deref()
-                    .unwrap_or("未配送 — run が先に終了しました"),
+                    .unwrap_or("Not delivered — the run ended first"),
             )
             .color(palette().WARNING_FG),
         );

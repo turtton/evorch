@@ -153,7 +153,7 @@ fn thread_status_icons_follow_state_and_question_priority() {
                 error
             );
             assert!(harness.query_by_label("?").is_none());
-            for label in ["Active", "Stopped (resumable)", "Waiting", "Done"] {
+            for label in ["Active", "Stopped", "Waiting", "Done"] {
                 assert!(
                     harness
                         .query_by_label(&format!("Thread status: {label}"))

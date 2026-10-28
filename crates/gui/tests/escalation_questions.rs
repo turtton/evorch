@@ -167,7 +167,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
         .entries()
         .iter()
         .find_map(|entry| match entry {
-            TranscriptEntry::Notice { text } if text.contains("引き継ぎ済み") => {
+            TranscriptEntry::Notice { text } if text.contains("moved to Orchestrator") => {
                 Some(text.clone())
             }
             _ => None,

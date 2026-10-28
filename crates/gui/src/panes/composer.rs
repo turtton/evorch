@@ -40,21 +40,6 @@ pub enum ComposerAction {
     OpenSandboxSettings,
 }
 
-fn count(amount: usize, noun: &str) -> String {
-    format!("{amount} {noun}{}", if amount == 1 { "" } else { "s" })
-}
-
-pub fn stopped_banner(running_children: usize) -> String {
-    if running_children > 0 {
-        format!(
-            "{} still running — press Stop subagents to stop them",
-            count(running_children, "subagent")
-        )
-    } else {
-        "Stopped (resumable) — send a message or /continue to resume".into()
-    }
-}
-
 /// What the strip reports to the pane that sizes it.
 pub struct ComposerStripOutput {
     pub action: Option<ComposerAction>,
@@ -138,12 +123,11 @@ pub fn composer_strip_within(
             if let Some(selected) = selectors::row(ui, sandbox, (model.role, model.role_locked), (picker, picker_state)) {
                 action = Some(selected);
             }
-            if phase == Some(ThreadRunPhase::Stopped) {
-                ui.label(egui::RichText::new(stopped_banner(model.running_children))
-                    .color(palette().WARNING_FG));
-            }
             if model.images_needed > 0 {
-                ui.label(egui::RichText::new(format!("画像 {} 枚は再添付が必要です", model.images_needed)).color(palette().WARNING_FG));
+                ui.label(egui::RichText::new(format!(
+                    "Re-attach {}",
+                    if model.images_needed == 1 { "1 image".to_owned() } else { format!("{} images", model.images_needed) }
+                )).color(palette().WARNING_FG));
             }
             images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
@@ -248,7 +232,7 @@ fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egu
             palette().WARNING_FG,
             palette().SURFACE_RAISED,
             format!(
-                "Stop {} of this stopped run (Esc). Everything stays resumable.",
+                "Stop {} (Esc)",
                 if running_children == 1 {
                     "the running subagent".to_owned()
                 } else {
@@ -261,7 +245,7 @@ fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egu
             "Stop",
             palette().ERROR_FG,
             palette().ERROR_SURFACE,
-            "Stop the current run (Esc). Its subagents keep running until you press Stop subagents; resume with /continue or a new message.".to_owned(),
+            "Stop the run (Esc). Its subagents keep running until stopped separately.".to_owned(),
         )
     };
     ui.add(egui::Button::new(egui::RichText::new(label).color(color)).fill(fill))
@@ -491,13 +475,16 @@ mod tests {
         assert_eq!(h.state().action, Some(ComposerAction::Stop));
     }
 
+    // Given: a stopped run / When: it is drawn / Then: no banner appears, and the
+    // subtree stop button is offered only while subagents are still running.
     #[test]
-    fn stopped_banner_keeps_subtree_stop_until_children_settle() {
+    fn stopped_run_shows_no_banner_and_keeps_subtree_stop_until_children_settle() {
         let mut h = harness("draft");
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 2;
         h.run();
-        h.get_by_label("2 subagents still running — press Stop subagents to stop them");
+        assert!(h.query_by_label_contains("still running").is_none());
+        assert!(h.query_by_label_contains("resume").is_none());
         h.get_by_label("Stop subagents").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Stop));
@@ -505,7 +492,7 @@ mod tests {
         h.state_mut().model.running_children = 0;
         h.state_mut().action = None;
         h.run();
-        h.get_by_label("Stopped (resumable) — send a message or /continue to resume");
+        assert!(h.query_by_label_contains("Stopped").is_none());
         assert!(h.query_by_label("Stop subagents").is_none());
         assert!(h.query_by_label("Discard").is_none());
         h.get_by_label("Send").click();
@@ -520,15 +507,13 @@ mod tests {
         h.run();
         h.get_by_label("Stop").hover();
         h.run();
-        h.get_by_label("Stop the current run (Esc). Its subagents keep running until you press Stop subagents; resume with /continue or a new message.");
+        h.get_by_label("Stop the run (Esc). Its subagents keep running until stopped separately.");
         h.state_mut().phase = Some(ThreadRunPhase::Stopped);
         h.state_mut().model.running_children = 3;
         h.run();
         h.get_by_label("Stop subagents").hover();
         h.run();
-        h.get_by_label(
-            "Stop all 3 running subagents of this stopped run (Esc). Everything stays resumable.",
-        );
+        h.get_by_label("Stop all 3 running subagents (Esc)");
     }
 
     #[test]

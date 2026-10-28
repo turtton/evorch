@@ -213,7 +213,7 @@ pub fn phase_label(phase: ThreadRunPhase) -> &'static str {
         ThreadRunPhase::Waiting => "Waiting for input",
         ThreadRunPhase::Done => "Done",
         ThreadRunPhase::Error => "Failed",
-        ThreadRunPhase::Stopped => "Stopped (resumable)",
+        ThreadRunPhase::Stopped => "Stopped",
     }
 }
 

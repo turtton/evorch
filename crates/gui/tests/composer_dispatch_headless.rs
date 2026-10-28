@@ -380,7 +380,8 @@ fn stopped_parent_with_live_child_keeps_banner_and_stops_subagents_without_disca
             running_children: 1,
         });
     harness.run();
-    assert!(harness.has_label("1 subagent still running — press Stop subagents to stop them"));
+    assert!(!harness.has_label("1 subagent still running — press Stop subagents to stop them"));
+    assert!(harness.has_label("Stop subagents"));
     harness.click_label("Stop subagents");
     harness.run();
     assert_eq!(
@@ -397,7 +398,8 @@ fn stopped_parent_with_live_child_keeps_banner_and_stops_subagents_without_disca
             running_children: 0,
         });
     harness.run();
-    assert!(harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
+    assert!(!harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
+    assert!(!harness.has_label("Stop subagents"));
     assert!(harness.has_label("Send"));
     assert!(!harness.has_label("Discard"));
 }

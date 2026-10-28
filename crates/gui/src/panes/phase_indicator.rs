@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn stopped_badge_is_resumable_and_warning_not_error() {
         let harness = harness(Some(ThreadRunPhase::Stopped));
-        harness.get_by_label("Stopped (resumable)");
+        harness.get_by_label("Stopped");
         assert_eq!(spinner_count(&harness), 0);
         assert_eq!(phase_color(ThreadRunPhase::Stopped), palette().WARNING_FG);
         assert_ne!(phase_color(ThreadRunPhase::Stopped), palette().ERROR_FG);

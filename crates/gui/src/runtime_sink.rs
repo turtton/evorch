@@ -503,7 +503,7 @@ impl RuntimeCommandSink {
                             saved,
                             LoopEvent::CommandRejected {
                                 reason: format!(
-                                    "回答は保存済みですが受信先を確認できません: {reason}"
+                                    "Answer saved, but its recipient could not be confirmed: {reason}"
                                 ),
                             },
                         ];
@@ -537,7 +537,7 @@ impl RuntimeCommandSink {
                 for event in &mut events {
                     if let LoopEvent::ChatRejected { reason, .. } = event {
                         *reason = format!(
-                            "回答は保存済みですが会話の再開に失敗しました: {reason}。原因を解消して会話を再開してください。"
+                            "Answer saved, but the conversation could not resume: {reason}. Fix the cause and resume it."
                         );
                     }
                 }

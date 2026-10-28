@@ -262,7 +262,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.history = previous_history;
                             self.composer_drafts = previous_drafts;
                             self.sidebar = previous_sidebar;
-                            self.push_notice(format!("送信前の保存に失敗しました: {error}"));
+                            self.push_notice(format!("Could not save before sending: {error}"));
                             return;
                         }
                         let submission_id = submission.submission_id.clone();

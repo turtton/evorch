@@ -164,7 +164,7 @@ fn receipts_override_counts_and_resolved_originals_ignore_late_delivery() {
             .rejection
             .as_ref()
             .unwrap()
-            .contains("重複")
+            .contains("duplicate")
     );
     state.restore_queued_follow_up(0);
     receipts.lock().unwrap()[0].status = storage::HostInputStatus::Delivered;
@@ -191,7 +191,7 @@ fn startup_missing_receipt_is_rejected_and_terminal_accepted_is_unknown() {
     state.history[0].status = DeliveryStatus::Queued;
     state.apply_receipts(&[], true);
     assert!(
-        matches!(&state.history[0].status, DeliveryStatus::Rejected { reason } if reason == "送信前に中断")
+        matches!(&state.history[0].status, DeliveryStatus::Rejected { reason } if reason == "Interrupted before sending")
     );
     state
         .phases

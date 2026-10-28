@@ -344,6 +344,6 @@ fn stopped_history_replays_as_resumable_with_role_and_partial_output_intact() {
     assert!(state.transcript().entries().iter().any(|entry| matches!(entry, gui::model::transcript::TranscriptEntry::Message { text, .. } if text == "kept output")));
     let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
-    assert!(harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
+    assert!(!harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
     assert!(harness.has_label("Send"));
 }

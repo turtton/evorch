@@ -183,7 +183,7 @@ async fn restart_recovers_accepted_without_chataccepted_run_binding() {
             .rejection
             .as_ref()
             .unwrap()
-            .contains("重複")
+            .contains("duplicate")
     );
     restored.restore_queued_follow_up(0);
     assert_eq!(restored.composer.input, "retry this");
@@ -277,7 +277,7 @@ fn delivered_to_unknown_with_or_without_notification_retracts_only_matching_bubb
                 .rejection
                 .as_ref()
                 .unwrap()
-                .contains("重複")
+                .contains("duplicate")
         );
         state.restore_queued_follow_up(0);
         assert_eq!(state.composer.input, "retry this");

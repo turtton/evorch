@@ -78,7 +78,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let notification = match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => SystemNotification {
-                title: "evorch: 回答が必要です".into(),
+                title: "evorch: Answer needed".into(),
                 body: bounded_text(&question.title),
             },
             EventKind::Lifecycle(
@@ -116,7 +116,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     return;
                 }
                 SystemNotification {
-                    title: "evorch: 作業が完了しました".into(),
+                    title: "evorch: Work finished".into(),
                     body: bounded_text(&thread.title),
                 }
             }

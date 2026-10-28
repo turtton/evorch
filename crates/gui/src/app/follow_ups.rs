@@ -186,7 +186,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .find(|message| message.id == id)
                 .unwrap()
                 .resolution = None;
-            self.push_notice(format!("状態を保存できませんでした: {error}"));
+            self.push_notice(format!("Could not save state: {error}"));
             return;
         }
         self.rebuild_delivery_rows();

@@ -67,6 +67,17 @@ fn diagnostic_survives_storage_replay_and_is_visible_in_owning_thread() {
         registry.run("run-1").expect("run").entries(),
         registry.thread().entries()
     );
+    let hovers: Vec<_> = registry
+        .thread()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            gui::model::transcript::TranscriptEntry::Diagnostic { hover, .. } => {
+                Some(hover.clone())
+            }
+            _ => None,
+        })
+        .collect();
     let mut harness = Harness::new_ui_state(
         |ui, registry| {
             gui::theme::install(ui.ctx());
@@ -86,9 +97,16 @@ fn diagnostic_survives_storage_replay_and_is_visible_in_owning_thread() {
                 .is_some()
         );
     }
+    // Severity, source and code are hover-only, not part of the visible line.
     assert!(
         harness
-            .query_by_label_contains("[info] process_owner (claim_conflict)")
-            .is_some()
+            .query_by_label_contains("process_owner (claim_conflict)")
+            .is_none()
+    );
+    assert_eq!(
+        hovers,
+        ["info", "warning", "error"].map(|severity| format!(
+            "[{severity}] process_owner (claim_conflict)\n{severity} diagnostic detail"
+        ))
     );
 }

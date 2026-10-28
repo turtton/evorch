@@ -100,7 +100,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             } else if startup && message.status == DeliveryStatus::Queued {
                 DeliveryStatus::Rejected {
-                    reason: "送信前に中断".into(),
+                    reason: "Interrupted before sending".into(),
                 }
             } else {
                 continue;

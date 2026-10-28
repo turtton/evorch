@@ -61,6 +61,13 @@ pub enum TranscriptEntry {
     Notice {
         text: String,
     },
+    /// A runtime diagnostic: `text` is the short user-facing line, `hover`
+    /// carries severity, source, code and the raw detail.
+    Diagnostic {
+        severity: event_bus::DiagnosticSeverity,
+        text: String,
+        hover: String,
+    },
     SandboxReview {
         text: String,
         run_id: Option<String>,
@@ -286,9 +293,10 @@ impl TranscriptModel {
                 run_id: run_id.clone(),
                 context_len: *context_len,
             }),
+            // A stop is visible in the phase indicator and the Stop controls; no notice.
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 to: event_bus::AgentRunPhase::Stopped, ..
-            }) => self.push(TranscriptEntry::Notice { text: "Run stopped (resumable)".into() }),
+            }) => {}
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
                     to: event_bus::AgentRunPhase::Error,
@@ -513,6 +521,7 @@ impl TranscriptModel {
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::Diagnostic { .. }
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
