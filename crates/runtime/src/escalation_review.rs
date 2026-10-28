@@ -20,6 +20,7 @@ pub(crate) use denial_streak::{CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, Denial
 pub use gate::{EvidenceStamp, SandboxEscalationGate};
 pub use loaded_skills::LoadedSkillRef;
 pub(crate) use loaded_skills::{LoadedBy, LoadedSkill, LoadedSkillView};
+use loaded_skills::{detach_attached_skills, merge_views};
 
 pub const DEFAULT_REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -45,7 +46,7 @@ macro_rules! critical_risk_rule {
 /// How the reviewer reads `loaded_skills` in the payload.
 macro_rules! loaded_skills_rule {
     () => {
-        "loaded_skills are procedures the agent was given for its work; they describe the expected steps and, like project rules, never widen authorization. loaded_by says who chose each one: skill_load and delegate_load_skills are the agent's or its parent's choices. "
+        "loaded_skills are procedures the agent was given for its work; they describe the expected steps and, like project rules, never widen authorization. loaded_by says who chose each one: skill_load and delegate_load_skills are the agent's or its parent's choices, and user_mention means the user attached it to their own message. "
     };
 }
 
@@ -325,10 +326,11 @@ pub(crate) fn review_context(
     run: ReviewRunContext,
     rules: Option<&crate::rules::RulesSource>,
 ) -> Result<(ReviewContext, EvidenceStamp), ReviewError> {
-    let (real_user_requests, revision, synced) = run.requests();
+    let (mut real_user_requests, revision, synced) = run.requests();
     if !synced {
         return Err(ReviewError::Unsynced);
     }
+    let attached = detach_attached_skills(&mut real_user_requests);
     let project_rules = rules.and_then(|rules| {
         if rules.trust() != crate::rules::ProjectTrust::Approved {
             return None;
@@ -347,8 +349,11 @@ pub(crate) fn review_context(
             text: String::from_utf8_lossy(&bytes).into_owned(),
         })
     });
-    let loaded_skills = run.reviewable_skills(
-        rules.is_some_and(|rules| rules.trust() == crate::rules::ProjectTrust::Approved),
+    let loaded_skills = merge_views(
+        run.reviewable_skills(
+            rules.is_some_and(|rules| rules.trust() == crate::rules::ProjectTrust::Approved),
+        ),
+        attached,
     );
     Ok((
         ReviewContext {
@@ -748,6 +753,10 @@ pub(crate) mod support;
 #[cfg(test)]
 #[path = "escalation_review/gate_tests.rs"]
 mod gate_tests;
+
+#[cfg(test)]
+#[path = "escalation_review/attachment_tests.rs"]
+mod attachment_tests;
 
 #[cfg(test)]
 #[path = "escalation_review/procedure_tests.rs"]

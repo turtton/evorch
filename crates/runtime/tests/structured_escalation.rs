@@ -887,3 +887,29 @@ async fn a_loaded_skill_reaches_the_review_and_the_normal_turns_keep_their_prefi
             .contains("exit_code: 0\\ncleaned")
     );
 }
+
+#[tokio::test]
+async fn an_expanded_mention_reaches_the_review_apart_from_the_user_words() {
+    let typed = "CI通ったらマージしていいよ @extra";
+    let mut prompt = typed.to_owned();
+    runtime::skill::append_skill_attachment(&mut prompt, "extra", "Extra procedure steps.");
+    let (turns, review) = run_skill_review(prompt.clone()).await;
+    assert_skill_review_keeps_the_prefix(&turns);
+    // The agent still receives the whole message, block included.
+    assert!(
+        turns[0]["messages"]
+            .to_string()
+            .contains("Extra procedure steps.")
+    );
+    let context = review_context(&review);
+    assert_eq!(context["real_user_requests"][0]["text"], typed);
+    let skills = context["loaded_skills"].as_array().expect("skills");
+    let attached = skills
+        .iter()
+        .find(|skill| skill["name"] == "extra")
+        .expect("attached skill");
+    assert_eq!(attached["loaded_by"], "user_mention");
+    assert_eq!(attached["trust"], "user-attached");
+    assert_eq!(attached["text"], "Extra procedure steps.");
+    assert!(skills.iter().any(|skill| skill["name"] == "worktree-pr"));
+}

@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ReviewRunContext, bounded};
-use crate::skill::SkillScope;
+use super::{ReviewRunContext, UserRequest, bounded};
+use crate::skill::{SkillScope, split_skill_attachments};
 
 /// Longest skill body sent to the reviewer, in bytes.
 pub(crate) const MAX_SKILL_BYTES: usize = 16 * 1024;
@@ -23,6 +23,9 @@ pub(crate) enum LoadedBy {
     SkillLoad,
     /// A parent started this run with `load_skills`.
     DelegateLoadSkills,
+    /// The user attached it to their own message with an `@skill` mention.
+    /// Only the reviewer's view carries this; a run never records it.
+    UserMention,
 }
 
 /// A skill body the runtime read for a run.
@@ -101,12 +104,54 @@ impl ReviewRunContext {
                     loaded_by: match skill.loaded_by {
                         LoadedBy::SkillLoad => "skill_load",
                         LoadedBy::DelegateLoadSkills => "delegate_load_skills",
+                        LoadedBy::UserMention => "user_mention",
                     },
                     text: skill.text.clone(),
                 })
             })
             .collect()
     }
+}
+
+/// Moves the skill bodies a host expanded from `@skill` mentions out of the
+/// user's words: each request keeps its typed text, and the bodies come back
+/// as views the user attached.
+pub(super) fn detach_attached_skills(requests: &mut [UserRequest]) -> Vec<LoadedSkillView> {
+    let mut attached = Vec::new();
+    for request in requests {
+        // An answer to a question is typed by the user; no host expands mentions in it.
+        if request.in_reply_to.is_some() {
+            continue;
+        }
+        let (typed, attachments) = split_skill_attachments(&request.text);
+        if attachments.is_empty() {
+            continue;
+        }
+        attached.extend(attachments.into_iter().map(|attachment| LoadedSkillView {
+            name: attachment.name.to_owned(),
+            scope: "user_message",
+            trust: "user-attached",
+            loaded_by: "user_mention",
+            text: bounded(&attachment.body, MAX_SKILL_BYTES),
+        }));
+        request.text = typed.to_owned();
+    }
+    attached
+}
+
+/// `recorded` followed by `attached`, a later load replacing an earlier one of
+/// the same name, newest [`MAX_LOADED_SKILLS`] kept.
+pub(super) fn merge_views(
+    mut recorded: Vec<LoadedSkillView>,
+    attached: Vec<LoadedSkillView>,
+) -> Vec<LoadedSkillView> {
+    for view in attached {
+        recorded.retain(|known| known.name != view.name);
+        recorded.push(view);
+    }
+    let excess = recorded.len().saturating_sub(MAX_LOADED_SKILLS);
+    recorded.drain(..excess);
+    recorded
 }
 
 #[cfg(test)]
