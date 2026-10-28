@@ -36,17 +36,6 @@ impl ThreadMetrics {
         }
     }
 
-    pub fn wall_label(&self) -> String {
-        format!("wall {}", crate::format::duration(self.wall_time))
-    }
-
-    pub fn wall_tooltip(&self) -> String {
-        format!(
-            "Wall time: time with at least one run Running\nagent time: {} (all runs summed)",
-            crate::format::duration(self.agent_time)
-        )
-    }
-
     pub fn cache_label(&self) -> String {
         self.cache_reuse.label()
     }
@@ -57,15 +46,12 @@ impl ThreadMetrics {
     }
 }
 
-/// The total length covered by `spans` (overlaps counted once), and the sum of
-/// their lengths (overlaps counted per span).
-fn union_and_sum(spans: &mut [(Instant, Instant)]) -> (Duration, Duration) {
+/// The total length covered by `spans`, counting overlaps once.
+fn union_length(spans: &mut [(Instant, Instant)]) -> Duration {
     spans.sort_unstable();
     let mut union = Duration::ZERO;
-    let mut sum = Duration::ZERO;
     let mut open: Option<(Instant, Instant)> = None;
     for &(start, end) in spans.iter() {
-        sum += end.saturating_duration_since(start);
         open = match open {
             Some((from, until)) if start <= until => Some((from, until.max(end))),
             Some((from, until)) => {
@@ -78,7 +64,7 @@ fn union_and_sum(spans: &mut [(Instant, Instant)]) -> (Duration, Duration) {
     if let Some((from, until)) = open {
         union += until.saturating_duration_since(from);
     }
-    (union, sum)
+    union
 }
 
 impl TelemetryOverlay {
@@ -104,7 +90,7 @@ impl TelemetryOverlay {
                 spans.push((*start, now.max(*start)));
             }
         }
-        let (wall_time, agent_time) = union_and_sum(&mut spans);
+        let wall_time = union_length(&mut spans);
         // Prefer explicit conversation roots. Older observations can lack a
         // lifecycle marker, so use parentless runs only when none are known.
         // A thread still owns all its subagents for the total cost above.
@@ -182,7 +168,6 @@ impl TelemetryOverlay {
             average_cache_hit_rate: has_usage.then(|| usage.cache_hit_rate()),
             cache_reuse,
             wall_time,
-            agent_time,
             context_pressure: latest.and_then(TelemetryRow::context_pressure),
             context_used_tokens: latest.and_then(TelemetryRow::context_used_tokens),
             ttft: latest

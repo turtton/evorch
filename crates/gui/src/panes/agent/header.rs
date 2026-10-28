@@ -1,5 +1,5 @@
 use super::{AgentIdentity, AgentPaneAction, ConversationContext};
-use crate::format::usd;
+use crate::format::{duration, usd};
 use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
 use crate::panes::agents::AgentsAction;
 use crate::theme::{
@@ -197,9 +197,9 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>, age
             metrics.ttft_label(),
             metrics.tok_s_label(),
             metrics.context_label(),
+            format!("wall {}", duration(metrics.wall_time)),
         ] {
             metric(ui, &segment);
         }
-        metric_detailed(ui, &metrics.wall_label(), &metrics.wall_tooltip(), false);
     });
 }

@@ -229,7 +229,7 @@ fn parallel_metrics(spans: &[(&str, u64, Option<u64>)], read_at: u64) -> ThreadM
 }
 
 #[test]
-fn wall_time_counts_parallel_runs_once_while_agent_time_sums_them() {
+fn wall_time_counts_parallel_runs_once() {
     // Given: a root running 0..100 with two subagents running 10..50 and 20..60.
     let metrics = parallel_metrics(
         &[
@@ -241,7 +241,6 @@ fn wall_time_counts_parallel_runs_once_while_agent_time_sums_them() {
     );
     // Then: wall time is the 100 elapsed seconds, not 100 + 40 + 40.
     assert_eq!(metrics.wall_time, Duration::from_secs(100));
-    assert_eq!(metrics.agent_time, Duration::from_secs(180));
 }
 
 #[test]
@@ -253,7 +252,6 @@ fn wall_time_merges_partial_overlaps_and_skips_gaps() {
     );
     // Then: 0..50 and 80..90 are counted once each.
     assert_eq!(metrics.wall_time, Duration::from_secs(60));
-    assert_eq!(metrics.agent_time, Duration::from_secs(70));
 }
 
 #[test]
@@ -262,7 +260,6 @@ fn wall_time_unions_in_flight_runs_with_finished_ones() {
     let metrics = parallel_metrics(&[("a", 0, Some(50)), ("b", 30, None)], 100);
     // Then: 0..100 is covered once; the overlap 30..50 is not doubled.
     assert_eq!(metrics.wall_time, Duration::from_secs(100));
-    assert_eq!(metrics.agent_time, Duration::from_secs(120));
 }
 
 fn wall_time_after_phases(phases: &[(AgentRunPhase, u64)]) -> Duration {

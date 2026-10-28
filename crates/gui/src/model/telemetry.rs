@@ -182,8 +182,6 @@ pub struct ThreadMetrics {
     /// Elapsed time during which at least one run of the thread was Running:
     /// the union of the runs' Running spans, so parallel subagents overlap.
     pub wall_time: Duration,
-    /// Running time summed over every run, counting overlapping spans separately.
-    pub agent_time: Duration,
     pub context_pressure: Option<u128>,
     pub context_used_tokens: Option<u128>,
     pub ttft: Option<Duration>,
