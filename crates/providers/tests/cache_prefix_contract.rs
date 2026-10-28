@@ -35,10 +35,14 @@ fn message(value: Value) -> Message {
 }
 
 fn conversation(model: &str) -> Vec<ChatRequest> {
+    conversation_with_effort(model, "medium")
+}
+
+fn conversation_with_effort(model: &str, effort: &str) -> Vec<ChatRequest> {
     let mut request: ChatRequest = serde_json::from_value(json!({
         "model": model,
-        "max_tokens": 1024,
-        "reasoning_effort": "medium",
+        "max_tokens": 4096,
+        "reasoning_effort": effort,
         "messages": [
             {"role": "system", "content": [
                 {"type": "text", "text": "Keep reports accurate. 日本語で説明する。\n".repeat(128)},
@@ -123,7 +127,7 @@ async fn assert_http_prefix_contract(
     endpoint: &str,
     fixture_provider: &str,
     fixture_name: &str,
-) {
+) -> Vec<Value> {
     Mock::given(method("POST"))
         .and(path(endpoint))
         .respond_with(support::sse_response(&support::fixture(
@@ -167,6 +171,7 @@ async fn assert_http_prefix_contract(
             "reversing tool registration must not change serialized tools"
         );
     }
+    bodies
 }
 
 #[tokio::test]
@@ -231,7 +236,7 @@ async fn anthropic_normal_turns_preserve_the_sent_prefix() {
         event_bus: None,
     })
     .unwrap();
-    assert_http_prefix_contract(
+    let bodies = assert_http_prefix_contract(
         &server,
         &client,
         CacheProtocol::Anthropic,
@@ -241,4 +246,93 @@ async fn anthropic_normal_turns_preserve_the_sent_prefix() {
         "stream_text.sse",
     )
     .await;
+    // The selected effort reaches the wire, identically on every turn of the conversation.
+    for body in &bodies {
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4095})
+        );
+        assert!(body.get("output_config").is_none());
+    }
+}
+
+fn anthropic_client(server: &MockServer) -> AnthropicClient {
+    AnthropicClient::new(AnthropicConfig {
+        base_url: server.uri(),
+        timeout: TIMEOUT,
+        event_bus: None,
+    })
+    .unwrap()
+}
+
+// Given: an effort-capable API-key model and a multi-turn conversation at one effort
+// When: every turn goes through the real client
+// Then: the effort controls are present and byte-identical on each turn, and an
+// independent oracle accepts the turns as append-only.
+#[tokio::test]
+async fn anthropic_effort_is_stable_across_normal_turns() {
+    let server = MockServer::start().await;
+    let bodies = assert_http_prefix_contract(
+        &server,
+        &anthropic_client(&server),
+        CacheProtocol::Anthropic,
+        "claude-sonnet-4-6",
+        "/messages",
+        "anthropic",
+        "stream_text.sse",
+    )
+    .await;
+    for body in &bodies {
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
+        assert_eq!(body["output_config"], json!({"effort": "medium"}));
+        assert_eq!(body["thinking"], bodies[0]["thinking"]);
+        assert_eq!(body["output_config"], bodies[0]["output_config"]);
+    }
+}
+
+// Given: a conversation sent at `medium` effort / When: the effort is changed to `high`
+// mid-run / Then: the settings change is an explicit cache boundary that the append-only
+// oracle reports (the resolved effort is part of the cached prefix), and turns that keep the
+// new effort are append-only against it again.
+#[tokio::test]
+async fn anthropic_effort_change_is_an_explicit_boundary_with_reuse_after_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(support::sse_response(&support::fixture(
+            "anthropic",
+            "stream_text.sse",
+        )))
+        .mount(&server)
+        .await;
+    let client = anthropic_client(&server);
+    let medium = conversation_with_effort("claude-sonnet-4-6", "medium");
+    let high = conversation_with_effort("claude-sonnet-4-6", "high");
+    for request in [&medium[0], &medium[1], &high[2], &high[3]] {
+        client
+            .stream(&ProviderAuth::new("local-contract-key"), request)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+    }
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(bodies.len(), 4);
+    assert_append_only(CacheProtocol::Anthropic, &bodies[0], &bodies[1]).unwrap();
+    assert_eq!(bodies[1]["output_config"], json!({"effort": "medium"}));
+    assert_eq!(bodies[2]["output_config"], json!({"effort": "high"}));
+    assert!(
+        assert_append_only(CacheProtocol::Anthropic, &bodies[1], &bodies[2]).is_err(),
+        "an effort change must not be mistaken for a reusable prefix"
+    );
+    assert_append_only(CacheProtocol::Anthropic, &bodies[2], &bodies[3]).unwrap();
 }

@@ -148,21 +148,17 @@ impl AnthropicClient {
         stream: bool,
     ) -> Result<(MessagesRequest, Option<ClaudeToolAdapter>), ProviderError> {
         let mut wire = to_wire_request(request, stream);
-        let reasoning = self
-            .claude_oauth
-            .then(|| {
-                ClaudeWireProfile.reasoning(
-                    &request.model,
-                    wire.max_tokens,
-                    request.reasoning_effort.as_deref(),
-                )
-            })
-            .transpose()?;
-        if self.claude_oauth
-            && (reasoning
-                .as_ref()
-                .is_some_and(ClaudeReasoningControls::is_enabled)
-                || ClaudeWireProfile.requires_default_temperature(&request.model))
+        let reasoning = self.reasoning_controls(
+            &request.model,
+            wire.max_tokens,
+            request.reasoning_effort.as_deref(),
+        )?;
+        // Thinking needs the default temperature on every transport; the stricter
+        // per-model sampling rule is only applied to the pinned Claude subscription profile.
+        if reasoning
+            .as_ref()
+            .is_some_and(ClaudeReasoningControls::is_enabled)
+            || (self.claude_oauth && ClaudeWireProfile.requires_default_temperature(&request.model))
         {
             if wire.temperature.is_some_and(|value| value != 1.0) {
                 return Err(ProviderError::Request(
@@ -194,6 +190,25 @@ impl AnthropicClient {
             },
             adapter,
         ))
+    }
+
+    /// Subscription requests always carry a (possibly empty) profile and fail on unsupported
+    /// efforts; API-key requests carry controls only for a supported explicit effort.
+    fn reasoning_controls(
+        &self,
+        model: &str,
+        max_tokens: u64,
+        effort: Option<&str>,
+    ) -> Result<Option<ClaudeReasoningControls>, ProviderError> {
+        if self.claude_oauth {
+            return ClaudeWireProfile
+                .reasoning(model, max_tokens, effort)
+                .map(Some);
+        }
+        Ok(
+            Some(ClaudeWireProfile.api_key_reasoning(model, max_tokens, effort))
+                .filter(|controls| *controls != ClaudeReasoningControls::default()),
+        )
     }
 
     fn authenticated_request(

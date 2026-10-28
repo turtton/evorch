@@ -165,7 +165,7 @@ impl Respond for ClaudeEndpoint {
     }
 }
 
-async fn exercise(oauth: bool) {
+async fn exercise(oauth: bool, effort: Option<&str>) {
     let server = MockServer::start().await;
     let oracle = Arc::new(Mutex::new(Oracle::default()));
     let token = "fixture-claude-token";
@@ -249,7 +249,7 @@ async fn exercise(oauth: bool) {
         model_preference: Some(ModelPreference {
             profile: "claude".into(),
             model: Some("claude-sonnet-4-6".into()),
-            reasoning_effort: None,
+            reasoning_effort: effort.map(str::to_owned),
         }),
         ..Default::default()
     };
@@ -346,6 +346,36 @@ async fn exercise(oauth: bool) {
     assert_eq!(oracle.searches.len(), 2);
     assert_eq!(search_usage.lock().unwrap().len(), 2);
     assert_eq!(oracle.cached[0], 0);
+    // The effort reaches the wire (and so the input-derived mock cache key) identically on
+    // every chat turn; without a selection nothing reasoning-related is sent.
+    let reasoning = |body: &Value| {
+        ["thinking", "output_config", "context_management"].map(|field| body[field].clone())
+    };
+    for body in &oracle.requests {
+        assert_eq!(reasoning(body), reasoning(&oracle.requests[0]));
+    }
+    if let (Some(effort), false) = (effort, oauth) {
+        assert_eq!(
+            oracle.requests[0]["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(
+            oracle.requests[0]["output_config"],
+            json!({"effort":effort})
+        );
+        assert!(oracle.requests[0].get("context_management").is_none());
+        assert!(
+            oracle
+                .model_inputs
+                .iter()
+                .all(|input| input["thinking"].is_object())
+        );
+    } else if effort.is_none() {
+        assert_eq!(
+            reasoning(&oracle.requests[0]),
+            [Value::Null, Value::Null, Value::Null]
+        );
+    }
     for (index, response) in responses.iter().enumerate().skip(1) {
         mock_openai::cache_contract::assert_append_only(
             mock_openai::cache_contract::CacheProtocol::Anthropic,
@@ -447,10 +477,15 @@ async fn exercise(oauth: bool) {
 
 #[tokio::test]
 async fn claude_api_key_runtime_tool_turns_and_hosted_search_preserve_prefix() {
-    exercise(false).await;
+    exercise(false, None).await;
+}
+
+#[tokio::test]
+async fn claude_api_key_runtime_with_reasoning_effort_preserves_prefix() {
+    exercise(false, Some("medium")).await;
 }
 
 #[tokio::test]
 async fn claude_oauth_runtime_tool_turns_and_hosted_search_preserve_prefix() {
-    exercise(true).await;
+    exercise(true, None).await;
 }

@@ -423,7 +423,8 @@ async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_con
 }
 
 #[tokio::test]
-async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_stay_unchanged() {
+async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_share_only_the_mapping()
+ {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -460,10 +461,13 @@ async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_sta
             .split(',')
             .any(|beta| beta == "effort-2025-11-24")
     );
+    // API-key requests share the thinking/effort mapping but none of the Claude Code
+    // transport: no context_management beta, beta header, or CLI identity.
     let api_body: Value = serde_json::from_slice(&captured[1].body).unwrap();
-    for control in ["thinking", "output_config", "context_management"] {
-        assert!(api_body.get(control).is_none());
-    }
+    assert_eq!(api_body["thinking"], subscription["thinking"]);
+    assert_eq!(api_body["output_config"], subscription["output_config"]);
+    assert!(api_body.get("context_management").is_none());
+    assert!(!captured[1].headers.contains_key("anthropic-beta"));
     assert!(
         !captured[1]
             .headers
@@ -895,7 +899,7 @@ async fn request_started_records_the_effort_actually_sent() {
     Mock::given(method("POST"))
         .and(path("/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(send_response()))
-        .expect(2)
+        .expect(3)
         .mount(&server)
         .await;
     let bus = Arc::new(event_bus::EventBus::new(32));
@@ -918,9 +922,16 @@ async fn request_started_records_the_effort_actually_sent() {
         .send(&auth, &input)
         .await
         .unwrap();
+    // A model without a known effort mapping sends nothing, and records nothing.
+    input.model = "some-gateway/claude".into();
+    AnthropicClient::new(config())
+        .unwrap()
+        .send(&auth, &input)
+        .await
+        .unwrap();
 
     let mut efforts = Vec::new();
-    while efforts.len() < 2 {
+    while efforts.len() < 3 {
         let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
             .await
             .expect("RequestStarted arrives")
@@ -934,5 +945,8 @@ async fn request_started_records_the_effort_actually_sent() {
         }
     }
 
-    assert_eq!(efforts, [Some("high".to_owned()), None]);
+    assert_eq!(
+        efforts,
+        [Some("high".to_owned()), Some("high".to_owned()), None]
+    );
 }
