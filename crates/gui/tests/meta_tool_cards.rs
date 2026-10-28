@@ -79,7 +79,6 @@ async fn a_delegate_card_names_the_agent_and_a_draft_shows_its_progress() {
             call_id: begins.then(|| "call-1".to_owned()),
             tool_name: begins.then(|| "delegate".to_owned()),
             arguments_delta: text.into(),
-            begins_attempt: begins,
         })
     };
     registry.apply(&draft("{\"name\":\"worker-w1\",\n", true));

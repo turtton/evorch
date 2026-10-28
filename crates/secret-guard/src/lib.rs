@@ -161,6 +161,30 @@ impl SecretRedactor {
         }
     }
 
+    /// Like [`Self::redact`] for text that is still being written. A trailing
+    /// token that already starts like a credential but is not long enough to
+    /// match a rule yet is masked too, so a credential never shows up in pieces.
+    #[must_use]
+    pub fn redact_streaming(&self, text: &str) -> RedactedText {
+        let mut redacted = self.redact(text);
+        let token_start = redacted
+            .text
+            .char_indices()
+            .rev()
+            .find(|(_, character)| !is_token_character(*character))
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        let token = &redacted.text[token_start..];
+        if STREAMING_PREFIXES
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+        {
+            redacted.text.truncate(token_start);
+            redacted.text.push_str("[REDACTED:partial-credential]");
+            redacted.count += 1;
+        }
+        redacted
+    }
+
     /// Redact textual JSON payloads, including credential-shaped object keys.
     /// Callers must exclude protocol identifiers from this payload-only traversal.
     pub fn redact_json(&self, value: &mut serde_json::Value) -> usize {
@@ -274,6 +298,25 @@ fn scan_prefixed<'a>(
 }
 
 type Rule = (&'static str, &'static str, usize, fn(u8) -> bool);
+/// Credential openings that identify an unfinished token while it streams in.
+const STREAMING_PREFIXES: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "AKIA",
+    "AIza",
+    "xox",
+    "eyJ",
+];
+
+fn is_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
 const PREFIX_RULES: &[Rule] = &[
     ("sk-", "openai-style-key", 20, base64url),
     ("ghp_", "github-token", 30, |byte| {

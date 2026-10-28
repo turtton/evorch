@@ -80,3 +80,18 @@ fn distinct_secret_json_keys_retain_both_values() {
     assert_eq!(value.as_object().unwrap().len(), 2);
     assert!(!value.to_string().contains("sk-abcdefghijklmnopqrstuvwxyz"));
 }
+
+#[test]
+fn streaming_redaction_masks_an_unfinished_credential_at_the_end() {
+    let redactor = SecretRedactor::with_known_values([]);
+    // Too short for any rule yet, but already recognisable as a credential opening.
+    let partial = redactor.redact_streaming("{\"token\":\"ghp_ABCD");
+    assert_eq!(partial.text, "{\"token\":\"[REDACTED:partial-credential]");
+    assert_eq!(partial.count, 1);
+    // Complete tokens use the regular rules and ordinary words are untouched.
+    let complete = redactor.redact_streaming(&format!("key ghp_{} then risk", "A".repeat(36)));
+    assert_eq!(complete.text, "key [REDACTED:github-token] then risk");
+    assert_eq!(redactor.redact_streaming("plain text").count, 0);
+    // A prefix inside a longer earlier token is not the unfinished tail.
+    assert_eq!(redactor.redact_streaming("ghp_ABCD done").count, 0);
+}

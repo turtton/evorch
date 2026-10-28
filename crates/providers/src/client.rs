@@ -112,7 +112,6 @@ pub trait ProviderClient: Send + Sync {
         let mut attempts_used = 0;
         loop {
             attempts_used += 1;
-            let mut attempt_has_tool_call = false;
             let (error, premature_eof) = match self.stream(auth, request).await {
                 Err(error) => (error, false),
                 Ok(mut stream) => loop {
@@ -147,23 +146,20 @@ pub trait ProviderClient: Send + Sync {
                             }
                         }
                         // Display only: Completed stays the sole source of the tool calls.
-                        // Retries replay from the start and are not deduplicated; the first
-                        // fragment of each attempt tells consumers to drop earlier drafts.
+                        // A retry replays tool calls from the start, so StreamRetried tells
+                        // consumers to drop the failed attempt's drafts.
                         StreamEvent::ToolCallDelta {
                             index,
                             id,
                             name,
                             arguments_delta,
                         } => {
-                            let begins_attempt =
-                                !std::mem::replace(&mut attempt_has_tool_call, true);
                             bus.emit(Event::new(MessageEvent::ToolCallDelta {
                                 run_id,
                                 index,
                                 call_id: id,
                                 tool_name: name,
                                 arguments_delta,
-                                begins_attempt,
                             }));
                         }
                         StreamEvent::Completed { response } => return Ok(response),
@@ -180,6 +176,12 @@ pub trait ProviderClient: Send + Sync {
                 });
             }
             dedup.on_new_attempt();
+            bus.emit(Event::new(MessageEvent::StreamRetried {
+                run_id: request
+                    .observation
+                    .as_ref()
+                    .map(|context| context.run_id.clone()),
+            }));
             tokio::time::sleep(policy.backoff_for(attempts_used - 1)).await;
         }
     }
@@ -285,6 +287,7 @@ mod tests {
                     assert_eq!(run_id, None);
                     deltas.push(delta);
                 }
+                EventKind::Message(MessageEvent::StreamRetried { .. }) => {}
                 other => panic!("想定外のイベント: {other:?}"),
             }
         }
@@ -346,15 +349,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_publishes_tool_call_drafts_and_marks_each_attempt() {
-        // Given: 最初の試行は引数の途中で EOF になり、二回目が全体を再生する。
+    async fn streaming_publishes_tool_call_drafts_and_announces_each_retry() {
+        // Given: 最初の試行は引数の途中で EOF になり、二回目はテキストだけを返す。
         let client = ScriptedClient::new(vec![
             Ok(vec![tool_delta(0, Some("call-1"), Some("write"), "{\"pa")]),
-            Ok(vec![
-                tool_delta(0, Some("call-1"), Some("write"), "{\"pa"),
-                tool_delta(0, None, None, "th\":1}"),
-                completed(),
-            ]),
+            Ok(vec![text("retried"), completed()]),
         ]);
         let bus = EventBus::new(16);
         let mut receiver = bus.subscribe();
@@ -362,38 +361,32 @@ mod tests {
         let result = client
             .send_streaming(&ProviderAuth::new("key"), &sample_request(), &bus)
             .await;
-        // Then: 確定応答は Completed のまま、表示用の断片は各試行の先頭だけが印付けされる。
+        // Then: 確定応答は Completed のまま、再試行の境界が tool 断片の有無に依らず通知される。
         assert_eq!(result, Ok(sample_response()));
-        let mut drafts = Vec::new();
+        let mut kinds = Vec::new();
         while let Some(event) = receiver.recv().now_or_never() {
-            let EventKind::Message(MessageEvent::ToolCallDelta {
-                call_id,
-                tool_name,
-                arguments_delta,
-                begins_attempt,
-                ..
-            }) = event.expect("イベントを受信できる").kind
-            else {
-                panic!("想定外のイベント");
-            };
-            drafts.push((call_id, tool_name, arguments_delta, begins_attempt));
+            kinds.push(match event.expect("イベントを受信できる").kind {
+                EventKind::Message(MessageEvent::ToolCallDelta {
+                    call_id,
+                    tool_name,
+                    arguments_delta,
+                    ..
+                }) => format!("tool {call_id:?} {tool_name:?} {arguments_delta}"),
+                EventKind::Message(MessageEvent::StreamRetried { run_id }) => {
+                    format!("retried {run_id:?}")
+                }
+                EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
+                    format!("text {delta}")
+                }
+                other => panic!("想定外のイベント: {other:?}"),
+            });
         }
         assert_eq!(
-            drafts,
+            kinds,
             [
-                (
-                    Some("call-1".into()),
-                    Some("write".into()),
-                    "{\"pa".into(),
-                    true
-                ),
-                (
-                    Some("call-1".into()),
-                    Some("write".into()),
-                    "{\"pa".into(),
-                    true
-                ),
-                (None, None, "th\":1}".into(), false),
+                "tool Some(\"call-1\") Some(\"write\") {\"pa",
+                "retried None",
+                "text retried",
             ]
         );
     }

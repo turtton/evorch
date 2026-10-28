@@ -116,8 +116,48 @@ fn shell_control(entry: &TranscriptEntry) -> Option<&str> {
         .filter(|action| matches!(*action, "poll" | "stdin" | "stop"))
 }
 
+/// Read-only status checks that agents repeat while waiting for something.
+const POLLING_TOOLS: &[&str] = &[
+    "inbox",
+    "user_answers",
+    "wait",
+    "wait_reply",
+    "run_output",
+    "subagent_questions",
+    "list_agents",
+    "inspect_agent",
+    "get_goal",
+    "working_note_read",
+];
+
+/// What makes two finished polls the same observation: caller, tool, target and
+/// the state they reported. Failures and running calls never match.
+fn poll_signature(
+    entry: &TranscriptEntry,
+) -> Option<(Option<&str>, &str, Option<&serde_json::Value>, &str)> {
+    let TranscriptEntry::Tool {
+        run_id,
+        tool_name,
+        input,
+        output: Some(output),
+        is_error: false,
+        status: ToolStatus::Succeeded,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    POLLING_TOOLS.contains(&tool_name.as_str()).then_some((
+        run_id.as_deref(),
+        tool_name,
+        input.as_ref(),
+        output,
+    ))
+}
+
 /// How many entries from the start of `entries` share one card: consecutive
-/// polls of the same shell job fold together, everything else stands alone.
+/// polls of the same shell job fold together, as do identical read-only status
+/// checks that observed the same state; everything else stands alone.
 pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
     let Some(first) = entries.first() else {
         return 0;
@@ -125,7 +165,13 @@ pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
     let Some(job) =
         resolved_shell_job_key(first, jobs).filter(|_| shell_control(first) == Some("poll"))
     else {
-        return 1;
+        let Some(signature) = poll_signature(first) else {
+            return 1;
+        };
+        return 1 + entries[1..]
+            .iter()
+            .take_while(|entry| poll_signature(entry) == Some(signature))
+            .count();
     };
     1 + entries[1..]
         .iter()
@@ -241,7 +287,7 @@ pub fn tool_card_group(
         if let Some(job) = job.filter(|job| preview && job.is_running()) {
             live_tail(ui, job);
         }
-        if expanded && !running && folded > 1 {
+        if expanded && !running && folded > 1 && shell_control(last).is_some() {
             let combined: String = group
                 .iter()
                 .filter_map(|entry| match entry {
@@ -408,15 +454,33 @@ fn live_tail(ui: &mut Ui, job: &ShellJob) {
     }
 }
 
+/// Characters of a draft line that are shown; a long one-line JSON keeps its end.
+const DRAFT_LINE_CHARS: usize = 120;
+
+/// The newest lines of the arguments being written, each cut to its end.
+pub fn draft_preview_lines(arguments: &str) -> Vec<String> {
+    let lines: Vec<&str> = arguments.lines().collect();
+    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| {
+            let count = line.chars().count();
+            if count <= DRAFT_LINE_CHARS {
+                return (*line).to_owned();
+            }
+            let tail: String = line.chars().skip(count - DRAFT_LINE_CHARS).collect();
+            format!("…{tail}")
+        })
+        .collect()
+}
+
 /// The last few lines of the arguments the model is still writing, so a long
 /// call shows its progress without expanding anything.
 fn draft_tail(ui: &mut Ui, arguments: &str) {
-    let lines: Vec<&str> = arguments.lines().collect();
-    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
-    for line in &lines[start..] {
+    for line in draft_preview_lines(arguments) {
         ui.add(
             egui::Label::new(
-                RichText::new(*line)
+                RichText::new(line)
                     .monospace()
                     .size(FONT_SMALL)
                     .color(palette().TEXT_MUTED),

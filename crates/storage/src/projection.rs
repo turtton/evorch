@@ -150,7 +150,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         EventKind::Message(
             MessageEvent::FinalResultPublished { .. }
             | MessageEvent::MessageCompleted { .. }
-            | MessageEvent::ToolCallDelta { .. },
+            | MessageEvent::ToolCallDelta { .. }
+            | MessageEvent::StreamRetried { .. },
         ) => {}
         EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
             if let Some(session) = state.session(stored) {

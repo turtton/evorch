@@ -134,6 +134,7 @@ pub struct TranscriptModel {
     pending_reviews: std::collections::BTreeMap<(Option<String>, String), Vec<ToolReview>>,
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
+    drafts: drafts::DraftIndex,
 }
 
 impl Default for TranscriptModel {
@@ -162,6 +163,7 @@ impl TranscriptModel {
             shell_jobs: shell_jobs::ShellJobs::default(),
             pending_reviews: std::collections::BTreeMap::new(),
             approvals_while_running: std::collections::BTreeSet::new(),
+            drafts: drafts::DraftIndex::default(),
         }
     }
 
@@ -314,7 +316,7 @@ impl TranscriptModel {
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
                 self.complete_message(run_id, text, &event.meta);
-                self.seal_drafts(run_id);
+                self.response_completed(run_id);
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::ToolCallDelta {
                 run_id,
@@ -322,15 +324,16 @@ impl TranscriptModel {
                 call_id,
                 tool_name,
                 arguments_delta,
-                begins_attempt,
             }) => self.apply_tool_call_delta(&drafts::ToolCallFragment {
                 run_id: run_id.as_deref(),
                 index: *index,
                 call_id: call_id.as_deref(),
                 tool_name: tool_name.as_deref(),
                 arguments_delta,
-                begins_attempt: *begins_attempt,
             }),
+            event_bus::EventKind::Message(event_bus::MessageEvent::StreamRetried { run_id }) => {
+                self.discard_drafts(run_id.as_deref());
+            }
             event_bus::EventKind::Message(message) => {
                 if let event_bus::MessageEvent::MessageDelta { run_id, .. }
                 | event_bus::MessageEvent::ReasoningDelta { run_id, .. } = message
@@ -461,7 +464,9 @@ impl TranscriptModel {
         let (delta, run_id) = match message {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
-            MessageEvent::MessageCompleted { .. } | MessageEvent::ToolCallDelta { .. } => return,
+            MessageEvent::MessageCompleted { .. }
+            | MessageEvent::ToolCallDelta { .. }
+            | MessageEvent::StreamRetried { .. } => return,
             MessageEvent::FinalResultPublished { text, run_id } => {
                 self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
@@ -522,7 +527,8 @@ impl TranscriptModel {
                 MessageEvent::MessageDelta { .. }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. }
-                | MessageEvent::ToolCallDelta { .. } => TranscriptEntry::Message {
+                | MessageEvent::ToolCallDelta { .. }
+                | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {
                     text: delta.clone(),
                     run_id: run_id.clone(),
                 },
@@ -587,6 +593,7 @@ impl TranscriptModel {
                 *id -= 1;
             }
         }
+        self.drafts.entry_removed(removed_id);
         self.thinking.retain(|_, id| *id != removed_id);
         for id in self.thinking.values_mut() {
             if *id > removed_id {
@@ -782,6 +789,7 @@ impl TranscriptModel {
             self.entries.remove(0);
             self.first_entry_id += 1;
             self.host_inputs.retain(|_, id| *id >= self.first_entry_id);
+            self.drafts.entries_evicted(self.first_entry_id);
             self.thinking.retain(|_, id| *id >= self.first_entry_id);
             self.streaming_messages.retain(|_, ids| {
                 ids.retain(|id| *id >= self.first_entry_id);

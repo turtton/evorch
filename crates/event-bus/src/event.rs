@@ -647,10 +647,13 @@ pub enum MessageEvent {
         tool_name: Option<String>,
         /// Raw argument text appended by this fragment.
         arguments_delta: String,
-        /// Whether this is the first call fragment of a new streaming attempt.
-        /// A retry replays the response from its start, so consumers discard
-        /// the drafts the earlier attempt left behind.
-        begins_attempt: bool,
+    },
+    /// The provider is retrying a response whose stream failed. The retry replays
+    /// the response from its start, so display consumers discard what the failed
+    /// attempt left behind, whether or not the retry carries any tool call.
+    StreamRetried {
+        /// Agent run that is streaming, when attributable.
+        run_id: Option<String>,
     },
 }
 

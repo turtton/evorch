@@ -323,7 +323,8 @@ impl SecretGuard {
                 self.check_text("event", "Compacted.checkpoint_id", checkpoint_id)?;
                 self.check_text("event", "Compacted.run_id", run_id)
             }
-            EventKind::Lifecycle(_)
+            EventKind::Message(MessageEvent::StreamRetried { .. })
+            | EventKind::Lifecycle(_)
             | EventKind::Tool(_)
             | EventKind::Provider(_)
             | EventKind::Usage(_)

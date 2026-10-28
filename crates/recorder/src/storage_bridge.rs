@@ -64,7 +64,9 @@ impl PersistencePolicy {
             EventKind::Tool(ToolEvent::ShellJobOutput { .. }) => true,
             // Tool calls still being composed are display-only; the accepted
             // response and ToolStarted/ToolCompleted are the durable record.
-            EventKind::Message(MessageEvent::ToolCallDelta { .. }) => true,
+            EventKind::Message(
+                MessageEvent::ToolCallDelta { .. } | MessageEvent::StreamRetried { .. },
+            ) => true,
             _ => false,
         }
     }

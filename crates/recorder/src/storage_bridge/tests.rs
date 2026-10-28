@@ -139,7 +139,7 @@ fn live_shell_output_is_not_persisted() {
 }
 
 #[test]
-fn composing_tool_call_drafts_are_not_persisted() {
+fn composing_tool_call_drafts_and_retry_markers_are_not_persisted() {
     // Given: a tool call still being streamed, next to a durable text delta.
     let (_dir, storage, db) = fixture();
     let mut bridge = StorageBridge::new(storage.handle(), "session");
@@ -151,7 +151,11 @@ fn composing_tool_call_drafts_are_not_persisted() {
             call_id: Some("call".into()),
             tool_name: Some("write".into()),
             arguments_delta: "{\"path\":".into(),
-            begins_attempt: true,
+        }))
+        .unwrap();
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::StreamRetried {
+            run_id: Some("run".into()),
         }))
         .unwrap();
     bridge

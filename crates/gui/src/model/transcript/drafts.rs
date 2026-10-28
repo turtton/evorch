@@ -4,17 +4,23 @@
 //! `ToolStatus::Drafting` that `ToolStarted` converts in place, so the card keeps
 //! its position. Anything the accepted response never turned into a call is
 //! discarded rather than left as a card that can never finish.
+//!
+//! Drafts are tracked by (run, call index) with a stable entry ID, so they are
+//! found, confirmed and discarded however far the transcript has since grown.
+
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
+use secret_guard::SecretRedactor;
 
 use super::{ToolStatus, TranscriptEntry, TranscriptModel};
 
-/// Drafts are the newest entries; bounding the search keeps each fragment cheap.
-const DRAFT_SEARCH_WINDOW: usize = 256;
-/// Large arguments (file contents) only ever show their tail, so the retained
-/// text is trimmed from the front beyond this size.
-const MAX_DRAFT_BYTES: usize = 128 * 1024;
-const TRIM_TO_BYTES: usize = 64 * 1024;
+/// Raw argument text kept per draft so a credential split across fragments is
+/// still recognised. Only a short redacted tail ever reaches an entry.
+const RAW_WINDOW_BYTES: usize = 16 * 1024;
+/// Redacted tail stored in the entry and handed to the renderer.
+const PREVIEW_BYTES: usize = 2 * 1024;
 /// Tools whose arguments the transcript never shows as a card.
 const HIDDEN_DRAFTS: &[&str] = &["finish"];
 
@@ -25,40 +31,89 @@ pub(super) struct ToolCallFragment<'a> {
     pub call_id: Option<&'a str>,
     pub tool_name: Option<&'a str>,
     pub arguments_delta: &'a str,
-    pub begins_attempt: bool,
+}
+
+type DraftKey = (Option<String>, usize);
+
+#[derive(Debug, Clone)]
+struct Draft {
+    /// Stable entry ID (`first_entry_id` based), shifted as entries are removed.
+    entry: usize,
+    /// Unredacted tail of the arguments; never leaves the model.
+    raw: String,
+}
+
+/// Where each live draft sits in the transcript.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DraftIndex {
+    drafts: BTreeMap<DraftKey, Draft>,
+}
+
+impl DraftIndex {
+    pub(super) fn entry_removed(&mut self, id: usize) {
+        self.drafts.retain(|_, draft| draft.entry != id);
+        for draft in self.drafts.values_mut() {
+            if draft.entry > id {
+                draft.entry -= 1;
+            }
+        }
+    }
+
+    pub(super) fn entries_evicted(&mut self, first_entry_id: usize) {
+        self.drafts.retain(|_, draft| draft.entry >= first_entry_id);
+    }
+
+    fn keys_of(&self, run_id: Option<&str>) -> Vec<DraftKey> {
+        self.drafts
+            .keys()
+            .filter(|(run, _)| run.as_deref() == run_id)
+            .cloned()
+            .collect()
+    }
+}
+
+fn redactor() -> &'static SecretRedactor {
+    static REDACTOR: OnceLock<SecretRedactor> = OnceLock::new();
+    REDACTOR.get_or_init(SecretRedactor::from_env)
 }
 
 fn placeholder_call_id(index: usize) -> String {
     format!("draft:{index}")
 }
 
+/// The newest `limit` bytes of `text`, starting on a character boundary.
+fn tail(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut cut = text.len() - limit;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    &text[cut..]
+}
+
+/// The redacted tail shown for a draft whose raw arguments are `raw`.
+fn preview(raw: &str) -> String {
+    let redacted = redactor().redact_streaming(raw).text;
+    tail(&redacted, PREVIEW_BYTES).to_owned()
+}
+
 impl TranscriptModel {
     pub(super) fn apply_tool_call_delta(&mut self, fragment: &ToolCallFragment<'_>) {
-        if fragment.begins_attempt {
-            self.discard_drafts(fragment.run_id);
-        }
-        if let Some(position) = self.draft_position(fragment.run_id, fragment.index) {
-            if let TranscriptEntry::Tool {
-                tool_name,
-                call_id,
-                status:
-                    ToolStatus::Drafting {
-                        arguments, sealed, ..
-                    },
-                ..
-            } = &mut self.entries[position]
-            {
-                if let Some(name) = fragment.tool_name {
-                    name.clone_into(tool_name);
-                }
-                if let Some(id) = fragment.call_id {
-                    id.clone_into(call_id);
-                }
-                arguments.push_str(fragment.arguments_delta);
-                trim_front(arguments);
-                *sealed = false;
+        let key: DraftKey = (fragment.run_id.map(str::to_owned), fragment.index);
+        if let Some(position) = self.draft_position(&key) {
+            let replaced = matches!(
+                (&self.entries[position], fragment.call_id),
+                (TranscriptEntry::Tool { call_id, .. }, Some(id))
+                    if call_id != id && *call_id != placeholder_call_id(fragment.index)
+            );
+            if !replaced {
+                self.extend_draft(&key, position, fragment);
+                return;
             }
-            return;
+            // A different call took over this slot, e.g. after a provider fallback.
+            self.remove_entry(position);
         }
         // Only the first fragment names the tool; later ones without a draft
         // belong to a call that is intentionally not shown.
@@ -68,8 +123,9 @@ impl TranscriptModel {
         else {
             return;
         };
-        let mut arguments = fragment.arguments_delta.to_owned();
-        trim_front(&mut arguments);
+        let raw = tail(fragment.arguments_delta, RAW_WINDOW_BYTES).to_owned();
+        let arguments = preview(&raw);
+        let entry = self.first_entry_id + self.entries.len();
         self.push(TranscriptEntry::Tool {
             run_id: fragment.run_id.map(str::to_owned),
             tool_name: name.to_owned(),
@@ -87,42 +143,80 @@ impl TranscriptModel {
             },
             reviews: Vec::new(),
         });
+        // A zero-capacity transcript keeps no entries and so no drafts.
+        if self.entries.len() + self.first_entry_id > entry {
+            self.drafts.drafts.insert(key, Draft { entry, raw });
+        }
     }
 
-    /// The response is final: its calls start next, and any draft that does not
-    /// become one is dropped when the following response begins.
-    pub(super) fn seal_drafts(&mut self, run_id: &str) {
-        for entry in self.recent_entries_mut() {
-            if let TranscriptEntry::Tool {
-                run_id: Some(run),
-                status: ToolStatus::Drafting { sealed, .. },
-                ..
-            } = entry
-                && run == run_id
+    fn extend_draft(&mut self, key: &DraftKey, position: usize, fragment: &ToolCallFragment<'_>) {
+        let Some(draft) = self.drafts.drafts.get_mut(key) else {
+            return;
+        };
+        draft.raw.push_str(fragment.arguments_delta);
+        if draft.raw.len() > RAW_WINDOW_BYTES * 2 {
+            draft.raw = tail(&draft.raw, RAW_WINDOW_BYTES).to_owned();
+        }
+        let shown = preview(tail(&draft.raw, RAW_WINDOW_BYTES));
+        if let TranscriptEntry::Tool {
+            tool_name,
+            call_id,
+            status: ToolStatus::Drafting {
+                arguments, sealed, ..
+            },
+            ..
+        } = &mut self.entries[position]
+        {
+            if let Some(name) = fragment.tool_name {
+                name.clone_into(tool_name);
+            }
+            if let Some(id) = fragment.call_id {
+                id.clone_into(call_id);
+            }
+            *arguments = shown;
+            *sealed = false;
+        }
+    }
+
+    /// The response is final: its calls start next. Drafts sealed by an earlier
+    /// response never started, so they are dropped first.
+    pub(super) fn response_completed(&mut self, run_id: &str) {
+        self.discard_matching(Some(run_id), |sealed| sealed);
+        for key in self.drafts.keys_of(Some(run_id)) {
+            if let Some(position) = self.draft_position(&key)
+                && let TranscriptEntry::Tool {
+                    status: ToolStatus::Drafting { sealed, .. },
+                    ..
+                } = &mut self.entries[position]
             {
                 *sealed = true;
             }
         }
     }
 
-    /// A new response means sealed drafts were never started as calls.
+    /// A new response began, so drafts sealed by the previous one are stale.
     pub(super) fn discard_sealed_drafts(&mut self, run_id: Option<&str>) {
-        self.retain_drafts(run_id, |sealed| !sealed);
+        self.discard_matching(run_id, |sealed| sealed);
     }
 
-    /// Drops every draft of `run_id`, e.g. when its stream restarts or it ends.
+    /// Drops every draft of `run_id`: its stream restarted or it ended.
     pub(super) fn discard_drafts(&mut self, run_id: Option<&str>) {
-        self.retain_drafts(run_id, |_| false);
+        self.discard_matching(run_id, |_| true);
     }
 
     pub(super) fn finish_drafts(&mut self, event: &Event) {
-        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-            run_id,
-            to: AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error,
-            ..
-        }) = &event.kind
-        {
-            self.discard_drafts(Some(run_id));
+        let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+            &event.kind
+        else {
+            return;
+        };
+        match to {
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
+                self.discard_drafts(Some(run_id));
+            }
+            // An idle run has no response left that could start a sealed call.
+            AgentRunPhase::Waiting => self.discard_sealed_drafts(Some(run_id)),
+            AgentRunPhase::Pending | AgentRunPhase::Running => {}
         }
     }
 
@@ -135,29 +229,31 @@ impl TranscriptModel {
         call_id: &str,
         input: Option<&serde_json::Value>,
     ) -> bool {
-        let matches_run = |run: &Option<String>| run.as_deref() == run_id;
-        let by_id = self.recent_position(|entry| {
-            matches!(entry, TranscriptEntry::Tool {
-                run_id: run, call_id: id, status: ToolStatus::Drafting { .. }, ..
-            } if matches_run(run) && id == call_id)
+        let keys = self.drafts.keys_of(run_id);
+        let by_id = keys.iter().find(|key| {
+            self.draft_position(key).is_some_and(|position| {
+                matches!(&self.entries[position],
+                    TranscriptEntry::Tool { call_id: id, .. } if id == call_id)
+            })
         });
         // A provider that never named the call by the ID the runtime reports is
-        // matched by tool name, oldest draft first.
-        let position = by_id.or_else(|| {
-            let start = self.entries.len().saturating_sub(DRAFT_SEARCH_WINDOW);
-            self.entries[start..]
-                .iter()
-                .position(|entry| {
-                    matches!(entry, TranscriptEntry::Tool {
-                        run_id: run, call_id: id, tool_name: name,
-                        status: ToolStatus::Drafting { index, .. }, ..
-                    } if matches_run(run) && name == tool_name && *id == placeholder_call_id(*index))
+        // matched by tool name, lowest index first.
+        let by_name = || {
+            keys.iter().find(|key| {
+                self.draft_position(key).is_some_and(|position| {
+                    matches!(&self.entries[position],
+                        TranscriptEntry::Tool { call_id: id, tool_name: name, .. }
+                            if name == tool_name && *id == placeholder_call_id(key.1))
                 })
-                .map(|offset| start + offset)
-        });
-        let Some(position) = position else {
+            })
+        };
+        let Some(key) = by_id.or_else(by_name).cloned() else {
             return false;
         };
+        let Some(position) = self.draft_position(&key) else {
+            return false;
+        };
+        self.drafts.drafts.remove(&key);
         let pending = self.take_pending_reviews(run_id, call_id);
         if let TranscriptEntry::Tool {
             tool_name: name,
@@ -177,56 +273,45 @@ impl TranscriptModel {
         true
     }
 
-    fn draft_position(&self, run_id: Option<&str>, index: usize) -> Option<usize> {
-        self.recent_position(|entry| {
-            matches!(entry, TranscriptEntry::Tool {
-                run_id: run,
-                status: ToolStatus::Drafting { index: draft, .. },
+    /// Current position of a draft's entry, or `None` once it stopped being a
+    /// draft (an approval request reuses the card) or left the transcript.
+    fn draft_position(&self, key: &DraftKey) -> Option<usize> {
+        let draft = self.drafts.drafts.get(key)?;
+        let position = draft.entry.checked_sub(self.first_entry_id)?;
+        matches!(
+            self.entries.get(position),
+            Some(TranscriptEntry::Tool {
+                status: ToolStatus::Drafting { index, .. },
                 ..
-            } if run.as_deref() == run_id && *draft == index)
-        })
+            }) if *index == key.1
+        )
+        .then_some(position)
     }
 
-    fn recent_position(&self, matches: impl Fn(&TranscriptEntry) -> bool) -> Option<usize> {
-        let start = self.entries.len().saturating_sub(DRAFT_SEARCH_WINDOW);
-        self.entries[start..]
-            .iter()
-            .rposition(matches)
-            .map(|offset| start + offset)
-    }
-
-    fn recent_entries_mut(&mut self) -> impl Iterator<Item = &mut TranscriptEntry> {
-        let start = self.entries.len().saturating_sub(DRAFT_SEARCH_WINDOW);
-        self.entries[start..].iter_mut()
-    }
-
-    fn retain_drafts(&mut self, run_id: Option<&str>, keep: impl Fn(bool) -> bool) {
-        let start = self.entries.len().saturating_sub(DRAFT_SEARCH_WINDOW);
-        let doomed: Vec<usize> = self.entries[start..]
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                matches!(entry, TranscriptEntry::Tool {
-                    run_id: run,
-                    status: ToolStatus::Drafting { sealed, .. },
-                    ..
-                } if run.as_deref() == run_id && !keep(*sealed))
-            })
-            .map(|(offset, _)| start + offset)
-            .collect();
-        for index in doomed.into_iter().rev() {
-            self.remove_entry(index);
+    fn discard_matching(&mut self, run_id: Option<&str>, discard: impl Fn(bool) -> bool) {
+        let mut doomed = Vec::new();
+        for key in self.drafts.keys_of(run_id) {
+            match self.draft_position(&key) {
+                Some(position) => {
+                    let sealed = matches!(
+                        &self.entries[position],
+                        TranscriptEntry::Tool {
+                            status: ToolStatus::Drafting { sealed: true, .. },
+                            ..
+                        }
+                    );
+                    if discard(sealed) {
+                        doomed.push(position);
+                    }
+                }
+                None => {
+                    self.drafts.drafts.remove(&key);
+                }
+            }
+        }
+        doomed.sort_unstable_by(|a, b| b.cmp(a));
+        for position in doomed {
+            self.remove_entry(position);
         }
     }
-}
-
-fn trim_front(arguments: &mut String) {
-    if arguments.len() <= MAX_DRAFT_BYTES {
-        return;
-    }
-    let mut cut = arguments.len() - TRIM_TO_BYTES;
-    while !arguments.is_char_boundary(cut) {
-        cut += 1;
-    }
-    arguments.drain(..cut);
 }
