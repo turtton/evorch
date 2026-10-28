@@ -605,4 +605,4 @@ fn file_viewer(ui: &mut egui::Ui, path: &Path, root: Option<&Path>, reload_poll:
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

@@ -901,10 +901,10 @@ impl LoopState {
                     }
                     let Some(runtime) = self.runtime() else {
                         for call in wave {
-                            self.context.push_tool_result(
-                                call.id,
-                                ToolResult::error("runtime is unavailable"),
-                            );
+                            let result = ToolResult::error("runtime is unavailable");
+                            self.ledger_tool_started(&call.name, &call.id, &call.input);
+                            self.ledger_tool_completed(&call.name, &call.id, &result);
+                            self.context.push_tool_result(call.id, result);
                             self.publish_message_count();
                         }
                         continue;
@@ -925,6 +925,9 @@ impl LoopState {
                             self.finish_interrupted(kind);
                             return false;
                         }
+                        // Each awaited delegate is its own call in the transcript, so it
+                        // reports its lifecycle like any other runtime-owned operation.
+                        self.ledger_tool_started(&call.name, &call.id, &call.input);
                         let child = match self
                             .guard_team_artifact(&call.name, &call.input)
                             .and_then(|()| {
@@ -948,6 +951,7 @@ impl LoopState {
                         .into_iter()
                         .zip(meta::wait_delegates(self, &runtime, children).await)
                     {
+                        self.ledger_tool_completed("delegate", &id, &dispatch.result);
                         self.record_tool_outcome("delegate", &dispatch.result, None);
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();

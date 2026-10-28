@@ -2914,6 +2914,7 @@ dependencies = [
  "rusqlite",
  "rustix 1.1.4",
  "sandbox",
+ "secret-guard",
  "serde",
  "serde_json",
  "storage",

@@ -333,6 +333,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 run_id, agent_name, ..
             }) => {
                 self.open_subagent_pane(run_id);
+                self.unpark_subagent(run_id);
                 if let Some(panel) = self
                     .panels
                     .get_mut(&PanelId::new(format!("agent-{run_id}")))
@@ -354,7 +355,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.park_completed_subagent(run_id);
                         }
                     }
-                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
+                    AgentRunPhase::Pending | AgentRunPhase::Running => {
+                        self.unpark_subagent(run_id);
+                    }
+                    AgentRunPhase::Waiting => {}
                 }
             }
             EventKind::Ownership(event_bus::OwnershipEvent {
@@ -412,6 +416,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Hand artifacts the user chose to open to the desktop, after panes render.
     fn open_requested_artifacts(&self, ctx: &egui::Context) {
+        for path in crate::panes::artifact_card::take_external_open_requests(ctx) {
+            crate::model::artifact_opener::ArtifactOpener::open(
+                &crate::model::artifact_opener::PortalArtifactOpener,
+                &path,
+            );
+        }
         for path in crate::panes::artifact_card::take_open_requests(ctx) {
             match &self.artifact_opener {
                 Some(opener) => opener.open(&path),

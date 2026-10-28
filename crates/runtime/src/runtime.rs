@@ -513,6 +513,10 @@ impl AgentRuntime {
                 }
                 Self::review_error(run_id, error)
             })?;
+        // Skills are not stored in the evidence graph; the replaced entry keeps them.
+        if let Some(previous) = runs.get(&run_id) {
+            review.loaded_skills = previous.loaded_skills.clone();
+        }
         if let Some(existing) = runs
             .values()
             .find(|run| run.root_run_id == review.root_run_id)

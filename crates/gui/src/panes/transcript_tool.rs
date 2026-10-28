@@ -19,9 +19,10 @@ mod run_js;
 mod sticky;
 
 pub use orchestration::agent_name;
-pub use run_js::{RUN_JS, RunJsChild, RunJsNesting, run_js_card};
+pub use run_js::{RUN_JS, RunJsChild, RunJsNesting, run_js_card, uses_run_js_layout};
 
 const LIVE_TAIL_LINES: usize = 4;
+const DRAFTING_META: &str = "composing…";
 /// Header note of a call whose run ended before it reported a result.
 pub const INTERRUPTED_META: &str = "ended without a result";
 const INTERRUPTED_NOTE: &str =
@@ -129,8 +130,49 @@ fn shell_control(entry: &TranscriptEntry) -> Option<&str> {
         .filter(|action| matches!(*action, "poll" | "stdin" | "stop"))
 }
 
+/// Read-only status checks that agents repeat while waiting for something.
+const POLLING_TOOLS: &[&str] = &[
+    "inbox",
+    "user_answers",
+    "wait",
+    "wait_reply",
+    "run_output",
+    "subagent_questions",
+    "list_agents",
+    "inspect_agent",
+    "get_goal",
+    "working_note_read",
+];
+
+/// What makes two finished polls the same observation: caller, tool, target and
+/// the state they reported. Failures and running calls never match.
+fn poll_signature(
+    entry: &TranscriptEntry,
+) -> Option<(Option<&str>, &str, Option<&serde_json::Value>, &str)> {
+    let TranscriptEntry::Tool {
+        run_id,
+        tool_name,
+        input,
+        output: Some(output),
+        is_error: false,
+        status: ToolStatus::Succeeded,
+        parent_call_id: None,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    POLLING_TOOLS.contains(&tool_name.as_str()).then_some((
+        run_id.as_deref(),
+        tool_name,
+        input.as_ref(),
+        output,
+    ))
+}
+
 /// How many entries from the start of `entries` share one card: consecutive
-/// polls of the same shell job fold together, everything else stands alone.
+/// polls of the same shell job fold together, as do identical read-only status
+/// checks that observed the same state; everything else stands alone.
 pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
     let Some(first) = entries.first() else {
         return 0;
@@ -147,7 +189,13 @@ pub fn card_len(entries: &[TranscriptEntry], jobs: &ShellJobs) -> usize {
             )
     };
     let Some(job) = resolved_shell_job_key(first, jobs).filter(|_| top_level_poll(first)) else {
-        return 1;
+        let Some(signature) = poll_signature(first) else {
+            return 1;
+        };
+        return 1 + entries[1..]
+            .iter()
+            .take_while(|entry| poll_signature(entry) == Some(signature))
+            .count();
     };
     1 + entries[1..]
         .iter()
@@ -182,14 +230,14 @@ pub fn tool_card_group(
     else {
         return;
     };
-    if tool_name == RUN_JS {
+    if uses_run_js_layout(last) {
         // Callers without the transcript's nesting still get the run_js layout.
         run_js_card(ui, last, &[], pane_id, context);
         return;
     }
     let folded = group.len();
     let id = pane_id.with(("tool-expanded", run_id, call_id));
-    let running = matches!(status, ToolStatus::Running);
+    let running = matches!(status, ToolStatus::Running | ToolStatus::Drafting { .. });
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let color = status_color(status, *is_error);
     let mut header = header::tool_header(
@@ -204,6 +252,15 @@ pub fn tool_card_group(
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
         header::with_shell_job(&mut header, job, shell_control(last).is_some());
+    }
+    if matches!(status, ToolStatus::Drafting { .. }) {
+        header.meta = Some(
+            [header.meta.take(), Some(DRAFTING_META.to_owned())]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
     }
     if matches!(status, ToolStatus::Interrupted) {
         header.meta = Some(
@@ -236,12 +293,15 @@ pub fn tool_card_group(
         for review in reviews {
             review_line(ui, review);
         }
+        if let ToolStatus::Drafting { arguments, .. } = status {
+            draft_tail(ui, arguments);
+        }
         // An expanded card already shows the output in full.
         let preview = context.latest_for_job && (running || !expanded);
         if let Some(job) = job.filter(|job| preview && job.is_running()) {
             live_tail(ui, job);
         }
-        if expanded && !running && folded > 1 {
+        if expanded && !running && folded > 1 && shell_control(last).is_some() {
             let combined: String = group
                 .iter()
                 .filter_map(|entry| match entry {
@@ -377,7 +437,7 @@ pub fn tool_card_group(
 fn status_color(status: &ToolStatus, is_error: bool) -> Color32 {
     match status {
         _ if is_error => palette().ERROR_FG,
-        ToolStatus::Running => palette().INFO,
+        ToolStatus::Running | ToolStatus::Drafting { .. } => palette().INFO,
         ToolStatus::Succeeded | ToolStatus::Approved => palette().TEXT_MUTED,
         ToolStatus::Failed | ToolStatus::Denied { .. } => palette().ERROR_FG,
         ToolStatus::AwaitingApproval => palette().WARNING_FG,
@@ -394,7 +454,7 @@ fn status_mark(
 ) -> (&'static str, &'static str) {
     match status {
         _ if is_error => (icons::X, "✗ "),
-        ToolStatus::Running => ("", ""),
+        ToolStatus::Running | ToolStatus::Drafting { .. } => ("", ""),
         ToolStatus::Succeeded | ToolStatus::Approved => (icon, "✓ "),
         ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
         ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
@@ -425,6 +485,42 @@ fn review_line(ui: &mut Ui, review: &ToolReview) {
 /// expanding anything.
 fn live_tail(ui: &mut Ui, job: &ShellJob) {
     for line in job.tail(LIVE_TAIL_LINES) {
+        ui.add(
+            egui::Label::new(
+                RichText::new(line)
+                    .monospace()
+                    .size(FONT_SMALL)
+                    .color(palette().TEXT_MUTED),
+            )
+            .truncate(),
+        );
+    }
+}
+
+/// Characters of a draft line that are shown; a long one-line JSON keeps its end.
+const DRAFT_LINE_CHARS: usize = 120;
+
+/// The newest lines of the arguments being written, each cut to its end.
+pub fn draft_preview_lines(arguments: &str) -> Vec<String> {
+    let lines: Vec<&str> = arguments.lines().collect();
+    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| {
+            let count = line.chars().count();
+            if count <= DRAFT_LINE_CHARS {
+                return (*line).to_owned();
+            }
+            let tail: String = line.chars().skip(count - DRAFT_LINE_CHARS).collect();
+            format!("…{tail}")
+        })
+        .collect()
+}
+
+/// The last few lines of the arguments the model is still writing, so a long
+/// call shows its progress without expanding anything.
+fn draft_tail(ui: &mut Ui, arguments: &str) {
+    for line in draft_preview_lines(arguments) {
         ui.add(
             egui::Label::new(
                 RichText::new(line)

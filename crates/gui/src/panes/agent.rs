@@ -261,9 +261,7 @@ fn run_detail_body(
                     );
                     continue;
                 }
-                if let TranscriptEntry::Tool { tool_name, .. } = entry
-                    && tool_name == crate::panes::transcript_tool::RUN_JS
-                {
+                if crate::panes::transcript_tool::uses_run_js_layout(entry) {
                     use crate::panes::transcript_tool::{RunJsChild, resolved_shell_job_key};
                     let children: Vec<_> = nesting
                         .children(entry_idx)

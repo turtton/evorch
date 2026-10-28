@@ -203,6 +203,92 @@ fn wall_time_includes_in_flight_runs() {
     assert_eq!(metrics.wall_time, Duration::from_secs(70));
 }
 
+/// Run each `(run, running_from, running_until)` through Pending -> Running -> Done
+/// on one clock; `until: None` leaves the run Running.
+fn parallel_metrics(spans: &[(&str, u64, Option<u64>)], read_at: u64) -> ThreadMetrics {
+    let mut overlay = TelemetryOverlay::new();
+    let start = Instant::now();
+    let at = |seconds| start + Duration::from_secs(seconds);
+    let mut events: Vec<(u64, Event)> = Vec::new();
+    for &(run, from, until) in spans {
+        events.push((0, agent_run_started(run)));
+        events.push((
+            from,
+            agent_run_changed(run, AgentRunPhase::Pending, AgentRunPhase::Running),
+        ));
+        if let Some(until) = until {
+            events.push((
+                until,
+                agent_run_changed(run, AgentRunPhase::Running, AgentRunPhase::Done),
+            ));
+        }
+    }
+    events.sort_by_key(|(seconds, _)| *seconds);
+    for (seconds, event) in &events {
+        overlay.apply_event_at(event, at(*seconds));
+    }
+    let runs: Vec<_> = spans.iter().map(|(run, ..)| (*run).to_owned()).collect();
+    overlay.thread_metrics_at(&runs, at(read_at))
+}
+
+#[test]
+fn wall_time_counts_parallel_runs_once() {
+    // Given: a root running 0..100 with two subagents running 10..50 and 20..60.
+    let metrics = parallel_metrics(
+        &[
+            ("root", 0, Some(100)),
+            ("sub-1", 10, Some(50)),
+            ("sub-2", 20, Some(60)),
+        ],
+        120,
+    );
+    // Then: wall time is the 100 elapsed seconds, not 100 + 40 + 40.
+    assert_eq!(metrics.wall_time, Duration::from_secs(100));
+}
+
+#[test]
+fn wall_time_merges_partial_overlaps_and_skips_gaps() {
+    // Given: 0..30 and 20..50 overlap; 80..90 stands apart.
+    let metrics = parallel_metrics(
+        &[("a", 0, Some(30)), ("b", 20, Some(50)), ("c", 80, Some(90))],
+        120,
+    );
+    // Then: 0..50 and 80..90 are counted once each.
+    assert_eq!(metrics.wall_time, Duration::from_secs(60));
+}
+
+#[test]
+fn wall_time_unions_in_flight_runs_with_finished_ones() {
+    // Given: one run finished at 50 and another still Running since 30.
+    let metrics = parallel_metrics(&[("a", 0, Some(50)), ("b", 30, None)], 100);
+    // Then: 0..100 is covered once; the overlap 30..50 is not doubled.
+    assert_eq!(metrics.wall_time, Duration::from_secs(100));
+}
+
+#[test]
+fn wall_time_counts_identical_spans_once_and_empty_spans_as_zero() {
+    let metrics = parallel_metrics(&[("a", 10, Some(50)), ("b", 10, Some(50))], 120);
+    assert_eq!(metrics.wall_time, Duration::from_secs(40));
+    let metrics = parallel_metrics(&[("a", 10, Some(10))], 120);
+    assert_eq!(metrics.wall_time, Duration::ZERO);
+}
+
+#[test]
+fn wall_time_joins_adjacent_spans_without_double_counting_the_boundary() {
+    // Given: b starts the instant a ends.
+    let metrics = parallel_metrics(&[("a", 10, Some(30)), ("b", 30, Some(70))], 120);
+    // Then: 10..70 is covered exactly once.
+    assert_eq!(metrics.wall_time, Duration::from_secs(60));
+}
+
+#[test]
+fn wall_time_unions_several_unfinished_runs_up_to_now() {
+    // Given: three runs that are all still Running at 100 seconds.
+    let metrics = parallel_metrics(&[("a", 10, None), ("b", 20, None), ("c", 60, None)], 100);
+    // Then: only 10..100 counts, once.
+    assert_eq!(metrics.wall_time, Duration::from_secs(90));
+}
+
 fn wall_time_after_phases(phases: &[(AgentRunPhase, u64)]) -> Duration {
     let mut overlay = TelemetryOverlay::new();
     let start = Instant::now();

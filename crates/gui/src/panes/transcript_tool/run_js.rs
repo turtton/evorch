@@ -19,6 +19,16 @@ use crate::theme::tokens::{FONT_SMALL, R_SM, SP_1, palette};
 
 pub const RUN_JS: &str = "run_js";
 
+/// Whether `entry` is drawn with the run_js layout. A call still being
+/// composed has no program yet, so it keeps the generic "composing…" card.
+pub fn uses_run_js_layout(entry: &TranscriptEntry) -> bool {
+    matches!(
+        entry,
+        TranscriptEntry::Tool { tool_name, status, .. }
+            if tool_name == RUN_JS && !matches!(status, ToolStatus::Drafting { .. })
+    )
+}
+
 /// Which entries are `run_js` children shown inside their parent's card.
 ///
 /// A child whose parent is not among the entries (a restore still in
