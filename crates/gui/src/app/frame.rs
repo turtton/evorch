@@ -416,6 +416,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Hand artifacts the user chose to open to the desktop, after panes render.
     fn open_requested_artifacts(&self, ctx: &egui::Context) {
+        for path in crate::panes::artifact_card::take_external_open_requests(ctx) {
+            crate::model::artifact_opener::ArtifactOpener::open(
+                &crate::model::artifact_opener::PortalArtifactOpener,
+                &path,
+            );
+        }
         for path in crate::panes::artifact_card::take_open_requests(ctx) {
             match &self.artifact_opener {
                 Some(opener) => opener.open(&path),
